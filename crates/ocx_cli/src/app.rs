@@ -369,7 +369,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
 /// - `Exec` (and its deprecated `run` spelling) is what every rendered
 ///   `<home>/toolchain/active/bin/<name>` trampoline `exec`s — the user typed `cmake`,
 ///   not `ocx`, and a quarter-second stall on the first build of the day is
-///   attributed to the tool, not to ocx.
+///   attributed to the binary, not to ocx.
 /// - `Env` and `Direnv` compose an environment for a shell to evaluate:
 ///   `.envrc`'s `eval "$(ocx direnv export)"` re-runs on every directory change
 ///   and on every `ocx.toml` / `ocx.lock` touch.

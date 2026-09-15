@@ -13,7 +13,7 @@ use ocx_lib::project::{ResolveLockOptions, remove_binding_in_memory, resolve_loc
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{load_project_for_mutate, record_activation_consent};
 
-/// Remove one or more tool bindings from `ocx.toml`.
+/// Remove one or more package bindings from `ocx.toml`.
 ///
 /// Each argument is reduced to a binding name — an identifier form like
 /// `ocx.sh/cmake:3.28` matches the binding named `cmake` — and the
@@ -21,11 +21,11 @@ use crate::app::project_context::{load_project_for_mutate, record_activation_con
 /// that name. A binding added under an explicit name
 /// (`ocx add glab=ocx.sh/gitlab/cli`) is matched only by that name.
 /// Matched bindings are removed, `ocx.lock` is rewritten with every
-/// surviving entry carried forward unchanged, and the tools are
+/// surviving entry carried forward unchanged, and their packages are
 /// uninstalled. If any argument matches no binding, the whole command
 /// fails and `ocx.toml` is left untouched.
 ///
-/// Removing a binding never re-resolves the surviving tools: their pins
+/// Removing a binding never re-resolves the surviving bindings: their pins
 /// are preserved exactly. Fails with exit 65 when `ocx.toml` drifted from
 /// `ocx.lock` before this remove (run `ocx lock` to reconcile), or exit 78
 /// when a survivor's legacy entry can no longer be migrated exactly (run
@@ -39,7 +39,7 @@ use crate::app::project_context::{load_project_for_mutate, record_activation_con
 /// group when `--group` is absent).
 #[derive(Parser, Clone)]
 pub struct Remove {
-    /// Identifiers of the tools to remove (binding name or fully-qualified
+    /// Bindings to remove (binding name or fully-qualified
     /// identifier, e.g. `cmake` or `ocx.sh/cmake:3.28`).
     #[arg(required = true, num_args = 1.., value_name = "IDENTIFIER")]
     pub identifiers: Vec<String>,

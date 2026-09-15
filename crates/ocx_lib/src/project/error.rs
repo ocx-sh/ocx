@@ -126,7 +126,7 @@ pub enum ProjectErrorKind {
     /// `ocx update` (the whole-file bump verb) to re-resolve if it has
     /// since been added.
     #[error(
-        "no '{platform}' leaf for tool '{name}' at the locked version; run `ocx update` to re-resolve if it has since been added"
+        "no '{platform}' leaf for binding '{name}' at the locked version; run `ocx update` to re-resolve if it has since been added"
     )]
     NoHostLeaf { name: String, platform: String },
 
@@ -139,7 +139,7 @@ pub enum ProjectErrorKind {
     /// disambiguate with an explicit `--platform`. `candidates` names every
     /// tied entry's canonical-grammar platform key.
     #[error(
-        "ambiguous '{platform}' leaf for tool '{name}': {} tied candidates ({}); pass --platform to disambiguate",
+        "ambiguous '{platform}' leaf for binding '{name}': {} tied candidates ({}); pass --platform to disambiguate",
         candidates.len(),
         candidates.join(", ")
     )]
@@ -185,7 +185,7 @@ pub enum ProjectErrorKind {
     )]
     InvalidToolchainNameCharset { scope: String, name: String },
 
-    /// A `[group.<name>]` table declares a tool binding directly, the form
+    /// A `[group.<name>]` table declares a binding directly, the form
     /// removed in favour of `[group.<name>.tools]`.
     ///
     /// `[group.<name>]` holds exactly two optional sub-tables, `tools` and
@@ -194,7 +194,7 @@ pub enum ProjectErrorKind {
     /// because for the handful of files written against the old shape this
     /// error IS the migration instruction.
     #[error(
-        "group '{group}' declares tool binding '{binding}' directly; tool bindings belong under [group.{group}.tools] — [group.{group}] holds the `tools` and `env` sub-tables and the `lazy-mode` setting"
+        "group '{group}' declares binding '{binding}' directly; bindings belong under [group.{group}.tools] — [group.{group}] holds the `tools` and `env` sub-tables and the `lazy-mode` setting"
     )]
     GroupHoldsDirectBinding { group: String, binding: String },
 
@@ -362,7 +362,7 @@ pub enum ProjectErrorKind {
     /// (`registry/repo:tag`) so resolution is reproducible regardless of
     /// `OCX_DEFAULT_REGISTRY`.
     #[error(
-        "tool '{name}': value '{value}' is missing a registry; expected 'registry/repo:tag' (e.g. 'ocx.sh/cmake:3.28')"
+        "binding '{name}': value '{value}' is missing a registry; expected 'registry/repo:tag' (e.g. 'ocx.sh/cmake:3.28')"
     )]
     ToolValueMissingRegistry { name: String, value: String },
 
@@ -370,7 +370,7 @@ pub enum ProjectErrorKind {
     /// for a reason other than missing registry (invalid characters,
     /// malformed digest, uppercase repo, etc.). Carries the underlying
     /// [`IdentifierError`] for diagnostic context.
-    #[error("tool '{name}': value '{value}' is not a valid identifier")]
+    #[error("binding '{name}': value '{value}' is not a valid identifier")]
     ToolValueInvalid {
         name: String,
         value: String,
@@ -453,7 +453,7 @@ pub enum ProjectErrorKind {
     /// The same binding name appears in two selected groups with
     /// non-equivalent identifiers — the composer cannot decide which to
     /// use without an explicit override.
-    #[error("tool '{name}' defined in multiple selected groups: '{group_a}' and '{group_b}'")]
+    #[error("binding '{name}' defined in multiple selected groups: '{group_a}' and '{group_b}'")]
     DuplicateToolAcrossSelectedGroups {
         name: String,
         group_a: String,
@@ -470,7 +470,7 @@ pub enum ProjectErrorKind {
     /// A binding name passed to [`crate::project::resolve_lock_touched`]
     /// as a touched `(group, name)` pair is not declared in `ocx.toml`.
     /// Surfaced when a caller names a tool that does not exist.
-    #[error("tool '{name}' not declared in ocx.toml")]
+    #[error("binding '{name}' not declared in ocx.toml")]
     ToolNotInConfig { name: String },
 
     /// The binding already exists in the target group in `ocx.toml`.

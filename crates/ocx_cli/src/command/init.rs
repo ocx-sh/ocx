@@ -14,7 +14,7 @@ use crate::app::project_context::record_activation_consent_over;
 /// Create a minimal `ocx.toml` in the current directory.
 ///
 /// Writes a skeleton config with a default registry comment and an empty
-/// `[tools]` table. Non-interactive by design — add tools with `ocx add`
+/// `[tools]` table. Non-interactive by design — add bindings with `ocx add`
 /// after initialisation.
 ///
 /// `ocx --global init` writes `$OCX_HOME/ocx.toml` instead — the same file

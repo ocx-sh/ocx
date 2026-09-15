@@ -34,8 +34,8 @@ use crate::{api, conventions, options};
 /// No downloading is performed — the package must already be installed.
 ///
 /// Every entry also reports which kind of directory it found: `package` for a
-/// materialized package root, `shim` for a tool composed with `--lazy-mode
-/// always` whose content has not downloaded yet. Once such a tool has been used
+/// materialized package root, `shim` for a package composed with `--lazy-mode
+/// always` whose content has not downloaded yet. Once such a package has been used
 /// once, its content is on disk and the entry reports `package` again.
 /// `--candidate` and `--current` always report `package`, because the install
 /// symlinks they resolve are only ever written for materialized content.

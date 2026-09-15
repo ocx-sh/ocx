@@ -20,7 +20,7 @@ use crate::options;
 ///
 /// Reads the nearest project `ocx.toml` (project tier only — no home-tier
 /// fallback in this phase), loads the matching `ocx.lock`, looks up each
-/// selected tool in the local object store, and prints bash export
+/// selected package in the local object store, and prints bash export
 /// lines for the resolved environment. The command is stateless, which is
 /// what makes it usable from `direnv`'s `.envrc` via
 /// `eval "$(ocx direnv export)"`.
@@ -36,13 +36,13 @@ use crate::options;
 /// <shell>`. Programs invoked via `eval` from `.envrc` therefore must emit
 /// bash. There is no `--shell` flag on this command for the same reason.
 ///
-/// By default a tool missing from the object store is materialised before
-/// exporting: a tool already present resolves locally with no network (its
+/// By default a package missing from the object store is materialised before
+/// exporting: a package already present resolves locally with no network (its
 /// lock-pinned digest is content-addressed — nothing to look up), so only a
 /// genuine miss falls through to the registry. Pass `--no-pull` to keep the
-/// command strictly offline — missing tools then produce a one-line stderr
+/// command strictly offline — missing packages then produce a one-line stderr
 /// note and are skipped. Either way a stale lock produces a stderr warning but
-/// the stale digests are still used, a missing tool never fails the prompt,
+/// the stale digests are still used, a missing package never fails the prompt,
 /// and when no project `ocx.toml` is found the command exits 0 with no output.
 /// The pull fallback is also skipped whenever no registry is reachable
 /// (`--offline` / no configured remote), so an offline shell never blocks.
@@ -57,16 +57,16 @@ pub struct DirenvExport {
     #[clap(flatten)]
     pull: options::Pull,
 
-    /// Top tier of the `lazy-mode` ladder for every tool this command exports.
+    /// Top tier of the `lazy-mode` ladder for every package this command exports.
     ///
-    /// `always` exports a tool as a generated shim: its declared names reach
+    /// `always` exports a package as a generated shim: its declared names reach
     /// `PATH` immediately and its content downloads the first time one of them
     /// runs. Without this, a project declaring `lazy-mode = "always"` would get
     /// shims under `ocx env` and eager content under direnv: one project with
     /// two environments depending on which door you came through.
     ///
-    /// A tool whose metadata is not already local is noted on stderr and
-    /// omitted, exactly as a not-materialised tool is. This command never fails
+    /// A package whose metadata is not already local is noted on stderr and
+    /// omitted, exactly as a not-materialised package is. This command never fails
     /// a prompt.
     #[clap(flatten)]
     lazy_mode: options::LazyMode,
@@ -211,7 +211,7 @@ impl DirenvExport {
                     composed.advisories.extend(installed.advisories);
                     composed.omitted = installed.omitted;
                 }
-                Err(err) => eprintln!("# ocx: pull failed ({err}); using locally available tools"),
+                Err(err) => eprintln!("# ocx: pull failed ({err}); using locally available packages"),
             }
         }
 

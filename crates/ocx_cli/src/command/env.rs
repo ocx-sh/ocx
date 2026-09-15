@@ -85,7 +85,7 @@ pub struct Env {
 
     /// Write the composed environment into a CI system's persistence channel.
     ///
-    /// `--ci=github` appends tool dirs and vars to `$GITHUB_PATH` /
+    /// `--ci=github` appends package dirs and vars to `$GITHUB_PATH` /
     /// `$GITHUB_ENV`; `--ci=gitlab` writes JSON-lines to `--export-file` (or
     /// stdout). Bare `--ci` autodetects the provider from CI environment
     /// variables; exit 64 if none is detected. Must be supplied with `=`

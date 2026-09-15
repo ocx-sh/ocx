@@ -383,7 +383,7 @@ pub fn verified_sources(
             Ok(leaf) => leaf,
             Err(error) => {
                 log::debug!(
-                    "No host leaf for locked tool '{}' on {platform}; clause 2 cannot corroborate this lock: {error}",
+                    "No host leaf for locked binding '{}' on {platform}; clause 2 cannot corroborate this lock: {error}",
                     tool.name
                 );
                 return None;
@@ -393,7 +393,7 @@ pub fn verified_sources(
             Ok(pinned) => pinned,
             Err(error) => {
                 log::debug!(
-                    "Unpinned host leaf for locked tool '{}'; clause 2 cannot corroborate this lock: {error}",
+                    "Unpinned host leaf for locked binding '{}'; clause 2 cannot corroborate this lock: {error}",
                     tool.name
                 );
                 return None;
@@ -402,7 +402,7 @@ pub fn verified_sources(
         let origins = store.package_dir(&pinned).recorded_origins();
         if origins.is_empty() {
             log::debug!(
-                "No recorded pull origin for locked tool '{}'; clause 2 cannot corroborate this lock",
+                "No recorded pull origin for locked binding '{}'; clause 2 cannot corroborate this lock",
                 tool.name
             );
             return None;

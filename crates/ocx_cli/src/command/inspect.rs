@@ -85,7 +85,7 @@ fn declared_identifier(config: &ProjectConfig, tool: &SelectedTool) -> oci::Iden
 /// transitive dependency set plus the binaries, entrypoints and env keys that
 /// would land on `PATH`, and each side's declared integration namespaces.
 /// Because `--closure` sees the whole selection at once, it also reports
-/// collisions between two different tools before either is installed.
+/// collisions between two different packages before either is installed.
 ///
 /// Needs a current `ocx.lock` (exit 78 when absent, 65 when it no longer
 /// matches `ocx.toml`) - without a pin there is no stable answer. For the

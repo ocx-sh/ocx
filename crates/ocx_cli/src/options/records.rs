@@ -14,7 +14,7 @@ pub struct Records {
     ///
     /// Overrides `[records] dir` and `OCX_RECORDS_DIR`. Without any of the
     /// three, no record is written. A record captures the resolved package
-    /// closure and executable immediately before the tool starts. See
+    /// closure and executable immediately before the binary starts. See
     /// https://ocx.sh/docs/reference/execution-records for the record format.
     #[clap(long = "records-dir", value_name = "DIRECTORY")]
     dir: Option<std::path::PathBuf>,

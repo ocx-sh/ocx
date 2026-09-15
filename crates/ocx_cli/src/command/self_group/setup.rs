@@ -86,12 +86,12 @@ pub struct SelfSetup {
     ///
     /// `env` composes the toolchain environment on every prompt. `bin` puts
     /// the toolchain's `bin` directory on PATH and composes nothing else, so
-    /// each tool is resolved by its launcher when it runs. `none` composes
+    /// each binary is resolved by its launcher when it runs. `none` composes
     /// nothing and adds nothing.
     ///
     /// For the global toolchain this flag writes, `bin` and `none` leave the
     /// same PATH: `$OCX_HOME/toolchain/active/bin` is a session directory `ocx
-    /// self setup` registers once and no prompt withdraws, so the global tools stay
+    /// self setup` registers once and no prompt withdraws, so the global binaries stay
     /// reachable through their trampolines under either. The two values part
     /// company only for a project's own toolchain.
     ///
@@ -1077,7 +1077,7 @@ mod tests {
             rendered.contains(
                 "For the global toolchain this flag writes, `bin` and `none` leave the same PATH: \
                  `$OCX_HOME/toolchain/active/bin` is a session directory `ocx self setup` \
-                 registers once and no prompt withdraws, so the global tools stay reachable \
+                 registers once and no prompt withdraws, so the global binaries stay reachable \
                  through their \
                  trampolines under either. The two values part company only for a project's own \
                  toolchain."

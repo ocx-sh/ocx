@@ -16,14 +16,14 @@ pub enum Shell {
     /// Consent to a project's shell activation.
     ///
     /// Records a consent stamp for the project governing PATH (default: the
-    /// current directory), so the next shell prompt applies that project's tools
+    /// current directory), so the next shell prompt applies that project's binaries
     /// and environment. This is the same stamp `ocx init` writes for the project
     /// it creates, and `ocx add`, `ocx lock`, `ocx pull` and `ocx exec` write as
     /// a side effect - running a mutating command in a directory is itself
     /// consent; this is the way to record one on purpose.
     ///
     /// The stamp records the source set the project's `ocx.lock` resolves from
-    /// at the time it is written. A tool added from a new registry or
+    /// at the time it is written. A binding added from a new registry or
     /// organisation invalidates it; run this again to consent to the wider set.
     ///
     /// Undo with `ocx shell revoke`. See which grant is in effect with
@@ -43,7 +43,7 @@ pub enum Shell {
     ///
     /// Removes the consent stamp for the project governing PATH (default: the
     /// current directory). The next shell prompt stops applying that project's
-    /// tools and environment, unless a `[shell.consent]` grant still covers it;
+    /// binaries and environment, unless a `[shell.consent]` grant still covers it;
     /// those live in `config.toml` and are removed by editing it.
     /// `ocx shell state` reports which grant is in effect.
     ///

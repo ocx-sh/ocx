@@ -17,12 +17,12 @@ use crate::app::project_context::{
 use crate::conventions;
 use crate::options;
 
-/// Add one or more tool bindings to `ocx.toml`.
+/// Add one or more package bindings to `ocx.toml`.
 ///
 /// Appends the given identifiers to the implicit default `[tools]` table,
 /// or to a named `[group.<name>]` table when `--group` is supplied.
 /// Resolves only the new bindings, carries every existing lock entry
-/// forward unchanged, and installs the tools (default eager behavior).
+/// forward unchanged, and installs the packages (default eager behavior).
 ///
 /// Each binding is named after the repository basename, so two packages
 /// with the same basename collide. Prefix an identifier with `NAME=` to

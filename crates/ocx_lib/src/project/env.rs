@@ -427,7 +427,7 @@ impl schemars::JsonSchema for ProjectEnv {
         let modifier_kind = modifier_kind.to_value();
         schemars::json_schema!({
             "type": "object",
-            "description": "Environment variables applied to tools run from this project. Keys matching OCX_* or __OCX_* are rejected: a checked-in file must not be able to reconfigure how ocx itself resolves. Values are literal — no interpolation.",
+            "description": "Environment variables applied to binaries run from this project. Keys matching OCX_* or __OCX_* are rejected: a checked-in file must not be able to reconfigure how ocx itself resolves. Values are literal — no interpolation.",
             "additionalProperties": crate::utility::schema::string_or_table(
                 "Shorthand for a constant: replaces any existing value of the variable.",
                 serde_json::json!({

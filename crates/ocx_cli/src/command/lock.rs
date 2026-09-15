@@ -14,14 +14,14 @@ use crate::app::project_context::{
 use crate::conventions;
 use crate::options;
 
-/// Resolve tool tags to digests and write `ocx.lock`.
+/// Resolve package tags to digests and write `ocx.lock`.
 ///
 /// Walks the nearest `ocx.toml` and reconciles the whole `ocx.lock` with
 /// it. When the lock is already current (its `declaration_hash` matches the
 /// config) the existing pins are carried forward verbatim — a byte-identical,
 /// idempotent no-op that never advances a moving tag. When the config drifted,
 /// every declared tag is re-resolved; a moving tag may advance to wherever it
-/// points today. Fully transactional — either every tool resolves or nothing
+/// points today. Fully transactional — either every binding resolves or nothing
 /// is written. Use `ocx update` to force a re-resolve of every tag regardless
 /// of drift.
 ///

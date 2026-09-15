@@ -15,7 +15,7 @@ use crate::options;
 /// Pre-warm the object store from the project `ocx.lock` without creating symlinks.
 ///
 /// Loads the nearest `ocx.toml` together with its sibling `ocx.lock`, collects
-/// every digest-pinned tool entry across the requested groups, and pulls each
+/// every digest-pinned lock entry across the requested groups, and pulls each
 /// one into the local object store. Distinct from `ocx package pull`: this
 /// command is project-tier (driven by the lock file) and never touches the
 /// candidate or current symlink namespace.
@@ -26,7 +26,7 @@ use crate::options;
 /// declared lock. Skipped under `--dry-run`.
 #[derive(Parser, Clone)]
 pub struct Pull {
-    /// Preview which locked tools are cached vs. would be fetched.
+    /// Preview which locked packages are cached vs. would be fetched.
     ///
     /// Walks `ocx.lock`, resolves each entry through the local index
     /// (cache-first, like `pull_all` does), and probes `find_plain` on
@@ -51,11 +51,11 @@ pub struct Pull {
     #[clap(flatten)]
     pub platform: options::PlatformOption,
 
-    /// Top tier of the `lazy-mode` ladder for every locked tool this command
+    /// Top tier of the `lazy-mode` ladder for every locked package this command
     /// pre-warms.
     ///
     /// This command composes nothing, so `always` changes *what* is pre-warmed
-    /// rather than what reaches `PATH`: a tool it applies to gets its metadata,
+    /// rather than what reaches `PATH`: a package it applies to gets its metadata,
     /// its dependency closure's config blobs and its generated launchers, and
     /// no content. The content downloads the first time one of those launchers
     /// runs, in whatever environment a later `ocx exec` or `ocx env` composes.
@@ -270,7 +270,7 @@ fn host_pull_pinned(
     let id = ocx_lib::project::host_leaf_identifier(tool, host).map_err(anyhow::Error::from)?;
     oci::PinnedIdentifier::try_from(id).map_err(|e| {
         anyhow::anyhow!(
-            "locked leaf for tool '{}' is not a valid pinned identifier: {e}",
+            "locked leaf for binding '{}' is not a valid pinned identifier: {e}",
             tool.name
         )
     })

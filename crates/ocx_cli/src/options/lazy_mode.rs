@@ -17,10 +17,10 @@ use ocx_lib::lazy;
 /// call `resolve()`; the floor lives there and nowhere else.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct LazyMode {
-    /// Control when a tool's content downloads: now, or on first use.
+    /// Control when a package's content downloads: now, or on first use.
     ///
-    /// `never` composes eagerly, so a tool's content is materialized before
-    /// the tool reaches `PATH`. `always` composes a shim instead: the tool's
+    /// `never` composes eagerly, so a package's content is materialized before
+    /// its binaries reach `PATH`. `always` composes a shim instead: the package's
     /// declared names are on `PATH` immediately, and its content downloads
     /// the first time one of those names runs.
     ///
@@ -59,7 +59,7 @@ mod tests {
     /// (argv path, trailing operands the command requires). Composition or
     /// pre-warming, as distinct from installing into the symlink namespace.
     ///
-    /// `ocx direnv export` is one of them: the `ocx.toml` tiers make a tool
+    /// `ocx direnv export` is one of them: the `ocx.toml` tiers make a package
     /// deferred with no flag typed at all, so a direnv-composed environment
     /// that ignored `lazy-mode` would differ from the `ocx env` one for the
     /// same project.

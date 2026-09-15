@@ -26,22 +26,22 @@ use ocx_lib::lazy;
 /// there and nowhere else.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct LazyReport {
-    /// Show progress while a deferred tool downloads on first use.
+    /// Show progress while a deferred package downloads on first use.
     ///
     /// `silent` opens no progress channel at all. `progress` renders progress
     /// on the controlling terminal; where no terminal is reachable - a
     /// container build, a CI runner, anything detached - it degrades to
     /// silent rather than failing. Errors go to stderr either way.
     ///
-    /// Only affects a tool composed with `--lazy-mode always`; an eagerly
-    /// composed tool has nothing to defer.
+    /// Only affects a package composed with `--lazy-mode always`; an eagerly
+    /// composed package has nothing to defer.
     ///
     /// When omitted, the value is read from `ocx.toml` (the package entry
     /// first, then the top-level `lazy-report` key), then from the
     /// `OCX_LAZY_REPORT` environment variable, and finally defaults to
     /// `silent`. Passing the flag overrides all of them. There is no
     /// per-group setting: unlike `lazy-mode`, this one is resolved when the
-    /// download happens rather than when the tool is composed, and no group
+    /// download happens rather than when the package is composed, and no group
     /// is in scope by then.
     ///
     /// See https://ocx.sh/docs/reference/command-line#arg-lazy-report for the

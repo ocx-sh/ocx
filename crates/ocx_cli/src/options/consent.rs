@@ -18,7 +18,7 @@ pub struct Consent {
     /// Record a consent stamp (the default unless OCX_NO_CONSENT is set)
     ///
     /// The stamp is what lets a shell prompt in this directory apply the
-    /// project's tools and environment; without one the project is inert.
+    /// project's binaries and environment; without one the project is inert.
     /// It is the same stamp `ocx add`, `ocx lock`, `ocx pull` and `ocx exec`
     /// write as a side effect, and `ocx shell revoke` takes back. Pass this
     /// to stamp anyway where OCX_NO_CONSENT is set.

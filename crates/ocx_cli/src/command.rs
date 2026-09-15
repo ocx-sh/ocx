@@ -100,7 +100,7 @@ pub enum Command {
     /// under `--global`. Defaults to a plain table; `ocx --format json env`
     /// emits JSON. `--shell[=NAME]` is the only eval-safe form.
     Env(toolchain_env::ToolchainEnv),
-    /// Add one or more tool bindings to ocx.toml.
+    /// Add one or more package bindings to ocx.toml.
     ///
     /// Resolves each new binding, records it in `ocx.lock`, and re-renders the
     /// project toolchain into `<project>/.ocx/toolchain/` - or under the
@@ -125,7 +125,7 @@ pub enum Command {
     About(about::About),
     /// Create a minimal ocx.toml in the current directory.
     Init(init::Init),
-    /// Resolve tool tags to digests and write ocx.lock.
+    /// Resolve package tags to digests and write ocx.lock.
     ///
     /// Re-renders the project toolchain into `<project>/.ocx/toolchain/` - or
     /// under the `toolchain_dir` root, when one is configured - so the
@@ -181,7 +181,7 @@ pub enum Command {
     /// The package store's own `candidate` and `current` symlinks are left
     /// alone: those move only when you install or select a package.
     Pull(pull::Pull),
-    /// Remove one or more tool bindings from ocx.toml.
+    /// Remove one or more package bindings from ocx.toml.
     ///
     /// Drops each binding from `ocx.lock` as well, then re-renders the project
     /// toolchain into `<project>/.ocx/toolchain/` - or under the

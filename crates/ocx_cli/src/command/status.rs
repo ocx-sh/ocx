@@ -21,7 +21,7 @@ use crate::api::data::status::StatusReport;
 
 /// Show what `ocx.toml` and `ocx.lock` declare, without resolving anything.
 ///
-/// Reports every declared group with its tool bindings and `[env]` table, each
+/// Reports every declared group with its bindings and `[env]` table, each
 /// binding's locked platform digests, the `[package."<id>"]` settings, and
 /// whether the lock is still current for the declaration.
 ///

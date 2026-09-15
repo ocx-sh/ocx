@@ -2086,7 +2086,7 @@ cmake = "3.28"
         let err = ProjectConfig::from_toml_str(toml).expect_err("rejected");
         let rendered = format!("{err:#}");
         assert!(
-            rendered.contains("tool 'cmake'"),
+            rendered.contains("binding 'cmake'"),
             "diagnostic must name the binding: {rendered}"
         );
         assert!(
