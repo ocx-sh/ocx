@@ -304,7 +304,6 @@ impl PackageManager {
             return Ok(Vec::new());
         }
         if packages.len() == 1 {
-            let _spin = self.progress().spinner(format!("Inspecting '{}'", packages[0]));
             let result = self.inspect(&packages[0], platform, options).await.map_err(|kind| {
                 package_manager::error::Error::InspectFailed(vec![PackageError::new(packages[0].clone(), kind)])
             })?;
@@ -317,7 +316,6 @@ impl PackageManager {
             let package = package.clone();
             let platform = platform.clone();
             tasks.spawn(async move {
-                let _spin = mgr.progress().spinner(format!("Inspecting '{package}'"));
                 let result = mgr.inspect(&package, platform, options).await;
                 (package, result)
             });

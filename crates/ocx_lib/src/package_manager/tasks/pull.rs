@@ -168,8 +168,7 @@ impl PackageManager {
                 // happens after the await returns, releasing the slot for
                 // the next queued root pull.
                 let _permit = super::super::concurrency::acquire_permit(&sem).await;
-                let spin = mgr.progress().spinner(format!("Pulling '{package}'"));
-                let result = spin.scope(setup_with_tracker(&mgr, &package, platform, groups)).await;
+                let result = setup_with_tracker(&mgr, &package, platform, groups).await;
                 (package, result)
             });
         }
@@ -678,10 +677,10 @@ async fn setup_dependencies(
         let dep_id = dep.identifier.clone();
         let platform = platform.clone();
         let groups = groups.clone();
-        tasks.spawn(crate::cli::progress::inherit_scope(async move {
+        tasks.spawn(async move {
             let info = setup_with_tracker(&mgr, &dep_id, platform, groups).await?;
             Ok::<_, PackageErrorKind>((idx, Arc::new(info)))
-        }));
+        });
     }
 
     let mut results: Vec<Option<Arc<InstallInfo>>> = vec![None; deps.len()];
@@ -816,10 +815,10 @@ async fn extract_layers(
         let transport = transport.clone();
         let layer_group = layer_group.clone();
         let dial_guard = dial_guard.clone();
-        tasks.spawn(crate::cli::progress::inherit_scope(async move {
+        tasks.spawn(async move {
             let res = extract_layer_atomic(&mgr, &pinned, &transport, &layer, &digest, layer_group, &dial_guard).await;
             (idx, res)
-        }));
+        });
     }
 
     let mut results: Vec<Option<oci::Digest>> = vec![None; tasks.len()];

@@ -195,14 +195,22 @@ Span-free. Progress is rendered through `crate::cli::progress::ProgressManager`
 (`with_progress`, default `disabled()` for library/test consumers); CLI
 `Context` injects the shared stderr manager.
 
-- Parallel tasks (`JoinSet`): each spawned task creates its own
-  `progress.spinner(label)` guard inside the async block; the guard clears
-  on task completion. No `.instrument()`.
-- Sequential tasks: hold a `Spinner` guard for the loop body.
+- **A bar exists only while bytes move.** The `Downloading`/`Uploading`
+  byte bars in `oci::Client` are created after every cache and mount check,
+  right before the transport call. No guard wraps `find`/`resolve`/`pull`
+  orchestration: a cache hit, an index lookup, an offline re-assembly and a
+  symlink operation render nothing — a spinner around those painted and
+  cleared a frame on every cached `ocx exec` and every shim re-entry.
+- `Spinner::scope` nesting is for a caller that owns a genuinely
+  long-running parent (ocx-mirror's prepare/push stages); ocx's own task
+  layer holds no spinner to nest under.
 - `ProgressManager`/guards are `indicatif`-backed (`Send + Sync + Clone`,
   no span registry) so concurrent create/use/drop cannot hit the
   `tracing_subscriber` sharded-registry clone-after-close panic.
-- Disabled manager (non-TTY) → guards are cheap no-ops.
+- Disabled manager (non-TTY, or `--quiet`) → guards are cheap no-ops.
+- `PackageManager::with_progress` also re-targets the `oci::Client`'s bars:
+  `materialize_deferred` swaps the manager for the `lazy-report` channel and
+  the download bar must follow that decision, not the process's ambient one.
 
 ## OCX Configuration Forwarding
 

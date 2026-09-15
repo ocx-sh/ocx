@@ -760,7 +760,6 @@ impl PackageManager {
             return Ok(Vec::new());
         }
         if packages.len() == 1 {
-            let _spin = self.progress().spinner(format!("Resolving '{}'", packages[0]));
             let pinned = self.resolve(&packages[0], platform).await.map_err(|kind| {
                 package_manager::error::Error::ResolveFailed(vec![PackageError::new(packages[0].clone(), kind)])
             })?;
@@ -773,7 +772,6 @@ impl PackageManager {
             let package = package.clone();
             let platform = platform.clone();
             tasks.spawn(async move {
-                let _spin = mgr.progress().spinner(format!("Resolving '{package}'"));
                 let result = mgr.resolve(&package, platform).await;
                 (package, result)
             });

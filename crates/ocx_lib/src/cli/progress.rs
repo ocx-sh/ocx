@@ -14,7 +14,7 @@ const NEST_PREFIX: &str = "  ↳ ";
 tokio::task_local! {
     /// The active parent bar for the current task, set by
     /// [`Spinner::scope`]. Child bars created while this is set
-    /// (`bytes`/`spinner`) insert after it and render indented. Plain
+    /// (`bytes`/`spinner`) render indented beneath it. Plain
     /// `indicatif` `Arc` handle — never a `tracing::Span` — so the
     /// task-local carries no span-registry state.
     static PARENT_BAR: indicatif::ProgressBar;
@@ -116,24 +116,20 @@ impl ProgressManager {
     /// Nesting is **styling only**: the bar is always appended, never
     /// positioned relative to its parent. `MultiProgress::insert_after`
     /// unwraps `parent.index()`, which is `None` whenever the parent is not a
-    /// member of this `MultiProgress`. Two real productions:
-    ///
-    /// - [`inherit_scope`] carries the parent across a `tokio::spawn`, so the
-    ///   parent's [`Guard`] can finish — dropping it from the `MultiProgress` —
-    ///   before the spawned task attaches its child. Observed as an abort in
-    ///   `ocx package exec --lazy-mode always` on a real terminal.
-    /// - A [`disabled`](Self::disabled) manager detaches its bars, so its
-    ///   spinner is the active parent while an enabled manager attaches the
-    ///   child. `materialize_deferred` swaps managers exactly that way.
+    /// member of this `MultiProgress` — a parent whose [`Guard`] finished
+    /// before the child attached (observed as an abort of `ocx package exec
+    /// --lazy-mode always` on a real terminal, back when a task spinner was
+    /// carried across the layer-download `tokio::spawn`), or a parent created
+    /// by a [`disabled`](Self::disabled) manager (detached by construction)
+    /// while an enabled manager attaches the child.
     ///
     /// A membership pre-check cannot close it: `index()` is private to
     /// `indicatif`, and the public `is_hidden`/`is_finished` pair still leaves
     /// the window where the parent finishes between the check and
-    /// `insert_after` re-reading the index. Losing that race aborts the user's
-    /// tool invocation, so the positional API is dropped altogether — `add`
-    /// cannot fail this way. Children keep their indent prefix; the only loss
-    /// is adjacency, a child rendering at the bottom rather than directly
-    /// beneath its parent.
+    /// `insert_after` re-reading the index. So the positional API is dropped
+    /// altogether — `add` cannot fail this way. Children keep their indent
+    /// prefix; the only loss is adjacency, a child rendering at the bottom
+    /// rather than directly beneath its parent.
     fn attach(&self, bar: indicatif::ProgressBar) -> (indicatif::ProgressBar, bool) {
         match &self.multi {
             Some(multi) => match Self::parent() {
@@ -232,8 +228,11 @@ fn open_controlling_terminal() -> Option<console::Term> {
             return None;
         }
     };
+    // `is_dumb` is the same gate `ProgressDrawTarget::stderr` applies: an
+    // escape-sequence bar on a `TERM=dumb` console is garbage, whichever fd
+    // it reaches.
     let term = console::Term::read_write_pair(read, write);
-    term.is_term().then_some(term)
+    (term.is_term() && !console::is_dumb()).then_some(term)
 }
 
 /// Windows has no controlling-terminal draw target yet, so `progress` degrades
@@ -286,27 +285,6 @@ impl Drop for Guard {
     fn drop(&mut self) {
         if !self.abandoned {
             self.pb.finish_and_clear();
-        }
-    }
-}
-
-/// Carries the active parent bar across a `tokio::spawn` boundary.
-///
-/// Task-locals do not propagate into spawned tasks, so a layer download
-/// dispatched on its own task would lose the package spinner as parent
-/// and render flat. Wrap the spawned future: the parent is captured
-/// **eagerly on the calling task** (this fn body runs before the
-/// returned future), then re-established for the child task.
-///
-/// ```ignore
-/// tasks.spawn(progress::inherit_scope(async move { work().await }));
-/// ```
-pub fn inherit_scope<F: std::future::Future>(fut: F) -> impl std::future::Future<Output = F::Output> {
-    let parent = ProgressManager::parent();
-    async move {
-        match parent {
-            Some(parent) => PARENT_BAR.scope(parent, fut).await,
-            None => fut.await,
         }
     }
 }
@@ -513,21 +491,18 @@ mod span_free_tests {
     /// `MultiProgress` must not abort the process.
     ///
     /// Reported from `ocx package exec --lazy-mode always` on a real terminal:
-    /// `insert_after` unwrapped `parent.index()`, and `extract_layer_inner`
-    /// creates its byte bar inside an [`inherit_scope`] whose captured parent
-    /// had already finished. Backtrace: `insert_after` ← `attach` ← `bytes` ←
-    /// `extract_layer_inner` ← `inherit_scope`.
+    /// `insert_after` unwrapped `parent.index()` for a byte bar whose parent
+    /// spinner, carried across a `tokio::spawn`, had already finished.
+    /// Backtrace: `insert_after` ← `attach` ← `bytes` ← `extract_layer_inner`.
     ///
-    /// The state is built from the second production — a detached parent from
+    /// The state is built from the other production — a detached parent from
     /// a disabled manager, an enabled manager attaching the child — because it
     /// needs no scheduling race to reproduce. `disabled()` sets a hidden draw
     /// target, so the parent is a non-member either way, which is the input
     /// `insert_after` could not survive.
     ///
     /// The sibling test above cannot catch this: it keeps every parent alive
-    /// and uses one manager. Neither can the acceptance suite, which never
-    /// gives ocx a TTY — `ProgressMode::detect().stderr` is false there, the
-    /// manager is `disabled()`, and `attach` never reaches an insert at all.
+    /// and uses one manager.
     #[tokio::test]
     async fn a_child_whose_parent_is_not_in_this_multi_does_not_panic() {
         let detached = ProgressManager::disabled();
@@ -563,32 +538,6 @@ mod span_free_tests {
             ProgressManager::parent().is_none(),
             "scope must not leak past the future"
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn inherit_scope_carries_parent_across_spawn() {
-        // The layer download runs on a spawned task (extract_layers
-        // JoinSet); task-locals do not cross tokio::spawn, so without
-        // inherit_scope the download bar would lose its package parent
-        // and render flat. inherit_scope captures the parent eagerly on
-        // the spawning task and re-establishes it on the child.
-        let manager = ProgressManager::hidden();
-        let spin = manager.spinner("Pulling 'pkg'");
-        spin.scope(async {
-            // Plain spawn: parent NOT visible (control).
-            let bare = tokio::spawn(async { ProgressManager::parent().is_some() })
-                .await
-                .unwrap();
-            assert!(!bare, "plain spawn must not inherit the task-local parent");
-
-            // inherit_scope: parent IS visible on the child task.
-            let inherited = tokio::spawn(super::inherit_scope(async { ProgressManager::parent().is_some() }))
-                .await
-                .unwrap();
-            assert!(inherited, "inherit_scope must carry the parent across spawn");
-        })
-        .await;
-        drop(spin);
     }
 
     #[test]
