@@ -58,6 +58,7 @@ Never inline "Error:" / "error:" prefix at log site — `log::error!` / `tracing
 - **Sentence-case or trailing-punctuation `#[error("...")]` strings** in library crates: violates `C-GOOD-ERR`, reads inconsistent in `{:#}` chains.
 - **`"Error:" / "error:"` prefix in `#[error("...")]` strings**: `Error` trait itself represents error category; prefix redundant, breaks chain readability.
 - **Missing `#[source]` on wrapping error variants**: every variant wrapping inner error must return it via `source()`. Without it, chain walking breaks for logging, diagnostics, downcasting.
+- **`#[source]` AND `{source}` interpolation on the same field**: `{err:#}` walks `source()` on top of the interpolated message and prints the cause twice. Exactly one of the two. Interpolate-only is permitted where a `classify()` arm answers at that variant (no walker descends) and the cause's only consumer is its text — the variant's doc comment says so.
 - **`anyhow::Error` in library APIs**: libraries use `thiserror` for structured errors; `anyhow::Error` is binary/application-layer convenience, destroys `match`-ability for downstream callers.
 
 ## Warn-tier Violations (should fix)
