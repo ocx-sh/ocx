@@ -72,6 +72,7 @@ pub mod setup;
 pub mod shell;
 pub mod shim;
 pub mod symlink;
+pub mod tls;
 pub mod trust;
 pub mod utility;
 

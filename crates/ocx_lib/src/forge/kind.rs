@@ -5,6 +5,7 @@
 //! through, and how a client for the pair is built.
 
 use super::{ForgeCredentials, ForgeError, GitBinary, GitHubForge, GitLabForge, RepoCoordinate};
+use crate::tls::ExtraRoots;
 
 /// How a run writes to the index repository.
 ///
@@ -210,6 +211,15 @@ impl ForgeKind {
     /// version-checked; it is **required** whenever `transport` is
     /// [`WriteTransport::Git`] and unused otherwise.
     ///
+    /// `extra_roots` is the caller's merged extra-CA view (C-007) — a
+    /// [`ForgeError::ClientBuild`] surfaces if the forge's TLS client cannot
+    /// be built with it. `extra_roots` reaches the forge's REST client only:
+    /// under [`WriteTransport::Git`] the GitLab push is a spawned `git` whose
+    /// TLS trust is libcurl's, and `GIT_SSL_CAINFO` REPLACES curl's store
+    /// rather than extending it — D-2 ("extra", never a replacement) is why
+    /// the bundle is not materialised for that hop; `git_command.rs` passes
+    /// the parent environment's `GIT_SSL_CAINFO` / `SSL_CERT_FILE` through.
+    ///
     /// # Errors
     ///
     /// Returns [`ForgeError::TransportUnsupported`] (via
@@ -223,6 +233,7 @@ impl ForgeKind {
         credentials: ForgeCredentials,
         coordinate: &RepoCoordinate,
         git: Option<GitBinary>,
+        extra_roots: &ExtraRoots,
     ) -> Result<Box<dyn super::Forge>, ForgeError> {
         self.validate_transport(transport)?;
         if transport == WriteTransport::Git && git.is_none() {
@@ -236,8 +247,8 @@ impl ForgeKind {
             // above refuses that pair — so its client carries neither the transport
             // nor the binary. A field it could never read would be dead by
             // construction and would have to be suppressed forever.
-            Self::GitHub => Box::new(GitHubForge::new(credentials, host)?),
-            Self::GitLab => Box::new(GitLabForge::new(credentials, transport, git, host)?),
+            Self::GitHub => Box::new(GitHubForge::new(credentials, host, extra_roots)?),
+            Self::GitLab => Box::new(GitLabForge::new(credentials, transport, git, host, extra_roots)?),
         })
     }
 }
@@ -277,6 +288,62 @@ mod tests {
 
     fn credentials() -> ForgeCredentials {
         ForgeCredentials::new(ForgeToken::new("token".to_string()))
+    }
+
+    /// C-007 / DX-13 (review r1): `ForgeKind::client` hands `extra_roots` to
+    /// the forge it builds — the one call `ocx package announce` / `claim`
+    /// rely on. Dialed through the trait object against an in-process HTTPS
+    /// server signed by a minted root (`host` set, so the GitHub arm composes
+    /// `https://<addr>/api/v3` and the GitLab arm `https://<addr>/api/v4`):
+    /// without the root the identity call ends in `UnknownIssuer`; with it
+    /// the handshake succeeds and the only failure left is the fake's empty
+    /// `200` body (`Decode`) — the green half asserts that shape, so a
+    /// timeout, a refused connection or `NotValidForName` cannot pass it.
+    /// Both halves, both arms, in one test.
+    ///
+    /// Mutation: pass `&ExtraRoots::default()` instead of `extra_roots` to
+    /// `new` in either arm — that arm's second half reds with
+    /// `UnknownIssuer`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extra_ca_client_threads_the_roots_into_the_forge_it_builds() {
+        use crate::tls::test_pki::{TestPki, assert_untrusted_root, error_chain, serve_https};
+
+        let pki = TestPki::mint();
+        let addr = serve_https(&pki).await;
+        let coordinate = RepoCoordinate {
+            host: Some(addr.to_string()),
+            namespace: "ocx-sh".to_string(),
+            project: "index".to_string(),
+        };
+
+        for kind in [ForgeKind::GitHub, ForgeKind::GitLab] {
+            let without = kind
+                .client(
+                    WriteTransport::Api,
+                    credentials(),
+                    &coordinate,
+                    None,
+                    &ExtraRoots::default(),
+                )
+                .expect("the forge builds");
+            let error = without
+                .authenticated_identity()
+                .await
+                .expect_err("without the root the handshake fails");
+            let chain = error_chain(&error);
+            assert_untrusted_root(&format!("{kind}: {chain}"));
+
+            let with = kind
+                .client(WriteTransport::Api, credentials(), &coordinate, None, &pki.roots())
+                .expect("the forge builds with the root");
+            match with.authenticated_identity().await {
+                Ok(_) | Err(ForgeError::Decode { .. }) => {}
+                Err(error) => panic!(
+                    "{kind}: with the root only the fake's empty body may fail: {}",
+                    error_chain(&error)
+                ),
+            }
+        }
     }
 
     #[test]
@@ -457,7 +524,13 @@ mod tests {
         let gitlab = coordinate("gitlab.com/acme/index");
 
         let error = ForgeKind::GitLab
-            .client(WriteTransport::Git, credentials(), &gitlab, None)
+            .client(
+                WriteTransport::Git,
+                credentials(),
+                &gitlab,
+                None,
+                &ExtraRoots::default(),
+            )
             .err()
             .expect("the git transport cannot run without a resolved git");
         assert!(matches!(error, ForgeError::GitUnavailable { .. }), "got {error:?}");
@@ -468,19 +541,37 @@ mod tests {
         };
         assert!(
             ForgeKind::GitLab
-                .client(WriteTransport::Git, credentials(), &gitlab, Some(git))
+                .client(
+                    WriteTransport::Git,
+                    credentials(),
+                    &gitlab,
+                    Some(git),
+                    &ExtraRoots::default()
+                )
                 .is_ok(),
             "the same pair must build once the argv gate has resolved a binary"
         );
         assert!(
             ForgeKind::GitLab
-                .client(WriteTransport::Api, credentials(), &gitlab, None)
+                .client(
+                    WriteTransport::Api,
+                    credentials(),
+                    &gitlab,
+                    None,
+                    &ExtraRoots::default()
+                )
                 .is_ok(),
             "a binary is required under `git` only — the API transport spawns nothing"
         );
         assert!(
             ForgeKind::GitHub
-                .client(WriteTransport::Api, credentials(), &coordinate("ocx-sh/index"), None)
+                .client(
+                    WriteTransport::Api,
+                    credentials(),
+                    &coordinate("ocx-sh/index"),
+                    None,
+                    &ExtraRoots::default()
+                )
                 .is_ok(),
             "and the requirement is not a blanket refusal on the other forge either"
         );

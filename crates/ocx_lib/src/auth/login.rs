@@ -41,15 +41,33 @@ pub trait RegistryPing: Send + Sync {
 /// scheme the rest of the binary would, and that answer is the union of
 /// `[registries.<name>].insecure` and `OCX_INSECURE_REGISTRIES`
 /// ([`crate::insecure_hosts`]) — a set a library adapter cannot assemble on
-/// its own.
+/// its own. The extra CA roots travel the same way (ocx#448, C-006): the
+/// first command an operator runs against a registry behind a corporate
+/// proxy is this one, and it must trust what every later command trusts.
 pub struct OciClientPing {
     insecure_hosts: Vec<String>,
+    extra_roots: crate::tls::ExtraRoots,
 }
 
 impl OciClientPing {
-    /// Probes registries over HTTPS, except the hosts named here.
-    pub fn new(insecure_hosts: Vec<String>) -> Self {
-        Self { insecure_hosts }
+    /// Probes registries over HTTPS, except the hosts named here, trusting
+    /// `extra_roots` on top of the bundled set.
+    pub fn new(insecure_hosts: Vec<String>, extra_roots: crate::tls::ExtraRoots) -> Self {
+        Self {
+            insecure_hosts,
+            extra_roots,
+        }
+    }
+
+    /// The fork `ClientConfig` one probe of `registry` runs on: the shared
+    /// [`oci::ClientBuilder`] composition (timeouts, extra CA roots) with the
+    /// protocol pinned by [`Self::protocol_for`]. Composed through the builder
+    /// rather than `ClientConfig { .. }` so this probe cannot drift from the
+    /// transport every other command dials with.
+    fn config(&self, registry: &str) -> oci_client::client::ClientConfig {
+        let mut config = oci::ClientBuilder::new().extra_roots(self.extra_roots.clone()).config();
+        config.protocol = self.protocol_for(registry);
+        config
     }
 
     /// The scheme this probe will use for `registry`.
@@ -91,16 +109,9 @@ impl OciClientPing {
 impl RegistryPing for OciClientPing {
     async fn ping(&self, registry: &str, cred: &Credential) -> Result<(), AuthError> {
         use oci_client::Reference;
-        use oci_client::client::{Client as RawClient, ClientConfig};
+        use oci_client::client::Client as RawClient;
 
-        let raw = RawClient::new(ClientConfig {
-            protocol: self.protocol_for(registry),
-            // Same per-read idle bound as the main client: a registry that
-            // accepts the connection and then goes quiet must not hang `ocx
-            // login` forever.
-            read_timeout: Some(oci::client::REGISTRY_READ_TIMEOUT),
-            ..Default::default()
-        });
+        let raw = RawClient::new(self.config(registry));
         let auth = to_registry_auth(cred);
         // Use a placeholder repository — the registry only ever responds to
         // GET /v2/ at this stage, which is repository-agnostic.
@@ -316,7 +327,77 @@ mod tests {
     // ─── `OciClientPing`'s protocol choice ───
 
     fn ping_allowing(hosts: &[&str]) -> OciClientPing {
-        OciClientPing::new(hosts.iter().map(|host| (*host).to_string()).collect())
+        OciClientPing::new(
+            hosts.iter().map(|host| (*host).to_string()).collect(),
+            crate::tls::ExtraRoots::default(),
+        )
+    }
+
+    /// C-006 / S-001 / S-003 at unit tier (review r1): the fork transport's
+    /// handshake proof — the ONE path registry traffic takes, which every
+    /// acceptance registry hop dials over plain HTTP. `OciClientPing::ping`
+    /// against an in-process HTTPS server signed by a minted root answering
+    /// `GET /v2/` with a 200 (anonymous, no challenge): with the root the
+    /// probe is `Ok`; with the default set the chain ends in `UnknownIssuer`.
+    /// Both halves in one test.
+    ///
+    /// Mutation: drop `.extra_roots(..)` from `OciClientPing::config`, or
+    /// break the fork's `convert_certificates` — the first half reds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_probe_handshake_trusts_the_extra_ca_roots_and_only_then() {
+        use crate::tls::ExtraRoots;
+        use crate::tls::test_pki::{TestPki, assert_untrusted_root, error_chain, serve_https};
+
+        let pki = TestPki::mint();
+        let addr = serve_https(&pki).await;
+        let registry = addr.to_string();
+        let anonymous = Credential::basic("", SecretString::default());
+
+        OciClientPing::new(vec![], pki.roots())
+            .ping(&registry, &anonymous)
+            .await
+            .unwrap_or_else(|error| panic!("the seeded probe trusts the minted root: {}", error_chain(&error)));
+
+        let error = OciClientPing::new(vec![], ExtraRoots::default())
+            .ping(&registry, &anonymous)
+            .await
+            .expect_err("without the root the probe must refuse the handshake");
+        let chain = error_chain(&error);
+        assert_untrusted_root(&chain);
+    }
+
+    /// C-006 (ocx#448): the probe's client carries the operator's extra CA
+    /// roots after the bundled Mozilla set, and the builder's bounded
+    /// timeouts with them — a `ClientConfig { .. }` composed here by hand
+    /// carried neither, so `ocx login` against a corp-CA registry failed
+    /// `UnknownIssuer` although every later command would have trusted it.
+    ///
+    /// Mutation: drop `.extra_roots(..)` from `OciClientPing::config` — the
+    /// count equals the Mozilla set and this reds.
+    #[test]
+    fn the_probe_client_carries_the_extra_ca_roots_and_the_shared_timeouts() {
+        use crate::tls::test_pki::TestPki;
+        use crate::tls::{ExtraRoots, ExtraRootsSource};
+
+        let pki = TestPki::mint();
+        let roots = ExtraRoots::parse_pem(pki.root_pem().as_bytes(), &ExtraRootsSource::Env).expect("a minted root");
+        let ping = OciClientPing::new(vec!["registry.corp:5000".to_string()], roots);
+
+        let config = ping.config("ghcr.io");
+
+        let mozilla = webpki_root_certs::TLS_SERVER_ROOT_CERTS.len();
+        assert_eq!(config.extra_root_certificates.len(), mozilla + 1);
+        assert_eq!(config.extra_root_certificates[mozilla].data, pki.root_der);
+        assert_eq!(config.read_timeout, Some(oci::client::REGISTRY_READ_TIMEOUT));
+        assert!(
+            config.connect_timeout.is_some(),
+            "the builder's connect bound comes with it — the hand-rolled config had none"
+        );
+        assert!(
+            matches!(config.protocol, oci_client::client::ClientProtocol::HttpsExcept(ref hosts) if hosts == &["registry.corp:5000".to_string()]),
+            "the protocol gate is still this probe's own: {:?}",
+            config.protocol
+        );
     }
 
     /// Mirrors what `ClientProtocol::scheme_for` does with the value this gate

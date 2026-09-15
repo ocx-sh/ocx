@@ -54,6 +54,14 @@
 //! module. Sharing it is what keeps a key reference spelled the same way on the
 //! command line and in a policy; a second parser here would be the drift.
 //! See `.claude/artifacts/adr_trust_policy.md`.
+//!
+//! **Distinct from [`crate::tls`].** This module pins WHO may sign — a signer
+//! identity — after the TLS handshake that fetched the artifact already
+//! succeeded; `tls` governs WHICH CAs are trusted to authenticate that
+//! handshake in the first place (`extra_ca_certs`/`extra_ca_certs_pem`,
+//! ocx#448). The two never overlap: a wrong `[[trust.policy]]` rejects a
+//! validly-fetched, wrongly-signed artifact, while a wrong extra CA root fails
+//! the fetch before any signature is even read.
 
 use std::path::PathBuf;
 

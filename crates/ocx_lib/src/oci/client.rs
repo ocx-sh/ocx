@@ -270,6 +270,14 @@ impl Client {
         self
     }
 
+    /// How many operator-supplied extra CA roots this client's transport is
+    /// built with (ocx#448, C-006) — the observable that tells the merged
+    /// trust view apart from the local-only one a caller was handed (S-006).
+    #[must_use]
+    pub fn extra_root_count(&self) -> usize {
+        self.recipe.extra_roots().len()
+    }
+
     /// Returns a reference to the inner transport.
     ///
     /// Crate-internal: the sign/verify pipelines take a `&Client` and derive

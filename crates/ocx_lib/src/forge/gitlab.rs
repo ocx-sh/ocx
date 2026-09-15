@@ -198,14 +198,24 @@ impl GitLabForge {
     ///
     /// Returns [`ForgeError::ClientBuild`] when the hardened HTTP client cannot
     /// be constructed.
+    ///
+    /// The REST client is built with `extra_roots` already trusted (ocx#448,
+    /// C-007): [`super::ForgeKind::client`], the one caller, always has the
+    /// operator's merged root set in hand before a client is needed, so
+    /// there is no default-then-rebuild. The REST client only: under
+    /// [`WriteTransport::Git`] the push is a spawned `git` with libcurl's
+    /// own trust, which `GIT_SSL_CAINFO` REPLACES rather than extends — so
+    /// the bundle is deliberately not materialised for it (D-2); the parent
+    /// environment's `GIT_SSL_CAINFO` / `SSL_CERT_FILE` pass through as-is.
     pub fn new(
         credentials: ForgeCredentials,
         transport: WriteTransport,
         git: Option<GitBinary>,
         host: Option<&str>,
+        extra_roots: &crate::tls::ExtraRoots,
     ) -> Result<Self, ForgeError> {
         let base_url = testing_base_url_override().unwrap_or_else(|| api_base_url(host));
-        Self::build(credentials, transport, git, base_url)
+        Self::build(credentials, transport, git, base_url, extra_roots)
     }
 
     /// Build a client against an explicit base URL (acceptance fake-forge seam).
@@ -227,7 +237,13 @@ impl GitLabForge {
         git: Option<GitBinary>,
         base_url: String,
     ) -> Result<Self, ForgeError> {
-        Self::build(credentials, transport, git, base_url)
+        Self::build(
+            credentials,
+            transport,
+            git,
+            base_url,
+            &crate::tls::ExtraRoots::default(),
+        )
     }
 
     fn build(
@@ -235,9 +251,10 @@ impl GitLabForge {
         transport: WriteTransport,
         git: Option<GitBinary>,
         base_url: String,
+        extra_roots: &crate::tls::ExtraRoots,
     ) -> Result<Self, ForgeError> {
         Ok(Self {
-            client: build_forge_http_client(REQUEST_TIMEOUT)?,
+            client: build_forge_http_client(REQUEST_TIMEOUT, extra_roots)?,
             credentials,
             base_url: base_url.trim_end_matches('/').to_string(),
             transport,
@@ -2192,6 +2209,49 @@ mod tests {
 
     use super::super::{ForgeToken, GitVersion};
     use super::*;
+
+    /// C-007 / DX-5: the roots handed to `build` are what make the forge
+    /// trust the operator's root — a client built with the default set does
+    /// not. Same shape as the GitHub sibling; the REST client is the only
+    /// one this covers (the `git` transport is libcurl's, see `new`'s doc).
+    ///
+    /// Mutation: have `build` pass `&ExtraRoots::default()` to
+    /// `build_forge_http_client` — the second half reds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extra_ca_build_threads_the_roots_into_the_private_client() {
+        use crate::tls::test_pki::{TestPki, assert_untrusted_root, error_chain, serve_https};
+
+        let pki = TestPki::mint();
+        let addr = serve_https(&pki).await;
+        let credentials = || ForgeCredentials::new(ForgeToken::new("token".to_string()));
+        let forge = GitLabForge::with_base_url(credentials(), WriteTransport::Api, None, format!("https://{addr}"))
+            .expect("the forge builds");
+
+        let error = forge
+            .client
+            .get(forge.url("/user"))
+            .send()
+            .await
+            .expect_err("a client built with the default roots does not know the minted root");
+        let chain = error_chain(&error);
+        assert_untrusted_root(&chain);
+
+        let forge = GitLabForge::build(
+            credentials(),
+            WriteTransport::Api,
+            None,
+            format!("https://{addr}"),
+            &pki.roots(),
+        )
+        .expect("the forge builds");
+        let response = forge
+            .client
+            .get(forge.url("/user"))
+            .send()
+            .await
+            .expect("a client built with the root trusts it");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
 
     fn coordinate(value: &str) -> RepoCoordinate {
         value.parse().expect("valid coordinate")

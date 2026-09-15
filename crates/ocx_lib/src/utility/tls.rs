@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Shared TLS root-seeding for hand-rolled `reqwest::Client` builders.
+//! Shared TLS root-seeding for hand-rolled `reqwest::Client` builders. The
+//! operator-supplied extra CA roots (`OCX_EXTRA_CA_CERTS` / `extra_ca_certs`,
+//! ocx#448) live in [`crate::tls`], beside the other trust ladders.
 
 /// Seeds a [`reqwest::ClientBuilder`] with the bundled Mozilla CA roots.
 ///

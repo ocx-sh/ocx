@@ -16,8 +16,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.helpers import push_managed_config
+from src.helpers import SIGSTORE_DIR, push_managed_config
 from src.runner import OcxRunner
+
+# A real self-signed CA (the test stack's Fulcio root): the positive case needs
+# material the certificate parser accepts, not a placeholder string.
+_CA_PEM = (SIGSTORE_DIR / "keys" / "fulcio-ca.crt.pem").read_text()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -263,6 +267,39 @@ def test_config_test_missing_candidate_exits_79(ocx: OcxRunner, tmp_path: Path) 
     result = ocx.run("config", "test", str(tmp_path / "absent.toml"), check=False)
 
     assert result.returncode == 79, result.stderr
+
+
+def test_config_test_refuses_both_extra_ca_certs_keys_78(ocx: OcxRunner, tmp_path: Path) -> None:
+    """C-003/S-003: `extra_ca_certs` and `extra_ca_certs_pem` set together in
+    one candidate is ambiguous — `config test` refuses it with exit 78, the
+    same validator `config push` runs. The path named here exists, so the
+    refusal can only come from the ambiguity, never from a failed read."""
+    (tmp_path / "corp-ca.pem").write_text(_CA_PEM)
+    candidate = _write_candidate(
+        tmp_path,
+        f"extra_ca_certs = \"corp-ca.pem\"\nextra_ca_certs_pem = '''\n{_CA_PEM}'''\n",
+    )
+
+    result = ocx.run("config", "test", str(candidate), check=False)
+
+    assert result.returncode == 78, result.stderr
+    assert "extra_ca_certs" in result.stderr, f"the refusal must name the ambiguous keys: {result.stderr}"
+
+
+def test_config_test_accepts_pem_payload(ocx: OcxRunner, tmp_path: Path) -> None:
+    """C-003: a clean `extra_ca_certs_pem` payload reports nothing — the
+    inlined form is exactly what a fleet consumer receives, so it is valid,
+    names no unknown key, and exits 0."""
+    candidate = _write_candidate(tmp_path, f"extra_ca_certs_pem = '''\n{_CA_PEM}'''\n")
+
+    result = ocx.run("config", "test", str(candidate), check=False)
+    assert result.returncode == 0, result.stderr
+
+    report = ocx.json("config", "test", str(candidate))
+    assert report["valid"] is True
+    assert report["unknown_keys"] == [], (
+        f"a key this ocx understands must not be reported as unknown: {report['unknown_keys']}"
+    )
 
 
 # ---------------------------------------------------------------------------

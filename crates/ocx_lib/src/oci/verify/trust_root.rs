@@ -24,7 +24,8 @@
 //!   air-gapped seam. No network.
 //! - [`TrustRoot::from_material`] — rebuild from the trust-root cache.
 //! - [`TrustRoot::load_embedded`] — the public-good Sigstore root, fetched and
-//!   verified over TUF by `sigstore`'s `tough`-backed client.
+//!   verified over TUF by `sigstore`'s `tough`-backed client, dialing through
+//!   the shared Sigstore HTTP client (`oci::endpoint::sigstore_http_client`).
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -34,8 +35,21 @@ use std::time::Duration;
 use pki_types::CertificateDer;
 use sigstore::trust::TrustRoot as SigstoreTrustRootTrait;
 use sigstore::trust::sigstore::SigstoreTrustRoot;
+use url::Url;
 
 use super::error::{TrustRootLoadReason, VerifyErrorKind};
+use crate::oci::endpoint::{resolve_sigstore_url, sigstore_http_client};
+
+/// The public-good Sigstore TUF repository `sigstore` fetches the trust root
+/// from.
+///
+/// `sigstore` hardcodes this base in its `constants` module and does not
+/// export it; the literal is repeated here because the shared Sigstore client
+/// dials only a host the SSRF guard has cleared, and clearing needs the URL
+/// before the fetch. A drift between the two is caught by
+/// `the_tuf_fetch_dials_through_the_injected_client`, which records every name
+/// the fetch resolves and compares it to this host.
+const SIGSTORE_TUF_URL: &str = "https://tuf-repo-cdn.sigstore.dev";
 
 /// Reject a certificate body that is not a parseable X.509 certificate.
 ///
@@ -51,33 +65,34 @@ fn parse_certificate(der: &[u8]) -> Result<(), String> {
 
 /// Whole-operation deadline for the public-good TUF trust-root fetch.
 ///
-/// Nothing below this call bounds the wait: `sigstore` builds the TUF client's
-/// `reqwest::Client` itself with no connect or request timeout and no injection
-/// point, and wraps it in its own transport, which replaces `tough`'s -- so
-/// `tough`'s own 30s/10s defaults never apply either. An endpoint that completes
-/// the TCP handshake and then sends nothing otherwise hangs `ocx package verify`
-/// forever, and through the auto-verify hook hangs every covered install.
+/// The fetch dials through the shared Sigstore client, so each request already
+/// carries that client's connect, request and read timeouts (`oci::endpoint`).
+/// Those are per-request bounds, and the fetch is a chain of several small
+/// sequential requests (TUF metadata, then the `trusted_root.json` target),
+/// not one -- `sigstore` wraps the client in its own `tough` transport and
+/// issues the requests itself, so no per-request number can be expressed here.
+/// This budget bounds the whole chain instead: without it an endpoint that
+/// answers each request just inside its per-request budget can stretch
+/// `ocx package verify` -- and through the auto-verify hook every covered
+/// install -- across the entire walk.
 ///
-/// The budget is a whole-operation one because the fetch is a chain of several
-/// small sequential requests (TUF metadata, then the `trusted_root.json`
-/// target), not one: a per-request number cannot be expressed here at all, since
-/// the requests are `sigstore`'s. It is set to twice the per-request budget the
-/// sibling trust services use for a single Fulcio or Rekor call (30s, in
-/// `oci::endpoint`) -- generous enough that a slow link walking the chain is not
-/// cut off mid-fetch, short enough that a blackholed endpoint fails in a minute
-/// rather than never.
+/// It is set to twice the per-request budget the sibling trust services use
+/// for a single Fulcio or Rekor call (30s, in `oci::endpoint`) -- generous
+/// enough that a slow link walking the chain is not cut off mid-fetch, short
+/// enough that the whole walk fails in a minute rather than one request at a
+/// time.
 const TUF_FETCH_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Bound `fetch` by `deadline`, reporting expiry as
 /// [`TrustRootLoadReason::TufFetchTimeout`].
 ///
-/// Separate from [`TrustRoot::load_embedded`] because that call reaches the live
-/// public-good TUF repository and cannot be pointed anywhere else -- `sigstore`
-/// hardcodes the metadata base URL and builds the HTTP client itself -- so this
-/// is the only seam at which the deadline is observable without a network. The
-/// deadline is a parameter for the same reason: it is what lets a test drive an
-/// already-elapsed budget against a never-ready future, which is decided purely
-/// by poll order and so cannot flake under load.
+/// Separate from [`TrustRoot::load_embedded`] so the deadline is observable
+/// without a network and without spending it: the client seam could pin the
+/// repository host to a local listener that never answers, but that proves the
+/// budget only by waiting it out. The deadline is a parameter for the same
+/// reason: it is what lets a test drive an already-elapsed budget against a
+/// never-ready future, which is decided purely by poll order and so cannot
+/// flake under load.
 async fn with_deadline<T>(
     deadline: Duration,
     fetch: impl Future<Output = Result<T, VerifyErrorKind>>,
@@ -86,6 +101,15 @@ async fn with_deadline<T>(
         Ok(fetched) => fetched,
         Err(_elapsed) => Err(VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::TufFetchTimeout)),
     }
+}
+
+/// Report a failure anywhere in the TUF chain -- the guard's verdict on the
+/// repository host, or the fetch itself -- as
+/// [`TrustRootLoadReason::AssetReadFailed`].
+fn tuf_fetch_failed(error: impl std::fmt::Display) -> VerifyErrorKind {
+    VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::AssetReadFailed {
+        source: Box::new(std::io::Error::other(format!("TUF trust-root fetch failed: {error}"))),
+    })
 }
 
 /// Sigstore trust material: Fulcio CAs, CTFE log keys, Rekor log keys.
@@ -125,25 +149,48 @@ impl TrustRoot {
     /// hash of `trusted_root.json` before returning it. `cache_dir` is where
     /// the fetched targets are checked out so the next run can reuse them.
     ///
+    /// The HTTP requests go through the shared Sigstore client
+    /// ([`sigstore_http_client`]), the same one Fulcio and Rekor calls use: so
+    /// the operator's extra CA roots, proxy configuration and the per-request
+    /// timeouts apply to the TUF fetch too, and a corporate TLS-terminating
+    /// proxy that every other Sigstore call already passes no longer fails
+    /// this one on a cold cache (ocx#470). That client dials only a host the
+    /// SSRF guard has cleared, so the repository host is resolved and pinned
+    /// through [`resolve_sigstore_url`] first -- with no `trusted_hosts`
+    /// admission, since the public-good CDN has no business resolving into a
+    /// private range. An operator whose DNS does that has the air-gapped
+    /// `--sigstore-trusted-root` seam.
+    ///
     /// # Errors
     /// [`VerifyErrorKind::TrustRootLoad`] with [`TrustRootLoadReason::AssetReadFailed`]
-    /// when the TUF client cannot produce a trusted root, or with
-    /// [`TrustRootLoadReason::TufFetchTimeout`] when it does not answer within
-    /// the whole-operation TUF deadline.
+    /// when the repository host is refused or does not resolve, or when the
+    /// TUF client cannot produce a trusted root; or with
+    /// [`TrustRootLoadReason::TufFetchTimeout`] when the chain does not
+    /// complete within the whole-operation TUF deadline.
     pub async fn load_embedded(cache_dir: &Path) -> Result<Self, VerifyErrorKind> {
         // Best-effort: a missing cache dir is not a reason to fail the fetch,
         // sigstore falls back to its embedded resources and the network.
         let _ = tokio::fs::create_dir_all(cache_dir).await;
         // The local mkdir above stays outside the deadline: it is already
-        // best-effort, and the budget is for the network chain.
-        let root = with_deadline(TUF_FETCH_DEADLINE, async {
-            SigstoreTrustRoot::new(Some(cache_dir)).await.map_err(|e| {
-                VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::AssetReadFailed {
-                    source: Box::new(std::io::Error::other(format!("TUF trust-root fetch failed: {e}"))),
-                })
-            })
+        // best-effort, and the budget is for the network chain -- which
+        // starts with the guard's own lookup of the repository host.
+        with_deadline(TUF_FETCH_DEADLINE, async {
+            let tuf = Url::parse(SIGSTORE_TUF_URL).map_err(tuf_fetch_failed)?;
+            resolve_sigstore_url(&tuf, &[]).await.map_err(tuf_fetch_failed)?;
+            Self::fetch_with(cache_dir, sigstore_http_client().clone()).await
         })
-        .await?;
+        .await
+    }
+
+    /// The TUF fetch with the HTTP client injected.
+    ///
+    /// Split from [`TrustRoot::load_embedded`] so a test can hand in a client
+    /// whose resolver records what the fetch dials, proving the seam is used
+    /// without a network; production passes the shared Sigstore client.
+    async fn fetch_with(cache_dir: &Path, client: reqwest::Client) -> Result<Self, VerifyErrorKind> {
+        let root = SigstoreTrustRoot::new_with_client(Some(cache_dir), client)
+            .await
+            .map_err(tuf_fetch_failed)?;
         Self::harvest(&root)
     }
 
@@ -318,6 +365,8 @@ impl SigstoreTrustRootTrait for TrustRoot {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
 
     /// A real, self-signed P-256 certificate. Synthetic "structurally valid
@@ -562,6 +611,59 @@ mod tests {
         );
     }
 
+    /// A resolver that refuses every name and remembers which it was asked.
+    struct RecordingResolver(Arc<Mutex<Vec<String>>>);
+
+    impl reqwest::dns::Resolve for RecordingResolver {
+        fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(name.as_str().to_owned());
+            Box::pin(async { Err("refused by the recording resolver".into()) })
+        }
+    }
+
+    /// The seam itself: the TUF fetch dials through the client it is handed,
+    /// and what it dials is the host [`SIGSTORE_TUF_URL`] names.
+    ///
+    /// Two reds. Fetching through `SigstoreTrustRoot::new` instead of
+    /// `new_with_client` resolves with the default client, so the fetch either
+    /// succeeds for real or fails without ever asking the recorder -- the
+    /// match or the non-empty check fails; a drift between the literal here
+    /// and the base `sigstore` hardcodes fails the equality. No network: the
+    /// resolver refuses before any dial, and `no_proxy` keeps an ambient
+    /// `HTTPS_PROXY` from turning the recorded name into the proxy's.
+    #[tokio::test]
+    async fn the_tuf_fetch_dials_through_the_injected_client() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(RecordingResolver(Arc::clone(&asked))))
+            .build()
+            .expect("a client with a custom resolver builds");
+        let cache = tempfile::tempdir().expect("temp cache dir");
+
+        match TrustRoot::fetch_with(cache.path(), client).await {
+            Err(VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::AssetReadFailed { .. })) => {}
+            other => panic!("expected AssetReadFailed from a refused dial, got: {other:?}"),
+        }
+
+        let expected = Url::parse(SIGSTORE_TUF_URL)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .expect("SIGSTORE_TUF_URL names a host");
+        let asked = asked.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        assert!(
+            !asked.is_empty(),
+            "the fetch never asked the injected client's resolver: the seam is bypassed"
+        );
+        assert!(
+            asked.iter().all(|name| name.eq_ignore_ascii_case(&expected)),
+            "the fetch dialed {asked:?}, expected only {expected}"
+        );
+    }
+
     /// The blackholed-endpoint case: a TUF endpoint that completes the TCP
     /// handshake and then sends nothing. Without the deadline this is an
     /// unbounded hang with no exit code -- in `ocx package verify`, and through
@@ -569,10 +671,11 @@ mod tests {
     /// cache is cold or expired, turning the fail-closed policy gate into
     /// fail-hung.
     ///
-    /// Asserted at [`with_deadline`] rather than through `load_embedded`,
-    /// because `sigstore` hardcodes the public-good metadata base URL and builds
-    /// the HTTP client itself -- a local listener cannot be substituted, so
-    /// `load_embedded` has no reachable failing input short of the real network.
+    /// Asserted at [`with_deadline`] rather than through `load_embedded`: the
+    /// client seam could pin the repository host to a local listener that
+    /// accepts and never answers, but that proves the budget only by waiting
+    /// it out, and the shared client's own per-request timeouts would fire
+    /// first.
     ///
     /// No clock dependence, so no flake and no multi-second test: the budget is
     /// already spent before the first poll and the fetch is never ready, so

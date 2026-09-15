@@ -56,11 +56,16 @@ pub enum BoundedReadError {
 /// Read all of `path`, refusing a non-regular file and anything over `cap`
 /// bytes.
 ///
-/// Blocking — wrap in `spawn_blocking` from an async caller.
+/// Blocking — wrap in `spawn_blocking` from an async caller. Never blocks on
+/// the *open*: a FIFO named as the path is refused from its metadata before
+/// `open(2)` — which POSIX blocks until a writer appears — is attempted, and
+/// on Unix the open itself is `O_NONBLOCK`, so a FIFO swapped in between the
+/// two still returns a handle the post-open check refuses (CWE-367; the
+/// `file_transport.rs` `open_for_read` shape).
 ///
 /// # Errors
 ///
-/// [`BoundedReadError::NotRegularFile`] for a directory or device,
+/// [`BoundedReadError::NotRegularFile`] for a directory, device or FIFO,
 /// [`BoundedReadError::TooLarge`] when the content passes `cap`, and
 /// [`BoundedReadError::Io`] for anything the filesystem raised.
 pub fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedReadError> {
@@ -68,34 +73,26 @@ pub fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedReadError> 
         path: path.to_path_buf(),
         source,
     };
-
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        // Windows refuses to open a directory as a file at all, raising
-        // `ERROR_ACCESS_DENIED`, where Unix opens it and lets the `is_file`
-        // check below refuse it — so without this arm one directory is
-        // `NotRegularFile` on one platform and `Io` on the other, and every
-        // caller's wording splits with it. Reading the path here cannot
-        // reintroduce the TOCTOU the check below is ordered against: the open
-        // has already failed, so there is no handle whose identity a swap could
-        // change, and both branches refuse either way.
-        Err(source) => {
-            return Err(if path.is_dir() {
-                BoundedReadError::NotRegularFile {
-                    path: path.to_path_buf(),
-                }
-            } else {
-                io(source)
-            });
-        }
+    let not_regular = || BoundedReadError::NotRegularFile {
+        path: path.to_path_buf(),
     };
+
+    // Before opening: a FIFO with no writer blocks `open(2)` forever, and a
+    // directory opens on Unix but not on Windows (`ERROR_ACCESS_DENIED`), so
+    // this is also what keeps a directory `NotRegularFile` on both. A path
+    // whose metadata cannot be read falls through to the open, whose own
+    // error (`NotFound`, `PermissionDenied`) is the one to report. The
+    // post-open check below stays: this one is on the path, and the path
+    // can be swapped between here and the open.
+    if std::fs::metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
+        return Err(not_regular());
+    }
+    let file = open_for_read(path).map_err(io)?;
     // After opening, not before: `metadata()` on the path would leave a window
     // in which the path is swapped between the check and the read.
     let metadata = file.metadata().map_err(io)?;
     if !metadata.is_file() {
-        return Err(BoundedReadError::NotRegularFile {
-            path: path.to_path_buf(),
-        });
+        return Err(not_regular());
     }
     read_under_cap(file, cap).map_err(|error| match error {
         None => BoundedReadError::TooLarge {
@@ -104,6 +101,25 @@ pub fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedReadError> 
         },
         Some(source) => io(source),
     })
+}
+
+/// Opens `path` for reading without blocking on a FIFO swapped in after the
+/// pre-stat. `O_NONBLOCK` is a no-op on a regular file.
+#[cfg(unix)]
+fn open_for_read(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+/// Opens `path` for reading. No `O_NONBLOCK` equivalent applies — the named
+/// pipes this guards against are a Unix concern.
+#[cfg(not(unix))]
+fn open_for_read(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 /// The ceiling itself, over a reader rather than a path.
