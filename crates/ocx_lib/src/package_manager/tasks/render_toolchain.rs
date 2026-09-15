@@ -1721,10 +1721,7 @@ fn publish_link_within(entry: &Path, target: &Path, dry_run: bool) -> RenderOutc
     {
         return RenderOutcome::Skipped {
             path: entry.to_path_buf(),
-            // `render_chain`, not `to_string`: `Error::InternalFile` carries its
-            // cause by `#[source]` alone, so `to_string` here would name the
-            // path and nothing else — a refusal the user cannot act on.
-            reason: crate::error::render_chain(&refuse_symlink(parent)),
+            reason: refuse_symlink(parent).to_string(),
         };
     }
     if dry_run {
@@ -1772,7 +1769,7 @@ fn publish_link_within(entry: &Path, target: &Path, dry_run: bool) -> RenderOutc
             reason: if occupied_by_directory(entry) {
                 refuse_dereferenced_copy(entry)
             } else {
-                crate::error::render_chain(&error)
+                error.to_string()
             },
         },
     }
@@ -1852,16 +1849,12 @@ async fn prune_outcome(home: &ToolchainHome, artifact: &RenderedArtifact, dry_ru
     match pruned {
         Ok(()) => RenderOutcome::Pruned,
         // The reason has to *be* the remedy, the same way
-        // [`refuse_dereferenced_copy`]'s does: `Error::InternalFile`'s `Display`
-        // names only its path, so `to_string` here would report a group
-        // directory the render cannot remove without ever saying why or what to
-        // do about it. `render_chain` supplies the cause — `ENOTEMPTY` for the
-        // one that actually happens, a containment refusal for the rest — and
-        // the sentence supplies the action.
+        // [`refuse_dereferenced_copy`]'s does: the error supplies the cause —
+        // `ENOTEMPTY` for the one that actually happens, a containment refusal
+        // for the rest — and the sentence supplies the action.
         Err(error) => RenderOutcome::Skipped {
             reason: format!(
-                "{} — it is left in place rather than deleted recursively. Remove '{}' and run `ocx pull` again",
-                crate::error::render_chain(&error),
+                "{error} — it is left in place rather than deleted recursively. Remove '{}' and run `ocx pull` again",
                 path.display()
             ),
             path,

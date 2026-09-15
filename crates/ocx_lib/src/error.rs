@@ -28,10 +28,17 @@ pub enum Error {
 
     /// A file I/O error with path context.
     ///
-    /// The io cause is carried by `#[source]` alone — interpolating it into the
-    /// message too would print it twice in a `{err:#}` chain.
-    #[error("internal file error for '{path}'", path = .0.display())]
-    InternalFile(std::path::PathBuf, #[source] std::io::Error),
+    /// The io cause is interpolated into the message and deliberately **not**
+    /// exposed as `#[source]` — the one exception to the "every wrapping
+    /// variant carries `#[source]`" rule, and exactly one of the two, never
+    /// both. Both together printed it twice in a `{err:#}` chain (#286);
+    /// `#[source]` alone left every `to_string()` producer — a warn line, a
+    /// machine-readable `reason` — naming the path and nothing else (#433).
+    /// Nothing is lost by the omission: [`ClassifyExitCode`] answers at this
+    /// variant and never descends to the io error, and no other consumer
+    /// downcasts through it.
+    #[error("internal file error for '{path}': {cause}", path = .0.display(), cause = .1)]
+    InternalFile(std::path::PathBuf, std::io::Error),
 
     /// A per-layer layout annotation read from a manifest layer descriptor could
     /// not be resolved into a placement.
@@ -410,16 +417,16 @@ mod tests {
     use super::*;
 
     /// Regression for the doubled-source-text bug observed in github issue
-    /// #286: `Error::InternalFile` both interpolates its `#[source]` io error
-    /// into the `#[error("...: {source}")]` message AND marks the same field
+    /// #286: `Error::InternalFile` both interpolated its io error into the
+    /// `#[error("...: {source}")]` message AND marked the same field
     /// `#[source]`. Rendering through `anyhow`'s alternate format (`{:#}`,
     /// the convention this codebase uses to print full error chains —
     /// `quality-rust-errors.md`) walks `source()` on top of the already-
     /// interpolated top-level message, so the io error's text is printed
     /// twice: `"internal file error for '<path>': <text>: <text>"`.
     ///
-    /// Guards against that doubling returning: the io cause must be carried by
-    /// `#[source]` alone, never also interpolated into the message.
+    /// Guards against that doubling returning: the io cause is interpolated
+    /// once and never also exposed as `source()`.
     #[test]
     fn internal_file_display_does_not_duplicate_source_text() {
         let io_error = std::io::Error::other("manifest blob not found in CAS");
@@ -430,6 +437,29 @@ mod tests {
         assert_eq!(
             occurrences, 1,
             "the io source text must appear exactly once in the alternate-format chain; got: {rendered}"
+        );
+    }
+
+    /// Regression for github issue #433: the io cause was carried by
+    /// `#[source]` alone, so `to_string()` — what every producer that builds a
+    /// machine-readable `reason` or a warn line uses — rendered
+    /// `internal file error for '<path>'` and named neither errno nor cause.
+    /// The variant's own `Display` must carry it, so no producer has to walk
+    /// the chain to say why a file operation failed.
+    #[test]
+    fn internal_file_display_names_its_cause() {
+        let error = file_error(
+            "/tmp/example/data",
+            std::io::Error::new(std::io::ErrorKind::NotFound, "no such file or directory (os error 2)"),
+        );
+        assert_eq!(
+            error.to_string(),
+            "internal file error for '/tmp/example/data': no such file or directory (os error 2)"
+        );
+        assert_eq!(
+            render_chain(&error),
+            error.to_string(),
+            "the chain walk adds nothing the text lacks"
         );
     }
 

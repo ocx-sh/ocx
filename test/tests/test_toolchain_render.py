@@ -632,18 +632,20 @@ def test_an_entry_that_cannot_be_written_for_any_other_reason_names_its_cause(
 ) -> None:
     """C-082 / C-050 — the arm that is *not* a directory still says why.
 
-    ``Error::InternalFile`` carries its io cause by ``#[source]`` alone and its
-    ``Display`` names only the path, so ``error.to_string()`` in a ``reason``
+    ``Error::InternalFile`` carried its io cause by ``#[source]`` alone and its
+    ``Display`` named only the path, so ``error.to_string()`` in a ``reason``
     field produced ``internal file error for '<path>'`` and stopped there — the
-    defect C-082 describes, in its non-directory half. ``error::render_chain``
-    exists for exactly this ("a warn line, a machine-readable ``reason`` field")
-    and is what the skip now walks.
+    defect C-082 describes, in its non-directory half. Since
+    `#433 <https://github.com/ocx-sh/ocx/issues/433>`_ the variant's own
+    ``Display`` carries the cause, so every producer that stringifies it says
+    why.
 
     A read-only group directory is the cheapest reachable instance: the staging
     symlink cannot be created inside it.
 
-    RED: put ``error.to_string()`` back — the errno vanishes from the warning
-    and the user is told a path they can already see.
+    RED: drop ``{cause}`` from ``Error::InternalFile``'s ``#[error]`` string —
+    the errno vanishes from the warning and the user is told a path they can
+    already see.
     """
     project = locked_project(ocx, tmp_path)
     entry = project.default_link
@@ -1965,17 +1967,16 @@ def test_a_skipped_group_directory_says_why_and_what_to_do(
     """S-001 *Errors* — "reported ``Skipped`` with **a remedy** naming the path".
 
     ``prune_outcome`` built its reason with ``error.to_string()``, and
-    ``Error::InternalFile`` carries its cause by ``#[source]`` alone — so the
+    ``Error::InternalFile`` carried its cause by ``#[source]`` alone — so the
     reason was ``internal file error for '<path>'`` and nothing else: the path,
-    twice, with no cause and no action. ``publish_link_within`` had already
-    solved this at the sibling site, and its own doc comment says why
-    (``to_string`` there "would name the path and nothing else — a refusal the
-    user cannot act on"); one producer of that contract was fixed and the other
-    was not.
+    twice, with no cause and no action. Since
+    `#433 <https://github.com/ocx-sh/ocx/issues/433>`_ the variant's own
+    ``Display`` carries the cause; the remedy sentence is this site's own.
 
-    RED: revert ``prune_outcome``'s reason to ``error.to_string()`` — the cause
-    assertion and the remedy assertion both red while the path assertion above
-    them still passes, which is what makes them the two halves this row adds.
+    RED: drop ``{cause}`` from ``Error::InternalFile``'s ``#[error]`` string for
+    the cause assertion, or the remedy sentence from ``prune_outcome`` for the
+    remedy assertion — each reds while the path assertion above them still
+    passes, which is what makes them the two halves this row adds.
     """
     checkout = two_branch_checkout(ocx, tmp_path)
     assert run_in(ocx, checkout.directory, "pull").returncode == EXIT_SUCCESS
