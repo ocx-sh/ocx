@@ -69,7 +69,7 @@ Lint tooling setup (one-off): the first `ocx pull` (or `task` invocation) materi
 
 ## Architecture
 
-Four crates: `crates/ocx_lib` (core), `crates/ocx_cli` (thin CLI, pkg `ocx`), `crates/ocx_schema` (build-only JSON schema), `crates/ocx_shim` (Windows launcher shim). The mirror tool lives in its own repo: [ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror) (vendors ocx as submodule). Rust 2024, resolver v3. `oci-client` patched to `external/rust-oci-client`.
+Four crates: `crates/ocx_lib` (core), `crates/ocx_cli` (thin CLI, pkg `ocx`), `crates/ocx_schema` (build-only JSON schema), `crates/ocx_shim` (Windows launcher shim). The mirror tool lives in its own repo: [ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror) (vendors ocx as submodule). Rust 2024, resolver v3. Three deps patched to submodules under `external/`: `oci-client` (`rust-oci-client`), `docker_credential`, `sigstore` (`sigstore-rs`).
 
 Subsystem rules auto-load on path match. Read relevant one before work on that area:
 

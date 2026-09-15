@@ -73,7 +73,7 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 
 | Subsystem | Rule | Path scope |
 |---|---|---|
-| OCI registry/index | [subsystem-oci.md](./rules/subsystem-oci.md) | `crates/ocx_lib/src/oci/**` |
+| OCI registry/index | [subsystem-oci.md](./rules/subsystem-oci.md) | `crates/ocx_lib/src/oci/**`, `external/rust-oci-client/**`, `external/sigstore-rs/**` |
 | Storage/symlinks | [subsystem-file-structure.md](./rules/subsystem-file-structure.md) | `crates/ocx_lib/src/file_structure/**` |
 | Package metadata | [subsystem-package.md](./rules/subsystem-package.md) | `crates/ocx_lib/src/package/**` |
 | Package manager | [subsystem-package-manager.md](./rules/subsystem-package-manager.md) | `crates/ocx_lib/src/package_manager/**` |
@@ -93,7 +93,7 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `**/Cargo.toml`, `**/Cargo.lock` | [quality-rust.md](./rules/quality-rust.md) |
 | `**/Cargo.toml`, `**/rustfmt.toml`, `**/deny.toml`, `**/rust-toolchain.toml` | [rust-cargo.md](./rules/rust-cargo.md) |
 | `Cargo.toml`, `crates/*/Cargo.toml`, `deny.toml`, `.licenserc.toml` | [subsystem-deps.md](./rules/subsystem-deps.md) |
-| `crates/ocx_lib/src/oci/**` | + [subsystem-oci.md](./rules/subsystem-oci.md) |
+| `crates/ocx_lib/src/oci/**`, `external/rust-oci-client/**`, `external/sigstore-rs/**` | + [subsystem-oci.md](./rules/subsystem-oci.md) |
 | `crates/ocx_lib/src/file_structure/**`, `file_structure.rs`, `reference_manager.rs`, `symlink.rs` | + [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
 | `crates/ocx_lib/src/script/**`, `test/tests/test_package_test_script.py` | + [subsystem-script.md](./rules/subsystem-script.md) |
 | `crates/ocx_lib/src/package/**`, `package.rs` | + [subsystem-package.md](./rules/subsystem-package.md) |

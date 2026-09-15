@@ -16,7 +16,7 @@ Two crates in `crates/`:
 | `ocx_lib` | Core library: OCI client, file structure, package manager |
 | `ocx_cli` | Thin CLI shell using clap; produces the `ocx` binary |
 
-`oci-client` is patched to a local git submodule at `external/rust-oci-client`. Run `git submodule update --init` after cloning.
+Three crates are patched to local git submodules under `external/`: `oci-client` (`rust-oci-client`), `docker_credential` and `sigstore` (`sigstore-rs`). Run `git submodule update --init` after cloning.
 
 ## Building
 
