@@ -5,13 +5,10 @@ use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{
-    cli::UsageError,
-    log, oci,
-    publisher::{CopyRequest, Publisher},
-};
+use ocx_package::publisher::{CopyRequest, Publisher};
 
 use crate::api::data::package_copy::{CopyReport, DescriptionOutcome};
+use crate::error::UsageError;
 use crate::options;
 
 #[derive(Parser)]
@@ -38,7 +35,7 @@ pub struct PackageCopy {
     /// and exactly one is required - a leaf manifest carries no platform of its
     /// own, so there is nothing to read it from.
     #[clap(short = 'p', long = "platform")]
-    platform: Vec<oci::Platform>,
+    platform: Vec<ocx_oci::Platform>,
 
     /// Recompute the rolling tags (`1.4`, `1`, `latest`) at the target.
     ///
@@ -129,7 +126,7 @@ impl PackageCopy {
         let scratch_root = context.file_structure().temp.root().to_path_buf();
         tokio::fs::create_dir_all(&scratch_root)
             .await
-            .map_err(|e| ocx_lib::error::file_error(&scratch_root, e))?;
+            .map_err(|e| ocx_util::error::FileError::new(&scratch_root, e))?;
 
         // Says what this run will do, not what a copy does: `--dry-run -l info`
         // asserting "copying" is a log line the run then contradicts.
@@ -190,7 +187,7 @@ impl PackageCopy {
         // part of this an operator can act on.
         Ok(match report.sidecar_conflicts.is_empty() {
             true => ExitCode::SUCCESS,
-            false => ExitCode::from(ocx_lib::cli::ExitCode::DataError),
+            false => ExitCode::from(ocx_exit::ExitCode::DataError),
         })
     }
 
@@ -200,12 +197,16 @@ impl PackageCopy {
     /// promotion shape; `--identifier` states the whole reference. Neither means
     /// the source repository at the default registry, which is only useful when
     /// the source named a different one.
-    fn resolve_target(&self, source: &oci::Identifier, default_registry: &str) -> anyhow::Result<oci::Identifier> {
+    fn resolve_target(
+        &self,
+        source: &ocx_oci::Identifier,
+        default_registry: &str,
+    ) -> anyhow::Result<ocx_oci::Identifier> {
         if let Some(identifier) = &self.identifier {
-            return Ok(identifier.with_domain(default_registry)?);
+            return identifier.with_domain(default_registry);
         }
         let registry = self.to.as_deref().unwrap_or(default_registry);
-        let target = oci::Identifier::new_registry(source.repository(), registry);
+        let target = ocx_oci::Identifier::new_registry(source.repository(), registry);
         Ok(match source.tag() {
             Some(tag) => target.clone_with_tag(tag),
             None => target,

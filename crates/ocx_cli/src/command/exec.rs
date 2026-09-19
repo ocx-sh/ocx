@@ -4,12 +4,14 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::env;
-use ocx_lib::launch::{self, Launch};
-use ocx_lib::package_manager::composer::{ComposeRequest, Materialization};
-use ocx_lib::record::{RecordInputs, Scope};
+use ocx_config::env;
+use ocx_package_manager::composer::{ComposeRequest, Materialization};
+use ocx_package_manager::launch::{self, Launch};
+use ocx_package_manager::record::{RecordInputs, Scope};
 
 use crate::{conventions::*, options};
+use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, reconcile_list_separators};
+use ocx_shell::shell::reconcile;
 
 /// Runs installed packages.
 ///
@@ -144,7 +146,7 @@ impl Exec {
             .resolve_env_with_attribution(
                 &install_infos,
                 self.self_view,
-                ocx_lib::package_manager::EnvScope::Package {
+                ocx_package_manager::EnvScope::Package {
                     env: env_overrides.clone(),
                 },
                 &platform,
@@ -155,12 +157,12 @@ impl Exec {
         // launcher) are disjoint `Vec`s holding independent copies of the
         // `--env` overrides — reconcile them together so a package-established
         // `list` separator reaches the forwarded copy.
-        env::reconcile_list_separators(entries.iter_mut().chain(env_overrides.iter_mut()))?;
+        reconcile_list_separators(entries.iter_mut().chain(env_overrides.iter_mut()))?;
 
         let mut process_env = if self.clean {
             env::Env::clean()
         } else {
-            env::Env::inherited()
+            reconcile::inherited_env()
         };
         // Hand the resolved sink down. The config and environment tiers a child
         // re-derives for itself; the flag tier it cannot, so without this a
@@ -174,7 +176,7 @@ impl Exec {
         // the `--env` overrides are the whole forwarded slice: there is no
         // project or group `[env]` to carry.
         process_env.apply_child_env(
-            env::ChildEnv {
+            ChildEnv {
                 composed: &entries,
                 forwarded: &env_overrides,
             },

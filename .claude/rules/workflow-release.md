@@ -70,7 +70,7 @@ Both must add to:
 
 ### Installers live in ocx-sh/www-setup
 
-The `curl … | sh` / PowerShell installers are no longer in this repo. They are the five per-shell bootstraps served at [setup.ocx.sh](https://setup.ocx.sh) (repo `ocx-sh/www-setup`): each detects the platform, resolves + verifies a release from `dist.json`, and hands off to `ocx self setup`. This repo owns only the machine-state logic those installers call — `crates/ocx_lib/src/setup/` (shims, profile blocks, completions) behind `ocx self setup`. Installer maintenance and its CI (clean-container / Windows-runner tests) live in the www-setup repo.
+The `curl … | sh` / PowerShell installers are no longer in this repo. They are the five per-shell bootstraps served at [setup.ocx.sh](https://setup.ocx.sh) (repo `ocx-sh/www-setup`): each detects the platform, resolves + verifies a release from `dist.json`, and hands off to `ocx self setup`. This repo owns only the machine-state logic those installers call — `crates/ocx_setup/src/` (shims, profile blocks, completions) behind `ocx self setup`. Installer maintenance and its CI (clean-container / Windows-runner tests) live in the www-setup repo.
 
 ### Shared Version Utility
 

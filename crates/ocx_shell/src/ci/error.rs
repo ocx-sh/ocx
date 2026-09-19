@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+/// Errors specific to CI environment export operations.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    /// A required CI environment variable (e.g. `$GITHUB_PATH`) is not set.
+    #[error("CI environment variable '${0}' is not set; is this running inside a CI system")]
+    MissingEnv(String),
+    /// A file I/O error occurred while writing to a CI runtime file.
+    #[error("failed to write CI file '{path}': {source}")]
+    File {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// A file I/O error occurred while writing to a CI export stream that has
+    /// no associated path (e.g. the GitLab JSON-lines stdout sink).
+    #[error("failed to write CI export stream: {0}")]
+    Write(#[source] std::io::Error),
+}

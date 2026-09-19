@@ -3,8 +3,6 @@
 
 use serde::Serialize;
 
-use ocx_lib::oci;
-
 use crate::api::Printable;
 
 /// A single field in the description.
@@ -22,11 +20,11 @@ pub struct Inner {
 /// JSON format: flat object with title/description/keywords, or `null` when absent.
 pub struct PackageDescription {
     inner: Option<Inner>,
-    identifier: oci::Identifier,
+    identifier: ocx_oci::Identifier,
 }
 
 impl PackageDescription {
-    pub fn new(inner: Option<Inner>, identifier: oci::Identifier) -> Self {
+    pub fn new(inner: Option<Inner>, identifier: ocx_oci::Identifier) -> Self {
         Self { inner, identifier }
     }
 }
@@ -38,7 +36,7 @@ impl Serialize for PackageDescription {
 }
 
 impl Printable for PackageDescription {
-    fn print_plain(&self, _printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, _printer: &ocx_console::DataInterface) {
         match &self.inner {
             Some(inner) => {
                 if let Some(title) = &inner.title {
@@ -88,7 +86,7 @@ impl Serialize for PackageDescriptions {
 }
 
 impl Printable for PackageDescriptions {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         for (key, description) in &self.entries {
             println!("== {key} ==");
             description.print_plain(printer);

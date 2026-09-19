@@ -375,7 +375,7 @@ Cold and warm
 -------------
 ``HostCapabilities`` persists its per-host answer at
 ``$OCX_HOME/state/host/capabilities.json`` with a 24-hour TTL
-(``crates/ocx_lib/src/oci/host_capabilities.rs``). Every number here is measured
+(``crates/ocx_oci/src/host_capabilities.rs``). Every number here is measured
 **warm**, and deliberately:
 
 * Warm is what a prompt pays. The record outlives the process, so within a TTL
@@ -682,7 +682,7 @@ EVAL_ITERATIONS = 200
 INJECT_ENV = "__OCX_TESTING_LATENCY_INJECT_MS"
 
 #: Where `HostCapabilities` persists its per-host detection record, relative to
-#: `$OCX_HOME` (`crates/ocx_lib/src/oci/host_capabilities.rs`). Deleting it is
+#: `$OCX_HOME` (`crates/ocx_oci/src/host_capabilities.rs`). Deleting it is
 #: what makes a sample cold — see "Cold and warm" in the module docstring.
 CAPABILITY_RECORD = Path("state") / "host" / "capabilities.json"
 
@@ -831,7 +831,7 @@ _EGRESS_CONTROL_PACKAGE = "ocx.sh/latency-egress-control"
 REENTRY_WORK_FLOOR_MS = 4.0
 
 #: The second line of every rendered POSIX trampoline
-#: (`crates/ocx_lib/src/env.rs` — `TRAMPOLINE_MARKER`), mirrored so
+#: (`crates/ocx_config/src/env.rs` — `TRAMPOLINE_MARKER`), mirrored so
 #: :func:`count_trampolines` can tell a trampoline from any other file that
 #: happens to sit in a `bin/`.
 #:
@@ -1894,7 +1894,7 @@ class _EgressTrap:
 #: hermetic latency arena cannot run that. A rename or a re-quoting raises out of
 #: :func:`_posix_shim_body` instead of falling back to a copy, because a fallback
 #: copy is the very thing this replaces.
-_SHIM_SOURCE = Path(__file__).resolve().parents[2] / "crates" / "ocx_lib" / "src" / "setup" / "shims.rs"
+_SHIM_SOURCE = Path(__file__).resolve().parents[2] / "crates" / "ocx_setup" / "src" / "shims.rs"
 _SHIM_CONST_OPEN = 'pub const ENV_SH: &str = r#"'
 _SHIM_CONST_CLOSE = '"#;'
 
@@ -2295,7 +2295,7 @@ printf '%s' "$(( (__end - __start) / {iterations} ))" > {micros_out}
 """
 
 #: The marker every path-kind apply line carries in the bash/zsh arm
-#: (``crates/ocx_lib/src/shell.rs`` — ``__ocx_p='<dir>'; PATH=…``). Its presence
+#: (``crates/ocx_shell/src/shell.rs`` — ``__ocx_p='<dir>'; PATH=…``). Its presence
 #: in an emitted stream is what "this prompt performs PATH surgery" looks like
 #: from outside the binary. As a plain substring it also matches the POSIX
 #: list arm (ash/ksh/dash, same ``__ocx_p='<dir>'`` prologue) and PowerShell's
@@ -2916,7 +2916,7 @@ def count_trampolines(bin_dir: Path) -> int:
     """How many files in ``bin_dir`` are ocx trampolines, by their own marker.
 
     :data:`TRAMPOLINE_MARKER` as **line two**, which is where
-    `crates/ocx_lib/src/env.rs` emits it and where `is_ocx_trampoline` reads it —
+    `crates/ocx_config/src/env.rs` emits it and where `is_ocx_trampoline` reads it —
     the same rule, so this counts what the binary would recognise rather than
     what the directory happens to hold. Counting entries instead would report a
     full `bin/` for a renderer that wrote anything at all into it.

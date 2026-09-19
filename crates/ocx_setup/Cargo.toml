@@ -1,0 +1,79 @@
+[package]
+name = "ocx_setup"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# The settings tier. This crate's heaviest edge by far: `apply_managed_config`
+# reads, renders and clears the `[managed]` tier end to end, and `config.toml`
+# editing goes through `ocx_config::edit`.
+ocx_config.workspace = true
+# The process-outcome vocabulary. Reached only from an intra-doc link
+# (`session_path.rs:142`, `ocx_exit::ExitCode::ConfigError`), which `cargo
+# machete` cannot see and reports as unused — dropping the row would turn that
+# link into a `broken_intra_doc_links` entry, so it stays.
+ocx_exit.workspace = true
+# Identifiers, digests and the `ocx` CLI's own identifier — bootstrap resolves
+# the published release through them.
+ocx_oci.workspace = true
+# `Version`, which `bootstrap` compares against the installed one.
+ocx_package.workspace = true
+# `PackageManager::check_update` and the install path bootstrap hands off to.
+ocx_package_manager.workspace = true
+# One reach, and it is an intra-doc link too (`shims.rs:204`,
+# `ocx_shell::shell::Shell::export_list`): the shim body documents the export
+# list the reconciler computes. Same `machete` false positive as `ocx_exit`.
+ocx_shell.workspace = true
+# `FileStructure` — every path this tier writes (shims, state, managed dir) is
+# resolved through it rather than composed here.
+ocx_store.workspace = true
+# The bottom tier: `fs`, `env`, process helpers.
+ocx_util.workspace = true
+
+hex.workspace = true
+log.workspace = true
+regex.workspace = true
+sha2.workspace = true
+# Runtime, not test-only: the macOS LaunchAgent is published by an atomic
+# `NamedTempFile` rename so a partial plist is never visible to `launchctl`.
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+# `managed_config::test_support::stub_client_with_package`, which builds the
+# managed-config package fixtures the `apply_managed_config` tests run against.
+# A dev edge enabling `__testing` is allowed from every crate
+# (`scripts/crate_map.toml` `[dev].testing_feature`); resolver v3 keeps the
+# feature out of the normal build, so the runtime row above stays seamless.
+ocx_config = { workspace = true, features = ["__testing"] }
+# `__testing` ONLY — the seam the managed-config tests build an `Index` through.
+# Dev-only: this tier reaches the index at runtime through `ocx_package_manager`,
+# never directly, so a runtime row would be an edge the crate does not have.
+ocx_index = { workspace = true, features = ["__testing"] }
+# `env::overrides::lock()` — the process-environment table the tier's tests
+# write through, on the same dev-only terms as the row above.
+ocx_util = { workspace = true, features = ["__testing"] }
+# `ocx_test_support::pki::pem_block`, which mints the malformed PEM the
+# extra-CA reader is shown refusing.
+ocx_test_support = { path = "../ocx_test_support" }
+# Test-only. The extra-CA tests re-encode a minted root with CRLF line endings
+# to prove the reader is insensitive to them. Every runtime use of `pem` left
+# with `ocx_sign`.
+pem.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

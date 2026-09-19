@@ -1,0 +1,486 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecutionRecord",
+  "description": "One pre-exec resolution record: the full resolved closure plus the resolved\nexecutable, written immediately before the child starts.\n\nSerialized **compact, one document per file, one line**. Every mainstream log\nshipper is line-oriented, so on one line \"read whole file\" degenerates to\n\"read one line\" and all of them cope. See [`Self::to_json`].",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "description": "Format version; always [`SCHEMA_VERSION`].",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Format discriminator; always [`RECORD_KIND`].",
+      "type": "string"
+    },
+    "recordedAt": {
+      "description": "When the record was written — RFC 3339, UTC, millisecond precision.\n\nSchema'd as a string rather than pulling in schemars' chrono feature: the\nwire form *is* a string, so the feature would buy nothing.",
+      "type": "string"
+    },
+    "ocx": {
+      "description": "The ocx build that produced the record.",
+      "$ref": "#/$defs/OcxBuild"
+    },
+    "frame": {
+      "description": "Which command frame launched, and how complete its identity data is.",
+      "$ref": "#/$defs/Frame"
+    },
+    "process": {
+      "description": "The process that runs the tool.",
+      "$ref": "#/$defs/Process"
+    },
+    "host": {
+      "description": "The machine, best-effort.",
+      "$ref": "#/$defs/Host"
+    },
+    "os": {
+      "description": "The operating system, best-effort.",
+      "$ref": "#/$defs/Os"
+    },
+    "executable": {
+      "description": "`sh.ocx.*` facts about the resolved executable: provenance, kind, and the\npackage purl it came from.\n\nA flat string map, deliberately **not** nested under\n`process.executable`: that field is typed as a flat keyword string by the\nvocabulary it was borrowed from, so hanging sub-fields off it would be an\ningest type conflict rather than a naming quibble.\n\n`sh.ocx.provenance` is the field an auditor reads first — `ocx-package`\nwhen the resolved path lands inside the store, `external` when it does\nnot. `ocx exec -- bash …` picking up the *system* bash is a fact this\nrecord states out loud.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "scope": {
+      "description": "What the launching frame was scoped to.",
+      "$ref": "#/$defs/ScopeBlock"
+    },
+    "resolution": {
+      "description": "The resolution policy in force — what makes drift auditable.",
+      "$ref": "#/$defs/Resolution"
+    },
+    "packages": {
+      "description": "The resolved package closure in topological order: roots tagged\n`sh.ocx.role: root`, the transitive closure `dependency`, and the patch\ncompanions the site tier overlaid onto them `companion`.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ResourceDescriptor"
+      }
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "kind",
+    "recordedAt",
+    "ocx",
+    "frame",
+    "process",
+    "host",
+    "os",
+    "executable",
+    "scope",
+    "resolution",
+    "packages"
+  ],
+  "$defs": {
+    "OcxBuild": {
+      "description": "The ocx build that produced a record.",
+      "type": "object",
+      "properties": {
+        "version": {
+          "description": "Crate version of the running binary.",
+          "type": "string"
+        },
+        "binary": {
+          "description": "Absolute path to the running binary.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "binary"
+      ]
+    },
+    "Frame": {
+      "description": "Which frame launched, and whether it could name everything it resolved.\n\nNot a bare enum: every record carries `command` *and* `identity`, and a\ndegraded frame adds `identityNote` explaining what it could not determine.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "The launching command.",
+          "$ref": "#/$defs/FrameCommand"
+        },
+        "identity": {
+          "description": "Whether the frame could name the packages it resolved.",
+          "$ref": "#/$defs/FrameIdentity"
+        },
+        "identityNote": {
+          "description": "Why identity is [`FrameIdentity::Degraded`]. Omitted when it is complete.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "identity"
+      ]
+    },
+    "FrameCommand": {
+      "description": "The command that opened a launching frame.\n\nThe wire values are the CLI's own canonical command names\n(`ocx_cli::app::canonical_command_name`), space-separated exactly as that\nfunction spells them: one grep joins a record to the error envelope of the\nsame invocation, instead of two ocx-authored JSON documents naming one\ncommand two ways.",
+      "oneOf": [
+        {
+          "description": "`ocx exec` — the project tier.\n\nAlso what the hidden deprecated `ocx run` spelling records. The record\nstates what executed, and both spellings execute the project tier; the\ndeprecation warning is the CLI's business, not the audit trail's.",
+          "type": "string",
+          "const": "exec"
+        },
+        {
+          "description": "`ocx package exec` — the OCI tier.",
+          "type": "string",
+          "const": "package exec"
+        },
+        {
+          "description": "`ocx launcher exec` — a generated entrypoint re-entry.",
+          "type": "string",
+          "const": "launcher exec"
+        },
+        {
+          "description": "`ocx launcher shim` — a deferred tool's first invocation, the one frame\nthat downloads the content it is about to run.",
+          "type": "string",
+          "const": "launcher shim"
+        }
+      ]
+    },
+    "FrameIdentity": {
+      "description": "How completely a frame could name what it resolved.",
+      "oneOf": [
+        {
+          "description": "Full logical identity: registry, repository, tag and digest.",
+          "type": "string",
+          "const": "complete"
+        },
+        {
+          "description": "Digest-complete but name-degraded. Package directories are\ncontent-shared and carry no registry/repository, so a launcher frame\ncannot recover logical identity and emits no purl. A truthful partial\nrecord beats a fabricated complete one.",
+          "type": "string",
+          "const": "degraded"
+        }
+      ]
+    },
+    "Process": {
+      "description": "The process that runs the tool.\n\n`pid` means the same thing on both platforms so a consumer never branches on\nOS: on Unix it is ocx's own pid, which `execvp` turns *into* the tool; on\nWindows it is the spawned child's.",
+      "type": "object",
+      "properties": {
+        "pid": {
+          "description": "The process that runs the tool.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "parent": {
+          "description": "The launching process. Best-effort; omitted when undeterminable.",
+          "$ref": "#/$defs/ParentProcess"
+        },
+        "user": {
+          "description": "The invoking user. Best-effort; omitted when undeterminable — a scratch\ncontainer with no passwd entry is the common case.",
+          "$ref": "#/$defs/User"
+        },
+        "arch": {
+          "description": "Architecture of the running ocx binary, e.g. `amd64`.\n\nThe **process's** architecture, not the machine's: an amd64 ocx under\nRosetta or qemu on an arm64 host reports `amd64` here, which is exactly\ntrue of the process that ran. The machine's native architecture is\ndeliberately absent — recovering it needs a per-OS native probe plus a\n`uname`-name-to-OCI mapping table this module would then own and have to\nkeep correct, and a wrong answer in that field is worse than no answer.\n\nTyped rather than stringly because the controlled vocabulary is the OCI\narchitecture vocabulary OCX already carries. An architecture outside that\nclosed set is undeterminable here and omits the key.",
+          "type": "string"
+        },
+        "executable": {
+          "description": "The resolved absolute executable — the record's highest-value field.",
+          "type": "string"
+        },
+        "working_directory": {
+          "description": "The working directory the child inherits.\n\nSnake-cased on the wire, unlike its camelCase envelope siblings, because\nthat is the published spelling of the vocabulary this block borrows.\nBest-effort; omitted when undeterminable.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pid",
+        "executable"
+      ]
+    },
+    "ParentProcess": {
+      "description": "The launching process.",
+      "type": "object",
+      "properties": {
+        "pid": {
+          "description": "The launching process id.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "pid"
+      ]
+    },
+    "User": {
+      "description": "The invoking user.\n\nTwo fields with different trust, which is the whole point of carrying both:\n[`Self::id`] comes from the kernel and cannot be forged by the caller's\nenvironment, while [`Self::name`] is read from the environment and can be.\nAn audit sink correlating *who ran this* must key on `id`.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The effective user id the kernel reports, as a string.\n\nA string rather than a number because the platforms disagree on the\ntype: a POSIX uid is numeric, a Windows SID is `S-1-5-…`. One key with\none type means a consumer never branches on OS to read it.\n\nOmitted when undeterminable — currently always on Windows, which has no\nuid and whose SID needs a token lookup this module does not do.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Account name, best-effort and **not trustworthy**: it is read from\n`$USER`/`$LOGNAME` (`%USERNAME%` on Windows), all of which the caller\ncontrols. Present for readability; [`Self::id`] is the field to key on.\n\nOmitted when undeterminable — a scratch container sets none of them.",
+          "type": "string"
+        }
+      }
+    },
+    "Host": {
+      "description": "The machine, best-effort — every field omits rather than guesses.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Hostname. Omitted when undeterminable.",
+          "type": "string"
+        }
+      }
+    },
+    "Os": {
+      "description": "The operating system, best-effort.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "description": "OS family, e.g. `linux`. Omitted when undeterminable.",
+          "type": "string"
+        }
+      }
+    },
+    "ScopeBlock": {
+      "description": "The record's `scope` block — the serialized projection of [`Scope`].\n\nInternally tagged on `tier`, matching the three-way union of the published\nshape. The launcher variant carries nothing else: a launcher re-entry has no\nproject context and did not compose the environment itself.",
+      "oneOf": [
+        {
+          "description": "`ocx exec` — a project toolchain.",
+          "type": "object",
+          "properties": {
+            "cleanEnv": {
+              "description": "Whether the child env was built clean rather than inherited.",
+              "type": "boolean"
+            },
+            "projectRoot": {
+              "description": "Directory holding `ocx.toml`.",
+              "type": "string"
+            },
+            "lock": {
+              "description": "The lock the closure was resolved through.",
+              "$ref": "#/$defs/LockReference"
+            },
+            "groups": {
+              "description": "Selected groups, in selection order.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "tier": {
+              "type": "string",
+              "const": "project"
+            }
+          },
+          "required": [
+            "cleanEnv",
+            "projectRoot",
+            "lock",
+            "groups",
+            "tier"
+          ]
+        },
+        {
+          "description": "`ocx package exec` — identifiers named on the command line.",
+          "type": "object",
+          "properties": {
+            "cleanEnv": {
+              "description": "Whether the child env was built clean rather than inherited.",
+              "type": "boolean"
+            },
+            "requested": {
+              "description": "Identifiers exactly as requested.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "tier": {
+              "type": "string",
+              "const": "package"
+            }
+          },
+          "required": [
+            "cleanEnv",
+            "requested",
+            "tier"
+          ]
+        },
+        {
+          "description": "`ocx launcher exec` — a generated entrypoint re-entry.",
+          "type": "object",
+          "properties": {
+            "tier": {
+              "type": "string",
+              "const": "launcher"
+            }
+          },
+          "required": [
+            "tier"
+          ]
+        }
+      ]
+    },
+    "LockReference": {
+      "description": "The lock file a project-tier closure was resolved through.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "description": "Absolute path to `ocx.lock`.",
+          "type": "string"
+        },
+        "declarationDigest": {
+          "description": "The lock's declaration hash, as `algorithm → bare lowercase hex`.\n\nNamed for what it hashes: the `ocx.toml` **declarations** the lock was\ngenerated from, which is the value the project tier already defines and\ncarries in the lock's own metadata. It is deliberately **not** a digest\nof the lock's contents — two runs whose declarations agree share this\nvalue even when they resolved different closures, so a consumer must\nnever use it as a closure identity. The resolved closure is recorded\npackage-by-package with its digests in `packages[]`; that is the\nauthoritative answer to \"what actually ran\".",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "path",
+        "declarationDigest"
+      ]
+    },
+    "Resolution": {
+      "description": "The resolution policy in force for this invocation.\n\nThe four frame-varying fields below distinguish two states a plain empty\ncollection cannot: `None` means the frame has no such context at all (the\nlauncher frame), `Some(empty)` means the frame has the context and it is\nempty. The published shape shows both — a package-tier record carries\n`\"mirrors\": {}` while a launcher record omits the key entirely.\n\n`autoInstalled` is load-bearing, not decoration: together with a\n`sh.ocx.resolved-from: tag` annotation it is what shows an invocation\nresolved a floating tag and materialized the package on the spot — the one\nstate no pull-time record can capture.",
+      "type": "object",
+      "properties": {
+        "offline": {
+          "description": "Whether `--offline` was in force.",
+          "type": "boolean"
+        },
+        "remote": {
+          "description": "Whether `--remote` was in force.",
+          "type": "boolean"
+        },
+        "frozen": {
+          "description": "Whether `--frozen` was in force — the **package tier** only.\n\nThe flag freezes package resolution; it does not freeze the patch tier.\nA patch companion resolves live under it and pins in\n`$OCX_HOME/state/patch-companions/`, and freezing that tier is\n`ocx patch freeze` plus `OCX_PATCH_SNAPSHOT`. So this field says \"the\npackage tier could not move\", never \"this invocation was frozen\".",
+          "type": "boolean"
+        },
+        "patchSnapshot": {
+          "description": "The patch snapshot in force, as `algorithm → bare lowercase hex` over\nthe snapshot **file's own bytes**.\n\nThe patch tier's answer to [`Self::frozen`], which scopes to the package\ntier alone. A snapshot is selected by `OCX_PATCH_SNAPSHOT` naming a\n`patches.snapshot.json` that `ocx patch freeze` wrote; under one, every\ncompanion composes at the digest the snapshot pins rather than at\nwhatever its tag resolves to today. Recording the content digest rather\nthan the path is what makes that auditable: a path is a name an operator\ncan point anywhere, while this value changes the moment the pins do.\n\nOmitted when no snapshot is in force — the common case, and a different\nstatement from \"a snapshot with no pins\".",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "noVerify": {
+          "description": "Whether the policy-gated auto-verify was opted out of (`OCX_NO_VERIFY`).\n\nBeside `offline` / `remote` / `frozen` because it belongs to the same\nclass: an operator-set policy that changes what resolution was allowed to\ndo. An auditor reading a record from a signing-enforced fleet needs to\nsee that this invocation ran with verification disabled — the record is\notherwise silent about it and the packages look identically resolved.\n\nThe env-tier opt-out only. The per-command `--no-verify` flag is a\none-shot user choice that never reaches a launching frame, so no\nlaunching frame can report it.",
+          "type": "boolean"
+        },
+        "requestedPlatform": {
+          "description": "The platform OCX **asked** resolution for, in the canonical platform\ngrammar — `linux/amd64+libc.glibc`.\n\nThe request, not the outcome: what each package's manifest leaf actually\nresolved to is its own `sh.ocx.platform` annotation, and the two differ\nlegitimately — a flat single-image package selects `any` under any\nrequest. Naming this field for the request is what keeps the pair\nreadable.\n\nA **string**, not a serialized [`Platform`]: `Platform`'s own\nserialization is the OCI descriptor object, which is a different shape.\n\nEmitted as an explicit `null` when the frame has no platform context —\nnever omitted, and never fabricated from the host, which would make the\nrecord lie in exactly the audit that matters.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "registries": {
+          "description": "Registries the frame's packages were fetched from.\n\nThe **content** registries: the physical hosts the transport addressed,\nnot the index endpoints a version choice was looked up through, and not\nthe logical namespaces the identifiers name. All three are routinely\ndifferent — a package named `ocx.sh/acme/tool` can be resolved through\n`index.ocx.sh` and fetched from `ghcr.io` — and reporting one under\nanother's name is the kind of quiet mislabelling an audit trail cannot\nafford. The logical namespace is reported too, in each `packages[]`\npurl's `repository_url`, so a divergence between the two is visible\nrather than flattened.\n\nReported before any `[mirrors]` rewrite of that host — the rewrites in\nforce are their own field, so the pair composes. A root whose resolution\nnamed no content registry is omitted rather than guessed at.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "insecureRegistries": {
+          "description": "Which of [`Self::registries`] this invocation was allowed to reach over\nplain HTTP.\n\nThe subset declared plaintext-eligible by `[registries.\"<name>\"]\ninsecure = true` or `OCX_INSECURE_REGISTRIES`, computed by the one\npredicate every other plaintext gate uses\n(`allows_plain_http`) so the record cannot disagree with the\ntransport about which hosts were exempt.\n\nIntersected with the registries this frame actually fetched from rather\nthan reporting the whole configured allowance: a fleet-wide list of\nhosts nobody contacted says nothing about this invocation, while a host\nthat both served content *and* was exempt from TLS is exactly the\nfinding an auditor is looking for.\n\nEmpty is absent, not `[]`: the overwhelmingly common case is that no\nregistry was exempt, and a key present on every record would train\nreaders to skip it.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mirrors": {
+          "description": "Active mirror rewrites, upstream traffic host to its replacement\nendpoints.\n\nA per-host object rather than one endpoint string: a mirror entry\ndeclares the `registry` role, the `index` role, or both, and the roles\naddress path-disjoint traffic. Collapsing them to one value would drop\nthe second endpoint of every entry that configures both.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MirrorEndpoints"
+          }
+        },
+        "managedConfig": {
+          "description": "The managed-config tier in force.",
+          "$ref": "#/$defs/ManagedConfigReference"
+        },
+        "autoInstalled": {
+          "description": "Packages materialized during this invocation rather than already\npresent — the drift signal.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "offline",
+        "remote",
+        "frozen",
+        "noVerify",
+        "requestedPlatform"
+      ]
+    },
+    "MirrorEndpoints": {
+      "description": "The replacement endpoints one mirror entry declares.\n\nBoth fields are optional and at least one is always present — an entry\ndeclaring neither role is not a rewrite and never reaches the record.",
+      "type": "object",
+      "properties": {
+        "registry": {
+          "description": "Endpoint OCI distribution traffic (`/v2`) is routed to.",
+          "type": "string"
+        },
+        "index": {
+          "description": "Endpoint index-tree traffic is routed to.",
+          "type": "string"
+        }
+      }
+    },
+    "ManagedConfigReference": {
+      "description": "The managed-config tier in force.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "description": "The configured managed-config source reference.",
+          "type": "string"
+        },
+        "digest": {
+          "description": "Digest of the applied snapshot, as `algorithm → bare lowercase hex`.\n\nOmitted when the applied snapshot's digest is not in hand at the\nlaunching frame. The source alone still names which tier was in force,\nand an empty map on the wire would read as \"no digest algorithm applies\"\nrather than \"not determinable here\".",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "source"
+      ]
+    },
+    "ResourceDescriptor": {
+      "description": "One resolved package, shaped field-for-field like an in-toto resource\ndescriptor so a consumer can lift `packages` straight into an attestation's\nresolved-dependency list without a translator.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The last repository segment, e.g. `cmake`.\n\n**Not unique on its own** — `ocx.sh/a/cli` and `ocx.sh/b/cli` both yield\n`cli`. Identity is name + `repository_url` + digest; a consumer joining\non `name` alone is wrong.",
+          "type": "string"
+        },
+        "uri": {
+          "description": "A `pkg:oci` package URL carrying the digest as its version.\n\nOmitted — never fabricated — when no logical identity exists, which is\nthe launcher frame's synthetic content-addressed identifier. The digest\nalone still identifies the resource.",
+          "type": "string"
+        },
+        "digest": {
+          "description": "Content digest as `algorithm → bare lowercase hex`.\n\nNever `sha256:<hex>` inside the value, never a transport prefix, never\nuppercase: the algorithm is the key, which is the point of the map. The\nvalue is the **platform leaf** manifest digest, never the multi-arch\nindex digest — it names the exact bits that ran.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "annotations": {
+          "description": "`sh.ocx.*` annotations: role, binding, group, platform, visibility,\ndeclared binaries and entry points, and the resolved-from marker that\nmakes tag drift visible.\n\nValues are JSON, not strings: an in-toto descriptor's `annotations` is\nan object with arbitrary values, and the name lists genuinely are lists.\nJoining them into one string would be lossy — no separator is forbidden\nin a binary name, so `[\"a,b\"]` and `[\"a\",\"b\"]` would arrive\nindistinguishable.",
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "name",
+        "digest",
+        "annotations"
+      ]
+    }
+  },
+  "$id": "https://ocx.sh/schemas/execution-record/v1.json",
+  "$comment": "machine-generated; one record per tool launch, written before the launch — not an authored document"
+}

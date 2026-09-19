@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use ocx_oci::layer_ref::LayerRef;
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 use anyhow::Context as _;
 use clap::Parser;
-use ocx_lib::{
-    log, oci, package,
-    package::version::{BuildTimestampFormat, Version, build_timestamp},
-    publisher::{self, LayerRef, Publisher},
+use ocx_package::{
+    publisher::{self, Publisher},
+    version::{BuildTimestampFormat, Version, build_timestamp},
 };
 
 use crate::api::data::push::SignedPlatformReport;
@@ -146,7 +146,7 @@ pub struct PackagePush {
         num_args = 0..=1,
         require_equals = true,
     )]
-    ci_annotations: Option<Option<ocx_lib::ci::CiFlavor>>,
+    ci_annotations: Option<Option<ocx_shell::ci::CiFlavor>>,
 
     /// After a successful push, append the pushed tag and any cascade tags
     /// to this file (creating it if absent), so `ocx package announce
@@ -231,7 +231,7 @@ pub struct PackagePush {
     /// used as given. Omit it to take the platform the build receipt beside
     /// the bundle recorded; a usage error (exit 64) when neither names one.
     #[clap(short, long)]
-    platform: Option<oci::Platform>,
+    platform: Option<ocx_oci::Platform>,
 
     /// Identifier under which the package is published (e.g. `repo:2.0.0`)
     ///
@@ -291,11 +291,11 @@ impl PackagePush {
     /// A method rather than an inline call so a test can drive it on a
     /// clap-parsed `PackagePush`: the absorption is the parser's doing, and a
     /// test that hand-built the fields would prove nothing about it.
-    fn refuse_spaced_ci_annotations(&self) -> Result<(), ocx_lib::cli::UsageError> {
+    fn refuse_spaced_ci_annotations(&self) -> Result<(), crate::error::UsageError> {
         // `Some(None)` is the bare flag: the `Option<Option<_>>` grammar keeps
         // bare and `--ci-annotations=gitlab` apart, so only the former can
         // have lost a value to `layers`.
-        conventions::refuse_spaced_enum_value::<ocx_lib::ci::CiFlavor>(
+        conventions::refuse_spaced_enum_value::<ocx_shell::ci::CiFlavor>(
             "--ci-annotations",
             matches!(self.ci_annotations, Some(None)),
             self.layers.iter().map(ToString::to_string),
@@ -319,7 +319,7 @@ impl PackagePush {
     /// A method rather than an inline call so a test can drive it on a
     /// clap-parsed `PackagePush`: the absorption is the parser's doing, and a
     /// test that hand-built the fields would prove nothing about it.
-    fn refuse_spaced_build_timestamp(&self) -> Result<(), ocx_lib::cli::UsageError> {
+    fn refuse_spaced_build_timestamp(&self) -> Result<(), crate::error::UsageError> {
         // `default_missing_value = "datetime"` erases the bare/`=` distinction
         // for `Datetime` alone — every other variant proves the value attached
         // and so cannot have been lost. Coupled to that clap attribute by
@@ -382,7 +382,7 @@ impl PackagePush {
         // network round-trip.
         if self.default && Version::parse(identifier.tag_or_latest()).is_none_or(|version| version.variant().is_none())
         {
-            return Err(ocx_lib::cli::UsageError::new(format!(
+            return Err(crate::error::UsageError::new(format!(
                 "--default requires a variant-prefixed tag, but {} carries no variant",
                 identifier.tag_or_latest()
             ))
@@ -403,7 +403,7 @@ impl PackagePush {
             package_sign_common::refuse_when_offline(
                 &context,
                 &identifier,
-                ocx_lib::oci::sign::SignErrorKind::OfflineSignRefused,
+                ocx_sign::sign::SignErrorKind::OfflineSignRefused,
             )?;
         }
         let sbom_predicate = match &self.sbom {
@@ -412,7 +412,7 @@ impl PackagePush {
                 package_sign_common::refuse_when_offline(
                     &context,
                     &identifier,
-                    ocx_lib::oci::sign::SignErrorKind::OfflineAttestRefused,
+                    ocx_sign::sign::SignErrorKind::OfflineAttestRefused,
                 )?;
                 Some(package_sign_common::read_predicate(path, &identifier).await?)
             }
@@ -440,7 +440,7 @@ impl PackagePush {
         // The publish gate, not the structural check: push is the last moment a
         // publisher can be told about an unrecognised token before it becomes a
         // published artifact nobody can edit (D14).
-        let valid = package::metadata::validate_for_publish(metadata)?;
+        let valid = ocx_package::metadata::validate_for_publish(metadata)?;
 
         let publisher = Publisher::new(context.remote_client()?.clone());
         publisher.ensure_auth(&identifier).await?;
@@ -453,7 +453,7 @@ impl PackagePush {
             publisher::verify_dependency_pins(publisher.client(), &valid, &platform).await?;
         }
 
-        let infos = vec![package::info::Info {
+        let infos = vec![ocx_package::info::Info {
             identifier: identifier.clone(),
             metadata: valid.into(),
             platform: platform.clone(),
@@ -463,7 +463,7 @@ impl PackagePush {
         let keep_tag = self.keep_tag.enabled();
         let generated = match ci_annotations {
             None => BTreeMap::new(),
-            Some(flavor) => ocx_lib::ci::annotations::for_flavor(
+            Some(flavor) => ocx_shell::ci::annotations::for_flavor(
                 flavor,
                 // The tag this push resolved, whatever answered for it. A
                 // pipeline that omits `--identifier` learns the tag only from
@@ -536,7 +536,7 @@ impl PackagePush {
         // `sweep_exit_code` over all of them: one fault class scripts through,
         // a mix collapses to the generic failure. Same collapse the `--tags`
         // sweep uses, and the same vocabulary in the rows.
-        let mut failures: Vec<ocx_lib::cli::ExitCode> = Vec::new();
+        let mut failures: Vec<ocx_exit::ExitCode> = Vec::new();
 
         if let Some(options) = &signing
             && self.sign
@@ -573,7 +573,7 @@ impl PackagePush {
                     }
                     Err(error) => {
                         let error = package_sign_common::attest_error_into_anyhow(error);
-                        failures.push(ocx_lib::cli::classify_error(error.as_ref()));
+                        failures.push(crate::exit::classify_library_error(error.as_ref()));
                         log::error!("{}", crate::api::data::sanitize_for_terminal(&format!("{error:#}")));
                         SignedPlatformReport::failed(
                             platform.to_string(),
@@ -597,7 +597,7 @@ impl PackagePush {
                 Ok(outcome) => report = report.with_attestation(outcome),
                 Err(err) => {
                     report = report.with_attestation(package_sign_common::failed_outcome(&err));
-                    failures.push(ocx_lib::cli::classify_error(err.as_ref()));
+                    failures.push(crate::exit::classify_library_error(err.as_ref()));
                     log::error!("{}", crate::api::data::sanitize_for_terminal(&format!("{err:#}")));
                 }
             }
@@ -645,12 +645,12 @@ impl PackagePush {
     /// `--no-rekor-upload` refusal (exit 64). Each carries the identifier,
     /// because each is returned as a `SignError` rather than a bare kind.
     ///
-    /// [`AttestOptions`]: ocx_lib::package_manager::AttestOptions
+    /// [`AttestOptions`]: ocx_package_manager::AttestOptions
     async fn resolve_signing(
         &self,
         context: &crate::app::Context,
-        identifier: &oci::Identifier,
-    ) -> anyhow::Result<ocx_lib::package_manager::SignOptions> {
+        identifier: &ocx_oci::Identifier,
+    ) -> anyhow::Result<ocx_package_manager::SignOptions> {
         let (fulcio_url, rekor_url) = package_sign_common::resolve_sigstore_pair(
             context.config_trust_sigstore(),
             identifier,
@@ -662,7 +662,7 @@ impl PackagePush {
         // `SignErrorKind` exits 1 with an empty `context` instead of 85/64
         // with the identifier. `sign` and `attest` wrap at the same two calls.
         let key = self.key.reference().map_err(|kind| {
-            ocx_lib::oci::sign::SignError::new(identifier.clone(), ocx_lib::oci::sign::SignErrorKind::from(kind))
+            ocx_sign::sign::SignError::new(identifier.clone(), ocx_sign::sign::SignErrorKind::from(kind))
         })?;
         let configured_rekor_upload = context
             .config_trust_sigstore()
@@ -670,12 +670,12 @@ impl PackagePush {
         let rekor_upload = self
             .rekor_upload
             .enabled(self.key.is_key_mode(), configured_rekor_upload)
-            .map_err(|kind| ocx_lib::oci::sign::SignError::new(identifier.clone(), kind))?;
+            .map_err(|kind| ocx_sign::sign::SignError::new(identifier.clone(), kind))?;
         // The OIDC token comes from OCX_IDENTITY_TOKEN or ambient CI detection
         // exactly as `ocx package attest` resolves it; `push` carries no
         // `--identity-token-*` flags, so both overrides enter as absent.
         let identity_token = package_sign_common::resolve_override_token(None, false, identifier).await?;
-        Ok(ocx_lib::package_manager::SignOptions {
+        Ok(ocx_package_manager::SignOptions {
             fulcio_url,
             rekor_url,
             identity_token,
@@ -694,7 +694,7 @@ impl PackagePush {
     /// identifier and platform, never derived from a keep tag —
     /// `--no-keep-tag` may have suppressed those.
     ///
-    /// `options` is the same [`SignOptions`](ocx_lib::package_manager::SignOptions)
+    /// `options` is the same [`SignOptions`](ocx_package_manager::SignOptions)
     /// the inline platform signing ran under, so `--signature-format`, `--key`
     /// and `--rekor-upload` mean one thing per invocation. `push --sbom` used
     /// to hard-code keyless with a mandatory Rekor upload because push carried
@@ -706,19 +706,19 @@ impl PackagePush {
     /// keeps its `context.identifier`.
     async fn attest_sbom(
         context: &crate::app::Context,
-        identifier: &oci::Identifier,
-        platform: &oci::Platform,
-        options: ocx_lib::package_manager::SignOptions,
+        identifier: &ocx_oci::Identifier,
+        platform: &ocx_oci::Platform,
+        options: ocx_package_manager::SignOptions,
         predicate: Vec<u8>,
     ) -> anyhow::Result<crate::api::data::push::AttestationOutcome> {
-        use ocx_lib::oci::attest::predicate::PredicateType;
+        use ocx_sign::attest::predicate::PredicateType;
 
         let result = context
             .manager()
             .attest_one(
                 identifier,
                 Some(platform),
-                ocx_lib::package_manager::AttestOptions {
+                ocx_package_manager::AttestOptions {
                     key: options.key,
                     rekor_upload: options.rekor_upload,
                     format: options.format,
@@ -790,7 +790,7 @@ async fn append_to_tags_file(path: &std::path::Path, tags: &[String]) -> anyhow:
     let merged = conventions::merge_tags_file(&existing, tags);
     tokio::fs::write(path, merged)
         .await
-        .map_err(|error| ocx_lib::error::file_error(path, error))
+        .map_err(|error| ocx_util::error::FileError::new(path, error))
         .with_context(|| format!("writing tags file {}", path.display()))
 }
 
@@ -979,7 +979,7 @@ mod signing_flag_tests {
     //! resolvers rather than "was this given" predicates.
 
     use clap::Parser as _;
-    use ocx_lib::oci::sign::SignatureFormat;
+    use ocx_sign::sign::SignatureFormat;
 
     use super::PackagePush;
 
@@ -1080,7 +1080,7 @@ mod signing_flag_tests {
             .enabled(push.key.is_key_mode(), None)
             .expect_err("keyless must refuse --no-rekor-upload");
         assert!(
-            matches!(error, ocx_lib::oci::sign::SignErrorKind::RekorUploadRequiredForKeyless),
+            matches!(error, ocx_sign::sign::SignErrorKind::RekorUploadRequiredForKeyless),
             "got: {error}"
         );
     }
@@ -1134,12 +1134,12 @@ mod signing_flag_tests {
     /// the whole reason ocx-mirror needs them (D1).
     #[test]
     fn the_resolved_endpoint_pair_prefers_pushs_flags_over_trust_sigstore() {
-        let configured = ocx_lib::trust::SigstoreTrust {
+        let configured = ocx_trust::SigstoreTrust {
             fulcio_url: Some("https://fleet-fulcio.example".to_string()),
             rekor_url: Some("https://fleet-rekor.example".to_string()),
-            ..ocx_lib::trust::SigstoreTrust::default()
+            ..ocx_trust::SigstoreTrust::default()
         };
-        let identifier = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").expect("static parse");
+        let identifier = ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("static parse");
 
         let push = parse(&[
             "--sign",
@@ -1188,7 +1188,7 @@ mod ci_annotations_flag_tests {
     /// The code the process would exit with, through the same authority
     /// `main.rs` uses.
     fn exit_code(error: &anyhow::Error) -> u8 {
-        crate::app::classify_error(error.as_ref()) as u8
+        crate::exit::classify_error(error.as_ref()) as u8
     }
 
     /// The premise the guard rests on: clap leaves the flag bare and hands the
@@ -1277,7 +1277,7 @@ mod build_timestamp_flag_tests {
     //! is the parser's doing.
 
     use clap::Parser as _;
-    use ocx_lib::package::version::BuildTimestampFormat;
+    use ocx_package::version::BuildTimestampFormat;
 
     use super::PackagePush;
 
@@ -1289,7 +1289,7 @@ mod build_timestamp_flag_tests {
     }
 
     fn exit_code(error: &anyhow::Error) -> u8 {
-        crate::app::classify_error(error.as_ref()) as u8
+        crate::exit::classify_error(error.as_ref()) as u8
     }
 
     /// The premise, and the whole reason this flag outranks `--ci-annotations`:

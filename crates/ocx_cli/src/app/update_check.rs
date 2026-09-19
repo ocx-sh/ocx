@@ -4,10 +4,7 @@
 use std::io::IsTerminal;
 use std::time::Duration;
 
-use ocx_lib::{
-    env, log,
-    package_manager::{TagProbe, UpdateCheckResult},
-};
+use ocx_package_manager::{TagProbe, UpdateCheckResult};
 
 use super::Context;
 
@@ -18,15 +15,15 @@ use super::Context;
 ///
 /// Suppressed when:
 /// - `OCX_NO_UPDATE_CHECK` is truthy
-/// - `CI` is truthy (see [`env::is_ci`])
+/// - `CI` is truthy (see [`ocx_util::env::is_ci`])
 /// - `OCX_OFFLINE` is truthy (or `--offline` flag)
 /// - stderr is not a terminal
 pub async fn check_for_update(ctx: &Context) {
-    if env::flag("OCX_NO_UPDATE_CHECK", false) {
+    if ocx_util::env::flag("OCX_NO_UPDATE_CHECK", false) {
         log::debug!("Update check skipped: OCX_NO_UPDATE_CHECK is set");
         return;
     }
-    if env::is_ci() {
+    if ocx_util::env::is_ci() {
         log::debug!("Update check skipped: CI environment detected");
         return;
     }
@@ -43,7 +40,7 @@ pub async fn check_for_update(ctx: &Context) {
     //   unset → None (lib defaults to 24h)
     //   "0"   → Some(ZERO) (always check)
     //   N     → Some(Duration::from_secs(N))
-    let throttle: Option<Duration> = match env::var("OCX_UPDATE_CHECK_INTERVAL") {
+    let throttle: Option<Duration> = match ocx_util::env::var("OCX_UPDATE_CHECK_INTERVAL") {
         None => None,
         Some(s) => match s.trim().parse::<u64>() {
             Ok(0) => Some(Duration::ZERO),

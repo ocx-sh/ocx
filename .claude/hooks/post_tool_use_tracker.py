@@ -29,10 +29,11 @@ import hook_utils
 
 # (glob_pattern, rule_filename, subsystem_label)
 CONTEXT_REMINDERS: list[tuple[str, str, str]] = [
-    ("crates/ocx_lib/src/oci/**", "subsystem-oci.md", "OCI"),
-    ("crates/ocx_lib/src/file_structure/**", "subsystem-file-structure.md", "File Structure"),
-    ("crates/ocx_lib/src/package/**", "subsystem-package.md", "Package"),
-    ("crates/ocx_lib/src/package_manager/**", "subsystem-package-manager.md", "Package Manager"),
+    ("crates/ocx_oci/**", "subsystem-oci.md", "OCI"),
+    ("crates/ocx_sign/**", "subsystem-oci.md", "OCI"),
+    ("crates/ocx_store/src/**", "subsystem-file-structure.md", "File Structure"),
+    ("crates/ocx_package/src/**", "subsystem-package.md", "Package"),
+    ("crates/ocx_package_manager/src/**", "subsystem-package-manager.md", "Package Manager"),
     ("crates/ocx_cli/src/**", "subsystem-cli.md", "CLI"),
     ("website/**", "subsystem-website.md", "Website"),
 ]

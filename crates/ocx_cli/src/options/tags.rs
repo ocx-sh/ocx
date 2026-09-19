@@ -3,8 +3,8 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::prelude::VecExt as _;
-use ocx_lib::utility::fs::{BoundedReadError, read_bounded};
+use ocx_util::fs::{BoundedReadError, read_bounded};
+use ocx_util::prelude::VecExt as _;
 
 /// The largest a `--tags-file` may be.
 ///
@@ -71,7 +71,8 @@ fn tags_file_error(path: &std::path::Path, error: BoundedReadError) -> anyhow::E
         BoundedReadError::Io { source, .. } => source,
         refusal => std::io::Error::other(refusal),
     };
-    anyhow::Error::new(ocx_lib::error::file_error(path, io)).context(format!("reading tags file {}", path.display()))
+    anyhow::Error::new(ocx_util::error::FileError::new(path, io))
+        .context(format!("reading tags file {}", path.display()))
 }
 
 /// Read and parse a `--tags-file`, where the file must be there.

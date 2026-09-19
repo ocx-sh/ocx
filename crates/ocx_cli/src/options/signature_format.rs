@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::cli::UsageError;
-use ocx_lib::oci::sign::SignatureFormat;
+use crate::error::UsageError;
+use ocx_sign::sign::SignatureFormat;
 
 /// Which cosign wire shape a command writes, or which shape a verify accepts.
 ///

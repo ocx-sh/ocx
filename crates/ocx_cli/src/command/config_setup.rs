@@ -6,14 +6,14 @@
 //! The automation/CI counterpart to `ocx self setup --managed-config`: adopts
 //! (or clears) the corporate managed-config tier without bootstrapping the ocx
 //! binary, writing env shims, or touching shell profiles. Both entry points
-//! share the single lib implementation (`ocx_lib::setup::apply_managed_config`),
+//! share the single lib implementation (`ocx_setup::apply_managed_config`),
 //! so precedence, the fetch-first ordering, and the dirty-fence contract are
 //! identical by construction.
 
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::cli::{self, ExitCode as OcxExitCode};
+use ocx_exit::ExitCode as OcxExitCode;
 
 use crate::api::data::config_setup::ConfigSetupData;
 
@@ -84,7 +84,7 @@ pub struct ConfigSetupArgs {
 /// The lib contract is deliberately simple: `Some(ref)` adopts, `Some("")`
 /// clears, `None` leaves the tier untouched. This CLI seam owns the precedence
 /// the lib no longer applies — when the flag is omitted it falls back to the
-/// same runtime `[managed]` resolution [`ocx_lib::resolve_managed_target`]
+/// same runtime `[managed]` resolution [`ocx_config::managed::resolve_managed_target`]
 /// uses (`OCX_MANAGED_CONFIG` non-empty over the `[managed].source` seed,
 /// honoring a system-lock). An explicit flag — including `--managed-config ""`
 /// to clear — is passed through verbatim.
@@ -98,14 +98,14 @@ pub struct ConfigSetupArgs {
 /// corrupt the required tier the lock protects.
 pub fn resolve_managed_config_arg(
     flag: Option<&str>,
-    config: &ocx_lib::Config,
+    config: &ocx_config::Config,
     env_override: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
     if let Some(value) = flag {
-        ocx_lib::check_locked_managed_override(config, value)?;
+        ocx_config::managed::check_locked_managed_override(config, value)?;
         return Ok(Some(value.to_string()));
     }
-    Ok(ocx_lib::resolve_managed_target(config, env_override)?.map(|resolved| resolved.source.to_string()))
+    Ok(ocx_config::managed::resolve_managed_target(config, env_override)?.map(|resolved| resolved.source.to_string()))
 }
 
 impl ConfigSetupArgs {
@@ -120,14 +120,14 @@ impl ConfigSetupArgs {
         // phases to run and treats this as a no-op), an explicit
         // `config setup` with nothing to set up is a usage error.
         let Some(value) = resolved else {
-            return Err(cli::UsageError::new(
+            return Err(crate::error::UsageError::new(
                 "nothing to set up: pass --managed-config <REF>, set OCX_MANAGED_CONFIG, \
                  or configure a [managed] seed",
             )
             .into());
         };
 
-        let outcome = ocx_lib::setup::apply_managed_config(
+        let outcome = ocx_setup::apply_managed_config(
             context.config(),
             Some(&value),
             self.dry_run,
@@ -140,7 +140,7 @@ impl ConfigSetupArgs {
         // The dirty-fence contract mirrors `self setup`: left untouched
         // without --force → exit 82 so scripts can `case $? in 82)`.
         // Dry-run reports would-adopt and never returns 82.
-        let dirty = matches!(outcome, ocx_lib::setup::ManagedConfigSetupOutcome::Dirty);
+        let dirty = matches!(outcome, ocx_setup::ManagedConfigSetupOutcome::Dirty);
         let exit = if dirty && !self.force && !self.dry_run {
             OcxExitCode::DirtyRcBlock.into()
         } else {
@@ -158,9 +158,9 @@ mod tests {
 
     /// Builds a `Config` carrying a `[managed]` seed source (unlocked,
     /// `required = false`).
-    fn config_with_seed(source: &str) -> ocx_lib::Config {
-        ocx_lib::Config {
-            managed: Some(ocx_lib::ManagedConfig {
+    fn config_with_seed(source: &str) -> ocx_config::Config {
+        ocx_config::Config {
+            managed: Some(ocx_config::managed::ManagedConfig {
                 source: Some(source.to_string()),
                 required: Some(false),
                 ..Default::default()
@@ -172,9 +172,9 @@ mod tests {
     /// Builds a system-locked `[managed]` config (declared `required` at the
     /// SYSTEM scope): `system_locked` is sticky and marks the tier non-clearable
     /// / non-redirectable by a lower tier or an explicit flag.
-    fn locked_config(source: &str) -> ocx_lib::Config {
-        ocx_lib::Config {
-            managed: Some(ocx_lib::ManagedConfig {
+    fn locked_config(source: &str) -> ocx_config::Config {
+        ocx_config::Config {
+            managed: Some(ocx_config::managed::ManagedConfig {
                 source: Some(source.to_string()),
                 required: Some(true),
                 system_locked: true,
@@ -255,7 +255,7 @@ mod tests {
     /// this to a usage error (64) in `execute`, unlike `self setup`'s no-op.
     #[test]
     fn omitted_flag_with_nothing_configured_is_none() {
-        let config = ocx_lib::Config::default();
+        let config = ocx_config::Config::default();
         let resolved = resolve_managed_config_arg(None, &config, None).unwrap();
         assert_eq!(resolved, None);
     }

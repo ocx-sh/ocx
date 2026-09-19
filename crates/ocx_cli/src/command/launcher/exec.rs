@@ -14,17 +14,18 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use crate::error::UsageError;
 use clap::Parser;
-use ocx_lib::cli::UsageError;
-use ocx_lib::env;
-use ocx_lib::file_structure::PackageDir;
-use ocx_lib::launch::{self, ExemptionReason, Launch};
-use ocx_lib::package::install_info::InstallInfo;
-use ocx_lib::package::metadata::Metadata;
-use ocx_lib::package::metadata::template::{TemplateResolver, Usage};
-use ocx_lib::package_manager::{AdmittedClaims, PatchProvenance};
-use ocx_lib::prelude::SerdeExt;
-use ocx_lib::record::{RecordInputs, Scope};
+use ocx_config::env;
+use ocx_package::install_info::InstallInfo;
+use ocx_package::metadata::Metadata;
+use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, forwarded_env, reconcile_list_separators};
+use ocx_package::metadata::template::{TemplateResolver, Usage};
+use ocx_package_manager::launch::{self, ExemptionReason, Launch};
+use ocx_package_manager::record::{RecordInputs, Scope};
+use ocx_package_manager::{AdmittedClaims, PatchProvenance};
+use ocx_store::file_structure::PackageDir;
+use ocx_util::prelude::SerdeExt;
 
 /// Entry point from generated launchers. Validates the package root, then
 /// executes the resolved entrypoint with forced self-view and silent presentation.
@@ -80,7 +81,7 @@ impl LauncherExec {
         // itself into. Folding it lets `Launch::exempt` refuse.
         let recording = Recording {
             exemption,
-            policy: context.records(ocx_lib::record::RecordsOptions::default())?,
+            policy: context.records(ocx_package_manager::record::RecordsOptions::default())?,
         };
         // Wrap the validated package root in a PackageDir so every per-package
         // path (`content/`, `metadata.json`, ...) comes from the file-structure
@@ -113,7 +114,7 @@ impl LauncherExec {
         // forwarded `OCX_PATCHES` → `patches_from_env()` is `None` → `Project(empty)`,
         // byte-identical to the former project-free scope. A system-required
         // tier still overlays regardless (the resolver enforces C7).
-        let no_patches = ocx_lib::patches_from_env()
+        let no_patches = ocx_config::patch::patches_from_env()
             .map_err(anyhow::Error::new)?
             .map(|forwarded| forwarded.no_patches)
             .unwrap_or_default();
@@ -131,7 +132,7 @@ impl LauncherExec {
         // filtering the bad entry and keeping the rest. A direct launcher
         // invocation with no `ocx exec` parent has no payload and gets an empty
         // vector — identical to the pre-forwarding behaviour.
-        let project_env = ocx_lib::env::forwarded_env().map_err(anyhow::Error::new)?;
+        let project_env = forwarded_env().map_err(anyhow::Error::new)?;
         // `info` is retained rather than moved into the resolve call: it is the
         // only package this frame resolved, and the record names it.
         let packages = [std::sync::Arc::new(info)];
@@ -145,7 +146,7 @@ impl LauncherExec {
             .resolve_env_with_attribution(
                 &packages,
                 true,
-                ocx_lib::package_manager::EnvScope::Project {
+                ocx_package_manager::EnvScope::Project {
                     no_patches,
                     env: project_env.clone(),
                     // No link lane here, and not for want of an input: this
@@ -159,7 +160,7 @@ impl LauncherExec {
                 },
                 // The launcher runs on the host, for the package materialized
                 // there — there is no target-platform question to carry.
-                &ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any),
+                &ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any),
             )
             .await?;
         // Same per-key list-separator agreement `ocx exec` and `ocx package
@@ -168,7 +169,7 @@ impl LauncherExec {
         // key's separator has to fail here too — otherwise the same package
         // exits 65 through `exec` and folds with a silently-chosen separator
         // through its own launcher.
-        ocx_lib::env::reconcile_list_separators(entries.iter_mut()).map_err(anyhow::Error::new)?;
+        reconcile_list_separators(entries.iter_mut()).map_err(anyhow::Error::new)?;
 
         // argv[0] is the launcher's own filename — the invocable entrypoint
         // name. argv[1..] are the user args.
@@ -234,7 +235,7 @@ impl LauncherExec {
                 admitted: &admitted,
                 patch_companions: &patch_companions,
             },
-            env::ChildEnv {
+            ChildEnv {
                 composed: &entries,
                 forwarded: &project_env,
             },
@@ -272,7 +273,7 @@ struct Recording {
     /// claims that command's recording exclusion.
     exemption: Option<ExemptionReason>,
     /// The folded sink, filename template and fail posture for this frame.
-    policy: ocx_lib::record::RecordingPolicy,
+    policy: ocx_package_manager::record::RecordingPolicy,
 }
 
 /// Run the resolved entrypoint with the given env.
@@ -308,7 +309,7 @@ struct Recording {
 async fn run_with_env(
     context: &crate::app::Context,
     resolved: Resolved<'_>,
-    child_env: env::ChildEnv<'_>,
+    child_env: ChildEnv<'_>,
     command: &str,
     argv: &[String],
     recording: Recording,
@@ -407,7 +408,7 @@ async fn run_with_env(
 /// `ocx_shim` (a binary crate), so no compiler link binds the two — the entire
 /// binding is a pair of tests restating the literals, one on each side (C-018).
 /// This function is what makes the CLI half of that pair possible.
-fn launcher_pkg_root_allow_list(fs: &ocx_lib::file_structure::FileStructure) -> [PathBuf; 3] {
+fn launcher_pkg_root_allow_list(fs: &ocx_store::file_structure::FileStructure) -> [PathBuf; 3] {
     [
         fs.packages.root().to_path_buf(),
         fs.temp.package_test_root(),
@@ -543,7 +544,7 @@ mod tests {
     #[test]
     fn launcher_pkg_root_allow_list_matches_the_shim_allow_list() {
         let home = tempfile::tempdir().unwrap();
-        let fs = ocx_lib::file_structure::FileStructure::with_root(home.path().to_path_buf());
+        let fs = ocx_store::file_structure::FileStructure::with_root(home.path().to_path_buf());
 
         let expected: Vec<PathBuf> = ["packages", "temp/test", "temp/patch-test"]
             .iter()

@@ -1,0 +1,53 @@
+[package]
+name = "ocx_trust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# The bottom tier: `FileReference` (the `key`/`key_file` path newtype),
+# `BoundedReadError` from the capped PEM read, and `schema::string_or_table`
+# for the hand-written `ScopeSpec` schema.
+#
+# `ocx_oci` is in this crate's allowed set and deliberately unused: nothing
+# here names a registry, a digest or a reference. Trust policy matches on
+# identity and scope strings alone, and listing a dependency the moved files
+# do not need would make the manifest claim a coupling that is not there.
+ocx_util.workspace = true
+
+# One `log::debug!`: `CosignVerificationKey::try_from_pem`'s rejection reason.
+# `KeyMalformed` carries a description rather than a `#[source]`, so the
+# sigstore error goes to the log instead of being flattened into a message an
+# operator cannot act on.
+log.workspace = true
+# `identity_regexp` — the one regex surface in `[trust]`.
+regex.workspace = true
+schemars.workspace = true
+serde.workspace = true
+# The `ScopeSpec` schema is hand-written rather than derived, because a derive
+# reads the Rust type and cannot see what the hand-rolled `Deserialize`
+# accepts — so this crate builds schema JSON directly.
+serde_json.workspace = true
+# `CosignVerificationKey` is what a compiled `key`/`key_file` policy *is*, so
+# the type crosses this crate's public surface and the dependency is
+# structural rather than incidental. Only the default workspace feature set:
+# this crate parses and holds a verification key, it neither signs nor talks
+# to Fulcio or Rekor.
+sigstore.workspace = true
+thiserror.workspace = true
+# Production, not dev: `TrustPolicyError::DocumentInvalid` carries a
+# `toml::de::Error` as its `#[source]`, and the project-tier reader parses the
+# `[trust]` table out of `ocx.toml` itself.
+toml.workspace = true
+
+[dev-dependencies]
+# `ocx_util::env::overrides`, the process-environment table the `key_env`
+# resolution tests write through.
+ocx_util = { workspace = true, features = ["__testing"] }
+# `key_file` resolution reads real paths off disk.
+tempfile.workspace = true
+
+[lints]
+workspace = true

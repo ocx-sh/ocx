@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+use super::architecture::Architecture;
+use super::operating_system::OperatingSystem;
+
+/// An error that occurred while parsing or validating an OCI platform.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("invalid platform '{input}': {kind}")]
+#[non_exhaustive]
+pub struct PlatformError {
+    /// The raw input that failed to parse.
+    pub input: String,
+    /// The specific reason parsing failed.
+    pub kind: PlatformErrorKind,
+}
+
+/// The specific reason a platform string failed to parse or validate.
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum PlatformErrorKind {
+    /// The platform string has an invalid format.
+    #[error("expected format 'os/arch[/variant][+feature[,feature...]]' or 'any'")]
+    InvalidFormat,
+
+    /// The OS component is not a recognized value.
+    #[error("unsupported OS '{os}'. Possible values are: {}", OperatingSystem::VARIANTS.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "))]
+    UnsupportedOs { os: String },
+
+    /// The architecture component is not a recognized value.
+    #[error("unsupported architecture '{arch}'. Possible values are: {}", Architecture::VARIANTS.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "))]
+    UnsupportedArch { arch: String },
+
+    /// The OS and architecture are each recognized, but the pairing is not
+    /// one OCX supports.
+    #[error("unsupported platform '{os}/{arch}'. Possible values are: {}", super::SUPPORTED_PAIRS.iter().map(|(os, arch)| format!("{os}/{arch}")).collect::<Vec<_>>().join(", "))]
+    UnsupportedPair { os: OperatingSystem, arch: Architecture },
+
+    /// The platform is syntactically valid but not supported by OCX.
+    #[error("unsupported platform: {0}")]
+    Unsupported(String),
+}

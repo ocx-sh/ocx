@@ -3,7 +3,7 @@
 """`ocx package announce` against GitLab.
 
 Runs the announce contract through `GitLabForge`
-(`crates/ocx_lib/src/forge/gitlab.rs`) on the GitLab surface of the shared fake
+(`crates/ocx_announce/src/forge/gitlab.rs`) on the GitLab surface of the shared fake
 forge (`fake_gitlab.py`). The two clients speak to **one** in-memory git object
 graph, so a scenario run on both forges compares like with like — that is what
 `test_both_forges_commit_the_same_root` exists to prove, and it is the reason

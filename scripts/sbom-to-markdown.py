@@ -20,7 +20,7 @@ import json
 import re
 import sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -131,21 +131,19 @@ def extract_binary_info(bom: dict) -> dict:
 
 
 def generate_markdown() -> str:
-    return "\n".join([
-        "---",
-        "title: Dependencies",
-        "---",
-        "",
-        "# Dependencies {#dependencies}",
-        "",
-        "Third-party dependencies compiled into the `ocx` binary,",
-        "generated from the [CycloneDX][cyclonedx] SBOM at build time.",
-        "",
-        "<DependencyExplorer />",
-        "",
-        "[cyclonedx]: https://cyclonedx.org/",
-        "",
-    ])
+    return """---
+title: Dependencies
+---
+
+# Dependencies {#dependencies}
+
+Third-party dependencies compiled into the `ocx` binary,
+generated from the [CycloneDX][cyclonedx] SBOM at build time.
+
+<DependencyExplorer />
+
+[cyclonedx]: https://cyclonedx.org/
+"""
 
 
 def main() -> None:
@@ -159,7 +157,7 @@ def main() -> None:
     raw_components = sorted(bom.get("components", []), key=lambda c: c.get("name", ""))
     components = [build_component(c) for c in raw_components]
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now = datetime.now(UTC).strftime("%Y-%m-%d")
 
     # Generate markdown page
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -33,7 +33,8 @@
 //! emitted: [`render_error_envelope`] always leaves it `None`, so it is omitted
 //! from real output. Consumers must treat it as optional.
 
-use ocx_lib::cli::{ClassifyErrorKind, ErrorCategory, ExitCode};
+use crate::exit::ClassifyErrorKind;
+use ocx_exit::{ErrorCategory, ExitCode};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -137,7 +138,7 @@ impl<'a, T: Serialize> SuccessEnvelope<'a, T> {
 /// report of its own — a report-then-fail command keeps its report as the one
 /// stdout document, and the failure detail stays on stderr).
 ///
-/// Classifies the exit code via [`crate::app::classify_error`] — the same
+/// Classifies the exit code via [`crate::exit::classify_error`] — the same
 /// authority `main.rs` returns from, so the envelope's `exit_code` can never
 /// disagree with the process's. The library classifier alone cannot downcast
 /// a CLI-local [`crate::app::CommandError`], so using it here rendered every
@@ -158,7 +159,7 @@ impl<'a, T: Serialize> SuccessEnvelope<'a, T> {
 /// propagate rather than panicking to keep the error path robust.
 pub fn render_error_envelope(command: &str, err: &anyhow::Error) -> anyhow::Result<String> {
     let err_ref: &(dyn std::error::Error + 'static) = err.as_ref();
-    let exit_code = crate::app::classify_error(err_ref);
+    let exit_code = crate::exit::classify_error(err_ref);
     let kind = ErrorCategory::from_exit_code(exit_code);
     let message = format!("{err:#}");
     let context = collect_context(err_ref);
@@ -187,9 +188,9 @@ pub fn render_error_envelope(command: &str, err: &anyhow::Error) -> anyhow::Resu
 /// refused. Additional subsystems attach their own context as they gain
 /// envelope-relevant metadata.
 fn collect_context(err: &(dyn std::error::Error + 'static)) -> BTreeMap<&'static str, serde_json::Value> {
-    use ocx_lib::oci::sign::SignError;
-    use ocx_lib::oci::verify::VerifyError;
-    use ocx_lib::publisher::CopyError;
+    use ocx_package::publisher::CopyError;
+    use ocx_sign::sign::SignError;
+    use ocx_sign::verify::VerifyError;
 
     let mut context = BTreeMap::new();
     for cause in std::iter::successors(Some(err), |e| e.source()) {
@@ -229,10 +230,10 @@ fn collect_context(err: &(dyn std::error::Error + 'static)) -> BTreeMap<&'static
 /// errors. Returning `None` (no match) leaves `detail` absent in the JSON
 /// envelope via `skip_serializing_if`.
 fn collect_detail(err: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
-    use ocx_lib::claim::ClaimError;
-    use ocx_lib::oci::sign::SignErrorKind;
-    use ocx_lib::oci::verify::VerifyErrorKind;
-    use ocx_lib::publisher::CopyErrorKind;
+    use ocx_announce::claim::ClaimError;
+    use ocx_package::publisher::CopyErrorKind;
+    use ocx_sign::sign::SignErrorKind;
+    use ocx_sign::verify::VerifyErrorKind;
 
     for cause in std::iter::successors(Some(err), |e| e.source()) {
         if let Some(error) = cause.downcast_ref::<ClaimError>() {
@@ -257,7 +258,7 @@ fn collect_detail(err: &(dyn std::error::Error + 'static)) -> Option<&'static st
 /// Success envelopes hard-code `exit_code = 0` — any command that wants to
 /// exit with a non-zero "success-ish" code (e.g. "nothing to do" for an idle
 /// operation) should return that code directly through
-/// [`ExitCode`](ocx_lib::cli::ExitCode) rather
+/// [`ExitCode`](ocx_exit::ExitCode) rather
 /// than layering a success envelope on top.
 pub fn render_success_envelope<T: Serialize>(command: &str, data: &T) -> anyhow::Result<String> {
     let envelope = SuccessEnvelope::new(command, data);
@@ -345,7 +346,7 @@ mod tests {
     /// hand-built envelope never calls.
     #[test]
     fn a_copy_refusal_carries_its_slug_and_both_endpoints() {
-        use ocx_lib::publisher::{CopyError, CopyErrorKind};
+        use ocx_package::publisher::{CopyError, CopyErrorKind};
 
         let error = anyhow::Error::new(CopyError {
             source_identifier: "dev.example.com/acme/tool:1.4.2".parse().expect("source"),
@@ -491,9 +492,8 @@ mod tests {
     fn render_error_envelope_classifies_verify_not_found() {
         // A `VerifyError(NoSignaturesFound)` surfaces as `kind=not_found`,
         // exit 79 — matches the frozen contract test in `test_verify.py`.
-        let id = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
-        let inner =
-            ocx_lib::oci::verify::VerifyError::new(id, ocx_lib::oci::verify::VerifyErrorKind::NoSignaturesFound);
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let inner = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::NoSignaturesFound);
         let err = anyhow::Error::from(inner);
         let json = render_error_envelope("verify", &err).expect("render ok");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -506,8 +506,8 @@ mod tests {
 
     #[test]
     fn render_error_envelope_classifies_sign_auth_error() {
-        let id = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
-        let inner = ocx_lib::oci::sign::SignError::new(id, ocx_lib::oci::sign::SignErrorKind::OidcTokenRejected);
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let inner = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::OidcTokenRejected);
         let err = anyhow::Error::from(inner);
         let json = render_error_envelope("package sign", &err).expect("render ok");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -529,10 +529,10 @@ mod tests {
         // envelope still says `"exit_code": 85` while `error.kind` silently
         // becomes `"internal"`. A code-only assertion passes through exactly
         // the failure the dedicated category exists to prevent.
-        let id = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
-        let rejected = ocx_lib::oci::sign::KeyRef::parse("awskms://alias/release")
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let rejected = ocx_trust::key_ref::KeyRef::parse("awskms://alias/release")
             .expect_err("awskms is recognised but unimplemented");
-        let inner = ocx_lib::oci::sign::SignError::new(id, ocx_lib::oci::sign::SignErrorKind::from(rejected));
+        let inner = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::from(rejected));
         let err = anyhow::Error::from(inner);
         let json = render_error_envelope("package sign", &err).expect("render ok");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -549,10 +549,10 @@ mod tests {
         // Verify parses `--key` on its own path, so the same reference must
         // reach the same envelope through `VerifyErrorKind`. One vocabulary,
         // two taxonomies: a script reads one word for one failure.
-        let id = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
-        let rejected = ocx_lib::oci::sign::KeyRef::parse("awskms://alias/release")
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let rejected = ocx_trust::key_ref::KeyRef::parse("awskms://alias/release")
             .expect_err("awskms is recognised but unimplemented");
-        let inner = ocx_lib::oci::verify::VerifyError::new(id, ocx_lib::oci::verify::VerifyErrorKind::from(rejected));
+        let inner = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::from(rejected));
         let err = anyhow::Error::from(inner);
         let json = render_error_envelope("package verify", &err).expect("render ok");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -570,8 +570,8 @@ mod tests {
         // discriminant of the inner `SignErrorKind`. Previously hard-coded to
         // `None`, which left scripts unable to distinguish e.g. an offline-refusal
         // from any other PermissionDenied without parsing stderr.
-        let id = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
-        let inner = ocx_lib::oci::sign::SignError::new(id, ocx_lib::oci::sign::SignErrorKind::OfflineSignRefused);
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let inner = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::OfflineSignRefused);
         let err = anyhow::Error::from(inner);
         let json = render_error_envelope("package sign", &err).expect("render ok");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -584,8 +584,8 @@ mod tests {
     fn envelope_detail_populated_for_verify_identity_mismatch() {
         // Mirror coverage on the verify side: a reachable VerifyErrorKind variant
         // must surface its snake_case discriminant via `envelope.error.detail`.
-        let id = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
-        let inner = ocx_lib::oci::verify::VerifyError::new(id, ocx_lib::oci::verify::VerifyErrorKind::IdentityMismatch);
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let inner = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::IdentityMismatch);
         let err = anyhow::Error::from(inner);
         let json = render_error_envelope("verify", &err).expect("render ok");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -599,7 +599,7 @@ mod tests {
         // #458: the idempotent-CI steady state ("already claimed, go announce")
         // exited 65 with no `detail`, so an SDK could not tell it from any
         // other DataError without matching on the message text.
-        let inner = ocx_lib::claim::ClaimError::PackageAlreadyClaimed {
+        let inner = ocx_announce::claim::ClaimError::PackageAlreadyClaimed {
             package: "acme/widget".into(),
             path: "p/acme/widget.json".into(),
             base_ref: "main".into(),
@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(value["error"]["kind"], "usage_error", "envelope: {json}");
         assert_eq!(
             value["exit_code"].as_u64().expect("exit_code is a number"),
-            crate::app::classify_error(err.as_ref()) as u8 as u64,
+            crate::exit::classify_error(err.as_ref()) as u8 as u64,
             "the envelope and the process must not disagree",
         );
     }

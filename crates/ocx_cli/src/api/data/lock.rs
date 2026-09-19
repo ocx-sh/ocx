@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use ocx_lib::cli::Cell;
+use ocx_console::Cell;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -47,10 +47,10 @@ impl LockEntry {
     /// leaf is absent OR ambiguous (the publisher does not ship this
     /// platform, or two entries tie), the primary digest falls back to empty
     /// rather than fabricating one or erroring out of a report command.
-    pub fn from_tool(tool: &ocx_lib::project::LockedTool, host: &ocx_lib::oci::Platform) -> Self {
-        let digest = match ocx_lib::project::lookup_host_leaf(&tool.platforms, host) {
-            ocx_lib::oci::Selection::Found((digest, _key)) => digest.to_string(),
-            ocx_lib::oci::Selection::None | ocx_lib::oci::Selection::Ambiguous(_) => String::new(),
+    pub fn from_tool(tool: &ocx_project::LockedTool, host: &ocx_oci::Platform) -> Self {
+        let digest = match ocx_project::lookup_host_leaf(&tool.platforms, host) {
+            ocx_oci::Selection::Found((digest, _key)) => digest.to_string(),
+            ocx_oci::Selection::None | ocx_oci::Selection::Ambiguous(_) => String::new(),
         };
         let platforms: BTreeMap<String, String> =
             tool.platforms.iter().map(|(k, v)| (k.clone(), v.to_string())).collect();
@@ -71,7 +71,7 @@ impl LockReport {
 }
 
 impl Printable for LockReport {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.entries {
             rows[0].push(entry.binding.clone());

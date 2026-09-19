@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProjectLock",
+  "description": "Top-level `ocx.lock` document — both the in-memory model and the on-disk\nwire shape (the `tool` TOML array name is the only difference, via\n`#[serde(rename = \"tool\")]`).\n\nAll locked tools are sorted by `(group, name)` at write time for\nbyte-stable output; [`Self::to_toml_string`] serializes through a\nborrowed, pre-sorted view rather than cloning the whole document.\n[`Self::from_str_with_path`] is the version-peek read path: it rejects any\n`lock_version` other than [`SUPPORTED_LOCK_VERSION`] before attempting the\nfull deserialize, and validates the bare-`repository` and\ncanonical-platform-key invariants (D3) on every tool afterward.",
+  "type": "object",
+  "properties": {
+    "metadata": {
+      "description": "Lock metadata header (version, declaration hash, generator, etc.).",
+      "$ref": "#/$defs/LockMetadata"
+    },
+    "tool": {
+      "description": "All locked tools in the project. Sorted by (group, name) at write\ntime for byte-stable output. On disk this is the `[[tool]]` array.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/LockedTool"
+      },
+      "default": []
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "metadata"
+  ],
+  "$defs": {
+    "LockMetadata": {
+      "description": "Lock metadata header.",
+      "type": "object",
+      "properties": {
+        "lock_version": {
+          "description": "On-disk schema version. `V3` is the only version this build reads or\nwrites.",
+          "$ref": "#/$defs/LockVersion"
+        },
+        "declaration_hash_version": {
+          "description": "Canonicalization contract version for [`Self::declaration_hash`].\nCurrently always `1` — see [`super::DECLARATION_HASH_VERSION`].",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "declaration_hash": {
+          "description": "`sha256:<hex>` of the RFC 8785 JCS-canonicalized declaration\n(see `super::hash`).",
+          "type": "string"
+        },
+        "generated_by": {
+          "description": "Tooling version string that wrote the lock, e.g. `\"ocx 0.3.0\"`.",
+          "type": "string"
+        },
+        "generated_at": {
+          "description": "ISO-8601 UTC timestamp. Preserved verbatim when the resolved\ncontent (registry, repository, digest) of every tool is unchanged\nbetween two `ocx lock` runs; updated otherwise.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "lock_version",
+        "declaration_hash_version",
+        "declaration_hash",
+        "generated_by",
+        "generated_at"
+      ]
+    },
+    "LockVersion": {
+      "description": "OCX lock format version (lock-format version 3). Written locks are always 3.",
+      "type": "integer",
+      "enum": [
+        3
+      ]
+    },
+    "LockedTool": {
+      "description": "One locked tool entry — identified by the local binding `(group, name)`.\n\n`name` is the TOML key used in the developer's `ocx.toml` (the local\nbinding); `group` is `\"default\"` for entries from the top-level `[tools]`\ntable or the named `[group.<name>]` key. `repository` is the bare\nregistry/repo coordinate (no tag, no digest) shared by every platform\nleaf — the outer image-index digest is intentionally not stored (the lock\nunit is the platform-manifest digest, uniform with dependency pins); the\nper-platform pull id is reconstructed as `repository.clone_with_digest(leaf)`.\n`platforms` records one leaf digest per shipped platform, keyed by the\ncanonical grammar string ([`Platform`] `Display` — D2); a platform the\npublisher does not ship is encoded by absence of its key.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Local binding name (TOML key from `ocx.toml`, e.g. `cmake`).",
+          "type": "string"
+        },
+        "group": {
+          "description": "Owning group. `\"default\"` for entries from the top-level\n`[tools]` table; otherwise the named `[group.*]` key.",
+          "type": "string"
+        },
+        "repository": {
+          "description": "Bare registry/repo coordinates shared by every platform leaf.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "platforms": {
+          "description": "Available-only per-platform leaf digests, keyed by the canonical\ngrammar [`Platform`] string. `BTreeMap` for byte-stable output\nwithout requiring `Ord` on `Platform`.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Digest"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "group",
+        "repository",
+        "platforms"
+      ]
+    },
+    "Identifier": {
+      "description": "OCI identifier in the format 'registry/repository[:tag][@digest]'.",
+      "type": "string"
+    },
+    "Digest": {
+      "description": "OCI content-addressed digest (e.g. 'sha256:abcdef...').",
+      "type": "string",
+      "pattern": "^sha(256|384|512):[0-9a-f]+$"
+    }
+  },
+  "$id": "https://ocx.sh/schemas/project-lock/v3.json",
+  "$comment": "machine-generated; format may evolve across OCX versions — do not hand-edit"
+}

@@ -1,0 +1,654 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "description": "Root configuration struct.\n\nNo `deny_unknown_fields` anywhere in this tree — unknown sections AND\nunknown keys inside a known section are silently ignored. The reason is\nfleet forward-compat, not convenience: one `config.toml` is read by many\nocx versions at once (the `[managed]` tier ships an operator's payload to\nevery binary in a fleet), so a file written for a newer ocx must degrade to\n\"the parts I understand\" on an older one. The alternative — rejecting the\nfile — takes the WHOLE payload out of service on every older binary, which\nis how a central rollout bricks a fleet.\n\nThe cost is that a typo'd key silently no-ops. When a change genuinely\ncannot degrade (a key whose meaning or value shape changed), the escape\nhatch is the tier's own OCI tag: publish the new payload under a new tag\nand move fleets onto it as they upgrade — see the 2026-07-31 amendment in\n`adr_managed_config_tier.md` and `website/src/docs/user-guide.md`\n(\"Rolling out an incompatible change\").",
+  "type": "object",
+  "properties": {
+    "registry": {
+      "description": "Global registry-subsystem settings (`[registry]` section).\n\nIn v1 contains only `default`, but reserved for future global settings\n(timeout, retry policy, default-credential-provider, etc.).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RegistryDefaults"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "registries": {
+      "description": "Named per-registry configuration tables (`[registries.<name>]`).\n\nThe plural name is deliberate: it matches Cargo's convention and avoids\na TOML collision with the singular `[registry]` global-settings section.\n\nEvery key is an identifier prefix, always — `[registry] default`\nnever dereferences through this table (§6 ratified simplification).\nFuture extensions (location rewrite, timeout, auth) drop into the same\nentry struct without breaking existing configs.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/RegistryConfig"
+      }
+    },
+    "mirrors": {
+      "description": "Per-traffic-host mirrors (`[mirrors.\"<host>\"]`).\n\nMaps a canonical upstream traffic host (e.g. `\"ghcr.io\"`,\n`\"index.ocx.sh\"`) to replacement endpoint(s) so OCX routes read\ntraffic to a corporate mirror instead of the firewall-blocked origin.\nEach value is a union (`adr_index_indirection.md` F5b): a bare string\nrewrites both traffic roles for that host; a `{registry?, index?}`\ntable splits per role — `registry` rewrites OCI distribution traffic\nonly, `index` rewrites index-tree traffic only. Replace semantics: no\norigin fallback. The canonical identifier and content-addressed digest\nstay unchanged, so an `ocx.lock` produced behind the mirror remains\nvalid with direct egress and vice versa.\n\nDeserialized via [`mirror::deserialize_mirrors_table`] (hand-rolled,\nvalue-first) rather than a plain derive, so a malformed entry raises a\nnamed per-host error instead of an opaque `#[serde(untagged)]`\nvariant-mismatch.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/MirrorConfig"
+      }
+    },
+    "patches": {
+      "description": "Site-tier patch configuration (`[patches]`).\n\nPoints at an operator-controlled patch registry that provides companion\npackages (CA bundles, proxy env vars, license-server endpoints) layered\nonto unmodified upstream packages at compose time. The patch tier is the\nexecution-env twin of `[mirrors]`: `[mirrors]` adapts transport, patches\nadapt the execution environment.\n\nAbsent → no patch tier configured (opt-in, not required).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PatchConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "managed": {
+      "description": "Corporate managed-configuration tier (`[managed]`).\n\nPoints at an operator-controlled OCI artifact that supplies a plain\n`config.toml` payload — mirrors, patches pointer, default registry —\nsynced into local state and merged above the user config every\ninvocation. See `crate::managed_config` for the fetch/persist domain\nlayer and `adr_managed_config_tier.md`.\n\nAbsent → no managed tier configured (opt-in, seeded by\n`ocx self setup --managed-config`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ManagedConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "trust": {
+      "description": "Identity-pinned verification policies (`[[trust.policy]]`).\n\nUnlike every other section, trust policies **array-append** across the\n`config.toml` tiers rather than replace (see [`Config::merge`]) — the\noperator (config.toml) trust set is the union of system/user/`$OCX_HOME`.\nAt verify time this operator set takes precedence over the project\n`ocx.toml` (`ocx_trust::resolve_tiered`). Consumed by\n`ocx package verify`. See `ocx_trust` and `adr_trust_policy.md`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TrustConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "shell": {
+      "description": "Shell-integration settings (`[shell]`) — the per-prompt hook and\ncompletions toggles, plus the activation consent whitelist.\n\n**Never contributed by the project tier.** `ConfigLoader` strips\n`shell` from any project-tier contribution explicitly (C-033), because\nconsent material read from a repo's own `ocx.toml` would let a clone\nconsent to itself. Consumed by `ocx self activate`, `ocx self setup`\nand `ocx shell state`. See `adr_shell_env_overhaul.md` Decisions 4, 5\nand 7.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ShellConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "records": {
+      "description": "Execution-record sink (`[records]`).\n\nDesignates where OCX writes one JSON resolution record per tool launch —\nthe resolved package closure with digests, plus the resolved executable.\nDeclared at SYSTEM scope it clamps: no lower tier can redirect or\ndisable it, which is what lets an operator make recording a fleet\nproperty instead of a wrapper-script convention.\n\nAbsent → no records written (opt-in).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RecordsOptions"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "toolchain_dir": {
+      "description": "Root directory under which each project's toolchain tree is rendered.\n\nA project's tree lands at `<root>/<project-key>/toolchain/`, so this\nnames one directory holding many projects, not a single project's\ntoolchain home. The global toolchain home ignores this key entirely: it\nis always `$OCX_HOME/toolchain`.\n\nA leading `~` expands against the home directory, and nothing else is\nexpanded — a `%VAR%` reference is taken literally on every platform,\nWindows included. The value must be absolute and must not contain a\n`..` component.\n\nThe directory it resolves to must sit inside the home directory or\ninside `$OCX_HOME`, must not be either of those two directories itself,\nand must not be inside `$OCX_HOME/toolchain`. It must not be a\nfilesystem root or a system location such as `/usr`, `/etc`, `/var/lib`\nor `C:\\Program Files`. On Linux and macOS it must additionally be owned\nby the invoking user and writable by neither group nor world; Windows\nchecks no ownership. ocx exits 78 when any of that fails. It does not\nhave to exist yet — the directory is created when a toolchain is first\nrendered.\n\nAvailable in every configuration tier, a managed-configuration payload\nincluded, so one fleet rollout can place every host's project trees on a\nchosen volume.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "extra_ca_certs": {
+      "description": "Extra CA certificate(s) trusted for OCI registry, index and forge\ntraffic, as a path to a PEM file (a bundle of one or more\nconcatenated `CERTIFICATE` blocks is accepted) additional to the\nplatform trust store.\n\nA relative path resolves against the directory of the `config.toml`\nthat declared it — rewritten to absolute at load time, so the same\nvalue means the same file regardless of the process working\ndirectory. Mutually exclusive with `extra_ca_certs_pem`: declaring\nboth in one file is refused. A managed payload never carries this\nform: a path on the publisher's disk means nothing on a consumer's, so\nthe managed tier drops it with a warning — publish with `ocx config\npush`, which inlines the file as `extra_ca_certs_pem`.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "extra_ca_certs_pem": {
+      "description": "The extra CA certificate bundle inlined verbatim (PEM text).\n\nThis is the form a fleet receives: `ocx config push` reads a\npath-form `extra_ca_certs` at publish time and inlines it here,\nbecause a path on the operator's disk means nothing on a consumer's.\nMutually exclusive with `extra_ca_certs`. From the managed tier it is\nhonoured for registry, index and forge traffic as published; Sigstore\ntraffic honours a managed-tier root set only behind a digest-pinned\n`[managed] source`.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    }
+  },
+  "$defs": {
+    "RegistryDefaults": {
+      "description": "Global registry-subsystem settings (`[registry]` section).\n\nNo `deny_unknown_fields` — unknown keys are ignored, like every other\nconfig table (see [`Config`]).",
+      "type": "object",
+      "properties": {
+        "default": {
+          "description": "Default registry for bare identifiers (e.g. `cmake:3.28` expands to\n`<default>/cmake:3.28`). Overridden by the `OCX_DEFAULT_REGISTRY`\nenvironment variable.\n\nAlways a literal prefix (e.g. `\"ghcr.io\"`, `\"ocx.sh\"`) — never\nresolved through the `[registries.<name>]` table (§6 ratified\nsimplification).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "RegistryConfig": {
+      "description": "Configuration for a single `[registries.<name>]` entry.\n\nRe-exported from [`crate`] as `RegistryConfig`. No\n`deny_unknown_fields` — unknown keys are ignored, like every other config\ntable (see [`crate::Config`]).",
+      "type": "object",
+      "properties": {
+        "index": {
+          "description": "Base URL of the `index.ocx.sh`-protocol index this namespace resolves\nthrough (`adr_index_indirection.md` F5a), e.g.\n`\"https://index.ocx.sh\"`. **Field presence is the kind marker**: a\n`[registries.\"<ns>\"]` entry that carries `index` resolves via the\nocx-index protocol (root → obs → `select_best`); an entry without\n`index` (or no entry at all) resolves as plain OCI. There is exactly\none resolution protocol per namespace — no index-then-OCI-tags\nfallback chain, no runtime format probing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trusted_hosts": {
+          "description": "SSRF escape hatch for this namespace's physical registry hosts: exact\nhostnames or CIDR blocks whose resolved addresses skip the default-on\nprivate/loopback/link-local/metadata refusal.\n\nAn index root's `repository` pointer arrives in remote-controlled data,\nso before OCX dereferences it into a physical fetch the target host must\nnot resolve to a forbidden range (ocx#218). A private corporate registry\nlegitimately lives on such a range, so listing it here (e.g.\n`[\"10.0.0.0/8\", \"registry.corp\"]`) restores access for exactly that\nnamespace without disabling the guard globally. The exemption is\nper-entry and managed-tier distributable, so `system_locked` applies —\nthere is no CLI flag to widen a locked trust set.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "insecure": {
+          "description": "Contact this registry over plain HTTP instead of HTTPS.\n\nThe per-registry spelling of what `OCX_INSECURE_REGISTRIES` says as a\nflat list; the two are a **union** in the permissive direction —\ndeclaring a host in either source adds it, so there is no \"config says\nsecure, env says insecure\" conflict to resolve. One source can subtract:\na SYSTEM-scope entry stating `insecure = false` locks that host shut\nagainst the env list too. See\n[`insecure_hosts`](crate::insecure::insecure_hosts) for the resolution rule.\n\nMatching is exact on the registry name as written, `host[:port]`\ntogether: an entry for `registry.corp` does not cover\n`registry.corp:5001`. The name must be the one references actually\ncarry, because that is the string the transport compares against.\n\n# What it reaches, stated in full\n\nDropping TLS is a security decision, so the entry is managed-tier\ndistributable and `system_locked` applies.\n\nBeyond the registry's own traffic it reaches exactly one thing: which\n**authentication realm** that registry may name. The transport accepts a\nrealm only when it is `https`, or shares the registry's own authority, or\nsits on a host that itself carries a plain-HTTP allowance. So a cleartext\ncredential can only ever go somewhere the operator already declared\nplaintext — an `insecure` entry for one host never licenses cleartext to a\nhost nobody named, for a realm or for registry traffic (CWE-319/CWE-522).\n\nThe operator-visible consequence: a plain-HTTP registry whose **token\nservice sits on a different host or port** needs that host declared plain\nHTTP too, or the probe is refused. Declaring the registry alone is enough\nonly when the realm is on the registry's own authority.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "MirrorConfig": {
+      "description": "Normalized `[mirrors.\"<host>\"]` entry: one independent optional endpoint\nper traffic role.\n\nRe-exported from [`crate`] as `MirrorConfig`. Never derives\n[`serde::Deserialize`] directly — the string-or-table union value it is\nbuilt from is parsed by [`parse_mirror_value`] (fed from\n[`deserialize_mirrors_table`] on the TOML side and\n[`crate::env::mirrors`] on the forwarded-env side), never by a derive on\nthis struct.",
+      "type": "object",
+      "properties": {
+        "registry": {
+          "description": "Endpoint for OCI distribution traffic (`/v2`) to this host, if a\nregistry role was declared for it (a bare string, `{registry: ...}`,\nor `{registry: ..., index: ...}`). Feeds\n[`MirrorMap`](ocx_oci::MirrorMap) only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "index": {
+          "description": "Endpoint for index-tree traffic (`/config.json`, `/c`, `/p`) to this\nhost, if an index role was declared for it. Feeds the index client's\nbase-URL resolution only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "PatchConfig": {
+      "description": "Configuration for the `[patches]` tier.\n\nStructural twin of [`MirrorConfig`](crate::mirror::MirrorConfig) +\nre-exported from [`crate`] as `PatchConfig`. No\n`deny_unknown_fields` (forward compat with descriptor fields added by later\nphases).\n\nAll fields are `Option` so [`Default`] and tier merge work correctly; absent\nfields fall back to their defaults in [`resolve_patch_config`].",
+      "type": "object",
+      "properties": {
+        "registry": {
+          "description": "OCI registry hosting patch descriptors, e.g.\n`\"internal.company.com/ocx-patches\"`.\n\nRequired at resolve time; absent → `resolve_patch_config` returns `None`\n(no patch tier configured).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Path-template for per-package patch repositories. Placeholders:\n- `{registry}` — slugified (via [`to_relaxed_slug`]) registry portion of\n  the base identifier's registry host.\n- `{repository}` — the base identifier's repository path.\n\nDefault: `\"{registry}/{repository}\"`.\n\nThe template always produces a two-or-more-segment sub-path, which never\ncollides with the reserved single-segment `global` repository that holds\nthe global descriptor (`<registry>/global:__ocx.patch`).\n\n[`to_relaxed_slug`]: ocx_util::string_ext::StringExt::to_relaxed_slug",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required": {
+          "description": "Fail posture when a matched companion is unavailable.\n\n- `true` (default) — fail closed: abort launch if a required companion\n  cannot be resolved (C7 enforcement; a tool that runs without its CA\n  overlay does TLS to untrusted endpoints, strictly worse than refusing).\n- `false` — fail open: skip with a warning (suitable for non-security\n  companions like a license-server URL or metrics endpoint).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
+    "ManagedConfig": {
+      "description": "Configuration for the `[managed]` tier.\n\nAll fields are `Option` so [`Default`] and tier merge work correctly; absent\nfields fall back to their defaults in [`resolve_managed_config`].\n\nLike [`PatchConfig`](crate::patch::PatchConfig), unknown fields\nare tolerated (no `deny_unknown_fields`) — fleet forward-compat: a config\nwritten for a newer ocx (e.g. a future `[managed]` key) must not brick\nevery older binary in the fleet that reads the same seed. The cost is that\na typo'd key silently no-ops; `ocx config update --check` surfaces the\ntier's effective state for diagnosis.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "description": "OCI reference for the managed-config artifact, e.g.\n`\"internal.company.com/ocx-config:user\"`.\n\nRequired at resolve time; absent → [`resolve_managed_config`] returns\n`None` (no managed tier configured).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required": {
+          "description": "Fail posture when the snapshot is required but absent.\n\n- `true` (default) — fail closed: [`ManagedConfigError::SnapshotRequired`]\n  until `ocx config update` (or `self setup --managed-config`) syncs one.\n- `false` — the tier contributes nothing until synced; a throttle-gated\n  stderr hint only (benign-state rule, no per-invocation WARN).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "refresh": {
+          "description": "Background refresh posture. Defaults to [`RefreshPolicy::Notify`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefreshPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "interval": {
+          "description": "Background refresh throttle interval, `\\d+[smhd]?` (bare = seconds).\nDefaults to [`ManagedConfig::DEFAULT_INTERVAL`] (`\"1d\"`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "RefreshPolicy": {
+      "description": "Background refresh posture for the `[managed]` tier.",
+      "oneOf": [
+        {
+          "description": "Drift silently triggers a full fetch + persist + swap — but only via the\nbackground tick, whose activation gate is narrow: it fires only on an\ninteractive terminal (stderr is a TTY), outside CI, and online (see\n`app::managed_config_check`). CI and other automation hosts never see\nthe tick run; they must refresh the snapshot with an explicit\n`ocx config update`.",
+          "type": "string",
+          "const": "apply"
+        },
+        {
+          "description": "Drift prints a stderr advisory (\"run `ocx config update`\"); content is\nnever fetched by the background tick.",
+          "type": "string",
+          "const": "notify"
+        },
+        {
+          "description": "The background tick is skipped entirely; only `ocx config update`\nrefreshes the snapshot.",
+          "type": "string",
+          "const": "manual"
+        }
+      ]
+    },
+    "TrustConfig": {
+      "description": "Container for the `[trust]` config section (`[[trust.policy]]` entries).",
+      "type": "object",
+      "properties": {
+        "policy": {
+          "description": "The declared policies. Empty when `[trust]` is present but lists none.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrustPolicy"
+          },
+          "default": []
+        },
+        "sigstore": {
+          "description": "Sigstore trust material for a self-hosted stack (`[trust.sigstore]`).\n\nRead from the operator `config.toml` tiers only. The project `ocx.toml`\nalso deserializes into [`TrustConfig`], but its `sigstore` sub-table is\nnever consulted: a repository that could name its own Fulcio CA would\nverify its own signatures, which is the whole trust decision.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SigstoreTrust"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "TrustPolicy": {
+      "description": "A single `[[trust.policy]]` entry.\n\nOne `signers` array names everyone this policy accepts, each entry tagged\n`kind = \"keyless\"` or `kind = \"key\"` ([`SignerSpec`]). Acceptance is ANY-of,\nso **adding a signer always widens what verifies, never narrows it**. There is no\n`[trust.policy.key]` sub-table and no `[trust.policy.keyless]` one — one\ncanonical spelling. [`Self::scope`] and [`Self::builder`] stay top-level\nbecause neither depends on which backend produced the signature.\n\n```toml\n[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n# or, to carve a subtree back out:\n# scope = { include = [\"ghcr.io/acme/*\"], exclude = [\"ghcr.io/acme/experimental/*\"] }\n\nsigners = [\n  { kind = \"keyless\",\n    identity = \"https://github.com/acme/tool/.github/workflows/release.yml@refs/tags/v1.2.3\",\n    oidc_issuer = \"https://token.actions.githubusercontent.com\" },\n]\n```\n\nEvery field is optional at the serde layer, for the same fleet\nforward-compat reason unknown keys are tolerated (see [`TrustConfig`]): an\nentry written by a newer ocx degrades to its known parts instead of failing\nthe whole file. An unknown `kind` degrades the same way, through\n[`SignerSpec::Unknown`] — an internally-tagged enum would otherwise make it\na parse error for the entire document. What a *resolved* policy is allowed\nto mean is narrowed at [`TrustPolicy::compile`] instead, which refuses a\npolicy that leaves no backend behind: an absent or empty array with\n[`TrustPolicyError::NoSigners`], and one whose every entry named an unknown\nkind with [`TrustPolicyError::NoUsableSigner`]. That is also what makes a\nmisspelled field loud — it parses as an unknown key, leaves the entry\ndeclaring nothing, and fails closed rather than widening.",
+      "type": "object",
+      "properties": {
+        "scope": {
+          "description": "Which packages this policy applies to — one prefix pattern, or an\ninclude/exclude set of them ([`ScopeSpec`]).\n\nA pattern with no `*` matches the target's canonical\n`registry/repository` on `/`-separated path-segment boundaries:\n`ghcr.io/acme/tool` matches the exact repo `ghcr.io/acme/tool` and any\nsub-path under it (`ghcr.io/acme/tool/plugin`), but NOT a sibling that\nmerely shares the prefix text — `ghcr.io/acme/tool` does **not** cover\n`ghcr.io/acme/tool-cli`. A trailing `/*` covers the subtree; a mid-string\n`*` is a literal-prefix substring glob (see [`pattern_matches`]).\n\n```toml\nscope = \"ghcr.io/acme/*\"\nscope = { include = [\"ghcr.io/acme/*\"], exclude = [\"ghcr.io/acme/experimental/*\"] }\n```\n\nAbsent reads exactly like `\"\"`: a catch-all. So does an object form with\nan empty `include` and no `exclude`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScopeSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "builder": {
+          "description": "Expected SLSA provenance builder identity, matched against the\nprovenance predicate during attestation verify.\n\nBackend-independent — it names who *built* the artifact, not how the\nsignature was made — so it is a sibling of [`Self::scope`] rather than a\nmember of a backend sub-table. Inert in signature mode: a pin on a\npolicy that never verifies provenance is forward configuration, not an\nerror.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "signers": {
+          "description": "The signers this policy accepts — an **ANY-of** set, each entry tagged\n`kind = \"keyless\"` or `kind = \"key\"` ([`SignerSpec`]).\n\n```toml\nsigners = [\n  { kind = \"keyless\", identity = \"release@acme.example\", oidc_issuer = \"https://accounts.google.com\" },\n  { kind = \"key\",     key = \"etc/acme-release.pub\" },\n]\n```\n\n**Every entry added here widens what verifies.** The set is an ANY-of, so\na new signer is a new way to pass, never a new condition to satisfy.\n\nAbsent reads as empty, and an empty set is a **configuration error**, not\na catch-all — a policy naming no acceptable signer accepts nothing, and\nthe permissive reading would turn a deleted line into a silent bypass.\nThat is also where a mis-spelled entry lands: unknown keys are tolerated\nfor the fleet forward-compat reason [`TrustPolicy`] states, so a typo\nleaves no signer behind and fails closed at [`Self::compile`].",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SignerSpec"
+          },
+          "default": []
+        }
+      }
+    },
+    "ScopeSpec": {
+      "oneOf": [
+        {
+          "description": "One scope pattern. Segment-bounded without a `*`, literal-prefix glob with one; the empty string is a catch-all.",
+          "type": "string"
+        },
+        {
+          "description": "Patterns to cover, minus patterns to carve back out. A target matches when it matches at least one `include` (an empty `include` is a catch-all) and no `exclude`.",
+          "type": "object",
+          "properties": {
+            "include": {
+              "description": "Patterns the policy covers. Empty is a catch-all.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "exclude": {
+              "description": "Patterns carved back out. Beats `include` wherever both match.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "include"
+              ]
+            },
+            {
+              "required": [
+                "exclude"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "SignerSpec": {
+      "description": "One entry of a policy's `signers = [...]` array.\n\nThe **config layer**. It compiles into a [`PolicyBackend`] exactly as\n[`KeylessMatcher`] compiles into [`CompiledKeyless`]: `PolicyBackend` holds a\ncompiled [`regex::Regex`] and deliberately carries no serde derives, so it is\nnever deserialized into directly.\n\nInternally tagged on `kind` with newtype variants, so a signer's fields sit\nflat beside the tag and the keyless arm reuses [`KeylessMatcher`] verbatim:\n\n```toml\n[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nsigners = [\n  { kind = \"keyless\", identity = \"release@acme.example\", oidc_issuer = \"https://accounts.google.com\" },\n  { kind = \"key\", key = \"etc/acme-release.pub\" },\n]\n```\n\nAn empty array is a configuration error, never a catch-all — see\n[`validate_signers`]. `scope` and `builder` stay policy-level siblings for\nthe reason [`TrustPolicy::builder`] gives: neither depends on which backend\nsigned.\n\nReachable from `Config` through [`TrustPolicy::signers`], so the `JsonSchema`\nderive is what puts these entries in the published `config.toml` schema —\nwhich is where typo detection for a signer belongs, since the deserializer\ndeliberately tolerates unknown keys (see [`TrustConfig`]).",
+      "oneOf": [
+        {
+          "description": "`{ kind = \"keyless\", identity | identity_regexp, oidc_issuer }`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "keyless"
+            }
+          },
+          "$ref": "#/$defs/KeylessMatcher",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "`{ kind = \"key\", key | key_pem }`.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "key"
+            }
+          },
+          "$ref": "#/$defs/KeyMatcher",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "A `kind` this build does not know — an entry written by a newer ocx.\n\nWithout this arm an internally-tagged enum makes an unrecognised `kind`\na hard **parse** error for the whole file, and a managed payload that\ndoes not parse is dropped entirely (`ConfigLoader` logs it and carries\non) — so one forward-looking signer would silently remove every trust\npolicy the fleet has. That is the one direction fleet forward-compat\nmust never take, for the same reason `[shell.consent]` carries the\nopposite carve-out: dropping an unknown *narrowing* declaration widens\ntrust.\n\nIt compiles to no backend, so it narrows — it accepts nobody, and a\nsibling `keyless` entry in the same policy keeps working. A policy whose\nsigners are *all* unknown compiles to nothing at all and is refused by\nname ([`TrustPolicyError::NoUsableSigner`]) rather than left to fail as\na confusing identity mismatch.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unknown"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "KeylessMatcher": {
+      "description": "A `kind = \"keyless\"` signer: which Sigstore identity may sign.\n\nExactly one of `identity` / `identity_regexp` must be set — both or neither\nis a configuration error surfaced by [`TrustPolicy::compile`] (cosign's\n`--certificate-identity` / `--certificate-identity-regexp` precedent) — and\n`oidc_issuer` must be present. All three are `Option` at the serde layer and\nmandatory at compile, for the tolerance reason [`TrustPolicy`] states.",
+      "type": "object",
+      "properties": {
+        "identity": {
+          "description": "Exact expected certificate SAN (byte-equal). Mutually exclusive with\n[`Self::identity_regexp`].",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "identity_regexp": {
+          "description": "Regex the certificate SAN must match in full (anchored `\\A…\\z`).\nMutually exclusive with [`Self::identity`].",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "oidc_issuer": {
+          "description": "Exact expected OIDC issuer URL (byte-equal).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "KeyMatcher": {
+      "description": "The `kind = \"key\"` signer: one public key, by reference or inline.\n\n`key` XOR `key_pem`, mirroring [`KeylessMatcher`]'s identity XOR — both\n`Option` at the serde layer for the fleet forward-compat reason\n[`TrustPolicy`] states, both narrowed at [`validate_signers`]. There is no\n`key_regexp`: a public key is a fixed value, not a pattern.\n\n`ocx config push` inlines the reference form into `key_pem` at publish time,\nfor the reason [`SigstoreTrust::trusted_root_json`] already gives — a path on\nthe operator's disk means nothing on a consumer's.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "description": "A key reference in the [`KeyRef`](key_ref::KeyRef) grammar\n(`[scheme://]<rest>`) — the same spelling `--key` takes on the command\nline, so a KMS entry later needs no config-format change. Mutually\nexclusive with [`Self::key_pem`].\n\n# Legal in a local tier, rejected in a managed payload\n\nA managed-config payload is a `config.toml` shipped as a package to a\nfleet, so a `file:` reference in one names the *operator's* disk and\nmeans nothing on any consumer. A published payload therefore accepts\n[`Self::key_pem`] only, and the path form is refused with an error\nnaming `key_pem` as the fix — the same convention `trusted_root` /\n`trusted_root_json` already follows, where\n`package_manager::managed_config::publish::inline_trusted_root` reads the path form at\npublish time and inlines it. Rejecting it removes an incoherent state\nrather than adding a guard.\n\n**Local tiers (project / operator / user config on the author's own\ndisk) leave this unrestricted.** A relative reference resolves against\nthe directory of the config file that declared it — ordinary resolution\nsemantics so a relative path means what its author meant. That is *not*\na containment check and must not be described as one; the author owns\nthat filesystem.\n\nThe refusal lives in\n`package_manager::managed_config::publish::validate_managed_config_payload`,\nbeside its `trusted_root` twin. A managed payload that reaches a\nconsumer with this field set anyway — published by an older ocx — has it\ndropped at load time rather than read.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "key_pem": {
+          "description": "Verbatim SPKI PEM. Mutually exclusive with [`Self::key`].",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "SigstoreTrust": {
+      "description": "The `[trust.sigstore]` sub-table: where verification gets its trust root\nwhen the stack is self-hosted rather than the Sigstore public good.\n\nEvery field is optional and the whole sub-table may be absent — omitting it\nreproduces the public-good behaviour exactly. Its purpose is fleet\ndistribution: an operator running an internal Fulcio/Rekor publishes one\n`config.toml` through the `[managed]` tier and every machine verifies\nagainst the internal CA with no env var and no file copy.",
+      "type": "object",
+      "properties": {
+        "trusted_root": {
+          "description": "Path to a Sigstore trusted-root JSON, or a directory holding\n`trusted_root.json`.\n\nA relative path resolves against the directory of the `config.toml`\nthat declared it — rewritten to absolute at load time, so the same\nvalue means the same file regardless of the process working directory.\nMutually exclusive with [`Self::trusted_root_json`].",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "trusted_root_json": {
+          "description": "The trusted-root document inlined verbatim.\n\nThis is the form a fleet receives: `ocx config push` reads a path-form\n[`Self::trusted_root`] at publish time and inlines it here, because a\npath on the operator's disk means nothing on a consumer's. Mutually\nexclusive with [`Self::trusted_root`].",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "fulcio_url": {
+          "description": "Default Fulcio base URL for `ocx package sign` when `--fulcio-url` is\nomitted.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "rekor_url": {
+          "description": "Default Rekor base URL for `ocx package sign` / `verify` when\n`--rekor-url` is omitted.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "rekor_upload": {
+          "description": "Fleet-wide default for uploading a **key-mode** signature to the\ntransparency log, when neither `--rekor-upload` nor `--no-rekor-upload`\nis given. Absent means off.\n\n**Key mode only.** Under keyless the upload is a *requirement*, not a\ndefault — a Fulcio certificate is valid for about ten minutes, and the\nRekor timestamp is the only proof the signature happened inside that\nwindow — so this field is ignored there, deliberately without a warning.\nErroring or warning on every keyless signature because a fleet-wide\nkey-mode setting says `false` would let an unrelated configuration key\nbreak the default signing path.\n\nOff by default in key mode even though cosign uploads: `rekor_url`\ndefaults to the **public** Rekor, so an on-by-default key path would\npublish the digest and signer of a private corporate artifact to a\nworld-readable append-only log on first run. That is irreversible; a\nsignature with no transparency record is fixed by re-signing.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "ShellConfig": {
+      "description": "The `[shell]` section (C-029).\n\n**No `deny_unknown_fields`**, like every other `Config` sub-struct: one\n`config.toml` is read by many ocx versions at once, so a file written for a\nnewer ocx must degrade to \"the parts I understand\". The tolerance stops one\nlevel down, at [`ShellConsent`], and only there.",
+      "type": "object",
+      "properties": {
+        "hook": {
+          "description": "Rung 4 of the hook ladder (C-038). Merges unconditionally in **both**\ndirections, including the managed tier over a user's own file (C-034) —\nsafe only because consent (C-025) still gates every project\nindependently. If that coupling ever weakens, this key stops being safe\nto merge unconditionally.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "completions": {
+          "description": "Rung 4 of the completions ladder (C-039) — the rung completions never\ngot. Follows `hook` a fortiori: it grants nothing and gates nothing.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "modify_path": {
+          "description": "Whether `ocx self setup` may write PATH surfaces — shell profiles and\nthe session-PATH stores alike. Absent means true.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "profiles": {
+          "description": "Which shell profile files receive the managed ocx block.\n\nAbsent means auto-detect fresh on every run; an empty list means write\nno profile blocks at all. The two are never the same thing, and a\ndetection result is never written back into this key.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "consent": {
+          "description": "The activation whitelist (C-025 clauses 2 and 3).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ShellConsent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ShellConsent": {
+      "description": "The `[shell.consent]` table (C-029).\n\n**This is the one place the fleet forward-compat tolerance stops.** On a\nconsent-bearing table, dropping an unknown *narrowing* key would **widen**\ntrust rather than narrow it — the one direction forward-compat must not\ntake. An operator publishing `namespaces` plus a future narrowing key an\nolder fleet host does not know must have that host **refuse** the payload,\nnot silently drop the key and activate on the full namespace.\n\nRecorded as the plan's single constitution deviation: `arch-principles.md`\nforbids `deny_unknown_fields` on anything reachable from `Config`, and\ncarries a consent-bearing-table carve-out for exactly this table.\n[`ShellConfig::hook`] / `completions` keep the tolerant behaviour; only this\ntable is strict.",
+      "type": "object",
+      "properties": {
+        "paths": {
+          "description": "Canonical directories that activate unconditionally (C-025 clause 3).\nModelled on git's `safe.directory`: an entry is one exact directory,\nor — with a trailing `/*` — that directory and everything beneath it,\nmatched component-wise ([`consent_path_matches`]). git's `/*` covers\nonly what is nested *under* the named directory; this one covers the\nnamed directory too. A bare `*` grants nothing: OCX has no\ntrust-this-machine token.\n\n**Only the project side is canonicalized; entries are compared\nliterally** after separator and trailing-slash normalization\n([`normalize_consent_path`], C-030). Canonicalizing entries at read time\nwould make the grant follow a symlink an attacker may control on the\nparent; comparing literally never matches a symlinked checkout and is\nthen silently inert — the fail-safe direction. A-28 adds a **near-miss**\nrow to `ocx shell state` when an entry differs from the canonical\ndirectory only by ASCII case.\n\nA **leading** `~` expands against the home directory at match time, the\nway git interpolates one in `safe.directory` — textually, resolving no\nsymlink, and never rewritten into the stored entry, so `ocx shell state`\nstill prints what the user wrote. `~user` is not supported.\n[`consent_entry_defect`] names every spelling that can never match.\n\nA-26 — a `paths` grant is deliberately drift-blind and writes no stamp,\nso revoking it is immediately effective.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "namespaces": {
+          "description": "Source namespaces that activate a project whose whole lock is inside\nthem (C-025 clause 2). **One [`ConsentScopeSpec`], never a `Vec`** — a\nflat list can only ever widen, so \"everything under `ocx.sh/acme/*`\nexcept the one compromised namespace\" would be unspellable.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConsentScopeSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConsentScopeSpec": {
+      "oneOf": [
+        {
+          "description": "One scope pattern. Segment-bounded without a `*`, literal-prefix glob with one; the empty string is a catch-all.",
+          "type": "string"
+        },
+        {
+          "description": "Patterns to cover, minus patterns to carve back out. A target matches when it matches at least one `include` (an empty `include` is a catch-all) and no `exclude`.",
+          "type": "object",
+          "properties": {
+            "include": {
+              "description": "Patterns the policy covers. Empty is a catch-all.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "exclude": {
+              "description": "Patterns carved back out. Beats `include` wherever both match.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "include"
+              ]
+            },
+            {
+              "required": [
+                "exclude"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "RecordsOptions": {
+      "description": "Where and how execution records are written.\n\nNo `deny_unknown_fields`: this is a fleet-read config surface, and a section\nwritten for a newer ocx must not brick an older binary reading the same file.",
+      "type": "object",
+      "properties": {
+        "dir": {
+          "description": "Directory records are written to. Absent → recording is off.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Name template for each record file, e.g. `{time}-{host}-{pid}-{rand}.json`.\n\nMust contain a component that varies per record, or two frames sharing a\nsink resolve to one path.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required": {
+          "description": "Fail posture when a record cannot be written.\n\n`true` aborts the launch; `false` warns and proceeds. **Config-file only\nat every tier** — never settable from the environment or a flag, so a\ndeveloper who fat-fingers `--records-dir` gets a warning rather than a\ndead build. Defaults `false` unlocked, `true` when SYSTEM-locked.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    }
+  },
+  "$id": "https://ocx.sh/schemas/config/v1.json"
+}

@@ -3,8 +3,8 @@
 
 use std::path::Path;
 
-use ocx_lib::cli::Cell;
-use ocx_lib::managed_config::ManagedConfigPreview;
+use ocx_console::Cell;
+use ocx_package_manager::managed_config::ManagedConfigPreview;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -93,8 +93,8 @@ impl ConfigTestData {
     pub fn new(
         candidate: &Path,
         preview: ManagedConfigPreview,
-        patches: Option<ocx_lib::ResolvedPatchConfig>,
-        managed: Option<&ocx_lib::ResolvedManagedConfig>,
+        patches: Option<ocx_config::patch::ResolvedPatchConfig>,
+        managed: Option<&ocx_config::managed::ResolvedManagedConfig>,
         plain_http: Vec<String>,
     ) -> Self {
         let effective = preview.effective;
@@ -134,7 +134,7 @@ fn sorted_keys<V>(table: Option<&std::collections::HashMap<String, V>>) -> Vec<S
 }
 
 impl Printable for ConfigTestData {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let mut fields: Vec<Cell> = Vec::new();
         let mut values: Vec<Cell> = Vec::new();
         let mut row = |field: Cell, value: String| {
@@ -182,17 +182,17 @@ mod tests {
     use super::*;
 
     fn preview_of(payload: &str) -> ManagedConfigPreview {
-        ocx_lib::managed_config::preview_managed_config(
+        ocx_package_manager::managed_config::preview_managed_config(
             payload.as_bytes(),
-            ocx_lib::Config::default(),
-            &ocx_lib::Config::default(),
+            ocx_config::Config::default(),
+            &ocx_config::Config::default(),
         )
         .expect("a well-formed candidate previews")
     }
 
     fn report(payload: &str, env_insecure: &[String]) -> ConfigTestData {
         let preview = preview_of(payload);
-        let plain_http = ocx_lib::insecure_hosts(&preview.effective, env_insecure);
+        let plain_http = ocx_config::insecure::insecure_hosts(&preview.effective, env_insecure);
         ConfigTestData::new(
             std::path::Path::new("/tmp/candidate.toml"),
             preview,

@@ -15,6 +15,8 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
@@ -101,6 +103,7 @@ def _setup_project_with_tool(
     return project_dir, _candidate_path(ocx, repo, tag)
 
 
+@pytest.mark.smoke
 def test_remove_drops_binding_and_uninstalls(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:

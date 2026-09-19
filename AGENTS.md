@@ -30,14 +30,17 @@ not rely on anything summarized in `AGENTS.md` alone.
 
 When reviewing or editing code under a specific path, **read the matching
 subsystem rule first** — it contains invariants, gotchas, and design
-decisions that are not obvious from the code:
+decisions that are not obvious from the code. Each rule's `paths:` glob moves
+with the code it governs, so the rule file, not the path here, is the anchor —
+`ocx_lib` finished dissolving into the 17 `ocx_*` crates at WP-37
+(`.claude/artifacts/adr_crate_split_workspace.md`):
 
 | Path | Subsystem rule |
 |---|---|
-| `crates/ocx_lib/src/oci/**` | `.claude/rules/subsystem-oci.md` |
-| `crates/ocx_lib/src/file_structure/**` | `.claude/rules/subsystem-file-structure.md` |
-| `crates/ocx_lib/src/package/**` | `.claude/rules/subsystem-package.md` |
-| `crates/ocx_lib/src/package_manager/**` | `.claude/rules/subsystem-package-manager.md` |
+| `crates/ocx_sign/**` | `.claude/rules/subsystem-oci.md` |
+| `crates/ocx_store/src/**` | `.claude/rules/subsystem-file-structure.md` |
+| `crates/ocx_package/src/**` | `.claude/rules/subsystem-package.md` |
+| `crates/ocx_package_manager/src/**` | `.claude/rules/subsystem-package-manager.md` |
 | `crates/ocx_cli/src/**` | `.claude/rules/subsystem-cli.md` |
 | `test/**` | `.claude/rules/subsystem-tests.md` |
 | `website/**` | `.claude/rules/subsystem-website.md` |
@@ -65,8 +68,10 @@ When Claude Code delegates an adversarial review to you (via
    assumptions it depends on, and where it could fail under real-world
    conditions.
 3. **Watch for cross-crate coupling** — especially lifting CLI-specific
-   types into `ocx_lib`, which the `crates/ocx_lib` ↔ `crates/ocx_cli`
-   boundary is meant to prevent.
+   types into a library crate, which the `crates/ocx_cli` ↔ library boundary
+   is meant to prevent. The workspace is mid-split (`ocx_lib` → 17 `ocx_*`
+   crates, `scripts/crate_map.toml`); `task rust:deps:direction` reds any
+   `ocx_*` edge the map does not allow.
 4. **Security attack surfaces** are enumerated in `.claude/rules/quality-security.md`.
 5. **Do not critique load-bearing conventions** stated in `CLAUDE.md` or
    `product-tech-strategy.md` (Tokio, Rust 2024, OCI-backed storage, never-push-to-

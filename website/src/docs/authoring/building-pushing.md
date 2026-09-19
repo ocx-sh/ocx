@@ -202,7 +202,7 @@ For command flags, token-source precedence, and exit codes see the
 [oci-dist-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md
 [ghcr-repo-link]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
-[mirror-pipeline]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
+[mirror-pipeline]: https://github.com/ocx-sh/ocx-mirror
 [oci-referrers-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers
 [sigstore]: https://www.sigstore.dev/
 [rekor]: https://github.com/sigstore/rekor

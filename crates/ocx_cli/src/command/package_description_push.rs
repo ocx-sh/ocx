@@ -6,7 +6,9 @@ use std::process::ExitCode;
 
 use anyhow::Context as _;
 use clap::Parser;
-use ocx_lib::{log, oci, oci::client::error::ClientError, package, package::tag::InternalTag, publisher::Publisher};
+use ocx_oci::client::error::ClientError;
+use ocx_oci::tag::InternalTag;
+use ocx_package::publisher::Publisher;
 
 use crate::options;
 
@@ -88,14 +90,14 @@ impl PackageDescriptionPush {
             Some(path) => {
                 let data = tokio::fs::read(path)
                     .await
-                    .map_err(|e| ocx_lib::error::file_error(path, e))
+                    .map_err(|e| ocx_util::error::FileError::new(path, e))
                     .with_context(|| format!("failed to read README at {}", path.display()))?;
                 let text = std::str::from_utf8(&data).map_err(|e| anyhow::anyhow!("README is not valid UTF-8: {e}"))?;
-                let parsed = package::description::parse_readme(text);
+                let parsed = ocx_package::description::parse_readme(text);
                 (parsed.body, parsed.frontmatter)
             }
             None => match &existing {
-                Some(desc) => (desc.readme.clone(), package::description::Frontmatter::default()),
+                Some(desc) => (desc.readme.clone(), ocx_package::description::Frontmatter::default()),
                 None => {
                     return Err(anyhow::anyhow!(
                         "no existing description found - --readme is required for the first push"
@@ -105,11 +107,11 @@ impl PackageDescriptionPush {
         };
 
         let logo = match &self.logo {
-            Some(path) => Some(package::description::load_logo(path)?),
+            Some(path) => Some(ocx_package::description::load_logo(path)?),
             None => existing
                 .as_ref()
                 .and_then(|d| d.logo.as_ref())
-                .map(|l| package::description::Logo {
+                .map(|l| ocx_package::description::Logo {
                     data: l.data.clone(),
                     media_type: l.media_type,
                 }),
@@ -117,22 +119,22 @@ impl PackageDescriptionPush {
 
         // Merge annotations: existing → frontmatter → CLI flags.
         let mut annotations = existing.as_ref().map(|d| d.annotations.clone()).unwrap_or_default();
-        Self::set_annotation(&mut annotations, oci::annotations::TITLE, &frontmatter.title);
+        Self::set_annotation(&mut annotations, ocx_oci::annotations::TITLE, &frontmatter.title);
         Self::set_annotation(
             &mut annotations,
-            oci::annotations::DESCRIPTION,
+            ocx_oci::annotations::DESCRIPTION,
             &frontmatter.description,
         );
         Self::set_annotation(
             &mut annotations,
-            oci::annotations::KEYWORDS,
+            ocx_oci::annotations::KEYWORDS,
             &frontmatter.keywords.map(|k| k.0),
         );
-        Self::set_annotation(&mut annotations, oci::annotations::TITLE, &self.title);
-        Self::set_annotation(&mut annotations, oci::annotations::DESCRIPTION, &self.description);
-        Self::set_annotation(&mut annotations, oci::annotations::KEYWORDS, &self.keywords);
+        Self::set_annotation(&mut annotations, ocx_oci::annotations::TITLE, &self.title);
+        Self::set_annotation(&mut annotations, ocx_oci::annotations::DESCRIPTION, &self.description);
+        Self::set_annotation(&mut annotations, ocx_oci::annotations::KEYWORDS, &self.keywords);
 
-        let desc = package::description::Description {
+        let desc = ocx_package::description::Description {
             readme,
             logo,
             annotations,
@@ -153,7 +155,7 @@ impl PackageDescriptionPush {
         &self,
         context: crate::app::Context,
         source: &options::Identifier,
-        target: &oci::Identifier,
+        target: &ocx_oci::Identifier,
     ) -> anyhow::Result<ExitCode> {
         let source = source.with_domain(context.default_registry())?;
         let publisher = Publisher::new(context.remote_client()?.clone());
@@ -192,7 +194,7 @@ impl PackageDescriptionPush {
 /// Carries the cause [`Publisher::pull_description`] swallowed into `Ok(None)`
 /// on the way here, so the chain walk reaches a classifiable error and the
 /// process exits 79 rather than the unclassified 1.
-fn no_description_to_copy(source: &oci::Identifier) -> anyhow::Error {
+fn no_description_to_copy(source: &ocx_oci::Identifier) -> anyhow::Error {
     anyhow::Error::new(ClientError::ManifestNotFound(format!(
         "{source}:{}",
         InternalTag::DESCRIPTION_TAG
@@ -213,14 +215,14 @@ mod tests {
     /// cannot be the walker classifying every error as 79.
     #[test]
     fn an_undescribed_source_exits_not_found() {
-        let source: oci::Identifier = "dev.example.com/acme/tool:1.4.2".parse().expect("identifier");
+        let source: ocx_oci::Identifier = "dev.example.com/acme/tool:1.4.2".parse().expect("identifier");
         let error = no_description_to_copy(&source);
 
         assert_eq!(
-            crate::app::classify_error(error.as_ref()),
-            ocx_lib::cli::ExitCode::NotFound
+            crate::exit::classify_error(error.as_ref()),
+            ocx_exit::ExitCode::NotFound
         );
-        assert_eq!(ocx_lib::cli::ExitCode::NotFound as u8, 79);
+        assert_eq!(ocx_exit::ExitCode::NotFound as u8, 79);
 
         let rendered = format!("{error:#}");
         assert!(
@@ -234,8 +236,8 @@ mod tests {
 
         let untyped = anyhow::anyhow!("{source} has no description to copy");
         assert_eq!(
-            crate::app::classify_error(untyped.as_ref()),
-            ocx_lib::cli::ExitCode::Failure,
+            crate::exit::classify_error(untyped.as_ref()),
+            ocx_exit::ExitCode::Failure,
             "control: the prose alone classifies to 1, so the 79 above comes from the cause"
         );
     }

@@ -60,6 +60,8 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 
 ## Command Summary
 
+**A new visible top-level verb ships with a `@pytest.mark.smoke` acceptance test that invokes it** — `test/tests/test_smoke_coverage.py` reds every verb of `pub enum Command` without one (`subsystem-tests.md` § Smoke Tier and Guards) — and `test/SUITE_FLOOR` rises in the same commit.
+
 ### Toolchain-Tier Commands
 
 | Command | Purpose | Key Flags |
@@ -131,7 +133,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 - Resolved digest surfaces in JSON output (`bootstrap.digest`; omitted when unpinned). Round-trips as a pin: `ocx self setup 0.9.2@<digest>`.
 - ChainMode applies to pin resolution: `--frozen`/`--offline` + uncached tag → exit 81; digest-only pin works frozen when blobs cached.
 - Exit 74 (`IoError`) — writing an env shim or shell profile failed (disk full, permission denied, etc.).
-- `--no-modify-path` (or `OCX_NO_MODIFY_PATH` truthy) — writes env shims only, skipping profile modification **and** the session-PATH registration (each store this host owns is still named in the report, as `SkippedOptOut`). `OCX_NO_MODIFY_PATH` is read through `ocx_lib::env::flag` + `BooleanString`: truthy = `1`/`y`/`yes`/`on`/`true`; falsy = `0`/`n`/`no`/`off`/`false`; unrecognised non-empty value → WARN + default (`false`). The opt-out **persists** as `[shell] modify_path = false` when given explicitly by flag or env, so later runs keep honouring it; ladder order is flag ▸ env ▸ `[shell] modify_path` ▸ default true. There is deliberately no `--modify-path` (C-043): the key only ever holds `false` and re-enabling is a hand edit.
+- `--no-modify-path` (or `OCX_NO_MODIFY_PATH` truthy) — writes env shims only, skipping profile modification **and** the session-PATH registration (each store this host owns is still named in the report, as `SkippedOptOut`). `OCX_NO_MODIFY_PATH` is read through `ocx_util::env::flag` + `BooleanString`: truthy = `1`/`y`/`yes`/`on`/`true`; falsy = `0`/`n`/`no`/`off`/`false`; unrecognised non-empty value → WARN + default (`false`). The opt-out **persists** as `[shell] modify_path = false` when given explicitly by flag or env, so later runs keep honouring it; ladder order is flag ▸ env ▸ `[shell] modify_path` ▸ default true. There is deliberately no `--modify-path` (C-043): the key only ever holds `false` and re-enabling is a hand edit.
 - `--profile PATH` — override auto-detected profiles; repeatable. Explicit targets use POSIX-fence semantics regardless of file name.
 - `--dry-run` — resolve but write nothing; reports `WouldPull` with resolved digest. Never returns exit 82.
 - `--force` — overwrite a managed block that carries user edits (the dirty state).
@@ -173,7 +175,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
-| `config setup` | Adopt (or clear) the `[managed]` tier — config-only counterpart to `self setup --managed-config`; shares `ocx_lib::setup::apply_managed_config` + the CLI precedence seam `command/config_setup.rs::resolve_managed_config_arg` (flag > `OCX_MANAGED_CONFIG` > seed). Nothing resolved → exit 64 (unlike `self setup`'s no-op); dirty fence → exit 82 | `--managed-config REF`, `--dry-run`, `--force` |
+| `config setup` | Adopt (or clear) the `[managed]` tier — config-only counterpart to `self setup --managed-config`; shares `ocx_setup::apply_managed_config` + the CLI precedence seam `command/config_setup.rs::resolve_managed_config_arg` (flag > `OCX_MANAGED_CONFIG` > seed). Nothing resolved → exit 64 (unlike `self setup`'s no-op); dirty fence → exit 82 | `--managed-config REF`, `--dry-run`, `--force` |
 | `config update [VERSION]` | Fetch + persist the managed-config snapshot (throttle-bypassing); `--check` probes only; `--pause`/`--resume` gate the background tick | `--check`, `--pause`, `--resume` |
 | `config push -i ID CONFIG` | Operator-side publish of a `config.toml` as a managed-config package | `-i`, `-c/--cascade`, `-p` |
 | `config test CONFIG` | Validate a managed-config payload locally — reports what a fleet would adopt (default registry, registries, mirrors, `[patches]`) plus this machine's `[managed]` posture. Unknown keys are warnings, never failures; keys inside a `[mirrors]` entry are not checked. Nothing is published, adopted or written; exit 78 when the file is not a publishable payload | — |

@@ -1,9 +1,12 @@
 from pathlib import Path
 
+import pytest
+
 from src import OcxRunner, PackageInfo, assert_dir_exists, assert_not_exists
 from src.helpers import make_package
 
 
+@pytest.mark.smoke
 def test_clean_removes_unreferenced_objects(
     ocx: OcxRunner, published_package: PackageInfo
 ):

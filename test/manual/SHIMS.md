@@ -354,6 +354,6 @@ loading bug — check whether the base was ever installed first.
 
 The manual rig is for exploring shapes; the durable coverage lives in
 `test/tests/test_lazy_*.py` and the unit tests in
-`crates/ocx_lib/src/package_manager/tasks/prepare_lazy.rs`. If a shape here
+`crates/ocx_package_manager/src/tasks/prepare_lazy.rs`. If a shape here
 surprises you, check whether the suite pins it — if it does not, that is a
 coverage gap worth filing, not a manual-only observation.

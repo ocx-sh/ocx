@@ -27,7 +27,7 @@ S-006's stamp protection covers the default group only, so nothing else catches
 it. **RED for the two C-070 cases: narrow the heal back to the default group.**
 
 The unit half of C-067's per-entry degrade lives in
-``crates/ocx_lib/src/package_manager/composer.rs``; these cases exist because
+``crates/ocx_package_manager/src/composer.rs``; these cases exist because
 nothing there can prove the ``-g`` set actually reaches ``ToolchainLinks::groups``
 through the CLI.
 

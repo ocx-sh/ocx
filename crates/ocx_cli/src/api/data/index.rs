@@ -17,10 +17,10 @@
 //! operator's terminal, so both are neutralized on the plain path — see
 //! [`sanitize_for_terminal`].
 //!
-//! [`CatalogDocument::into_packages`]: ocx_lib::oci::index::CatalogDocument
+//! [`CatalogDocument::into_packages`]: ocx_index::CatalogDocument
 
-use ocx_lib::cli::{Cell, DataInterface};
-use ocx_lib::oci::index::RegenerateOutcome;
+use ocx_console::{Cell, DataInterface};
+use ocx_index::RegenerateOutcome;
 use serde::Serialize;
 
 use crate::api::Printable;

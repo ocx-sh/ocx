@@ -11,10 +11,10 @@
 //! rows under `signatures`, which is **absent** until a discovery pipeline
 //! populates it — an array that always rendered `[]` would claim we looked.
 
-use ocx_lib::cli::Cell;
-use ocx_lib::oci;
-use ocx_lib::oci::sign::{KeyBackendKind, SignatureFormat};
-use ocx_lib::oci::verify::DiscoveryMethod;
+use ocx_console::Cell;
+use ocx_sign::sign::SignatureFormat;
+use ocx_sign::verify::DiscoveryMethod;
+use ocx_trust::key_ref::KeyBackendKind;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -55,7 +55,7 @@ pub struct SignatureEntry {
     /// What produced it: `keyless`, `file`, or a key-backend scheme.
     pub key_backend: KeyBackendKind,
     /// Digest of the referrer manifest or sidecar layer carrying it.
-    pub referrer_digest: oci::Digest,
+    pub referrer_digest: ocx_oci::Digest,
     /// Certificate SAN (identity) embedded in the Fulcio cert. Absent under a
     /// key — a legal shape, not malformed input. Registry-served, so it is
     /// attacker input: see the struct note before rendering it in plain text.
@@ -102,7 +102,7 @@ pub struct SignatureEntry {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct VerificationReport {
     /// Digest of the subject manifest whose signature was verified.
-    pub subject_digest: oci::Digest,
+    pub subject_digest: ocx_oci::Digest,
     /// What carried the verified signature — **not always a manifest**.
     ///
     /// The OCI referrer manifest's digest for a Sigstore bundle; the **layer**
@@ -114,7 +114,7 @@ pub struct VerificationReport {
     /// digest while `discovery_method` reads `referrers_api`. So this is
     /// addressable as `GET /v2/<name>/manifests/<digest>` only under
     /// `signature_format == "bundle"`.
-    pub referrer_digest: oci::Digest,
+    pub referrer_digest: ocx_oci::Digest,
     /// Certificate SAN (identity) embedded in the Fulcio cert.
     pub certificate_identity: String,
     /// Certificate OIDC issuer embedded in the Fulcio cert.
@@ -140,8 +140,8 @@ impl VerificationReport {
     /// `signatures` starts empty and is therefore omitted from JSON; a
     /// discovery pipeline fills it in place, so no call site changes.
     pub fn new(
-        subject_digest: oci::Digest,
-        referrer_digest: oci::Digest,
+        subject_digest: ocx_oci::Digest,
+        referrer_digest: ocx_oci::Digest,
         certificate_identity: String,
         certificate_oidc_issuer: String,
         signed_at: String,
@@ -199,7 +199,7 @@ impl VerificationReport {
 }
 
 impl Printable for VerificationReport {
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         // `subject_digest` is the answer (what was verified) and stays full;
         // `referrer_digest` shortens to 12 hex so only one full
         // sha256:<64hex> earns its row (subsystem-cli-api.md "Plain-Mode
@@ -214,7 +214,7 @@ impl Printable for VerificationReport {
 
     /// Emit a success envelope:
     /// `{"schema_version":1,"command":"package verify","exit_code":0,"data":{...}}`.
-    fn print_json(&self, data: &ocx_lib::cli::DataInterface) -> anyhow::Result<()>
+    fn print_json(&self, data: &ocx_console::DataInterface) -> anyhow::Result<()>
     where
         Self: Sized,
     {
@@ -231,8 +231,8 @@ mod tests {
 
     fn sample_report() -> VerificationReport {
         VerificationReport::new(
-            ocx_lib::oci::Digest::Sha256("a".repeat(64)),
-            ocx_lib::oci::Digest::Sha256("b".repeat(64)),
+            ocx_oci::Digest::Sha256("a".repeat(64)),
+            ocx_oci::Digest::Sha256("b".repeat(64)),
             "test-signer@example.com".into(),
             "https://fake-oidc.test".into(),
             "2026-04-19T12:00:00Z".into(),
@@ -266,7 +266,7 @@ mod tests {
             signature_format: SignatureFormat::Bundle,
             discovery_method: DiscoveryMethod::ReferrersApi,
             key_backend: KeyBackendKind::Keyless,
-            referrer_digest: ocx_lib::oci::Digest::Sha256("b".repeat(64)),
+            referrer_digest: ocx_oci::Digest::Sha256("b".repeat(64)),
             certificate_identity: Some("test-signer@example.com".into()),
             certificate_oidc_issuer: Some("https://fake-oidc.test".into()),
             signed_at: Some("2026-04-19T12:00:00Z".into()),
@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn print_plain_smoke() {
         let report = sample_report();
-        let data = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+        let data = ocx_console::DataInterface::new(ocx_console::Printer::new(false, false));
         report.print_plain(&data);
     }
 
@@ -433,8 +433,8 @@ mod tests {
     /// exact `(label, value)` pairs `print_plain` writes.
     fn rendered_with(hostile: &str) -> Vec<String> {
         let report = VerificationReport::new(
-            ocx_lib::oci::Digest::Sha256("a".repeat(64)),
-            ocx_lib::oci::Digest::Sha256("b".repeat(64)),
+            ocx_oci::Digest::Sha256("a".repeat(64)),
+            ocx_oci::Digest::Sha256("b".repeat(64)),
             hostile.to_string(),
             hostile.to_string(),
             hostile.to_string(),
@@ -561,8 +561,8 @@ mod tests {
         // ESC never reaches a terminal through this path either.
         let hostile = "\u{1b}]52;c;ZXZpbA==\u{7}signer@example.com";
         let report = VerificationReport::new(
-            ocx_lib::oci::Digest::Sha256("a".repeat(64)),
-            ocx_lib::oci::Digest::Sha256("b".repeat(64)),
+            ocx_oci::Digest::Sha256("a".repeat(64)),
+            ocx_oci::Digest::Sha256("b".repeat(64)),
             hostile.to_string(),
             "https://fake-oidc.test".into(),
             "2026-04-19T12:00:00Z".into(),

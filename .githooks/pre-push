@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+#
+# git resolves every refspec itself and feeds them in on stdin as
+# `<local-ref> <local-sha> <remote-ref> <remote-sha>` lines, so a redirection,
+# an alias or a bare `git push` reaches the gate identically.
+#
+# Two consumers, one stdin: the trunk gate and Git LFS both need those lines,
+# and stdin can only be read once, so it is read here and replayed to each.
+# The gate runs FIRST and `set -e` stops the hook on a refusal — a refused push
+# must not upload LFS objects for a push that will not happen.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+refs="$(cat)"
+[ -n "$refs" ] || exit 0
+
+printf '%s\n' "$refs" | python3 "$here/../scripts/commit_gate.py" --check-push "$(git rev-parse --show-toplevel)"
+
+# Taking over core.hooksPath takes over from `git lfs install`, so this
+# directory owes LFS the delegation its own hook used to do. Same hard failure
+# as the stock hook: this repository tracks its images in LFS, and pushing
+# pointers without their objects is worse than refusing.
+command -v git-lfs >/dev/null 2>&1 || {
+    printf >&2 "\n%s\n\n" "This repository is configured for Git LFS but 'git-lfs' was not found on your path."
+    exit 2
+}
+printf '%s\n' "$refs" | git lfs pre-push "$@"

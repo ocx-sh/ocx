@@ -23,11 +23,12 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use crate::error::UsageError;
 use clap::CommandFactory as _;
-use ocx_lib::cli::{LogSettings, UsageError};
-use ocx_lib::env::Env;
-use ocx_lib::log;
-use ocx_lib::utility::child_process::propagate_exit_code;
+
+use crate::tracing_init::LogSettings;
+use ocx_config::env::Env;
+use ocx_util::child_process::propagate_exit_code;
 
 use crate::app::context_options::ContextOptions;
 
@@ -189,7 +190,7 @@ fn build_plugin_command(
     // ambient environment is forwarded deliberately (see above), but a bearer
     // credential never is: `apply_ocx_config` removed these from the map, and
     // this is what makes the removal reach the child.
-    for credential in ocx_lib::env::keys::CREDENTIAL_KEYS {
+    for credential in ocx_config::env::keys::CREDENTIAL_KEYS {
         cmd.env_remove(credential);
     }
 
@@ -261,10 +262,10 @@ mod tests {
             .map(|(key, _)| key.to_string_lossy().into_owned())
             .collect();
         assert!(
-            !ocx_lib::env::keys::CREDENTIAL_KEYS.is_empty(),
+            !ocx_config::env::keys::CREDENTIAL_KEYS.is_empty(),
             "an empty credential list would make the loop below vacuous"
         );
-        for credential in ocx_lib::env::keys::CREDENTIAL_KEYS {
+        for credential in ocx_config::env::keys::CREDENTIAL_KEYS {
             assert!(
                 removed.iter().any(|key| key == credential),
                 "{credential} reaches the plugin; removed = {removed:?}"

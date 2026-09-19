@@ -1,0 +1,58 @@
+[package]
+name = "ocx_store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Internal-only escape hatch, the project's one seam convention
+# (`subsystem-tests.md` "Test-Only Seams"). Gates `shim_bin_store`'s
+# `__OCX_TESTING_SHIM_LOST_PUBLISH_RACE` seam, which forces the lost-publish
+# race the acceptance binary cannot otherwise reach. Forwarded by `ocx_lib`'s
+# and `ocx`'s own `__testing`.
+__testing = []
+
+# The seams `ocx_lib`'s own tests drive across the crate boundary, which a bare
+# `#[cfg(test)]` cannot reach. Deliberately NOT forwarded by `ocx`'s
+# `__testing`, so it never reaches the acceptance binary: `BlobStore`'s write
+# counter is a unit-test instrument, not a product seam.
+__test_scaffolding = []
+
+[dependencies]
+# `$OCX_HOME` and the toolchain-home resolution this crate renders into.
+ocx_config.workspace = true
+# Digests, layer layouts and the platform vocabulary: what the three CAS tiers
+# are keyed by and what `assemble` places.
+ocx_oci.workspace = true
+# The bottom tier: `fs` (symlinks, locks, atomic publish, walkers), `error`,
+# the extension-trait prelude.
+ocx_util.workspace = true
+
+dunce.workspace = true
+hex.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+# `ocx_config::sandbox_or_skip`, the toolchain-store tests' sandbox anchor. It
+# is `__test_scaffolding`-gated there — deliberately NOT forwarded by `ocx`'s
+# `__testing`, so it stays out of the acceptance binary (WP-26).
+ocx_config = { workspace = true, features = ["__test_scaffolding"] }
+# `ocx_util::env::overrides`, the process-environment table this crate's tests
+# write through. A dev edge that enables `__testing` is allowed from every
+# crate (`scripts/crate_map.toml` `[dev].testing_feature`); resolver v3 keeps
+# the feature out of the normal build, so the runtime row above stays seamless.
+ocx_util = { workspace = true, features = ["__testing"] }
+
+[lints]
+workspace = true

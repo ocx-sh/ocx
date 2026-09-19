@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::oci;
-
 /// Shared `--platform` / `-p` argument for commands that resolve against a
 /// single platform.
 ///
@@ -24,5 +22,5 @@ pub struct PlatformOption {
     /// Defaults to the auto-detected host platform. Details:
     /// <https://ocx.sh/docs/authoring/multi-platform>
     #[clap(short = 'p', long = "platform", value_name = "PLATFORM")]
-    pub platform: Option<oci::Platform>,
+    pub platform: Option<ocx_oci::Platform>,
 }

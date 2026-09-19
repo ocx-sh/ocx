@@ -5,8 +5,7 @@ use std::collections::HashSet;
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::cli;
-use ocx_lib::project::{
+use ocx_project::{
     ALL_GROUP, DEFAULT_GROUP, LockedTool, ProjectConfig, ProjectLock, ResolveLockOptions, expand_all_keyword,
     locked_tool_content_equal, resolve_lock, resolve_lock_touched,
 };
@@ -150,7 +149,7 @@ impl Update {
                 return Err(CommandError::new(
                     "ocx.lock candidate would change pinned content; \
                      re-run `ocx update` (without --check) to refresh the lock",
-                    cli::ExitCode::DataError,
+                    ocx_exit::ExitCode::DataError,
                 )
                 .into());
             }
@@ -178,7 +177,7 @@ impl Update {
                 guard,
                 staged,
                 new_lock.clone(),
-                ocx_lib::package_manager::ToolchainRender {
+                ocx_package_manager::ToolchainRender {
                     scope: &scope,
                     toolchain_root: context.toolchain_root(),
                     platform: &platform,
@@ -222,7 +221,7 @@ fn missing_lock(lock_path: &std::path::Path) -> CommandError {
             "ocx.lock not found at {}; run `ocx lock` to create it",
             lock_path.display()
         ),
-        cli::ExitCode::ConfigError,
+        ocx_exit::ExitCode::ConfigError,
     )
 }
 
@@ -242,7 +241,7 @@ fn missing_lock(lock_path: &std::path::Path) -> CommandError {
 ///
 /// # Errors
 ///
-/// Returns a [`CommandError`] classified [`cli::ExitCode::UsageError`] (exit
+/// Returns a [`CommandError`] classified [`ocx_exit::ExitCode::UsageError`] (exit
 /// 64) when a requested group is unknown (mirroring `ocx exec`) or a requested
 /// name matches no binding in scope.
 fn select_touched(
@@ -250,7 +249,7 @@ fn select_touched(
     groups: &[String],
     names: &[String],
 ) -> Result<Vec<(String, String)>, CommandError> {
-    let usage = |message: String| CommandError::new(message, cli::ExitCode::UsageError);
+    let usage = |message: String| CommandError::new(message, ocx_exit::ExitCode::UsageError);
 
     // Validate + expand the group filter. `None` = every group. `default` and
     // `all` are always valid reserved keywords; any other name must be a
@@ -404,7 +403,7 @@ mod tests {
     /// `ripgrep` in both `[tools]` (default) and `[group.ci]`; `fd` only in
     /// default; `cmake` only in `ci`.
     fn sample_config() -> ProjectConfig {
-        use ocx_lib::oci::Identifier;
+        use ocx_oci::Identifier;
         use std::collections::BTreeMap;
         let id = |repo: &str| Identifier::new_registry(repo, "ocx.sh");
         let tools = BTreeMap::from([("ripgrep".to_string(), id("ripgrep")), ("fd".to_string(), id("fd"))]);
@@ -420,8 +419,8 @@ mod tests {
         (group.to_string(), name.to_string())
     }
 
-    fn exit_code(err: &CommandError) -> Option<cli::ExitCode> {
-        use ocx_lib::cli::ClassifyExitCode as _;
+    fn exit_code(err: &CommandError) -> Option<ocx_exit::ExitCode> {
+        use crate::exit::ClassifyExitCode as _;
         err.classify()
     }
 
@@ -461,7 +460,7 @@ mod tests {
     #[test]
     fn select_touched_unknown_name_errors() {
         let err = select_touched(&sample_config(), &[], &["nope".to_string()]).expect_err("unknown name");
-        assert_eq!(exit_code(&err), Some(cli::ExitCode::UsageError));
+        assert_eq!(exit_code(&err), Some(ocx_exit::ExitCode::UsageError));
     }
 
     /// A name outside the `-g` scope is unknown (exit 64): `fd` exists in the
@@ -469,14 +468,14 @@ mod tests {
     #[test]
     fn select_touched_name_outside_scope_errors() {
         let err = select_touched(&sample_config(), &["ci".to_string()], &["fd".to_string()]).expect_err("out of scope");
-        assert_eq!(exit_code(&err), Some(cli::ExitCode::UsageError));
+        assert_eq!(exit_code(&err), Some(ocx_exit::ExitCode::UsageError));
     }
 
     /// An unknown group is a usage error (exit 64).
     #[test]
     fn select_touched_unknown_group_errors() {
         let err = select_touched(&sample_config(), &["ghost".to_string()], &[]).expect_err("unknown group");
-        assert_eq!(exit_code(&err), Some(cli::ExitCode::UsageError));
+        assert_eq!(exit_code(&err), Some(ocx_exit::ExitCode::UsageError));
     }
 
     /// `--platform` accepts a single value.

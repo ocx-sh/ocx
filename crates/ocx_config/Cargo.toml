@@ -1,0 +1,112 @@
+[package]
+name = "ocx_config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Internal-only escape hatch, the same convention every other crate here uses:
+# it gates the `__OCX_TESTING_*` seams (`loader::SYSTEM_CONFIG_OVERRIDE`,
+# `edit`'s lock-hold delay) and `managed_config::test_support`, whose package
+# fixtures `ocx_lib`'s own tests build on. Forwarding `ocx_oci/__testing` is
+# what makes that module compile: it is written against `StubTransport`, which
+# `ocx_oci` gates the same way.
+__testing = ["ocx_oci/__testing"]
+# Test scaffolding `ocx_lib`'s unit tests inherited when `config` was a sibling
+# module rather than a crate: `ToolchainRoot::from_validated` and the
+# containment-anchor sandbox.
+#
+# **Deliberately a second feature, and deliberately not forwarded by `ocx`'s
+# `__testing`.** `from_validated` bypasses C-017 to C-019 wholesale, and its
+# own doc has always said it must not exist in any build an acceptance test can
+# invoke — which `__testing` is. `cfg(test)` used to carry that guarantee for
+# free, because nothing outside this crate could select it; across a crate
+# boundary it stops carrying anything, so the guarantee is restated as a
+# feature only `ocx_lib`'s **dev**-dependency turns on. A dev edge is not
+# transitive and never enters `cargo build -p ocx`, so the acceptance binary
+# lacks the code path exactly as before.
+__test_scaffolding = ["dep:tempfile"]
+
+[dependencies]
+# The registry vocabulary the `[managed]` tier is stated in: `Identifier`,
+# `Digest`, `Client` — a managed config is an ordinary ocx package, so the
+# tier that resolves `[managed]` names the types that address one.
+ocx_oci.workspace = true
+# `[trust]` is a config section, so parsing it means naming its types;
+# `resolve_extra_roots` hands `tls.rs` the sigstore trust material.
+ocx_trust.workspace = true
+# The bottom tier: `env::{var, flag, string}`, `FileReference`, the bounded
+# read every config file goes through, and the scoped lock `edit` takes.
+ocx_util.workspace = true
+
+# `fetched_at` on the managed snapshot and the pause file's deadline are
+# timestamps, compared and rendered.
+chrono.workspace = true
+# The user config directory, which is one of the four discovered tiers.
+dirs.workspace = true
+# Canonicalisation that does not hand back a Windows verbatim path —
+# `toolchain_dir` containment is decided on canonical paths.
+dunce.workspace = true
+# The managed-config payload is a gzip'd tar; this is the gzip half.
+flate2.workspace = true
+# `join_all` over the per-tier reads: the loader stats four candidate files
+# concurrently rather than in series.
+futures.workspace = true
+# `geteuid`, for the unix half of the `toolchain_dir` ownership check (C-019).
+libc.workspace = true
+log.workspace = true
+# Every config struct that appears in `ocx config test --json` derives a
+# schema; `ScopeSpec`-style hand-written schemas are `ocx_trust`'s, not this
+# crate's.
+schemars.workspace = true
+serde.workspace = true
+# `preserve_order` and `raw_value` for the same reason `ocx_lib` takes them:
+# the managed snapshot round-trips a JSON document whose key order is part of
+# its identity, and the payload is carried as a raw value.
+serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
+# The tar half of the managed-config payload.
+tar.workspace = true
+thiserror.workspace = true
+# The loader is async end to end (`tokio::fs`), so a config read never blocks
+# a runtime worker.
+tokio.workspace = true
+# `config.toml` is TOML. `Error::Parse` carries `toml::de::Error` as its
+# `#[source]`, so this is production, not a dev edge.
+toml.workspace = true
+# `ocx config`'s edit path rewrites a document in place and keeps its
+# formatting and comments, which a parse/serialize round-trip would not.
+toml_edit.workspace = true
+# `resolve_command`'s PATH search.
+which.workspace = true
+
+# Optional, and only `__test_scaffolding` turns it on: the containment-anchor
+# sandbox that feature exposes is the one non-test build that needs a temporary
+# directory. `[dev-dependencies]` carries it too, for this crate's own tests.
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+# `ocx_oci::client::test_transport`, for `managed_config::test_support`'s
+# package fixtures when the crate is built as its own test target.
+ocx_oci = { workspace = true, features = ["__testing"] }
+# `sandbox_or_skip`'s containment-anchor helpers and the shared fixture data.
+ocx_test_support = { path = "../ocx_test_support" }
+# `ocx_util::env::overrides`, the process-environment table every loader test
+# writes through.
+ocx_util = { workspace = true, features = ["__testing"] }
+# `tls`'s extra-CA tests build and re-encode real PEM documents rather than
+# asserting on a string, so the refusal under test is the one a real
+# certificate produces.
+pem.workspace = true
+# One test drives `reqwest`'s own certificate parser over the roots
+# `resolve_extra_roots` produced — the consumer this tier exists to feed.
+reqwest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+# The same tests read the certificate's fields back out to assert which
+# document was accepted.
+x509-cert.workspace = true
+
+[lints]
+workspace = true

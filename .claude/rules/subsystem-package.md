@@ -1,12 +1,11 @@
 ---
 paths:
-  - crates/ocx_lib/src/package/**
-  - crates/ocx_lib/src/package.rs
+  - crates/ocx_package/src/**
 ---
 
 # Package Subsystem
 
-Package metadata, env resolution, bundling, cascade publishing, version semantics at `crates/ocx_lib/src/package/`.
+Package metadata, env resolution, bundling, cascade publishing, version semantics at `crates/ocx_package/src/`.
 
 ## Design Rationale
 

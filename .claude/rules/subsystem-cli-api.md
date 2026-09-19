@@ -30,7 +30,7 @@ Reference impls: `api/data/paths.rs`, `api/data/env.rs`.
 
 ## Output architecture — three structs, two streams (Block-tier)
 
-OCX is a **backend tool** (`product-context.md`: automation-first). Output is split across three `ocx_lib::cli` structs.
+OCX is a **backend tool** (`product-context.md`: automation-first). Output is split across three `ocx_console` structs.
 
 | Struct | Stream | Role |
 |--------|--------|------|

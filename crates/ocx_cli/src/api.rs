@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::cli::DataInterface;
+use ocx_console::DataInterface;
 
 use crate::options;
 
@@ -86,7 +86,7 @@ impl Api {
 mod tests {
     use std::cell::Cell;
 
-    use ocx_lib::cli::Printer;
+    use ocx_console::Printer;
 
     use super::*;
 

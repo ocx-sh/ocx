@@ -22,11 +22,11 @@ Read `.claude/rules/subsystem-*.md` for relevant subsystem before design. Key pa
 | Feature type | Location |
 |-------------|----------|
 | New CLI command | `crates/ocx_cli/src/command/` |
-| New task method | `crates/ocx_lib/src/package_manager/tasks/` |
+| New task method | `crates/ocx_package_manager/src/tasks/` |
 | New output format | `crates/ocx_cli/src/api/data/` |
-| New storage path | `crates/ocx_lib/src/file_structure/` |
-| New index operation | `crates/ocx_lib/src/oci/index/` |
-| New metadata field | `crates/ocx_lib/src/package/metadata/` |
+| New storage path | `crates/ocx_store/src/file_structure/` |
+| New index operation | `crates/ocx_index/src/` |
+| New metadata field | `crates/ocx_package/src/metadata/` |
 
 ## Capabilities
 - Analyze design trade-offs

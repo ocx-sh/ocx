@@ -5,9 +5,9 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::cli::Cell;
-use ocx_lib::package::cascade::apply::{RepairOutcome, WriteOutcome};
-use ocx_lib::package::cascade::graph::{CascadeReport, PlannedWrite, Unrepairable};
+use ocx_console::Cell;
+use ocx_package::cascade::apply::{RepairOutcome, WriteOutcome};
+use ocx_package::cascade::graph::{CascadeReport, PlannedWrite, Unrepairable};
 use serde::Serialize;
 
 use super::package_cascade_check::stale_index_hint;
@@ -61,7 +61,7 @@ pub struct PackageCascadeRepair {
     /// Not serialized. The JSON key set is what a `--format json` consumer
     /// parses and stays pinned; this is a note, not a finding.
     #[serde(skip)]
-    pub index_layer_skipped: Vec<ocx_lib::oci::Identifier>,
+    pub index_layer_skipped: Vec<ocx_oci::Identifier>,
 }
 
 impl PackageCascadeRepair {
@@ -151,7 +151,7 @@ impl PackageCascadeRepair {
     /// only *found* index staleness has none, so `announce` has to re-observe
     /// the committed tags itself. A preview gets neither - it moved nothing,
     /// so there is nothing yet to publish.
-    fn print_follow_up_hints(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_follow_up_hints(&self, data: &ocx_console::DataInterface) {
         let wrote = self.wrote_anything();
         for entry in &self.entries {
             let report = &entry.report;
@@ -184,7 +184,7 @@ impl PackageCascadeRepair {
 }
 
 impl Printable for PackageCascadeRepair {
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         let theme = data.theme();
         let mut columns: [Vec<Cell>; 4] = Default::default();
         for row in self.table_rows() {
@@ -197,7 +197,7 @@ impl Printable for PackageCascadeRepair {
         // The Package column repeats one constant for the ordinary
         // single-package run, and a column whose every value is the same
         // string is noise the plain table pays width for.
-        let headers: [ocx_lib::cli::Column; 4] = ["Package".into(), "Tag".into(), "Status".into(), "Detail".into()];
+        let headers: [ocx_console::Column; 4] = ["Package".into(), "Tag".into(), "Status".into(), "Detail".into()];
         let first = usize::from(self.entries.len() < 2);
         data.print_table(&headers[first..], &columns[first..]);
 
@@ -213,7 +213,7 @@ impl Printable for PackageCascadeRepair {
 /// `--tags-file` wrote.
 ///
 /// One of the three pure hint builders DX-70 extracts. They exist for
-/// testability rather than reuse: [`ocx_lib::cli::DataInterface::print_hint`]
+/// testability rather than reuse: [`ocx_console::DataInterface::print_hint`]
 /// writes the real stdout, so these strings were covered by no assertion at all
 /// and migrating them to the positional `ocx package announce` grammar would
 /// have reded nothing. The `stale_index_hint` third one is
@@ -242,7 +242,7 @@ fn publish_moved_tags_without_file_hint(package: &str) -> String {
 /// A write that dropped dead orphan entries did not put the planned bytes on
 /// the wire, so it must not read like a clean one. The count is what the cell
 /// carries - the digests themselves are unbounded and already in the JSON.
-fn written_detail(digest: &ocx_lib::oci::Digest, dropped: &[String]) -> String {
+fn written_detail(digest: &ocx_oci::Digest, dropped: &[String]) -> String {
     let landed = digest.to_short_string();
     if dropped.is_empty() {
         return landed;
@@ -256,10 +256,9 @@ fn written_detail(digest: &ocx_lib::oci::Digest, dropped: &[String]) -> String {
 
 /// A raced alias's detail cell: what the plan expected the tag to hold against
 /// what it holds now. `-` for a side the tag did not exist on.
-fn raced_detail(expected: Option<&ocx_lib::oci::Digest>, live: Option<&ocx_lib::oci::Digest>) -> String {
-    let render = |digest: Option<&ocx_lib::oci::Digest>| {
-        digest.map_or_else(|| "-".to_string(), ocx_lib::oci::Digest::to_short_string)
-    };
+fn raced_detail(expected: Option<&ocx_oci::Digest>, live: Option<&ocx_oci::Digest>) -> String {
+    let render =
+        |digest: Option<&ocx_oci::Digest>| digest.map_or_else(|| "-".to_string(), ocx_oci::Digest::to_short_string);
     format!("{} -> {}", render(expected), render(live))
 }
 
@@ -279,14 +278,14 @@ fn refusal_detail(reason: &Unrepairable) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::oci;
-    use ocx_lib::package::cascade::graph::AliasTag;
+
+    use ocx_package::cascade::graph::AliasTag;
 
     use super::*;
 
     fn report() -> CascadeReport {
         CascadeReport {
-            identifier: oci::Identifier::parse("registry.test/acme/cmake").unwrap(),
+            identifier: ocx_oci::Identifier::parse("registry.test/acme/cmake").unwrap(),
             logical: None,
             aliases: Default::default(),
             rows: Vec::new(),
@@ -296,8 +295,8 @@ mod tests {
         }
     }
 
-    fn digest() -> oci::Digest {
-        oci::Digest::try_from("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc").unwrap()
+    fn digest() -> ocx_oci::Digest {
+        ocx_oci::Digest::try_from("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc").unwrap()
     }
 
     fn entry(outcomes: Vec<RepairOutcome>) -> RepairEntry {
@@ -309,8 +308,8 @@ mod tests {
         }
     }
 
-    fn version(text: &str) -> ocx_lib::package::version::Version {
-        ocx_lib::package::version::Version::parse(text).unwrap()
+    fn version(text: &str) -> ocx_package::version::Version {
+        ocx_package::version::Version::parse(text).unwrap()
     }
 
     fn outcome(tag: &str, outcome: WriteOutcome) -> RepairOutcome {
@@ -446,7 +445,7 @@ mod tests {
         let mut clean = PackageCascadeRepair::from_reports(vec![report()], true);
         clean.entries[0].planned = vec![PlannedWrite {
             tag: AliasTag::Version(version("3.28")),
-            index: oci::ImageIndex {
+            index: ocx_oci::ImageIndex {
                 schema_version: 2,
                 media_type: None,
                 manifests: Vec::new(),

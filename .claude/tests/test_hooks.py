@@ -7,7 +7,11 @@ Run:
 
 from __future__ import annotations
 
+import ast
 import json
+import os
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -22,9 +26,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hooks"))
 import hook_utils
 from hook_utils import LearningsStore, StateManager
 import pre_tool_use_validator
-import pre_commit_verification
-import conventional_commit_validator
-import pre_push_main_blocker
 import post_tool_use_tracker
 import stop_validator
 import subagent_stop_logger
@@ -125,7 +126,7 @@ class TestStateManager:
             "timestamp": int(time.time()) - 9999,
             "tool": "Write",
         }
-        lock_file.write_text(json.dumps(stale_data))
+        lock_file.write_text(json.dumps(stale_data), encoding="utf-8")
         blocking = sm.check_lock("src/main.rs", "session-B", ttl_seconds=120)
         assert blocking is None
 
@@ -158,7 +159,6 @@ class TestStateManager:
         # Manually set the file's mtime to two days ago
         session_file = sm.state_dir / "session_oldoldol.json"
         stale_time = time.time() - (48 * 3600)
-        import os
         os.utime(session_file, (stale_time, stale_time))
         sm.clean_old_sessions(max_age_hours=24)
         assert not session_file.exists()
@@ -169,10 +169,10 @@ class TestStateManager:
         sm.ensure_dirs()
         # Write fewer lines than the default threshold of 110
         lines = [f"[2024-01-01 00:00:00] Write: src/file{i}.rs" for i in range(50)]
-        sm.tracker_file.write_text("\n".join(lines) + "\n")
+        sm.tracker_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
         sm.trim_tracker(max_lines=100, threshold=110)
         # File should be unchanged
-        result_lines = sm.tracker_file.read_text().splitlines()
+        result_lines = sm.tracker_file.read_text(encoding="utf-8").splitlines()
         assert len(result_lines) == 50
 
     def test_trim_tracker_when_threshold_exceeded(self, tmp_path: Path) -> None:
@@ -181,9 +181,9 @@ class TestStateManager:
         sm.ensure_dirs()
         # Write more lines than the threshold
         lines = [f"[2024-01-01 00:00:00] Write: src/file{i}.rs" for i in range(120)]
-        sm.tracker_file.write_text("\n".join(lines) + "\n")
+        sm.tracker_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
         sm.trim_tracker(max_lines=100, threshold=110)
-        result_lines = sm.tracker_file.read_text().splitlines()
+        result_lines = sm.tracker_file.read_text(encoding="utf-8").splitlines()
         assert len(result_lines) == 100
 
 
@@ -254,126 +254,113 @@ class TestPreToolUseValidator:
 
 
 # ---------------------------------------------------------------------------
-# TestPreCommitVerification
+# The gate call sites. The gate itself is `scripts/commit_gate.py`, run by
+# git through `.githooks/`, and shown red and green by its own `--self-test`.
 # ---------------------------------------------------------------------------
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RELEASE_TASKFILE = REPO_ROOT / "taskfiles" / "release.taskfile.yml"
 
-class TestPreCommitVerification:
-    def test_non_git_commit_command_ignored(self) -> None:
-        """is_git_commit returns False for non-commit commands."""
-        assert pre_commit_verification.is_git_commit("cargo build --release") is False
 
-    def test_git_commit_detected(self) -> None:
-        """is_git_commit returns True for a git commit command."""
-        assert pre_commit_verification.is_git_commit('git commit -m "feat: add feature"') is True
+class TestReleasePrepareGuard:
+    """`task release:prepare` runs the commit gate predicate first (C-021).
 
-    def test_detect_project_tools_rust(self, tmp_path: Path) -> None:
-        """detect_project_tools returns Rust tools when Cargo.toml exists."""
-        (tmp_path / "Cargo.toml").write_text('[package]\nname = "myproject"')
-        tools = pre_commit_verification.detect_project_tools(str(tmp_path))
-        assert "cargo-test" in tools
-        assert "cargo-clippy" in tools
-        assert "cargo-fmt" in tools
+    The predicate itself is shown red and green by
+    `scripts/commit_gate.py --self-test`; what this catches is the *call site*
+    drifting away from it — a `prepare` that touches a file before asking for
+    the full mark, or one that stopped asking at all.
+    """
 
-    def test_recently_verified_skips_reminder(self, tmp_path: Path) -> None:
-        """is_recently_verified returns True when the sentinel file is fresh."""
-        sm = StateManager(str(tmp_path))
-        sm.ensure_dirs()
-        # Write current timestamp into commit-verified
-        verify_file = sm.state_dir / "commit-verified"
-        verify_file.write_text(str(int(time.time())))
-        assert sm.is_recently_verified(ttl_seconds=300) is True
+    def test_release_prepare_runs_this_guard_first(self) -> None:
+        prepare = RELEASE_TASKFILE.read_text(encoding="utf-8").split("\n  prepare:\n", 1)[1]
+        cmds = prepare.split("    cmds:\n", 1)[1]
+        first = next(line for line in cmds.splitlines() if line.strip().startswith("- "))
+        assert "commit_gate.py --require-full-mark" in first
 
-    def test_build_deny_reason_contains_tools(self) -> None:
-        """build_deny_reason includes detected tools in the deny message."""
-        reason = pre_commit_verification.build_deny_reason(
-            ["cargo-test", "cargo-clippy"], "/tmp/.state"
+
+class TestHandMarkScope:
+    """`task verify:mark` writes a *scoped* mark whatever the command line says (DX-3).
+
+    A CLI variable beats a callee's `default`, so without the pinned `vars:`
+    on the `.verify:mark` call, `task verify:mark SCOPE=full` hand-writes the
+    mark only `task verify` may write. `--dry` renders the command it would
+    run; the rendering on stderr is the evidence.
+    """
+
+    @pytest.mark.parametrize(
+        "cli_vars",
+        [
+            pytest.param([], id="bare"),
+            pytest.param(["SCOPE=full"], id="scope-full"),
+            pytest.param(["SCOPE=full", "CRATES=ocx_setup"], id="scope-full-crates"),
+        ],
+    )
+    def test_hand_mark_is_never_full(self, cli_vars: list[str]) -> None:
+        if shutil.which("task") is None:
+            pytest.skip("`task` is not on PATH (shutil.which returned None)")
+        result = subprocess.run(
+            ["task", "verify:mark", *cli_vars, "--dry"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
         )
-        assert "BLOCKED" in reason
-        assert "cargo-test" in reason
-        assert "task verify" in reason
-
-    def test_build_deny_reason_no_tools(self) -> None:
-        """build_deny_reason handles empty tool list gracefully."""
-        reason = pre_commit_verification.build_deny_reason([], "/tmp/.state")
-        assert "none detected" in reason
+        assert result.returncode == 0, result.stderr
+        rendered = [line for line in result.stderr.splitlines() if "--mark" in line]
+        assert rendered, result.stderr
+        assert all("--mark scoped" in line for line in rendered), rendered
+        assert "--mark full" not in result.stderr, rendered
 
 
-# ---------------------------------------------------------------------------
-# TestConventionalCommitValidator
-# ---------------------------------------------------------------------------
+class TestHookSubprocessDecoding:
+    """Every captured `subprocess.run` under `.claude/hooks/` names `encoding=`.
 
+    `text=True` alone decodes with `locale.getpreferredencoding(False)` — UTF-8
+    on a developer's box, ASCII under `LANG=C`. One non-ASCII byte in a branch
+    name or a commit subject then raises `UnicodeDecodeError` on one machine
+    and nowhere else, and the stop validator reads `status --porcelain` to
+    decide whether a session ends on a dirty tree (PY-PROC-01).
 
-class TestConventionalCommitValidator:
-    def test_valid_feat_commit(self) -> None:
-        """A feat: message is accepted."""
-        assert conventional_commit_validator.is_conventional_commit("feat: add search command") is True
+    Nothing lints this tree — `task scripts:lint` covers `scripts/` — and ruff
+    does not carry the rule for subprocess in any case (`PLW1514` is files
+    only), so the sweep is the check.
+    """
 
-    def test_valid_fix_with_scope(self) -> None:
-        """A fix(scope): message is accepted."""
-        assert conventional_commit_validator.is_conventional_commit("fix(oci): handle missing manifest") is True
+    _HOOKS = Path(__file__).resolve().parents[1] / "hooks"
 
-    def test_valid_chore_commit(self) -> None:
-        """A chore: message is accepted."""
-        assert conventional_commit_validator.is_conventional_commit("chore: update AI configuration") is True
+    @classmethod
+    def _captured_runs(cls) -> list[tuple[str, int, set[str]]]:
+        """Every `subprocess.run(capture_output=…)` call site, with its keywords."""
+        found: list[tuple[str, int, set[str]]] = []
+        for path in sorted(cls._HOOKS.glob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not isinstance(node, ast.Call):
+                    continue
+                if ast.unparse(node.func) != "subprocess.run":
+                    continue
+                keywords = {kw.arg for kw in node.keywords if kw.arg}
+                if "capture_output" in keywords:
+                    found.append((path.name, node.lineno, keywords))
+        return found
 
-    def test_valid_breaking_change(self) -> None:
-        """A feat!: breaking change message is accepted."""
-        assert conventional_commit_validator.is_conventional_commit("feat!: remove deprecated API") is True
+    def test_the_sweep_finds_the_call_sites(self) -> None:
+        """The sweep's own red state: a renamed call shape finds nothing, and
+        the assertion below then holds over an empty list."""
+        assert self._captured_runs(), (
+            "no `subprocess.run(capture_output=…)` call found under .claude/hooks/ — the "
+            "reader drifted, or the hooks stopped shelling out (then delete this with them)"
+        )
 
-    def test_valid_breaking_with_scope(self) -> None:
-        """A refactor(cli)!: breaking change with scope is accepted."""
-        assert conventional_commit_validator.is_conventional_commit("refactor(cli)!: rename commands") is True
-
-    def test_all_valid_types(self) -> None:
-        """All conventional commit types are accepted."""
-        for commit_type in ("feat", "fix", "refactor", "ci", "chore", "docs", "test", "perf", "build", "style"):
-            assert conventional_commit_validator.is_conventional_commit(f"{commit_type}: description") is True
-
-    def test_invalid_no_type(self) -> None:
-        """A message without a type prefix is rejected."""
-        assert conventional_commit_validator.is_conventional_commit("add new feature") is False
-
-    def test_invalid_unknown_type(self) -> None:
-        """An unknown type prefix is rejected."""
-        assert conventional_commit_validator.is_conventional_commit("feature: add search") is False
-
-    def test_invalid_missing_space_after_colon(self) -> None:
-        """A message missing the space after colon is rejected."""
-        assert conventional_commit_validator.is_conventional_commit("feat:no space") is False
-
-    def test_invalid_checkpoint(self) -> None:
-        """A 'Checkpoint' message is rejected."""
-        assert conventional_commit_validator.is_conventional_commit("Checkpoint") is False
-
-    def test_extract_double_quoted_message(self) -> None:
-        """extract_commit_message parses double-quoted -m."""
-        msg = conventional_commit_validator.extract_commit_message('git commit -m "feat: add feature"')
-        assert msg == "feat: add feature"
-
-    def test_extract_single_quoted_message(self) -> None:
-        """extract_commit_message parses single-quoted -m."""
-        msg = conventional_commit_validator.extract_commit_message("git commit -m 'fix: bug'")
-        assert msg == "fix: bug"
-
-    def test_extract_heredoc_message(self) -> None:
-        """extract_commit_message parses heredoc-style -m."""
-        cmd = 'git commit -m "$(cat <<\'EOF\'\nchore: update config\n\nCo-Authored-By: test\nEOF\n)"'
-        msg = conventional_commit_validator.extract_commit_message(cmd)
-        assert msg == "chore: update config"
-
-    def test_extract_no_message_flag(self) -> None:
-        """extract_commit_message returns None when no -m flag is present."""
-        msg = conventional_commit_validator.extract_commit_message("git commit --amend")
-        assert msg is None
-
-    def test_non_commit_command(self) -> None:
-        """is_git_commit returns False for non-commit commands."""
-        assert conventional_commit_validator.is_git_commit("git push origin main") is False
-
-    def test_git_commit_detected(self) -> None:
-        """is_git_commit returns True for commit commands."""
-        assert conventional_commit_validator.is_git_commit('git commit -m "test: ok"') is True
+    def test_every_captured_subprocess_names_its_encoding(self) -> None:
+        undecoded = [
+            f"{name}:{line}"
+            for name, line, keywords in self._captured_runs()
+            if "encoding" not in keywords
+        ]
+        assert not undecoded, (
+            f"captured `subprocess.run` without `encoding=` in .claude/hooks/: {undecoded}. "
+            f"`text=True` alone rides the locale (PY-PROC-01) — pass `encoding=\"utf-8\"`"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -398,33 +385,6 @@ class TestPreToolUseValidatorGenerated:
 
 
 # ---------------------------------------------------------------------------
-# TestPrePushMainBlocker
-# ---------------------------------------------------------------------------
-
-
-class TestPrePushMainBlocker:
-    def test_explicit_push_to_main_blocked(self) -> None:
-        """A command that explicitly names 'main' as the branch is blocked."""
-        assert pre_push_main_blocker.is_push_to_main("git push origin main", "feature") is True
-
-    def test_push_to_feature_branch_allowed(self) -> None:
-        """Pushing a feature branch is not blocked."""
-        assert pre_push_main_blocker.is_push_to_main("git push origin feature/my-work", "feature/my-work") is False
-
-    def test_push_with_flags_to_main_blocked(self) -> None:
-        """Explicit push with flags that names main is blocked."""
-        assert pre_push_main_blocker.is_push_to_main("git push --force origin master", "feature") is True
-
-    def test_bare_git_push_on_main_branch_blocked(self) -> None:
-        """A bare 'git push' while on main is blocked (implicit tracking branch)."""
-        assert pre_push_main_blocker.is_push_to_main("git push", "main") is True
-
-    def test_non_push_command_ignored(self) -> None:
-        """is_git_push returns False for a non-push command."""
-        assert pre_push_main_blocker.is_git_push("git status") is False
-
-
-# ---------------------------------------------------------------------------
 # TestPostToolUseTracker
 # ---------------------------------------------------------------------------
 
@@ -435,13 +395,83 @@ class TestPostToolUseTracker:
         assert post_tool_use_tracker.check_context_staleness("README.md") is None
         assert post_tool_use_tracker.check_config_reminder("README.md") is None
 
+    def test_every_reminder_glob_matches_a_tracked_file(self) -> None:
+        """No reminder row may name a path the tree no longer has.
+
+        Derived rather than a list of pairs, because the failure mode is
+        silence: a row whose glob matches nothing fires never, and a hook that
+        reminds about nothing is indistinguishable from one that is simply not
+        being triggered. WP-27 emptied the monolith's ``src/file_structure/``
+        and the row naming it survived the move under a green suite, because
+        the only assertions here named the OCI pair. One case per row cannot
+        catch the next one; matching every row against the tracked tree can.
+
+        ``git ls-files`` rather than a filesystem walk, so a glob that only
+        matches build output or an untracked scratch file still counts as dead.
+        """
+        tracked = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files"],
+            capture_output=True, text=True, check=True,
+        ).stdout.split()
+        assert len(tracked) > 500, f"ls-files read {len(tracked)} paths — refusing to judge globs on that"
+
+        rows = [(g, "CONTEXT_REMINDERS") for g, _, _ in post_tool_use_tracker.CONTEXT_REMINDERS]
+        rows += [(g, "CONFIG_REMINDERS") for g, _, _ in post_tool_use_tracker.CONFIG_REMINDERS]
+        assert rows, "both reminder tables are empty — nothing was read"
+
+        def alive(glob: str) -> bool:
+            if any(post_tool_use_tracker.glob_match(path, glob) for path in tracked):
+                return True
+            # A glob may legitimately name a path git is told to ignore —
+            # `.claude/state/plans/` holds real plans and is in `.gitignore`.
+            # A tracked-file oracle cannot judge those, so the second test is
+            # whether git ignores the glob's directory prefix deliberately.
+            # Earned by what the path IS; no row is exempted by name.
+            #
+            # Deliberately NOT also requiring the directory to exist on disk.
+            # That conjunct was here and was wrong twice over: `check-ignore`
+            # reads `.gitignore`, never the filesystem — it answers 0 for
+            # `.claude/state/plans/DOES_NOT_EXIST` and 1 for
+            # `.claude/nonexistent_dir` — so existence added no discrimination
+            # at all, only a dependence on untracked local state. A checkout
+            # that has not yet run a plan has no `.claude/state/`, so the row
+            # read dead in every fresh worktree and would have reddened CI,
+            # while passing here because this checkout happens to hold one.
+            # A green that depends on local state nobody committed is the same
+            # class of defect as the reader floors this check exists to add.
+            #
+            # Everything before the first wildcard, truncated at the last "/".
+            # Not `Path(...).parent`: the pre-wildcard text can end mid-filename
+            # ("…/plans/plan_"), which has no suffix and would read as a directory.
+            head = glob.split("*", 1)[0]
+            if "/" not in head:
+                return False
+            directory = Path(head.rsplit("/", 1)[0])
+            if str(directory) in ("", "."):
+                return False
+            return subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "check-ignore", "-q", str(directory)]
+            ).returncode == 0
+
+        dead = [f"{table}: {glob}" for glob, table in rows if not alive(glob)]
+        assert not dead, "reminder globs matching nothing the tree has:\n" + "\n".join(dead)
+
     def test_context_reminder_for_oci_subsystem(self) -> None:
-        """Editing an OCI file triggers a context staleness reminder."""
-        reminder = post_tool_use_tracker.check_context_staleness(
-            "crates/ocx_lib/src/oci/client.rs"
-        )
-        assert reminder is not None
-        assert "OCI" in reminder
+        """Editing an OCI file triggers a context staleness reminder.
+
+        Both spellings, because the subsystem spans two crates: the generic
+        distribution-spec client ``ocx_oci`` and the signing tier ``ocx_sign``
+        that WP-31 took out of ``ocx_lib/src/oci/``. A row covering only one
+        would stop reminding the moment the file being edited is in the other —
+        a config that quietly does less, indistinguishable from one that fires.
+        """
+        for path in (
+            "crates/ocx_oci/src/client.rs",
+            "crates/ocx_sign/src/verify/pipeline.rs",
+        ):
+            reminder = post_tool_use_tracker.check_context_staleness(path)
+            assert reminder is not None, path
+            assert "OCI" in reminder, path
 
     def test_config_reminder_for_taskfile(self) -> None:
         """Editing the root taskfile.yml triggers a config update reminder."""
@@ -454,12 +484,12 @@ class TestPostToolUseTracker:
         assert post_tool_use_tracker.glob_match("taskfile.yml", "taskfile.yml") is True
         assert post_tool_use_tracker.glob_match("src/other.yml", "taskfile.yml") is False
         assert post_tool_use_tracker.glob_match(
-            "crates/ocx_lib/src/oci/client.rs",
-            "crates/ocx_lib/src/oci/**",
+            "crates/ocx_sign/src/sign/rekor.rs",
+            "crates/ocx_sign/**",
         ) is True
         assert post_tool_use_tracker.glob_match(
-            "crates/ocx_lib/src/other/file.rs",
-            "crates/ocx_lib/src/oci/**",
+            "crates/ocx_store/src/other/file.rs",
+            "crates/ocx_sign/**",
         ) is False
 
 
@@ -562,7 +592,7 @@ class TestPostToolUseContextSampling:
         )
         jsonl = tmp_path / ".claude" / "state" / "context-samples.jsonl"
         assert jsonl.exists(), "context-samples.jsonl was not created"
-        lines = jsonl.read_text().splitlines()
+        lines = jsonl.read_text(encoding="utf-8").splitlines()
         assert len(lines) == 1
         record = json.loads(lines[0])
         assert record["session_id"] == "sess-phase3"
@@ -686,7 +716,7 @@ class TestLearningsStore:
         assert not store.pending_path.exists()
         store.append_pending(self._valid_record())
         assert store.pending_path.exists()
-        lines = store.pending_path.read_text().splitlines()
+        lines = store.pending_path.read_text(encoding="utf-8").splitlines()
         assert len(lines) == 1
         assert json.loads(lines[0])["category"] == "rust"
 
@@ -753,7 +783,7 @@ class TestLearningsStore:
         assert stats["quarantined"] == 1
         assert store.read_canonical() == []
         assert store.orphan_path.exists()
-        orphan_lines = store.orphan_path.read_text().splitlines()
+        orphan_lines = store.orphan_path.read_text(encoding="utf-8").splitlines()
         assert len(orphan_lines) == 1
         assert json.loads(orphan_lines[0])["schema_version"] == 999
 
@@ -764,7 +794,7 @@ class TestLearningsStore:
         store.ensure_canonical_dir()
         assert store.day30_sentinel.exists()
         # Content is an ISO-8601 timestamp ~30 days out
-        content = store.day30_sentinel.read_text().strip()
+        content = store.day30_sentinel.read_text(encoding="utf-8").strip()
         assert "T" in content  # ISO-8601 separator
 
     def test_parse_learning_markers_extracts_multiple_blocks(self) -> None:
@@ -884,7 +914,8 @@ class TestLearningsStore:
             "summary": "broken canonical missing fingerprint",
         }
         store.canonical_path.write_text(
-            json.dumps(valid) + "\n" + json.dumps(invalid) + "\n"
+            json.dumps(valid) + "\n" + json.dumps(invalid) + "\n",
+            encoding="utf-8",
         )
         # Also seed one pending record with a distinct fingerprint.
         store.append_pending(
@@ -900,7 +931,7 @@ class TestLearningsStore:
         # and the newly-merged pending record should survive.
         assert stats["canonical_quarantined"] == 1
         assert stats["captured"] == 1
-        canonical_lines = store.canonical_path.read_text().splitlines()
+        canonical_lines = store.canonical_path.read_text(encoding="utf-8").splitlines()
         assert len(canonical_lines) == 2, (
             "Valid canonical entry + newly-merged pending entry should "
             "survive; malformed entry should be gone from canonical."
@@ -908,7 +939,7 @@ class TestLearningsStore:
         # Orphan store contains the malformed record.
         assert store.orphan_path.exists()
         assert "broken canonical missing fingerprint" in (
-            store.orphan_path.read_text()
+            store.orphan_path.read_text(encoding="utf-8")
         )
 
         # Stage 1 summary surfaces the canonical rescue.
@@ -1091,7 +1122,7 @@ class TestStopValidatorLearnings:
     def test_memory_md_untouched_by_phase4(self, tmp_path: Path) -> None:
         """`MEMORY.md` file mtime is unchanged by Phase 4 processing."""
         memory_md = tmp_path / "MEMORY.md"
-        memory_md.write_text("# memory\n- user preference\n")
+        memory_md.write_text("# memory\n- user preference\n", encoding="utf-8")
         import os as _os
 
         # Snapshot mtime at a fixed past timestamp so the test is stable

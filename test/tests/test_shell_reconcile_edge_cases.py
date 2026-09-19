@@ -928,7 +928,7 @@ def test_ec_fp_005_self_update_recomposes_every_open_shell(arena: Arena) -> None
     binary_count = len({str(arena.ocx)})
     pytest.skip(
         f"observed: {binary_count} distinct ocx build is available under test ({arena.ocx}), and "
-        "fingerprint()'s CARGO_PKG_VERSION fold (crates/ocx_lib/src/shell/reconcile.rs:507) has no runtime "
+        "fingerprint()'s CARGO_PKG_VERSION fold (crates/ocx_shell/src/shell/reconcile.rs:507) has no runtime "
         "override seam (grepped: no __OCX_TEST_* var reaches it) — a real version bump needs a second binary "
         "build, which this harness does not provide"
     )
@@ -1557,7 +1557,7 @@ def test_ec_hook_011_flap_converges_to_baseline_by_the_second_prompt(arena: Aren
     the stamp and the baked watch paths are all unchanged by a ``direnv`` hook
     that ran earlier in the same prompt. The emitted guard therefore folds
     ``YIELD_SIGNALS`` (``DIRENV_DIR``, ``MISE_SHELL``, ``__MISE_ORIG_PATH`` —
-    `crates/ocx_lib/src/shell/hook.rs`) into both halves of its comparison and
+    `crates/ocx_shell/src/shell/hook.rs`) into both halves of its comparison and
     re-records them in its epilogue, alongside ``__ocx_pwd=$PWD``. The raw
     values are compared, not a yield verdict: this is a "something moved"
     tripwire, and the reconciler owns the decision to revert.
@@ -2527,7 +2527,7 @@ def test_ec_nu_006_global_list_kind_is_not_silently_misapplied_as_a_constant(are
     """EC-NU-006 — A-23 (widened): a ``list``-kind global entry applies through nu's ``list`` arm, preserving the caller's prior value.
 
     This was a strict xfail while `NU_ENV_APPLY_LOOP`
-    (``crates/ocx_lib/src/setup/shims.rs``) was a two-way branch that sent a
+    (``crates/ocx_setup/src/shims.rs``) was a two-way branch that sent a
     ``list`` entry down the constant arm and clobbered the prior. The four-way
     dispatch (``path`` / ``list`` / ``constant`` / apply-nothing) has landed, so
     this is an ordinary positive assertion again — a strict xfail against a
@@ -4804,7 +4804,7 @@ def manual_procedure_ec_quote_011_delayed_expansion_on_truncation() -> None:
     `batch_refuses_percent_lf_and_cr_on_both_emitters` (LF/CR + `%` refusal),
     `batch_accepts_a_bang_under_the_delayed_expansion_precondition` (the `!`
     string-level pin) and `live_batch_bang_survives_without_delayed_expansion`
-    (the same claim against a real `cmd.exe`), all in `crates/ocx_lib/src/shell.rs`,
+    (the same claim against a real `cmd.exe`), all in `crates/ocx_shell/src/shell.rs`,
     running on the `verify-deep.yml` windows-latest `nextest` leg. What is
     NOT automated is the delayed-expansion-**on** half, where the row's own
     text predicts truncation: the emitted line contains the value twice (once

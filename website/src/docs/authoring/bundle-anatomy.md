@@ -105,7 +105,7 @@ This metadata field and [`ocx package create --strip-components`][cmd-package-cr
 - [Migration patterns][authoring-migration] — repackaging Homebrew, GitHub Releases, raw tarballs
 
 <!-- external -->
-[in-tree-mirrors]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
+[in-tree-mirrors]: https://github.com/ocx-sh/ocx-mirror
 [gnu-tar-strip]: https://www.gnu.org/software/tar/manual/html_section/transform.html
 [oci-media-types]: https://github.com/opencontainers/image-spec/blob/v1.1.0/media-types.md
 

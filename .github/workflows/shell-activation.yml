@@ -21,7 +21,8 @@ name: Shell Activation
 # `--expect-fail` step unable to go red, i.e. unable to prove anything. The two
 # artifacts are not interchangeable in either direction; do not collapse them.
 # Both builds share one job and one target dir, so the second recompiles only
-# `ocx_lib` and `ocx` (the feature reaches no third-party crate).
+# `ocx_shell`, `ocx_lib` and `ocx` (the feature reaches no third-party crate).
+# `ocx_shell` joined that list at WP-32, which is where the seam itself moved.
 #
 # The Debian leg carries the NFR latency gate (C-044): it needs no Docker and the
 # binaries are already on the runner, so it rides an existing job rather than
@@ -31,20 +32,16 @@ name: Shell Activation
 on:
   pull_request:
     paths:
-      - crates/ocx_lib/src/setup.rs
-      - crates/ocx_lib/src/setup/**
-      - crates/ocx_lib/src/shim.rs
-      - crates/ocx_lib/src/shell.rs
-      - crates/ocx_lib/src/shell/**
+      - crates/ocx_setup/src/**
+      - crates/ocx_store/src/shim.rs
+      - crates/ocx_shell/src/shell.rs
+      - crates/ocx_shell/src/shell/**
       - crates/ocx_cli/src/command/self_group/**
       - crates/ocx_cli/src/command/shell_state.rs
       # The C-044 latency gate times the composed-env resolve path, not just
       # activation plumbing — a regression here must fire the same gate.
-      - crates/ocx_lib/src/package_manager.rs
-      - crates/ocx_lib/src/package_manager/**
-      - crates/ocx_lib/src/oci/index.rs
-      - crates/ocx_lib/src/oci/index/**
-      - crates/ocx_lib/src/activation.rs
+      - crates/ocx_package_manager/src/**
+      - crates/ocx_index/src/**
       - test/tests/test_shell_activation.py
       - test/tests/test_self_activate.py
       - test/tests/test_shell_reconcile.py

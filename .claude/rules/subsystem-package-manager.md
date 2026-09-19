@@ -1,12 +1,11 @@
 ---
 paths:
-  - crates/ocx_lib/src/package_manager/**
-  - crates/ocx_lib/src/package_manager.rs
+  - crates/ocx_package_manager/src/**
 ---
 
 # Package Manager Subsystem
 
-Facade over FileStructure + Index + Client. Task impls at `crates/ocx_lib/src/package_manager/`.
+Facade over FileStructure + Index + Client. Task impls at `crates/ocx_package_manager/src/`.
 
 ## Design Rationale
 
@@ -189,7 +188,7 @@ value never matches a canonical key behind a symlinked `/tmp`. See `quality-rust
 
 ## Progress Pattern
 
-Span-free. Progress is rendered through `crate::cli::progress::ProgressManager`
+Span-free. Progress is rendered through `ocx_console::progress::ProgressManager`
 (owns one `indicatif::MultiProgress`), **not** `tracing` spans. ADR:
 `adr_progress_architecture.md`. `PackageManager` carries a `progress` field
 (`with_progress`, default `disabled()` for library/test consumers); CLI

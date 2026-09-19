@@ -10,12 +10,10 @@
 
 use std::collections::BTreeMap;
 
-use ocx_lib::{
-    cli::{Annotation, DataInterface, Theme, TreeItem},
-    oci::Platform,
-    package::metadata::env::modifier::ModifierKind,
-    project::{PackageSettings, ProjectConfig, ProjectEnv, ProjectLock},
-};
+use ocx_console::{Annotation, DataInterface, Theme, TreeItem};
+use ocx_oci::Platform;
+use ocx_package::metadata::env::modifier::ModifierKind;
+use ocx_project::{PackageSettings, ProjectConfig, ProjectEnv, ProjectLock};
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -194,7 +192,7 @@ impl StatusReport {
         // appears rather than looking undeclared.
         let mut groups: BTreeMap<String, GroupStatus> = BTreeMap::new();
         groups.insert(
-            ocx_lib::project::DEFAULT_GROUP.to_owned(),
+            ocx_project::DEFAULT_GROUP.to_owned(),
             GroupStatus {
                 tools: declared_tools(&config.tools),
                 env: env_out(&config.env),
@@ -274,7 +272,7 @@ impl StatusReport {
     fn unreadable_lock(project: &std::path::Path, config: &ProjectConfig, error: String) -> Self {
         let mut groups: BTreeMap<String, GroupStatus> = BTreeMap::new();
         groups.insert(
-            ocx_lib::project::DEFAULT_GROUP.to_owned(),
+            ocx_project::DEFAULT_GROUP.to_owned(),
             GroupStatus {
                 tools: declared_tools(&config.tools),
                 env: env_out(&config.env),
@@ -320,7 +318,7 @@ impl From<&PackageSettings> for PackageSettingsOut {
     }
 }
 
-fn declared_tools(tools: &BTreeMap<String, ocx_lib::oci::Identifier>) -> BTreeMap<String, ToolStatus> {
+fn declared_tools(tools: &BTreeMap<String, ocx_oci::Identifier>) -> BTreeMap<String, ToolStatus> {
     tools
         .iter()
         .map(|(binding, identifier)| {

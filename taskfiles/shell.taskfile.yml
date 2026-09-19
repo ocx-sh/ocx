@@ -15,7 +15,10 @@ vars:
   # reports SC2148 on every one of them — and the fix cannot be to add one,
   # because that would make the fixture stop modelling the thing it exists to
   # model. Both the `.claude/` originals and their `.opencode/` mirrors.
-  SHELL_GLOB: "'*.sh' ':(exclude)website/src/_scripts/' ':(exclude,glob)**/docs-quality/checks/fixtures/**'"
+  # `.githooks/*` is listed by path, not by suffix: git only runs a hook whose
+  # filename is exactly `commit-msg`, `pre-push` and so on, so those shims can
+  # never be `*.sh` and would otherwise be the only unlinted shell here.
+  SHELL_GLOB: "'*.sh' '.githooks/*' ':(exclude)website/src/_scripts/' ':(exclude,glob)**/docs-quality/checks/fixtures/**'"
 
 tasks:
   verify:

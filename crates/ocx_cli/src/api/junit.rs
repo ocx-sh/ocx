@@ -108,12 +108,12 @@ pub async fn write(target: &Target<'_>, report: &ScriptRunReport) -> anyhow::Res
     if let Some(parent) = target.path.parent().filter(|p| !p.as_os_str().is_empty()) {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| ocx_lib::error::file_error(parent, e))
+            .map_err(|e| ocx_util::error::FileError::new(parent, e))
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
     tokio::fs::write(target.path, xml)
         .await
-        .map_err(|e| ocx_lib::error::file_error(target.path, e))
+        .map_err(|e| ocx_util::error::FileError::new(target.path, e))
         .with_context(|| format!("failed to write the JUnit report to {}", target.path.display()))
 }
 

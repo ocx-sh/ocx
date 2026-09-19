@@ -133,6 +133,7 @@ def test_env_no_project_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_env_in_project_default_plain(ocx: OcxRunner, tmp_path: Path) -> None:
     """``ocx env`` in a project outputs a plain table by default (no flags).
 

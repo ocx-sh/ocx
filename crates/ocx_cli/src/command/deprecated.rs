@@ -71,7 +71,7 @@ pub fn warn_renamed(context: &Context, old: &str, new: &str) {
 /// form and [`REMOVAL_RELEASE`] (C-062).
 ///
 /// Returns the sentence instead of warning with it, and that split is the
-/// point: [`ocx_lib::cli::Printer`] writes the real streams and no seam in this
+/// point: [`ocx_console::Printer`] writes the real streams and no seam in this
 /// workspace captures one, so a `warn_renamed`-shaped helper would leave the
 /// sentence — and the release it names — with nothing able to assert it. The
 /// caller routes the value through [`Context::ui`], which is what keeps it on
@@ -98,8 +98,8 @@ mod tests {
     ///
     /// This is the **reachable half** of the inventory's
     /// `announce_warning_never_reaches_stdout` (DX-69). No Rust seam in this
-    /// workspace observes stdout — [`ocx_lib::cli::Printer`] writes the real
-    /// streams and [`ocx_lib::cli::Cell`] exposes no text — so the stdout-purity
+    /// workspace observes stdout — [`ocx_console::Printer`] writes the real
+    /// streams and [`ocx_console::Cell`] exposes no text — so the stdout-purity
     /// and once-ness halves are acceptance assertions instead, in
     /// `test/tests/test_announce.py::test_deprecated_package_flag_warns_once_on_stderr_only`,
     /// whose mechanism is already proved in both directions at

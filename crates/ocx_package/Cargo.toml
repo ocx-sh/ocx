@@ -1,0 +1,64 @@
+[package]
+name = "ocx_package"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Internal-only escape hatch, the project's one seam convention
+# (`subsystem-tests.md` "Test-Only Seams"). Forwarded by `ocx_lib`'s and `ocx`'s
+# own `__testing`.
+__testing = []
+
+[dependencies]
+# The resolution index, for the dependency pins this tier verifies.
+ocx_index.workspace = true
+# Identifiers, digests, manifests, platforms, the registry client: the
+# vocabulary of what a package *is* and what publishing one moves.
+ocx_oci.workspace = true
+# The blob store a bundle is written through.
+ocx_store.workspace = true
+# `$OCX_HOME` and the composed environment a metadata document declares.
+ocx_config.workspace = true
+# `FileError`, the archive helpers, the extension-trait prelude.
+ocx_util.workspace = true
+
+async-trait.workspace = true
+# The `observed` timestamp on a description artifact.
+chrono.workspace = true
+# `BuildTimestampFormat` is a `ValueEnum`: the CLI takes it as a flag value, and
+# the enum lives with the version grammar it belongs to rather than with the
+# parser that reads it.
+clap_builder.workspace = true
+# ELF PT_INTERP parsing — the libc lint's host-feature classification.
+elf.workspace = true
+# Canonical Windows paths without the `\\?\\` prefix — the env resolver and the
+# template renderer both emit paths a user reads.
+dunce.workspace = true
+futures.workspace = true
+log.workspace = true
+# `expect.matches`-style pattern checks in the metadata token scanner.
+regex.workspace = true
+# The metadata document's types derive `JsonSchema`; `ocx_schema` publishes
+# them.
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_repr.workspace = true
+# The description artifact's front matter.
+serde_yaml_ng.workspace = true
+# "did you mean" suggestions for an unrecognised interpolation token.
+strsim.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+# Structured warn lines on the description read path.
+tracing.workspace = true
+
+[dev-dependencies]
+# The bundler and scan tests build a package root and a scratch root.
+tempfile.workspace = true
+
+[lints]
+workspace = true

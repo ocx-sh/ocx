@@ -10,10 +10,26 @@ on:
         description: Run the build / cross-compile / acceptance matrix, not just the drift check.
         type: boolean
         default: true
+  # The deep tier of the two-tier gate (subsystem-ci.md "Verification tiers"):
+  # every pull request once it is out of draft — the job-level guard below
+  # skips drafts, and `ready_for_review` is listed because GitHub's default
+  # types omit it, so without it the workflow never fires when a draft is
+  # marked ready — the merge queue, so the required checks run again on the
+  # queued merge commit, and every push to `main`: merges are rebase-only and
+  # there is no queue, so a PR verified at its own head lands on a `main` that
+  # moved since, and this is the one full run over the tree that actually
+  # landed (DX-16). `verify-basic.yml` runs its smoke tier on the same push.
+  # remove push: [main] once merge_group is live (D6)
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group: {}
   # Weekly, for `index-conformance-drift` only — it is the one check here that
   # can go stale without anyone touching this repository. The build / cross-compile
-  # / acceptance matrix stays dispatch-and-call-only: a cron'd 3-OS build plus
-  # Docker acceptance is real money for a signal that a PR already produces.
+  # / acceptance matrix stays off the cron: a cron'd 3-OS build plus Docker
+  # acceptance is real money for a signal the per-PR run already produces.
   schedule:
     - cron: '0 6 * * 1'
 
@@ -29,11 +45,19 @@ permissions:
 # contend for one group.
 concurrency:
   group: verify-deep-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # A cancelled merge-queue run is a failed check to the queue, which then
+  # drops the entry — so queue refs are never cancelled; `main` keeps its
+  # carve-out. `.claude/tests/test_workflows.py` asserts this expression.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/heads/gh-readonly-queue/') && github.ref != 'refs/heads/main' }}
 
 jobs:
   index-conformance-drift:
     name: Index Conformance Drift
+    # Draft pull requests skip every job of this workflow — each carries this
+    # guard (`.claude/tests/test_workflows.py` checks that). `merge_group`
+    # events have no `pull_request` object, so the event-name half is what
+    # keeps a queue run alive; `draft == false` alone would skip it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     # Reads a public repository through `gh api`; nothing here writes.
     permissions:
@@ -56,7 +80,7 @@ jobs:
     # gains a `schedule:` trigger — a GO verdict over no build at all.
     # `inputs.full` is null on our own dispatch/cron and true (its default) on
     # every call, so the expensive legs are tied to the call, not the trigger.
-    if: github.event_name != 'schedule' || inputs.full
+    if: (github.event_name != 'schedule' || inputs.full) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
@@ -119,7 +143,7 @@ jobs:
 
   cross-compile:
     name: Cross-compile (${{ matrix.job.name }})
-    if: github.event_name != 'schedule' || inputs.full
+    if: (github.event_name != 'schedule' || inputs.full) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     runs-on: ubuntu-latest
     container:
       image: messense/cargo-xwin
@@ -156,6 +180,7 @@ jobs:
   acceptance-tests:
     name: Acceptance (${{ matrix.job.name }})
     needs: [build, cross-compile]
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
@@ -291,7 +316,7 @@ jobs:
     name: Publish Deep Test Results
     needs: [build, cross-compile, acceptance-tests]
     runs-on: ubuntu-latest
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || inputs.full) }}
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || inputs.full) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     steps:
       - name: Download Artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -303,3 +328,67 @@ jobs:
         with:
           files: "artifacts/**/junit.xml"
           check_name: "Deep Test Results"
+
+  satellite-verify:
+    name: Satellite Verify (ocx-mirror)
+    # The schedule clause matches `build`: the weekly cron is the drift check
+    # only, and a mirror build is real money for a signal every PR produces.
+    if: (github.event_name != 'schedule' || inputs.full) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    # NON-BLOCKING until ocx-sh/ocx-mirror re-points at the split crates
+    # (plan_crate_split_workspace.md DEC-4). The flip is deleting the
+    # `continue-on-error` line below and nothing else; the ocx-mirror
+    # follow-up PR that WP-39 specifies carries it. While the line is set
+    # this job must NEVER be made a required check: the job's own check run
+    # still concludes `failure` (only the workflow run and `needs.*.result`
+    # read `success`), so a required check on it would block every merge
+    # until the mirror re-points — and if GitHub ever read the job as green,
+    # it would gate nothing. Either way, required + continue-on-error is a
+    # gate that cannot do its job. Job-level rather than step-level so the
+    # job shows red in the run view when the task fails.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    # Reads two public repositories; nothing here writes.
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ocx
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: ocx
+          submodules: true
+      # `actions/checkout` refuses a `path:` outside the workspace, so the
+      # satellite is a sibling under it rather than the task's `../ocx-mirror`
+      # default, and `OCX_MIRROR_DIR` names it. Its submodule is not fetched:
+      # `task satellite:verify` overlays this checkout over the mirror's
+      # `external/ocx` (rsync --delete), so the pinned pointer's tree would
+      # only be cloned to be deleted.
+      - name: Checkout ocx-mirror
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ocx-sh/ocx-mirror
+          path: ocx-mirror
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          # The toolchain file and the cached workspace live under `ocx/`, not
+          # at the workspace root.
+          rust-src-dir: ocx
+          matcher: true
+          # Same reason as verify-basic.yml: denial lives in
+          # [workspace.lints.rust] so the path-vendored forks stay capped.
+          rustflags: ""
+          # The mirror builds into the persistent target dir the task keeps
+          # under `.tmp/satellite-verify/`; cache it (on failure too — the job
+          # is expected red until the mirror re-points, and a cache that only
+          # saves on green would never warm).
+          cache-workspaces: "ocx -> .tmp/satellite-verify/cargo-target"
+          cache-on-failure: true
+      - name: Setup Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Build ocx-mirror against this tree and check the satellite linking rule
+        env:
+          OCX_MIRROR_DIR: ${{ github.workspace }}/ocx-mirror
+        run: task satellite:verify --force

@@ -7,7 +7,18 @@ version.workspace = true
 
 [dependencies]
 ocx.workspace = true
-ocx_lib.workspace = true
+# The config structs the generated schemas describe left `ocx_lib` with the
+# tier that owns them.
+ocx_config.workspace = true
+# The project/lock schemas moved with the tier at WP-33.
+ocx_project.workspace = true
+ocx_package_manager.workspace = true
+# `AuthoringMetadata`: the package metadata document's authoring shape, which
+# left `ocx_lib` with the package tier at WP-30.
+ocx_package.workspace = true
+# The `spec_vocabulary` conformance test names the OCI media-type and platform
+# vocabulary at its source rather than through `ocx_lib`'s re-exports.
+ocx_oci.workspace = true
 schemars.workspace = true
 serde_json.workspace = true
 

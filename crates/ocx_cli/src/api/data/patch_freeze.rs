@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::cli::Cell;
+use ocx_console::Cell;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -36,7 +36,7 @@ impl PatchFreezeReport {
 }
 
 impl Printable for PatchFreezeReport {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let rows: [Vec<String>; 2] = [
             vec!["companions".to_owned(), "descriptors".to_owned()],
             vec![self.companions.to_string(), self.descriptors.to_string()],

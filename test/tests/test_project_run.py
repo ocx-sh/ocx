@@ -50,6 +50,8 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src.helpers import make_package
 from src.runner import OcxRunner
 
@@ -141,6 +143,7 @@ def _published_tool(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_run_golden_path(ocx: OcxRunner, tmp_path: Path) -> None:
     """``ocx run -- hello`` with a single binding exits 0 and runs the binary.
 

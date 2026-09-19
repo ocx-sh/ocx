@@ -1,0 +1,109 @@
+[package]
+name = "ocx_oci"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# `liblzma` is a link-config-only dependency (enables the `static` feature); it is
+# intentionally never referenced from Rust, so exempt it from unused-dep tooling.
+[package.metadata.cargo-machete]
+ignored = ["liblzma"]
+
+[features]
+# Internal-only escape hatch, the same `__name` convention `ocx_lib` uses.
+# Gates `testing`, the transport doubles the signing pipelines drive their unit
+# tests through (`RecordingTransport`, `SbomTransport`). Compile-gated out of
+# release artifacts — a release build physically lacks the module.
+__testing = []
+
+[dependencies]
+# The rendering tier: the pull/push paths report byte progress through
+# `ocx_console`'s bars, and the login flow prompts for a secret through it.
+ocx_console.workspace = true
+# The process-outcome vocabulary. Named because `ssrf`'s refusal and the
+# transport's retry ladder classify themselves.
+ocx_exit.workspace = true
+# The bottom tier: `archive`, `compression`, `fs`, `env`, `tls` and the
+# `FileError`/`SerializationError` pair this crate's io paths raise.
+ocx_util.workspace = true
+
+# The distribution-spec client this crate wraps, vendored at
+# `external/rust-oci-client`. Its `Reference`, manifest and descriptor types are
+# re-exported through `native` and are this crate's wire vocabulary.
+oci-client.workspace = true
+# The Docker credential-helper protocol behind `auth::store`.
+docker_credential.workspace = true
+
+# The index-role HTTP transport and the SSRF guard's resolver both build a
+# `reqwest::Client` directly.
+reqwest.workspace = true
+# `hyper_util::client::proxy::matcher::Matcher::intercept` takes an `http::Uri`,
+# so the SSRF guard's route probe (`ssrf.rs`) needs the type at runtime.
+hyper-util.workspace = true
+http.workspace = true
+# Bundled Mozilla CA roots seeded into the HTTP client so TLS works without a
+# system trust store. Same rationale as `ocx_lib`'s row.
+webpki-root-certs.workspace = true
+
+# Async layer streaming: the pull pipeline decompresses gzip/xz/zstd on the way
+# to the layer store, and bridges the async reader into `tar` at a
+# `spawn_blocking` boundary.
+async-compression.workspace = true
+# Phantom dep: not referenced from Rust — present only to enable liblzma's
+# `static` feature so the binary static-links vendored xz instead of a host
+# liblzma dylib. Rationale in root Cargo.toml; ignored by cargo-machete above.
+# It lives here because this is the crate that pulls `async-compression`, and
+# the edge has to be declared by a crate in the binary's graph to unify at all.
+liblzma.workspace = true
+tokio-util.workspace = true
+flate2.workspace = true
+lzma-rust2.workspace = true
+zstd.workspace = true
+tar.workspace = true
+
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+# ELF PT_INTERP parsing — the libc-family host detection behind `os.features`.
+elf.workspace = true
+futures.workspace = true
+hex.workspace = true
+log.workspace = true
+schemars.workspace = true
+# `Secret<String>` for the password the login flow holds.
+secrecy.workspace = true
+serde.workspace = true
+# `preserve_order` + `raw_value`: inherited from the workspace-wide unification
+# `ocx_lib` documents. Named here because this crate's manifest round-trips are
+# on the same wire.
+serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
+serde_repr.workspace = true
+sha2.workspace = true
+# The staging directory every layer pull and every cross-registry copy writes
+# through before the atomic rename — production, not only tests.
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+# The boundary/structural harness this crate's own guards run under.
+ocx_test_support = { path = "../ocx_test_support" }
+# The HTTP/2 peer behind `transport_policy.rs`'s `h2_wire_tests`: a `GOAWAY` or
+# `RST_STREAM` is only expressible by an h2 server, and it is the only way the
+# retry classifier's h2 branch has a reachable red state. Test-only on purpose —
+# production speaks h2 through `reqwest`.
+h2.workspace = true
+# `test-util` ONLY — `tokio::time::pause()` for the retry ladder's virtual-clock
+# tests. `pause()` reachable from production code would be a runtime footgun.
+tokio = { workspace = true, features = ["test-util"] }
+# `ocx_util::env::overrides`, the process-environment table this crate's tests
+# write through.
+ocx_util = { workspace = true, features = ["__testing"] }
+
+[lints]
+workspace = true

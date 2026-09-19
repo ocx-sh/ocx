@@ -29,11 +29,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
+use crate::error::UsageError;
 use anyhow::Context as _;
-use ocx_lib::cli::UsageError;
-use ocx_lib::log;
-use ocx_lib::oci;
-use ocx_lib::publisher::LayerRef;
+use ocx_oci::layer_ref::LayerRef;
 
 /// Known versions of the build-receipt format.
 ///
@@ -62,18 +60,18 @@ pub struct BuildReceipt {
     /// The platform `ocx package create --platform` declared, in the canonical
     /// grammar (`linux/amd64`, `linux/amd64+libc.glibc`, `any`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none", with = "platform_field")]
-    pub platform: Option<oci::Platform>,
+    pub platform: Option<ocx_oci::Platform>,
 
     /// The identifier `ocx package create --identifier` declared, resolved
     /// against the default registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identifier: Option<oci::Identifier>,
+    pub identifier: Option<ocx_oci::Identifier>,
 }
 
 impl BuildReceipt {
     /// A receipt in the current format version recording whatever `create`
     /// knew. `None` when it knew neither: there is nothing to write.
-    pub fn new(platform: Option<oci::Platform>, identifier: Option<oci::Identifier>) -> Option<Self> {
+    pub fn new(platform: Option<ocx_oci::Platform>, identifier: Option<ocx_oci::Identifier>) -> Option<Self> {
         (platform.is_some() || identifier.is_some()).then_some(Self {
             version: ReceiptVersion::V1,
             platform,
@@ -111,10 +109,10 @@ pub async fn read(path: &Path) -> anyhow::Result<Option<BuildReceipt>> {
     let bytes = match tokio::fs::read(path).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(ocx_lib::error::file_error(path, error).into()),
+        Err(error) => return Err(ocx_util::error::FileError::new(path, error).into()),
     };
     let receipt: BuildReceipt = serde_json::from_slice(&bytes)
-        .map_err(ocx_lib::Error::from)
+        .map_err(ocx_util::error::SerializationError::from)
         .with_context(|| format!("reading the build receipt {}", path.display()))?;
     Ok(Some(receipt))
 }
@@ -132,9 +130,9 @@ pub async fn read(path: &Path) -> anyhow::Result<Option<BuildReceipt>> {
 /// nothing determines which OCI slot the bundle belongs in, and guessing the
 /// host's platform would mislabel every cross-built artifact.
 pub fn resolve_target_platform(
-    explicit: Option<oci::Platform>,
+    explicit: Option<ocx_oci::Platform>,
     receipt: Option<&BuildReceipt>,
-) -> Result<oci::Platform, UsageError> {
+) -> Result<ocx_oci::Platform, UsageError> {
     if let Some(explicit) = explicit {
         return Ok(explicit);
     }
@@ -164,9 +162,9 @@ pub fn resolve_target_platform(
 ///
 /// [`UsageError`] (64) when neither `--identifier` nor the receipt names one.
 pub fn resolve_target_identifier(
-    explicit: Option<oci::Identifier>,
+    explicit: Option<ocx_oci::Identifier>,
     receipt: Option<&BuildReceipt>,
-) -> Result<oci::Identifier, UsageError> {
+) -> Result<ocx_oci::Identifier, UsageError> {
     if let Some(explicit) = explicit {
         // The same-repository check is what keeps this a gap-fill rather than
         // an override: only a receipt describing THIS repository may say which
@@ -198,14 +196,14 @@ pub fn resolve_target_identifier(
 
 /// Serializes [`BuildReceipt::platform`] as its canonical grammar string — the
 /// same encoding used for `ocx.lock` keys and `--platform` — rather than
-/// [`oci::Platform`]'s own `Serialize`, which goes through the OCI JSON object
+/// [`ocx_oci::Platform`]'s own `Serialize`, which goes through the OCI JSON object
 /// shape (`{"os":...,"architecture":...}`).
 mod platform_field {
     use std::str::FromStr;
 
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    use ocx_lib::oci::Platform;
+    use ocx_oci::Platform;
 
     pub fn serialize<S: Serializer>(value: &Option<Platform>, serializer: S) -> Result<S::Ok, S::Error> {
         value.as_ref().map(Platform::to_string).serialize(serializer)
@@ -222,15 +220,16 @@ mod platform_field {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Aliased: `crate::app::classify_error` takes an `anyhow` chain, this one
+    // Aliased: `crate::exit::classify_error` takes an `anyhow` chain, this one
     // takes a `&dyn Error`. Two names, no guessing which is in scope.
-    use ocx_lib::cli::{ExitCode, classify_error as classify_typed_error};
+    use crate::exit::classify_library_error as classify_typed_error;
+    use ocx_exit::ExitCode;
 
-    fn platform(value: &str) -> oci::Platform {
+    fn platform(value: &str) -> ocx_oci::Platform {
         value.parse().expect("platform parses")
     }
 
-    fn identifier(value: &str) -> oci::Identifier {
+    fn identifier(value: &str) -> ocx_oci::Identifier {
         value.parse().expect("identifier parses")
     }
 
@@ -394,7 +393,7 @@ mod tests {
 
     // ── read ─────────────────────────────────────────────────────────────
 
-    fn layer(path: &std::path::Path) -> ocx_lib::publisher::LayerRef {
+    fn layer(path: &std::path::Path) -> ocx_oci::layer_ref::LayerRef {
         path.to_string_lossy().parse().expect("layer ref parses")
     }
 
@@ -446,6 +445,6 @@ mod tests {
         let error = read_beside_bundle(&[layer(&bundle)])
             .await
             .expect_err("a receipt that exists but cannot be parsed must never degrade to `no receipt`");
-        assert_eq!(crate::app::classify_error(error.as_ref()), ExitCode::DataError);
+        assert_eq!(crate::exit::classify_error(error.as_ref()), ExitCode::DataError);
     }
 }

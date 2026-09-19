@@ -1,0 +1,17 @@
+// Witness for `every_utility_error_reaching_the_cli_is_armed`.
+//
+// `NeverArmedError` is named by no `downcast_arm!` anywhere under
+// `crates/ocx_cli/src/`, so a scanner that still reads a `pub fn` signature
+// reports exactly one reach here. A scanner that stopped reading signatures —
+// or an armed set that grew to swallow everything — reports none, and the
+// clean scan over `utility/` would then mean nothing.
+//
+// The commented signature below is the C-007 half: a reach written inside a
+// comment must not count, so this file is only a witness because of the live
+// one underneath it.
+//
+// pub fn commented_out_is_not_a_witness() -> Result<(), NeverArmedError> {}
+
+pub fn crosses_the_boundary_unarmed() -> Result<(), NeverArmedError> {
+    unimplemented!()
+}

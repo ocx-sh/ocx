@@ -1,8 +1,8 @@
 """Local static-file HTTP fixture encoding the `index.ocx.sh` wire shapes.
 
 Ground truth for the wire shapes: `IndexRoot`, `RootTag`, `CatalogIndex` in
-`crates/ocx_lib/src/oci/index/wire.rs`, and `IndexFormatConfig` in
-`crates/ocx_lib/src/oci/index/ocx_index.rs`. Only the ``●`` frozen shapes in
+`crates/ocx_index/src/wire.rs`, and `IndexFormatConfig` in
+`crates/ocx_index/src/ocx_index.rs`. Only the ``●`` frozen shapes in
 `.claude/artifacts/adr_oci_index_only_dispatch.md` (Decision D1) are served
 here:
 

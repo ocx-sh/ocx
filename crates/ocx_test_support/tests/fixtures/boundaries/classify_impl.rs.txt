@@ -1,0 +1,7 @@
+impl ClassifyExitCode for Probe {
+    fn classify(&self) -> u8 { 70 }
+}
+
+impl ClassifyErrorKind for Probe {
+    fn kind(&self) -> u8 { 1 }
+}

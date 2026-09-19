@@ -8,8 +8,7 @@
 //! different fields, so one shared type would have to make half of them
 //! optional.
 
-use ocx_lib::cli::Cell;
-use ocx_lib::oci;
+use ocx_console::Cell;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -44,7 +43,7 @@ pub struct AttestationReport {
     /// `--platform` was absent and the run attested whatever resolved.
     pub platform: String,
     /// Digest of the subject manifest the Statement names.
-    pub subject_digest: oci::Digest,
+    pub subject_digest: ocx_oci::Digest,
     /// The resolved `predicateType` URI written into the Statement.
     pub predicate_type: String,
     /// Digest of the referrer's layer content: the Sigstore bundle blob on a
@@ -52,16 +51,16 @@ pub struct AttestationReport {
     /// keeps its shipped name.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
-    pub bundle_digest: Option<oci::Digest>,
+    pub bundle_digest: Option<ocx_oci::Digest>,
     /// Digest of the published OCI referrer manifest wrapping the payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
-    pub referrer_digest: Option<oci::Digest>,
+    pub referrer_digest: Option<ocx_oci::Digest>,
     /// Digest of the `sha256-<hex>.att` sidecar manifest, when
     /// `--signature-format` asked for one.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
-    pub sidecar_digest: Option<oci::Digest>,
+    pub sidecar_digest: Option<ocx_oci::Digest>,
     /// Whether the referrer carries a signature. `false` means the document was
     /// attached as-is, with no identity behind it — the two certificate fields
     /// below are then absent rather than empty.
@@ -82,7 +81,7 @@ pub struct AttestationReport {
     /// spells it, so one vocabulary describes both commands.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
-    pub key_backend: Option<oci::sign::KeyBackendKind>,
+    pub key_backend: Option<ocx_trust::key_ref::KeyBackendKind>,
     /// The signing key's cosign hint, in key mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
@@ -105,20 +104,20 @@ pub struct AttestationReport {
 /// meets one word for one state. Keeping the field a plain string is
 /// deliberate: it is a shipped JSON contract (C-S1-1), and turning it null
 /// would break every consumer reading it unconditionally.
-fn platform_label(platform: Option<&oci::Platform>) -> String {
-    platform.map_or_else(|| "any".to_string(), oci::Platform::to_string)
+fn platform_label(platform: Option<&ocx_oci::Platform>) -> String {
+    platform.map_or_else(|| "any".to_string(), ocx_oci::Platform::to_string)
 }
 
 impl AttestationReport {
     /// Build a report from the pipeline result and the invocation's own inputs.
     ///
-    /// Takes the whole [`AttestResult`](ocx_lib::oci::attest::pipeline::AttestResult)
+    /// Takes the whole [`AttestResult`](ocx_sign::attest::pipeline::AttestResult)
     /// rather than its fields: three of them are `Digest` and two are `String`,
     /// so as adjacent positionals a swapped pair would type-check silently.
     pub fn new(
         identifier: String,
-        platform: Option<&oci::Platform>,
-        result: ocx_lib::oci::attest::pipeline::AttestResult,
+        platform: Option<&ocx_oci::Platform>,
+        result: ocx_sign::attest::pipeline::AttestResult,
     ) -> Self {
         Self {
             identifier,
@@ -204,7 +203,7 @@ impl AttestationReport {
 }
 
 impl Printable for AttestationReport {
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         let mut rows: [Vec<Cell>; 2] = [Vec::new(), Vec::new()];
         for (label, value) in self.plain_fields() {
             rows[0].push(Cell::from(label.to_string()));
@@ -215,7 +214,7 @@ impl Printable for AttestationReport {
 
     /// Emit a C-S1-1 success envelope:
     /// `{"schema_version":1,"command":"package attest","exit_code":0,"data":{...}}`.
-    fn print_json(&self, data: &ocx_lib::cli::DataInterface) -> anyhow::Result<()>
+    fn print_json(&self, data: &ocx_console::DataInterface) -> anyhow::Result<()>
     where
         Self: Sized,
     {
@@ -228,11 +227,11 @@ impl Printable for AttestationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_lib::oci::attest::pipeline::AttestResult;
-    use ocx_lib::oci::sign::pipeline::LegDigests;
+    use ocx_sign::attest::pipeline::AttestResult;
+    use ocx_sign::sign::pipeline::LegDigests;
 
-    fn digest(fill: char) -> oci::Digest {
-        oci::Digest::Sha256(fill.to_string().repeat(64))
+    fn digest(fill: char) -> ocx_oci::Digest {
+        ocx_oci::Digest::Sha256(fill.to_string().repeat(64))
     }
 
     fn sample() -> AttestationReport {
@@ -320,7 +319,7 @@ mod tests {
                 "registry.example/pkg:1.0".into(),
                 None,
                 AttestResult {
-                    key_backend: Some(ocx_lib::oci::sign::KeyBackendKind::File),
+                    key_backend: Some(ocx_trust::key_ref::KeyBackendKind::File),
                     public_key_hint: Some("cosign-hint".into()),
                     transparency_log_index,
                     subject_digest: digest('a'),

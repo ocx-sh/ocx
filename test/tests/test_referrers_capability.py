@@ -16,14 +16,14 @@ subsequent invocation within the 6h TTL.
 Acceptance-level, this can observe the *cache artifact* (file exists,
 correct shape, fresh expiry) and that the artifact is untouched by a second
 invocation. Since ``write_cache`` in ``SignPipeline`` only runs on the
-cache-miss branch (see ``crates/ocx_lib/src/oci/sign/pipeline.rs``), an
+cache-miss branch (see ``crates/ocx_sign/src/sign/pipeline.rs``), an
 unchanged ``probed_at`` after a second successful sign is direct proof that
 branch was not re-entered — i.e. no second probe happened. Both tests below
 drive ``sign`` for that reason: ``VerifyPipeline`` writes no capability record
 any more. This test cannot observe the
 real registry's HTTP traffic directly; the transport-level proof (a stub
 that errors if probed) lives in
-``crates/ocx_lib/src/oci/referrer/capability.rs::fresh_cache_short_circuits_probe``.
+``crates/ocx_oci/src/referrer/capability.rs::fresh_cache_short_circuits_probe``.
 """
 from __future__ import annotations
 

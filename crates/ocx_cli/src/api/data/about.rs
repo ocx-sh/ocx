@@ -63,7 +63,7 @@ impl About {
 }
 
 impl Printable for About {
-    fn print_plain(&self, _printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, _printer: &ocx_console::DataInterface) {
         // Plain format is handled directly by the command (logo rendering).
         // This is only called as a fallback.
         println!("Version:   {}", self.version);
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn print_plain_smoke() {
         use crate::api::Printable as _;
-        use ocx_lib::cli::{DataInterface, Printer};
+        use ocx_console::{DataInterface, Printer};
 
         let about = make_about_with_provenance(Provenance {
             channel: None,

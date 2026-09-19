@@ -3,12 +3,15 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::cli::{ExitCode, UsageError, UserInterface};
+use ocx_console::UserInterface;
+use ocx_exit::ExitCode;
+
+use crate::error::UsageError;
 // The canonical spelling, never a local copy: `env::keys` is where the ladder's
 // reader and the `CREDENTIAL_KEYS` scrub list both take it from, so the name in
 // this refusal cannot drift from the name that is read.
-use ocx_lib::env::keys::OCX_ANNOUNCE_TOKEN;
-use ocx_lib::forge::{ForgeCredentials, ForgeError, ForgeKind, RepoCoordinate, WriteTransport};
+use ocx_announce::forge::{ForgeCredentials, ForgeError, ForgeKind, RepoCoordinate, WriteTransport};
+use ocx_config::env::keys::OCX_ANNOUNCE_TOKEN;
 
 use crate::app::CommandError;
 
@@ -246,7 +249,7 @@ impl ForgeWriteOptions {
     ///
     /// # Errors
     ///
-    /// [`crate::app::CommandError`] at [`ocx_lib::cli::ExitCode::AuthError`].
+    /// [`crate::app::CommandError`] at [`ocx_exit::ExitCode::AuthError`].
     pub fn require_credential(&self, credentials: &ForgeCredentials) -> anyhow::Result<()> {
         // `--out` reads the forge but writes nothing, so it proceeds
         // unauthenticated (S-011).
@@ -314,7 +317,7 @@ impl ForgeWriteOptions {
     /// push credential *kind* and the *variable* the secret came from, and it
     /// says outright that ocx cannot name the person behind it. It must never
     /// print the HTTP Basic username instead. In exactly the state this fires,
-    /// [`GitPushCredential::username`](ocx_lib::forge::GitPushCredential::username)
+    /// [`GitPushCredential::username`](ocx_announce::forge::GitPushCredential::username)
     /// is `gitlab-ci-token` — `OCX_ANNOUNCE_GIT_USERNAME`'s default, a protocol
     /// artifact GitLab ignores the value of. Printing it here would name the
     /// *job* as the author in the one warning whose entire subject is that the
@@ -336,12 +339,12 @@ impl ForgeWriteOptions {
 mod tests {
     use clap::{Args as _, CommandFactory as _, Parser as _};
 
-    use ocx_lib::cli::ExitCode;
-    use ocx_lib::forge::{ForgeCredentials, ForgeToken, WriteTransport};
+    use ocx_announce::forge::{ForgeCredentials, ForgeToken, WriteTransport};
+    use ocx_exit::ExitCode;
 
     use super::ForgeWriteOptions;
-    use crate::app::classify_error;
     use crate::command::package_claim::PackageClaim;
+    use crate::exit::classify_error;
 
     /// A minimal command carrying nothing but the flatten, so the shared
     /// grammar can be parsed without any one command's own flags.
@@ -524,7 +527,7 @@ mod tests {
     /// mutation — hardcoding `WriteTransport::Api` at
     /// `package_claim.rs`'s `resolve` call — reds nothing. No red is reachable
     /// at unit scope: `ocx_cli`'s test binary links a non-`cfg(test)`
-    /// `ocx_lib`, so `crate::env::var`'s override map cannot be reached from
+    /// `ocx_lib`, so `crate::utility::env::var`'s override map cannot be reached from
     /// here and the job-token rung cannot be staged without mutating the real
     /// process environment. The control is WP-17's
     /// `::test_job_token_pickup_headers_and_push_user`, which observes the
@@ -590,7 +593,7 @@ mod tests {
     ///
     /// The tempting way to make a warning about authorship concrete is to print
     /// the identity the push authenticates as. ocx has exactly one string that
-    /// looks like one — [`GitPushCredential::username`](ocx_lib::forge::GitPushCredential::username)
+    /// looks like one — [`GitPushCredential::username`](ocx_announce::forge::GitPushCredential::username)
     /// — and in the state this notice fires it is `gitlab-ci-token`, the
     /// constant default GitLab ignores the value of. It names the pipeline,
     /// which is precisely the party the warning exists to say is *not* the
@@ -598,7 +601,7 @@ mod tests {
     /// helpful detail.
     ///
     /// The username needle is read off
-    /// [`GitPushCredential::DEFAULT_USERNAME`](ocx_lib::forge::GitPushCredential::DEFAULT_USERNAME),
+    /// [`GitPushCredential::DEFAULT_USERNAME`](ocx_announce::forge::GitPushCredential::DEFAULT_USERNAME),
     /// never spelled here: a rename that kept a hardcoded copy would leave this
     /// passing over the new value.
     ///
@@ -614,12 +617,12 @@ mod tests {
         let notice = super::PUSH_IDENTITY_NOTICE;
 
         assert!(
-            !notice.contains(ocx_lib::forge::GitPushCredential::DEFAULT_USERNAME),
+            !notice.contains(ocx_announce::forge::GitPushCredential::DEFAULT_USERNAME),
             "the HTTP Basic username is a protocol constant naming the pipeline, which is the one \
              party this notice says did NOT author the request: {notice}"
         );
         assert!(
-            notice.contains(ocx_lib::env::keys::OCX_ANNOUNCE_TOKEN),
+            notice.contains(ocx_config::env::keys::OCX_ANNOUNCE_TOKEN),
             "the notice must name the variable the push secret came from: {notice}"
         );
         assert!(

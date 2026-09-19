@@ -1,0 +1,80 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+//! The project tier: `ocx.toml`/`ocx.lock`, consent, mutation, per-prompt
+//! activation sequencing, lazy loading.
+//!
+//! The `project/**` subtree flattens to the crate root rather than keeping a
+//! `project` module, so a caller writes `ocx_project::config` and not
+//! `ocx_project::project::config`. `ocx_oci` set that precedent; `ocx_shell`
+//! kept its subtree only because it holds two of them.
+//!
+//! `activate`, `ladder` and `lazy` join it as siblings: they are the
+//! sequencing and lazy-loading halves of the same tier, and the per-prompt
+//! path crosses all four.
+
+pub mod activate;
+pub mod ladder;
+pub mod lazy;
+
+pub mod compose;
+pub mod config;
+pub mod consent;
+mod document;
+pub mod env;
+pub mod error;
+pub mod hash;
+pub mod hook;
+mod internal;
+pub mod lock;
+pub mod mutate;
+pub mod mutation;
+mod project_lock;
+pub mod registry;
+pub mod resolve;
+pub mod toolchain_home;
+
+pub use compose::{
+    Origin, PositionalPackage, ResolvedTool, SelectedTool, ToolSource, check_duplicate_selection, compose_tool_set,
+    expand_all_keyword, host_leaf_identifier, parse_positional, project_env_entries, resolve_selected_tools,
+    select_tool_set,
+};
+pub use config::{Group, PackageSettings, ProjectConfig, lazy_mode_for_tool, lazy_mode_ladder_for_tool};
+pub use env::{EnvValue, ProjectEnv};
+pub use error::{Error, ProjectError, ProjectErrorKind};
+pub use hash::{DECLARATION_HASH_VERSION, declaration_hash};
+pub use hook::{MissingState, ProjectState, load_project_state};
+pub use lock::{LockCurrency, LockMetadata, LockVersion, LockedTool, ProjectLock, locked_tool_content_equal};
+pub use mutate::{
+    add_binding, add_binding_in_memory, binding_key, init_project, init_project_at_default, remove_binding,
+    remove_binding_in_memory, set_activate,
+};
+pub use mutation::{ManifestSnapshot, MutationCommit, MutationGuard, StagedMutation};
+pub use project_lock::{acquire_project_lock, acquire_project_lock_for_file};
+pub use registry::ProjectRegistry;
+pub use resolve::{ResolveLockOptions, lookup_host_leaf, resolve_lock, resolve_lock_touched};
+pub use toolchain_home::resolve_toolchain_home;
+
+/// The crate's own `Result`, the project tier's half of the `ocx_lib::Result`
+/// the split dissolved (E1, DEC-27).
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Reserved group name for the implicit default group (the top-level
+/// `[tools]` table in `ocx.toml`, the `"default"` group key in lock
+/// entries, and the JSON key in the declaration-hash canonical form).
+///
+/// Re-exported from the module-private [`internal::DEFAULT_GROUP`] so CLI
+/// callers (`exec`, `pull`, `lock`, `update`, `shell-hook`, `hook-env`, …)
+/// share a single source of truth instead of each defining a local
+/// `const DEFAULT_GROUP: &str = "default"`.
+pub const DEFAULT_GROUP: &str = internal::DEFAULT_GROUP;
+
+/// Reserved CLI keyword that expands to the union of the default group and
+/// every named group declared in `ocx.toml` when passed to `-g`.
+///
+/// Re-exported from the module-private [`internal::ALL_GROUP`]. Project-tier
+/// commands (`run`, `pull`, `lock`, `update`) accept `-g all` and expand it
+/// at the CLI layer via [`compose::expand_all_keyword`] before calling
+/// [`compose_tool_set`]. `[group.all]` in `ocx.toml` is rejected at parse
+/// time; `--group all` in mutating commands is rejected at mutate time.
+pub const ALL_GROUP: &str = internal::ALL_GROUP;

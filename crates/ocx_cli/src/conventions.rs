@@ -1,17 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::{
-    ci::CiFlavor,
-    cli::{MetadataResolutionError, UsageError},
-    lazy::LazyMode,
-    oci,
-    package::cascade::apply::WriteOutcome,
-    package::metadata::env::entry::Entry,
-    package_manager::composer::lazy_mode_for_package,
-    publisher::LayerRef,
-    shell::Shell,
-};
+use crate::error::{MetadataResolutionError, UsageError};
+use ocx_oci::layer_ref::LayerRef;
+use ocx_package::{cascade::apply::WriteOutcome, metadata::env::entry::Entry};
+use ocx_package_manager::composer::lazy_mode_for_package;
+use ocx_project::lazy::LazyMode;
+use ocx_shell::{ci::CiFlavor, shell::Shell};
 
 /// Derives a `<stem>-<suffix>.json` sidecar path beside an archive file.
 ///
@@ -125,19 +120,17 @@ pub fn resolve_receipt_path(layers: &[LayerRef]) -> Option<std::path::PathBuf> {
 /// means the sidecar was hand-authored or edited rather than compiled. The
 /// context line says so; the underlying serialization failure classifies to
 /// `DataError` (65).
-pub async fn read_published_metadata(path: &std::path::Path) -> anyhow::Result<ocx_lib::package::metadata::Metadata> {
+pub async fn read_published_metadata(path: &std::path::Path) -> anyhow::Result<ocx_package::metadata::Metadata> {
     use anyhow::Context as _;
-    use ocx_lib::prelude::*;
+    use ocx_util::prelude::*;
 
-    ocx_lib::package::metadata::Metadata::read_json(path)
-        .await
-        .with_context(|| {
-            format!(
-                "reading package metadata from {}; `ocx package create -m <FILE> -p <PLATFORM>` \
+    ocx_package::metadata::Metadata::read_json(path).await.with_context(|| {
+        format!(
+            "reading package metadata from {}; `ocx package create -m <FILE> -p <PLATFORM>` \
                  compiles an authoring sidecar into this form",
-                path.display()
-            )
-        })
+            path.display()
+        )
+    })
 }
 
 /// Resolves an explicit `--platform` value, falling back to the current host
@@ -146,8 +139,8 @@ pub async fn read_published_metadata(path: &std::path::Path) -> anyhow::Result<o
 /// The single source of truth for "which platform does this command resolve
 /// against" — every resolution command (`ocx package install/pull/exec`,
 /// `ocx exec`, `ocx env`, ...) applies the same default.
-pub fn platform_or_default(platform: Option<oci::Platform>) -> oci::Platform {
-    platform.unwrap_or_else(|| oci::Platform::current().unwrap_or_else(oci::Platform::any))
+pub fn platform_or_default(platform: Option<ocx_oci::Platform>) -> ocx_oci::Platform {
+    platform.unwrap_or_else(|| ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any))
 }
 
 /// Resolves the OCI-tier `lazy-mode` ladder for one invocation, applying
@@ -174,7 +167,7 @@ pub fn platform_or_default(platform: Option<oci::Platform>) -> oci::Platform {
 ///
 /// Shared by the two OCI-tier composing commands (`ocx package env`,
 /// `ocx package exec`); the project tier resolves through
-/// `ocx_lib::project::lazy_mode_for_tool` instead, which reads the `ocx.toml`
+/// `ocx_project::lazy_mode_for_tool` instead, which reads the `ocx.toml`
 /// tiers this one has none of.
 pub fn resolved_lazy_mode(cli: Option<LazyMode>, self_view: bool) -> Result<LazyMode, UsageError> {
     if self_view && cli == Some(LazyMode::Always) {
@@ -184,7 +177,7 @@ pub fn resolved_lazy_mode(cli: Option<LazyMode>, self_view: bool) -> Result<Lazy
     }
     let resolved = lazy_mode_for_package(cli);
     if self_view && resolved == LazyMode::Always {
-        ocx_lib::log::debug!(
+        log::debug!(
             "Composing eagerly: --self selects a package's private view, which bypasses the launchers a shim is made of."
         );
         return Ok(LazyMode::Never);
@@ -238,8 +231,8 @@ pub fn emit_lines(shell: Shell, entries: &[Entry]) {
 /// Split out so the admission rules are testable — `emit_lines` itself only
 /// decides which of the two streams the result goes to.
 fn emit_line(shell: Shell, entry: &Entry) -> Result<String, String> {
-    use ocx_lib::package::metadata::env::list::DEFAULT_SEPARATOR;
-    use ocx_lib::package::metadata::env::modifier::ModifierKind;
+    use ocx_package::metadata::env::list::DEFAULT_SEPARATOR;
+    use ocx_package::metadata::env::modifier::ModifierKind;
 
     /// The `--shell=` value name (`cmd`-style), not the Rust variant name —
     /// read from clap's own possible values so the two cannot drift.
@@ -255,7 +248,7 @@ fn emit_line(shell: Shell, entry: &Entry) -> Result<String, String> {
     // `type = "path"` value embedding the platform separator reached ksh, dash
     // and pwsh, whose split-based folds see it as two segments, match neither,
     // and prepend another copy on every re-source.
-    ocx_lib::shell::is_emittable(entry).map_err(|reason| format!("skipping env var {:?} — {reason}", entry.key))?;
+    ocx_shell::shell::is_emittable(entry).map_err(|reason| format!("skipping env var {:?} — {reason}", entry.key))?;
 
     let line = match entry.kind {
         ModifierKind::Path => shell.export_path(&entry.key, &entry.value),
@@ -554,7 +547,7 @@ pub fn env_entries(entries: &[Entry]) -> Vec<crate::api::data::env::EnvEntry> {
 /// replacement for it.
 pub fn inspect_exit_code(report: &crate::api::data::package_inspect::InspectReport) -> std::process::ExitCode {
     if report.has_conflicts() {
-        ocx_lib::cli::ExitCode::DataError.into()
+        ocx_exit::ExitCode::DataError.into()
     } else {
         std::process::ExitCode::SUCCESS
     }
@@ -575,11 +568,11 @@ pub fn inspect_exit_code(report: &crate::api::data::package_inspect::InspectRepo
 /// binary. The caller converts.
 pub fn cascade_check_exit_code(
     report: &crate::api::data::package_cascade_check::PackageCascadeCheck,
-) -> ocx_lib::cli::ExitCode {
+) -> ocx_exit::ExitCode {
     if report.reports.iter().any(|report| report.has_findings()) {
-        ocx_lib::cli::ExitCode::DataError
+        ocx_exit::ExitCode::DataError
     } else {
-        ocx_lib::cli::ExitCode::Success
+        ocx_exit::ExitCode::Success
     }
 }
 
@@ -596,7 +589,7 @@ pub fn cascade_check_exit_code(
 /// while naming repairs would be useless as a gate.
 pub fn cascade_repair_exit_code(
     report: &crate::api::data::package_cascade_repair::PackageCascadeRepair,
-) -> ocx_lib::cli::ExitCode {
+) -> ocx_exit::ExitCode {
     let remains = report.entries.iter().any(|entry| {
         !entry.report.unrepairable.is_empty()
             || entry
@@ -606,9 +599,9 @@ pub fn cascade_repair_exit_code(
             || (report.dry_run && !entry.planned.is_empty())
     });
     if remains {
-        ocx_lib::cli::ExitCode::DataError
+        ocx_exit::ExitCode::DataError
     } else {
-        ocx_lib::cli::ExitCode::Success
+        ocx_exit::ExitCode::Success
     }
 }
 
@@ -623,7 +616,7 @@ pub fn cascade_repair_exit_code(
 pub fn manager_with_verify_flag(
     context: &crate::app::Context,
     verify: &crate::options::SignatureVerify,
-) -> ocx_lib::package_manager::PackageManager {
+) -> ocx_package_manager::PackageManager {
     let manager = context.manager().clone();
     let Some(auto_verify) = manager.auto_verify().cloned() else {
         return manager;
@@ -680,12 +673,12 @@ mod tests {
         emit_line, export_ci, infer_metadata_file, infer_receipt_file, merge_tags_file, not_eval_safe_advisory,
         parse_tags_file, resolve_ci_arg, resolve_receipt_path, resolve_shell_arg, resolved_lazy_mode,
     };
-    use ocx_lib::ci::CiFlavor;
-    use ocx_lib::cli::UsageError;
-    use ocx_lib::lazy::LazyMode;
-    use ocx_lib::package::metadata::env::{entry::Entry, modifier::ModifierKind};
-    use ocx_lib::publisher::LayerRef;
-    use ocx_lib::shell::Shell;
+    use crate::error::UsageError;
+    use ocx_oci::layer_ref::LayerRef;
+    use ocx_package::metadata::env::{entry::Entry, modifier::ModifierKind};
+    use ocx_project::lazy::LazyMode;
+    use ocx_shell::ci::CiFlavor;
+    use ocx_shell::shell::Shell;
 
     // ── The "not eval-safe" advisory fires only where the footgun is ─────────
 
@@ -966,13 +959,13 @@ mod tests {
     // neither code can quietly become the other's.
 
     mod cascade {
-        use ocx_lib::cli::ExitCode;
-        use ocx_lib::oci;
-        use ocx_lib::package::cascade::apply::{RepairOutcome, WriteOutcome};
-        use ocx_lib::package::cascade::graph::{
+        use ocx_exit::ExitCode;
+
+        use ocx_package::cascade::apply::{RepairOutcome, WriteOutcome};
+        use ocx_package::cascade::graph::{
             AliasState, AliasTag, CascadeReport, IndexFinding, PlannedWrite, SlotRow, SlotStatus, Unrepairable,
         };
-        use ocx_lib::package::version::Version;
+        use ocx_package::version::Version;
 
         use crate::api::data::package_cascade_check::PackageCascadeCheck;
         use crate::api::data::package_cascade_repair::{PackageCascadeRepair, RepairEntry};
@@ -986,22 +979,22 @@ mod tests {
             AliasTag::Version(version(text))
         }
 
-        fn digest() -> oci::Digest {
-            oci::Digest::try_from("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        fn digest() -> ocx_oci::Digest {
+            ocx_oci::Digest::try_from("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
                 .expect("fixture digest parses")
         }
 
         /// A second digest, so a staleness fixture's committed and live sides
         /// actually differ - one value on both would describe an index that
         /// agrees, which is the opposite of the case under test.
-        fn other_digest() -> oci::Digest {
-            oci::Digest::try_from("sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+        fn other_digest() -> ocx_oci::Digest {
+            ocx_oci::Digest::try_from("sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
                 .expect("fixture digest parses")
         }
 
         fn report() -> CascadeReport {
             CascadeReport {
-                identifier: oci::Identifier::parse("registry.test/acme/cmake").expect("fixture parses"),
+                identifier: ocx_oci::Identifier::parse("registry.test/acme/cmake").expect("fixture parses"),
                 logical: None,
                 aliases: [(tag("3.28"), AliasState::Present)].into_iter().collect(),
                 rows: Vec::new(),
@@ -1014,9 +1007,9 @@ mod tests {
         fn stale_row() -> SlotRow {
             SlotRow {
                 tag: tag("3.28"),
-                platform: oci::native::Platform {
-                    os: oci::native::Os::Linux,
-                    architecture: oci::native::Arch::Amd64,
+                platform: ocx_oci::native::Platform {
+                    os: ocx_oci::native::Os::Linux,
+                    architecture: ocx_oci::native::Arch::Amd64,
                     variant: None,
                     features: None,
                     os_version: None,
@@ -1033,7 +1026,7 @@ mod tests {
         fn planned_write() -> PlannedWrite {
             PlannedWrite {
                 tag: tag("3.28"),
-                index: oci::ImageIndex {
+                index: ocx_oci::ImageIndex {
                     schema_version: 2,
                     media_type: None,
                     manifests: Vec::new(),
@@ -1227,7 +1220,7 @@ mod tests {
         // Executed on ksh, dash and pwsh: their split-based folds see `/n/a:b`
         // as two segments, match neither against the whole operand, and prepend
         // another copy on every re-source — PATH grows without bound.
-        let separator = ocx_lib::env::PATH_SEPARATOR;
+        let separator = ocx_util::env::PATH_SEPARATOR;
         let entry = path_entry("OCXP", &format!("/n/a{separator}b"));
         let note = emit_line(Shell::Bash, &entry).expect_err("must be refused, not emitted");
         assert!(note.contains("path separator"), "{note}");

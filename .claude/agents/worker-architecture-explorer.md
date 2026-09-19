@@ -18,7 +18,7 @@ Given feature area or topic. Focus exploration on relevant parts, but always bui
 ### 1. Module Map (always run first)
 
 Use Glob to find top-level modules:
-- `crates/ocx_lib/src/*.rs` — library modules
+- `crates/ocx_*/src/*.rs` — the seventeen tier crates' modules
 - `crates/ocx_cli/src/*.rs` — CLI modules
 
 Each relevant module: read root `.rs` file, note public types, key traits, re-exports.

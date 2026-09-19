@@ -6,13 +6,15 @@ use std::process::ExitCode;
 use std::str::FromStr;
 
 use clap::Parser;
-use ocx_lib::activate::ActivateMode;
-use ocx_lib::cli::ExitCode as OcxExitCode;
-use ocx_lib::env;
-use ocx_lib::setup::shell_config::{self, ShellKey, ShellValue};
-use ocx_lib::setup::{self, ExtraCaCertsOutcome, SessionPathOutcome, SetupOptions, SetupOutcome, VersionSpec};
-use ocx_lib::utility::boolean_string::BooleanString;
-use ocx_lib::{ConfigTier, ShellConfig};
+use ocx_config::ConfigTier;
+use ocx_config::env;
+use ocx_config::shell::ShellConfig;
+use ocx_exit::ExitCode as OcxExitCode;
+use ocx_project::activate::ActivateMode;
+use ocx_setup as setup;
+use ocx_setup::shell_config::{self, ShellKey, ShellValue};
+use ocx_setup::{ExtraCaCertsOutcome, SessionPathOutcome, SetupOptions, SetupOutcome, VersionSpec};
+use ocx_util::boolean_string::BooleanString;
 
 // The `--managed-config` precedence seam (`resolve_managed_config_arg`) is
 // shared with `ocx config setup` and lives in `command/config_setup.rs`.
@@ -275,7 +277,7 @@ impl SelfSetup {
     /// The target is the ocx home's own `ocx.toml`, never the project in
     /// effect — `--project` / `OCX_PROJECT` name a different toolchain and
     /// this flag does not redirect onto it. The write itself belongs to
-    /// [`ocx_lib::project::mutate`], which owns the file's lock and its
+    /// [`ocx_project::mutate`], which owns the file's lock and its
     /// format-preserving edit.
     async fn apply_toolchain_activate(&self, context: &crate::app::Context) -> anyhow::Result<()> {
         let Some(mode) = self.toolchain_activate else {
@@ -290,7 +292,7 @@ impl SelfSetup {
             );
             return Ok(());
         }
-        ocx_lib::project::set_activate(&config_path, mode).await?;
+        ocx_project::set_activate(&config_path, mode).await?;
         Ok(())
     }
 }
@@ -377,16 +379,16 @@ fn requested(on: bool, off: bool) -> Option<bool> {
 /// `on`/`true`), `Some(true)` when it is falsy, `None` when absent or
 /// unrecognised (a WARN is logged for the latter).
 ///
-/// **Not [`env::flag`]**: that helper folds "absent" and "unrecognised" into
+/// **Not [`ocx_util::env::flag`]**: that helper folds "absent" and "unrecognised" into
 /// its own default and can never report `None` for a lower rung to answer
 /// instead — exactly the distinction this rung exists to preserve now that
 /// the env var no longer supplies clap's `default_value_t`.
 fn env_modify_path() -> Option<bool> {
-    let raw = env::var(env::keys::OCX_NO_MODIFY_PATH)?;
+    let raw = ocx_util::env::var(env::keys::OCX_NO_MODIFY_PATH)?;
     match BooleanString::try_from(raw.as_str()) {
         Ok(boolean) => Some(!bool::from(boolean)),
         Err(error) => {
-            ocx_lib::log::warn!(
+            log::warn!(
                 "environment variable '{}' has invalid boolean value: {error}",
                 env::keys::OCX_NO_MODIFY_PATH
             );
@@ -489,7 +491,7 @@ fn emit_advisories(context: &crate::app::Context, outcome: &SetupOutcome, dry_ru
         context.ui().warn(format!(
             "OCX_EXTRA_CA_CERTS was not persisted: extra_ca_certs / extra_ca_certs_pem are locked by {}; edit the \
              system tier or ask its owner",
-            ocx_lib::ConfigLoader::system_path().display(),
+            ocx_config::loader::ConfigLoader::system_path().display(),
         ));
     }
     // One line per surface this run actually changed, because the remedy
@@ -522,10 +524,10 @@ fn emit_advisories(context: &crate::app::Context, outcome: &SetupOutcome, dry_ru
 /// rewrites the block (so no profile is `SkippedDirty`) and `dry_run` only
 /// reports would-skip — neither returns 82. The `[managed]` fence carries the
 /// same dirty-fence contract (criterion 5) via
-/// [`ocx_lib::setup::ManagedConfigSetupOutcome::Dirty`].
+/// [`ocx_setup::ManagedConfigSetupOutcome::Dirty`].
 fn exit_code_for(outcome: &SetupOutcome, force: bool, dry_run: bool) -> ExitCode {
     let profile_dirty = setup::profiles_dirty(&outcome.profiles);
-    let managed_config_dirty = matches!(outcome.managed_config, ocx_lib::setup::ManagedConfigSetupOutcome::Dirty);
+    let managed_config_dirty = matches!(outcome.managed_config, ocx_setup::ManagedConfigSetupOutcome::Dirty);
     if (profile_dirty || managed_config_dirty) && !force && !dry_run {
         return OcxExitCode::DirtyRcBlock.into();
     }
@@ -537,7 +539,7 @@ mod tests {
     use std::path::PathBuf;
 
     use clap::Parser as _;
-    use ocx_lib::setup::{
+    use ocx_setup::{
         BootstrapOutcome, BootstrapStatus, ExtraCaCertsOutcome, ManagedConfigSetupOutcome, ProfileOutcome, SetupOutcome,
     };
 
@@ -1041,9 +1043,9 @@ mod tests {
     /// Every clause is load-bearing: the global toolchain reads its own
     /// `activate` (`ocx_cli::command::self_group::activate`'s
     /// `global_prompt_entries`), a project's own `ocx.toml` still decides for
-    /// that project (`ocx_lib::activation::project_contribution`), and
+    /// that project (`ocx_package_manager::activation::project_contribution`), and
     /// `OCX_TOOLCHAIN_ACTIVATE` is the weakest tier on both
-    /// (`ocx_lib::activation::activate_mode`). `quality-cli-help.md` rates an
+    /// (`ocx_package_manager::activation::activate_mode`). `quality-cli-help.md` rates an
     /// incorrect statement of behaviour in clap-rendered text Block-tier.
     ///
     /// The second literal is C-059's consequence, pinned in the help closest to

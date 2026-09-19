@@ -22,7 +22,7 @@
 //! `OCX_SIGSTORE_TRUSTED_ROOT`, then `[trust.sigstore]` from `config.toml`,
 //! then `$OCX_HOME/sigstore/trusted-root.json`, then the fresh trust-root
 //! cache, then the Sigstore TUF root fetched over the network — and drives the verify
-//! pipeline through the [`PackageManager`](ocx_lib::package_manager) facade
+//! pipeline through the [`PackageManager`](ocx_package_manager) facade
 //! (`verify_one`), which runs the full state machine and returns a
 //! [`VerificationReport`].
 //!
@@ -40,11 +40,9 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use ocx_lib::cli;
-use ocx_lib::oci;
-use ocx_lib::oci::attest::predicate::PredicateType;
-use ocx_lib::oci::verify::{VerifyContentMode, VerifyError, VerifyErrorKind};
-use ocx_lib::package_manager::VerifyOptions;
+use ocx_package_manager::VerifyOptions;
+use ocx_sign::attest::predicate::PredicateType;
+use ocx_sign::verify::{VerifyContentMode, VerifyError, VerifyErrorKind};
 
 use crate::api::data::verification::{SignatureEntry, VerificationReport};
 use crate::command::package_sign_common;
@@ -59,7 +57,7 @@ pub struct PackageVerify {
     /// signature. Given against a reference that resolves to a single manifest,
     /// there is nothing to narrow and the command fails.
     #[clap(short = 'p', long = "platform", value_name = "PLATFORM")]
-    platform: Option<oci::Platform>,
+    platform: Option<ocx_oci::Platform>,
 
     /// Expected certificate SAN (exact match).
     ///
@@ -171,7 +169,7 @@ impl PackageVerify {
         // rather than a silent pick — before any network request rather than
         // after one. The resolved pin then decides *discovery*: the shape it
         // does not name is never looked for.
-        let signature_format = self.signature_format.pin().map_err(cli::UsageError::from)?;
+        let signature_format = self.signature_format.pin().map_err(crate::error::UsageError::from)?;
 
         // Parsed before the trust root is resolved and before any request, so
         // `--key awskms://alias/release` names its unimplemented backend (exit
@@ -205,7 +203,7 @@ impl PackageVerify {
         // The trust-root cache is keyed by the Rekor instance; compute the key
         // here (where `rekor_url`'s type is in scope) so the resolver takes a
         // plain string and the CLI need not name `url::Url`.
-        let rekor_cache_key = ocx_lib::oci::verify::trust_cache::cache_key_for_rekor(&rekor_url);
+        let rekor_cache_key = ocx_sign::verify::trust_cache::cache_key_for_rekor(&rekor_url);
         let trust_root = package_sign_common::resolve_trust_root(
             &context,
             &identifier,
@@ -284,7 +282,7 @@ impl PackageVerify {
     /// A borrow, not a move: the verdict is the first of the same list and the
     /// flat fields are read off it afterwards. Nothing here is rendered in
     /// plain text — see the `SignatureEntry` struct note (CWE-150).
-    fn signature_entry(result: &ocx_lib::oci::verify::VerifyResult) -> SignatureEntry {
+    fn signature_entry(result: &ocx_sign::verify::VerifyResult) -> SignatureEntry {
         SignatureEntry {
             signature_format: result.signature_format,
             discovery_method: result.discovery_method,
@@ -318,7 +316,7 @@ mod tests {
     /// than stopping at "attestation mode is reachable".
     #[test]
     fn the_content_mode_follows_the_flags() {
-        use ocx_lib::oci::attest::predicate::PredicateType;
+        use ocx_sign::attest::predicate::PredicateType;
 
         let cases: [(&[&str], VerifyContentMode); 3] = [
             (&[], VerifyContentMode::Signature),
@@ -380,9 +378,10 @@ mod tests {
     /// `VerifyResult` the pipeline returns.
     #[test]
     fn the_signature_row_carries_what_the_pipeline_verified() {
-        use ocx_lib::oci::Digest;
-        use ocx_lib::oci::sign::{KeyBackendKind, SignatureFormat};
-        use ocx_lib::oci::verify::{DiscoveryMethod, VerifyResult};
+        use ocx_oci::Digest;
+        use ocx_sign::sign::SignatureFormat;
+        use ocx_sign::verify::{DiscoveryMethod, VerifyResult};
+        use ocx_trust::key_ref::KeyBackendKind;
 
         let verified = VerifyResult {
             subject_digest: Digest::Sha256("a".repeat(64)),

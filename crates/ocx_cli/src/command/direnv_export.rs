@@ -4,17 +4,15 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{
-    env, oci,
-    package_manager::composer::{ComposeRequest, Materialization},
-    project::{
-        DEFAULT_GROUP, MissingState, expand_all_keyword, host_leaf_identifier, lazy_mode_for_tool, load_project_state,
-    },
-    shell,
+use ocx_package_manager::composer::{ComposeRequest, Materialization};
+use ocx_project::{
+    DEFAULT_GROUP, MissingState, expand_all_keyword, host_leaf_identifier, lazy_mode_for_tool, load_project_state,
 };
+use ocx_shell::shell;
 
 use crate::conventions::emit_lines;
 use crate::options;
+use ocx_package::metadata::env::apply::reconcile_list_separators;
 
 /// Prints stateless shell export statements for the project toolchain.
 ///
@@ -85,7 +83,7 @@ impl DirenvExport {
         // Project tier ONLY in Phase 7 — Phase 9 will add home-tier
         // fallback. The OCX_NO_PROJECT=1 kill switch is honored by
         // `load_project_state` via `ProjectConfig::resolve`.
-        let cwd = env::current_dir()?;
+        let cwd = ocx_util::env::current_dir()?;
         // A relative `:path` value anchors here, to the directory ocx runs in
         // — which under direnv is the directory holding `.envrc`. Resolved to
         // an absolute value before the entry exists, so the emitted export
@@ -130,7 +128,7 @@ impl DirenvExport {
             expanded = vec![DEFAULT_GROUP.to_owned()];
         }
 
-        let platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+        let platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
 
         // One request per in-scope lock tool, each carrying the `lazy-mode` its
         // ladder resolved to — the same ladder `ocx env` and `ocx exec` apply, so
@@ -176,7 +174,7 @@ impl DirenvExport {
             // would re-run `prepare_lazy` for every tool that already composed
             // — a second closure walk each, on a partially-warm store, because
             // one unrelated eager tool was missing.
-            let missing: Vec<oci::Identifier> = composed
+            let missing: Vec<ocx_oci::Identifier> = composed
                 .omitted
                 .iter()
                 .map(|omission| omission.identifier.clone())
@@ -229,7 +227,7 @@ impl DirenvExport {
 
         // Stages 4-6, same assembly as `ocx exec` and `ocx env`: the project's
         // `[env]`, each selected group's `[env]` in `-g` order, then `--env`.
-        let mut project_env = ocx_lib::project::project_env_entries(&project.config, &project.config_path, &expanded);
+        let mut project_env = ocx_project::project_env_entries(&project.config, &project.config_path, &expanded);
         project_env.extend(env_overrides);
         // C-065/C-070, same derivation as `ocx env` and `ocx exec`: this is a
         // composing emitter, so it heals the groups it is about to emit before
@@ -245,7 +243,7 @@ impl DirenvExport {
             None,
         )
         .await?;
-        let scope = ocx_lib::package_manager::EnvScope::Project {
+        let scope = ocx_package_manager::EnvScope::Project {
             no_patches: project.config.no_patches_repositories(),
             env: project_env,
             toolchain: Some(Box::new(toolchain)),
@@ -259,7 +257,7 @@ impl DirenvExport {
         // contributor (project `[env]`, `--env`) inherits, not the fold's bare
         // default. No forwarded copy exists here (this command never spawns a
         // re-entrant launcher), so a single-vector pass is enough.
-        env::reconcile_list_separators(entries.iter_mut())?;
+        reconcile_list_separators(entries.iter_mut())?;
 
         // Delegate to the shared emit helper (C5 / conventions.rs).
         // `Shell::Bash` is fixed: direnv always evaluates `.envrc` in a bash

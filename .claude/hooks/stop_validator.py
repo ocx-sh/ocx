@@ -20,7 +20,7 @@ def count_uncommitted_changes(project_dir: str) -> int:
         result = subprocess.run(
             ["git", "-C", project_dir, "status", "--porcelain"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
             timeout=10,
         )
         if result.returncode != 0:

@@ -9,7 +9,7 @@ case-insensitive, so `__ocx`, `__ocxfoo`, `__OCX.desc` and the keep tag
 `<algorithm>.<hex>` — plus the OCI referrers tag-schema fallback index
 `<algorithm>-<encoded truncated to 64>` and the cosign `.sig` / `.att` /
 `.sbom` sidecars parked beside it. The rule is one implementation,
-`Tag::is_reserved` (`crates/ocx_lib/src/package/tag.rs`).
+`Tag::is_reserved` (`crates/ocx_package/src/tag.rs`).
 
 Two surfaces enforce it, and they fail differently, so both live here rather
 than beside their command:

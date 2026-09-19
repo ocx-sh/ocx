@@ -4,8 +4,8 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::auth::login::logout;
-use ocx_lib::auth::store::{DockerCredentialStore, StoreOptions};
+use ocx_oci::auth::login::logout;
+use ocx_oci::auth::store::{DockerCredentialStore, StoreOptions};
 
 use crate::api::data::login::LogoutResult;
 

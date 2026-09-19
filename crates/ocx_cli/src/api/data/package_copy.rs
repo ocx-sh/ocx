@@ -3,10 +3,8 @@
 
 use std::fmt;
 
-use ocx_lib::{
-    cli::Cell,
-    publisher::{CopyOutcome, Disposition},
-};
+use ocx_console::Cell;
+use ocx_package::publisher::{CopyOutcome, Disposition};
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -275,7 +273,7 @@ impl CopyReport {
 }
 
 impl Printable for CopyReport {
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         data.print_table(
             &["Platform".into(), "Digest".into(), "Result".into()],
             &self

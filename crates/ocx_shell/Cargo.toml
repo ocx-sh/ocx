@@ -1,0 +1,62 @@
+[package]
+name = "ocx_shell"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Internal-only escape hatch, forwarded from `ocx_lib` and `ocx`. Gates the
+# registration delay seam `shell::hook` exposes so the C-044 latency gate in
+# `shell-activation.yml` has a reachable red state; a release-clean binary
+# physically lacks the code path, which is why that gate and the shell zoo
+# cannot share one artifact.
+__testing = []
+
+[dependencies]
+# The package tier: `shell`'s export composition reads entrypoints, metadata
+# and resolved packages straight out of it — the widest edge this crate has.
+ocx_package.workspace = true
+# The settings tier: `Config`, `Env` and the project toolchain rows the
+# reconciler plans against.
+ocx_config.workspace = true
+# The storage tier: `$OCX_HOME` layout, the shim path and the reference
+# manager the emitted hook resolves through.
+ocx_store.workspace = true
+# Reference parsing for the toolchain rows an export line names.
+ocx_oci.workspace = true
+# Terminal styling for the CI annotation writers.
+ocx_console.workspace = true
+# The bottom tier: path normalisation, environment overrides, escaping.
+ocx_util.workspace = true
+
+base64.workspace = true
+chrono.workspace = true
+# Shell-completion generation is driven from the same builder the CLI uses, so
+# the emitted hook and the completions it installs agree on one command tree.
+clap_builder.workspace = true
+clap_complete.workspace = true
+console.workspace = true
+indexmap.workspace = true
+log.workspace = true
+# The ledger and coexistence records are `ocx shell state --format json`
+# payloads, and `ocx_schema` generates their schema from these derives.
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+sysinfo.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# `ocx_util::env::overrides` — the process-environment table the CI
+# annotation tests write through. A dev edge enabling `__testing` is
+# allowed from every crate (`scripts/crate_map.toml` `[dev].testing_feature`);
+# resolver v3 keeps the feature out of the normal build.
+ocx_util = { workspace = true, features = ["__testing"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

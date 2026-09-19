@@ -50,7 +50,11 @@ from pygments.lexers import get_lexer_for_filename
 from pygments.token import Comment, Keyword, Name, Number, String
 from pygments.util import ClassNotFound
 
-REPO_ANCHOR = "crates/ocx_lib/src/oci/client.rs"
+# A workspace-root file the crate split cannot move: it is the split's own
+# dependency map. The previous anchor was `ocx_lib/src/oci/client.rs`, which
+# WP-24 moved out — a repo-root probe naming a file an extraction relocates
+# makes the script refuse to run from the repo root.
+REPO_ANCHOR = "scripts/crate_map.toml"
 TEMPLATE = pathlib.Path(__file__).parent / "review_surface_page.html"
 
 TIERS = {
@@ -66,9 +70,10 @@ ORDER = ["T0", "T1", "T2", "T3", "T4", "T5", "T6"]
 PROD = {"T0", "T1", "T2", "T3"}
 
 WIRE_FILES = re.compile(
-    r"crates/ocx_lib/src/oci/(index/(wire|wire_writer|ocx_index|oci_index)\.rs|manifest\.rs)"
-    r"|crates/ocx_lib/src/project/(config|lock)\.rs"
-    r"|crates/ocx_lib/src/package/metadata"
+    r"crates/ocx_index/src/(wire|wire_writer|ocx_index|oci_index)\.rs"
+    r"|crates/ocx_oci/src/manifest\.rs"
+    r"|crates/ocx_project/src/(config|lock)\.rs"
+    r"|crates/ocx_package/src/metadata"
     r"|crates/ocx_schema/"
     r"|fixtures/index_wire/"
 )

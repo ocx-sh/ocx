@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::cli::Cell;
-use ocx_lib::package_manager::{HandoffFailure, SelfUpdateResult, SkippedReason, UpdateCheckResult};
+use ocx_console::Cell;
+use ocx_package_manager::{HandoffFailure, SelfUpdateResult, SkippedReason, UpdateCheckResult};
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -90,7 +90,7 @@ impl UpdateCheckData {
 }
 
 impl Printable for UpdateCheckData {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         // Key/value layout: rows[0] = field names, rows[1] = values. Conditional
         // rows keep the output narrow — only fields with payload appear.
         let mut fields: Vec<Cell> = vec!["Status".into()];
@@ -194,7 +194,7 @@ impl SelfUpdateData {
 }
 
 impl Printable for SelfUpdateData {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         // Key/value layout: only fields with payload appear. Suppresses the empty
         // rows the old 4-column `Status|From|To|Reason` layout produced.
         let mut fields: Vec<Cell> = vec!["Status".into()];
@@ -223,10 +223,7 @@ impl Printable for SelfUpdateData {
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::{
-        oci,
-        package_manager::{HandoffFailure, SelfUpdateResult, SkippedReason, UpdateCheckResult},
-    };
+    use ocx_package_manager::{HandoffFailure, SelfUpdateResult, SkippedReason, UpdateCheckResult};
     use serde_json::json;
 
     use super::{SelfUpdateData, UpdateCheckData};
@@ -246,7 +243,7 @@ mod tests {
     #[test]
     fn update_check_data_update_available_carries_identifier() {
         let identifier =
-            oci::Identifier::new_registry("ocx/cli", oci::OCX_SH_REGISTRY).clone_with_tag("1.2.3".to_string());
+            ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY).clone_with_tag("1.2.3".to_string());
         let data = UpdateCheckData::from_result(&UpdateCheckResult::UpdateAvailable(identifier));
         let value = serde_json::to_value(&data).unwrap();
         assert_eq!(value["status"], json!("update_available"));

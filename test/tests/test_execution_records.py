@@ -1380,7 +1380,7 @@ def test_sink_designated_through_a_symlink_records_at_its_target(
     and pinned, then swapped for a link *before the same process writes* — has no
     acceptance-level subject: pinning and writing happen inside one ocx process,
     with no window a test can open deterministically between them. It is covered
-    where it can be: ``crates/ocx_lib/src/record/sink.rs``
+    where it can be: ``crates/ocx_package_manager/src/record/sink.rs``
     ``a_sink_substituted_after_designation_is_refused``.
     """
     ocx.plain("package", "install", "--select", published_package.short)

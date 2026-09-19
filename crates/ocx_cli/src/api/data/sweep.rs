@@ -13,7 +13,8 @@
 //! [`SignatureReport`]: crate::api::data::signature::SignatureReport
 //! [`AttestationReport`]: crate::api::data::attestation::AttestationReport
 
-use ocx_lib::cli::{Cell, ExitCode};
+use ocx_console::Cell;
+use ocx_exit::ExitCode;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -203,7 +204,7 @@ impl<R> SweepReport<R> {
 }
 
 impl<R: Serialize> Printable for SweepReport<R> {
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         // Column-major, like every other `print_table` caller: one `Vec<Cell>`
         // per column.
         let mut rows: [Vec<Cell>; 3] = [Vec::new(), Vec::new(), Vec::new()];
@@ -215,7 +216,7 @@ impl<R: Serialize> Printable for SweepReport<R> {
         data.print_table(&["Tag".into(), "Status".into(), "Detail".into()], &rows);
     }
 
-    fn print_json(&self, data: &ocx_lib::cli::DataInterface) -> anyhow::Result<()>
+    fn print_json(&self, data: &ocx_console::DataInterface) -> anyhow::Result<()>
     where
         Self: Sized,
     {

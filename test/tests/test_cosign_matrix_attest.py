@@ -63,7 +63,7 @@ under `--no-verify`, refused `unsigned_rejected_by_policy` (77) under
 type OCX reads and never writes.
 
 **There is an OCX reader, and A-05 exercises it.**
-`crates/ocx_lib/src/oci/verify/attestation_sidecar.rs` is the `.att` reader;
+`crates/ocx_sign/src/verify/attestation_sidecar.rs` is the `.att` reader;
 `verify/pipeline.rs` opens that door on any run whose `--signature-format` is
 not pinned to `bundle` and whose content mode is `Attestation`. An earlier
 revision of this docstring recorded the opposite, quoting
@@ -79,7 +79,7 @@ sidecar `ocx package attest --signature-format simplesigning` had ever written:
     Error: no matching attestations: signature layer sha256:... is missing
     "dev.cosignproject.cosign/signature" annotation
 
-`SidecarLayer::attestation` (`crates/ocx_lib/src/oci/sign/simplesigning_write.rs`)
+`SidecarLayer::attestation` (`crates/ocx_sign/src/sign/simplesigning_write.rs`)
 omitted that annotation, reasoning that an empty value would claim material that
 is not there. Measurement contradicted it in both halves: cosign's own `attach
 attestation` writes the key **empty** — pinned in
@@ -763,7 +763,7 @@ def test_ocx_verifies_a_cosign_attestation_sidecar_tag(
     cannot reach: the `sha256-<hex>.att` tag carries neither `artifactType` nor
     `subject`, so no listing finds it and the fallback index does not hold it
     either — the tag is the whole discovery story. The reader is
-    `crates/ocx_lib/src/oci/verify/attestation_sidecar.rs`, and this cell is
+    `crates/ocx_sign/src/verify/attestation_sidecar.rs`, and this cell is
     what proves it agrees with cosign's writer on the wire rather than only with
     the committed capture its own unit tests replay.
 
@@ -966,7 +966,7 @@ def test_cosign_verifies_an_ocx_attestation_sidecar_tag(
 #: and the one OCX itself writes: cosign derives this one by appending `+json`
 #: to its own `text/spdx`. Measured on the pinned image over the full `--type` ×
 #: `--input-format` cross product; the table is recorded in
-#: `crates/ocx_lib/src/oci/referrer/media_types.rs`. Asserting the pair (this
+#: `crates/ocx_oci/src/referrer/media_types.rs`. Asserting the pair (this
 #: string, the URI below) is what makes the SPDX half more than a second
 #: CycloneDX run: a reader covering only OCX's own three spellings refuses it.
 COSIGN_SPDX_JSON_MEDIA_TYPE = "text/spdx+json"

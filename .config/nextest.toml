@@ -8,6 +8,23 @@
 [profile.default]
 test-threads = 8
 
+# A hang must report. Gate 7 of WP-33 ran past 420 s on two tests and died by
+# `SIGTERM` with no `verify_exit` marker in its log -- a gate that cannot say
+# what happened, which is worse than a red (DEC-87). `terminate-after` turns
+# that into an ordinary test failure nextest names.
+#
+# Sized off the slowest *legitimately* passing unit test plus platform margin,
+# never off the run's own total (DEC-77): the slowest release test is
+# `every_utility_error_reaching_the_cli_is_armed` at 21.8 s, and the same test
+# is the slowest in a debug build at roughly 100 s. 5 x 120 s = 600 s leaves
+# about 6x over the debug worst case before a slower CI runner multiplies it,
+# and still bounds a hang well under the 420 s a human waited through.
+#
+# Unit profiles only, which is every profile in this file: the acceptance suite
+# is pytest and never runs under nextest, so nothing here can fabricate a
+# failure in a suite that is slow on purpose. `profile.ci` inherits this.
+slow-timeout = { period = "120s", terminate-after = 5 }
+
 [profile.ci]
 default-filter = "all()"
 fail-fast = false

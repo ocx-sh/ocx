@@ -82,7 +82,7 @@ tokio = { workspace = true }
 Most deps use caret (`"1.2"`) ranges. A small set is **exact-pinned** (`=X.Y.Z`)
 because upstream does not promise API stability between releases. Treat any
 bump as a **breaking change**: it requires a manual review pass AND re-running
-the engine-isolation test (`crates/ocx_lib/src/script` firewall) before merge.
+the engine-isolation test (`crates/ocx_script/src` firewall) before merge.
 
 | Crates | Pin | Reason / upgrade tripwire |
 |--------|-----|---------------------------|

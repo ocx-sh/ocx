@@ -22,7 +22,7 @@ No test asserts on not-yet-existing ``ProjectErrorKind`` variants.
 
 Gitattributes coverage (test 11) is the ONLY Python-only coverage point
 for the note — the unit-test counterpart is tombstoned in
-``crates/ocx_lib/src/project/resolve.rs`` (see docstring there).
+``crates/ocx_project/src/resolve.rs`` (see docstring there).
 """
 from __future__ import annotations
 
@@ -30,6 +30,8 @@ import re
 import subprocess
 from pathlib import Path
 from uuid import uuid4
+
+import pytest
 
 from src.assertions import assert_not_exists
 from src.helpers import make_package
@@ -174,6 +176,7 @@ def _tool_leaf_digests(lock_text: str, name: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_lock_two_tools_produces_valid_lock_file(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
@@ -979,7 +982,7 @@ cmake = "{ocx.registry}/{repo}:3.0.0"
 
 
 # Compose-time conflict (different content across groups when both selected) is
-# unit-tested in `crates/ocx_lib/src/project/compose.rs::tests::
+# unit-tested in `crates/ocx_project/src/compose.rs::tests::
 # compose_errors_on_duplicate_binding_across_groups_with_different_content`.
 # Acceptance coverage will land alongside the CLI command that calls
 # `compose_tool_set` (env/exec); none of the current commands do.

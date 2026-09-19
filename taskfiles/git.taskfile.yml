@@ -3,6 +3,35 @@
 version: '3'
 
 tasks:
+  # Point git at the repository's own tracked hook directory, so the commit
+  # and push gates (`.githooks/`, `scripts/commit_gate.py`) run for every
+  # commit and every push however it was spelled. Called by `default` and
+  # `verify` because those are the two things everyone working here runs;
+  # there is no `task setup` to put it in.
+  #
+  # `core.hooksPath` lives in the SHARED `.git/config`, so one run arms every
+  # linked worktree — but the value is relative, so it resolves against each
+  # worktree's own top level and a worktree on a branch without `.githooks`
+  # simply runs no hook instead of erroring. Both measured, not assumed.
+  #
+  # It also takes the setting over from `git lfs install`, which points it at
+  # an absolute `.git/hooks`. `.githooks/` therefore carries LFS's four hooks
+  # as delegating shims — this repository tracks its images in LFS, and losing
+  # them would check out pointer files and push pointers with no objects.
+  # The relative path cuts both ways: a worktree parked on a branch from
+  # BEFORE this commit has no `.githooks/`, so it loses LFS's hooks as well as
+  # the gate until it moves to a branch that has them. Degradation, not
+  # corruption — the `filter.lfs` smudge driver is config, not a hook — but it
+  # is where a pointer-file surprise on an old branch comes from.
+  # Public, not `internal:`: with no `task setup` in this repository, this is
+  # the one command that arms a fresh clone, so it belongs in `task --list`.
+  hooks:
+    desc: Wire core.hooksPath to the repository's tracked .githooks/ (idempotent)
+    status:
+      - test "$(git config --get core.hooksPath)" = .githooks
+    cmds:
+      - git config core.hooksPath .githooks
+
   # Fast-forward the current branch onto main.
   # Captures the current branch, switches to main, then `git merge --ff-only`.
   # Fails if the working tree is dirty or already on main.

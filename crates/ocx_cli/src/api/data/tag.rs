@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use ocx_lib::cli::Cell;
+use ocx_console::Cell;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -87,7 +87,7 @@ impl Tags {
     /// which is the theme's own ANSI and would be stripped instead of the
     /// attack. A test passes the plain theme so the rows carry no escapes of
     /// their own.
-    fn plain_rows(&self, theme: &ocx_lib::cli::Theme) -> [Vec<String>; 2] {
+    fn plain_rows(&self, theme: &ocx_console::Theme) -> [Vec<String>; 2] {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         let (TagsData::Tags(packages) | TagsData::Platforms(packages) | TagsData::Variants(packages)) = &self.packages;
         for (package, values) in packages {
@@ -101,7 +101,7 @@ impl Tags {
 }
 
 impl Printable for Tags {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         printer.print_table(
             &["Package".into(), self.plain_header().into()],
             &self
@@ -274,8 +274,8 @@ mod tests {
 
     /// The no-colour theme, so a row's only escapes would be ones that survived
     /// the sanitizer rather than ones the theme added.
-    fn plain_theme() -> ocx_lib::cli::Theme {
-        ocx_lib::cli::Theme::new(false)
+    fn plain_theme() -> ocx_console::Theme {
+        ocx_console::Theme::new(false)
     }
 
     #[test]

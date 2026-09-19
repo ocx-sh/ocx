@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::cli::Cell;
+use ocx_console::Cell;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -24,8 +24,8 @@ pub struct PatchSyncReport {
 }
 
 impl PatchSyncReport {
-    /// Build a sync report from the library-layer [`ocx_lib::package_manager::PatchSyncReport`].
-    pub fn new(inner: ocx_lib::package_manager::PatchSyncReport) -> Self {
+    /// Build a sync report from the library-layer [`ocx_package_manager::PatchSyncReport`].
+    pub fn new(inner: ocx_package_manager::PatchSyncReport) -> Self {
         Self {
             bases_checked: inner.bases_checked,
             descriptors_updated: inner.descriptors_updated,
@@ -35,7 +35,7 @@ impl PatchSyncReport {
 }
 
 impl Printable for PatchSyncReport {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         // Column-major: each inner Vec is one column (Checked | Updated | Companions),
         // matching `print_table`'s contract (`rows[c]` holds the cells of column c).
         let rows: [Vec<String>; 3] = [

@@ -3,7 +3,10 @@
 
 //! Shared helpers for the `ocx patch` maintainer subcommands.
 
-use ocx_lib::{PatchConfig, ResolvedPatchConfig, cli::UsageError};
+use ocx_config::patch::PatchConfig;
+use ocx_config::patch::ResolvedPatchConfig;
+
+use crate::error::UsageError;
 
 /// Resolve the effective patch tier for a maintainer command, honouring an
 /// optional ad-hoc `--registry` override.

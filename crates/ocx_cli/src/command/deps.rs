@@ -8,18 +8,14 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
-use ocx_lib::{
-    file_structure::FileStructure,
-    oci,
-    package::{
-        install_info::InstallInfo,
-        metadata::{Metadata, ValidMetadata, visibility::Visibility},
-        resolved_package::ResolvedPackage,
-    },
-    package_manager::composer,
-    prelude::SerdeExt,
-    utility,
+use ocx_package::{
+    install_info::InstallInfo,
+    metadata::{Metadata, ValidMetadata, visibility::Visibility},
+    resolved_package::ResolvedPackage,
 };
+use ocx_package_manager::composer;
+use ocx_store::file_structure::FileStructure;
+use ocx_util::prelude::SerdeExt;
 
 use crate::{api, conventions, options};
 
@@ -120,7 +116,7 @@ impl Deps {
                     }
                     if seen.insert(dep.identifier.strip_advisory()) {
                         entries.push(api::data::deps::FlatDependency {
-                            identifier: oci::Identifier::from(dep.identifier.clone()),
+                            identifier: ocx_oci::Identifier::from(dep.identifier.clone()),
                             visibility: dep.visibility,
                         });
                     }
@@ -128,7 +124,7 @@ impl Deps {
                 // Root packages are always public — they are the roots of env resolution.
                 if seen.insert(info.identifier().strip_advisory()) {
                     entries.push(api::data::deps::FlatDependency {
-                        identifier: oci::Identifier::from(info.identifier().clone()),
+                        identifier: ocx_oci::Identifier::from(info.identifier().clone()),
                         visibility: Visibility::PUBLIC,
                     });
                 }
@@ -140,7 +136,7 @@ impl Deps {
             let mut all_paths = Vec::new();
 
             for info in &infos {
-                let mut current_path = vec![oci::Identifier::from(info.identifier().clone())];
+                let mut current_path = vec![ocx_oci::Identifier::from(info.identifier().clone())];
                 find_paths_to(fs, info, &why_id, &mut current_path, &mut all_paths).await;
             }
 
@@ -218,9 +214,9 @@ fn build_tree_node<'a>(
 fn find_paths_to<'a>(
     fs: &'a FileStructure,
     info: &'a InstallInfo,
-    target: &'a oci::Identifier,
-    current_path: &'a mut Vec<oci::Identifier>,
-    all_paths: &'a mut Vec<Vec<oci::Identifier>>,
+    target: &'a ocx_oci::Identifier,
+    current_path: &'a mut Vec<ocx_oci::Identifier>,
+    all_paths: &'a mut Vec<Vec<ocx_oci::Identifier>>,
 ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
     Box::pin(async move {
         // Resolve declared deps via resolve.json (not deps/ symlinks).
@@ -230,7 +226,7 @@ fn find_paths_to<'a>(
             let dep_id = &dep.identifier;
             current_path.push(dep_id.clone().into());
 
-            if oci::Repository::from(dep_id.as_identifier()) == oci::Repository::from(target) {
+            if ocx_oci::Repository::from(dep_id.as_identifier()) == ocx_oci::Repository::from(target) {
                 all_paths.push(current_path.clone());
             }
 
@@ -251,11 +247,11 @@ fn find_paths_to<'a>(
 /// This replaces the previous `read_deps_symlinks` approach — resolve.json
 /// is the canonical source written at pull time, and digest-pinned metadata
 /// cannot form cycles by construction.
-fn resolved_dep_map(resolved: &ResolvedPackage) -> HashMap<oci::Repository, &oci::PinnedIdentifier> {
+fn resolved_dep_map(resolved: &ResolvedPackage) -> HashMap<ocx_oci::Repository, &ocx_oci::PinnedIdentifier> {
     resolved
         .dependencies
         .iter()
-        .map(|rd| (oci::Repository::from(&*rd.identifier), &rd.identifier))
+        .map(|rd| (ocx_oci::Repository::from(&*rd.identifier), &rd.identifier))
         .collect()
 }
 
@@ -263,19 +259,19 @@ fn resolved_dep_map(resolved: &ResolvedPackage) -> HashMap<oci::Repository, &oci
 /// resolve.json map (not deps/ symlinks).
 async fn resolve_dep_via_metadata(
     fs: &FileStructure,
-    id: &oci::PinnedIdentifier,
-    resolved_map: &HashMap<oci::Repository, &oci::PinnedIdentifier>,
+    id: &ocx_oci::PinnedIdentifier,
+    resolved_map: &HashMap<ocx_oci::Repository, &ocx_oci::PinnedIdentifier>,
 ) -> Option<InstallInfo> {
     // Primary: direct digest lookup (single-platform manifests where
     // the declared digest matches the stored content digest).
     let content = fs.packages.content(id);
-    if utility::fs::path_exists_lossy(&content).await {
+    if ocx_util::fs::path_exists_lossy(&content).await {
         return load_install_info(id.clone(), content).await;
     }
 
     // Fallback: the declared digest is an Image Index digest — look up the
     // platform-resolved identifier from the parent's resolve.json.
-    let repo_key = oci::Repository::from(&**id);
+    let repo_key = ocx_oci::Repository::from(&**id);
     let resolved_id = resolved_map.get(&repo_key)?;
     let content = fs.packages.content(resolved_id);
     load_install_info((*resolved_id).clone(), content).await
@@ -284,12 +280,11 @@ async fn resolve_dep_via_metadata(
 /// Whether validation refused the metadata for declaring an env modifier type
 /// this ocx does not know — the one failure here that means "too old", not
 /// "broken".
-fn is_unknown_env_modifier(error: &ocx_lib::Error) -> bool {
-    matches!(error, ocx_lib::Error::Package(cause)
-        if matches!(cause.as_ref(), ocx_lib::package::error::Error::UnknownEnvModifier { .. }))
+fn is_unknown_env_modifier(error: &ocx_package::error::Error) -> bool {
+    matches!(error, ocx_package::error::Error::UnknownEnvModifier { .. })
 }
 
-async fn load_install_info(identifier: oci::PinnedIdentifier, content: std::path::PathBuf) -> Option<InstallInfo> {
+async fn load_install_info(identifier: ocx_oci::PinnedIdentifier, content: std::path::PathBuf) -> Option<InstallInfo> {
     let (metadata, resolved) = tokio::join!(
         Metadata::read_json(content.with_file_name("metadata.json")),
         ResolvedPackage::read_json(content.with_file_name("resolve.json")),
@@ -344,7 +339,7 @@ async fn load_install_info(identifier: oci::PinnedIdentifier, content: std::path
             return None;
         }
     };
-    let dir = ocx_lib::file_structure::PackageDir {
+    let dir = ocx_store::file_structure::PackageDir {
         dir: content
             .parent()
             .map(std::path::Path::to_path_buf)
@@ -378,10 +373,10 @@ mod tests {
             .await
             .expect("write resolve.json");
 
-        let identifier: oci::Identifier = format!("ocx.sh/cmake:1@sha256:{}", hex(1))
+        let identifier: ocx_oci::Identifier = format!("ocx.sh/cmake:1@sha256:{}", hex(1))
             .parse()
             .expect("valid identifier");
-        let pinned = oci::PinnedIdentifier::try_from(identifier).expect("identifier has digest");
+        let pinned = ocx_oci::PinnedIdentifier::try_from(identifier).expect("identifier has digest");
 
         load_install_info(pinned, content).await
     }

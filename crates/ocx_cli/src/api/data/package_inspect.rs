@@ -3,14 +3,10 @@
 
 use serde::{Serialize, ser::SerializeStruct};
 
-use ocx_lib::{
-    cli::{Annotation, DataInterface, Theme, TreeItem, human_bytes},
-    oci,
-    package::metadata::{Binaries, Metadata, env::modifier::ModifierKind, visibility::Visibility},
-    package_manager::{
-        ClosureConflicts, ClosureEdge, ClosureEnvVar, ClosureNode, InspectClosure, InspectResult, ResolvedChain,
-        Surface,
-    },
+use ocx_console::{Annotation, DataInterface, Theme, TreeItem, human_bytes};
+use ocx_package::metadata::{Binaries, Metadata, env::modifier::ModifierKind, visibility::Visibility};
+use ocx_package_manager::{
+    ClosureConflicts, ClosureEdge, ClosureEnvVar, ClosureNode, InspectClosure, InspectResult, ResolvedChain, Surface,
 };
 
 use crate::api::{
@@ -44,9 +40,9 @@ impl SemanticAnnotation {
     fn ink(&self, theme: &Theme) -> Annotation {
         match self {
             SemanticAnnotation::Digest(text) => Annotation::new(theme.digest(text)),
-            SemanticAnnotation::Visibility(visibility) => {
-                Annotation::new(theme.visibility(*visibility, visibility.to_string()))
-            }
+            SemanticAnnotation::Visibility(visibility) => Annotation::new(
+                theme.visibility(crate::api::data::visibility_style(*visibility), visibility.to_string()),
+            ),
             SemanticAnnotation::Note(text) => Annotation::new(theme.note(text)),
             SemanticAnnotation::Plain(text) => Annotation::new(text.clone()),
         }
@@ -81,13 +77,13 @@ impl SemanticAnnotation {
 /// render human-readable (binary units); JSON keeps the raw integer `size`.
 pub struct PackageInspect {
     name: String,
-    identifier: oci::Identifier,
+    identifier: ocx_oci::Identifier,
     body: Body,
 }
 
 enum Body {
     Candidates {
-        pinned: oci::PinnedIdentifier,
+        pinned: ocx_oci::PinnedIdentifier,
         candidates: Vec<CandidateOut>,
     },
     /// A toolchain binding projected straight from `ocx.lock` — the locked
@@ -98,14 +94,14 @@ enum Body {
     /// name until `--resolve` picks a platform.
     Locked { candidates: Vec<CandidateOut> },
     Manifest {
-        pinned: oci::PinnedIdentifier,
+        pinned: ocx_oci::PinnedIdentifier,
         metadata: Metadata,
         layers: Vec<Layer>,
         closure: Option<ClosureOut>,
     },
     Resolved {
-        pinned: oci::PinnedIdentifier,
-        platform: oci::Platform,
+        pinned: ocx_oci::PinnedIdentifier,
+        platform: ocx_oci::Platform,
         metadata: Metadata,
         layers: Vec<Layer>,
         resolution: Resolution,
@@ -219,7 +215,7 @@ struct EnvVarAttribution {
 impl EnvVarAttribution {
     /// Projects admitted `(identifier, ClosureEnvVar)` pairs into the wire
     /// shape — the env sibling of [`BinaryAttribution::from_pairs`].
-    fn from_pairs(pairs: &[(oci::PinnedIdentifier, ClosureEnvVar)]) -> Vec<Self> {
+    fn from_pairs(pairs: &[(ocx_oci::PinnedIdentifier, ClosureEnvVar)]) -> Vec<Self> {
         pairs
             .iter()
             .map(|(identifier, var)| Self {
@@ -252,7 +248,7 @@ impl NamespaceAttribution {
     /// Projects admitted `(identifier, namespace key)` pairs into the wire
     /// shape — the payload-free sibling of
     /// [`IntegrationAttribution::from_pairs`](crate::api::data::env::IntegrationAttribution::from_pairs).
-    fn from_pairs(pairs: &[(oci::PinnedIdentifier, String)]) -> Vec<Self> {
+    fn from_pairs(pairs: &[(ocx_oci::PinnedIdentifier, String)]) -> Vec<Self> {
         pairs
             .iter()
             .map(|(identifier, namespace)| Self {
@@ -436,7 +432,7 @@ struct Layer {
 impl Layer {
     /// Projects raw OCI layer descriptors onto the report surface, shared by
     /// the default-manifest and resolved views.
-    fn from_descriptors(descriptors: &[oci::Descriptor]) -> Vec<Self> {
+    fn from_descriptors(descriptors: &[ocx_oci::Descriptor]) -> Vec<Self> {
         descriptors
             .iter()
             .map(|descriptor| Layer {
@@ -454,7 +450,12 @@ impl PackageInspect {
     /// binding); `identifier` is the requested identifier (post
     /// default-registry expansion); `platform` is the platform resolution
     /// selected against (only meaningful in `--resolve` mode).
-    pub fn new(name: String, identifier: oci::Identifier, platform: oci::Platform, result: InspectResult) -> Self {
+    pub fn new(
+        name: String,
+        identifier: ocx_oci::Identifier,
+        platform: ocx_oci::Platform,
+        result: InspectResult,
+    ) -> Self {
         match result {
             InspectResult::Candidates { pinned, candidates } => Self {
                 name,
@@ -517,8 +518,8 @@ impl PackageInspect {
     /// naming the leaf it would resolve to.
     pub fn locked(
         name: String,
-        identifier: oci::Identifier,
-        platforms: &std::collections::BTreeMap<String, oci::Digest>,
+        identifier: ocx_oci::Identifier,
+        platforms: &std::collections::BTreeMap<String, ocx_oci::Digest>,
     ) -> Self {
         let candidates = platforms
             .iter()
@@ -565,7 +566,7 @@ impl PackageInspect {
     /// right) to name the exact artifact. `None` for a lock projection, which
     /// selects nothing: there the per-candidate `pinned_identifier` is the
     /// pullable reference.
-    fn pinned_identifier(&self) -> Option<&oci::PinnedIdentifier> {
+    fn pinned_identifier(&self) -> Option<&ocx_oci::PinnedIdentifier> {
         match &self.body {
             Body::Candidates { pinned, .. } | Body::Manifest { pinned, .. } | Body::Resolved { pinned, .. } => {
                 Some(pinned)
@@ -581,9 +582,9 @@ impl PackageInspect {
     /// stores the bare repository shared by every platform leaf, so rooting at
     /// anything lock-derived would silently drop the `:tag` every other
     /// inspect view shows.
-    fn root_identifier(&self) -> &oci::Identifier {
+    fn root_identifier(&self) -> &ocx_oci::Identifier {
         self.pinned_identifier()
-            .map_or(&self.identifier, oci::PinnedIdentifier::as_identifier)
+            .map_or(&self.identifier, ocx_oci::PinnedIdentifier::as_identifier)
     }
 
     /// The whole plain-format tree for this entry: the root identifier with
@@ -691,7 +692,7 @@ struct Node {
     /// When set, the label is an identifier inked with the active theme at
     /// render time (so the root reads like every other identifier). Takes
     /// precedence over `label`.
-    identifier: Option<oci::Identifier>,
+    identifier: Option<ocx_oci::Identifier>,
     annotations: Vec<SemanticAnnotation>,
     children: Vec<Node>,
 }
@@ -718,7 +719,7 @@ impl Node {
     /// A branch whose label is an identifier — inked with the active theme
     /// at render time so it matches digest/identifier colouring everywhere
     /// else in the tree.
-    fn identifier_branch(identifier: oci::Identifier, children: Vec<Node>) -> Self {
+    fn identifier_branch(identifier: ocx_oci::Identifier, children: Vec<Node>) -> Self {
         Self {
             label: String::new(),
             identifier: Some(identifier),
@@ -751,7 +752,7 @@ impl Node {
 impl TreeItem for Node {
     fn label(&self, theme: &Theme) -> String {
         match &self.identifier {
-            Some(identifier) => theme.of(identifier),
+            Some(identifier) => crate::api::data::ink_identifier(theme, identifier),
             None => self.label.clone(),
         }
     }
@@ -890,7 +891,7 @@ fn layers_node(layers: &[Layer]) -> Node {
 /// the OCI walk itself. `platform` is the answer under `--platform` (a libc
 /// refinement in particular is invisible anywhere else in the tree), so it is
 /// rendered even though it also serializes at the top level.
-fn resolution_node(resolution: &Resolution, platform: &oci::Platform) -> Node {
+fn resolution_node(resolution: &Resolution, platform: &ocx_oci::Platform) -> Node {
     // Chain entries render like layers — role label, then digest / size — so the
     // OCI walk (index → manifest → config) is legible instead of an opaque
     // positional digest list. The role doubles as the walk-order marker the bare
@@ -973,14 +974,14 @@ fn closure_dep_leaf(dep: &ClosureDepOut) -> Node {
 /// answer, and repository conflicts report digests in their own branch. Falls
 /// back to the verbatim string if the wire value does not parse.
 fn without_digest(identifier: &str) -> String {
-    oci::Identifier::parse(identifier)
+    ocx_oci::Identifier::parse(identifier)
         .map_or_else(|_| identifier.to_string(), |parsed| parsed.without_digest().to_string())
 }
 
 /// A wire digest string in its canonical short form (`sha256:` + 12 hex). Falls
 /// back to the verbatim string if the wire value does not parse.
 fn short_digest(digest: &str) -> String {
-    oci::Digest::try_from(digest).map_or_else(|_| digest.to_string(), |parsed| parsed.to_short_string())
+    ocx_oci::Digest::try_from(digest).map_or_else(|_| digest.to_string(), |parsed| parsed.to_short_string())
 }
 
 /// The short display name of a wire identifier string — the repository's final
@@ -988,7 +989,7 @@ fn short_digest(digest: &str) -> String {
 /// branch reads as the legend for every surface attribution. Falls back to the
 /// verbatim string if the wire value does not parse.
 fn attribution_name(identifier: &str) -> String {
-    oci::Identifier::parse(identifier).map_or_else(|_| identifier.to_string(), |parsed| parsed.name().to_string())
+    ocx_oci::Identifier::parse(identifier).map_or_else(|_| identifier.to_string(), |parsed| parsed.name().to_string())
 }
 
 /// Parses a wire `effective_visibility` string back into the palette-typed
@@ -1127,7 +1128,7 @@ impl InspectReport {
     /// unconditionally would make `-p` observable in a default-mode
     /// `ocx package inspect`, which selects no platform at all — the report
     /// would then name a platform nothing was resolved against.
-    pub fn new(platform: Option<&oci::Platform>, packages: Vec<PackageInspect>, env: Vec<EnvEntry>) -> Self {
+    pub fn new(platform: Option<&ocx_oci::Platform>, packages: Vec<PackageInspect>, env: Vec<EnvEntry>) -> Self {
         Self {
             platform: platform.map(ToString::to_string),
             packages,
@@ -1212,11 +1213,11 @@ impl schemars::JsonSchema for PackageInspect {
         resolved package). `closure` rides along with the last two under `--closure`.",
             "properties": {
                 "name": {"type": "string"},
-                "identifier": generator.subschema_for::<oci::Identifier>(),
+                "identifier": generator.subschema_for::<ocx_oci::Identifier>(),
                 "pinned_identifier": {"type": "string"},
                 "pinned_digest": {"type": "string"},
                 "candidates": generator.subschema_for::<Vec<CandidateOut>>(),
-                "platform": generator.subschema_for::<oci::Platform>(),
+                "platform": generator.subschema_for::<ocx_oci::Platform>(),
                 "metadata": generator.subschema_for::<Metadata>(),
                 "layers": generator.subschema_for::<Vec<Layer>>(),
                 "resolution": generator.subschema_for::<Resolution>(),
@@ -1231,13 +1232,13 @@ impl schemars::JsonSchema for PackageInspect {
 mod tests {
     use std::collections::BTreeSet;
 
-    use ocx_lib::package::metadata::{
+    use ocx_package::metadata::{
         BinaryName, Entrypoints, ValidMetadata,
         bundle::{Bundle, Version},
         dependency::Dependencies,
         env::Env,
     };
-    use ocx_lib::package_manager::{ClosureConflicts, ClosureNode, InspectClosure};
+    use ocx_package_manager::{ClosureConflicts, ClosureNode, InspectClosure};
 
     use super::*;
 
@@ -1303,21 +1304,21 @@ mod tests {
     // (`closure_node`, `surface_node`) map a hand-built lib-level
     // [`InspectClosure`] into the nested `closure` object and its flat tree.
     // The interface-vs-private axis FILTERING is a lib concern (tested in
-    // `package_manager::tasks::inspect`); these tests pin the WIRE shape and
+    // `ocx_package_manager::tasks::inspect`); these tests pin the WIRE shape and
     // the plain render.
 
-    fn test_identifier() -> oci::Identifier {
-        oci::Identifier::new_registry("toolchain", "example.com").clone_with_tag("1.0")
+    fn test_identifier() -> ocx_oci::Identifier {
+        ocx_oci::Identifier::new_registry("toolchain", "example.com").clone_with_tag("1.0")
     }
 
-    fn test_platform() -> oci::Platform {
-        oci::Platform::any()
+    fn test_platform() -> ocx_oci::Platform {
+        ocx_oci::Platform::any()
     }
 
-    fn pinned(repo: &str, hex_char: char) -> oci::PinnedIdentifier {
-        let id = oci::Identifier::new_registry(repo, "example.com")
-            .clone_with_digest(oci::Digest::Sha256(hex_char.to_string().repeat(64)));
-        oci::PinnedIdentifier::try_from(id).expect("digest-bearing identifier is always pinnable")
+    fn pinned(repo: &str, hex_char: char) -> ocx_oci::PinnedIdentifier {
+        let id = ocx_oci::Identifier::new_registry(repo, "example.com")
+            .clone_with_digest(ocx_oci::Digest::Sha256(hex_char.to_string().repeat(64)));
+        ocx_oci::PinnedIdentifier::try_from(id).expect("digest-bearing identifier is always pinnable")
     }
 
     fn fake_digest(hex_char: char) -> String {
@@ -1354,7 +1355,7 @@ mod tests {
 
     /// Builds a minimal `Manifest`-mode `InspectResult` carrying `closure`
     /// (or `None`, the no-`--closure` case).
-    fn manifest_result(root: oci::PinnedIdentifier, closure: Option<InspectClosure>) -> InspectResult {
+    fn manifest_result(root: ocx_oci::PinnedIdentifier, closure: Option<InspectClosure>) -> InspectResult {
         InspectResult::Manifest {
             pinned: root,
             metadata: ValidMetadata::try_from(bundle_metadata(None)).expect("bare bundle metadata is always valid"),
@@ -1364,10 +1365,10 @@ mod tests {
     }
 
     /// A non-root closure node with the given composed-from-root visibility.
-    fn dep_node(identifier: oci::PinnedIdentifier, effective_visibility: Visibility) -> ClosureNode {
+    fn dep_node(identifier: ocx_oci::PinnedIdentifier, effective_visibility: Visibility) -> ClosureNode {
         ClosureNode {
             identifier,
-            config_digest: oci::Digest::Sha256("e".repeat(64)),
+            config_digest: ocx_oci::Digest::Sha256("e".repeat(64)),
             effective_visibility: Some(effective_visibility),
             binaries: None,
             entrypoints: vec![],
@@ -1379,10 +1380,10 @@ mod tests {
     }
 
     /// The root closure node — no composed-from-root visibility.
-    fn root_node(identifier: oci::PinnedIdentifier) -> ClosureNode {
+    fn root_node(identifier: ocx_oci::PinnedIdentifier) -> ClosureNode {
         ClosureNode {
             identifier,
-            config_digest: oci::Digest::Sha256("e".repeat(64)),
+            config_digest: ocx_oci::Digest::Sha256("e".repeat(64)),
             effective_visibility: None,
             binaries: None,
             entrypoints: vec![],
@@ -1395,7 +1396,7 @@ mod tests {
 
     /// A lib-level [`Surface`] with only env entries (binaries/entrypoints
     /// empty), the common shape the wire tests need.
-    fn surface_with_env(env: Vec<(oci::PinnedIdentifier, ClosureEnvVar)>, binaries_complete: bool) -> Surface {
+    fn surface_with_env(env: Vec<(ocx_oci::PinnedIdentifier, ClosureEnvVar)>, binaries_complete: bool) -> Surface {
         Surface {
             binaries: vec![],
             entrypoints: vec![],
@@ -1437,8 +1438,8 @@ mod tests {
     #[test]
     fn json_locked_projects_every_platform_as_a_candidate() {
         let platforms = std::collections::BTreeMap::from([
-            ("linux/amd64".to_string(), oci::Digest::Sha256("a".repeat(64))),
-            ("darwin/arm64".to_string(), oci::Digest::Sha256("b".repeat(64))),
+            ("linux/amd64".to_string(), ocx_oci::Digest::Sha256("a".repeat(64))),
+            ("darwin/arm64".to_string(), ocx_oci::Digest::Sha256("b".repeat(64))),
         ]);
         let report = PackageInspect::locked("toolchain".into(), test_identifier(), &platforms);
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
@@ -1468,7 +1469,7 @@ mod tests {
     #[test]
     fn json_locked_omits_what_the_lock_does_not_record() {
         let platforms =
-            std::collections::BTreeMap::from([("linux/amd64".to_string(), oci::Digest::Sha256("a".repeat(64)))]);
+            std::collections::BTreeMap::from([("linux/amd64".to_string(), ocx_oci::Digest::Sha256("a".repeat(64)))]);
         let report = PackageInspect::locked("toolchain".into(), test_identifier(), &platforms);
         let value = serde_json::to_value(&report).expect("PackageInspect always serializes");
         let object = value.as_object().expect("top-level JSON is an object");
@@ -1493,7 +1494,7 @@ mod tests {
     #[test]
     fn locked_plain_tree_roots_at_the_declared_identifier() {
         let platforms =
-            std::collections::BTreeMap::from([("linux/amd64".to_string(), oci::Digest::Sha256("a".repeat(64)))]);
+            std::collections::BTreeMap::from([("linux/amd64".to_string(), ocx_oci::Digest::Sha256("a".repeat(64)))]);
         let report = PackageInspect::locked("toolchain".into(), test_identifier(), &platforms);
 
         let root = report.tree();

@@ -1,0 +1,1507 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::task::JoinSet;
+use tracing::info_span;
+
+use crate::{composer, concurrency::Concurrency, error::PackageErrorKind};
+use ocx_oci::{self, media_type::MEDIA_TYPE_PACKAGE_V1};
+use ocx_package::{
+    install_info::InstallInfo, install_status::InstallStatus, metadata, resolved_package::ResolvedPackage,
+};
+use ocx_store::file_structure;
+
+use ocx_util::prelude::SerdeExt;
+use ocx_util::singleflight;
+
+use super::super::PackageManager;
+
+/// Singleflight group capacity — maximum number of unique
+/// [`PinnedIdentifier`](ocx_oci::PinnedIdentifier)s (root packages + transitive
+/// dependencies) tracked across all packages in a single `pull_all` call.
+///
+/// 8192 is the soft worst-case bound for realistic large-closure workloads:
+/// mise-style toolchains with 50+ tools each carrying 30–50 transitive deps
+/// plausibly push peak in-flight key counts above the previous 1024 cap,
+/// which would surface as `singleflight::Error::CapacityExceeded` and abort
+/// the install. The cap is intentionally hard rather than backpressuring —
+/// hitting 8192 in-flight singleflight keys signals a pathological closure
+/// that warrants a publisher-side review, not a silent slow-down.
+const MAX_NODES: usize = 8192;
+
+/// How long a waiter blocks on the singleflight watch channel for a leader
+/// to complete. This is **not** the OCI download timeout — the OCI client
+/// has separate `read_timeout` / `connect_timeout` fields (both default to
+/// `None`). This guards against a leader that hangs indefinitely.
+const PACKAGE_SETUP_TIMEOUT: Duration = Duration::from_mins(10);
+
+/// Layer extraction can take substantially longer than package setup because
+/// a single layer may be several hundred MB. 30 minutes is generous enough
+/// to accommodate slow networks and large payloads while still bounding a
+/// hung leader.
+const LAYER_SETUP_TIMEOUT: Duration = Duration::from_mins(30);
+
+/// Conservative lock timeout used when there is no OCI client to derive a
+/// configured timeout from (e.g., in `pull_local` with offline mode or a
+/// caller-supplied local metadata).
+pub const PULL_LOCAL_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Singleflight group keyed by [`PinnedIdentifier`](ocx_oci::PinnedIdentifier)
+/// (advisory tag stripped) for in-process dedup of concurrent dependency setups.
+type SetupGroup = singleflight::Group<ocx_oci::PinnedIdentifier, InstallInfo>;
+
+/// Singleflight group for in-process dedup of concurrent layer extractions.
+/// Two packages that share a layer run the extraction exactly once.
+/// Key: `(registry, layer_digest)`. Value: `()` — the observable artifact
+/// is the on-disk presence of `layers/{digest}/content/`.
+type LayerGroup = singleflight::Group<(String, ocx_oci::Digest), ()>;
+
+/// Bundle of singleflight groups threaded through the pull pipeline so
+/// package-level and layer-level dedup share a session lifetime.
+///
+/// Exposed to sibling task modules (`pull_local`) so they can call
+/// `setup_owned` with a fresh group and bypass the `setup_impl` dedup gate.
+#[derive(Clone)]
+pub struct SetupGroups {
+    packages: SetupGroup,
+    layers: LayerGroup,
+}
+
+impl SetupGroups {
+    pub fn new() -> Self {
+        Self {
+            packages: SetupGroup::new(MAX_NODES, PACKAGE_SETUP_TIMEOUT),
+            layers: LayerGroup::new(MAX_NODES, LAYER_SETUP_TIMEOUT),
+        }
+    }
+}
+
+/// Maps singleflight errors into the package manager error model.
+fn map_singleflight_error(e: singleflight::Error) -> PackageErrorKind {
+    let dep_err: crate::DependencyError = e.into();
+    PackageErrorKind::Internal(dep_err.into())
+}
+
+impl PackageManager {
+    /// Downloads a package and its transitive dependencies to the object store.
+    ///
+    /// Creates dependency back-references so GC can track the relationship.
+    /// Does NOT create install symlinks (candidate/current) — that is the
+    /// responsibility of [`PackageManager::install`].
+    ///
+    /// # Idempotency and concurrent safety
+    ///
+    /// Multiple pulls of the same package — within one process or across
+    /// processes — are safe and idempotent. Three defense layers prevent
+    /// redundant downloads:
+    ///
+    /// 1. **Singleflight dedup** — in-process dedup via a shared
+    ///    [`singleflight::Group`]. The first task to claim a dependency
+    ///    gets a [`singleflight::Handle`]; subsequent tasks block until
+    ///    the result is broadcast.
+    ///
+    /// 2. **[`PackageManager::find_plain`]** — checks the object store before
+    ///    acquiring any lock. If a concurrent process already placed the
+    ///    package in the store, returns immediately without downloading.
+    ///
+    /// 3. **File lock + post-lock recheck** — acquires an exclusive lock on a
+    ///    deterministic temp directory via
+    ///    [`TempStore::try_acquire`](ocx_store::file_structure::TempStore::try_acquire).
+    ///    After the lock is acquired, the object store is re-checked so a
+    ///    process that waited for the lock skips the download if the first
+    ///    process already wrote the package. Manifest and metadata fetches
+    ///    only happen after this gate, avoiding redundant network calls.
+    pub fn pull(
+        &self,
+        package: &ocx_oci::Identifier,
+        platform: ocx_oci::Platform,
+    ) -> Pin<Box<dyn Future<Output = Result<InstallInfo, PackageErrorKind>> + Send + '_>> {
+        let groups = SetupGroups::new();
+        setup_with_tracker(self, package, platform, groups)
+    }
+
+    /// Pulls multiple packages in parallel with a shared singleflight group
+    /// for cross-package diamond dependency dedup.
+    ///
+    /// Every caller — including single-package invocations — goes through the
+    /// same JoinSet dispatch so progress is symmetric. Each per-package task
+    /// owns a span-free `Spinner` guard (`Pulling '<id>'`) and `scope`s its
+    /// work so the download bar nests beneath it. An outer
+    /// `info_span!("Pulling", count)` carries only the batch log event.
+    ///
+    /// `concurrency` caps the **outer** dispatch only — at most N root-package
+    /// pulls run in parallel. Inner `setup_dependencies` and `extract_layers`
+    /// stay unbounded so a transitive dependency never blocks waiting for a
+    /// permit held by its own ancestor (deadlock).
+    pub async fn pull_all(
+        &self,
+        packages: &[ocx_oci::Identifier],
+        platform: ocx_oci::Platform,
+        concurrency: Concurrency,
+    ) -> Result<Vec<InstallInfo>, crate::error::Error> {
+        if packages.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let count = packages.len();
+        let outer = info_span!("Pulling", count);
+        // Emit an info-level event inside the outer span so the batch is
+        // visible in tracing log output (e.g. `RUST_LOG=info`) regardless of
+        // whether stderr is a TTY — the non-TTY observable counterpart of the
+        // per-package spinners.
+        tracing::info!(parent: &outer, count, "pulling");
+
+        let shared_groups = SetupGroups::new();
+        let semaphore = concurrency.semaphore();
+        let mut tasks = JoinSet::new();
+        for package in packages {
+            let mgr = self.clone();
+            let package = package.clone();
+            let platform = platform.clone();
+            let groups = shared_groups.clone();
+            let sem = semaphore.clone();
+            tasks.spawn(async move {
+                // Permit lives for the full setup_with_tracker call; drop
+                // happens after the await returns, releasing the slot for
+                // the next queued root pull.
+                let _permit = super::super::concurrency::acquire_permit(&sem).await;
+                let result = setup_with_tracker(&mgr, &package, platform, groups).await;
+                (package, result)
+            });
+        }
+
+        super::common::drain_package_tasks(packages, tasks, crate::error::Error::InstallFailed).await
+    }
+}
+
+/// Setup with an externally provided singleflight group, allowing shared
+/// dedup state across parallel pulls.
+fn setup_with_tracker<'a>(
+    mgr: &'a PackageManager,
+    package: &ocx_oci::Identifier,
+    platform: ocx_oci::Platform,
+    groups: SetupGroups,
+) -> Pin<Box<dyn Future<Output = Result<InstallInfo, PackageErrorKind>> + Send + 'a>> {
+    let package = package.clone();
+    Box::pin(async move { setup_impl(mgr, &package, platform, groups, None).await })
+}
+
+/// Inner implementation of [`PackageManager::pull`] — see that method for
+/// concurrency safety documentation.
+///
+/// `dest_override` — when `Some(path)`, forwarded to [`setup_owned`] and
+/// ultimately to [`move_temp_to_object_store`] so the package lands at `path`
+/// instead of the content-addressed object store location. All existing callers
+/// pass `None`; only `pull_local` supplies a value here (via `setup_owned`
+/// directly, bypassing this function's singleflight gate).
+async fn setup_impl(
+    mgr: &PackageManager,
+    package: &ocx_oci::Identifier,
+    platform: ocx_oci::Platform,
+    groups: SetupGroups,
+    dest_override: Option<&std::path::Path>,
+) -> Result<InstallInfo, PackageErrorKind> {
+    log::debug!("Pulling package: {}", package);
+
+    // Step 1: Resolve via the index (Image Index → platform manifest).
+    // The returned `ResolvedChain` carries the full `(registry, digest)` walk
+    // (top-level index + platform child where applicable) and the leaf
+    // `final_manifest` — the pull pipeline no longer re-fetches the manifest
+    // from the client, and the chain is linked into `refs/blobs/` in one shot.
+    let resolved = mgr.resolve(package, platform.clone()).await?;
+    let pinned = resolved.pinned.clone();
+    log::debug!("Resolved package identifier: {}", &pinned);
+
+    // Step 2: In-process dedup — check if another task is already setting
+    // up this exact dependency, or has already completed it.
+    let handle = match groups
+        .packages
+        .try_acquire(pinned.strip_advisory())
+        .await
+        .map_err(map_singleflight_error)?
+    {
+        singleflight::Acquisition::Resolved(info) => {
+            log::debug!("Package '{}' already set up by another task, reusing.", &pinned);
+            // Singleflight key is the final pinned digest, so two concurrent
+            // installs of different alias tags (e.g. `cmake:latest` and
+            // `cmake:3.28`) that land on the same leaf manifest share a
+            // leader — but their resolution chains may differ (different
+            // top-level image indexes). The leader linked only its chain,
+            // so top up the waiter's chain here. Staging + linking are
+            // idempotent, so overlapping entries are no-ops; only the unique
+            // entries (e.g., the waiter's distinct image-index digest) get
+            // materialized and linked.
+            super::common::stage_and_link_chain_blobs(
+                mgr.file_structure(),
+                mgr.index(),
+                &info.dir().content(),
+                &resolved,
+            )
+            .await?;
+            return Ok(info);
+        }
+        singleflight::Acquisition::Leader(handle) => handle,
+    };
+
+    // Policy-gated auto-verify at the metadata-first seam: the manifest digest
+    // is known but no layer has been downloaded, so a fail-closed abort leaves
+    // no package-store or symlink state (only inert content-addressed blob-cache
+    // writes from resolve). Runs leader-only — the singleflight key is the
+    // resolved digest, so a waiter shares an already-verified digest and skips
+    // re-verifying (diamond deps verify once). A verify failure is broadcast to
+    // waiters via `handle.fail`. A no-op unless a `[[trust.policy]]` covers the
+    // package; fires for the root and every transitive dependency (each unique
+    // digest reaches this single choke point). See `tasks::auto_verify`.
+    if let Err(kind) = mgr.maybe_auto_verify(pinned.as_identifier()).await {
+        let shared = handle.fail(kind);
+        return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
+    }
+
+    // From here on, we own the handle. On success, broadcast the result
+    // to waiters. On error, broadcast the error message so waiters get a
+    // meaningful diagnostic instead of a generic "abandoned".
+    // If we panic, Drop sends Abandoned as a fallback.
+    match setup_owned(mgr, &pinned, resolved, platform, groups, dest_override, None).await {
+        Ok(info) => {
+            handle.complete(info.clone());
+            Ok(info)
+        }
+        Err(e) => {
+            let shared = handle.fail(e);
+            Err(map_singleflight_error(singleflight::Error::Failed(shared)))
+        }
+    }
+}
+
+/// Performs the actual download, dependency resolution, and store placement.
+/// Called only by the task that owns the singleflight handle.
+///
+/// `dest_override` — when `Some(path)`, the package is written to `path` instead
+/// of the content-addressed object store location. Passed through to
+/// [`move_temp_to_object_store`] and the launcher bake-in step. All existing
+/// callers pass `None`.
+///
+/// `provided_metadata` — when `Some`, the metadata validation + `pull_metadata`
+/// registry call is skipped and the supplied value is used directly. Used by
+/// `pull_local` which has already validated the metadata before calling this
+/// function. When `None` (normal pull path), metadata is fetched from the
+/// registry via `client.pull_metadata`.
+pub async fn setup_owned(
+    mgr: &PackageManager,
+    pinned: &ocx_oci::PinnedIdentifier,
+    resolved: super::resolve::ResolvedChain,
+    platform: ocx_oci::Platform,
+    groups: SetupGroups,
+    dest_override: Option<&std::path::Path>,
+    provided_metadata: Option<metadata::Metadata>,
+) -> Result<InstallInfo, PackageErrorKind> {
+    // Stamp what the resolution learned exactly once, at the single boundary
+    // every returned `InstallInfo` passes through: the platform, so the
+    // candidate-symlink gate can suppress foreign-platform installs (issue
+    // #179), and the registry the content came from, which under index
+    // indirection is not the registry the identifier names. Threading them as a
+    // wrapper (rather than at each `return`) makes it structurally impossible
+    // for a new early return in `setup_owned_impl` to forget the stamp.
+    let resolved_platform = resolved.platform.clone();
+    let transport_registry = resolved.transport_pinned.registry().to_string();
+    setup_owned_impl(
+        mgr,
+        pinned,
+        resolved,
+        platform,
+        groups,
+        dest_override,
+        provided_metadata,
+    )
+    .await
+    .map(|info| {
+        info.with_platform(resolved_platform)
+            .with_transport_registry(transport_registry)
+    })
+}
+
+async fn setup_owned_impl(
+    mgr: &PackageManager,
+    pinned: &ocx_oci::PinnedIdentifier,
+    resolved: super::resolve::ResolvedChain,
+    platform: ocx_oci::Platform,
+    groups: SetupGroups,
+    dest_override: Option<&std::path::Path>,
+    provided_metadata: Option<metadata::Metadata>,
+) -> Result<InstallInfo, PackageErrorKind> {
+    // `provided_metadata` is `Some` on exactly one path — `pull_local`, which
+    // materializes from a local tarball with no registry in the loop. Captured
+    // before the value is moved so the origin-marker gate below can name the
+    // distinction it actually cares about.
+    let from_registry = provided_metadata.is_none();
+
+    // Defense layer 2 — skip if already fully installed (cross-process).
+    // When dest_override is set the caller wants to materialize to a specific
+    // path, not the object-store CAS path — bypass the fast-path so the
+    // materialization always proceeds to the override destination.
+    if dest_override.is_none()
+        && let Some(info) = mgr.find_plain(pinned).await?
+    {
+        let install_path = mgr.file_structure().packages.install_status(pinned);
+        if ocx_package::install_status::check_install_status(&install_path).await {
+            log::debug!("Package '{}' already fully installed, skipping.", pinned);
+            // Top up chain refs in case the already-installed package was
+            // resolved via a different image-index path (alias tag). See
+            // the waiter branch in `setup_impl` for the same invariant.
+            super::common::stage_and_link_chain_blobs(
+                mgr.file_structure(),
+                mgr.index(),
+                &info.dir().content(),
+                &resolved,
+            )
+            .await?;
+            return Ok(info);
+        }
+        // Status missing / partial / not-ok — crash recovery, re-pull.
+        log::debug!(
+            "Package '{}' present in object store but install status not OK, re-pulling.",
+            pinned
+        );
+    }
+
+    // Defense layer 3: Acquire exclusive temp directory (file lock).
+    // When `provided_metadata` is set (pull_local path), there may be no OCI
+    // client (offline mode). In that case fall back to a conservative timeout.
+    let lock_timeout = mgr
+        .client()
+        .map(|c| c.lock_timeout())
+        .unwrap_or(PULL_LOCAL_LOCK_TIMEOUT);
+    let temp = acquire_temp_dir(mgr.file_structure(), pinned, lock_timeout).await?;
+
+    // Post-lock recheck — if we waited for another process to release the
+    // lock, it may have already installed the package. Same dest_override
+    // gate as above: skip when a specific destination is requested.
+    if dest_override.is_none()
+        && let Some(info) = mgr.find_plain(pinned).await?
+    {
+        let install_path = mgr.file_structure().packages.install_status(pinned);
+        if ocx_package::install_status::check_install_status(&install_path).await {
+            log::debug!(
+                "Package '{}' installed by another process while waiting for lock, skipping.",
+                pinned
+            );
+            super::common::stage_and_link_chain_blobs(
+                mgr.file_structure(),
+                mgr.index(),
+                &info.dir().content(),
+                &resolved,
+            )
+            .await?;
+            return Ok(info);
+        }
+    }
+
+    // Manifest comes from the resolver — ChainedIndex already persisted it to
+    // the index snapshot via write-through during resolve, so no extra fetch is
+    // needed here; `stage_and_link_chain_blobs` below copies the chain into
+    // `$OCX_HOME/blobs` for GC (B2). When `provided_metadata` is `Some`
+    // (pull_local path), the metadata has already been validated by the caller;
+    // skip the registry round-trip.
+    let manifest = resolved.final_manifest.clone();
+    let metadata = if let Some(meta) = provided_metadata {
+        meta
+    } else {
+        // Fetch + media-type-check + validate the config blob. GC-protection
+        // comes from the config-blob digest carried in `ResolvedChain.chain`
+        // driving `ReferenceManager::link_blobs` below.
+        super::common::load_config_metadata(mgr.index(), pinned, &manifest)
+            .await?
+            .into()
+    };
+
+    // Validate manifest before any extraction work. Zero layers is valid —
+    // the package is a config-only artifact whose `content/` is the empty
+    // directory and whose metadata is the only carried payload.
+    if manifest.artifact_type.as_deref() != Some(MEDIA_TYPE_PACKAGE_V1) {
+        return Err(PackageErrorKind::from(
+            ocx_oci::client::error::ClientError::UnexpectedArtifactType {
+                expected: MEDIA_TYPE_PACKAGE_V1.to_string(),
+                actual: manifest.artifact_type.clone(),
+            },
+        ));
+    }
+
+    // Wrap the temp directory in a PackageDir so all sibling-file accesses
+    // use the canonical accessors instead of hardcoded strings.
+    let pkg = file_structure::PackageDir::with_root(temp.dir.dir.clone());
+
+    // Record the logical repository this digest was fetched under.
+    //
+    // `pinned`, deliberately — NOT `resolved.transport_pinned`, which is what
+    // the layer fetch below travels over after a `[mirrors]` rewrite or an
+    // index indirection. Consent has one identity and it is the logical one
+    // (`project::consent::source_of`); recording the routed address would pin
+    // consent to routing, the failure `adr_lock_records_physical_address.md`
+    // was rejected for. Both redirects are operator-configured — `config.toml`
+    // tiers only, `ocx.toml` reaches neither — and the content is
+    // digest-verified whichever endpoint serves it. See `record_origin`.
+    //
+    // Security-critical siting, not a convenience: the package path is
+    // (registry, digest) only, so this marker is the store's ONLY record of
+    // provenance, and shell-activation consent clause 2 quantifies over it
+    // (`project::consent::verified_sources`). It is written here — past both
+    // store-hit fast paths, inside the branch that fetches — so a local hit
+    // can never mint one, and it is skipped entirely when `from_registry` is
+    // false (`pull_local`, whose identifier is author-supplied text no
+    // registry vouched for). Writing into the staging dir means the marker is
+    // published by the same atomic temp→store rename as `install.json`.
+    if from_registry {
+        file_structure::record_origin(&pkg, pinned.as_identifier())
+            .await
+            .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+    }
+
+    // Store manifest in temp dir for audit trail — gets moved with the package.
+    manifest
+        .write_json(pkg.manifest())
+        .await
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+
+    let fs = mgr.file_structure();
+
+    // Extract layers to layers/ store and pull dependencies in parallel.
+    let (layer_digests, dependencies) = tokio::join!(
+        extract_layers(
+            mgr,
+            pinned,
+            &resolved.transport_pinned,
+            &manifest,
+            groups.layers.clone()
+        ),
+        setup_dependencies(mgr, &metadata, pinned, platform, groups.clone()),
+    );
+    let (layer_digests, dependencies) = (layer_digests?, dependencies?);
+
+    // Write metadata.json to package temp dir.
+    metadata
+        .write_json(pkg.metadata())
+        .await
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+
+    // GC race-closure: create refs/layers/ forward-refs BEFORE the walker
+    // runs. Once any file in the package content/ shares an inode with a
+    // layer file, the layer MUST already be protected by a forward-ref so
+    // a concurrent `ocx clean` cannot sweep it mid-assembly.
+    let layers_dir = pkg.refs_layers_dir();
+    tokio::fs::create_dir_all(&layers_dir)
+        .await
+        .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(layers_dir.clone(), e)))?;
+    link_layers_in_temp(&pkg, pinned.registry(), &layer_digests, fs)?;
+
+    // Assemble package content/ by hardlinking files from all layers.
+    // The walker mirrors each layer's directory tree into a single content/
+    // directory — regular files become hardlinks; intra-layer symlinks are
+    // preserved verbatim. Layers must not overlap (same file in two layers
+    // is an error).
+    let layer_contents: Vec<std::path::PathBuf> = layer_digests
+        .iter()
+        .map(|d| fs.layers.content(pinned.registry(), d))
+        .collect();
+    let sources: Vec<&std::path::Path> = layer_contents.iter().map(AsRef::as_ref).collect();
+    // Layers are stored verbatim (strip = 0). Per-layer placement (strip +
+    // output prefix) is resolved from each manifest layer descriptor's
+    // annotations, falling back to the package-wide `Bundle.strip_components`
+    // (BC1), and applied once here at assemble time. `extract_layers` preserves
+    // manifest declaration order, so `placements` aligns 1:1 with `sources`.
+    let bundle_strip = metadata.strip_components();
+    let mut placements: Vec<ocx_util::fs::path::LayerPlacement> = Vec::with_capacity(manifest.layers.len());
+    for layer in &manifest.layers {
+        let placement = ocx_oci::resolve_layer_placement(layer.annotations.as_ref(), bundle_strip)
+            .map_err(|e| PackageErrorKind::Internal(crate::Error::LayerLayout(e)))?;
+        placements.push(placement);
+    }
+    ocx_store::file_structure::assemble_from_layers_with_layouts(&sources, &placements, &pkg.content())
+        .await
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+
+    // Entry point launcher generation.
+    // Launchers are written into pkg.entrypoints() — the temp dir's entrypoints/ sibling —
+    // BEFORE post_download_actions so they are carried by the existing atomic move.
+    // The launcher BAKES THE FINAL packages/<digest>/ package-root path (resolved via
+    // `fs.packages.path(pinned)`), NOT the temp staging path: the launcher file
+    // moves atomically with the package, but the path it bakes must reference the
+    // post-move location to remain valid after the move.
+    if let Some(entrypoints) = metadata.entrypoints()
+        && !entrypoints.is_empty()
+    {
+        let dest = pkg.entrypoints();
+        // Bake the post-move package-root path into the launcher so it remains
+        // valid after the temp→final atomic rename.
+        let final_pkg_root = dest_override
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| fs.packages.path(pinned));
+        crate::launcher::generate(&final_pkg_root, entrypoints, &dest, &fs.shim_bin)
+            .await
+            .map_err(PackageErrorKind::Internal)?;
+    }
+
+    // Build resolved package and enrich temp dir.
+    // Order invariant: setup_dependencies returns results in declaration order.
+    let resolved_package = ResolvedPackage::new().with_dependencies(
+        metadata
+            .dependencies()
+            .iter()
+            .zip(dependencies.iter())
+            .map(|(decl, info)| (info.identifier().clone(), info.resolved().clone(), decl.visibility)),
+    );
+
+    // Stage 1 entrypoint collision check — runs against the interface
+    // projection of the transitive closure, before `resolve.json` is
+    // persisted. Catches user-facing duplicate launcher names at install
+    // time so the bad state never reaches disk.
+    //
+    // Scope: interface-projection only (`tc_entry.visibility.has_interface()`).
+    // Private-surface duplicates that arise when a private-edge dep
+    // contributes its own entrypoint synth-PATH under `--self` are
+    // deliberately tolerated and resolved at runtime by topological PATH
+    // order (root prepends last so root wins). See `adr_two_env_composition.md`.
+    {
+        let root_info = Arc::new(InstallInfo::new(
+            pinned.clone(),
+            metadata.clone(),
+            resolved_package.clone(),
+            pkg.clone(),
+        ));
+        composer::check_entrypoints(std::slice::from_ref(&root_info), &fs.packages).await?;
+    }
+
+    post_download_actions(&pkg, pinned, &resolved_package).await?;
+
+    // Create remaining forward-ref symlinks in temp dir BEFORE move — targets
+    // are absolute paths already in their respective stores. This ensures the
+    // move is atomic: no window where the package exists without refs/.
+    // NOTE: issue #23 (relative symlinks) will need to revisit this approach.
+    if !dependencies.is_empty() {
+        let deps_dir = pkg.refs_deps_dir();
+        tokio::fs::create_dir_all(&deps_dir)
+            .await
+            .map_err(|e| PackageErrorKind::Internal(crate::Error::InternalFile(deps_dir.clone(), e)))?;
+    }
+    link_dependencies_in_temp(&pkg, &dependencies)?;
+    // Materialize the resolver's manifest + config chain into `$OCX_HOME/blobs`
+    // (the B2 duplicate the index snapshot does not provide) and forward-ref
+    // every blob into `refs/blobs/` so GC's `add_index_retention_edges` can
+    // reach the full resolution chain from the installed package.
+    super::common::stage_and_link_chain_blobs(fs, mgr.index(), &pkg.content(), &resolved).await?;
+
+    // Atomic move temp → object store.
+    let install_info = move_temp_to_object_store(
+        mgr.file_structure(),
+        pinned,
+        &metadata,
+        resolved_package,
+        temp,
+        dest_override,
+    )
+    .await?;
+
+    log::debug!("Pull succeeded for '{}'.", pinned);
+    Ok(install_info)
+}
+
+/// Acquires an exclusive temp directory for the given identifier.
+///
+/// `lock_timeout` is used when the temp directory is locked by another
+/// process — this is how long to wait before giving up. Pass
+/// `client.lock_timeout()` on the normal pull path; pass
+/// [`PULL_LOCAL_LOCK_TIMEOUT`] when there is no client available (e.g.,
+/// the `pull_local` offline path).
+pub async fn acquire_temp_dir(
+    fs: &file_structure::FileStructure,
+    identifier: &ocx_oci::PinnedIdentifier,
+    lock_timeout: Duration,
+) -> Result<ocx_store::file_structure::TempAcquireResult, PackageErrorKind> {
+    let temp_path = fs
+        .temp
+        .path(identifier)
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+
+    let acquire = match fs
+        .temp
+        .try_acquire(&temp_path)
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?
+    {
+        Some(r) => r,
+        None => {
+            log::debug!("Temp dir locked by another process, waiting: {}", temp_path.display());
+            fs.temp
+                .acquire_with_timeout(&temp_path, lock_timeout)
+                .await
+                .map_err(|error| PackageErrorKind::Internal(error.into()))?
+        }
+    };
+    if acquire.was_cleaned {
+        log::debug!("Cleaned previous temp data at {}", temp_path.display());
+    }
+    Ok(acquire)
+}
+
+/// Sets up dependencies in parallel, returning results in declaration order.
+///
+/// Each dependency is dispatched through [`setup_with_tracker`], which calls
+/// the singleflight group internally. Diamond dependencies are deduplicated
+/// automatically — the first task to claim a dependency does the work, and
+/// all others block on the watch channel.
+///
+/// Returns `Vec<Arc<InstallInfo>>` rather than `Vec<InstallInfo>` so the
+/// caller (`setup_owned`) can hand each dep straight to
+/// [`DependencyContext::full(Arc<InstallInfo>)`](ocx_package::metadata::env::dep_context::DependencyContext::full)
+/// without re-allocating an `Arc` (and cloning the underlying `InstallInfo`)
+/// per direct dep. The Arc-sharing invariant introduced by the metadata
+/// pipeline (commit 40b001f) is meant to live end-to-end on this path; the
+/// previous `Vec<InstallInfo>` return type forced the consumer to
+/// `Arc::new(info.clone())` and undid the saving.
+async fn setup_dependencies(
+    mgr: &PackageManager,
+    metadata: &ocx_package::metadata::Metadata,
+    parent: &ocx_oci::PinnedIdentifier,
+    platform: ocx_oci::Platform,
+    groups: SetupGroups,
+) -> Result<Vec<Arc<InstallInfo>>, PackageErrorKind> {
+    let deps = metadata.dependencies();
+    if deps.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    log::debug!(
+        "Package '{}' has {} dependencies, pulling transitively.",
+        parent,
+        deps.len(),
+    );
+
+    let mut tasks = JoinSet::new();
+
+    for (idx, dep) in deps.iter().enumerate() {
+        let mgr = mgr.clone();
+        let dep_id = dep.identifier.clone();
+        let platform = platform.clone();
+        let groups = groups.clone();
+        tasks.spawn(async move {
+            let info = setup_with_tracker(&mgr, &dep_id, platform, groups).await?;
+            Ok::<_, PackageErrorKind>((idx, Arc::new(info)))
+        });
+    }
+
+    let mut results: Vec<Option<Arc<InstallInfo>>> = vec![None; deps.len()];
+    while let Some(join_result) = tasks.join_next().await {
+        // Preserve the original task panic for diagnostics: per
+        // `quality-rust.md` Async Patterns, resume_unwind on panic and
+        // panic with the JoinError context on cancellation.
+        let (idx, info) = match join_result {
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => panic!("dependency setup task aborted: {e}"),
+            Ok(v) => v,
+        }?;
+        results[idx] = Some(info);
+    }
+
+    Ok(results.into_iter().flatten().collect())
+}
+
+/// Post processing after download of the package content and all dependencies are fully set up.
+///
+/// - Writes the `resolve.json` metadata file with the resolved dependencies for this package.
+/// - Writes the `install.json` sentinel file to indicate the package is fully installed.
+/// - Writes the `digest` file for recovery of the full digest from the truncated CAS path.
+async fn post_download_actions(
+    pkg: &file_structure::PackageDir,
+    pinned: &ocx_oci::PinnedIdentifier,
+    resolved: &ResolvedPackage,
+) -> Result<(), PackageErrorKind> {
+    // Tag-preservation policy: `resolve.json` deliberately keeps each
+    // dependency's advisory tag (the form that won the install-time race).
+    // `ocx.lock` strips it via `PinnedIdentifier::strip_advisory()` because
+    // a project lock is the canonical pinned record and a tag-only churn
+    // would bust `generated_at` preservation. The two files have different
+    // jobs: install-time audit trail vs. canonical project pin. Do not
+    // harmonise without revisiting plan_project_toolchain.md §7.4.
+    resolved
+        .write_json(pkg.resolve())
+        .await
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+
+    // Write install.json through the lock-owning handle so concurrent
+    // `check_install_status` readers (shared lock) wait for the write to
+    // complete before reading. Eliminates the existence-probe race where a
+    // reader could observe a partial JSON document from a mid-write writer.
+    {
+        let mut locked = ocx_util::fs::LockedJsonFile::<InstallStatus>::open_exclusive(pkg.install_status())
+            .await
+            .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+        locked
+            .write(&InstallStatus::new().ok())
+            .await
+            .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+    }
+
+    file_structure::write_digest_file(&pkg.digest_file(), &pinned.digest())
+        .await
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+
+    Ok(())
+}
+
+/// Atomically moves the enriched temp directory to the object store.
+///
+/// When `dest_override` is `Some(path)`, the package is moved to `path` instead
+/// of the content-addressed location under `$OCX_HOME/packages/`. The returned
+/// [`InstallInfo`] is constructed with a [`PackageDir`](file_structure::PackageDir)
+/// rooted at whichever destination was chosen, so all downstream consumers
+/// (including `install_info_from_package_root`) see the correct paths. All
+/// existing callers pass `None`.
+async fn move_temp_to_object_store(
+    fs: &file_structure::FileStructure,
+    identifier: &ocx_oci::PinnedIdentifier,
+    metadata: &metadata::Metadata,
+    resolved: ResolvedPackage,
+    temp: ocx_store::file_structure::TempAcquireResult,
+    dest_override: Option<&std::path::Path>,
+) -> Result<InstallInfo, PackageErrorKind> {
+    let output_path = dest_override
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| fs.packages.path(identifier));
+    let temp_path = temp.dir.dir.clone();
+    let pkg = file_structure::PackageDir::with_root(output_path.clone());
+
+    ocx_util::fs::move_dir(&temp_path, &output_path)
+        .await
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+
+    drop(temp);
+
+    Ok(InstallInfo::new(identifier.clone(), metadata.clone(), resolved, pkg))
+}
+
+/// Extracts all layers referenced by a manifest in parallel, returning their
+/// parsed digests in manifest declaration order.
+///
+/// Each layer is dispatched through [`extract_layer_atomic`], which provides
+/// the same atomicity guarantees as package install — in-process
+/// singleflight dedup, find-plain gate, exclusive temp lock, post-lock
+/// recheck, and atomic move into `layers/{digest}/`.
+async fn extract_layers(
+    mgr: &PackageManager,
+    pinned: &ocx_oci::PinnedIdentifier,
+    transport: &ocx_oci::PinnedIdentifier,
+    manifest: &ocx_oci::ImageManifest,
+    layer_group: LayerGroup,
+) -> Result<Vec<ocx_oci::Digest>, PackageErrorKind> {
+    // Parse all layer digests up front so we can return a typed error
+    // before spawning any work.
+    let mut parsed = Vec::with_capacity(manifest.layers.len());
+    for layer in &manifest.layers {
+        let digest: ocx_oci::Digest = layer
+            .digest
+            .clone()
+            .try_into()
+            .map_err(|e: ocx_oci::digest::error::DigestError| PackageErrorKind::Internal(e.into()))?;
+        parsed.push((layer.clone(), digest));
+    }
+
+    // One SSRF pre-flight per pull operation, run by whichever layer task first
+    // finds it has to dial (see `Index::guard_physical_dial`). Shared rather than
+    // hoisted here so a pull whose layers are all cached never resolves the
+    // physical host at all.
+    let dial_guard: Arc<tokio::sync::OnceCell<DialVerdict>> = Arc::new(tokio::sync::OnceCell::new());
+
+    // Dispatch extractions in parallel. JoinSet results come back in
+    // completion order, so we tag each task with its index and reorder at
+    // the end to preserve manifest declaration order.
+    let mut tasks: JoinSet<(usize, Result<ocx_oci::Digest, PackageErrorKind>)> = JoinSet::new();
+    for (idx, (layer, digest)) in parsed.into_iter().enumerate() {
+        let mgr = mgr.clone();
+        let pinned = pinned.clone();
+        let transport = transport.clone();
+        let layer_group = layer_group.clone();
+        let dial_guard = dial_guard.clone();
+        tasks.spawn(async move {
+            let res = extract_layer_atomic(&mgr, &pinned, &transport, &layer, &digest, layer_group, &dial_guard).await;
+            (idx, res)
+        });
+    }
+
+    let mut results: Vec<Option<ocx_oci::Digest>> = vec![None; tasks.len()];
+    while let Some(join_res) = tasks.join_next().await {
+        // Preserve the original task panic for diagnostics: per
+        // `quality-rust.md` Async Patterns, resume_unwind on panic and
+        // panic with the JoinError context on cancellation.
+        let (idx, task_res) = match join_res {
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => panic!("layer extraction task aborted: {e}"),
+            Ok(v) => v,
+        };
+        results[idx] = Some(task_res?);
+    }
+    Ok(results.into_iter().flatten().collect())
+}
+
+/// Atomically extracts a single layer into `layers/{digest}/`, dedup-ing
+/// in-process concurrent extractions via the layer singleflight group.
+///
+/// Flow:
+/// 1. Singleflight acquire — `Resolved` means another task already
+///    finished; `Leader` means we do the work and broadcast on completion.
+/// 2. Find-plain — skip if `layers/{digest}/content/` already exists.
+/// 3. Acquire exclusive temp dir via `TempStore::layer_path`.
+/// 4. Post-lock recheck — another process may have finished while we waited.
+/// 5. Pull the layer blob into the temp dir.
+/// 6. Write the `digest` file for CAS-path recovery.
+/// 7. Atomic rename temp → `layers/{digest}/`. A late race at rename time
+///    (another process finishing between step 4 and step 7) is still
+///    tolerated as a no-op cleanup.
+/// 8. Broadcast completion via the singleflight handle.
+///
+/// The memoized outcome of a pull operation's dial-site SSRF pre-flight.
+///
+/// The **whole verdict** is memoized, not just success:
+/// [`tokio::sync::OnceCell::get_or_try_init`] leaves the cell uninitialized when
+/// its initializer fails, so caching only the `Ok` would let every missing layer
+/// re-ask — and a host that answers differently between two adjacent lookups
+/// needs exactly one `Ok` to be dialled. One refusal is therefore final for the
+/// operation.
+type DialVerdict = Result<(), DialRefusal>;
+
+/// A dial-site refusal, shared across the layer tasks that observe it.
+///
+/// [`crate::Error`] is not `Clone`, and every waiter needs the same verdict, so
+/// the refusal is shared behind an `Arc` and the original is exposed as the
+/// chain successor — `cli::classify_error` walks to it and still reports the
+/// `SsrfError`'s exit code. Same shape as
+/// [`singleflight::SharedError`](ocx_util::singleflight::SharedError),
+/// which cannot be constructed outside its own `Handle::fail`.
+#[derive(Debug, Clone)]
+struct DialRefusal(Arc<crate::Error>);
+
+impl std::fmt::Display for DialRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for DialRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.0)
+    }
+}
+
+/// `dial_guard` memoizes the pull operation's SSRF pre-flight over the physical
+/// target, so the check runs once however many layers are fetched — and a
+/// refusal stays refused ([`DialVerdict`]).
+async fn extract_layer_atomic(
+    mgr: &PackageManager,
+    pinned: &ocx_oci::PinnedIdentifier,
+    transport: &ocx_oci::PinnedIdentifier,
+    layer: &ocx_oci::Descriptor,
+    layer_digest: &ocx_oci::Digest,
+    layer_group: LayerGroup,
+    dial_guard: &tokio::sync::OnceCell<DialVerdict>,
+) -> Result<ocx_oci::Digest, PackageErrorKind> {
+    let fs = mgr.file_structure();
+    let registry = pinned.registry().to_string();
+
+    // Step 1: singleflight gate.
+    let key = (registry.clone(), layer_digest.clone());
+    let handle = match layer_group.try_acquire(key).await.map_err(map_singleflight_error)? {
+        singleflight::Acquisition::Resolved(()) => {
+            log::debug!("Layer {} already extracted by another task, reusing.", layer_digest);
+            return Ok(layer_digest.clone());
+        }
+        singleflight::Acquisition::Leader(handle) => handle,
+    };
+
+    // Step 2: layer cache fast path — if `layers/{digest}/content/` is present,
+    // no fetch is needed. Acquire the client lazily so an offline manager (no
+    // client) can still re-assemble a package whose layers are all cached.
+    let layer_content = fs.layers.content(pinned.registry(), layer_digest);
+    if ocx_util::fs::path_exists_lossy(&layer_content).await {
+        log::debug!("Layer {} present on disk, skipping fetch.", layer_digest);
+        handle.complete(());
+        return Ok(layer_digest.clone());
+    }
+
+    let client = match mgr.require_client() {
+        Ok(c) => c,
+        Err(e) => {
+            let kind = PackageErrorKind::Internal(e);
+            let shared = handle.fail(kind);
+            return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
+        }
+    };
+
+    // The layer is genuinely absent, so a request to the PHYSICAL location is
+    // imminent — and `client` carries no SSRF resolver of its own. This is the
+    // one point where a target the index rewrote is validated before anything
+    // dials it; the pre-flight `physical_reference` ran at resolve time had to
+    // tolerate a lookup failure, so its verdict cannot stand in for this one.
+    if let Err(refusal) = dial_guard
+        .get_or_init(|| async {
+            mgr.index()
+                .guard_physical_dial(pinned.as_identifier(), transport.as_identifier())
+                .await
+                .map_err(|error| DialRefusal(Arc::new(error.into())))
+        })
+        .await
+    {
+        let shared = handle.fail(refusal.clone());
+        return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
+    }
+
+    // We own the handle. Either complete on Ok or fail on Err before return.
+    match extract_layer_inner(pinned, transport, layer, layer_digest, client, fs).await {
+        Ok(()) => {
+            handle.complete(());
+            Ok(layer_digest.clone())
+        }
+        Err(e) => {
+            let shared = handle.fail(e);
+            Err(map_singleflight_error(singleflight::Error::Failed(shared)))
+        }
+    }
+}
+
+/// Inner extraction implementation — runs only for the leader task.
+async fn extract_layer_inner(
+    pinned: &ocx_oci::PinnedIdentifier,
+    transport: &ocx_oci::PinnedIdentifier,
+    layer: &ocx_oci::Descriptor,
+    layer_digest: &ocx_oci::Digest,
+    client: &ocx_oci::Client,
+    fs: &file_structure::FileStructure,
+) -> Result<(), PackageErrorKind> {
+    // Step 2: find-plain — skip if already extracted on disk.
+    let layer_content = fs.layers.content(pinned.registry(), layer_digest);
+    if ocx_util::fs::path_exists_lossy(&layer_content).await {
+        log::debug!("Layer {} already present on disk, skipping.", layer_digest);
+        return Ok(());
+    }
+
+    // Step 3: acquire exclusive temp dir at the layer-keyed path.
+    let temp_path = fs.temp.layer_path(pinned.registry(), layer_digest);
+    let temp = match fs
+        .temp
+        .try_acquire(&temp_path)
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?
+    {
+        Some(r) => r,
+        None => {
+            log::debug!(
+                "Layer temp dir locked by another process, waiting: {}",
+                temp_path.display()
+            );
+            fs.temp
+                .acquire_with_timeout(&temp_path, client.lock_timeout())
+                .await
+                .map_err(|error| PackageErrorKind::Internal(error.into()))?
+        }
+    };
+
+    // Step 4: post-lock recheck.
+    if ocx_util::fs::path_exists_lossy(&layer_content).await {
+        log::debug!(
+            "Layer {} installed by another process while waiting for lock, skipping.",
+            layer_digest
+        );
+        return Ok(());
+    }
+
+    // Step 5: pull the layer blob. Content comes from the PHYSICAL location
+    // (`transport`) — for an index-sourced package that is the registry the
+    // root's `repository` pointer names, not the logical `ocx.sh` host. Storage
+    // paths above stay keyed on the logical `pinned` (Decision C2). For
+    // registry-backed packages `transport == pinned`.
+    client.pull_layer(transport, layer, &temp.dir.dir).await?;
+
+    // Step 5a: ad-hoc code-sign the extracted tree (macOS only). First use of
+    // `content/` after extraction, deliberately: nothing may read or link an
+    // unsigned Mach-O out of the layer store.
+    ocx_store::codesign::sign_extracted_content(&temp.dir.dir.join("content"))
+        .await
+        .map_err(ocx_oci::client::error::ClientError::internal)?;
+
+    // Step 6: write digest file for CAS-path recovery.
+    file_structure::write_digest_file(&temp.dir.dir.join(file_structure::DIGEST_FILENAME), layer_digest)
+        .await
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+
+    // Step 7: atomic rename temp → layers/{digest}/.
+    super::layer_staging::finalize_layer_dir(fs, pinned.registry(), layer_digest, &temp.dir.dir).await?;
+
+    drop(temp);
+    Ok(())
+}
+
+/// Creates dependency forward-refs (`refs/deps/` symlinks) inside the temp directory.
+///
+/// Symlink targets are absolute paths to dependency content directories already
+/// present in the object store (deps are pulled before the dependent). After
+/// `move_dir` the symlinks remain valid because their targets are not inside the
+/// temp directory being moved.
+///
+/// ALL deps get symlinks regardless of visibility — visibility only controls
+/// env composition, not GC or filesystem presence.
+///
+/// The caller is responsible for pre-creating `pkg.refs_deps_dir()` via an
+/// async `tokio::fs::create_dir_all` — this helper stays sync so it does not
+/// introduce blocking I/O into an async context.
+#[allow(clippy::result_large_err)]
+fn link_dependencies_in_temp(
+    pkg: &file_structure::PackageDir,
+    dep_infos: &[Arc<InstallInfo>],
+) -> Result<(), PackageErrorKind> {
+    if dep_infos.is_empty() {
+        return Ok(());
+    }
+    let deps_dir = pkg.refs_deps_dir();
+    for info in dep_infos {
+        // The dep's digest is already in hand via its pinned identifier —
+        // no path-based recovery needed.
+        let dep_digest = info.identifier().digest();
+        let name = ocx_store::file_structure::cas_ref_name(&dep_digest);
+        let link_path = deps_dir.join(name);
+        ocx_util::fs::symlink::create(info.dir().content(), &link_path)
+            .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+    }
+    Ok(())
+}
+
+/// Creates layer forward-refs (`refs/layers/` symlinks) inside the temp directory.
+///
+/// Symlink targets point to `layers/.../content/` — the content path inside
+/// each layer. GC's `read_refs` takes `.parent()` on each target to recover
+/// the layer entry directory, matching the same convention deps use (targets
+/// point to `{entry}/content/`, not the entry dir itself).
+///
+/// The caller is responsible for pre-creating `pkg.refs_layers_dir()` via an
+/// async `tokio::fs::create_dir_all` — this helper stays sync so it does not
+/// introduce blocking I/O into an async context.
+#[allow(clippy::result_large_err)]
+fn link_layers_in_temp(
+    pkg: &file_structure::PackageDir,
+    registry: &str,
+    layer_digests: &[ocx_oci::Digest],
+    fs: &file_structure::FileStructure,
+) -> Result<(), PackageErrorKind> {
+    if layer_digests.is_empty() {
+        return Ok(());
+    }
+    let layers_dir = pkg.refs_layers_dir();
+    for digest in layer_digests {
+        let layer_content = fs.layers.content(registry, digest);
+        let name = ocx_store::file_structure::cas_ref_name(digest);
+        let link_path = layers_dir.join(name);
+        ocx_util::fs::symlink::create(&layer_content, &link_path)
+            .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{SetupGroups, setup_owned};
+    use crate::{
+        PackageManager,
+        error::PackageErrorKind,
+        tasks::resolve::{ChainBlob, ChainRole, ResolvedChain},
+    };
+    use ocx_index::{ChainMode, Index, IndexStore, LocalConfig, LocalIndex, test_source::TrustingSource};
+    use ocx_oci::{client::test_transport::StubTransport, client::test_transport::StubTransportData};
+    use ocx_package::{
+        install_info::InstallInfo,
+        metadata::{
+            Metadata,
+            bundle::{Bundle, Version},
+            dependency::Dependencies,
+            entrypoint::Entrypoints,
+            env::Env,
+        },
+    };
+    use ocx_store::file_structure::FileStructure;
+
+    /// Drives `setup_owned` against a leaf that is a perfectly valid OCI
+    /// artifact but not an OCX package, and returns the refusal.
+    ///
+    /// `provided_metadata` selects which of the two gates trips first, and the
+    /// two differ in more than sequencing:
+    ///
+    /// - `Some(..)` short-circuits the config-blob fetch, so the manifest
+    ///   `artifactType` gate is first.
+    /// - `None` — the shape `ocx install` / `ocx pull` actually take — reaches
+    ///   `load_config_metadata`, whose config media-type gate fires *before*
+    ///   the artifact-type gate ever runs.
+    ///
+    /// Both must exit 65. Covering only the `Some(..)` shape certifies a fix
+    /// on a path the real install never walks.
+    async fn refuse_foreign_leaf_artifact(provided_metadata: Option<Metadata>) -> PackageErrorKind {
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::new(dir.path().join("index")),
+            }),
+            Vec::new(),
+            ChainMode::Offline,
+        );
+        // No client: nothing in this path may reach the registry.
+        let manager = PackageManager::new(file_structure, index, None, "example.com");
+
+        let digest = ocx_oci::Digest::Sha256("d".repeat(64));
+        let pinned = ocx_oci::PinnedIdentifier::try_from(
+            ocx_oci::Identifier::new_registry("test/foreign", "example.com")
+                .clone_with_tag("1.0.0")
+                .clone_with_digest(digest.clone()),
+        )
+        .expect("pinned identifier");
+
+        let platform = ocx_oci::Platform::Specific {
+            os: ocx_oci::OperatingSystem::Linux,
+            arch: ocx_oci::Architecture::Amd64,
+            variant: None,
+            os_features: Vec::new(),
+        };
+
+        // A leaf manifest that is a perfectly valid OCI artifact — just not an
+        // OCX package.
+        let final_manifest = ocx_oci::ImageManifest {
+            artifact_type: Some("application/vnd.example.other.v1".to_string()),
+            config: ocx_oci::Descriptor {
+                media_type: "application/vnd.example.other.config.v1+json".to_string(),
+                digest: digest.to_string(),
+                size: 2,
+                urls: None,
+                artifact_type: None,
+                annotations: None,
+            },
+            ..Default::default()
+        };
+
+        let resolved = ResolvedChain {
+            pinned: pinned.clone(),
+            transport_pinned: pinned.clone(),
+            chain: vec![ChainBlob {
+                identifier: pinned.clone(),
+                role: ChainRole::Manifest,
+                media_type: ocx_oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                size: 2,
+            }],
+            final_manifest,
+            platform: platform.clone(),
+        };
+
+        setup_owned(
+            &manager,
+            &pinned,
+            resolved,
+            platform,
+            SetupGroups::new(),
+            None,
+            provided_metadata,
+        )
+        .await
+        .expect_err("a foreign leaf artifact type must be refused")
+    }
+
+    fn bundle_metadata() -> Metadata {
+        Metadata::Bundle(Bundle {
+            binaries: None,
+            version: Version::V1,
+            strip_components: None,
+            env: Env::default(),
+            dependencies: Dependencies::default(),
+            entrypoints: Entrypoints::default(),
+            integrations: Default::default(),
+        })
+    }
+
+    /// Bug 20 / F1: the leaf artifact-type gate used to wrap a media-type
+    /// error in `ClientError::Internal`, whose terminal `Failure` arm ends the
+    /// chain walk — so installing a non-OCX artifact exited 1 while every
+    /// sibling artifact-type gate exits 65.
+    ///
+    /// The assertion is deliberately on the **classified exit code**, not the
+    /// error variant: `ClientError::UnexpectedArtifactType` already classified
+    /// as `DataError` before the fix. A variant-only assertion would have
+    /// passed against the bug.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unexpected_leaf_artifact_type_exits_data_error() {
+        let error = refuse_foreign_leaf_artifact(Some(bundle_metadata())).await;
+
+        let message = error.to_string();
+        assert!(
+            message.contains("application/vnd.sh.ocx.package.v1"),
+            "the error must name the expected type: {message}"
+        );
+        assert!(
+            message.contains("application/vnd.example.other.v1"),
+            "the error must name the actual type: {message}"
+        );
+    }
+
+    /// The path `ocx install docker.io/library/alpine:3` actually takes:
+    /// `provided_metadata` is `None`, so `load_config_metadata`'s config
+    /// media-type gate fires before the artifact-type gate. That gate used to
+    /// wrap `crate::Error::UnsupportedMediaType` — which classifies as 65 on
+    /// its own — in `ClientError::internal`, whose terminal `Failure` arm
+    /// stops the chain walk at exit 1.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unexpected_leaf_config_media_type_exits_data_error() {
+        let error = refuse_foreign_leaf_artifact(None).await;
+
+        let message = error.to_string();
+        assert!(
+            message.contains("application/vnd.example.other.config.v1+json"),
+            "the error must name the offending config media type: {message}"
+        );
+    }
+
+    // ── The dial-site SSRF floor over a rewritten physical target ────────────
+
+    /// Whatever a layer fetch touches on the transport — the request log and the
+    /// auth handshake that precedes it. Both must be empty for "no dial".
+    struct TransportTouches {
+        calls: Vec<String>,
+        auth: usize,
+    }
+
+    impl TransportTouches {
+        fn none(&self) -> bool {
+            self.calls.is_empty() && self.auth == 0
+        }
+    }
+
+    /// What a pull left behind for the assertions: the outcome, what reached the
+    /// transport, and how many times the dial-site guard was evaluated.
+    struct PullObservation {
+        outcome: Result<InstallInfo, PackageErrorKind>,
+        touches: TransportTouches,
+        guard_evaluations: usize,
+    }
+
+    /// Runs a real `setup_owned` for a `layers`-layer package whose physical
+    /// transport registry differs from its logical one — the index-indirected
+    /// shape.
+    ///
+    /// `layers_cached` decides whether the pull has anything to fetch: with every
+    /// layer already extracted on disk the operation is fully warm and no dial is
+    /// imminent, which is exactly the case the guard must not judge.
+    ///
+    /// The chain always carries a `TrustingSource` owning the LOGICAL registry.
+    /// It trusts nothing, so it changes no verdict — it is there to count, since
+    /// `guard_physical_dial` asks it for `trusted_hosts` exactly once per
+    /// evaluation.
+    async fn pull_indirected_package(physical_registry: &str, layers: usize, layers_cached: bool) -> PullObservation {
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        let guard_evaluations = Arc::new(AtomicUsize::new(0));
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::new(dir.path().join("index")),
+            }),
+            vec![TrustingSource::new("example.com", Vec::new(), guard_evaluations.clone()).into_index()],
+            ChainMode::Default,
+        );
+        let transport_data = StubTransportData::new();
+        let client = ocx_oci::Client::with_transport(Box::new(StubTransport::new(transport_data.clone())));
+        let manager = PackageManager::new(file_structure.clone(), index, Some(client), "example.com");
+
+        let manifest_digest = ocx_oci::Digest::Sha256("d".repeat(64));
+        let layer_digests: Vec<ocx_oci::Digest> = (0..layers)
+            .map(|index| ocx_oci::Digest::Sha256(format!("{index:064}")))
+            .collect();
+        let pinned = ocx_oci::PinnedIdentifier::try_from(
+            ocx_oci::Identifier::new_registry("test/indirected", "example.com")
+                .clone_with_tag("1.0.0")
+                .clone_with_digest(manifest_digest.clone()),
+        )
+        .expect("pinned identifier");
+        // The physical pointer an index root would mint: a different registry,
+        // carrying the same leaf digest (transport-only, Decision C2).
+        let transport_pinned = ocx_oci::PinnedIdentifier::try_from(
+            ocx_oci::Identifier::new_registry("mirror/indirected", physical_registry)
+                .clone_with_digest(manifest_digest.clone()),
+        )
+        .expect("pinned physical identifier");
+
+        if layers_cached {
+            for layer_digest in &layer_digests {
+                tokio::fs::create_dir_all(file_structure.layers.content(pinned.registry(), layer_digest))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let platform = ocx_oci::Platform::Specific {
+            os: ocx_oci::OperatingSystem::Linux,
+            arch: ocx_oci::Architecture::Amd64,
+            variant: None,
+            os_features: Vec::new(),
+        };
+
+        let final_manifest = ocx_oci::ImageManifest {
+            artifact_type: Some(super::MEDIA_TYPE_PACKAGE_V1.to_string()),
+            config: ocx_oci::Descriptor {
+                media_type: ocx_oci::media_type::MEDIA_TYPE_PACKAGE_METADATA_V1.to_string(),
+                digest: manifest_digest.to_string(),
+                size: 2,
+                urls: None,
+                artifact_type: None,
+                annotations: None,
+            },
+            layers: layer_digests
+                .iter()
+                .map(|layer_digest| ocx_oci::Descriptor {
+                    media_type: ocx_oci::media_type::MEDIA_TYPE_TAR_GZ.to_string(),
+                    digest: layer_digest.to_string(),
+                    size: 1,
+                    urls: None,
+                    artifact_type: None,
+                    annotations: None,
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        let resolved = ResolvedChain {
+            pinned: pinned.clone(),
+            transport_pinned,
+            chain: vec![ChainBlob {
+                identifier: pinned.clone(),
+                role: ChainRole::Manifest,
+                media_type: ocx_oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                size: 2,
+            }],
+            final_manifest,
+            platform: platform.clone(),
+        };
+
+        let outcome = setup_owned(
+            &manager,
+            &pinned,
+            resolved,
+            platform,
+            SetupGroups::new(),
+            None,
+            Some(bundle_metadata()),
+        )
+        .await;
+
+        PullObservation {
+            outcome,
+            touches: TransportTouches {
+                calls: transport_data.read().calls.clone(),
+                auth: transport_data.read().auth_calls.len(),
+            },
+            guard_evaluations: guard_evaluations.load(Ordering::SeqCst),
+        }
+    }
+
+    /// The gap the dial-site guard closes: `physical_reference` resolves the
+    /// pointer on every resolve, so its own pre-flight must tolerate a lookup
+    /// failure — and the pull then dials the admitted host on the shared client,
+    /// which performs its own independent lookup and carries no
+    /// `GuardedResolver`. A hostile local index tree (an rsync'd copy is a
+    /// supported distribution mechanism) naming a host that answers NXDOMAIN at
+    /// check time and loopback at dial time would otherwise reach a forbidden
+    /// target deterministically.
+    ///
+    /// `localhost` is the fixture because it is a plain DNS name that genuinely
+    /// resolves into the forbidden range — the *post*-rebind state of that
+    /// attack, judged the way the dial would judge it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rewritten_forbidden_transport_is_refused_before_the_first_layer_request() {
+        let (host, port) = ocx_oci::ssrf::split_host_port("localhost:5999");
+        assert!(
+            matches!(
+                ocx_oci::ssrf::resolve_and_validate(host, port, &[]).await,
+                Err(ocx_oci::ssrf::SsrfError::ForbiddenTarget { .. })
+            ),
+            "the fixture must resolve into the forbidden range, or the refusal below proves nothing"
+        );
+
+        let observed = pull_indirected_package("localhost:5999", 1, false).await;
+
+        let _error = observed
+            .outcome
+            .expect_err("a forbidden physical target must not be dialled");
+        // Asserted before the exit code: without the guard the pull still fails
+        // (the stub serves no blob), so only the empty log distinguishes "refused"
+        // from "dialled and happened to fail".
+        assert!(
+            observed.touches.none(),
+            "the refusal must land BEFORE any request reaches the transport; saw {:?} and {} auth handshake(s)",
+            observed.touches.calls,
+            observed.touches.auth
+        );
+    }
+
+    /// The verdict is memoized **whole**, so one refusal is final for the pull.
+    ///
+    /// Caching only success would leave every missing layer free to re-ask, and a
+    /// host that answers differently between two adjacent lookups needs exactly
+    /// one `Ok` to be dialled — N missing layers would hand a rebinding attacker
+    /// N attempts at it. Two layers, both missing: the guard must be evaluated
+    /// once, not twice.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dial_refusal_is_evaluated_once_however_many_layers_are_missing() {
+        let observed = pull_indirected_package("localhost:5999", 2, false).await;
+
+        observed
+            .outcome
+            .expect_err("a forbidden physical target must not be dialled");
+        assert_eq!(
+            observed.guard_evaluations, 1,
+            "a refusal must stay refused for the whole pull; the second missing layer re-asked it"
+        );
+        assert!(
+            observed.touches.none(),
+            "no layer may reach the transport; saw {:?} and {} auth handshake(s)",
+            observed.touches.calls,
+            observed.touches.auth
+        );
+    }
+
+    /// The check is gated on a dial, not on a resolve: a fully-warm pull whose
+    /// layer is already extracted never resolves the physical host at all. The
+    /// fixture is an unresolvable name, so if the guard ran the pull would fail
+    /// closed — the warm-store-no-network property `physical_reference`'s
+    /// local-first order exists to serve would be gone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_warm_pull_never_judges_an_unresolvable_transport_host() {
+        let (host, port) = ocx_oci::ssrf::split_host_port("physical.invalid");
+        assert!(
+            matches!(
+                ocx_oci::ssrf::resolve_and_validate(host, port, &[]).await,
+                Err(ocx_oci::ssrf::SsrfError::Resolution { .. })
+            ),
+            "the fixture must genuinely fail to resolve, or a skipped guard is indistinguishable from a passing one"
+        );
+
+        let observed = pull_indirected_package("physical.invalid", 1, true).await;
+
+        observed
+            .outcome
+            .expect("a fully-warm pull must not depend on resolving the physical host");
+        assert_eq!(
+            observed.guard_evaluations, 0,
+            "a warm pull must not evaluate the guard at all"
+        );
+        assert!(
+            observed.touches.none(),
+            "a warm pull must reach the transport for nothing; saw {:?} and {} auth handshake(s)",
+            observed.touches.calls,
+            observed.touches.auth
+        );
+    }
+}

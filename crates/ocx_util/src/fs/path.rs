@@ -1,0 +1,798 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+//! Lexical path helpers shared across archive extraction, symlink validation,
+//! and the layer assembly walker.
+//!
+//! These helpers operate **without filesystem access** and are designed for
+//! pre-flight containment checks. They are not a substitute for
+//! [`dunce::canonicalize`], which follows symlinks and reads the filesystem.
+//! Use this module for validating paths (possibly not yet on disk) that must
+//! not escape a logical root; use `dunce::canonicalize` for resolving paths
+//! that already exist.
+
+use std::path::{Component, Path, PathBuf};
+
+/// Maximum number of path components a [`RelativePath`] may carry (W4). Bounds
+/// synthetic-directory amplification driven by an untrusted output prefix.
+const MAX_RELPATH_COMPONENTS: usize = 32;
+/// Maximum byte length of any single [`RelativePath`] component (W4).
+const MAX_RELPATH_COMPONENT_BYTES: usize = 255;
+/// Maximum total byte length across all [`RelativePath`] components (W4).
+const MAX_RELPATH_TOTAL_BYTES: usize = 4096;
+
+/// Lexically normalizes a path by resolving `.` and `..` components
+/// **without filesystem access**.
+///
+/// Preserves leading `..` components when they would escape past the logical
+/// root, so that [`escapes_root`] can detect them.
+///
+/// Backslashes (`\`) are treated as path separators on all platforms.
+/// This ensures that Windows-style paths embedded in archive metadata or
+/// user input are correctly split into components even on Unix build hosts.
+pub fn lexical_normalize(path: &Path) -> PathBuf {
+    // Pre-pass: normalize backslash separators to forward slash so that
+    // `Path::components()` splits them correctly on all platforms.
+    // On Linux, `\` is a legal filename character, not a separator, so
+    // without this step `foo\bar` would be a single component.
+    let normalized_sep;
+    let path: &Path = if path.as_os_str().as_encoded_bytes().contains(&b'\\') {
+        let s = path.to_string_lossy().replace('\\', "/");
+        normalized_sep = PathBuf::from(s);
+        &normalized_sep
+    } else {
+        path
+    };
+
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                if matches!(components.last(), Some(Component::Normal(_))) {
+                    components.pop();
+                } else if !matches!(components.last(), Some(Component::RootDir | Component::Prefix(_))) {
+                    components.push(component);
+                }
+            }
+            Component::CurDir => {}
+            other => components.push(other),
+        }
+    }
+    components.iter().collect()
+}
+
+/// Returns `true` if the lexically normalized path contains any `..`
+/// components, meaning it escapes its logical root.
+pub fn escapes_root(path: &Path) -> bool {
+    lexical_normalize(path)
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+}
+
+/// Reason an untrusted relative path was rejected as unsafe to join under a
+/// containment root. Produced by [`join_under_root`] and [`RelativePath::parse`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum PathEscapeError {
+    /// The path is absolute (e.g. `/etc`); only relative paths may be joined.
+    #[error("path must be relative")]
+    Absolute,
+    /// The path carries a Windows drive-letter (`C:\…`), UNC (`\\srv\share`),
+    /// or verbatim (`\\?\…`) prefix. Rejected host-independently — a Linux
+    /// publish host would otherwise let such a prefix through to escape a
+    /// Windows read host.
+    #[error("Windows drive-letter or UNC/verbatim path is not allowed")]
+    WindowsPrefix,
+    /// The path escapes the containment root via residual `..` traversal.
+    #[error("path escapes the containment root")]
+    Escapes,
+    /// The path exceeds the allowed component-count or length bound, so an
+    /// untrusted value cannot drive synthetic-directory amplification (W4).
+    #[error("path exceeds the allowed component or length bound")]
+    TooLong,
+    /// A path component contains a control character. A hostile annotation
+    /// could embed a newline or NUL to forge log lines when the value is later
+    /// echoed (CWE-117), mirroring the sanitization already applied to strip
+    /// annotations.
+    #[error("path contains a control character")]
+    ControlCharacter,
+}
+
+/// Joins an untrusted relative path under `root`, guaranteeing the result stays
+/// contained within `root`.
+///
+/// The check is **lexical** (no filesystem access) and **host-independent**:
+/// Windows drive-letter / UNC / verbatim prefixes are rejected on every
+/// platform, not just Windows, because [`Path::is_absolute`] only parses those
+/// prefixes on Windows. See the module doc for why lexical (not
+/// [`dunce::canonicalize`]) is the right tool for a not-yet-on-disk path.
+///
+/// # Errors
+///
+/// Returns [`PathEscapeError`] when `untrusted_relative` is absolute, carries a
+/// Windows prefix, or escapes `root` via `..`.
+pub fn join_under_root(root: &Path, untrusted_relative: &Path) -> std::result::Result<PathBuf, PathEscapeError> {
+    // 1. Host-independent Windows drive-letter / UNC / verbatim rejection FIRST.
+    //    `//srv/x` is `is_absolute() == true` on Unix, so it must be caught here
+    //    as `WindowsPrefix` before the generic `is_absolute` check below would
+    //    misclassify it as `Absolute`.
+    if has_windows_prefix(untrusted_relative) {
+        return Err(PathEscapeError::WindowsPrefix);
+    }
+
+    // 2. A single-separator absolute path (`/etc`, `\etc`) is not a relative
+    //    path. Checked host-independently because `Path::is_absolute` misses the
+    //    single-leading-separator case on Windows (drive-relative → not absolute).
+    if has_leading_separator(untrusted_relative) || untrusted_relative.is_absolute() {
+        return Err(PathEscapeError::Absolute);
+    }
+
+    // 3. Fold `.` / `..` lexically (backslash-aware) without touching the disk.
+    let normalized = lexical_normalize(untrusted_relative);
+
+    // Empty and `.`-only inputs normalize to the empty path — they denote the
+    // containment root itself.
+    if normalized.as_os_str().is_empty() {
+        return Ok(root.to_path_buf());
+    }
+
+    // 4. Any residual leading `..` escapes the root.
+    if escapes_root(&normalized) {
+        return Err(PathEscapeError::Escapes);
+    }
+
+    // 5. Belt-and-suspenders: join and re-verify the result stays under `root`.
+    let joined = root.join(&normalized);
+    let normalized_root = lexical_normalize(root);
+    if !lexical_normalize(&joined).starts_with(&normalized_root) {
+        return Err(PathEscapeError::Escapes);
+    }
+    Ok(joined)
+}
+
+/// Returns `true` when `path` begins with a Windows drive-letter (`C:`),
+/// UNC/verbatim prefix (`\\`, `//`), or any two-separator lead.
+///
+/// The check is byte-level on the raw `OsStr` so it is **host-independent**:
+/// [`Path::is_absolute`] only parses Windows prefixes on Windows, so a Linux
+/// publish host would otherwise let `C:\Windows` or `\\srv\share` through to a
+/// Windows read host.
+fn has_windows_prefix(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    // Drive-letter: `[A-Za-z]:` (e.g. `C:\Windows`).
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return true;
+    }
+    // UNC (`\\srv\share`), verbatim (`\\?\C:\x`), or `//srv/x` — any path that
+    // leads with two path separators (either slash flavour).
+    let is_sep = |b: u8| b == b'\\' || b == b'/';
+    bytes.len() >= 2 && is_sep(bytes[0]) && is_sep(bytes[1])
+}
+
+/// Returns `true` when `path` begins with a single path separator (`/etc`,
+/// `\etc`) — a root-relative absolute path.
+///
+/// [`Path::is_absolute`] only recognizes this on Unix; on Windows a single
+/// leading separator is "relative to the current drive" and reports
+/// `is_absolute() == false`, so an untrusted `/etc` would otherwise slip past
+/// the absolute-path rejection and be accepted as a relative path. The
+/// byte-level check keeps rejection host-independent, mirroring
+/// [`has_windows_prefix`]. Callers must check [`has_windows_prefix`] first so a
+/// two-separator lead classifies as a Windows prefix, not a plain absolute path.
+fn has_leading_separator(path: &Path) -> bool {
+    matches!(path.as_os_str().as_encoded_bytes().first(), Some(b'/' | b'\\'))
+}
+
+/// A validated, non-escaping, **bounded** relative path. Its [`Default`] is the
+/// empty path (the containment root itself).
+///
+/// Used for an output prefix supplied by an untrusted manifest annotation or a
+/// CLI layer-ref: the component-count / length bound (W4) prevents an oversized
+/// value from amplifying into unbounded synthetic directories during assembly.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RelativePath(PathBuf);
+
+impl RelativePath {
+    /// Parses `s` into a bounded, non-escaping relative path.
+    ///
+    /// Applies the same absolute / Windows-prefix / escape checks as
+    /// [`join_under_root`] plus a component-count and length bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PathEscapeError`] when `s` is absolute, Windows-prefixed,
+    /// escapes the root, or exceeds the bound ([`PathEscapeError::TooLong`]).
+    pub fn parse(s: &str) -> std::result::Result<Self, PathEscapeError> {
+        let path = Path::new(s);
+
+        // Steps 1-2 of `join_under_root`: reject Windows prefixes host-
+        // independently, then reject absolute paths.
+        if has_windows_prefix(path) {
+            return Err(PathEscapeError::WindowsPrefix);
+        }
+        if has_leading_separator(path) || path.is_absolute() {
+            return Err(PathEscapeError::Absolute);
+        }
+
+        // Steps 3-4: normalize, then reject residual `..` escapes.
+        let normalized = lexical_normalize(path);
+        if escapes_root(&normalized) {
+            return Err(PathEscapeError::Escapes);
+        }
+
+        // W4 bound: cap component count and per-component / total byte length so
+        // an untrusted annotation cannot drive synthetic-directory amplification
+        // during assembly. Only `Normal` components remain after normalization
+        // (no root, `.`, or escaping `..`).
+        let mut components = 0usize;
+        let mut total = 0usize;
+        for component in normalized.components() {
+            let os = component.as_os_str();
+            // Reject control characters (CWE-117): the input originates from an
+            // untrusted CLI layer-ref or manifest annotation, so a newline or NUL
+            // must not survive to a later error message or log line. The value is
+            // valid UTF-8 (parsed from `&str`), so `to_string_lossy` is exact.
+            if os.to_string_lossy().chars().any(|c| c.is_control()) {
+                return Err(PathEscapeError::ControlCharacter);
+            }
+            let len = os.as_encoded_bytes().len();
+            if len > MAX_RELPATH_COMPONENT_BYTES {
+                return Err(PathEscapeError::TooLong);
+            }
+            components += 1;
+            total += len;
+        }
+        if components > MAX_RELPATH_COMPONENTS || total > MAX_RELPATH_TOTAL_BYTES {
+            return Err(PathEscapeError::TooLong);
+        }
+
+        Ok(RelativePath(normalized))
+    }
+
+    /// Returns the validated relative path.
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Renders the canonical `/`-separated wire form.
+    ///
+    /// The internal `PathBuf` uses the host separator (`\` on Windows), but the
+    /// layer-ref grammar and the `sh.ocx.layer.prefix` annotation are
+    /// platform-independent wire formats. Serializing via `as_path().display()`
+    /// would emit `share\lib` on a Windows host and break the Display→FromStr
+    /// round-trip and cross-platform annotation reads. Only `Normal` components
+    /// remain after normalization, so joining their UTF-8 lossy forms with `/`
+    /// is exact.
+    pub fn to_wire(&self) -> String {
+        self.0
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    /// Returns `true` when this is the empty path (the containment root).
+    pub fn is_empty(&self) -> bool {
+        self.0.as_os_str().is_empty()
+    }
+}
+
+/// Per-layer placement the assembler applies to each source before the overlap
+/// merge: drop `strip` leading components, then place the result under
+/// `prefix`.
+///
+/// It lives here, beside [`RelativePath`], because both of its producers need
+/// it and neither may see the other: `oci::layer_layout` resolves it out of an
+/// untrusted manifest annotation, and `file_structure::assemble` consumes it.
+/// Owning it in either of those would point the store at `oci` or `oci` at the
+/// store; owning it in `utility/fs` points both at a type that names nothing
+/// above it (DIP / W2). `prefix` defaults to the empty path (package root).
+#[derive(Debug, Clone)]
+pub struct LayerPlacement {
+    /// Leading path components to drop from this layer.
+    pub strip: u8,
+    /// Output prefix under which this layer's post-strip tree is placed.
+    pub prefix: RelativePath,
+}
+
+/// How a local-file reference was spelled.
+///
+/// **Two spellings, not three.** `file:<path>` with a single colon is not one
+/// of them anywhere in OCX: `adr_key_reference_grammar.md` removed it because
+/// cosign resolves that string to a file *literally named* `file:…`, so
+/// honouring it as a prefix made one value name two different files depending
+/// on which tool read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spelling {
+    /// The value is the path itself — `etc/acme.pub`, `/srv/ocx-index`.
+    Bare,
+    /// `file://<path>` — everything after the two slashes is the path,
+    /// verbatim. The only spelling that can name a path containing `://`.
+    FileUrl,
+}
+
+/// A local-file reference as an operator writes one: a bare path, or a
+/// `file://` URL.
+///
+/// One grammar behind three doors that had three hand-rolled copies of it —
+/// `[registries.<ns>] index`, `[[trust.policy]] signers[].key` / `--key`, and
+/// `[trust.sigstore] trusted_root` / `--sigstore-trusted-root`
+/// ([ocx-sh/ocx#379](https://github.com/ocx-sh/ocx/issues/379)).
+///
+/// **Borrowed and total.** Every string is one spelling or the other, so
+/// parsing cannot fail and each door keeps its own error vocabulary and exit
+/// code — `InvalidIndexUrl` (78) and `KeyRefError` (64) say different things
+/// about an empty value, and neither should have to speak through a shared one.
+///
+/// **No `as_path()`.** The three exits — [`anchored_at`](Self::anchored_at),
+/// [`absolute`](Self::absolute) and [`as_written`](Self::as_written) — each
+/// name a *resolution policy*, so a caller cannot obtain a path without saying
+/// which one it wants. That absence is the point of the type: the three doors
+/// resolve a relative reference three different ways on purpose (an `index`
+/// names a directory root joined against for many fetches, where a
+/// CWD-relative root is a real hazard; a `key` names one file beside the
+/// `config.toml` that declared it), and an unqualified accessor is how they
+/// would drift back into one rule that fits none of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileReference<'a> {
+    spelling: Spelling,
+    /// The path payload: the whole value for [`Spelling::Bare`], the text
+    /// after `file://` for [`Spelling::FileUrl`].
+    path: &'a str,
+}
+
+impl<'a> FileReference<'a> {
+    /// Reads the spelling of `value`.
+    ///
+    /// The `file://` token is matched case-insensitively, which is what the
+    /// `index` door already did — its `scheme_of` lowercases the token it
+    /// splits off, and a configured base is not more or less valid for being
+    /// shouted.
+    pub fn parse(value: &'a str) -> Self {
+        match value.split_at_checked("file://".len()) {
+            Some((prefix, path)) if prefix.eq_ignore_ascii_case("file://") => Self {
+                spelling: Spelling::FileUrl,
+                path,
+            },
+            _ => Self {
+                spelling: Spelling::Bare,
+                path: value,
+            },
+        }
+    }
+
+    /// A [`Spelling::Bare`] reference over a payload some other grammar has
+    /// already extracted — never re-split.
+    ///
+    /// `KeyRef` is the caller: it consumes `<scheme>://` itself, generically
+    /// over every backend, and hands the remainder here. Re-parsing that
+    /// remainder would break the one escape the `file://` spelling exists to
+    /// provide — `--key file://file:x` names a file called `file:x`, and by
+    /// the same rule `file://file://x` names one called `file://x`.
+    pub const fn bare(path: &'a str) -> Self {
+        Self {
+            spelling: Spelling::Bare,
+            path,
+        }
+    }
+
+    /// The spelling this reference was written in.
+    ///
+    /// Public because one door refuses a spelling rather than resolving it:
+    /// `[registries.<ns>] index` takes [`Spelling::FileUrl`] only, since a
+    /// schemeless `index = "index.corp.example"` already means
+    /// `https://index.corp.example` and must never be read as a path.
+    pub const fn spelling(&self) -> Spelling {
+        self.spelling
+    }
+
+    /// Policy: **take the path as written** — a relative one resolves against
+    /// the process working directory, like any path typed at a shell.
+    ///
+    /// The right policy for a value that arrives on the command line or in the
+    /// environment, where the caller's CWD is the frame the author had in mind.
+    /// Wrong for a value in a config file, which outlives the directory it is
+    /// read from — that is [`anchored_at`](Self::anchored_at).
+    pub fn as_written(&self) -> &'a Path {
+        Path::new(self.path)
+    }
+
+    /// Policy: **a relative path resolves against `dir`** — the directory of
+    /// the file that declared it, so the same value names the same file
+    /// regardless of the process working directory.
+    ///
+    /// "Relative" is `!has_root()`, **not** `is_relative()`. The two agree on
+    /// Unix and part company on Windows, where a driveless `/etc/ocx/root.json`
+    /// has a root but no drive prefix and so reports itself relative. Joining
+    /// one onto `dir` does not merely fail to help: `Path::join` keeps only the
+    /// base's *prefix*, so the reference silently moves to `dir`'s drive
+    /// (`C:/etc/ocx/root.json`). A config file travels between platforms; a
+    /// rooted reference already names one file on each of them.
+    pub fn anchored_at(&self, dir: &Path) -> PathBuf {
+        let path = self.as_written();
+        if path.has_root() {
+            path.to_path_buf()
+        } else {
+            dir.join(path)
+        }
+    }
+
+    /// Policy: **only an already-absolute reference is acceptable** — `None`
+    /// for anything else.
+    ///
+    /// Absolute here is the `file:///<abs>` shape: an empty authority, so the
+    /// payload begins with `/`. Tested on that byte and never through
+    /// [`Path::has_root`], because on Windows `Path::new("C:/srv/x")` reports a
+    /// root and that payload is the **authority** of `file://C:/srv/x`, not a
+    /// local tree. A configured base has to be valid or not independently of
+    /// the host that reads it.
+    ///
+    /// Trailing separators are trimmed — `file:///srv/x/` and `file:///srv/x`
+    /// name one directory — so `file:///` answers `None` rather than the
+    /// filesystem root, which names no index.
+    ///
+    /// Yields `&str` rather than `&Path` because its one caller composes the
+    /// canonical `file://<path>` URL back out of the answer, and the Windows
+    /// drive-designator rule it applies next is a byte rule too.
+    pub fn absolute(&self) -> Option<&'a str> {
+        let path = self.path.trim_end_matches('/');
+        path.starts_with('/').then_some(path)
+    }
+}
+
+/// Recursively validates that every symlink under `dir` resolves within
+/// `root` via [`crate::fs::symlink::validate_target`].
+///
+/// Used as a defence-in-depth sweep after archive extraction and wherever a
+/// layer population path might bypass the archive extractor.
+pub fn validate_symlinks_in_dir(root: &Path, dir: &Path) -> Result<(), crate::archive::Error> {
+    for entry in std::fs::read_dir(dir).map_err(|e| crate::archive::Error::Io {
+        path: dir.to_path_buf(),
+        source: e,
+    })? {
+        let entry = entry.map_err(|e| crate::archive::Error::Io {
+            path: dir.to_path_buf(),
+            source: e,
+        })?;
+        let ft = entry.file_type().map_err(|e| crate::archive::Error::Io {
+            path: entry.path(),
+            source: e,
+        })?;
+        if ft.is_symlink() {
+            let target = std::fs::read_link(entry.path()).map_err(|e| crate::archive::Error::Io {
+                path: entry.path(),
+                source: e,
+            })?;
+            crate::fs::symlink::validate_target(root, &entry.path(), &target)?;
+        } else if ft.is_dir() {
+            validate_symlinks_in_dir(root, &entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lexical_normalize_resolves_dot() {
+        assert_eq!(lexical_normalize(Path::new("a/./b")), PathBuf::from("a/b"));
+    }
+
+    #[test]
+    fn lexical_normalize_resolves_parent() {
+        assert_eq!(lexical_normalize(Path::new("a/../b")), PathBuf::from("b"));
+    }
+
+    #[test]
+    fn lexical_normalize_resolves_mixed() {
+        assert_eq!(lexical_normalize(Path::new("/a/b/../c")), PathBuf::from("/a/c"));
+    }
+
+    #[test]
+    fn lexical_normalize_clamps_at_root() {
+        assert_eq!(lexical_normalize(Path::new("/a/../../b")), PathBuf::from("/b"));
+    }
+
+    #[test]
+    fn lexical_normalize_preserves_escaping_parent() {
+        assert_eq!(lexical_normalize(Path::new("../../x")), PathBuf::from("../../x"));
+    }
+
+    #[test]
+    fn lexical_normalize_empty() {
+        assert_eq!(lexical_normalize(Path::new("")), PathBuf::new());
+    }
+
+    #[test]
+    fn escapes_root_detects_leading_parent() {
+        assert!(escapes_root(Path::new("../outside")));
+    }
+
+    #[test]
+    fn escapes_root_allows_internal_parent() {
+        assert!(!escapes_root(Path::new("a/../b")));
+    }
+
+    #[test]
+    fn escapes_root_rejects_parent_past_absolute_root() {
+        // Absolute path `..` clamps, so this is safe.
+        assert!(!escapes_root(Path::new("/a/../b")));
+    }
+
+    // ── Backslash separator tests ────────────────────────────────────────────
+
+    #[test]
+    fn lexical_normalize_backslash_parent_collapses() {
+        // `foo\..\bar` must collapse to `bar` even on Linux.
+        assert_eq!(lexical_normalize(Path::new("foo\\..\\bar")), PathBuf::from("bar"));
+    }
+
+    #[test]
+    fn escapes_root_backslash_escape_detected() {
+        // `..\..\secret` escapes root regardless of separator.
+        assert!(escapes_root(Path::new("..\\..\\secret")));
+    }
+
+    #[test]
+    fn lexical_normalize_backslash_parent_no_trailing_segment() {
+        // `foo\..` — parent-dir segment with no trailing component must
+        // collapse to an empty path, not a literal single component named
+        // `foo\..`. Without the collapse, `escapes_root` could miss it as a
+        // current-directory equivalent.
+        assert_eq!(lexical_normalize(Path::new("foo\\..")), PathBuf::new());
+        assert!(!escapes_root(Path::new("foo\\..")));
+    }
+
+    #[test]
+    fn lexical_normalize_backslash_two_components() {
+        // `foo\bar` must be two components yielding `foo/bar`, not a single
+        // component named `foo\bar`.
+        let result = lexical_normalize(Path::new("foo\\bar"));
+        let mut iter = result.components();
+        assert_eq!(iter.next(), Some(Component::Normal("foo".as_ref())));
+        assert_eq!(iter.next(), Some(Component::Normal("bar".as_ref())));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn lexical_normalize_mixed_separators_three_components() {
+        // `foo\bar/baz` — mix of `\` and `/` — must yield three components.
+        let result = lexical_normalize(Path::new("foo\\bar/baz"));
+        let components: Vec<_> = result.components().collect();
+        assert_eq!(components.len(), 3);
+        assert_eq!(components[0], Component::Normal("foo".as_ref()));
+        assert_eq!(components[1], Component::Normal("bar".as_ref()));
+        assert_eq!(components[2], Component::Normal("baz".as_ref()));
+    }
+
+    #[test]
+    fn lexical_normalize_forward_slash_unchanged() {
+        // Forward-slash behaviour must be identical to before this change.
+        assert_eq!(lexical_normalize(Path::new("a/b/../c")), PathBuf::from("a/c"));
+    }
+
+    // ── Part 2 containment primitives: join_under_root + RelativePath (U12–U14) ────
+    //
+    // Cover `join_under_root` and `RelativePath::parse`: host-independent Windows
+    // prefix rejection, absolute/escape classification, and the component/length
+    // bound. Rows cite the plan Test Matrix tag (U#).
+
+    /// U12 (Windows-drive-rejection-on-Linux · D8/D10): a Windows drive-letter,
+    /// UNC, or verbatim prefix must be rejected as `WindowsPrefix` on THIS Linux
+    /// host — the critical cross-platform bypass a Linux publisher could
+    /// otherwise smuggle to a Windows read host. Both `join_under_root` and
+    /// `RelativePath::parse` reject them. `//srv/x` leads with a double slash (UNC),
+    /// so it classifies as `WindowsPrefix`, NOT the plain `Absolute` that a
+    /// single-slash `/etc` gets in U13 — the discriminating ordering the
+    /// implementer must honour.
+    #[test]
+    fn windows_prefixes_rejected_on_linux() {
+        let root = Path::new("/root");
+        for spec in ["C:\\Windows", "\\\\srv\\share", "\\\\?\\C:\\x", "//srv/x"] {
+            assert!(
+                matches!(
+                    join_under_root(root, Path::new(spec)),
+                    Err(PathEscapeError::WindowsPrefix)
+                ),
+                "join_under_root must reject {spec:?} as WindowsPrefix"
+            );
+            assert!(
+                matches!(RelativePath::parse(spec), Err(PathEscapeError::WindowsPrefix)),
+                "RelativePath::parse must reject {spec:?} as WindowsPrefix"
+            );
+        }
+    }
+
+    /// U13 (D8): `join_under_root` classifies a plain (single-slash) absolute
+    /// path as `Absolute`, residual `..` as `Escapes`, resolves an internal
+    /// `..` under the root, and treats empty / `.` as the root itself.
+    #[test]
+    fn join_under_root_classifies_and_normalizes() {
+        let root = Path::new("/root");
+        assert!(
+            matches!(join_under_root(root, Path::new("/etc")), Err(PathEscapeError::Absolute)),
+            "a single-slash absolute path must be Absolute, not WindowsPrefix"
+        );
+        // Host-independent: a single leading separator (either flavour) is an
+        // absolute path on every platform. `Path::is_absolute` misses this on
+        // Windows (drive-relative), so `RelativePath::parse` must reject both
+        // itself rather than accept `/etc` / `\etc` as a containable relative path.
+        for spec in ["/etc", "\\etc"] {
+            assert!(
+                matches!(join_under_root(root, Path::new(spec)), Err(PathEscapeError::Absolute)),
+                "a single-separator absolute path {spec:?} must be Absolute"
+            );
+            assert!(
+                matches!(RelativePath::parse(spec), Err(PathEscapeError::Absolute)),
+                "RelativePath::parse must reject {spec:?} as Absolute"
+            );
+        }
+        assert!(
+            matches!(join_under_root(root, Path::new("../x")), Err(PathEscapeError::Escapes)),
+            "residual `..` traversal must be Escapes"
+        );
+        assert_eq!(
+            join_under_root(root, Path::new("a/../b")).expect("internal `..` resolves"),
+            root.join("b"),
+            "an internal `..` resolves under the root"
+        );
+        assert_eq!(
+            join_under_root(root, Path::new("")).expect("empty is root"),
+            root.to_path_buf(),
+            "empty relative path is the root itself"
+        );
+        assert_eq!(
+            join_under_root(root, Path::new(".")).expect("`.` is root"),
+            root.to_path_buf(),
+            "`.` is the root itself"
+        );
+    }
+
+    /// U14 (W4): `RelativePath::parse` bounds component count and length so an
+    /// untrusted annotation cannot drive synthetic-directory amplification. A
+    /// normal prefix parses and is preserved; an over-deep or over-long one is
+    /// `TooLong`.
+    #[test]
+    fn relpath_parse_bounds_depth_and_length() {
+        let ok = RelativePath::parse("share/lib").expect("a normal prefix parses");
+        assert!(!ok.is_empty(), "a non-empty prefix must not report empty");
+        assert_eq!(ok.as_path(), Path::new("share/lib"), "prefix preserved verbatim");
+
+        // Well past any reasonable component-count bound.
+        let deep = vec!["a"; 500].join("/");
+        assert!(
+            matches!(RelativePath::parse(&deep), Err(PathEscapeError::TooLong)),
+            "an over-deep prefix must be TooLong"
+        );
+
+        // Well past any reasonable per-component / total length bound.
+        let long = "x".repeat(5000);
+        assert!(
+            matches!(RelativePath::parse(&long), Err(PathEscapeError::TooLong)),
+            "an over-long prefix must be TooLong"
+        );
+    }
+
+    /// `to_wire` renders the canonical `/`-separated form regardless of the host
+    /// separator — the layer-ref grammar and the `sh.ocx.layer.prefix` annotation
+    /// are platform-independent wire formats. On Windows the internal `PathBuf`
+    /// stores `share\lib`; `to_wire` must still emit `share/lib` so the
+    /// Display→FromStr round-trip and cross-platform annotation reads hold.
+    /// Backslash-separated input normalizes to the same wire form on all hosts.
+    #[test]
+    fn relpath_to_wire_is_always_forward_slash() {
+        for spec in ["share/lib", "share\\lib", "a/b/c"] {
+            let wire = RelativePath::parse(spec).expect("a normal prefix parses").to_wire();
+            assert!(
+                !wire.contains('\\'),
+                "wire form must not carry a backslash: {spec:?} → {wire:?}"
+            );
+        }
+        assert_eq!(RelativePath::parse("share/lib").unwrap().to_wire(), "share/lib");
+        assert_eq!(RelativePath::parse("share\\lib").unwrap().to_wire(), "share/lib");
+        assert_eq!(RelativePath::parse("a").unwrap().to_wire(), "a");
+    }
+
+    /// A component carrying a control character (newline / NUL) is rejected as
+    /// `ControlCharacter` so a hostile annotation cannot forge log lines when the
+    /// prefix is later echoed (CWE-117) — mirrors the strip-annotation sanitization.
+    #[test]
+    fn relpath_parse_rejects_control_characters() {
+        for spec in ["share/lib\nrm -rf", "share/\u{0}evil", "a\tb"] {
+            assert!(
+                matches!(RelativePath::parse(spec), Err(PathEscapeError::ControlCharacter)),
+                "a control character must be ControlCharacter: {spec:?}"
+            );
+        }
+    }
+
+    // ── FileReference (#379) ─────────────────────────────────────────────────
+
+    /// The whole grammar, in one table: two spellings and nothing else.
+    /// `file:` with a single colon is deliberately **not** a third — it is a
+    /// bare path whose first component happens to start with `file:`, exactly
+    /// as it is to cosign (`adr_key_reference_grammar.md`).
+    #[test]
+    fn file_reference_reads_two_spellings_and_nothing_else() {
+        for (value, spelling, path) in [
+            ("etc/acme.pub", Spelling::Bare, "etc/acme.pub"),
+            ("/srv/ocx-index", Spelling::Bare, "/srv/ocx-index"),
+            ("C:\\keys\\acme.pub", Spelling::Bare, "C:\\keys\\acme.pub"),
+            ("file:etc/acme.pub", Spelling::Bare, "file:etc/acme.pub"),
+            ("awskms:us-east-1/abc", Spelling::Bare, "awskms:us-east-1/abc"),
+            ("", Spelling::Bare, ""),
+            ("file:///srv/x", Spelling::FileUrl, "/srv/x"),
+            // Case-insensitive, matching the `index` door's own `scheme_of`.
+            ("FILE:///srv/x", Spelling::FileUrl, "/srv/x"),
+            ("file://etc/acme.pub", Spelling::FileUrl, "etc/acme.pub"),
+            // The escape the spelling exists for: a path containing `://`.
+            ("file://./weird://name", Spelling::FileUrl, "./weird://name"),
+            ("file://", Spelling::FileUrl, ""),
+        ] {
+            let reference = FileReference::parse(value);
+            assert_eq!(reference.spelling(), spelling, "{value:?}");
+            assert_eq!(reference.as_written(), Path::new(path), "{value:?}");
+        }
+    }
+
+    /// `KeyRef` consumes `<scheme>://` itself and hands the remainder here, so
+    /// re-splitting it would break the one escape the `file://` spelling
+    /// provides: `--key file://file:x` names a file called `file:x`, and by the
+    /// same rule `file://file://x` names one called `file://x`.
+    #[test]
+    fn bare_never_re_splits_an_already_extracted_payload() {
+        let handed_over = FileReference::bare("file://x");
+        assert_eq!(handed_over.spelling(), Spelling::Bare);
+        assert_eq!(handed_over.as_written(), Path::new("file://x"));
+        assert_eq!(
+            FileReference::parse("file://x").as_written(),
+            Path::new("x"),
+            "`parse` is the other half of the contrast — it does split"
+        );
+    }
+
+    /// The config-file policy: a rootless reference resolves against the
+    /// directory of the file that declared it, and a rooted one already names
+    /// one file. Both spellings take the same rule (#379 / C-083).
+    #[test]
+    fn anchored_at_joins_only_a_rootless_reference() {
+        let dir = Path::new("/etc/ocx");
+        for (value, expected) in [
+            ("acme.pub", dir.join("acme.pub")),
+            ("sigstore/trusted-root.json", dir.join("sigstore/trusted-root.json")),
+            ("file://acme.pub", dir.join("acme.pub")),
+            ("/srv/keys/acme.pub", PathBuf::from("/srv/keys/acme.pub")),
+            ("file:///srv/keys/acme.pub", PathBuf::from("/srv/keys/acme.pub")),
+        ] {
+            assert_eq!(FileReference::parse(value).anchored_at(dir), expected, "{value:?}");
+        }
+    }
+
+    /// The `index` policy: an empty authority and a path that names a
+    /// directory, tested on bytes so a base is valid or not independently of
+    /// the host reading it.
+    #[test]
+    fn absolute_answers_only_for_an_empty_authority_naming_a_directory() {
+        for (value, expected) in [
+            ("file:///srv/x", Some("/srv/x")),
+            ("file:///srv/x/", Some("/srv/x")),
+            ("file:///C:/srv/x", Some("/C:/srv/x")),
+            // A bare drive survives here and is refused by the caller, which
+            // owns the reason (`/C:` resolves against Win32's per-drive CWD).
+            ("file:///C:/", Some("/C:")),
+            // Authority forms: UNC/remote, never a local tree.
+            ("file://host.example/srv/x", None),
+            ("file://srv", None),
+            // On Windows `Path::new("C:/srv/x")` reports a root; this payload
+            // is still an authority, and the answer must not depend on the OS.
+            ("file://C:/srv/x", None),
+            // Names no directory.
+            ("file:///", None),
+            ("file://", None),
+        ] {
+            assert_eq!(FileReference::parse(value).absolute(), expected, "{value:?}");
+        }
+    }
+}

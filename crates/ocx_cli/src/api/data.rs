@@ -49,6 +49,42 @@ pub mod verification;
 pub mod version;
 pub mod warmed_paths;
 
+use ocx_console::{Theme, VisibilityStyle};
+use ocx_oci::Identifier;
+use ocx_package::metadata::visibility::Visibility;
+
+/// Picks the palette entry an env-entry visibility renders in.
+///
+/// The two axes are package vocabulary, so the mapping onto a colour lives
+/// here rather than in the theme: `ocx_console` paints what it is told and
+/// never learns what a `private`/`interface` pair means.
+pub fn visibility_style(visibility: Visibility) -> VisibilityStyle {
+    match (visibility.private, visibility.interface) {
+        (true, true) => VisibilityStyle::Public,
+        (true, false) => VisibilityStyle::Private,
+        (false, true) => VisibilityStyle::Interface,
+        (false, false) => VisibilityStyle::Sealed,
+    }
+}
+
+/// Composes an identifier into its coloured form: plain registry/repository,
+/// then the tag, the `@` separator and the digest each in their own colour.
+///
+/// With colour off every paint method returns its input unchanged, so the
+/// result equals the identifier's `Display` byte for byte — the property
+/// `ink_plain_equals_display_for_all_part_combinations` pins.
+pub fn ink_identifier(theme: &Theme, identifier: &Identifier) -> String {
+    let mut out = format!("{}/{}", identifier.registry(), identifier.repository());
+    if let Some(tag) = identifier.tag() {
+        out.push_str(&theme.tag(format!(":{tag}")));
+    }
+    if let Some(digest) = identifier.digest() {
+        out.push_str(&theme.punct("@"));
+        out.push_str(&theme.digest(digest.to_string()));
+    }
+    out
+}
+
 /// Neutralizes terminal-control sequences in an untrusted name bound for an
 /// operator's screen (CWE-150).
 ///
@@ -72,7 +108,7 @@ pub mod warmed_paths;
 ///   payloads this work package owns. The other `api/data` payloads are **not
 ///   routed** — [`deps`], [`package_inspect`] and [`removed`] render
 ///   publisher-authored names read off fetched manifests straight into
-///   `print_table` / `print_tree`, and `ocx_lib::cli` does no neutralizing of
+///   `print_table` / `print_tree`, and `ocx_console` does no neutralizing of
 ///   its own. Closing those is a follow-up this function is ready for, not
 ///   something it already did.
 /// - **stderr, operator prose** — the rule, because four rounds of review broke
@@ -212,6 +248,70 @@ pub(crate) fn is_zero_width(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn id(spec: &str) -> Identifier {
+        Identifier::parse_with_default_registry(spec, "ocx.sh").unwrap()
+    }
+
+    #[test]
+    fn ink_plain_equals_display_for_all_part_combinations() {
+        let theme = Theme::new(false);
+        let specs = [
+            "ocx.sh/cmake".to_string(),
+            "ocx.sh/cmake:3.28".to_string(),
+            format!("ocx.sh/cmake@sha256:{}", "a".repeat(64)),
+            format!("ocx.sh/cmake:3.28@sha256:{}", "b".repeat(64)),
+        ];
+        for spec in specs {
+            let identifier = id(&spec);
+            assert_eq!(
+                ink_identifier(&theme, &identifier),
+                identifier.to_string(),
+                "plain ink must match Display"
+            );
+        }
+    }
+
+    #[test]
+    fn ink_colored_strips_back_to_display() {
+        let theme = Theme::new(true);
+        let identifier = id(&format!("ocx.sh/cmake:3.28@sha256:{}", "a".repeat(64)));
+        let inked = ink_identifier(&theme, &identifier);
+        assert!(inked.contains("\x1b["), "expected ANSI in colored ink");
+        assert_eq!(console::strip_ansi_codes(&inked), identifier.to_string());
+    }
+
+    /// The visibility palette is reached through two hops now — this crate maps
+    /// the axes onto a [`VisibilityStyle`], the theme maps that onto a colour —
+    /// and a swapped arm in either hop renders a wrong-but-plausible colour that
+    /// no colour-off assertion can see. Four distinct axis pairs must still
+    /// produce four distinct renderings.
+    #[test]
+    fn each_visibility_pair_reaches_its_own_colour() {
+        let theme = Theme::new(true);
+        let mut seen: Vec<(Visibility, String)> = Vec::new();
+        for visibility in [
+            Visibility::PUBLIC,
+            Visibility::PRIVATE,
+            Visibility::INTERFACE,
+            Visibility::SEALED,
+        ] {
+            let painted = theme.visibility(visibility_style(visibility), "vis");
+            assert_eq!(
+                console::strip_ansi_codes(&painted),
+                "vis",
+                "{visibility:?} must keep its text"
+            );
+            for (other, other_painted) in &seen {
+                assert_ne!(
+                    &painted, other_painted,
+                    "{visibility:?} and {other:?} render identically — one of the two mapping hops \
+                     collapsed them"
+                );
+            }
+            seen.push((visibility, painted));
+        }
+    }
 
     /// One row per stripped codepoint — a corpus that shares a single row per
     /// *class* cannot tell "all four are stripped" from "the first one is".

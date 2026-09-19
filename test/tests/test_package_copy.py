@@ -776,7 +776,7 @@ def test_a_platform_the_source_does_not_offer_is_a_usage_error(
     ocx: OcxRunner, target_registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
     """RED until WP-D reclassifies
-    `crates/ocx_lib/src/publisher/copy.rs::resolve_source_leaves`'s
+    `crates/ocx_package/src/publisher/copy.rs::resolve_source_leaves`'s
     no-matching-platform refusal from `ClientError::InvalidManifest` (exit 65)
     to a usage-shaped error. team-lead's decision (relayed after
     `review_r1_spec_package_copy.md` finding A7 /

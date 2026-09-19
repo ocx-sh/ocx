@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::cli;
 
 use crate::api::data::package_receipt::PackageReceipt;
 use crate::app::CommandError;
@@ -32,7 +31,7 @@ impl PackageReceiptCommand {
                     "no build receipt at {}; `ocx package create` writes one beside the bundle",
                     path.display()
                 ),
-                cli::ExitCode::NotFound,
+                ocx_exit::ExitCode::NotFound,
             )
             .into()),
         }

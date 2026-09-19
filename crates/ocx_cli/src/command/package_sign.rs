@@ -14,15 +14,13 @@
 //! sign pipeline. There is deliberately NO `--identity-token <VALUE>` flag —
 //! raw tokens on the command line would leak into shell history.
 
+use ocx_package_manager::Error as PmError;
 use std::process::ExitCode;
 
 use clap::Parser;
-
-use ocx_lib::Error as LibError;
-use ocx_lib::oci;
-use ocx_lib::oci::sign::{SignError, SignErrorKind};
-use ocx_lib::package_manager::error::{PackageError, PackageErrorKind};
-use ocx_lib::package_manager::{SignOptions, SweptOutcome};
+use ocx_package_manager::error::{PackageError, PackageErrorKind};
+use ocx_package_manager::{SignOptions, SweptOutcome};
+use ocx_sign::sign::{SignError, SignErrorKind};
 
 use crate::api::data::sweep::{SweepReport, SweptTagReport};
 use crate::command::package_sign_common;
@@ -50,7 +48,7 @@ pub struct PackageSign {
         value_name = "PLATFORM",
         conflicts_with_all = ["tags", "tags_file"]
     )]
-    platform: Option<oci::Platform>,
+    platform: Option<ocx_oci::Platform>,
 
     // C-S1-3 injection seam: these two URL overrides point sign at a private
     // Fulcio/Rekor deployment (validated at the boundary in `execute`). Left
@@ -227,7 +225,7 @@ impl PackageSign {
             // success envelope hard-codes 0, and `error_envelope.rs` states the
             // invariant this would otherwise break: the envelope's `exit_code`
             // can never disagree with the process's.
-            .with_exit_code(failure.unwrap_or(ocx_lib::cli::ExitCode::Success));
+            .with_exit_code(failure.unwrap_or(ocx_exit::ExitCode::Success));
         context.api().report(&report)?;
         Ok(failure.map_or(ExitCode::SUCCESS, ExitCode::from))
     }
@@ -242,11 +240,11 @@ impl PackageSign {
     /// process returns. Nothing here can abort early: the sweep already ran to
     /// completion, which is the contract.
     ///
-    /// [`PackageManager::sign_tags`]: ocx_lib::package_manager::PackageManager::sign_tags
+    /// [`PackageManager::sign_tags`]: ocx_package_manager::PackageManager::sign_tags
     async fn sweep(
         &self,
         context: &crate::app::Context,
-        identifier: &oci::Identifier,
+        identifier: &ocx_oci::Identifier,
         tags: &[String],
         options: &SignOptions,
     ) -> anyhow::Result<ExitCode> {
@@ -260,7 +258,7 @@ impl PackageSign {
                 SweptOutcome::CoveredBy(signed_as) => SweptTagReport::covered(entry.tag, signed_as),
                 SweptOutcome::Failed(error) => {
                     let error = sign_error_into_anyhow(*error);
-                    failures.push(ocx_lib::cli::classify_error(error.as_ref()));
+                    failures.push(crate::exit::classify_library_error(error.as_ref()));
                     SweptTagReport::failed(
                         entry.tag,
                         None,
@@ -314,9 +312,9 @@ impl PackageSign {
 /// test — the sweep itself needs a live `PackageManager`, so nothing that can
 /// run in-process could otherwise read the row back.
 fn swept_signature_report(
-    identifier: &oci::Identifier,
+    identifier: &ocx_oci::Identifier,
     tag: &str,
-    result: ocx_lib::oci::sign::SignResult,
+    result: ocx_sign::sign::SignResult,
 ) -> crate::api::data::signature::SignatureReport {
     package_sign_common::signature_report(&identifier.clone_with_tag(tag), None, result)
 }
@@ -334,7 +332,7 @@ fn swept_signature_report(
 /// whether or not the `SignError` node is preserved.
 fn sign_error_into_anyhow(err: PackageError) -> anyhow::Error {
     match err.kind {
-        PackageErrorKind::Internal(LibError::Sign(sign_error)) => anyhow::Error::new(*sign_error),
+        PackageErrorKind::Internal(PmError::Sign(sign_error)) => anyhow::Error::new(*sign_error),
         kind => anyhow::Error::new(kind),
     }
 }
@@ -344,10 +342,10 @@ mod tests {
     //! Unit tests for the sign-path error-envelope contract.
 
     use super::*;
-    use ocx_lib::oci::sign::SignError;
+    use ocx_sign::sign::SignError;
 
-    fn test_identifier() -> oci::Identifier {
-        oci::Identifier::parse("registry.example/pkg:1.0").expect("static parse")
+    fn test_identifier() -> ocx_oci::Identifier {
+        ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("static parse")
     }
 
     /// A pipeline-stage `SignError` wrapped in a `PackageError` (the shape the
@@ -366,7 +364,7 @@ mod tests {
         let id = test_identifier();
         let package_error = PackageError::new(
             id.clone(),
-            PackageErrorKind::Internal(LibError::Sign(Box::new(SignError::new(
+            PackageErrorKind::Internal(PmError::Sign(Box::new(SignError::new(
                 id,
                 SignErrorKind::OidcTokenRejected,
             )))),
@@ -394,14 +392,14 @@ mod tests {
     /// this needs its own assertion.
     #[test]
     fn a_swept_row_reports_the_tag_it_signed_not_the_positional() {
-        use ocx_lib::oci::sign::pipeline::{LegDigests, SignResult, SignatureLeg};
+        use ocx_sign::sign::pipeline::{LegDigests, SignResult, SignatureLeg};
 
-        let digest = |fill: char| oci::Digest::Sha256(fill.to_string().repeat(64));
-        let positional = oci::Identifier::parse("registry.example/pkg:9.9.9").expect("static parse");
+        let digest = |fill: char| ocx_oci::Digest::Sha256(fill.to_string().repeat(64));
+        let positional = ocx_oci::Identifier::parse("registry.example/pkg:9.9.9").expect("static parse");
         let result = SignResult {
             subject_digest: digest('a'),
             legs: vec![SignatureLeg {
-                format: ocx_lib::oci::sign::SignatureFormat::Bundle,
+                format: ocx_sign::sign::SignatureFormat::Bundle,
                 outcome: Ok(LegDigests {
                     payload_digest: digest('b'),
                     manifest_digest: digest('c'),
@@ -409,7 +407,7 @@ mod tests {
             }],
             certificate_identity: "signer@example.com".into(),
             certificate_oidc_issuer: "https://accounts.google.com".into(),
-            key_backend: ocx_lib::oci::sign::KeyBackendKind::Keyless,
+            key_backend: ocx_trust::key_ref::KeyBackendKind::Keyless,
             public_key_hint: None,
             transparency_log_index: None,
         };
@@ -512,7 +510,7 @@ mod platform_optionality_tests {
 
     /// The parsed `--platform`, or clap's error kind on refusal. `extra` is
     /// appended after the required arguments.
-    fn parse(extra: &[&str]) -> Result<Option<oci::Platform>, clap::error::ErrorKind> {
+    fn parse(extra: &[&str]) -> Result<Option<ocx_oci::Platform>, clap::error::ErrorKind> {
         let mut argv = REQUIRED.to_vec();
         argv.extend_from_slice(extra);
         PackageSign::try_parse_from(argv)
@@ -531,7 +529,7 @@ mod platform_optionality_tests {
     /// so the test above measures optionality rather than a deleted flag.
     #[test]
     fn the_flag_still_parses_in_both_spellings() {
-        let expected = Ok(Some("linux/amd64".parse::<oci::Platform>().expect("platform")));
+        let expected = Ok(Some("linux/amd64".parse::<ocx_oci::Platform>().expect("platform")));
         assert_eq!(parse(&["--platform", "linux/amd64", REFERENCE]), expected);
         assert_eq!(parse(&["-p", "linux/amd64", REFERENCE]), expected);
     }

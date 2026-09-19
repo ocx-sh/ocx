@@ -1,9 +1,7 @@
 ---
 paths:
-  - crates/ocx_lib/src/file_structure/**
-  - crates/ocx_lib/src/file_structure.rs
-  - crates/ocx_lib/src/reference_manager.rs
-  - crates/ocx_lib/src/symlink.rs
+  - crates/ocx_store/src/**
+  - crates/ocx_util/src/fs/symlink.rs
 ---
 
 # File Structure Subsystem
@@ -41,7 +39,7 @@ Fourth tier `state/` for **ephemeral, non-content-addressed runtime state** (TTL
 | `temp_store.rs` | Temp dirs for in-progress downloads | `TempStore`, `TempDir`, `TempAcquireResult`, `StaleEntry`, `TempEntry` |
 | `state_store.rs` | Persistent + ephemeral runtime state per subsystem (update-check throttle, managed-config, OCI Referrers capability cache, offline-verify trust-root cache) — named per-subsystem accessors, no generic `StateKey`; also the toolchain **render stamps** (C-003) | `StateStore`, `RenderStamp`, `RenderStampScope`, `RenderStampTarget`, `BinEntryStamp` |
 | `cas_path.rs` | Digest sharding; `CasTier` enum | `cas_shard_path()`, `is_valid_cas_path()`, `write_digest_file()` |
-| `index_store.rs` | Local index collection — wire-grammar store (root docs + dispatch-object CAS, A2); config blobs route through the machine-global `BlobStore` instead | `IndexStore`, `CatalogEntryStatus`, `CatalogTransaction`, `RootReadResult` |
+| `ocx_index/src/local_index/store.rs` | Local index collection — wire-grammar store (root docs + dispatch-object CAS, A2); config blobs route through the machine-global `BlobStore` instead | `IndexStore`, `CatalogEntryStatus`, `CatalogTransaction`, `RootReadResult` |
 | `shim_store.rs` | Generated shim directories — the on-disk form of a **deferred** tool | `ShimStore`, `ShimDir` |
 | `shim_bin_store.rs` | Flat CAS for the embedded Windows `ocx-shim` executable blob | `ShimBinStore` |
 | `toolchain_store.rs` | Rendered toolchain home — one grammar, two tiers: the store wraps the **global** home, the home is the value type a project tier reuses | `ToolchainStore`, `ToolchainHome`, `ToolchainPathComponent`, `ToolchainPathError` |
@@ -49,13 +47,13 @@ Fourth tier `state/` for **ephemeral, non-content-addressed runtime state** (TTL
 
 ### Cross-cutting link primitives
 
-These modules sit at `crates/ocx_lib/src/` root — consumed across subsystems.
+These modules sit outside `file_structure/` — consumed across subsystems.
 
 | Module | Purpose | Used by |
 |--------|---------|---------|
-| `symlink.rs` | Symlink create/update/remove/is_link; Windows junction aware | ReferenceManager, pull, assemble walker, archive extractor |
+| `ocx_util::fs::symlink` | Symlink create/update/remove/is_link; Windows junction aware | ReferenceManager, pull, assemble walker, archive extractor |
 | `hardlink.rs` | Hardlink create/update — THE ONE place `std::fs::hard_link` lives | assemble walker, codesign |
-| `utility/fs/path.rs` | Lexical path helpers: `lexical_normalize`, `escapes_root`, `validate_symlinks_in_dir` | symlink, archive extractor, assemble walker |
+| `ocx_util::fs::path` | Lexical path helpers: `lexical_normalize`, `escapes_root`, `validate_symlinks_in_dir` | symlink, archive extractor, assemble walker |
 
 ## FileStructure (composite root)
 
@@ -391,4 +389,4 @@ Low-level primitives for file-level dedup during layer assembly:
 
 Cross-device hardlinks fail with `io::ErrorKind::CrossesDevices`. `$OCX_HOME` must sit on single volume — required by `temp → packages/` atomic rename.
 
-**Assembly walker**: `utility/fs/assemble_from_layer(source_content, dest_content)` mirror layer's `content/` tree into package's `content/` dir — hardlink regular files via `hardlink::create`, create real subdirs, recreate intra-layer symlinks verbatim. `packages/{P}/content/` is real dir, not symlink into `layers/`. Walker fan out dir-level tasks through semaphore-bounded `JoinSet`; per-task stats return-and-summed (no shared mutex). Windows layer symlinks return `io::ErrorKind::Unsupported`.
+**Assembly walker**: `file_structure::assemble_from_layer(source_content, dest_content)` mirror layer's `content/` tree into package's `content/` dir — hardlink regular files via `hardlink::create`, create real subdirs, recreate intra-layer symlinks verbatim. `packages/{P}/content/` is real dir, not symlink into `layers/`. Walker fan out dir-level tasks through semaphore-bounded `JoinSet`; per-task stats return-and-summed (no shared mutex). Windows layer symlinks return `io::ErrorKind::Unsupported`.

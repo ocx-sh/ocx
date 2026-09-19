@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/ocx_cli", "crates/ocx_lib", "crates/ocx_schema", "crates/ocx_shim"]
+# Every directory under crates/ is a member. Cargo errors on a directory here
+# that carries no Cargo.toml, so crates/ holds crate directories and plain
+# files (NEXTEST_FLOOR, NEXTEST_SKIP_CEILING) only — never a bare directory.
+members = ["crates/*"]
 # The submodule is pulled in via [patch.crates-io] below; excluding it here
 # lets `cargo` commands run directly inside `external/rust-oci-client/` (for
 # the fork's own test suite) without the outer workspace claiming ownership.
@@ -8,6 +11,10 @@ exclude = ["external/rust-oci-client", "external/docker_credential", "external/s
 
 [workspace.package]
 version = "0.6.2"
+edition = "2024"
+# Equal to rust-toolchain.toml's channel by policy (rust-cargo.md TOOL-02):
+# this project ships binaries, so the floor is the pinned compiler.
+rust-version = "1.95.0"
 license = "Apache-2.0"
 description = "The simple package manager"
 repository = "https://github.com/ocx-sh/ocx"
@@ -42,7 +49,7 @@ strip = "symbols"
 # Cargo does not support) keeps every other crate's `release`/`dist` build
 # untouched. The refresh flow (build both gnullvm arches through
 # `task rust:shim:build`, commit the stripped bytes, re-record the SHA-256) is
-# documented once, in crates/ocx_lib/src/shim.rs § "Blob refresh-PR flow" — do
+# documented once, in crates/ocx_store/src/shim.rs § "Blob refresh-PR flow" — do
 # not restate the commands here; the copy that lived here went stale against
 # cargo-xwin/msvc and outlived the toolchain it named.
 [profile.shim]
@@ -54,11 +61,29 @@ panic = "abort"
 strip = "symbols"
 
 [workspace.dependencies]
-# Internal crates
-ocx_lib = { path = "crates/ocx_lib" }
+# Internal crates — this block alone is kept sorted, so that every extraction
+# commit of the crate split lands on a distinct line (design spec D-052).
 # The CLI as a library. Only `ocx_schema` links it, so that the published
 # report contract is generated from the very types the CLI serializes.
 ocx = { path = "crates/ocx_cli" }
+ocx_announce = { path = "crates/ocx_announce" }
+ocx_config = { path = "crates/ocx_config" }
+ocx_console = { path = "crates/ocx_console" }
+ocx_exit = { path = "crates/ocx_exit" }
+ocx_index = { path = "crates/ocx_index" }
+ocx_oci = { path = "crates/ocx_oci" }
+ocx_package = { path = "crates/ocx_package" }
+ocx_package_manager = { path = "crates/ocx_package_manager" }
+ocx_project = { path = "crates/ocx_project" }
+ocx_schema = { path = "crates/ocx_schema" }
+ocx_script = { path = "crates/ocx_script" }
+ocx_setup = { path = "crates/ocx_setup" }
+ocx_shell = { path = "crates/ocx_shell" }
+ocx_sign = { path = "crates/ocx_sign" }
+ocx_store = { path = "crates/ocx_store" }
+ocx_test_support = { path = "crates/ocx_test_support" }
+ocx_trust = { path = "crates/ocx_trust" }
+ocx_util = { path = "crates/ocx_util" }
 
 # Async runtime
 tokio = { version = "1.52", features = ["full"] }
@@ -90,9 +115,16 @@ anyhow = "1.0.102"
 thiserror = "2.0.18"
 
 # Tracing
+# The facade every library crate logs through; `std` is load-bearing for the
+# one test logger (`log::set_boxed_logger`). Records reach the subscriber
+# through `LogTracer`, which is tracing-subscriber's `tracing-log` feature —
+# named below although it is a default, so the bridge is visible here and
+# survives a `default-features = false`; no manifest lists the tracing-log
+# crate itself, since no source names it (D-002: the bridge belongs with the
+# subscriber, and the subscriber is where `try_init` installs it).
+log = { version = "0.4", features = ["std"] }
 tracing = "0.1.44"
-tracing-log = "0.2.0"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "std", "fmt", "json", "registry"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "std", "fmt", "json", "registry", "tracing-log"] }
 
 # OCI / HTTP
 oci-client = "0.17"
@@ -163,6 +195,14 @@ sigstore_protobuf_specs = "0.5.1"
 pki-types = { package = "rustls-pki-types", version = "1" }
 p256 = { version = "0.13.2", features = ["ecdsa", "pem", "pkcs8"] }
 x509-cert = { version = "0.2.5", features = ["builder", "pem"] }
+# The `sha2` 0.10 line `p256` pulls in — a different major from the `sha2`
+# above, and named only for its `oid` feature: `x509-cert`'s
+# `CertificateBuilder` signs through `DynSignatureAlgorithmIdentifier`, which
+# needs `AssociatedOid` for the P-256 digest, and `p256` declares its `sha2`
+# edge with `default-features = false`. Inside `ocx_lib`'s graph `sigstore`
+# happens to turn the feature on; a crate that mints certificates without
+# `sigstore` beside it has to ask for it itself. Never referenced from Rust.
+sha2_oid = { package = "sha2", version = "0.10", features = ["oid"] }
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
 
 # Compression / archive
@@ -200,7 +240,7 @@ async-compression = { version = "0.4.42", default-features = false, features = [
 # absolute `/opt/homebrew/...` path into the Mach-O so `ocx` won't start on a
 # stock Mac. `static` forces liblzma-sys to compile & static-link the vendored
 # xz on every host, keeping the binary self-contained. Link-config only — not
-# referenced from Rust code (see the phantom dep in crates/ocx_lib/Cargo.toml).
+# referenced from Rust code (see the phantom dep in crates/ocx_oci/Cargo.toml).
 liblzma = { version = "0.4", default-features = false, features = ["static"] }
 # SyncIoBridge for bridging AsyncRead → sync Read at the spawn_blocking boundary
 # in Client::pull_layer. New direct dep — confirmed absent from workspace before
@@ -227,6 +267,14 @@ indexmap = "2.14.0"
 # no line to LICENSE-THIRD-PARTY.md. MIT — already in deny.toml's allowlist.
 strsim = "0.11.1"
 regex = "1.12.3"
+# Rust source as data, for the boundary-test harness alone (`ocx_test_support`,
+# a dev-dependency): the structural guards read the workspace's own sources
+# through a real parser instead of a tokenizer of ours (quality-core "Don't
+# Own Non-Domain Code"). Both already resolve in Cargo.lock through the derive
+# macros; `span-locations` is what turns a span into a line number.
+syn = { version = "2.0.119", features = ["full", "visit"] }
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+quote = "1.0.47"
 chrono = "0.4.44"
 schemars = "1.2.1"
 # Package URL rendering for execution-record descriptors (`pkg:oci/...`), so an

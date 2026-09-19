@@ -1,7 +1,7 @@
 """Unit tests for CastRecording.truncate_digests.
 
 Regression coverage for the decorated-table refactor (commit bc26e1ea):
-`StyledInk for Identifier` paints `@` (punct) and `sha256:…` (digest) as
+`api::data::ink_identifier` paints `@` (punct) and `sha256:…` (digest) as
 separate SGR spans, wedging an escape run between `@` and `sha256:`. The
 ref-digest regex must tolerate that run while preserving it verbatim, so
 the recording stays coloured *and* shortened.

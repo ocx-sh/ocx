@@ -12,7 +12,9 @@ Early stage. Core lib + CLI implemented.
 
 ### Stability tiers
 
-**Internal code structure has no stability at all.** Crate layout, module paths, type names, function signatures, enum shapes — all free to change. Never add a compat shim, deprecation window, re-export alias, or `_v2` name for an internal refactor. Rename in place and delete the old form as if it never existed. `ocx_lib` is not a published library; the binary is the only consumer.
+**Internal code structure has no stability at all.** Crate layout, module paths, type names, function signatures, enum shapes — all free to change. Never add a compat shim, deprecation window, re-export alias, or `_v2` name for an internal refactor. Rename in place and delete the old form as if it never existed. No `ocx_*` crate is a published library; the binary is the only consumer.
+
+**Ecosystem crates sit between the two: a crate a lockstep submodule consumer links.** `ocx_util`, `ocx_console`, `ocx_oci`, `ocx_trust`, `ocx_sign`, `ocx_config`, `ocx_index`, `ocx_package`. Breaking changes are allowed when justified — but the consumer is upgraded **in the same change series**, not afterwards, and `task satellite:verify` (a `verify-deep.yml` job) is what makes that an obligation rather than a label. A lockstep consumer does *not* promote a crate to interface. Tier table and rationale → [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md) § "Stability tiers and the ecosystem contract".
 
 **Interfaces are the CLI surface and every wire/persisted format** — command and flag grammar, exit codes, package metadata, OCI manifests, `ocx.lock`, the index format, `ocx.toml`. These are real contracts: other tools and published artifacts depend on them, so a change here is a decision, not a refactor.
 
@@ -56,7 +58,7 @@ Before plan/research/architectural decision, scan "By concern" in catalog. Auto-
 
 ## Build & Development
 
-Task runner [`task`](https://taskfile.dev) (Taskfile v3). **Run `task --list` before invent ad-hoc commands.** Common: `task` (fast check), `task verify` (full gate), `task rust:verify`, `task test`, `task checkpoint`. Cargo OK for finer control. Always `cargo fmt` before commit, `task verify` after implementation. Conventions → [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md).
+Task runner [`task`](https://taskfile.dev) (Taskfile v3). **Run `task --list` before invent ad-hoc commands.** Common: `task` (fast check), `task verify:scoped --force` (per work package; escalates to full when it must), `task verify` (full gate), `task rust:verify`, `task test`, `task checkpoint`. Cargo OK for finer control. Always `cargo fmt` before commit, `task verify` (or a green `task verify:scoped --force`) after implementation. Conventions → [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md).
 
 **Project toolchain.** `ocx.toml` lists `actionlint`, `bun`, `cosign`, `git-cliff`, `go-task`, `lychee`, `shellcheck`, `shfmt`, `uv`. `ocx self setup` wires a per-prompt hook that puts them on `PATH` when you `cd` in and takes them off when you leave (bash, zsh, fish, PowerShell, elvish; `ocx.toml` and `ocx.lock` are reconciled each prompt, so an edit takes effect at the next one). CI bootstraps the same set via the `setup-ocx` action. Taskfiles call the tools directly — no `ocx package exec` wrapping. For one-off overrides — e.g. testing a freshly built ocx, or invoking from a shell with no hook — prefix with `ocx exec -- <cmd>`. Details → [getting-started.md](./website/src/docs/getting-started.md) § Project Toolchain.
 
@@ -69,18 +71,42 @@ Lint tooling setup (one-off): the first `ocx pull` (or `task` invocation) materi
 
 ## Architecture
 
-Four crates: `crates/ocx_lib` (core), `crates/ocx_cli` (thin CLI, pkg `ocx`), `crates/ocx_schema` (build-only JSON schema), `crates/ocx_shim` (Windows launcher shim). The mirror tool lives in its own repo: [ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror) (vendors ocx as submodule). Rust 2024, resolver v3. Three deps patched to submodules under `external/`: `oci-client` (`rust-oci-client`), `docker_credential`, `sigstore` (`sigstore-rs`).
+20 workspace members (`members = ["crates/*"]`), Rust 2024, resolver v3. `scripts/crate_map.toml` is the dependency map and the only allowed-edge table; the split that produced this layout is [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md). Tier in brackets.
+
+| Crate | Owns |
+|---|---|
+| `ocx_exit` [interface] | Process-outcome vocabulary: `ExitCode` and the `error.detail` slug — an exit code is a CLI contract |
+| `ocx_util` [ecosystem] | Domain-free primitives: fs, locking, extension traits, singleflight, TLS roots, archive, compression, path-context errors |
+| `ocx_console` [ecosystem] | Presentation vocabulary: rendering, printer, theme, styles, progress, data interface |
+| `ocx_oci` [ecosystem] | Distribution-spec-generic registry work: references, digests, manifests, transport, referrers, SSRF guard, auth |
+| `ocx_trust` [ecosystem] | Signer-identity policy: `[[trust.policy]]`, tiered resolution, compiled identity rules |
+| `ocx_sign` [ecosystem] | Supply-chain signing: keyless Sigstore sign, DSSE attest, verify, cosign simplesigning, SBOM referrers |
+| `ocx_config` [ecosystem] | Resolved settings from files and environment: the config tiers, the managed tier, env-var vocabulary |
+| `ocx_store` [internal] | The on-disk layout: three-tier CAS, symlink namespace, package materialisation, shim blobs |
+| `ocx_index` [ecosystem] | The OCX resolution-index protocol and its local collection |
+| `ocx_package` [ecosystem] | Package identity, metadata, versioning, cascade, authoring, publication |
+| `ocx_shell` [internal] | Shell and CI export surface: export generation, per-prompt reconciliation, hook emission |
+| `ocx_project` [internal] | The project tier: `ocx.toml`/`ocx.lock`, consent, mutation, per-prompt activation |
+| `ocx_package_manager` [internal] | Resolution, install, environment composition, patches, launch, execution records |
+| `ocx_announce` [internal] | Index publication: announce pipeline, forge drivers, index claim |
+| `ocx_script` [internal] | The Starlark host API for `ocx package test --script` |
+| `ocx_setup` [internal] | Self-install: bootstrap, env shim files, managed RC blocks, profile detection |
+| `ocx_test_support` [internal] | Shared unit-test fixtures and the process-environment override seam — dev-dependency only |
+
+Three are not tier crates: `ocx_cli` [interface] is the application layer (argv, context, commands, reports, and **all** error-to-exit-code classification, pkg `ocx`); `ocx_schema` [internal] generates JSON Schema at build time; `ocx_shim` [interface] is the Windows `.exe` launcher and its wire ABI.
+
+The mirror tool lives in its own repo: [ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror) (vendors ocx as submodule). Three deps patched to submodules under `external/`: `oci-client` (`rust-oci-client`), `docker_credential`, `sigstore` (`sigstore-rs`).
 
 Subsystem rules auto-load on path match. Read relevant one before work on that area:
 
 | Subsystem | Rule | Scope |
 |-----------|------|-------|
-| OCI registry/index | [subsystem-oci.md](./.claude/rules/subsystem-oci.md) | `crates/ocx_lib/src/oci/**` |
-| Storage/symlinks | [subsystem-file-structure.md](./.claude/rules/subsystem-file-structure.md) | `crates/ocx_lib/src/file_structure/**` |
-| Package metadata | [subsystem-package.md](./.claude/rules/subsystem-package.md) | `crates/ocx_lib/src/package/**` |
-| Package manager | [subsystem-package-manager.md](./.claude/rules/subsystem-package-manager.md) | `crates/ocx_lib/src/package_manager/**` |
+| OCI registry/index | [subsystem-oci.md](./.claude/rules/subsystem-oci.md) | `crates/ocx_oci/**`, `crates/ocx_index/**`, `crates/ocx_sign/**` |
+| Storage/symlinks | [subsystem-file-structure.md](./.claude/rules/subsystem-file-structure.md) | `crates/ocx_store/src/**` |
+| Package metadata | [subsystem-package.md](./.claude/rules/subsystem-package.md) | `crates/ocx_package/src/**` |
+| Package manager | [subsystem-package-manager.md](./.claude/rules/subsystem-package-manager.md) | `crates/ocx_package_manager/src/**` |
 | CLI commands/API | [subsystem-cli.md](./.claude/rules/subsystem-cli.md) | `crates/ocx_cli/src/**` |
-| Script host API | [subsystem-script.md](./.claude/rules/subsystem-script.md) | `crates/ocx_lib/src/script/**` |
+| Script host API | [subsystem-script.md](./.claude/rules/subsystem-script.md) | `crates/ocx_script/src/**` |
 | Acceptance tests | [subsystem-tests.md](./.claude/rules/subsystem-tests.md) | `test/**` |
 | Website/docs | [subsystem-website.md](./.claude/rules/subsystem-website.md) | `website/**` |
 

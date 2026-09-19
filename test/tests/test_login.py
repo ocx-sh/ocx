@@ -232,6 +232,7 @@ def test_login_falls_back_to_default_registry(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_login_password_stdin_ci_stores_credential(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
@@ -910,6 +911,7 @@ def test_logout_was_logged_in_exits_0(ocx: OcxRunner, tmp_path: Path) -> None:
     assert cfg is None or "ghcr.io" not in cfg.get("auths", {})
 
 
+@pytest.mark.smoke
 def test_logout_not_logged_in_exits_0_noop(ocx: OcxRunner, tmp_path: Path) -> None:
     """Scenario 7 — logout on a fresh state exits 0 (CI cleanup convention)."""
     docker_config_dir = tmp_path / "docker"

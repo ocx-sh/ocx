@@ -4,11 +4,8 @@
 use std::{collections::HashMap, process::ExitCode};
 
 use clap::Parser;
-use ocx_lib::{
-    log, oci,
-    oci::index::IndexOperation,
-    package::version::{self, Version},
-};
+use ocx_index::IndexOperation;
+use ocx_package::version::{self, Version};
 
 use crate::{api, options};
 
@@ -34,7 +31,7 @@ pub struct IndexList {
     packages: Vec<options::Identifier>,
 }
 
-type ResolvedTags = Vec<(String, oci::Identifier, Vec<String>)>;
+type ResolvedTags = Vec<(String, ocx_oci::Identifier, Vec<String>)>;
 
 impl IndexList {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
@@ -69,7 +66,7 @@ impl IndexList {
     async fn resolve_tags(
         &self,
         context: &crate::app::Context,
-        identifiers: Vec<oci::Identifier>,
+        identifiers: Vec<ocx_oci::Identifier>,
     ) -> anyhow::Result<ResolvedTags> {
         let futures = self.packages.iter().zip(identifiers).map(|(package, identifier)| {
             let context = context.clone();
@@ -166,7 +163,7 @@ impl IndexList {
                 .fetch_manifest(&target, IndexOperation::Query)
                 .await?
             {
-                Some((_, manifest)) => oci::Platform::from_manifest(&manifest)
+                Some((_, manifest)) => ocx_oci::Platform::from_manifest(&manifest)
                     .into_iter()
                     .map(|p| p.to_string())
                     .collect(),

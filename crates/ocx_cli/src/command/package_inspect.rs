@@ -90,7 +90,7 @@ pub struct PackageInspect {
 
 impl PackageInspect {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        use ocx_lib::package_manager::InspectOptions;
+        use ocx_package_manager::InspectOptions;
 
         use crate::api::data::package_inspect::{InspectReport, PackageInspect};
 

@@ -19,9 +19,20 @@ name = "ocx"
 path = "src/main.rs"
 
 [features]
-# Forwards `ocx_lib`'s internal-only test escape hatch. NEVER enable in
-# release builds. See `ocx_lib`'s manifest for the full contract.
-__testing = ["ocx_lib/__testing"]
+# Forwards each seam crate's internal-only test escape hatch. NEVER enable in
+# release builds. See those crates' manifests for the full contract; the list
+# is checked by `testing_feature_forward_list_matches_grep`.
+__testing = [
+  "ocx_announce/__testing",
+  "ocx_config/__testing",
+  "ocx_index/__testing",
+  "ocx_package/__testing",
+  "ocx_package_manager/__testing",
+  "ocx_shell/__testing",
+  "ocx_oci/__testing",
+  "ocx_store/__testing",
+  "ocx_util/__testing",
+]
 
 [build-dependencies]
 # vergen-gix bakes git + build metadata into the binary via `cargo:rustc-env`
@@ -36,7 +47,57 @@ __testing = ["ocx_lib/__testing"]
 vergen-gix = { version = "=9.1.0", default-features = false, features = ["build", "cargo", "rustc"] }
 
 [dependencies]
-ocx_lib.workspace = true
+# The extracted settings tier: the binary loads the config (`ConfigLoader`),
+# classifies its errors (`exit/ocx_config.rs`) and reads `Env` directly, so
+# the row is a first-class edge rather than a re-export through `ocx_lib`.
+ocx_announce.workspace = true
+ocx_config.workspace = true
+ocx_console.workspace = true
+ocx_exit.workspace = true
+# The resolution-index tier: `app::context` builds the index chain itself
+# (`LocalIndex`, `OcxIndex`, `OciIndex`) and the `ocx index` commands name
+# `IndexOperation` and `RegenerateOutcome`, so the row is a first-class edge
+# rather than a re-export through `ocx_lib`.
+ocx_index.workspace = true
+# The extracted OCI tier: the binary names `Identifier`, `Platform`, `Digest`
+# and the client directly, so the row is a first-class edge rather than a
+# re-export through `ocx_lib`.
+ocx_oci.workspace = true
+# The storage tier: `exit/ocx_store.rs` classifies its errors and the CLI
+# builds a `FileStructure`/`ToolchainStore` directly, so the row is a
+# first-class edge rather than a re-export through `ocx_lib`.
+# The Starlark host: `command/script_runner.rs` drives `run_script` and
+# `api/data/script_run.rs` mirrors its outcome kinds, so the row is a
+# first-class edge rather than a re-export through `ocx_lib`.
+# The package tier: metadata, versioning, the publisher — the CLI builds and
+# reads all three directly, so the row is a first-class edge rather than a
+# re-export through `ocx_lib`.
+ocx_package.workspace = true
+ocx_project.workspace = true
+ocx_package_manager.workspace = true
+ocx_script.workspace = true
+# The signing tier: `exit/ocx_sign.rs` classifies `SignError`,
+# `VerifyError` and `SbomError`, and `package_sign*.rs` drives the sign,
+# attest and verify pipelines directly.
+ocx_sign.workspace = true
+# The shell and CI export tier: `self activate` and `shell state` drive the
+# reconciler and hook emission directly, and `exit/ocx_shell.rs` classifies the
+# CI-detection error family.
+ocx_shell.workspace = true
+# The self-install tier, extracted at WP-36: `self setup`, `config setup` and
+# `config update` call it directly, `shell state` probes its witness shim, and
+# `exit/ocx_setup.rs` classifies its error family.
+ocx_setup.workspace = true
+ocx_store.workspace = true
+# The trust-policy tier: `exit/ocx_sign.rs` classifies its errors and
+# `package_sign_common.rs` builds a `CompiledPolicy` from the resolved tiers.
+ocx_trust.workspace = true
+ocx_util.workspace = true
+
+# `AuthError::Helper` wraps `docker_credential::CredentialRetrievalError`, and
+# that error's exit-code classification lives here (`exit::ocx_oci`), so the
+# binary must name the variants the mapping turns on.
+docker_credential.workspace = true
 
 chrono.workspace = true
 tokio.workspace = true
@@ -44,11 +105,21 @@ tokio.workspace = true
 # `value_terminator("--") + last(true)` interaction; 4.5.57 (2026-02-03)
 # fixed it. Floor in workspace prevents the broken versions.
 clap.workspace = true
+# `clap_parse::parse` drives `Command::try_get_matches` and maps clap's own
+# error kinds onto the typed exit-code ladder, so it names the builder half
+# directly rather than reaching for it through `clap`'s re-export.
+clap_builder.workspace = true
 clap_complete.workspace = true
 anyhow.workspace = true
 tempfile.workspace = true
 futures.workspace = true
+log.workspace = true
 tracing.workspace = true
+# `tracing_init::LogSettings` installs the subscriber, and with it the
+# `log` -> `tracing` bridge (`LogTracer`, the `tracing-log` feature named in
+# the workspace declaration). Only a process that owns `main` may install a
+# global subscriber, so the bridge lives here and in no library crate.
+tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 quick-junit.workspace = true
@@ -65,11 +136,40 @@ secrecy.workspace = true
 async-trait.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+# `SharedError` has no public constructor, and the relocated tests need one to
+# pin that a singleflight waiter reports its inner error's exit code. A dev
+# edge is not built by `cargo build --release -p ocx`, so the seam reaches the
+# tests and never the shipped binary.
+ocx_config = { workspace = true, features = ["__testing"] }
+ocx_oci = { workspace = true, features = ["__testing"] }
+ocx_store = { workspace = true, features = ["__testing"] }
+ocx_util = { workspace = true, features = ["__testing"] }
+# The relocated classification tests fabricate the two foreign error values the
+# ladder matches on: `toml::de::Error` (a `ConfigError` source) and a
+# `reqwest::Error` (a `ForgeError::Transport` source). Neither has a public
+# constructor, so the tests build a real one.
+toml.workspace = true
+reqwest.workspace = true
+# `ProjectErrorKind::ManifestEditParse` carries a `toml_edit` parse error, and
+# the exit code it classifies to is asserted here.
+toml_edit.workspace = true
+# DEC-46's enrichment added two columns to the frozen baseline. That it added
+# only columns is checked rather than claimed: a sha256 over the five columns
+# that existed before, recorded in the file and recomputed by the test.
+sha2.workspace = true
+# The pre-split classification baseline is compared arm by arm, and a
+# line-oriented scan of the source cannot do that: a rustfmt-wrapped `impl`
+# header hides a whole impl, a nested `match` manufactures arms, and a textual
+# `Error::` -> `Self::` rewrite mangles every enum whose name ends in `Error`.
+# The same parser the workspace-structure guards already use reads the arms
+# structurally instead.
+syn = { workspace = true, features = ["visit-mut"] }
+quote.workspace = true
+proc-macro2.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
-
-[dev-dependencies]
-serde_json = "1"
 
 [lints]
 workspace = true

@@ -3,7 +3,7 @@
 """GitLab REST v4 surface for the fake forge.
 
 A mixin over `FakeForge` (`fake_forge.py`) that serves the endpoints
-`GitLabForge` (`crates/ocx_lib/src/forge/gitlab.rs`) calls, backed by the **same
+`GitLabForge` (`crates/ocx_announce/src/forge/gitlab.rs`) calls, backed by the **same
 in-memory git object graph** the GitHub surface uses.
 
 Sharing the graph is the point, not an implementation shortcut. Every announce

@@ -1,19 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use ocx_oci::layer_ref::LayerRef;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Parser;
-use ocx_lib::launch::{self, ExemptionReason, Launch};
-use ocx_lib::utility::child_process;
-use ocx_lib::utility::fs as ocx_fs;
-use ocx_lib::{cli::UsageError, env, oci, package, publisher::LayerRef};
+use ocx_config::env;
+use ocx_package_manager::launch::{self, ExemptionReason, Launch};
+use ocx_util::child_process;
+use ocx_util::fs as ocx_fs;
 
 use crate::api::data::script_run::{AssertionRecord, ScriptRunReport, ScriptStatus};
+use crate::error::UsageError;
 use crate::{conventions, options};
+use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, reconcile_list_separators};
+use ocx_shell::shell::reconcile;
 
 /// Materialize a package locally (no registry round-trip) and run a command in its env.
 ///
@@ -42,7 +46,7 @@ pub struct PackageTest {
     /// recorded; a usage error (exit 64) when neither names one. Parity with
     /// `package push`.
     #[clap(short, long)]
-    platform: Option<oci::Platform>,
+    platform: Option<ocx_oci::Platform>,
 
     /// Materialize into DIR instead of an auto-managed temp dir. DIR must not
     /// exist (created by ocx) or be empty. Implies keep - the dir is never
@@ -187,8 +191,8 @@ impl PackageTest {
             None => crate::build_receipt::read_beside_bundle(&self.layers).await?,
         };
         let platform = crate::build_receipt::resolve_target_platform(self.platform.clone(), receipt.as_ref())?;
-        let metadata = package::metadata::ValidMetadata::try_from(metadata)?;
-        let info = package::info::Info {
+        let metadata = ocx_package::metadata::ValidMetadata::try_from(metadata)?;
+        let info = ocx_package::info::Info {
             identifier: identifier.clone(),
             metadata: metadata.into(),
             platform: platform.clone(),
@@ -222,7 +226,7 @@ impl PackageTest {
                     // Validate same filesystem as $OCX_HOME/layers/.
                     let layers_root = fs.layers.root();
                     if !ocx_fs::same_filesystem(out, layers_root).await? {
-                        return Err(anyhow::Error::from(ocx_lib::Error::InternalFile(
+                        return Err(anyhow::Error::from(ocx_util::error::FileError::new(
                             out.clone(),
                             std::io::Error::new(
                                 std::io::ErrorKind::CrossesDevices,
@@ -239,18 +243,18 @@ impl PackageTest {
                     ocx_fs::ensure_empty_or_absent(out).await?;
                     tokio::fs::create_dir_all(out)
                         .await
-                        .map_err(|e| ocx_lib::error::file_error(out, e))?;
+                        .map_err(|e| ocx_util::error::FileError::new(out, e))?;
                     (out.clone(), None, None)
                 }
 
                 (None, true) => {
                     tokio::fs::create_dir_all(&temp_test_root)
                         .await
-                        .map_err(|e| ocx_lib::error::file_error(&temp_test_root, e))?;
+                        .map_err(|e| ocx_util::error::FileError::new(&temp_test_root, e))?;
                     let td = tempfile::Builder::new()
                         .prefix("test-")
                         .tempdir_in(&temp_test_root)
-                        .map_err(|e| ocx_lib::error::file_error(&temp_test_root, e))?;
+                        .map_err(|e| ocx_util::error::FileError::new(&temp_test_root, e))?;
                     let path = td.path().to_path_buf();
                     // Suppress RAII delete — caller wants to inspect on failure too.
                     // `TempDir::keep()` returns a `PathBuf` (infallible); `path` was
@@ -262,11 +266,11 @@ impl PackageTest {
                 (None, false) => {
                     tokio::fs::create_dir_all(&temp_test_root)
                         .await
-                        .map_err(|e| ocx_lib::error::file_error(&temp_test_root, e))?;
+                        .map_err(|e| ocx_util::error::FileError::new(&temp_test_root, e))?;
                     let td = tempfile::Builder::new()
                         .prefix("test-")
                         .tempdir_in(&temp_test_root)
-                        .map_err(|e| ocx_lib::error::file_error(&temp_test_root, e))?;
+                        .map_err(|e| ocx_util::error::FileError::new(&temp_test_root, e))?;
                     let path = td.path().to_path_buf();
                     // RAII guard: drops on any `?` error before exec, cleaning up.
                     // Before the exec call we explicitly close/drop to delete the
@@ -295,7 +299,7 @@ impl PackageTest {
                 // Cloned, not moved: the same overrides are ALSO the forwarded
                 // slice below, and a handful of entries is cheaper than the
                 // machinery to hand them back out of the scope.
-                ocx_lib::package_manager::EnvScope::Package {
+                ocx_package_manager::EnvScope::Package {
                     env: env_overrides.clone(),
                 },
                 &platform,
@@ -305,7 +309,7 @@ impl PackageTest {
         // independent copies of the `--env` overrides (mirrors exec.rs) —
         // reconcile them together so a package-established `list` separator
         // reaches the forwarded copy.
-        env::reconcile_list_separators(entries.iter_mut().chain(env_overrides.iter_mut()))?;
+        reconcile_list_separators(entries.iter_mut().chain(env_overrides.iter_mut()))?;
 
         // Step 6: Compose env (mirrors exec.rs). Composed entries + forwarded
         // ocx config + forwarded overrides, in the one order that is correct —
@@ -315,10 +319,10 @@ impl PackageTest {
         let mut process_env = if self.clean {
             env::Env::clean()
         } else {
-            env::Env::inherited()
+            reconcile::inherited_env()
         };
         process_env.apply_child_env(
-            env::ChildEnv {
+            ChildEnv {
                 composed: &entries,
                 forwarded: &env_overrides,
             },
@@ -349,7 +353,7 @@ impl PackageTest {
             // policy refuses the preview outright rather than letting the
             // script run an arbitrary number of unrecorded children.
             launch::exemption_allowed(
-                &context.records(ocx_lib::record::RecordsOptions::default())?,
+                &context.records(ocx_package_manager::record::RecordsOptions::default())?,
                 ExemptionReason::PackageTest,
             )?;
             // Read the script source. `-` reads the SOURCE from stdin (R1);
@@ -379,7 +383,7 @@ impl PackageTest {
                     Ok(0) => {
                         drop(td_guard);
                         let message = "no script source provided on stdin (--script -)";
-                        let fault = anyhow::Error::from(ocx_lib::Error::InternalFile(
+                        let fault = anyhow::Error::from(ocx_util::error::FileError::new(
                             std::path::PathBuf::from("<stdin>"),
                             std::io::Error::new(std::io::ErrorKind::UnexpectedEof, message),
                         ));
@@ -391,7 +395,7 @@ impl PackageTest {
                     Err(e) => {
                         drop(td_guard);
                         let message = format!("failed reading script source from stdin: {e}");
-                        let fault = anyhow::Error::from(ocx_lib::Error::InternalFile(
+                        let fault = anyhow::Error::from(ocx_util::error::FileError::new(
                             std::path::PathBuf::from("<stdin>"),
                             std::io::Error::new(e.kind(), message.clone()),
                         ));
@@ -499,7 +503,7 @@ impl PackageTest {
         // It is also bounded by the operator's posture: `Launch::exempt` refuses
         // under `required = true`, so the policy is resolved here and handed to
         // it rather than the exemption being taken for granted.
-        let policy = context.records(ocx_lib::record::RecordsOptions::default())?;
+        let policy = context.records(ocx_package_manager::record::RecordsOptions::default())?;
         if td_guard.is_some() {
             // Bare invocation: spawn child, await exit, drop tempdir, propagate.
             let launch = Launch::exempt(process_env, &resolved, args, ExemptionReason::PackageTest, &policy)?;
@@ -558,7 +562,7 @@ async fn argv_fault_with_report(
         None,
     );
     if let Err(error) = crate::api::junit::write(junit, &report).await {
-        ocx_lib::log::warn!("could not write the JUnit report to {}: {error}", junit.path.display());
+        log::warn!("could not write the JUnit report to {}: {error}", junit.path.display());
     }
     fault
 }
@@ -582,7 +586,7 @@ async fn provision_scratch_dir(package_root: &std::path::Path) -> anyhow::Result
         // Scratch creation failure → IoError (74) per C2; surface as the lib
         // file error so classify_error maps it (this is a pre-engine host
         // setup failure, not a script outcome).
-        anyhow::Error::from(ocx_lib::error::file_error(&scratch, e))
+        anyhow::Error::from(ocx_util::error::FileError::new(&scratch, e))
     })?;
     Ok(scratch)
 }

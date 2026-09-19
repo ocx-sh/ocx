@@ -11,7 +11,7 @@
 ///
 /// Resolve with [`Consent::explicit`] and hand the `Option<bool>` to the write
 /// seam, which fills a `None` in from
-/// [`OCX_NO_CONSENT`](ocx_lib::env::keys::OCX_NO_CONSENT) and otherwise stamps.
+/// [`OCX_NO_CONSENT`](ocx_config::env::keys::OCX_NO_CONSENT) and otherwise stamps.
 /// The ladder is flag, then env, then stamp.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Consent {
@@ -41,7 +41,7 @@ impl Consent {
     ///
     /// The tri-state is the whole point: "neither flag" and "`--consent`" are
     /// different answers, and collapsing them to a `bool` at the command would
-    /// let [`OCX_NO_CONSENT`](ocx_lib::env::keys::OCX_NO_CONSENT) — read further
+    /// let [`OCX_NO_CONSENT`](ocx_config::env::keys::OCX_NO_CONSENT) — read further
     /// down, at the write seam — outrank a flag the user typed. `None` travels
     /// to that seam so the env speaks only where nothing else did.
     pub fn explicit(&self) -> Option<bool> {

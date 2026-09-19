@@ -6,7 +6,7 @@ Cluster A (mutation transactionality) — Codex H2 fix:
 half-committed `ocx add` state must be recoverable without manual cleanup.
 
 Spec sources:
-- ``crates/ocx_lib/src/project/mutation.rs`` — ``MutationGuard::commit``
+- ``crates/ocx_project/src/mutation.rs`` — ``MutationGuard::commit``
   ordering contract: lock first, manifest second, with rollback on
   manifest failure.
 - plan_review_fixes_project_toolchain.md Phase 1 step 4 (atomic two-file

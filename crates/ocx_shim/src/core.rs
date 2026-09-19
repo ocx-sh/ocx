@@ -489,7 +489,7 @@ pub(super) fn parse_exec_sidecar(raw: &[u8]) -> Result<Sidecar, ShimError> {
 /// Registry-host validity, the repository-path grammar, tag grammar, the
 /// digest's length or its algorithm's existence, and whether the digest names
 /// anything real. Authority for all of that stays with
-/// `ocx_lib::oci::PinnedIdentifier`, which re-parses this exact value on the
+/// `ocx_oci::PinnedIdentifier`, which re-parses this exact value on the
 /// receiving end of the wire and exits 64 if it does not hold (C-011). This
 /// narrowness is the point: a second, hand-rolled OCI reference parser living
 /// in a dependency-free crate would be a wire-format parser owned in the wrong

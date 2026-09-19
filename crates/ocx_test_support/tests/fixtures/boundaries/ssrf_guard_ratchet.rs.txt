@@ -1,0 +1,7 @@
+async fn fetch(url: &str) -> reqwest::Result<String> {
+    reqwest::Client::builder().build()?.get(url).send().await?.text().await
+}
+
+async fn fetch_default(url: &str) -> reqwest::Result<String> {
+    reqwest::Client::default().get(url).send().await?.text().await
+}

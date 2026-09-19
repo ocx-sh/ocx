@@ -17,10 +17,9 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use ocx_lib::oci;
-use ocx_lib::oci::attest::predicate::PredicateType;
-use ocx_lib::oci::sign::{SignError, SignErrorKind};
-use ocx_lib::package_manager::{AttestOptions, SweptOutcome};
+use ocx_package_manager::{AttestOptions, SweptOutcome};
+use ocx_sign::attest::predicate::PredicateType;
+use ocx_sign::sign::{SignError, SignErrorKind};
 
 use crate::api::data::attestation::AttestationReport;
 use crate::api::data::sweep::{SweepReport, SweptTagReport};
@@ -49,7 +48,7 @@ pub struct PackageAttest {
         value_name = "PLATFORM",
         conflicts_with_all = ["tags", "tags_file"]
     )]
-    platform: Option<oci::Platform>,
+    platform: Option<ocx_oci::Platform>,
 
     /// Predicate document to attach (JSON).
     ///
@@ -230,11 +229,11 @@ impl PackageAttest {
     /// The reporting half of [`PackageManager::attest_tags`]; the loop itself
     /// runs to completion there, so nothing here can abort early.
     ///
-    /// [`PackageManager::attest_tags`]: ocx_lib::package_manager::PackageManager::attest_tags
+    /// [`PackageManager::attest_tags`]: ocx_package_manager::PackageManager::attest_tags
     async fn sweep(
         &self,
         context: &crate::app::Context,
-        identifier: &oci::Identifier,
+        identifier: &ocx_oci::Identifier,
         tags: &[String],
         options: &AttestOptions,
     ) -> anyhow::Result<ExitCode> {
@@ -248,7 +247,7 @@ impl PackageAttest {
                 SweptOutcome::CoveredBy(attested_as) => SweptTagReport::covered(entry.tag, attested_as),
                 SweptOutcome::Failed(error) => {
                     let error = package_sign_common::attest_error_into_anyhow(*error);
-                    failures.push(ocx_lib::cli::classify_error(error.as_ref()));
+                    failures.push(crate::exit::classify_library_error(error.as_ref()));
                     SweptTagReport::failed(
                         entry.tag,
                         None,
@@ -385,7 +384,7 @@ mod platform_optionality_tests {
 
     /// The parsed `--platform`, or clap's error kind on refusal. `extra` is
     /// appended after the required arguments.
-    fn parse(extra: &[&str]) -> Result<Option<oci::Platform>, clap::error::ErrorKind> {
+    fn parse(extra: &[&str]) -> Result<Option<ocx_oci::Platform>, clap::error::ErrorKind> {
         let mut argv = REQUIRED.to_vec();
         argv.extend_from_slice(extra);
         PackageAttest::try_parse_from(argv)
@@ -404,7 +403,7 @@ mod platform_optionality_tests {
     /// so the test above measures optionality rather than a deleted flag.
     #[test]
     fn the_flag_still_parses_in_both_spellings() {
-        let expected = Ok(Some("linux/amd64".parse::<oci::Platform>().expect("platform")));
+        let expected = Ok(Some("linux/amd64".parse::<ocx_oci::Platform>().expect("platform")));
         assert_eq!(parse(&["--platform", "linux/amd64", REFERENCE]), expected);
         assert_eq!(parse(&["-p", "linux/amd64", REFERENCE]), expected);
     }
@@ -427,7 +426,7 @@ mod signature_format_tests {
     //! to the default.
 
     use super::*;
-    use ocx_lib::oci::sign::SignatureFormat;
+    use ocx_sign::sign::SignatureFormat;
 
     const REFERENCE: &str = "registry.example/pkg:1.0";
 

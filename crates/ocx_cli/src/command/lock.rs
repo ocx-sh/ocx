@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::project::{ResolveLockOptions, resolve_lock, resolve_lock_touched};
+use ocx_project::{ResolveLockOptions, resolve_lock, resolve_lock_touched};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{
@@ -145,7 +145,7 @@ impl Lock {
                 guard,
                 staged,
                 new_lock.clone(),
-                ocx_lib::package_manager::ToolchainRender {
+                ocx_package_manager::ToolchainRender {
                     scope: &scope,
                     toolchain_root: context.toolchain_root(),
                     platform: &platform,

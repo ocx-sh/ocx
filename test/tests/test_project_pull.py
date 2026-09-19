@@ -178,6 +178,7 @@ def _symlinks_root(ocx_home: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_pull_no_args_pulls_all_groups(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:

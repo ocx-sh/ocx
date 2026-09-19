@@ -21,7 +21,8 @@ Pytest (not Rust integration tests) because acceptance tests exercise real compi
 | `test/src/assertions.py` | Cross-platform assertion helpers |
 | `test/src/helpers.py` | `make_package()`: build + push test packages |
 | `test/src/registry.py` | OCI registry helpers (fetch manifest, extract platforms) |
-| `test/taskfile.yml` | Task runner (default, quick, parallel) |
+| `test/taskfile.yml` | Task runner (default, quick, parallel, smoke, scoped; suite floor/ceiling checks) |
+| `test/SUITE_FLOOR`, `test/SKIP_CEILING`, `test/XFAIL_CEILING` | Plain-integer floor files the run is bracketed by (below) |
 
 ## Key Fixtures
 
@@ -105,10 +106,47 @@ pkg = make_package(ocx, repo, tag, tmp_path,
 task test              # Build + registry + all tests
 task test:quick        # Skip rebuild
 task test:parallel     # pytest-xdist (-n auto)
+task test:smoke        # The smoke tier only (-m smoke), ~5 s
+task test:scoped -- ocx_setup   # The acceptance subset the named crates own
 
 # Single test (runs prebuilt test/bin/ocx — rebuild via `task test` after Rust changes):
 cd test && uv run pytest tests/test_install.py::test_name -v
 ```
+
+## Smoke Tier and Guards
+
+The crate split (`plan_crate_split_workspace.md` DEC-10, C-012…C-014, C-069, C-077) makes
+the suite an unmodified proof while `ocx_lib` is taken apart. Four mechanisms:
+
+- **`smoke` marker.** One `@pytest.mark.smoke` happy path per visible top-level `ocx` verb
+  (22), registry only, never `sigstore_stack` / `identity_token`, never a `sign|attest|verify|cosign`
+  test. `test/pyproject.toml` registers the marker and sets `--strict-markers`, so a misspelled
+  marker is a collection error, not a silently unselected test. `task test:smoke` runs
+  `-m smoke -n auto --dist loadgroup` under a 90 s wall-clock budget (target 60 s);
+  `tests/test_smoke_coverage.py` reds a verb without a smoke test and a smoke test on the
+  signing surface. `task test:scoped -- <crate>...` runs the rows of `SCOPED_ROWS` in
+  `test/taskfile.yml`; a missing row, an `escalate` row or a glob collecting no test fails.
+- **Floor files.** `test/SUITE_FLOOR` (collected count, only ever rises — in the commit that
+  adds the tests), `test/SKIP_CEILING`, `test/XFAIL_CEILING`. `task test` (and `test:quick` /
+  `test:parallel`, which route through it) refuses below the floor before the run and above a
+  ceiling after it, both as `cmds:` (`--force` skips `preconditions:`).
+- **Diff guard.** `scripts/test_diff_guard.py <base>..<head>` (run at every merge over both the
+  per-WP range and `merge-base(origin/main)..HEAD`) refuses any diff under `test/` except:
+  an added `@pytest.mark.smoke` line (and the `import pytest` a module lacked); a
+  docstring/comment line that carries none of `assert`, `pytest.mark.skip`, `xfail`,
+  `parametrize`, `pytest.fixture` or a `def` signature — the keyword check runs before the
+  inertness check on purpose, so commenting an assertion out is refused exactly like deleting
+  it; a wholly new test function or `Test*` class, or a new
+  `test/tests/**/*.py` module (never `conftest.py`, `__init__.py`, `pytest.ini`, `tox.ini`,
+  `setup.cfg`); edits to `test/pyproject.toml`, `test/taskfile.yml` and the three floor files.
+  A new def or class is exempt from the line checks but not from the rebinding checks — the
+  shapes `scripts/test_diff_guard.py`'s docstring names (that list is the authority; it
+  widens as adversaries find shapes). One `--allow <path>:<line>` exempts a single
+  one-line-for-one-line hunk (the trampoline blob path, DEC-10 d). The plan's own oracles (`test_smoke_coverage.py`,
+  `test_logging.py`, `test_no_crate_path_assertions.py`) are the only modules exempt from
+  the line checks. `--self-test` shows every shape red and green.
+- **Adding a verb** (see `subsystem-cli-commands.md`): its acceptance test carries a `smoke`
+  row, or `test_smoke_coverage.py` reds; `SUITE_FLOOR` rises in the same commit.
 
 ## Observing a Running Suite
 
@@ -157,6 +195,22 @@ identical run in every sibling worktree on this host.
 
 For shell-friendly assertions (exec output, file existence, exit-code branches), prefer `test/scenarios/` — see Platform Split below.
 
+`scripts/test_diff_guard.py` refuses an attribute call on a receiver the new code does not
+own unless the verb is a pure read, so a few ordinary-looking spellings red at merge. The
+verb is judged without the receiver's type — `shutil.copy` and `dict.copy`, `requests.get`
+and `dict.get`, `pickle.load` and `json.load` are the same name — so the mandated spellings
+are:
+
+| Instead of | Write |
+|---|---|
+| `os.environ.copy()` | `env = dict(os.environ)`, then mutate `env` |
+| `os.environ.get("X")` | `dict(os.environ).get("X")`, or `os.environ["X"]` |
+| `json.load(fh)` | `json.loads(p.read_text(encoding="utf-8"))` |
+| `Path(p).write_text(...)` on a path outside `tmp_path` | don't — the suite's inputs are frozen |
+
+`pickle`, `marshal`, `shelve` and `dill` are refused by name: unpickling is `exec` under
+another spelling, and a reviewer reading `loads(b"…")` sees a parsed fixture.
+
 ## Test Files
 
 Test files cover: install, find, select, uninstall, purge, clean, offline, env, exec, package lifecycle, cascade, package pull, package description push, package description pull, inspect (candidates/metadata/resolution + `--closure` dependency closure + read-only no-index-growth contract), index, color, mirror, CI export, shell profile.
@@ -186,7 +240,7 @@ test per row of `analysis_shell_env_edge_cases.md`). Their shared helpers live i
 puts `src` on `pythonpath`, which is what lets the same import work inside the container.
 
 **Five shells host a per-prompt hook: bash, zsh, fish, PowerShell, and elvish.**
-`crates/ocx_lib/src/shell/hook.rs::registration` returns `Some` for each of those five and `None` only
+`crates/ocx_shell/src/shell/hook.rs::registration` returns `Some` for each of those five and `None` only
 for `Ash | Ksh | Dash | Nushell | Batch` — `ash`/`ksh`/`dash` have no append-safe prompt-hook point at
 all, and nushell's hook is a different mechanism (`env_change.PWD`, fires on directory change rather
 than every prompt, inlined in its shim body). Tier 3 (a real pty, the hook firing on its own) drives
@@ -233,12 +287,12 @@ for full usage.
 
 When an acceptance test must force internal state that production code derives at runtime (the running self-image, the detected host libc, …), **do not invent a new env var or a plain `cfg(test)` gate.** There is one canonical project convention — reuse it:
 
-1. **Cargo feature `__testing`** — declared `__testing = []` in `crates/ocx_lib/Cargo.toml`, re-exported `__testing = ["ocx_lib/__testing"]` in `crates/ocx_cli/Cargo.toml`. Follows the Rust-ecosystem `__name` convention (axum `__private`, reqwest `__tls`): internal, no stability guarantee, never enabled by downstream code.
+1. **Cargo feature `__testing`** — declared `__testing = []` in each seam crate's `Cargo.toml` and forwarded from `crates/ocx_cli/Cargo.toml` (the list `testing_feature_forward_list_matches_grep` checks). Follows the Rust-ecosystem `__name` convention (axum `__private`, reqwest `__tls`): internal, no stability guarantee, never enabled by downstream code.
 2. **Gate every seam** `#[cfg(any(test, feature = "__testing"))]` — `test` covers unit tests, `feature = "__testing"` covers the acceptance binary. **Release artifacts physically lack the code path.**
 3. **Env-var name is double-underscore-prefixed `__OCX_*`** (e.g. `__OCX_SELF_IMAGE`, `__OCX_TEST_LIBC`) — the prefix signals "private test seam, not user-facing config." These are NOT documented in `website/src/docs/reference/environment.md` and are NOT forwarded via `Env::apply_ocx_config`.
 4. **Defense-in-depth assert inside the gate** where misuse is dangerous — e.g. `__OCX_SELF_IMAGE` asserts the override targets a loopback registry, so even a build with the feature on cannot be coerced against a real registry.
 
-The acceptance harness already builds with the feature: `test/taskfile.yml` and `taskfiles/rust.taskfile.yml` pass `--features ocx/__testing`. Adding a new seam needs **no build change** — just gate it and read the `__OCX_*` var. Reference implementation: `crates/ocx_lib/src/package_manager/tasks/update_check.rs::ocx_cli_identifier` (the `__OCX_SELF_IMAGE` seam). Acceptance usage: `test/tests/test_self_update.py`.
+The acceptance harness already builds with the feature: `test/taskfile.yml` and `taskfiles/rust.taskfile.yml` pass `--features ocx/__testing`. Adding a new seam needs **no build change** — just gate it and read the `__OCX_*` var. Reference implementation: `crates/ocx_package_manager/src/tasks/update_check.rs::ocx_cli_identifier` (the `__OCX_SELF_IMAGE` seam). Acceptance usage: `test/tests/test_self_update.py`.
 
 ## Unfalsifiable Greens
 

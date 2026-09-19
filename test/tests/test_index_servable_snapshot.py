@@ -1969,7 +1969,7 @@ def test_a_slow_but_progressing_root_outlives_the_retired_total_deadline(
     fails.
 
     Both halves run against the ``__OCX_TESTING_INDEX_TIMEOUTS_MS`` seam
-    (`crates/ocx_lib/src/oci/index/ocx_index.rs`), which scales the three
+    (`crates/ocx_index/src/ocx_index.rs`), which scales the three
     shipped bounds by 1/30 for this process only. Before the seam existed this
     row cost **64.6 s of wall clock** — 5 chunks 16 s apart, out-waiting a
     retired deadline in real time — for a claim that is entirely a *ratio*

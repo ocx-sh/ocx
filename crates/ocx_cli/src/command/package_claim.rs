@@ -19,7 +19,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::claim::{self, ClaimRequest, ClaimTarget, Upstream};
+use ocx_announce::claim::{self, ClaimRequest, ClaimTarget, Upstream};
 
 use crate::api::data::claim::ClaimReport;
 use crate::options;
@@ -51,7 +51,7 @@ pub struct PackageClaim {
     /// against, so it names the registry repository, not the index.
     //
     // Deliberately a bare `String` with no `value_parser`: the pointer is parsed
-    // by the existing `oci::index::parse_physical_repository`, which
+    // by the existing `ocx_index::parse_physical_repository`, which
     // `claim::root` already calls and which names the refused value back
     // (`ClaimError::MalformedRepository`, exit 64). A clap `value_parser` would
     // move that refusal to `ValueValidation` -- 64 as well, so the exit code
@@ -139,7 +139,7 @@ impl PackageClaim {
     /// # Errors
     ///
     /// A usage error (exit 64) naming the refused value and the `LOGIN:ID` form.
-    fn owner_specs(&self) -> anyhow::Result<Vec<ocx_lib::claim::OwnerSpec>> {
+    fn owner_specs(&self) -> anyhow::Result<Vec<ocx_announce::claim::OwnerSpec>> {
         self.owner.iter().map(|value| parse_owner_spec(value)).collect()
     }
 
@@ -161,7 +161,7 @@ impl PackageClaim {
     /// # Errors
     ///
     /// Every refusal here classifies to exit 64.
-    fn argv_faults(&self) -> anyhow::Result<ocx_lib::forge::ForgeKind> {
+    fn argv_faults(&self) -> anyhow::Result<ocx_announce::forge::ForgeKind> {
         // `validate` carries C-058's value-conditional exclusions, the `git`
         // transport's GitHub refusal and the fork/index host agreement, and it
         // is the single producer of the resolved kind the report renders.
@@ -180,7 +180,7 @@ impl PackageClaim {
 /// constrained by the identifier grammar, and the login by
 /// `claim::owners::login_charset_is_valid`. The rule itself lives in the library
 /// beside the field it protects
-/// ([`ocx_lib::claim::upstream_repository_url_is_publishable`], which states why
+/// ([`ocx_announce::claim::upstream_repository_url_is_publishable`], which states why
 /// each half exists); this function owns only the flag name and the exit code.
 ///
 /// **The message names the flag and the rule, never the value.** The refusal's
@@ -191,7 +191,7 @@ impl PackageClaim {
 /// does name its value: a `--owner` login carries no secret.
 fn validate_upstream_repository_url(value: Option<&str>) -> anyhow::Result<()> {
     match value {
-        Some(url) if !claim::upstream_repository_url_is_publishable(url) => Err(ocx_lib::cli::UsageError::new(
+        Some(url) if !claim::upstream_repository_url_is_publishable(url) => Err(crate::error::UsageError::new(
             "--upstream-repository-url must be an http or https url without embedded credentials",
         )
         .into()),
@@ -207,12 +207,12 @@ fn validate_upstream_repository_url(value: Option<&str>) -> anyhow::Result<()> {
 /// method's doc forbids — `--owner ""` carries no colon, so it reaches the
 /// library as `OwnerSpec::Login("")` and is refused there, where the governance
 /// rule is documented.
-fn parse_owner_spec(value: &str) -> anyhow::Result<ocx_lib::claim::OwnerSpec> {
+fn parse_owner_spec(value: &str) -> anyhow::Result<ocx_announce::claim::OwnerSpec> {
     let Some((login, id)) = value.split_once(':') else {
-        return Ok(ocx_lib::claim::OwnerSpec::Login(value.to_string()));
+        return Ok(ocx_announce::claim::OwnerSpec::Login(value.to_string()));
     };
     let refuse = || {
-        ocx_lib::cli::UsageError::new(format!(
+        crate::error::UsageError::new(format!(
             "--owner {value} is neither a LOGIN nor a LOGIN:ID pair; an id is a non-negative whole number"
         ))
     };
@@ -222,7 +222,7 @@ fn parse_owner_spec(value: &str) -> anyhow::Result<ocx_lib::claim::OwnerSpec> {
     // `u64`, never `i64`: `alice:-1` is not an account id, and the last-colon
     // split would silently read `alice:7:8` as login `alice:7`.
     let id: u64 = id.parse().map_err(|_| refuse())?;
-    Ok(ocx_lib::claim::OwnerSpec::Resolved {
+    Ok(ocx_announce::claim::OwnerSpec::Resolved {
         login: login.to_string(),
         id,
     })
@@ -252,7 +252,7 @@ impl PackageClaim {
         // binary, so an unconditional probe would only show up as an ordinary
         // `api` claim failing on a host that never needed git.
         let git = if self.forge.needs_git() {
-            Some(ocx_lib::forge::probe_git_binary().await?)
+            Some(ocx_announce::forge::probe_git_binary().await?)
         } else {
             None
         };
@@ -260,7 +260,7 @@ impl PackageClaim {
         // 2. The whole C-063 ladder lives in `resolve`, never here, and the
         //    resolved pair travels down as one value. The selected transport is
         //    what opens the job-token rung, so it is passed rather than assumed.
-        let credentials = ocx_lib::forge::ForgeCredentials::resolve(self.forge.transport);
+        let credentials = ocx_announce::forge::ForgeCredentials::resolve(self.forge.transport);
         self.forge.require_credential(&credentials)?;
 
         // C-064: before the write, and only in the one state that surprises.
@@ -331,11 +331,11 @@ impl PackageClaim {
 mod tests {
     use clap::{CommandFactory as _, Parser as _};
 
-    use ocx_lib::claim::{ClaimTarget, OwnerSpec, Upstream};
-    use ocx_lib::cli::ExitCode;
+    use ocx_announce::claim::{ClaimTarget, OwnerSpec, Upstream};
+    use ocx_exit::ExitCode;
 
     use super::PackageClaim;
-    use crate::app::classify_error;
+    use crate::exit::classify_error;
 
     /// A valid invocation with `flags` inserted before the positional.
     fn parse(flags: &[&str]) -> Result<PackageClaim, clap::Error> {
@@ -363,7 +363,7 @@ mod tests {
         /// clap refuses the invocation at parse time, with this error kind.
         ///
         /// The kind is carried rather than a bare `is_err()` so a clap row names
-        /// its exit code the way the `Validate` rows do: `cli::clap::parse` maps
+        /// its exit code the way the `Validate` rows do: `clap_parse::parse` maps
         /// **every** `clap::Error` to `EX_USAGE`, so the kind is the only thing
         /// distinguishing "refused by the rule this row is about" from "refused
         /// because the argv the row builds is malformed for some other reason".
@@ -640,7 +640,7 @@ mod tests {
     /// C-057: `--repository` reaches the library **unparsed**.
     ///
     /// The physical pointer is parsed by the existing
-    /// `oci::index::parse_physical_repository`, which `claim::root` already
+    /// `ocx_index::parse_physical_repository`, which `claim::root` already
     /// calls — mapping the failure to `ClaimError::MalformedRepository` (exit
     /// 64) and naming the refused value back. A clap `value_parser` would move
     /// that refusal to `ValueValidation` (64 as well, so the exit code cannot

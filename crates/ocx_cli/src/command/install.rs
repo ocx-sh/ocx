@@ -18,8 +18,6 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use ocx_lib::log;
-
 use crate::{api, conventions, options};
 
 #[derive(Parser, Clone)]

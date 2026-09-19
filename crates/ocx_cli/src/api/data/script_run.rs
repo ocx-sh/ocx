@@ -20,7 +20,7 @@ use serde::Serialize;
 use crate::api::Printable;
 
 /// Overall outcome of a scripted test run. Mirrors
-/// `ocx_lib::script::ScriptOutcomeKind` at the OCX-facing level.
+/// `ocx_script::ScriptOutcomeKind` at the OCX-facing level.
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptStatus {
@@ -71,8 +71,8 @@ pub struct SourceLocation {
     pub column: usize,
 }
 
-impl From<&ocx_lib::script::ScriptLocation> for SourceLocation {
-    fn from(location: &ocx_lib::script::ScriptLocation) -> Self {
+impl From<&ocx_script::ScriptLocation> for SourceLocation {
+    fn from(location: &ocx_script::ScriptLocation) -> Self {
         Self {
             file: location.file.clone(),
             line: location.line,
@@ -120,8 +120,8 @@ impl ScriptRunReport {
 
     /// Builds the envelope from an engine-neutral [`ScriptOutcome`] plus the
     /// surfaced terminal `ocx.run` result (if any).
-    pub fn from_outcome(outcome: &ocx_lib::script::ScriptOutcome, run: Option<ocx_lib::script::RunSummary>) -> Self {
-        use ocx_lib::script::ScriptOutcomeKind as K;
+    pub fn from_outcome(outcome: &ocx_script::ScriptOutcome, run: Option<ocx_script::RunSummary>) -> Self {
+        use ocx_script::ScriptOutcomeKind as K;
         let (status, assertion) = match &outcome.kind {
             K::Passed => (ScriptStatus::Passed, None),
             K::Failed {
@@ -181,7 +181,7 @@ impl ScriptRunReport {
 }
 
 impl Printable for ScriptRunReport {
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         // Single-table rule: one table, status + detail columns.
         let status = match self.status {
             ScriptStatus::Passed => "passed",
@@ -280,7 +280,7 @@ mod tests {
         // W7 / plan C5: `kind` reflects the actual failing `expect.*` fn, not a
         // constant "failed". `from_outcome` must carry `AssertionKind` through
         // `ScriptOutcomeKind::Failed` into the stable JSON `kind` field.
-        use ocx_lib::script::{AssertionKind, ScriptOutcome, ScriptOutcomeKind};
+        use ocx_script::{AssertionKind, ScriptOutcome, ScriptOutcomeKind};
         let cases = [
             (AssertionKind::Ok, "ok"),
             (AssertionKind::Eq, "eq"),
@@ -313,7 +313,7 @@ mod tests {
         // W7 edge: a terminal failure the engine cannot attribute to a single
         // assertion (e.g. stack overflow) → stable `kind: "unknown"`, never a
         // misleading concrete assertion name.
-        use ocx_lib::script::{ScriptOutcome, ScriptOutcomeKind};
+        use ocx_script::{ScriptOutcome, ScriptOutcomeKind};
         let outcome = ScriptOutcome {
             kind: ScriptOutcomeKind::Failed {
                 kind: None,

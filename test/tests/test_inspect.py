@@ -27,6 +27,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from src.helpers import inspect_entry, inspect_names, make_package
 from src.runner import OcxRunner, current_platform
 
@@ -86,6 +88,7 @@ def test_inspect_is_keyed_by_binding_not_identifier(
     assert data["platform"], "--resolve selects a platform, so the report names it"
 
 
+@pytest.mark.smoke
 def test_inspect_default_lists_locked_candidates_without_resolving(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:

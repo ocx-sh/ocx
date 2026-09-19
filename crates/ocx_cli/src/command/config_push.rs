@@ -4,11 +4,8 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{
-    managed_config::{ManagedConfigPublishOptions, publish_managed_config},
-    oci,
-    publisher::Publisher,
-};
+use ocx_package::publisher::Publisher;
+use ocx_package_manager::managed_config::{ManagedConfigPublishOptions, publish_managed_config};
 
 use crate::options;
 
@@ -31,7 +28,7 @@ pub struct ConfigPushArgs {
     /// `ocx config update` only consumes the platform-independent `any`
     /// entry; keep the default unless you know the consumer differs.
     #[clap(short, long, default_value = "any")]
-    platform: oci::Platform,
+    platform: ocx_oci::Platform,
 
     /// The config file to publish (its content is staged as `config.toml`).
     config: std::path::PathBuf,

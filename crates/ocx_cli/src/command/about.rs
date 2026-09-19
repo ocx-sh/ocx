@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use console::{Style, Term};
-use ocx_lib::{file_structure, oci, shell};
+use ocx_shell::shell;
 
 use crate::api::Printable;
 use crate::app::Context;
@@ -56,17 +56,17 @@ impl About {
         // suffix): `Platform::current()`'s `Display` now carries the detected
         // libc, which the dedicated `Libc` row already shows. `segments()` is
         // the no-features rendering.
-        let host_platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+        let host_platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         let platforms: Vec<String> = vec![host_platform.segments().join("/")];
         let current_shell = shell::Shell::from_process().map(|s| format!("{s}"));
-        let home = file_structure::default_ocx_root()
+        let home = ocx_config::home::default_ocx_root()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "~/.ocx".to_string());
         // Reuse the libc families the resolution path detected —
         // `Context::try_init` already ran `HostCapabilities::detect_and_cache()`,
         // so this reads the populated cache rather than spawning a second probe.
         // A host may advertise multiple families (e.g. glibc + musl).
-        let libc: Vec<String> = oci::cached_libc_labels();
+        let libc: Vec<String> = ocx_oci::cached_libc_labels();
 
         let info = crate::api::data::about::About::new(version, registry, platforms, libc, current_shell, home);
 

@@ -2,6 +2,11 @@
 
 version: '3'
 
+vars:
+  # The tee'd log of the last `test:unit` run; `test:ceiling` reads its
+  # Summary line (C-070).
+  NEXTEST_RUN_LOG: '{{.ROOT_DIR}}/target/nextest/run.log'
+
 includes:
   # `--all-targets` on the check variants only. Without it `cargo check`
   # compiles the lib and the bins and stops, so every `#[cfg(test)]` module is
@@ -52,28 +57,47 @@ x-shared:
 
 tasks:
   verify:
-    desc: Rust quality gate (format, clippy, license, build, unit tests)
+    desc: Rust-only developer gate for review-fix loops — NOT part of `task verify`, which reaches these checks through `.verify:lint` / `.verify:build-test` instead
     summary: |
+      A convenience entry point, not a gate: nothing in `taskfile.yml`, in
+      `.github/workflows/**` or in `scripts/scoped_gate.py` calls this task.
+      Four subsystem rules and `workflow-feature.md` tell a developer to run
+      it during a review-fix loop when only Rust changed, which is what it is
+      for and the reason it stays. Anything it runs that must also gate a
+      merge is wired into `.verify:build-test` or a workflow job in its own
+      right — never left to this list, which no CI run and no commit hook
+      evaluates. `check:windows-cfg` below is reachable only from here; the
+      MSVC property it checks is gated natively by verify-deep.yml's
+      `Build & Unit Test (Windows)` job.
+
       Runs all Rust-specific checks sequentially (fail-fast):
         1. cargo fmt --check
         2. cargo clippy
-        3. cargo check of ocx_shim on both Windows MSVC targets
-           (see check:windows-cfg for why ocx_lib cannot join it here)
-        4. hawkeye license headers
-        5. cargo-deny license audit
-        6. cargo-about third-party notice freshness
-        7. cargo build --release
-        8. cargo nextest run
+        3. the lint ratchet (Linux; lint:ratchet)
+        4. cargo check of ocx_shim on both Windows MSVC targets
+           (see check:windows-cfg for why the rest cannot join it here)
+        5. hawkeye license headers
+        6. cargo-deny license audit
+        7. cargo-about third-party notice freshness
+        8. cargo build --release
+        9. the unit-test floor (Linux; test:floor)
+       10. cargo nextest run
+       11. the ignored/skipped ceiling over that run (Linux; test:ceiling)
+       12. that ceiling parser's own red/green fixtures (Linux; test:ceiling:self-test)
       Use during review-fix loops when only Rust code changed.
     cmds:
       - task: format:check
       - task: clippy:check
+      - task: lint:ratchet
       - task: check:windows-cfg
       - task: license:check
       - task: license:deps
       - task: license:notice:check
       - task: build
+      - task: test:floor
       - task: test:unit
+      - task: test:ceiling
+      - task: test:ceiling:self-test
 
   check:windows-cfg:
     desc: Type-check the cfg(windows)-only code the host gate cannot see
@@ -90,21 +114,24 @@ tasks:
       and stays the gate for the rest of the crates).
 
       Scoped to `ocx_shim` because it CANNOT be widened here, not because
-      widening it would merely be slow. `ocx_lib` pulls `aws-lc-sys`, whose
-      build script compiles C for the *target*; on a Linux host with no
-      MSVC-targeting C toolchain `cargo check -p ocx_lib --target
-      x86_64-pc-windows-msvc` dies in cc-rs (measured: exit 101,
-      "command did not execute successfully", `pthread_rwlock_t` undeclared)
-      before rustc ever type-checks a line of `ocx_lib`. Adding `-p ocx_lib`
-      here buys a gate that is red for a reason nobody can fix. `ocx_shim`
-      escapes it by having no dependencies off Windows.
+      widening it would merely be slow. `ocx_oci` pulls `aws-lc-sys` (through
+      the `oci-client` fork's `jsonwebtoken`), whose build script compiles C
+      for the *target*; on a Linux host with no MSVC-targeting C toolchain
+      `cargo check -p ocx_oci --target x86_64-pc-windows-msvc` dies in cc-rs
+      (measured: exit 101, "command did not execute successfully",
+      `pthread_rwlock_t` undeclared) before rustc ever type-checks a line of
+      it — and every crate above `ocx_oci` inherits that. Adding them here
+      buys a gate that is red for a reason nobody can fix. `ocx_shim` escapes
+      it by having no dependencies off Windows.
 
-      So `ocx_lib`'s own `cfg(windows)` code is covered elsewhere, and is
+      So the workspace's own `cfg(windows)` code is covered elsewhere, and is
       covered — the claim that nothing sees it is wrong:
-        * `Smoke (Windows)` in verify-basic.yml runs
-          `cargo nextest run --workspace` on windows-latest on EVERY pull
-          request, which compiles the lib and every test target natively.
-          It is the gate that has actually caught these breaks.
+        * `Build & Unit Test (Windows)` in verify-deep.yml runs
+          `cargo nextest run --workspace` on windows-latest for every
+          non-draft pull request, the merge queue and every push to main,
+          which compiles the lib and every test target natively. It is the
+          gate that has actually caught these breaks (basic has no Windows
+          leg, D5).
         * `check:windows` below is its local mirror, through cargo-xwin in
           Docker, and now carries `--all-targets` for the same reason.
       Both inherit `-D warnings` from `[workspace.lints.rust]`, so neither
@@ -128,6 +155,44 @@ tasks:
     sources: *rust-sources
     cmd: cargo clippy --workspace --locked --all-targets -- -D warnings
 
+  doc:ratchet:
+    desc: Ratchet the rustdoc backlog against rustdoc-warn-baseline.json, per (file, lint code)
+    summary: |
+      Replaces the per-crate `-D rustdoc::broken_intra_doc_links` run this
+      task used to be. That run denied a lint the workspace has a 400-entry
+      backlog of, so it could not go green, and it was wired only into
+      `verify:scoped`'s *scoped* arm — every escalated work package skipped
+      it, which is how WP-10 shipped 21 new broken links past a gate that
+      exists to catch exactly that.
+
+      `cargo doc --message-format=json` emits the same `compiler-message`
+      records clippy does, so scripts/lint_ratchet.py consumes this stream
+      unchanged. `--by-file` keys each entry `<file>::<code>`: a bare per-code
+      count stays flat when one link is fixed and another appears, and across
+      a crate split that is the common case. A decrease is committed with
+      `-- --update`; a file move reds until it is.
+
+      `RUSTDOCFLAGS=--cap-lints warn` for the same reason `lint:ratchet`
+      passes it to clippy: `[workspace.lints] warnings = "deny"` reaches
+      rustdoc too, and without the cap the walk aborts at the first crate
+      with a backlog and the stream describes nothing after it.
+
+      No `sources:`, for the reason `test:lint` gives: a fingerprint-cached
+      gate reports the verdict of an earlier run. Its own CARGO_TARGET_DIR
+      (target/docratchet) keeps the trailing rustdoc flags out of the
+      fingerprint the other cargo tasks share. Linux only, like lint:ratchet:
+      cfg-gated code makes the counts platform-dependent.
+    platforms: [linux]
+    cmds:
+      - >-
+        set -o pipefail;
+        RUSTDOCFLAGS='--cap-lints warn'
+        CARGO_TARGET_DIR='{{.ROOT_DIR}}/target/docratchet'
+        cargo doc --workspace --no-deps --locked --message-format=json
+        | python3 {{.ROOT_DIR}}/scripts/lint_ratchet.py --by-file
+        --baseline '{{.ROOT_DIR}}/rustdoc-warn-baseline.json'
+        {{.CLI_ARGS | default "--check"}}
+
   clippy:fix:
     desc: Auto-fix clippy warnings
     cmd: cargo clippy --workspace --locked --all-targets --fix --allow-dirty
@@ -140,7 +205,7 @@ tasks:
       `__OCX_SELF_IMAGE` env var override that acceptance tests use to
       redirect the canonical `ocx.sh/ocx/cli` identifier to a localhost
       test registry — see `test/taskfile.yml::build` and
-      `crates/ocx_lib/Cargo.toml`). The seams are loopback-only-asserted
+      `crates/ocx_cli/Cargo.toml`). The seams are loopback-only-asserted
       at runtime — safe in all non-release binaries. User-facing release
       artifacts come from cargo-dist (release.yml), which does not pass
       this feature flag and therefore physically lacks the seams.
@@ -164,10 +229,48 @@ tasks:
 
   test:unit:
     desc: Run unit tests
-    sources: *rust-sources
+    # No `sources:`. The bracket around this run — `test:floor` deletes the
+    # log, `test:ceiling` reads it — needs the run to happen every time: a
+    # fingerprint-cached skip would leave the ceiling no log and red an
+    # unchanged tree, and a subset run (`-- <filter>`) would otherwise stamp
+    # the full run up to date. Cargo's own fingerprints make the recompile a
+    # no-op; the run itself is the price of a Summary line that is always
+    # this run's.
     deps:
       - install:nextest
-    cmd: cargo nextest run --workspace --release --locked {{.CLI_ARGS}}
+    # `set -o pipefail` so nextest's own exit status survives the `tee`; the
+    # tee is what lets `test:ceiling` read the Summary line of the run that
+    # just happened rather than of some earlier one (same shape as
+    # test/taskfile.yml's `.suite-ceilings`).
+    cmds:
+      - mkdir -p {{.ROOT_DIR}}/target/nextest
+      - >-
+        set -o pipefail;
+        cargo nextest run --workspace --release --locked {{.CLI_ARGS}}
+        2>&1 | tee {{.NEXTEST_RUN_LOG}}
+
+  test:doc:
+    desc: Run the workspace doctests
+    summary: |
+      `cargo test --doc --workspace`. nextest cannot run doctests at all, so
+      `test:unit` above never executes one and the unit floor/ceiling bracket
+      cannot see them either.
+
+      On the full route deliberately, not only in `verify:scoped`'s per-crate
+      loop: that loop is driven by `CRATES`, which `verify:scoped` sets to the
+      empty string on an escalate, and `ocx` is in TABLE_ESCALATES — so a
+      change under the CLI escalates and the per-crate doctest step iterated
+      over nothing. (`ocx_lib` was the other such row until WP-37 deleted the
+      crate, which is why every extraction escalated.) The same defect
+      `rust:doc:ratchet` was moved here for (DX-58), left standing beside it
+      for `cargo test --doc` until a doctest carried across a crate boundary
+      (`ocx_util::list`, then still naming `ocx_lib`) landed red on `evelynn`
+      with no gate to catch it.
+
+      Dev profile, matching the per-crate step in `verify:scoped` byte for
+      byte: the two arms must judge the same thing, and a release doctest run
+      would also drop every `debug_assert!` a doctest may rely on.
+    cmd: cargo test --doc --workspace --locked {{.CLI_ARGS}}
 
   install:hawkeye:
     internal: true
@@ -274,7 +377,7 @@ tasks:
       Hermetically cross-builds crates/ocx_shim with the size-tuned `shim`
       profile for one *-pc-windows-gnullvm target via cargo-zigbuild and
       writes the stripped binary to target/<TARGET>/shim/ocx-shim.exe. The
-      committed blobs under crates/ocx_lib/src/shims/ and the SHIM_SHA256
+      committed blobs under crates/ocx_store/src/shims/ and the SHIM_SHA256
       constants are refreshed from this output in a dedicated PR (see
       shim.rs module docs and adr_shim_hermetic_zigbuild.md). Required var:
       TARGET (x86_64-pc-windows-gnullvm | aarch64-pc-windows-gnullvm).
@@ -326,13 +429,27 @@ tasks:
     summary: |
       Runs `cargo xwin check --all-targets` for x86_64-pc-windows-msvc and
       aarch64-pc-windows-msvc inside the messense/cargo-xwin Docker image.
-      This is the ONLY local gate that type-checks `ocx_lib`'s `cfg(windows)`
-      code — `check:windows-cfg` cannot reach it on the host (see there) — and
+      This is the ONLY local gate that type-checks the workspace's
+      `cfg(windows)` code — `check:windows-cfg` cannot reach it on the host
+      (see there) — and
       it covers the aarch64 arm that no CI leg on a pull request does. Not in
-      `verify`: it needs Docker and a ~250 MiB SDK download, and every pull
-      request already runs `Smoke (Windows)`, which compiles the same code
-      natively. Run it before pushing anything under a `cfg(windows)` or
-      `cfg(not(unix))` branch and save a CI round-trip. First run
+      `verify`: it needs Docker and a ~250 MiB SDK download, and every
+      non-draft pull request already runs verify-deep.yml's `Build & Unit
+      Test (Windows)`, which compiles the same code natively. Run it before
+      marking a PR ready with anything under a `cfg(windows)` or
+      `cfg(not(unix))` branch and save a CI round-trip.
+
+      Not a `verify-basic.yml` leg either, and a plain host `cargo check
+      --target` is not a cheaper substitute for one: `ocx_oci` pulls
+      `aws-lc-sys`, whose build script compiles C for the TARGET, so on a
+      Linux host `cargo check -p ocx_oci --locked --target
+      x86_64-pc-windows-msvc` dies in cc-rs before rustc type-checks a line
+      (measured 2026-09-16: exit 101, "unknown type name 'pthread_rwlock_t'").
+      The only Linux-hosted path that does work is this one — Docker plus a
+      ~250 MiB MSVC SDK — which is the cost ruling D5 took off the draft tier,
+      and `aarch64-apple-darwin` has no host equivalent at all. So the draft
+      and `announce/**` gaps that subsystem-ci.md records under D5/D10 stay as
+      ruled: covering them means paying for deep, not for a cheap extra leg. First run
       downloads the MSVC SDK headers (~250 MiB) and crate registry into
       .cache/xwin/; subsequent runs reuse both caches plus target/xwin/
       so an unchanged tree finishes in seconds.
@@ -379,3 +496,209 @@ tasks:
     deps:
       - task: build:windows:x86
     cmd: bash {{.ROOT_DIR}}/test/manual/run-windows-activation.sh
+
+  # ---------------------------------------------------------------------------
+  # Structural checks of the crate split (plan WP-02). Appended here so the
+  # tasks WP-04 inserts after `clippy:check` merge cleanly.
+  # ---------------------------------------------------------------------------
+
+  deps:direction:
+    desc: Every ocx_* dependency edge is in scripts/crate_map.toml (C-009)
+    summary: |
+      Runs the `deps_direction` guards of
+      crates/ocx_test_support/tests/workspace_structure.rs:
+      the live check over the `cargo metadata` resolve graph (aliases and
+      target-specific tables included) plus its synthetic-metadata unit tests.
+      A disallowed edge reds naming `from -> to`.
+    deps:
+      - install:nextest
+    # `--release` so it shares `test:unit`'s artifacts instead of a second debug build.
+    # `--no-tests=fail`: the trailing word is a name substring, so a rename
+    # selects zero tests. Without it the verdict is the installed nextest's
+    # default, and nextest is unpinned here — a zero-test green would be a
+    # toolchain accident rather than a property of this repository.
+    cmd: cargo nextest run -p ocx_test_support --test workspace_structure --release --locked --no-tests=fail deps_direction
+
+  test:loop-guard:
+    desc: No test holds a loop whose body can neither fail nor be observed
+    summary: |
+      Runs the `inert` guards of
+      crates/ocx_test_support/tests/workspace_structure.rs: the walk over every
+      `crates/*/src` plus the red/green cases that pin the predicate itself.
+      A loop inside test code whose body holds no call, macro, assignment,
+      `.await`, `?` or wildcard-free `match` reds naming the file, the line and
+      the keyword — the shape WP-10's in-place strip left behind thirteen
+      times, which compiled and passed.
+
+      Reachable without this entry (`test:unit` runs the whole workspace and
+      the `verify:scoped` manifest route runs this target), so it gates
+      nothing on its own; it exists because the crate-split batches want the
+      guard alone, in seconds, between moves.
+    deps:
+      - install:nextest
+    # `--release` so it shares `test:unit`'s artifacts instead of a second debug build.
+    # `--no-tests=fail`: the trailing word is a name substring, so a rename
+    # selects zero tests. Without it the verdict is the installed nextest's
+    # default, and nextest is unpinned here — a zero-test green would be a
+    # toolchain accident rather than a property of this repository.
+    cmd: cargo nextest run -p ocx_test_support --test workspace_structure --release --locked --no-tests=fail inert
+
+  lint:ratchet:
+    desc: Ratchet the lints with a backlog against clippy-warn-baseline.json (LINT-15/16)
+    summary: |
+      A second clippy invocation, separate from `clippy:check`: the lints that
+      still carry a backlog (`-W unreachable_pub`, rust-cargo.md LINT-11) run
+      with NO `-D warnings`, and `--cap-lints warn` keeps the manifest's
+      `warnings = "deny"` from turning them into build errors that would stop
+      the walk at the first crate. scripts/lint_ratchet.py groups the JSON by
+      FILE and lint code (`--by-file`) and fails on any key above its committed
+      count; a decrease is committed with `-- --update`. Linux only: cfg-gated
+      code makes the counts platform-dependent.
+
+      `--by-file` sits outside CLI_ARGS on purpose: `-- --update` must not have
+      to re-spell the keying, or an update would rewrite a per-file baseline in
+      per-code shape and discard the attribution in silence. One scalar per
+      lint code cannot see X warnings appearing in one crate while X are fixed
+      in another, and crate-boundary `pub` promotion is exactly what
+      `unreachable_pub` fires on, so this refactor produces that shape at every
+      extraction. Keying per file is also what puts `member_of` to work: the
+      baseline becomes the record of which crates carry a backlog, which is the
+      evidence the "member gone quiet" refusal needs to tell a crate that was
+      fixed from a crate that was never linted.
+
+      Its own CARGO_TARGET_DIR (target/ratchet): the trailing rustc args are
+      part of cargo's fingerprint, so sharing `clippy:check`'s directory made
+      each of the two re-lint every workspace member the other had just
+      linted (≈ 40 s each way, every `task verify`). The dependency
+      artifacts are built once more, cold, and never again.
+    platforms: [linux]
+    cmds:
+      - >-
+        set -o pipefail;
+        CARGO_TARGET_DIR='{{.ROOT_DIR}}/target/ratchet'
+        cargo clippy --workspace --all-targets --locked --message-format=json
+        -- --cap-lints warn -W unreachable_pub
+        | python3 {{.ROOT_DIR}}/scripts/lint_ratchet.py --by-file {{.CLI_ARGS | default "--check"}}
+
+  # The unit-test set never shrinks or goes quiet (C-070). Both checks are
+  # `cmds:` entries, never `preconditions:`, so `task --force` cannot skip
+  # them; Linux only because cfg-gated tests make the counts platform-dependent.
+  test:floor:
+    desc: Fail when nextest lists fewer tests than crates/NEXTEST_FLOOR (Linux)
+    summary: |
+      `cargo nextest list --message-format json` over the whole workspace, in
+      the release profile `test:unit` uses so the binaries are shared. The
+      floor is held at its initial value until WP-37 re-baselines it.
+
+      Opens the bracket: the previous run log is deleted here, so the Summary
+      line `test:ceiling` reads can only come from the `test:unit` between
+      the two — a log from an earlier or a subset run is never a verdict.
+    platforms: [linux]
+    deps:
+      - install:nextest
+    cmds:
+      - rm -f {{.NEXTEST_RUN_LOG}}
+      - >-
+        set -o pipefail;
+        floor=$(cat {{.ROOT_DIR}}/crates/NEXTEST_FLOOR);
+        count=$(cargo nextest list --workspace --release --locked --message-format json
+        | python3 -c 'import json, sys; suites = json.load(sys.stdin)["rust-suites"]; print(sum(len(s["testcases"]) for s in suites.values()))');
+        [ -n "$count" ] || { echo "nextest floor: no test count from nextest list" >&2; exit 1; };
+        [ "$count" -ge "$floor" ] || {
+          echo "nextest floor: $count tests listed, floor is $floor (crates/NEXTEST_FLOOR) — the unit-test set shrank" >&2; exit 1; };
+        echo "nextest floor: $count tests listed (floor $floor)"
+
+  test:ceiling:
+    desc: Fail when the last unit run skipped more tests than crates/NEXTEST_SKIP_CEILING (Linux)
+    summary: |
+      Parses the Summary line of the run `test:unit` tee'd to target/nextest/run.log:
+      an `#[ignore]` added to dodge a red shows up here as a skipped count
+      above the ceiling. Run `task rust:test:floor` then `task rust:test:unit`
+      first: the floor deletes the previous log, so a line here is that run's.
+    platforms: [linux]
+    vars:
+      # nextest's whole Summary grammar, read from 0.9.144's
+      # `displayer/progress.rs::write_summary_str` (nextest-runner): every
+      # token but `passed` is conditional, so the skipped count is read only
+      # from a line this matches end to end — an absent token is 0 there and
+      # nowhere else. That version always prints `, N skipped`; the optional
+      # group is for the day it stops. The tool is unpinned (`.ensure-cargo-tool`
+      # installs latest, CI's install-action is unversioned), so a Summary
+      # reshape reds this gate loudly, by design — as does anything else, a
+      # cancelled `--stress` run included.
+      SUMMARY_GRAMMAR: >-
+        ^ *Summary \[ *[0-9]+\.[0-9]+s\] [0-9]+(/[0-9]+)? tests? run:
+        [0-9]+ passed( \([0-9]+ (slow|flaky|leaky)(, [0-9]+ (slow|flaky|leaky))*\))?(,
+        [0-9]+ failed( \([0-9]+ due to being leaky\))?)?(, [0-9]+ exec failed)?(,
+        [0-9]+ timed out)?(, [0-9]+ skipped)?$
+    cmds:
+      - >-
+        summary=$(sed -E 's/\x1b\[[0-9;]*m//g' {{.NEXTEST_RUN_LOG}} | grep -E 'Summary \[' | tail -n 1);
+        [ -n "$summary" ] || { echo "nextest ceiling: no Summary line in {{.NEXTEST_RUN_LOG}} — rust:test:unit did not run in this bracket; run task rust:test:floor then task rust:test:unit first" >&2; exit 1; };
+        printf '%s\n' "$summary" | grep -Eq '{{.SUMMARY_GRAMMAR}}' || { echo "nextest ceiling: Summary line is not nextest's grammar (a nextest bump?): $summary" >&2; exit 1; };
+        skipped=$(printf '%s' "$summary" | sed -nE 's/.*, ([0-9]+) skipped$/\1/p');
+        skipped=${skipped:-0};
+        ceiling=$(cat {{.ROOT_DIR}}/crates/NEXTEST_SKIP_CEILING);
+        [ "$skipped" -le "$ceiling" ] || {
+          echo "nextest ceiling: $skipped skipped exceeds crates/NEXTEST_SKIP_CEILING ($ceiling): $summary" >&2; exit 1; };
+        echo "nextest ceiling: $skipped skipped (ceiling $ceiling)"
+
+  test:ceiling:self-test:
+    desc: Show the skipped-ceiling parser red on an over-ceiling Summary line and green on a clean one (Linux)
+    summary: |
+      `test:ceiling` above is a shell parser, and its red state lived in a
+      commit message — nothing in the tree re-proved it. These two fixture
+      logs are that proof, run by `.verify:build-test` (so by `task verify`
+      and by `task verify:scoped`'s escalation) right after the `test:ceiling`
+      they judge, and by verify-basic.yml's `Ceiling self-test` step beside
+      its `Skip ceiling`: a green no one can tell from a parser that stopped
+      matching is not a check. It hung off `rust:verify` alone until R16, and
+      `rust:verify` is on no gate — so the proof itself ran nowhere.
+
+      Both fixtures are nextest 0.9.144 Summary lines, so they also exercise
+      SUMMARY_GRAMMAR, not only the comparison. The red one carries a skipped
+      count no ceiling will ever permit, so the case cannot go vacuous when
+      crates/NEXTEST_SKIP_CEILING moves. The green one carries `1 skipped`,
+      not `0 skipped`, and the case asserts the parser SAYS `1 skipped`:
+      `skipped=${skipped:-0}` means a sed that stopped matching reports zero,
+      so a zero-skip fixture is green whether or not the extraction works.
+
+      The red half reads the message, not the exit status. `if <task>; then
+      fail` is satisfied by a renamed task, an unreadable log or an argument
+      typo exactly as well as by the ceiling gating, so a parser that never
+      reaches the comparison is green — the assertion below names the
+      comparison's own wording, and says so when the run failed for some
+      other reason.
+
+      The nested call names the root taskfile explicitly: entered through the
+      root `rust:` include, a bare `task` would resolve against whichever
+      taskfile it finds above the current directory.
+    platforms: [linux]
+    vars:
+      RED_SKIPPED: '999999'
+      RED_SUMMARY: '    Summary [   1.234s] 100 tests run: 1 passed, {{.RED_SKIPPED}} skipped'
+      GREEN_SUMMARY: '    Summary [   1.234s] 100 tests run: 99 passed, 1 skipped'
+      # `-s`: without it go-task echoes the task body to STDERR, and the body
+      # contains the very phrase the red half looks for — the assertion would
+      # then match the script quoting itself and pass for any failure at all.
+      CEILING: task -s -t {{.ROOT_DIR}}/taskfile.yml rust:test:ceiling
+      # Carries the runtime count for the same reason: `$skipped skipped
+      # exceeds …` is in the body, `999999 skipped exceeds …` can only be output.
+      RED_REASON: '{{.RED_SKIPPED}} skipped exceeds crates/NEXTEST_SKIP_CEILING'
+    cmds:
+      - >-
+        log=$(mktemp); trap 'rm -f "$log"' EXIT;
+        printf '%s\n' '{{.RED_SUMMARY}}' > "$log";
+        status=0;
+        red=$({{.CEILING}} NEXTEST_RUN_LOG="$log" 2>&1 >/dev/null) || status=$?;
+        [ "$status" -ne 0 ] || {
+          echo "ceiling self-test: the parser accepted 999999 skipped — it is not gating" >&2; exit 1; };
+        case "$red" in *'{{.RED_REASON}}'*) ;; *)
+          echo "ceiling self-test: the red run exited $status without reaching the ceiling — it failed for another reason: $red" >&2; exit 1;;
+        esac;
+        printf '%s\n' '{{.GREEN_SUMMARY}}' > "$log";
+        green=$({{.CEILING}} NEXTEST_RUN_LOG="$log" 2>/dev/null | tail -n 1);
+        case "$green" in *'nextest ceiling: 1 skipped'*) ;; *)
+          echo "ceiling self-test: the parser read no skipped count from a 1-skipped Summary: $green" >&2; exit 1;;
+        esac;
+        echo "ceiling self-test: parser red on 999999 skipped, green reading 1 skipped"

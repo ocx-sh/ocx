@@ -31,13 +31,10 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{
-    oci,
-    package_manager::InspectOptions,
-    project::{
-        DEFAULT_GROUP, Origin, ProjectConfig, SelectedTool, ToolSource, check_duplicate_selection, expand_all_keyword,
-        resolve_selected_tools, select_tool_set,
-    },
+use ocx_package_manager::InspectOptions;
+use ocx_project::{
+    DEFAULT_GROUP, Origin, ProjectConfig, SelectedTool, ToolSource, check_duplicate_selection, expand_all_keyword,
+    resolve_selected_tools, select_tool_set,
 };
 
 use crate::api::data::package_inspect::{InspectReport, PackageInspect};
@@ -54,7 +51,7 @@ use crate::{conventions, options};
 /// Falls back to the lock's bare repository if the config has no such binding.
 /// A current lock (which this command requires) rules that out, so the arm is
 /// a total-match tail rather than a real state.
-fn declared_identifier(config: &ProjectConfig, tool: &SelectedTool) -> oci::Identifier {
+fn declared_identifier(config: &ProjectConfig, tool: &SelectedTool) -> ocx_oci::Identifier {
     let declared = match &tool.origin {
         Origin::Group(group) if group == DEFAULT_GROUP => config.tools.get(&tool.binding),
         Origin::Group(group) => config
@@ -159,7 +156,7 @@ impl Inspect {
         let filtered = filter_by_names(selected, &self.names)?;
         check_duplicate_selection(&filtered)?;
 
-        let declared: Vec<oci::Identifier> = filtered
+        let declared: Vec<ocx_oci::Identifier> = filtered
             .iter()
             .map(|tool| declared_identifier(&ctx.config, tool))
             .collect();
@@ -180,7 +177,7 @@ impl Inspect {
         // merged — `ocx env` is what answers "what is the final value", and it
         // materializes to do so because package values are `${installPath}`-
         // templated.
-        let mut env = ocx_lib::project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
+        let mut env = ocx_project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
         env.extend(env_overrides);
 
         let report = InspectReport::new(
@@ -205,11 +202,11 @@ impl Inspect {
         &self,
         context: &crate::app::Context,
         selected: &[SelectedTool],
-        declared: &[oci::Identifier],
-        platform: &oci::Platform,
+        declared: &[ocx_oci::Identifier],
+        platform: &ocx_oci::Platform,
     ) -> anyhow::Result<Vec<PackageInspect>> {
         let resolved = resolve_selected_tools(selected, platform)?;
-        let identifiers: Vec<oci::Identifier> = resolved
+        let identifiers: Vec<ocx_oci::Identifier> = resolved
             .iter()
             .zip(declared)
             .map(|(tool, declared)| match tool.identifier.digest() {
@@ -247,7 +244,7 @@ impl Inspect {
 ///
 /// Offline by construction: the lock's platform-to-leaf map *is* the candidate
 /// list, so nothing is fetched and no platform is chosen.
-fn locked_packages(selected: &[SelectedTool], declared: &[oci::Identifier]) -> Vec<PackageInspect> {
+fn locked_packages(selected: &[SelectedTool], declared: &[ocx_oci::Identifier]) -> Vec<PackageInspect> {
     selected
         .iter()
         .zip(declared)

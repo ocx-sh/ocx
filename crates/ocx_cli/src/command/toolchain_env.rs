@@ -64,18 +64,16 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
-use ocx_lib::{
-    env,
-    oci::Platform,
-    package::metadata::env::entry::Entry,
-    package_manager::{
-        AdmittedClaims, PatchProvenance,
-        composer::{ComposeRequest, ComposeRoots, Materialization},
-    },
-    project::{
-        ALL_GROUP, DEFAULT_GROUP, Origin, ProjectLock, ResolvedTool, compose_tool_set, expand_all_keyword,
-        lazy_mode_for_tool, lock::lock_path_for,
-    },
+use ocx_oci::Platform;
+use ocx_package::metadata::env::apply::reconcile_list_separators;
+use ocx_package::metadata::env::entry::Entry;
+use ocx_package_manager::{
+    AdmittedClaims, PatchProvenance,
+    composer::{ComposeRequest, ComposeRoots, Materialization},
+};
+use ocx_project::{
+    ALL_GROUP, DEFAULT_GROUP, Origin, ProjectLock, ResolvedTool, compose_tool_set, expand_all_keyword,
+    lazy_mode_for_tool, lock::lock_path_for,
 };
 
 use crate::{
@@ -153,7 +151,7 @@ pub struct ToolchainEnv {
         num_args = 0..=1,
         require_equals = true
     )]
-    shell: Option<Option<ocx_lib::shell::Shell>>,
+    shell: Option<Option<ocx_shell::shell::Shell>>,
 
     /// Write the composed environment into a CI system's persistence channel.
     ///
@@ -167,7 +165,7 @@ pub struct ToolchainEnv {
     /// makes the environment available to later pipeline steps. Conflicts with
     /// `--shell`.
     #[arg(long, value_enum, value_name = "PROVIDER", num_args = 0..=1, require_equals = true, conflicts_with = "shell")]
-    ci: Option<Option<ocx_lib::ci::CiFlavor>>,
+    ci: Option<Option<ocx_shell::ci::CiFlavor>>,
 
     /// Write the GitLab export to this file instead of stdout.
     ///
@@ -296,7 +294,7 @@ impl ToolchainEnv {
         // Advisories raised by the deferred half of the project tier, kept for
         // the structured report below (C-015: warning-only, but readable —
         // a channel that only reaches a log is not a channel).
-        let mut advisories: Vec<ocx_lib::package_manager::LazyAdvisory> = Vec::new();
+        let mut advisories: Vec<ocx_package_manager::LazyAdvisory> = Vec::new();
 
         // ── Resolve entries: one global path, one project path ───────────────
         // Root `--global` / `OCX_GLOBAL` (already folded into the context via
@@ -395,7 +393,7 @@ impl ToolchainEnv {
                 .await?;
             self.report_deferred(&context, &roots, &composed);
             advisories = roots.advisories;
-            let infos: Vec<Arc<ocx_lib::package::install_info::InstallInfo>> = roots.roots;
+            let infos: Vec<Arc<ocx_package::install_info::InstallInfo>> = roots.roots;
             // Per-package opt-out from the in-scope project `ocx.toml`, plus
             // its `[env]`, each selected group's `[env]`, and `--env` last —
             // stages 4-6, assembled exactly as `ocx exec` assembles them.
@@ -404,7 +402,7 @@ impl ToolchainEnv {
             // equivalence is the reason `--env` belongs here at all — a caller
             // that builds an argv array must be able to export the environment
             // it would otherwise execute in.
-            let mut project_env = ocx_lib::project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
+            let mut project_env = ocx_project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
             project_env.extend(env_overrides);
             // C-065/C-070: the groups this invocation selected, healed and
             // probed once inside `resolve_env_with_attribution`. `ocx env` and
@@ -419,7 +417,7 @@ impl ToolchainEnv {
                 self.pinned.pinned(),
             )
             .await?;
-            let scope = ocx_lib::package_manager::EnvScope::Project {
+            let scope = ocx_package_manager::EnvScope::Project {
                 no_patches: ctx.config.no_patches_repositories(),
                 env: project_env,
                 toolchain: Some(Box::new(toolchain)),
@@ -435,7 +433,7 @@ impl ToolchainEnv {
         // second forwarded vector of its own — `project_env` above is moved
         // into the scope that produced `entries` — so a single-vector pass
         // covers both branches.
-        env::reconcile_list_separators(entries.iter_mut())?;
+        reconcile_list_separators(entries.iter_mut())?;
 
         // ── Emit ─────────────────────────────────────────────────────────────
         if let Some(provider) = ci {
@@ -460,7 +458,7 @@ impl ToolchainEnv {
         // `--env` follow it — so the bound-checked accessor is what keeps a
         // project entry from being mislabelled as a companion (and from indexing
         // past `provenance`).
-        let overlay = ocx_lib::package_manager::PatchOverlay::new(patch_start, &provenance);
+        let overlay = ocx_package_manager::PatchOverlay::new(patch_start, &provenance);
         let env_data: Vec<api::data::env::EnvEntry> = entries
             .into_iter()
             .enumerate()
@@ -493,7 +491,7 @@ impl ToolchainEnv {
             context.api().is_json(),
             std::io::IsTerminal::is_terminal(&std::io::stdout()),
         ) {
-            ocx_lib::log::warn!("{advisory}");
+            log::warn!("{advisory}");
         }
 
         let binaries = api::data::env::BinaryAttribution::from_pairs(&attribution.binaries);
@@ -568,7 +566,7 @@ fn group_of(origin: &Origin) -> Option<&str> {
 /// that path resolves from the file and environment tiers exactly as before.
 ///
 /// It reaches the ladder through the one resolver every tier uses,
-/// [`pinned_for_project`](ocx_lib::package_manager::pinned_for_project), in
+/// [`pinned_for_project`](ocx_package_manager::pinned_for_project), in
 /// **both** arms of the config read — a global file that will not parse yields
 /// the same absent file tier a file stating nothing would, and a typed
 /// `--pinned` still outranks it. `ocx --global exec` already honoured the flag
@@ -605,7 +603,7 @@ pub(crate) async fn resolve_global_pinned_env(
     pinned_cli: Option<bool>,
 ) -> anyhow::Result<Option<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedClaims)>> {
     let home = context.file_structure().root();
-    let global_config = ocx_lib::project::ProjectConfig::global_manifest_path(home);
+    let global_config = ocx_project::ProjectConfig::global_manifest_path(home);
     let global_lock_path = lock_path_for(&global_config);
 
     // Per-package opt-out AND the global file's own `[env]` / group `[env]`,
@@ -624,7 +622,7 @@ pub(crate) async fn resolve_global_pinned_env(
     // in the same arm as the config it reads: an unparseable global file yields
     // the floor, which is the following lane, exactly as a file stating nothing
     // would.
-    let (no_patches, mut project_env, pinned) = match ocx_lib::project::ProjectConfig::from_path(&global_config).await {
+    let (no_patches, mut project_env, pinned) = match ocx_project::ProjectConfig::from_path(&global_config).await {
         Ok(config) => {
             // Expand `all` against the CONFIG's groups, not the lock's: a group
             // that declares only `[group.<name>.env]` and no tools has no lock
@@ -633,14 +631,14 @@ pub(crate) async fn resolve_global_pinned_env(
             if env_groups.is_empty() {
                 env_groups = vec![DEFAULT_GROUP.to_owned()];
             }
-            let env = ocx_lib::project::project_env_entries(&config, &global_config, &env_groups);
-            let pinned = ocx_lib::package_manager::pinned_for_project(pinned_cli, &config);
+            let env = ocx_project::project_env_entries(&config, &global_config, &env_groups);
+            let pinned = ocx_package_manager::pinned_for_project(pinned_cli, &config);
             (config.no_patches_repositories(), env, pinned)
         }
         Err(_) => (
             std::collections::BTreeSet::new(),
             Vec::new(),
-            ocx_lib::package_manager::pinned_for_project(pinned_cli, &ocx_lib::project::ProjectConfig::default()),
+            ocx_package_manager::pinned_for_project(pinned_cli, &ocx_project::ProjectConfig::default()),
         ),
     };
     // Stage 6 last, on this tier too. An unparseable global file yields an
@@ -685,17 +683,17 @@ pub(crate) async fn resolve_global_pinned_env(
         // (C-067) and the shell still starts.
         toolchain = context
             .manager()
-            .toolchain_home(&ocx_lib::file_structure::RenderStampScope::Global, None)
+            .toolchain_home(&ocx_store::file_structure::RenderStampScope::Global, None)
             .ok()
             .map(|home| {
                 let mut followable = lock.clone();
                 followable
                     .tools
                     .retain(|tool| home.entry(&tool.group, &tool.name).is_ok());
-                Box::new(ocx_lib::package_manager::ToolchainLinks {
+                Box::new(ocx_package_manager::ToolchainLinks {
                     pinned,
                     home,
-                    scope: ocx_lib::file_structure::RenderStampScope::Global,
+                    scope: ocx_store::file_structure::RenderStampScope::Global,
                     lock: followable,
                     groups: selected_groups.clone(),
                 })
@@ -711,12 +709,10 @@ pub(crate) async fn resolve_global_pinned_env(
             // leaf and find that directly. Absent OR ambiguous leaf → skip
             // silently (global tier is lenient; the login exporter must never
             // block a shell on a disambiguation it cannot perform).
-            let ocx_lib::oci::Selection::Found((leaf, _key)) =
-                ocx_lib::project::lookup_host_leaf(&tool.platforms, target)
-            else {
+            let ocx_oci::Selection::Found((leaf, _key)) = ocx_project::lookup_host_leaf(&tool.platforms, target) else {
                 continue;
             };
-            let identifier: ocx_lib::oci::Identifier = tool.repository.clone_with_digest(leaf.clone());
+            let identifier: ocx_oci::Identifier = tool.repository.clone_with_digest(leaf.clone());
             match manager.find(&identifier, target.clone()).await {
                 Ok(info) => infos.push(Arc::new(info)),
                 // Pinned package not materialised locally — skip silently
@@ -737,7 +733,7 @@ pub(crate) async fn resolve_global_pinned_env(
     // `offline_view` preserves the patch tier (the network alone is disabled).
     // Return the companion-overlay boundary so `--show-patches` can annotate
     // companion entries on the global path, exactly as on the project path.
-    let scope = ocx_lib::package_manager::EnvScope::Project {
+    let scope = ocx_package_manager::EnvScope::Project {
         no_patches,
         env: project_env,
         // RUL-104 — the global tier follows the lane like the other three
@@ -852,8 +848,8 @@ mod tests {
     // ── selected_groups_global ────────────────────────────────────────────────
 
     fn lock_with_groups(groups: &[&str]) -> ProjectLock {
-        use ocx_lib::oci::{Digest, Identifier};
-        use ocx_lib::project::{LockMetadata, LockVersion, LockedTool};
+        use ocx_oci::{Digest, Identifier};
+        use ocx_project::{LockMetadata, LockVersion, LockedTool};
         let tools = groups
             .iter()
             .enumerate()
@@ -946,7 +942,7 @@ mod tests {
     /// whether the **link lane** ran.
     ///
     /// C-066: `pinned = true` is answered "before any I/O: no heal, no probe,
-    /// no link consulted" ([`ocx_lib::package_manager::ToolchainLinks::pinned`]),
+    /// no link consulted" ([`ocx_package_manager::ToolchainLinks::pinned`]),
     /// while the following lane heals first — and `heal_links` creates the
     /// toolchain home root before it repairs anything. So the root's existence
     /// after the run IS the lane the resolver chose, and it needs no
@@ -962,13 +958,13 @@ mod tests {
     /// The home path is asked of the manager (the same call
     /// `resolve_global_pinned_env` makes), never joined by hand.
     async fn link_lane_ran(config_body: &str, flags: &[&str]) -> bool {
-        use ocx_lib::cli::ColorModeConfig;
-        use ocx_lib::file_structure::RenderStampScope;
+        use ocx_console::ColorModeConfig;
+        use ocx_store::file_structure::RenderStampScope;
 
         use crate::app::{Cli, Context, ManagedConfigGate};
 
         let home = global_home(config_body);
-        // SAFETY: `OCX_HOME` is read through `ocx_lib::env::var`, whose
+        // SAFETY: `OCX_HOME` is read through `ocx_util::env::var`, whose
         // `#[cfg(test)]` override seam is internal to `ocx_lib` and therefore
         // unavailable from this crate; the process variable is the only seam.
         // nextest runs one test per process, so this cannot race a sibling.

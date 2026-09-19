@@ -1,0 +1,74 @@
+[package]
+name = "ocx_util"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Internal-only escape hatch (plan DEC-16, C-051): gates `env::overrides`, the
+# process-environment override table every env-touching test writes through.
+# `cfg(test)` does not cross a crate boundary and the tests that write the
+# table live in other crates, so the seam is a feature a **dev**-dependency
+# enables — resolver v3 keeps a dev-dependency feature out of the normal
+# build, so a release binary physically lacks the table and a production `use`
+# of it does not compile. That compiler refusal is the tripwire; there is no
+# scanner.
+__testing = []
+
+[dependencies]
+# No `ocx_*` row, and none may be added: this is the bottom tier of
+# `scripts/crate_map.toml`, whose allowed set is empty (C-051).
+async-trait.workspace = true
+bzip2.workspace = true
+dunce.workspace = true
+flate2.workspace = true
+fs4.workspace = true
+hex.workspace = true
+log.workspace = true
+lzma-rust2.workspace = true
+pem.workspace = true
+pki-types.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+symlink.workspace = true
+tar.workspace = true
+# Runtime, not test-only: `fs::persist_temp_file` is the workspace's one
+# atomic-publish primitive and builds its `NamedTempFile` in production.
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+# The bundled Mozilla roots `tls::embedded_roots` seeds into a hand-rolled
+# `reqwest::ClientBuilder`.
+webpki-root-certs.workspace = true
+x509-cert.workspace = true
+zip.workspace = true
+zstd.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+junction.workspace = true
+windows-sys.workspace = true
+
+[dev-dependencies]
+# Fixture data (`data::archive_xz`, `pki::TestPki`, `fifo::mkfifo`). A dev edge
+# to `ocx_test_support` is allowed from every crate
+# (`scripts/crate_map.toml` `[dev].allowed_everywhere`).
+ocx_test_support = { path = "../ocx_test_support" }
+# `FutureExt` in the file-lock contention tests only.
+futures.workspace = true
+# The in-process TLS server behind the extra-CA-roots handshake proof
+# (ocx#448). Test-only: production never terminates TLS, only dials out.
+tokio-rustls = { workspace = true, default-features = false }
+
+[lints]
+workspace = true

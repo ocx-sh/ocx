@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use clap::ValueEnum;
-use ocx_lib::compression;
+use ocx_util::compression;
 
 #[derive(Clone, Copy, Debug, ValueEnum, Default)]
 pub enum CompressionLevel {

@@ -1,0 +1,159 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+use serde::{Deserialize, Serialize};
+
+pub mod apply;
+pub mod conflict;
+pub mod constant;
+pub mod dep_context;
+pub mod entry;
+pub mod list;
+pub mod modifier;
+pub mod path;
+pub mod resolver;
+pub mod var;
+
+/// A package's declared environment variables, in **declaration order**.
+///
+/// # The order is semantic, not incidental
+///
+/// `variables` is the JSON array exactly as authored: nothing in the metadata
+/// tree sorts it, and every reader — [`IntoIterator`], the composer, the
+/// validators — walks it in that order. So "declared strictly earlier" is a
+/// well-defined, stable property of the document, which is what lets
+/// `${self.env.KEY}` scope itself to earlier vars with no graph, no topological
+/// sort and no cycle detector: a back-edge is unrepresentable.
+///
+/// Order was already load-bearing before that: the composer pushes entries in
+/// declaration order and its documented PATH invariant (the last entry pushed
+/// ends up first) makes the order observable in the resolved `PATH`.
+///
+/// **Generator hazard.** Building this array from an unordered map — a Go
+/// `map`, a Java `HashMap`, a Python `set` — emits an order that varies run to
+/// run, so a package using `${self.env.X}` publishes on some runs and fails on
+/// others with no change to the generator's input. Emit `env` from an ordered
+/// structure.
+#[derive(Debug, Default, Clone)]
+pub struct Env {
+    variables: Vec<var::Var>,
+}
+
+impl Env {
+    pub fn is_empty(&self) -> bool {
+        self.variables.is_empty()
+    }
+}
+
+impl IntoIterator for Env {
+    type Item = var::Var;
+    type IntoIter = std::vec::IntoIter<var::Var>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.variables.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Env {
+    type Item = &'a var::Var;
+    type IntoIter = std::slice::Iter<'a, var::Var>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.variables.iter()
+    }
+}
+
+impl Serialize for Env {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.variables.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Env {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let variables = Vec::<var::Var>::deserialize(deserializer)?;
+        Ok(Env { variables })
+    }
+}
+
+impl schemars::JsonSchema for Env {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("Env")
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // Env serializes as a flat array of Var objects
+        <Vec<var::Var>>::json_schema(generator)
+    }
+}
+
+pub struct EnvBuilder {
+    variables: Vec<var::Var>,
+}
+
+impl Default for EnvBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EnvBuilder {
+    pub fn new() -> Self {
+        EnvBuilder { variables: Vec::new() }
+    }
+
+    pub fn add_var(&mut self, var: var::Var) -> &mut Self {
+        self.variables.push(var);
+        self
+    }
+
+    pub fn with_var(mut self, var: var::Var) -> Self {
+        self.add_var(var);
+        self
+    }
+
+    pub fn add_path(&mut self, name: impl ToString, value: impl ToString, required: bool) -> &mut Self {
+        self.add_var(var::Var::new_path(name, value, required))
+    }
+
+    pub fn with_path(mut self, name: impl ToString, value: impl ToString, required: bool) -> Self {
+        self.add_path(name, value, required);
+        self
+    }
+
+    pub fn add_constant(&mut self, name: impl ToString, value: impl ToString) -> &mut Self {
+        self.add_var(var::Var::new_constant(name, value))
+    }
+
+    pub fn with_constant(mut self, name: impl ToString, value: impl ToString) -> Self {
+        self.add_constant(name, value);
+        self
+    }
+
+    pub fn build(self) -> Env {
+        Env {
+            variables: self.variables,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_env_builder() {
+        let env = EnvBuilder::new()
+            .with_path("PATH", "${installPath}/bin", true)
+            .with_constant("JAVA_HOME", "${installPath}")
+            .build();
+        let json = serde_json::to_string_pretty(&env).unwrap();
+        println!("Serialized env: {}", json);
+    }
+}

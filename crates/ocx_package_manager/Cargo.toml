@@ -1,0 +1,105 @@
+[package]
+name = "ocx_package_manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# The seam feature, forwarded the way every other crate forwards it: test-only
+# surface that must never reach the release binary.
+__testing = ["ocx_index/__testing", "ocx_package/__testing", "ocx_shell/__testing", "ocx_store/__testing"]
+
+[dependencies]
+# Every workspace edge below is a row of `scripts/crate_map.toml`'s
+# `ocx_package_manager` entry; a dependency absent from that row is a defect
+# even when Cargo would accept it.
+ocx_config.workspace = true
+ocx_console.workspace = true
+ocx_index.workspace = true
+ocx_oci.workspace = true
+ocx_package.workspace = true
+# The project tier this one composes over: `activation` sequences a per-prompt
+# reconcile against it, and the task layer resolves through its lock.
+ocx_project.workspace = true
+ocx_shell.workspace = true
+ocx_sign.workspace = true
+ocx_store.workspace = true
+ocx_trust.workspace = true
+ocx_util.workspace = true
+
+async-trait.workspace = true
+chrono.workspace = true
+dunce.workspace = true
+flate2.workspace = true
+futures.workspace = true
+hex.workspace = true
+log.workspace = true
+# `record::name_template` draws its suffix from
+# `p256::elliptic_curve::rand_core::OsRng`.
+p256.workspace = true
+packageurl.workspace = true
+schemars.workspace = true
+serde.workspace = true
+# `managed_config::preview` ONLY — see the workspace Cargo.toml comment.
+serde_ignored.workspace = true
+serde_json.workspace = true
+serde_repr.workspace = true
+sha2.workspace = true
+symlink.workspace = true
+sysinfo.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+tracing.workspace = true
+url.workspace = true
+which.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# `record::environment` reads the effective uid; `render_toolchain`'s tests
+# make a fifo to prove the walker does not block on one.
+libc.workspace = true
+
+[dev-dependencies]
+# `__testing` ONLY — the runtime edges are in `[dependencies]` above. WP-33's
+# lesson: without these the test target builds only inside a `--workspace` run,
+# where a sibling's features unify in, and `cargo test -p ocx_package_manager`
+# alone fails. `test_transport`, `IndexImpl` and `managed_config::test_support`
+# are the gated items this tier's tests drive.
+# `__test_scaffolding` alongside `__testing`: `mutate.rs` builds a
+# `ToolchainRoot::from_validated` out of a `tempfile` scratch root, which no
+# containment anchor accepts. The seam is deliberately NOT forwarded by `ocx`'s
+# `__testing`, so a dev edge is the only way to reach it and the acceptance
+# binary still lacks the code path.
+ocx_config = { workspace = true, features = ["__testing", "__test_scaffolding"] }
+ocx_index = { workspace = true, features = ["__testing"] }
+ocx_oci = { workspace = true, features = ["__testing"] }
+# `__testing` ONLY — the runtime edge is in `[dependencies]` above. The seam
+# exposes `Entrypoints::from_names`, the test-only constructor the composer's
+# fixtures build with; it was a `pub(crate)` sibling before `ocx_package` left.
+ocx_package = { workspace = true, features = ["__testing"] }
+# `__test_scaffolding` for `BlobStore::write_call_count`, the singleflight
+# instrument `tasks::pull_local`'s coalescing test reads. Same non-forwarded
+# seam as `ocx_config`'s, for the same reason.
+ocx_store = { workspace = true, features = ["__testing", "__test_scaffolding"] }
+ocx_util = { workspace = true, features = ["__testing"] }
+# The FIFO helpers and the `archive.tar.xz` fixture path `managed_config`'s
+# publish tests and `tasks::pull_local` drive. Dev-only by construction
+# (`scripts/crate_map.toml` `[dev].allowed_everywhere`).
+ocx_test_support = { path = "../ocx_test_support" }
+# `error.rs` renders its own chain through `anyhow::Error::from` to pin the
+# `{:#}` text an operator sees. Test-only: nothing in the library returns one.
+anyhow.workspace = true
+# `test-util` ONLY, and it is the WP-33 lesson written down: `ocx_project`'s
+# test target compiled solely inside a `--workspace` run because a sibling's
+# features unified in, and `cargo test -p ocx_project` failed with 34 errors.
+# A crate's test target must build on its own.
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

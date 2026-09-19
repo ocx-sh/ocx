@@ -52,7 +52,7 @@ def _installed_marker_via_seam(ocx: OcxRunner, short: str, libc: str) -> str:
 # named host with OCX_REAL_HOST_LIBC_TESTS set — they document the non-FHS
 # expectations the FHS-only allowlist could not satisfy. See
 # adr_platform_libc_os_features.md "Detection mechanism v2" and
-# crates/ocx_lib/src/oci/host_capabilities.rs.
+# crates/ocx_oci/src/host_capabilities.rs.
 # ---------------------------------------------------------------------------
 
 REAL_HOST_LIBC_ENV = "OCX_REAL_HOST_LIBC_TESTS"

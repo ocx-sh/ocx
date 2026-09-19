@@ -22,7 +22,7 @@ Three tiers, each with an honest reach:
   a *silent wrong value* — the escaping rows.
 
 **Nushell.** Its ``env_change.PWD`` hook is inlined in ``ENV_NU``
-(``crates/ocx_lib/src/setup/shims.rs``) and calls only ``ocx --format json
+(``crates/ocx_setup/src/shims.rs``) and calls only ``ocx --format json
 --global env``: it applies the global toolchain and never consumes
 ``--reconcile``. So the nushell arm takes part in **global-scope tier-2 rows
 only**; every project-scope row skips through

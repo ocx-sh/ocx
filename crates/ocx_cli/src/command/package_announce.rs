@@ -15,13 +15,11 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use crate::error::UsageError;
 use clap::Parser;
-use ocx_lib::cli::UsageError;
-use ocx_lib::forge::ForgeCredentials;
-use ocx_lib::{
-    announce::{self, AnnounceRequest, AnnounceTarget, TagSelection},
-    publisher::Publisher,
-};
+use ocx_announce::announce::{self, AnnounceRequest, AnnounceTarget, TagSelection};
+use ocx_announce::forge::ForgeCredentials;
+use ocx_package::publisher::Publisher;
 
 use crate::{api::data::announce::AnnounceReport, command::deprecated, options};
 
@@ -59,7 +57,7 @@ const TAG_SELECTION_SIBLINGS_OF_TAGS: [&str; 3] = ["tags_file", "tags_from_regis
 // `.required(true)` alone is exactly-one — `multiple` already defaults to
 // false, and stating it produced byte-identical outcomes when measured. Both
 // spellings together is `ArgumentConflict`, neither is
-// `MissingRequiredArgument`, and `cli::clap::parse` maps both to exit 64.
+// `MissingRequiredArgument`, and `clap_parse::parse` maps both to exit 64.
 #[clap(group(
     clap::ArgGroup::new("package_selector")
         .args(["package", "package_flag"])
@@ -249,7 +247,7 @@ impl PackageAnnounce {
         // unconditional probe would only show up as an ordinary `api` announce
         // failing on a host that never needed git.
         let git = if self.forge.needs_git() {
-            Some(ocx_lib::forge::probe_git_binary().await?)
+            Some(ocx_announce::forge::probe_git_binary().await?)
         } else {
             None
         };
@@ -289,7 +287,7 @@ impl PackageAnnounce {
         // shared recipe (mirror map, plain-HTTP set, merged extra-CA view —
         // the physical registry a curated tag is read from sits behind the
         // same corporate proxy as everything else this invocation dials),
-        // pinned through the same `oci::ssrf::GuardedResolver` seam the
+        // pinned through the same `ocx_oci::ssrf::GuardedResolver` seam the
         // index read path uses (`ClientBuilder::ssrf_guard`) — the
         // physical registry a curated tag resolves against is
         // remote-controlled data (a root `repository` pointer), so the
@@ -340,7 +338,7 @@ mod tests {
     use clap::error::ErrorKind;
     use clap::{Args as _, CommandFactory as _, Parser as _};
 
-    use ocx_lib::announce::AnnounceTarget;
+    use ocx_announce::announce::AnnounceTarget;
 
     use super::PackageAnnounce;
     use crate::command::package_claim::PackageClaim;
@@ -422,7 +420,7 @@ mod tests {
     /// The `ErrorKind` is asserted, never `is_err()` (E-02): a mis-declared
     /// group refuses this argv too, with `MissingRequiredArgument`, so
     /// `is_err()` cannot tell a working exactly-one rule from a broken one.
-    /// `cli::clap::parse` maps every non-help clap error to
+    /// `clap_parse::parse` maps every non-help clap error to
     /// `ExitCode::UsageError`, which is where the 64 comes from.
     ///
     /// **Green on arrival** — the stub declares the `ArgGroup`.
@@ -619,7 +617,7 @@ mod tests {
     /// `CascadeGroup` is the in-repo precedent for the fix (variants carry no
     /// doc, the text lives with the flags it describes).
     ///
-    /// The variable is read from [`ocx_lib::env::keys`] rather than spelled here,
+    /// The variable is read from [`ocx_config::env::keys`] rather than spelled here,
     /// the same discipline `options::forge_write` applies to its exit-80 refusal:
     /// help naming a variable the ladder no longer reads is worse than no help.
     ///
@@ -636,7 +634,7 @@ mod tests {
         let sentence = format!(
             "needs a forge credential: `{}`, or the job token under `--transport git` inside a \
              GitLab job. Writing to `--out` works without one.",
-            ocx_lib::env::keys::OCX_ANNOUNCE_TOKEN
+            ocx_config::env::keys::OCX_ANNOUNCE_TOKEN
         );
 
         for command in ["announce", "claim"] {

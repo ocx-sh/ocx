@@ -21,21 +21,20 @@
 //! `_common` suffix — the position `patch_common.rs` and `index_common.rs`
 //! already hold.
 
+use ocx_package_manager::Error as PmError;
 use std::path::Path;
 
 use anyhow::Context as _;
+use ocx_oci::endpoint::{Url, validate_sigstore_url};
+use ocx_package_manager::error::{PackageError, PackageErrorKind};
+use ocx_sign::attest::MAX_PREDICATE_FILE_BYTES;
+use ocx_sign::sign::{SignError, SignErrorKind};
+use ocx_sign::verify::{TrustRoot, VerifyError, VerifyErrorKind};
+use ocx_trust::key_ref::KeyRef;
+use ocx_trust::{self, CompiledPolicy};
+use ocx_util::fs::path::FileReference;
 use tokio::io::AsyncReadExt;
 use zeroize::Zeroizing;
-
-use ocx_lib::Error as LibError;
-use ocx_lib::oci;
-use ocx_lib::oci::attest::MAX_PREDICATE_FILE_BYTES;
-use ocx_lib::oci::endpoint::{Url, validate_sigstore_url};
-use ocx_lib::oci::sign::{KeyRef, SignError, SignErrorKind};
-use ocx_lib::oci::verify::{TrustRoot, VerifyError, VerifyErrorKind};
-use ocx_lib::package_manager::error::{PackageError, PackageErrorKind};
-use ocx_lib::trust::{self, CompiledPolicy};
-use ocx_lib::utility::fs::path::FileReference;
 
 use crate::api::data::signature::{SignatureLegReport, SignatureReport};
 
@@ -50,7 +49,7 @@ use crate::api::data::signature::{SignatureLegReport, SignatureReport};
 /// touches a credential.
 pub(super) fn refuse_when_offline(
     context: &crate::app::Context,
-    identifier: &oci::Identifier,
+    identifier: &ocx_oci::Identifier,
     kind: SignErrorKind,
 ) -> anyhow::Result<()> {
     if context.is_offline() {
@@ -101,7 +100,7 @@ fn redacted_token_path(path: &std::path::Path) -> std::path::PathBuf {
 pub(super) async fn resolve_override_token(
     identity_token_file: Option<&Path>,
     identity_token_stdin: bool,
-    identifier: &oci::Identifier,
+    identifier: &ocx_oci::Identifier,
 ) -> anyhow::Result<Option<Zeroizing<String>>> {
     // On a non-Unix target (Windows), ACL-based permission validation is not
     // implemented for Slice 1 (windows-acl integration is out of scope).
@@ -173,13 +172,13 @@ pub(super) async fn resolve_override_token(
                             // `internal` — a missing token file reported as a bug
                             // in ocx. The basename only: the CWE-209 note above is
                             // not relaxed, it is honoured by what is handed in.
-                            anyhow::Error::new(ocx_lib::error::file_error(redacted_token_path(&path_owned), e))
+                            anyhow::Error::new(ocx_util::error::FileError::new(redacted_token_path(&path_owned), e))
                                 .context("failed to open --identity-token-file")
                         }
                     })?;
                 let meta = std_file
                     .metadata()
-                    .map_err(|e| ocx_lib::error::file_error(redacted_token_path(&path_owned), e))
+                    .map_err(|e| ocx_util::error::FileError::new(redacted_token_path(&path_owned), e))
                     .context("failed to stat --identity-token-file")?;
                 // CWE-732: reject token files not owned by the effective
                 // user. A file writable by another uid could have been
@@ -209,7 +208,7 @@ pub(super) async fn resolve_override_token(
                 // pass the uid and mode checks above when the operator owns
                 // them.
                 if !meta.is_file() {
-                    return Err(anyhow::Error::new(ocx_lib::error::file_error(
+                    return Err(anyhow::Error::new(ocx_util::error::FileError::new(
                         redacted_token_path(&path_owned),
                         std::io::Error::other("--identity-token-file is not a regular file"),
                     )));
@@ -235,10 +234,10 @@ pub(super) async fn resolve_override_token(
                 .take(MAX_IDENTITY_TOKEN_BYTES + 1)
                 .read_to_string(&mut raw)
                 .await
-                .map_err(|e| ocx_lib::error::file_error(redacted_token_path(path), e))
+                .map_err(|e| ocx_util::error::FileError::new(redacted_token_path(path), e))
                 .context("failed to read --identity-token-file")?;
             if raw.len() as u64 > MAX_IDENTITY_TOKEN_BYTES {
-                return Err(anyhow::Error::new(ocx_lib::error::file_error(
+                return Err(anyhow::Error::new(ocx_util::error::FileError::new(
                     redacted_token_path(path),
                     std::io::Error::other(format!(
                         "--identity-token-file is larger than {MAX_IDENTITY_TOKEN_BYTES} bytes"
@@ -261,7 +260,7 @@ pub(super) async fn resolve_override_token(
         return Ok(Some(Zeroizing::new(buf.trim().to_string())));
     }
     // Credential exemption: not forwarded via OcxConfigView. See subsystem-cli.md.
-    if let Ok(token) = std::env::var(ocx_lib::env::keys::OCX_IDENTITY_TOKEN)
+    if let Ok(token) = std::env::var(ocx_config::env::keys::OCX_IDENTITY_TOKEN)
         && !token.is_empty()
     {
         return Ok(Some(Zeroizing::new(token)));
@@ -289,7 +288,7 @@ const MAX_IDENTITY_TOKEN_BYTES: u64 = 64 * 1024;
 ///
 /// The one literal for it: `sign`, `attest` and `push --sbom` all reach it
 /// through [`resolve_endpoint`], so there is no second copy to drift. Rekor's
-/// twin is [`ocx_lib::oci::endpoint::DEFAULT_REKOR_URL`], which already lives
+/// twin is [`ocx_oci::endpoint::DEFAULT_REKOR_URL`], which already lives
 /// in the library because verify needs it too.
 pub(crate) const DEFAULT_FULCIO_URL: &str = "https://fulcio.sigstore.dev";
 
@@ -313,13 +312,13 @@ pub(crate) enum SigstoreEndpoint {
 /// The result is still untrusted: a config-supplied URL is exactly as
 /// attacker-reachable as a flag-supplied one (a `[managed]` payload can carry
 /// one), so every caller passes it through
-/// [`validate_sigstore_url`](ocx_lib::oci::endpoint::validate_sigstore_url)
+/// [`validate_sigstore_url`](ocx_oci::endpoint::validate_sigstore_url)
 /// before it becomes an HTTP target. Returning a `String` rather than a
 /// validated `Url` is what keeps that step at the call site, where the
 /// per-subsystem error wrap (`SignError` vs `VerifyError`) lives.
 pub(crate) fn resolve_endpoint(
     flag: Option<&str>,
-    configured: Option<&ocx_lib::trust::SigstoreTrust>,
+    configured: Option<&ocx_trust::SigstoreTrust>,
     endpoint: SigstoreEndpoint,
 ) -> String {
     let from_config = configured.and_then(|sigstore| match endpoint {
@@ -328,7 +327,7 @@ pub(crate) fn resolve_endpoint(
     });
     let builtin = match endpoint {
         SigstoreEndpoint::Fulcio => DEFAULT_FULCIO_URL,
-        SigstoreEndpoint::Rekor => ocx_lib::oci::endpoint::DEFAULT_REKOR_URL,
+        SigstoreEndpoint::Rekor => ocx_oci::endpoint::DEFAULT_REKOR_URL,
     };
     flag.or(from_config).unwrap_or(builtin).to_string()
 }
@@ -355,8 +354,8 @@ pub(crate) fn resolve_endpoint(
 ///
 /// [`SignErrorKind::InvalidEndpointUrl`] (exit 64) naming the rejected flag.
 pub(super) fn resolve_sigstore_pair(
-    configured: Option<&ocx_lib::trust::SigstoreTrust>,
-    identifier: &oci::Identifier,
+    configured: Option<&ocx_trust::SigstoreTrust>,
+    identifier: &ocx_oci::Identifier,
     fulcio_flag: Option<&str>,
     rekor_flag: Option<&str>,
 ) -> anyhow::Result<(Url, Url)> {
@@ -389,8 +388,8 @@ pub(super) fn resolve_sigstore_pair(
 ///
 /// [`VerifyErrorKind::InvalidEndpointUrl`] (exit 64) naming `--rekor-url`.
 pub(super) fn resolve_rekor_endpoint(
-    configured: Option<&ocx_lib::trust::SigstoreTrust>,
-    identifier: &oci::Identifier,
+    configured: Option<&ocx_trust::SigstoreTrust>,
+    identifier: &ocx_oci::Identifier,
     rekor_flag: Option<&str>,
 ) -> anyhow::Result<Url> {
     let rekor = resolve_endpoint(rekor_flag, configured, SigstoreEndpoint::Rekor);
@@ -423,7 +422,7 @@ pub(super) fn iso8601(epoch_secs: u64) -> String {
 /// Policy mode (neither flag): the scope-matched `[[trust.policy]]` set
 /// under cross-tier precedence — the operator `config.toml` tiers are
 /// authoritative; the project `ocx.toml` only adds trust where the operator
-/// has not governed the scope (see [`trust::resolve_tiered`]). A malformed
+/// has not governed the scope (see [`ocx_trust::resolve_tiered`]). A malformed
 /// matched policy → [`VerifyErrorKind::TrustPolicyInvalid`] (exit 78); no
 /// matching policy → [`VerifyErrorKind::NoIdentityProvided`] (exit 64). The
 /// one carve-out is a signer whose `key` names a file that cannot be read: that is a
@@ -437,7 +436,7 @@ pub(super) fn iso8601(epoch_secs: u64) -> String {
 /// its own command files, so this shared leaf is not edited again.
 pub(super) async fn resolve_policies(
     context: &crate::app::Context,
-    identifier: &oci::Identifier,
+    identifier: &ocx_oci::Identifier,
     certificate_identity: Option<&str>,
     certificate_oidc_issuer: Option<&str>,
     key: Option<&KeyRef>,
@@ -466,7 +465,7 @@ pub(super) async fn resolve_policies(
 /// through the keyless path they were written for.
 pub(super) async fn resolve_policies_lenient(
     context: &crate::app::Context,
-    identifier: &oci::Identifier,
+    identifier: &ocx_oci::Identifier,
     certificate_identity: Option<&str>,
     certificate_oidc_issuer: Option<&str>,
     key: Option<&KeyRef>,
@@ -477,7 +476,7 @@ pub(super) async fn resolve_policies_lenient(
     // both groups, so reaching here with a key *and* a flag pair is not a
     // reachable invocation.
     if let Some(key) = key {
-        let policy = trust::compile_key_signer(key)
+        let policy = ocx_trust::compile_key_signer(key)
             .map_err(|kind| VerifyError::new(identifier.clone(), VerifyErrorKind::from(kind)))?;
         return Ok(vec![policy]);
     }
@@ -490,7 +489,7 @@ pub(super) async fn resolve_policies_lenient(
     let project_policies = project_trust_policies(context, identifier).await?;
     // Operator tier (config.toml) is authoritative; the project ocx.toml
     // only adds trust for scopes the operator has not governed.
-    trust::resolve_tiered(context.config_trust_policies(), &project_policies, &target)
+    ocx_trust::resolve_tiered(context.config_trust_policies(), &project_policies, &target)
         .map_err(|kind| VerifyError::new(identifier.clone(), VerifyErrorKind::from(kind)).into())
 }
 
@@ -500,20 +499,16 @@ pub(super) async fn resolve_policies_lenient(
 /// which OCI-tier commands otherwise never consult (see `adr_trust_policy.md`).
 async fn project_trust_policies(
     context: &crate::app::Context,
-    identifier: &oci::Identifier,
-) -> anyhow::Result<Vec<trust::TrustPolicy>> {
+    identifier: &ocx_oci::Identifier,
+) -> anyhow::Result<Vec<ocx_trust::TrustPolicy>> {
     // A missing/inaccessible CWD is non-fatal: `ProjectConfig::resolve` still
     // honors an explicit `--project` / `OCX_PROJECT`, and with no project file
     // resolved the trust-policy set is simply empty (flag-mode verify works).
     let cwd = std::env::current_dir().ok();
     let ocx_home = context.file_structure().root();
-    let resolved = ocx_lib::project::ProjectConfig::resolve(
-        cwd.as_deref(),
-        context.project_path(),
-        Some(ocx_home),
-        context.global(),
-    )
-    .await?;
+    let resolved =
+        ocx_project::ProjectConfig::resolve(cwd.as_deref(), context.project_path(), Some(ocx_home), context.global())
+            .await?;
     match resolved {
         Some((config_path, _lock_path)) => {
             // Lenient trust-only parse: an unrelated malformed section (a bad
@@ -521,7 +516,7 @@ async fn project_trust_policies(
             // matters here (the OCI-tier carve-out is scoped to trust policy).
             let text = tokio::fs::read_to_string(&config_path)
                 .await
-                .map_err(|error| ocx_lib::error::file_error(&config_path, error))
+                .map_err(|error| ocx_util::error::FileError::new(&config_path, error))
                 .with_context(|| format!("reading project config `{}` for trust policies", config_path.display()))?;
             // Anchored on the project file's own directory, like every other
             // tier: a relative key path must name the same file whether
@@ -531,7 +526,7 @@ async fn project_trust_policies(
             // downcast ladder, so a bare `?` here exits 1 `internal` for an
             // operator's malformed `ocx.toml`. The same wrapper every other
             // trust-policy refusal on this path already goes through.
-            trust::policies_from_ocx_toml(&text, config_dir)
+            ocx_trust::policies_from_ocx_toml(&text, config_dir)
                 .map_err(|kind| VerifyError::new(identifier.clone(), VerifyErrorKind::TrustPolicyInvalid(kind)).into())
         }
         None => Ok(Vec::new()),
@@ -574,7 +569,7 @@ pub(crate) fn explicit_trust_root_path(value: std::path::PathBuf) -> std::path::
 /// below never learns which was written.
 pub(super) async fn resolve_trust_root(
     context: &crate::app::Context,
-    identifier: &oci::Identifier,
+    identifier: &ocx_oci::Identifier,
     rekor_cache_key: &str,
     offline: bool,
     trusted_root: Option<&std::path::Path>,
@@ -583,12 +578,14 @@ pub(super) async fn resolve_trust_root(
         .map(std::path::Path::to_path_buf)
         .or_else(|| std::env::var_os("OCX_SIGSTORE_TRUSTED_ROOT").map(std::path::PathBuf::from))
         .map(explicit_trust_root_path);
-    let home_trusted_root = ocx_lib::ConfigLoader::home_sigstore_trusted_root_path();
-    ocx_lib::oci::verify::resolve_trust_root(
+    let home_trusted_root = ocx_config::loader::ConfigLoader::home_sigstore_trusted_root_path();
+    ocx_sign::verify::resolve_trust_root(
         explicit.as_deref(),
         context.config_trust_sigstore(),
         home_trusted_root.as_deref(),
-        &context.file_structure().state,
+        // The trust-root cache is `ocx_sign`'s corner of the state root; the
+        // store only says where that root is (ADR 1.9).
+        &ocx_sign::sign::state::SigningStatePaths::new(context.file_structure().state.root()),
         rekor_cache_key,
         offline,
     )
@@ -609,7 +606,7 @@ pub(super) async fn resolve_trust_root(
 /// whether or not the `VerifyError` node is preserved.
 pub(super) fn verify_error_into_anyhow(err: PackageError) -> anyhow::Error {
     match err.kind {
-        PackageErrorKind::Internal(LibError::Verify(verify_error)) => anyhow::Error::new(*verify_error),
+        PackageErrorKind::Internal(PmError::Verify(verify_error)) => anyhow::Error::new(*verify_error),
         kind => anyhow::Error::new(kind),
     }
 }
@@ -623,9 +620,9 @@ pub(super) fn verify_error_into_anyhow(err: PackageError) -> anyhow::Error {
 /// exit code (64) and the same offending flag by construction rather than by
 /// three call sites agreeing.
 fn invalid_endpoint(
-    identifier: &oci::Identifier,
+    identifier: &ocx_oci::Identifier,
     flag: &'static str,
-) -> impl Fn(ocx_lib::oci::endpoint::UrlRejection) -> anyhow::Error {
+) -> impl Fn(ocx_oci::endpoint::UrlRejection) -> anyhow::Error {
     let identifier = identifier.clone();
     move |reason| {
         anyhow::Error::from(SignError::new(
@@ -652,7 +649,7 @@ fn invalid_endpoint(
 ///
 /// [`SignErrorKind::PredicateTooLarge`] (exit 65) past the limit; an I/O error
 /// (exit 74) naming the path otherwise, including the symlink refusal.
-pub(super) async fn read_predicate(path: &Path, identifier: &oci::Identifier) -> anyhow::Result<Vec<u8>> {
+pub(super) async fn read_predicate(path: &Path, identifier: &ocx_oci::Identifier) -> anyhow::Result<Vec<u8>> {
     let file = open_predicate(path).await?;
 
     // One byte past the ceiling: enough to tell "at the limit" from "over it"
@@ -664,7 +661,7 @@ pub(super) async fn read_predicate(path: &Path, identifier: &oci::Identifier) ->
     file.take(ceiling)
         .read_to_end(&mut bytes)
         .await
-        .map_err(|error| ocx_lib::error::file_error(path, error))?;
+        .map_err(|error| ocx_util::error::FileError::new(path, error))?;
 
     if bytes.len() > MAX_PREDICATE_FILE_BYTES {
         return Err(anyhow::Error::from(SignError::new(
@@ -708,7 +705,7 @@ async fn open_predicate(path: &Path) -> anyhow::Result<tokio::fs::File> {
                 .open(&owned)
         })
         .await
-        .map_err(|join| ocx_lib::error::file_error(path, std::io::Error::other(join)))?;
+        .map_err(|join| ocx_util::error::FileError::new(path, std::io::Error::other(join)))?;
 
         match opened {
             Ok(file) => Ok(tokio::fs::File::from_std(file)),
@@ -716,10 +713,10 @@ async fn open_predicate(path: &Path) -> anyhow::Result<tokio::fs::File> {
             // one open(2) error that means "this path is a link", so it is
             // reported as the refusal it is rather than as a generic I/O fault.
             Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
-                Err(anyhow::Error::from(ocx_lib::error::file_error(path, error))
+                Err(anyhow::Error::from(ocx_util::error::FileError::new(path, error))
                     .context("refusing to read a predicate through a symlink"))
             }
-            Err(error) => Err(ocx_lib::error::file_error(path, error).into()),
+            Err(error) => Err(ocx_util::error::FileError::new(path, error).into()),
         }
     }
     #[cfg(not(unix))]
@@ -728,7 +725,7 @@ async fn open_predicate(path: &Path) -> anyhow::Result<tokio::fs::File> {
         // plain, and the symlink refusal is a Unix-only guarantee.
         tokio::fs::File::open(path)
             .await
-            .map_err(|error| ocx_lib::error::file_error(path, error).into())
+            .map_err(|error| ocx_util::error::FileError::new(path, error).into())
     }
 }
 
@@ -777,8 +774,8 @@ pub(super) fn error_slug(command: &str, err: &anyhow::Error) -> String {
 /// most specific thing there is, and it is the same fallback
 /// [`error_slug`] takes for errors outside the sign and verify taxonomies, so
 /// a sweep's rows carry one vocabulary either way.
-pub(super) fn category_slug(code: ocx_lib::cli::ExitCode) -> String {
-    serde_json::to_value(ocx_lib::cli::ErrorCategory::from_exit_code(code))
+pub(super) fn category_slug(code: ocx_exit::ExitCode) -> String {
+    serde_json::to_value(ocx_exit::ErrorCategory::from_exit_code(code))
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_else(|| "failure".to_string())
@@ -796,16 +793,16 @@ pub(super) fn category_slug(code: ocx_lib::cli::ExitCode) -> String {
 ///   defined as "use only when no specific code applies", which is exactly the
 ///   state a mixed sweep is in. The per-tag codes stay readable in the report.
 ///
-/// No new [`ExitCode`](ocx_lib::cli::ExitCode) variant: every answer here is
+/// No new [`ExitCode`](ocx_exit::ExitCode) variant: every answer here is
 /// one a script already knows.
-pub(super) fn sweep_exit_code(failures: &[ocx_lib::cli::ExitCode]) -> ocx_lib::cli::ExitCode {
+pub(super) fn sweep_exit_code(failures: &[ocx_exit::ExitCode]) -> ocx_exit::ExitCode {
     let mut codes = failures.iter();
     let Some(first) = codes.next() else {
-        return ocx_lib::cli::ExitCode::Success;
+        return ocx_exit::ExitCode::Success;
     };
     match codes.all(|code| code == first) {
         true => *first,
-        false => ocx_lib::cli::ExitCode::Failure,
+        false => ocx_exit::ExitCode::Failure,
     }
 }
 
@@ -822,7 +819,7 @@ pub(super) fn sweep_exit_code(failures: &[ocx_lib::cli::ExitCode]) -> ocx_lib::c
 /// does not, which is what the unwrap is for.
 pub(super) fn attest_error_into_anyhow(err: PackageError) -> anyhow::Error {
     match err.kind {
-        PackageErrorKind::Internal(LibError::Sign(sign_error)) => anyhow::Error::new(*sign_error),
+        PackageErrorKind::Internal(PmError::Sign(sign_error)) => anyhow::Error::new(*sign_error),
         kind => anyhow::Error::new(kind),
     }
 }
@@ -833,9 +830,9 @@ pub(super) fn attest_error_into_anyhow(err: PackageError) -> anyhow::Error {
 /// carries the same document a single run prints — the sweep aggregates the
 /// existing report rather than modelling a second one.
 pub(super) fn signature_report(
-    identifier: &oci::Identifier,
-    platform: Option<&oci::Platform>,
-    result: ocx_lib::oci::sign::SignResult,
+    identifier: &ocx_oci::Identifier,
+    platform: Option<&ocx_oci::Platform>,
+    result: ocx_sign::sign::SignResult,
 ) -> SignatureReport {
     let legs = result
         .legs
@@ -876,19 +873,19 @@ pub(super) fn signature_report(
 /// keeps the `ClientError` intact under it rather than flattening it). Reading
 /// the kind directly would exit 1 for a 503 that exits 75 when it fails the run
 /// as a whole — the same fault, two codes, decided by how many legs it hit.
-pub(super) fn leg_exit_code(kind: &ocx_lib::oci::sign::SignErrorKind) -> ocx_lib::cli::ExitCode {
+pub(super) fn leg_exit_code(kind: &ocx_sign::sign::SignErrorKind) -> ocx_exit::ExitCode {
     match kind {
-        ocx_lib::oci::sign::SignErrorKind::Internal(cause) => ocx_lib::cli::classify_error(cause.as_ref()),
-        other => ocx_lib::cli::ClassifyErrorKind::exit_code(other),
+        ocx_sign::sign::SignErrorKind::Internal(cause) => crate::exit::classify_library_error(cause.as_ref()),
+        other => crate::exit::ClassifyErrorKind::exit_code(other),
     }
 }
 
 #[cfg(test)]
 mod leg_exit_code_tests {
     use super::leg_exit_code;
-    use ocx_lib::cli::ExitCode;
-    use ocx_lib::oci::client::error::ClientError;
-    use ocx_lib::oci::sign::SignErrorKind;
+    use ocx_exit::ExitCode;
+    use ocx_oci::client::error::ClientError;
+    use ocx_sign::sign::SignErrorKind;
 
     /// A leg that failed on a registry fault must exit the way the same fault
     /// exits when it fails the whole run.
@@ -956,8 +953,8 @@ mod tests {
     }
 
     /// A `[trust.sigstore]` block pinning both endpoints at a self-hosted stack.
-    fn self_hosted() -> ocx_lib::trust::SigstoreTrust {
-        ocx_lib::trust::SigstoreTrust {
+    fn self_hosted() -> ocx_trust::SigstoreTrust {
+        ocx_trust::SigstoreTrust {
             fulcio_url: Some("https://fulcio.corp.example".to_string()),
             rekor_url: Some("https://rekor.corp.example".to_string()),
             ..Default::default()
@@ -981,7 +978,7 @@ mod tests {
             ),
             (
                 SigstoreEndpoint::Rekor,
-                ocx_lib::oci::endpoint::DEFAULT_REKOR_URL,
+                ocx_oci::endpoint::DEFAULT_REKOR_URL,
                 "https://rekor.corp.example",
                 "https://rekor.flag.example",
             ),
@@ -1005,7 +1002,7 @@ mod tests {
     /// other off its default — the two fields are independent decisions.
     #[test]
     fn a_half_filled_config_leaves_the_other_endpoint_alone() {
-        let cfg = ocx_lib::trust::SigstoreTrust {
+        let cfg = ocx_trust::SigstoreTrust {
             rekor_url: Some("https://rekor.corp.example".to_string()),
             ..Default::default()
         };
@@ -1027,10 +1024,10 @@ mod tests {
     /// *everything* would pass the negative half unnoticed.
     #[test]
     fn a_forbidden_config_url_is_refused_exactly_like_a_forbidden_flag_url() {
-        use ocx_lib::oci::endpoint::validate_sigstore_url;
+        use ocx_oci::endpoint::validate_sigstore_url;
 
         let forbidden = "http://fulcio.corp.example";
-        let hostile = ocx_lib::trust::SigstoreTrust {
+        let hostile = ocx_trust::SigstoreTrust {
             fulcio_url: Some(forbidden.to_string()),
             ..Default::default()
         };
@@ -1052,8 +1049,8 @@ mod tests {
         );
     }
 
-    fn test_identifier() -> oci::Identifier {
-        oci::Identifier::parse("registry.example/pkg:1.0").expect("static parse")
+    fn test_identifier() -> ocx_oci::Identifier {
+        ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("static parse")
     }
 
     /// Write `contents` to a new file in `dir` and set the given Unix mode.
@@ -1201,7 +1198,7 @@ mod tests {
         assert_eq!(fulcio.as_str().trim_end_matches('/'), DEFAULT_FULCIO_URL);
         assert_eq!(
             rekor.as_str().trim_end_matches('/'),
-            ocx_lib::oci::endpoint::DEFAULT_REKOR_URL
+            ocx_oci::endpoint::DEFAULT_REKOR_URL
         );
     }
 
@@ -1211,16 +1208,13 @@ mod tests {
     /// contacts Fulcio.
     #[test]
     fn the_rekor_single_refuses_through_the_verify_family() {
-        let broken_fulcio = ocx_lib::trust::SigstoreTrust {
+        let broken_fulcio = ocx_trust::SigstoreTrust {
             fulcio_url: Some("file:///etc/passwd".to_string()),
             ..Default::default()
         };
         let ok = resolve_rekor_endpoint(Some(&broken_fulcio), &test_identifier(), None)
             .expect("a Fulcio typo cannot fail a command that never calls Fulcio");
-        assert_eq!(
-            ok.as_str().trim_end_matches('/'),
-            ocx_lib::oci::endpoint::DEFAULT_REKOR_URL
-        );
+        assert_eq!(ok.as_str().trim_end_matches('/'), ocx_oci::endpoint::DEFAULT_REKOR_URL);
 
         let err = resolve_rekor_endpoint(None, &test_identifier(), Some("http://rekor.evil.example"))
             .expect_err("plain http on a non-loopback host is an SSRF risk");
@@ -1246,10 +1240,10 @@ mod tests {
     /// regresses, `context.identifier` vanishes and this test fails.
     #[test]
     fn verify_error_wrapped_in_package_error_still_populates_envelope_identifier() {
-        let id = oci::Identifier::parse("registry.example/pkg:1.0").expect("parse identifier");
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("parse identifier");
         let package_error = PackageError::new(
             id.clone(),
-            PackageErrorKind::Internal(LibError::Verify(Box::new(VerifyError::new(
+            PackageErrorKind::Internal(PmError::Verify(Box::new(VerifyError::new(
                 id,
                 VerifyErrorKind::IdentityMismatch,
             )))),
@@ -1273,7 +1267,7 @@ mod tests {
         let id = test_identifier();
         PackageError::new(
             id.clone(),
-            PackageErrorKind::Internal(LibError::Sign(Box::new(SignError::new(id, kind)))),
+            PackageErrorKind::Internal(PmError::Sign(Box::new(SignError::new(id, kind)))),
         )
     }
 
@@ -1369,7 +1363,7 @@ mod tests {
     /// reach a terminal (CWE-150).
     #[test]
     fn failed_outcome_sanitizes_the_message() {
-        let hostile = oci::Identifier::parse("registry.example/pkg:1.0").expect("parse");
+        let hostile = ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("parse");
         let err = anyhow::Error::from(SignError::new(
             hostile,
             SignErrorKind::TargetNotFound {
@@ -1500,7 +1494,7 @@ mod sweep_exit_code_tests {
     //! Which code a partially-failed `--tags` / `--tags-file` sweep returns.
 
     use super::sweep_exit_code;
-    use ocx_lib::cli::ExitCode;
+    use ocx_exit::ExitCode;
 
     /// Nothing failed, so nothing is reported as failing. The sweep's own
     /// skips (a tag resolving to a bare manifest) never reach here — they are

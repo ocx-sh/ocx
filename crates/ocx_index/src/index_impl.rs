@@ -1,0 +1,342 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+use async_trait::async_trait;
+
+use super::error::Result;
+
+use super::IndexOperation;
+
+#[async_trait]
+pub trait IndexImpl: Send + Sync {
+    async fn list_repositories(&self, registry: &str) -> Result<Vec<String>>;
+
+    /// List all tags for the given identifier.
+    ///
+    /// Implementations return the source's tags as recorded; reserved tags
+    /// ([`is_reserved_tag`](ocx_oci::tag::is_reserved_tag) — the
+    /// `__ocx` namespace, which carries the keep tag, plus the frozen legacy
+    /// `sha256.<hex>` keep tags) are filtered
+    /// once, in [`Index::list_tags`](super::Index::list_tags).
+    async fn list_tags(&self, identifier: &ocx_oci::Identifier) -> Result<Option<Vec<String>>>;
+
+    /// Fetch the manifest for the given identifier.
+    ///
+    /// Pure-read callers must pass [`IndexOperation::Query`]; install/pull
+    /// callers pass [`IndexOperation::Resolve`]. The trait does not validate
+    /// this — misuse silently leaks writes through query paths. The
+    /// [`IndexOperation`] enum exists to make the choice unmissable at every
+    /// call site.
+    async fn fetch_manifest(
+        &self,
+        identifier: &ocx_oci::Identifier,
+        op: IndexOperation,
+    ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>>;
+    /// Fetch the manifest digest for the given identifier.
+    ///
+    /// `op` carries the same contract as on [`Self::fetch_manifest`].
+    async fn fetch_manifest_digest(
+        &self,
+        identifier: &ocx_oci::Identifier,
+        op: IndexOperation,
+    ) -> Result<Option<ocx_oci::Digest>>;
+
+    /// Fetch the raw bytes of a content blob.
+    ///
+    /// `blob_ref` carries `(registry, repo)` for the OCI blob endpoint and
+    /// the blob's own digest for content addressing. `Ok(None)` = unrecoverable
+    /// miss (e.g. local-only mode + absent).
+    async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>>;
+
+    /// Fetch the verbatim manifest bytes alongside the parsed manifest and its
+    /// digest.
+    ///
+    /// A registry-backed source ([`super::OciIndex`]) returns the exact
+    /// bytes the registry served — digest recompute-verified — so the index
+    /// store can persist them without re-serialisation
+    /// (`adr_index_indirection.md` A3). `Ok(None)` = tag/manifest absent.
+    ///
+    /// The default derives the bytes by re-serialising the parsed manifest.
+    /// That fallback is correct only for sources that do not retain the wire
+    /// bytes (test fakes that never persist); every source that a persisting
+    /// caller can reach overrides it — registry sources, `OcxIndex`, and
+    /// `ChainedIndex` itself (which walks its own source chain rather than
+    /// falling back to a re-serialisation of its cache-first `fetch_manifest`
+    /// read). The persist path ([`super::LocalIndex::persist_dispatch`]) and
+    /// chain-blob staging (`ocx_lib::package_manager::tasks::common::stage_and_link_chain_blobs`)
+    /// are always driven with a registry-backed source in production, so the
+    /// re-serialising default never reaches a verifying write.
+    async fn fetch_manifest_raw_bytes(
+        &self,
+        identifier: &ocx_oci::Identifier,
+    ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
+        match self.fetch_manifest(identifier, IndexOperation::Resolve).await? {
+            Some((digest, manifest)) => {
+                let bytes = serde_json::to_vec(&manifest)?;
+                Ok(Some((bytes, digest, manifest)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Fetch a published index root document verbatim: the exact
+    /// `p/<ns>/<pkg>.json` bytes the index site served, alongside the parsed
+    /// [`IndexRoot`](super::IndexRoot).
+    ///
+    /// A **published** ocx-index source ([`super::OcxIndex`]) serves the
+    /// verbatim root so `LocalIndex::persist_published_root` can grow the local
+    /// copy byte-for-byte (copy-a-mirror, `adr_index_indirection.md` A2). A
+    /// **derived** (plain OCI-registry) source publishes no index of its own, so
+    /// the default returns `None` — its root is OCX-authored field-wise instead
+    /// (`LocalIndex::commit_root_tag`, A2/H). `Ok(None)` = this source serves no
+    /// verbatim root for `identifier`.
+    ///
+    /// `Ok(None)` never means "outside jurisdiction" — that outcome has its own
+    /// type ([`super::Jurisdiction`]) on its own method, consulted before a
+    /// source is asked, precisely so
+    /// [`LocalIndex::refresh_tags`](super::LocalIndex::refresh_tags)'s
+    /// derived-source switch on this return value cannot misread it.
+    async fn fetch_root_document(
+        &self,
+        identifier: &ocx_oci::Identifier,
+    ) -> Result<Option<(Vec<u8>, super::IndexRoot)>> {
+        let _ = identifier;
+        Ok(None)
+    }
+
+    /// The physical transport identifier for `identifier`, when this source
+    /// rewrites a logical reference to a distinct physical location
+    /// (`index.ocx.sh`'s `repository` pointer). `Ok(None)` = no rewrite
+    /// (registry sources: physical == logical).
+    ///
+    /// The returned reference is **transport-only** (Decision C2) — used to
+    /// fetch layer/manifest content from the registry the index points at, and
+    /// never round-tripped into a storage path or lock. The default returns
+    /// `None`; only [`super::OcxIndex`] (and `ChainedIndex`, which delegates)
+    /// override it.
+    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::Identifier>> {
+        let _ = identifier;
+        Ok(None)
+    }
+
+    /// The physical transport identifier for `identifier` derived from **local
+    /// state alone** — no source is ever contacted.
+    ///
+    /// The transport address exists to route a *download*. A caller that has
+    /// already established it is downloading nothing (the package is
+    /// materialized in the store) must not spend a network round trip on it:
+    /// that dial was issue #424, one `GET /p/<ns>/<pkg>.json` per locked tool
+    /// on every trampoline invocation, for a pointer nothing consumed.
+    ///
+    /// `Ok(None)` = nothing local rewrites this reference, which a caller reads
+    /// exactly as [`Self::physical_reference`]'s `Ok(None)`: no rewrite known.
+    /// The default returns `None`; only `ChainedIndex` overrides it, because it
+    /// is the only implementor that holds a local copy to answer from.
+    async fn physical_reference_local(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::Identifier>> {
+        let _ = identifier;
+        Ok(None)
+    }
+
+    /// Record the routing pointer for `identifier` in local state, so the next
+    /// invocation answers [`Self::physical_reference_local`] from disk instead
+    /// of dialling a source for it again (#424).
+    ///
+    /// **Called from the resolve path only, and that placement is the gate.**
+    /// A physical address is asked for by readers too — `ocx package cascade
+    /// check`, `package verify`, `package sign`, `package attest` — and a read
+    /// must not snapshot one: writing `p/<ns>/<pkg>.json` *is* a snapshot of
+    /// the physical address even with no tag inside it, because the next
+    /// invocation routes by it having never re-asked. Recording where the
+    /// materialization happens keeps that unreachable from a read by
+    /// construction rather than by a policy each caller must remember.
+    ///
+    /// Best-effort and infallible by signature: this repairs a cache after the
+    /// caller's real work has already succeeded, so a lost race or a read-only
+    /// index home is logged, not surfaced. The default does nothing; only
+    /// `ChainedIndex` overrides it, being the only implementor with a local
+    /// copy to record into.
+    async fn record_routing_pointer(&self, identifier: &ocx_oci::Identifier) {
+        let _ = identifier;
+    }
+
+    /// Whether this source will answer for `identifier`, and what its silence
+    /// means — asked **before** the source is fetched from.
+    ///
+    /// An [`Authoritative`](super::Jurisdiction::Authoritative) source's
+    /// **refusal** (a yanked tag without opt-in, a dispatch-object tamper, a
+    /// fail-closed format mismatch) and its clean miss both stop the chain walk
+    /// — neither may fall through to a lower source that could answer the same
+    /// name and both bypass the refusal and leak the induced-error traffic to
+    /// that source. An [`Outside`](super::Jurisdiction::Outside) source serves
+    /// another registry entirely, so it is never asked and its silence decides
+    /// nothing.
+    ///
+    /// Synchronous and I/O-free: every verdict is decided from the identifier's
+    /// registry alone. It used to be `async` because a source could consult its
+    /// own published `config.json` to decline an individual name; that
+    /// declaration is gone (ocx#251 — a configured index is authoritative for
+    /// its whole registry), and with it the only reason to await here.
+    ///
+    /// The default is [`FallThrough`](super::Jurisdiction::FallThrough) (a
+    /// plain registry claims nothing); only [`super::OcxIndex`] and
+    /// [`ChainedIndex`](super::chained_index::ChainedIndex) override it.
+    fn jurisdiction(&self, identifier: &ocx_oci::Identifier) -> super::Jurisdiction {
+        let _ = identifier;
+        super::Jurisdiction::FallThrough
+    }
+
+    /// This source's SSRF escape hatch — the `[registries."<ns>"].trusted_hosts`
+    /// entry it was built with (ocx#218). Cheap, synchronous, no I/O.
+    ///
+    /// Exposed on the trait so
+    /// [`ChainedIndex`](super::chained_index::ChainedIndex) can apply the SSRF
+    /// floor to a physical target the LOCAL copy minted with the SAME trust set
+    /// [`super::OcxIndex::physical_identifier`] applies to its own answer — one
+    /// config value, one meaning, never a second trusted-hosts notion. The
+    /// default is empty (guard every host); only [`super::OcxIndex`] overrides
+    /// it.
+    fn trusted_hosts(&self) -> &[String] {
+        &[]
+    }
+
+    /// The exemption set that applies to `registry` — [`Self::trusted_hosts`]
+    /// asked of an index that holds several sources.
+    ///
+    /// Keyed on the registry (ownership), never on per-name jurisdiction: a name
+    /// the owning index's grammar cannot express is still that operator's
+    /// namespace and keeps their exemption. The default ignores `registry` and
+    /// answers with this source's own set — a single source is the owner of
+    /// every registry it answers for; only
+    /// [`ChainedIndex`](super::chained_index::ChainedIndex) overrides it, picking
+    /// the owning source out of the chain.
+    fn trusted_hosts_for(&self, registry: &str) -> &[String] {
+        let _ = registry;
+        self.trusted_hosts()
+    }
+
+    /// Replaces the proxy-route rules this source's own SSRF guard reads.
+    ///
+    /// Test seam, mirroring [`super::Index::with_proxy_rules`]: `cargo test`
+    /// runs on machines that may have a real `HTTPS_PROXY`, so a guard test
+    /// that read the ambient environment would pass or fail by accident. The
+    /// default is a no-op — only sources that guard a physical dial of their
+    /// own ([`ChainedIndex`](super::chained_index::ChainedIndex)) carry rules
+    /// to replace; `OcxIndex` takes its own at construction
+    /// ([`super::OcxIndexConfig::proxy_rules`]).
+    fn set_proxy_rules(&mut self, rules: std::sync::Arc<ocx_oci::ssrf::ProxyRules>) {
+        let _ = rules;
+    }
+
+    /// The `OCX_INSECURE_REGISTRIES` authorities this index was built with —
+    /// the `host[:port]` spellings that are dialled over plain HTTP.
+    ///
+    /// Exposed on the trait because the SSRF floor's proxy question is
+    /// per-scheme (`HTTP_PROXY` applies to an `insecure` registry,
+    /// `HTTPS_PROXY` to every other), so
+    /// [`Index::guard_physical_dial`](super::Index::guard_physical_dial) has to
+    /// know which scheme the dial it is about to guard will use. The value
+    /// travels with the index for the same reason `trusted_hosts` does: every
+    /// chain that can mint a physical pointer is built from one, so no
+    /// construction site can forget it.
+    ///
+    /// The default is empty (every host dialled over HTTPS);
+    /// [`LocalIndex`](super::LocalIndex) and
+    /// [`OcxIndex`](super::ocx_index::OcxIndex) carry a configured set, and
+    /// [`ChainedIndex`](super::chained_index::ChainedIndex) delegates to its
+    /// local copy.
+    fn insecure_hosts(&self) -> &[String] {
+        &[]
+    }
+
+    /// Whether this source is the configured owner of `registry` — a cheap,
+    /// no-I/O ownership test, deliberately distinct from the per-name
+    /// [`Self::jurisdiction`].
+    ///
+    /// Ownership decides local-subtree *layout* (a published source's
+    /// `c/index.json` catalog vs a derived source's `p/` enumeration), which is
+    /// per-source and never per-name — so every name under an owned registry
+    /// reports that source's [`Self::source_kind`], grammar notwithstanding.
+    /// The default returns `false`; only [`super::OcxIndex`] (its own
+    /// namespace) and [`ChainedIndex`](super::chained_index::ChainedIndex) (any
+    /// of its sources) override it.
+    fn serves_registry(&self, registry: &str) -> bool {
+        let _ = registry;
+        false
+    }
+
+    /// The static-file base URL this source resolves against, when it is a
+    /// configured ocx-index — the value a
+    /// [`Jurisdiction::Authoritative`](super::Jurisdiction::Authoritative)
+    /// terminal miss names so the user learns *which* index answered "no"
+    /// (ocx#251).
+    ///
+    /// The effective base is not obvious from the outside: it is merged across
+    /// the compiled-in default, the managed tier, `[registries."<ns>"] index`
+    /// and the `[mirrors."<host>"] index` role override, so an error that only
+    /// named the namespace would still leave the reader guessing which endpoint
+    /// was consulted. The default is `None` — a plain OCI registry is not an
+    /// index and has no base to name; only [`super::OcxIndex`] overrides it.
+    fn index_base_url(&self) -> Option<&str> {
+        None
+    }
+
+    /// This source's provenance (`adr_index_indirection.md` A2/H — the "two
+    /// ifs" that distinguish a published copy from a derived one).
+    ///
+    /// A cheap, synchronous, no-I/O classification with exactly two jobs, both
+    /// about who authored the local copy's root document: the root-read catalog
+    /// cross-check (`c/index.json` for a published copy, none for a derived one)
+    /// and root authorship on growth (verbatim copy vs OCX-authored field-wise).
+    /// Recovery routing is **not** one of them — an absent dispatch object is
+    /// fetched by digest regardless of provenance. `ChainedIndex` calls this to
+    /// pick [`super::local_index::SourceKind`] without contacting the source.
+    /// The default is [`super::local_index::SourceKind::Derived`] (an OCI
+    /// registry publishes no index of its own); only [`super::OcxIndex`]
+    /// overrides it (`Published`).
+    fn source_kind(&self) -> super::local_index::SourceKind {
+        super::local_index::SourceKind::Derived
+    }
+
+    fn box_clone(&self) -> Box<dyn IndexImpl>;
+
+    /// A view that resolves identically but writes **nothing** into the local
+    /// index — no dispatch object, no root-document tag pointer, no
+    /// absent-dispatch self-heal. Content-addressed blob writes (leaf manifests,
+    /// config blobs) still happen: the blob store is the GC-able content
+    /// cache, distinct from the permanent local index. Used by read-only
+    /// views (`ocx package inspect`) so merely looking at a package never
+    /// grows the committed index (`adr_index_indirection.md` — the index is
+    /// deployment-managed, outside GC; only `ocx index update` / pins may
+    /// populate it).
+    ///
+    /// Default: [`Self::box_clone`] — a source with no local index of its own
+    /// (a bare remote) has nothing to suppress. Only [`super::chained_index::ChainedIndex`]
+    /// overrides it, returning a clone whose write policy is read-only.
+    fn read_only_view(&self) -> Box<dyn IndexImpl> {
+        self.box_clone()
+    }
+
+    /// A view that lists and reads **live from the sources** regardless of the
+    /// ambient [`ChainMode`](super::ChainMode), and writes nothing into the
+    /// local index.
+    ///
+    /// Used by the update-check probe, whose whole job is to surface the
+    /// freshest *upstream* release: an ambient-mode listing would echo the local
+    /// index instead. Routing through the chain (rather than asking a registry's
+    /// tags API directly) is what makes a **logical** name resolvable — the
+    /// published index routes `ocx.sh/<ns>/<pkg>` to whatever physical
+    /// repository currently holds it, which a bare tags-API probe cannot see.
+    ///
+    /// Writing nothing is deliberate and stronger than the listing needs:
+    /// listing never writes anyway, but an update-check view must never be able
+    /// to move a pin — the local index is the package-tier lock
+    /// (`adr_index_indirection.md`), so the view is made safe by construction
+    /// for any future caller that resolves through it.
+    ///
+    /// Default: [`Self::box_clone`] — a bare remote source already reads live
+    /// and has no local index to protect. Only
+    /// [`super::chained_index::ChainedIndex`] overrides it.
+    fn remote_view(&self) -> Box<dyn IndexImpl> {
+        self.box_clone()
+    }
+}

@@ -7,8 +7,8 @@ physical manifest), catalog sync (F2), status surfacing (F3), and the
 HTTP fixture that encodes the frozen ● wire shapes.
 
 Ground truth for the wire shapes: `IndexRoot`, `RootTag`, `CatalogIndex` in
-`crates/ocx_lib/src/oci/index/wire.rs` (`IndexFormatConfig`/`CatalogSyncOutcome`
-in `crates/ocx_lib/src/oci/index/ocx_index.rs`). The dispatch object a root's
+`crates/ocx_index/src/wire.rs` (`IndexFormatConfig`/`CatalogSyncOutcome`
+in `crates/ocx_index/src/ocx_index.rs`). The dispatch object a root's
 `content` names is a real OCI image index, stored verbatim
 (`adr_oci_index_only_dispatch.md` D1).
 
@@ -1733,7 +1733,7 @@ def dead_endpoint() -> Iterator[str]:
 
     A loopback IP literal rather than the `no-such-*.invalid` names used
     elsewhere in this file: `OcxIndex::physical_identifier`
-    (`crates/ocx_lib/src/oci/index/ocx_index.rs`) runs
+    (`crates/ocx_index/src/ocx_index.rs`) runs
     `oci::ssrf::resolve_and_validate` on the physical host BEFORE the mirror
     seam in `Client::transport_reference`, so a `.invalid` name would die in
     DNS (`SsrfError::Resolution` -> exit 69) and never reach the seam under
@@ -1831,7 +1831,7 @@ def test_registry_role_mirror_rewrites_an_unreachable_physical_host(
     G7 above already composes both mirror roles in one install; what it does
     not pin is that the physical host is never dialed at all. Here the pointer
     address is *unreachable* (`dead_endpoint` proves it refuses), so the
-    rewrite in `Client::transport_reference` (`crates/ocx_lib/src/oci/client.rs`)
+    rewrite in `Client::transport_reference` (`crates/ocx_oci/src/client.rs`)
     must happen before the connect — a reachable-but-empty registry, G7's
     arrangement, cannot distinguish the two orders.
     """

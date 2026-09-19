@@ -36,7 +36,7 @@ exports it.
 
 ``deregister_session_path`` has **no CLI caller** on any platform, so S-014's
 removal half is not reachable from this harness at all; its coverage is the
-Rust unit tests in ``crates/ocx_lib/src/setup/session_path/{linux,macos,
+Rust unit tests in ``crates/ocx_setup/src/session_path/{linux,macos,
 windows}.rs``. What is reachable — and asserted here — is S-014's survivor
 premise on the register path: a foreign ``environment.d`` prepend planted
 before ``ocx self setup`` is still on the generated PATH afterwards.

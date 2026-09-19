@@ -246,7 +246,7 @@ When edit any `.claude/` artifact:
 
 ## Structural Validation Tests
 
-`.claude/tests/test_ai_config.py` = automated enforcement layer for checklist above. Tests live alongside config they validate (not in `test/`, which for OCX binary acceptance tests). Run as part of `task verify` (via `claude:tests`) and catch:
+`.claude/tests/test_ai_config.py` = automated enforcement layer for checklist above. Tests live alongside config they validate (not in `test/`, which for OCX binary acceptance tests). `task claude:tests` runs three files — `test_ai_config.py`, `test_hooks.py` (the hook modules' pure logic: verify-mark polarities, the release full-mark guard, commit-message extraction) and `test_workflows.py` (`.github/workflows/*.yml` glob liveness + `verify-deep.yml`'s trigger shape) — as part of `task verify` (via `claude:verify`) and catch:
 
 - **Rule glob validity**: every `paths:` glob in scoped rules match at least one file on disk (dead glob detection)
 - **CLAUDE.md consistency**: line budget, stated principle count match headings, stated worktree count match table rows
@@ -254,6 +254,8 @@ When edit any `.claude/` artifact:
 - **Agent correctness**: tool/body consistency (no commands need tools not in frontmatter), completion protocol compliance
 - **Hook safety**: no `set -e` in PostToolUse hooks, conditional log trim
 - **Taskfile robustness**: empty file list guards for lint tasks
+- **Hook logic** (`test_hooks.py`): the surviving Claude hooks' pure logic, plus the *call sites* of the commit gate (`task release:prepare` asks for a full mark first; `task verify:mark` can never hand-write a `full` one). The gate itself is `scripts/commit_gate.py`, run by git through `.githooks/`, and shown red and green by its own `--self-test` under `task scripts:self-test` — a Claude hook never sees a commit, so it is not tested as one
+- **Workflow shape** (`test_workflows.py`): every `paths:`/`paths-ignore:` entry matches a tracked file; `verify-deep.yml` fires per non-draft PR, in the merge queue and on push to `main`
 
 ### When to extend the tests
 
@@ -270,8 +272,8 @@ When edit any `.claude/` artifact:
 ### Running the tests
 
 ```sh
-task claude:tests                      # via task runner (used by task verify)
-cd .claude/tests && uv run pytest -v   # directly
+task claude:tests                      # via task runner (used by task verify): the three files above
+uv run --directory .claude/tests pytest test_ai_config.py test_hooks.py test_workflows.py -q   # directly
 ```
 
 ### Principle: test the contract, not the content
@@ -282,7 +284,7 @@ AI config tests validate **structural invariants** (paths exist, counts match, c
 
 PostToolUse hook (`post-tool-use-tracker.sh`) fire on every `Edit|Write` and output AI config update reminders when infrastructure files change. Two reminder types:
 
-1. **`context_reminder`** — source subsystem changes (e.g., edit `crates/ocx_lib/src/oci/`) → remind to update match `subsystem-*.md` rule
+1. **`context_reminder`** — source subsystem changes (e.g., edit `crates/ocx_sign/`) → remind to update match `subsystem-*.md` rule
 2. **`config_reminder`** — infrastructure changes (Taskfiles, Vue components, VitePress config, CI workflows, Cargo.toml, deny.toml, mirror configs) → list specific AI config files need update
 
 **When add new infrastructure dependency** (new Taskfile, new component library, new CI tool), add corresponding `config_reminder` entry to `post-tool-use-tracker.sh` that map file pattern to all AI config files that reference it. Ensure future changes trigger update reminders auto.

@@ -8,7 +8,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::project::{ResolveLockOptions, remove_binding_in_memory, resolve_lock, resolve_lock_touched};
+use ocx_project::{ResolveLockOptions, remove_binding_in_memory, resolve_lock, resolve_lock_touched};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{load_project_for_mutate, record_activation_consent};
@@ -64,12 +64,12 @@ impl Remove {
         // `install_identifiers` collects only the bindings that were live so
         // the post-commit uninstall targets exactly those.
         let mut remove_keys: Vec<String> = Vec::with_capacity(self.identifiers.len());
-        let mut install_identifiers: Vec<ocx_lib::oci::Identifier> = Vec::new();
+        let mut install_identifiers: Vec<ocx_oci::Identifier> = Vec::new();
 
         for raw in &self.identifiers {
             let binding_key = if raw.contains('/') {
-                match ocx_lib::oci::Identifier::parse_with_default_registry(raw, context.default_registry()) {
-                    Ok(id) => ocx_lib::project::binding_key(&id),
+                match ocx_oci::Identifier::parse_with_default_registry(raw, context.default_registry()) {
+                    Ok(id) => ocx_project::binding_key(&id),
                     Err(_) => raw.rsplit('/').next().unwrap_or(raw).to_owned(),
                 }
             } else {
@@ -154,14 +154,14 @@ impl Remove {
         // (RUL-53). `ocx remove` has no `--platform`, so the render resolves
         // link leaves for the host.
         let scope = context.toolchain_render_scope(guard.config_path()).await?;
-        let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
+        let host = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         let commit = context
             .manager()
             .commit_and_render(
                 guard,
                 staged,
                 new_lock.clone(),
-                ocx_lib::package_manager::ToolchainRender {
+                ocx_package_manager::ToolchainRender {
                     scope: &scope,
                     toolchain_root: context.toolchain_root(),
                     platform: &host,

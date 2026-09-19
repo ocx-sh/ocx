@@ -49,6 +49,7 @@ def _project(ocx: OcxRunner, tmp_path: Path) -> Path:
     return project
 
 
+@pytest.mark.smoke
 def test_status_without_lock_reports_declared_only(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:

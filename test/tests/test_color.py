@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 ANSI_ESCAPE = re.compile(r"\x1b\[")
 
 
+@pytest.mark.smoke
 def test_color_never_suppresses_ansi(ocx):
     """``--color never`` output must not contain ANSI escape sequences."""
     result = ocx.run("--color", "never", "version", format=None)
@@ -23,6 +26,7 @@ def test_color_always_emits_ansi(ocx):
     )
 
 
+@pytest.mark.smoke
 def test_default_piped_suppresses_ansi(ocx):
     """Default (piped through pytest) should not emit ANSI escape sequences."""
     result = ocx.run("about", format=None)

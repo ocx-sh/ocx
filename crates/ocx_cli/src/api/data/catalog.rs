@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
-use ocx_lib::cli::Cell;
+use ocx_console::Cell;
 
 use crate::api::Printable;
 use crate::api::data::sanitize_for_terminal;
@@ -88,8 +88,8 @@ impl Catalog {
 }
 
 impl Printable for Catalog {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
-        let headers: &[ocx_lib::cli::Column] = match &self.repositories {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
+        let headers: &[ocx_console::Column] = match &self.repositories {
             CatalogData::WithoutTags(_) => &["Repository".into()],
             CatalogData::WithTags(_) => &["Repository".into(), "Tag".into()],
         };

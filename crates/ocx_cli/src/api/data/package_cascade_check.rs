@@ -3,9 +3,8 @@
 
 //! Report data for `ocx package cascade check`.
 
-use ocx_lib::cli::Cell;
-use ocx_lib::oci;
-use ocx_lib::package::cascade::graph::{CascadeReport, IndexFinding, SlotStatus, Unrepairable};
+use ocx_console::Cell;
+use ocx_package::cascade::graph::{CascadeReport, IndexFinding, SlotStatus, Unrepairable};
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -36,7 +35,7 @@ pub struct PackageCascadeCheck {
     /// Not serialized. The JSON key set is what a `--format json` consumer
     /// parses and stays pinned; this is a note, not a finding.
     #[serde(skip)]
-    pub index_layer_skipped: Vec<oci::Identifier>,
+    pub index_layer_skipped: Vec<ocx_oci::Identifier>,
 }
 
 impl PackageCascadeCheck {
@@ -61,7 +60,7 @@ impl PackageCascadeCheck {
                 rows.push([
                     package.clone(),
                     row.tag.to_string(),
-                    oci::render_native_platform(&row.platform),
+                    ocx_oci::render_native_platform(&row.platform),
                     slot_status_label(row.status).to_string(),
                     digest_transition(row.observed.as_deref(), row.expected.as_deref()),
                 ]);
@@ -114,7 +113,7 @@ impl PackageCascadeCheck {
 }
 
 impl Printable for PackageCascadeCheck {
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         let theme = data.theme();
         let mut columns: [Vec<Cell>; 5] = Default::default();
         for row in self.table_rows() {
@@ -128,7 +127,7 @@ impl Printable for PackageCascadeCheck {
         // The Package column repeats one constant for the ordinary
         // single-package run, and a column whose every value is the same
         // string is noise the plain table pays width for.
-        let headers: [ocx_lib::cli::Column; 5] = [
+        let headers: [ocx_console::Column; 5] = [
             "Package".into(),
             "Tag".into(),
             "Platform".into(),
@@ -166,7 +165,7 @@ impl Printable for PackageCascadeCheck {
 ///
 /// A pure builder rather than an inline `format!` argument, and the reason is
 /// testability rather than reuse (DX-70, the same shape as the claim report's
-/// `plain_table`): [`ocx_lib::cli::DataInterface::print_hint`] writes the real
+/// `plain_table`): [`ocx_console::DataInterface::print_hint`] writes the real
 /// stdout, so the four remediation strings the cascade commands print at an
 /// operator were covered by **no** assertion at all — migrating them to the
 /// positional `ocx package announce` grammar would have reded nothing. They are
@@ -219,18 +218,18 @@ fn digest_transition(observed: Option<&str>, expected: Option<&str>) -> String {
 /// string when it does not parse - an index may legitimately name an algorithm
 /// this build does not implement, and the report still has to show it.
 fn short_digest(digest: &str) -> String {
-    oci::Digest::try_from(digest).map_or_else(|_| digest.to_string(), |parsed| parsed.to_short_string())
+    ocx_oci::Digest::try_from(digest).map_or_else(|_| digest.to_string(), |parsed| parsed.to_short_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::package::cascade::graph::{AliasTag, SlotRow};
+    use ocx_package::cascade::graph::{AliasTag, SlotRow};
 
     use super::*;
 
     fn report_with(rows: Vec<SlotRow>, index_findings: Vec<IndexFinding>) -> CascadeReport {
         CascadeReport {
-            identifier: oci::Identifier::parse("registry.test/acme/cmake").unwrap(),
+            identifier: ocx_oci::Identifier::parse("registry.test/acme/cmake").unwrap(),
             logical: None,
             aliases: Default::default(),
             rows,
@@ -240,16 +239,16 @@ mod tests {
         }
     }
 
-    fn version(text: &str) -> ocx_lib::package::version::Version {
-        ocx_lib::package::version::Version::parse(text).unwrap()
+    fn version(text: &str) -> ocx_package::version::Version {
+        ocx_package::version::Version::parse(text).unwrap()
     }
 
     fn slot_row(tag: &str, status: SlotStatus, observed: Option<&str>, expected: Option<&str>) -> SlotRow {
         SlotRow {
             tag: AliasTag::Version(version(tag)),
-            platform: oci::native::Platform {
-                os: oci::native::Os::Linux,
-                architecture: oci::native::Arch::Amd64,
+            platform: ocx_oci::native::Platform {
+                os: ocx_oci::native::Os::Linux,
+                architecture: ocx_oci::native::Arch::Amd64,
                 variant: None,
                 features: None,
                 os_version: None,
@@ -333,9 +332,9 @@ mod tests {
     #[test]
     fn the_platform_cell_carries_variant_and_os_features() {
         let mut row = slot_row("3.28", SlotStatus::Ok, Some(OBSERVED), Some(OBSERVED));
-        row.platform = ocx_lib::oci::native::Platform {
-            os: ocx_lib::oci::native::Os::Linux,
-            architecture: ocx_lib::oci::native::Arch::ARM64,
+        row.platform = ocx_oci::native::Platform {
+            os: ocx_oci::native::Os::Linux,
+            architecture: ocx_oci::native::Arch::ARM64,
             variant: Some("v8".to_string()),
             features: None,
             os_version: None,
@@ -395,7 +394,7 @@ mod tests {
     #[test]
     fn the_skipped_index_layer_note_never_reaches_the_json() {
         let mut check = PackageCascadeCheck::new(vec![report_with(Vec::new(), Vec::new())]);
-        check.index_layer_skipped = vec![oci::Identifier::parse("registry.test/acme/cmake").unwrap()];
+        check.index_layer_skipped = vec![ocx_oci::Identifier::parse("registry.test/acme/cmake").unwrap()];
 
         let value = serde_json::to_value(&check).unwrap();
         let keys: Vec<&str> = value
@@ -448,7 +447,7 @@ mod tests {
     ///
     /// Asserted against the pure builder, which is why the builder exists
     /// (E-21): the four remediation strings were inline `format!` arguments to
-    /// [`ocx_lib::cli::DataInterface::print_hint`], which writes the real
+    /// [`ocx_console::DataInterface::print_hint`], which writes the real
     /// stdout, so they were covered by **no** assertion anywhere — the nearest
     /// one, `test/tests/test_package_cascade.py:470`, checks `--tags-file` and
     /// contains no `--package` at all. Migrating them would have reded nothing,
