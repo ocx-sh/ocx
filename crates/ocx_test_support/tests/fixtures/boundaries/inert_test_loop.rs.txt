@@ -1,0 +1,49 @@
+// The positive control for `tests_hold_no_inert_loop`. One inert loop per
+// keyword the scanner must still recognise — delete any of them and the guard
+// reports "the scan proves nothing for those" instead of a clean workspace.
+
+#[test]
+fn a_table_the_strip_emptied() {
+    let pairs = [(1, "a"), (2, "b")];
+    assert_eq!(pairs.len(), 2);
+    // WP-10's shape: the match arms moved to another crate and the body went
+    // with them. The length assertion above kept this green.
+    for (_expected, _kind) in pairs {}
+}
+
+// The strip one step further along: no loop left to find inert, and the name
+// still promises the classification it no longer checks. Four of these reached
+// `evelynn` under WP-10 and no gate in the repo saw them.
+#[test]
+fn a_body_the_strip_emptied_entirely() {}
+
+#[test]
+fn a_while_that_only_binds() {
+    let cursor = 0;
+    while cursor < 3 {
+        let _step = cursor;
+    }
+}
+
+#[test]
+fn a_loop_with_nothing_left_in_it() {
+    let budget = 3;
+    loop {
+        let _remaining = budget;
+    }
+}
+
+// Neither of these is a violation — they sit here so the contrast is visible
+// where the witness is read. A body that calls anything is exempt, and a
+// `while` whose condition does the work is exempt with an empty body.
+#[test]
+fn a_loop_that_still_asserts() {
+    for (expected, kind) in [(1, "a")] {
+        assert_eq!(expected, kind.len());
+    }
+}
+
+#[tokio::test]
+async fn a_drain_whose_condition_is_the_work() {
+    while let Some(_finished) = tasks.join_next().await {}
+}

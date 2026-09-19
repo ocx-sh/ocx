@@ -225,7 +225,7 @@ def test_offline_install_missing_index_exits_policy_blocked(
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     # Pins `oci::index::error::Error::PolicyResolutionBlocked`
-    # (crates/ocx_lib/src/oci/index/error.rs): "{policy} mode refused to
+    # (crates/ocx_index/src/error.rs): "{policy} mode refused to
     # resolve unpinned reference '{identifier}'; ...". "unpinned reference" is
     # unique to this variant's message.
     assert "unpinned reference" in result.stderr.lower(), (
@@ -353,7 +353,7 @@ def test_offline_install_missing_blobs_exits_policy_blocked(
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
     )
     # Pins `PackageErrorKind::OfflineManifestMissing`
-    # (crates/ocx_lib/src/package_manager/error.rs): "manifest {digest} is not
+    # (crates/ocx_package_manager/src/error.rs): "manifest {digest} is not
     # in the local cache; run `ocx install {identifier}` online to populate
     # it". "populate" is unique to this variant's message and distinct from
     # the missing-index PolicyResolutionBlocked message above.

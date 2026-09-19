@@ -32,7 +32,15 @@
       "Bash(curl:*)",
       "Bash(wget:*)",
 
-      "// === Git Destructive Operations (git push handled by pre_push_main_blocker hook) ===",
+      "// === Git Destructive Operations ===",
+      "// The commit and push gates are git's own hooks (.githooks/, core.hooksPath),",
+      "// so they see every spelling — except --no-verify, which tells git to skip",
+      "// hooks outright. That is the one thing no git-native gate can defend, so it",
+      "// is denied here. Prefix matching only: `git -c x commit --no-verify` slips",
+      "// past. Treated as a guard against the reflex, not against evasion.",
+      "Bash(git commit --no-verify:*)",
+      "Bash(git commit -n:*)",
+      "Bash(git push --no-verify:*)",
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
       "Bash(git push origin --force:*)",
@@ -74,26 +82,6 @@
           {
             "type": "command",
             "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_tool_use_validator.py\"",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_commit_verification.py\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/conventional_commit_validator.py\"",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "uv run \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_push_main_blocker.py\"",
             "timeout": 5
           }
         ]

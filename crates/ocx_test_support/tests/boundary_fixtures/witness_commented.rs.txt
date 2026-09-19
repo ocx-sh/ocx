@@ -1,0 +1,5 @@
+// use crate::project::ProjectConfig;
+// module_path!()
+fn doc() -> &'static str {
+    r#"crate::project::lock and module_path!()"#
+}

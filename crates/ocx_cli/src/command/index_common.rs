@@ -17,14 +17,13 @@
 //! exist reads as a leaf and pre-books the name of the next one.
 
 use futures::StreamExt;
-use ocx_lib::{log, oci, oci::index};
 
 use crate::api::data::{sanitize_error_chain, sanitize_for_terminal};
 
 /// Bounded concurrency for the per-package refresh fan-out
 /// (`adr_servable_index_snapshot.md` C-024).
 ///
-/// Nested inside [`ocx_lib::oci::index::TAG_REFRESH_CONCURRENCY`], giving a
+/// Nested inside [`ocx_index::TAG_REFRESH_CONCURRENCY`], giving a
 /// stated ceiling of **≤ 512 in-flight requests** however large the work set is
 /// — an argv list, one catalog, or every catalog a single `ocx index sync`
 /// names, since the fan-out is over the flattened set rather than per registry.
@@ -41,14 +40,30 @@ pub(super) const INDEX_REFRESH_CONCURRENCY: usize = 8;
 /// `subject` is sanitized even when the caller believes it is argv: under
 /// `ocx index sync` an identifier is built from a foreign catalog key, and the
 /// distinction is exactly the kind that stops being true after a refactor.
-/// `sanitize_error_chain`, not `{error:#}`: an `ocx_lib::Error`'s `thiserror`
-/// Display ignores the alternate flag and would drop the cause.
-pub(super) fn log_failure(action: &str, subject: &str, error: &ocx_lib::Error) {
+/// `sanitize_error_chain`, not `{error:#}`: a `thiserror`-generated Display
+/// ignores the alternate flag and would drop the cause.
+pub(super) fn log_failure(action: &str, subject: &str, error: &anyhow::Error) {
     log::error!(
         "{action} '{}': {}",
         sanitize_for_terminal(subject),
-        sanitize_error_chain(error)
+        sanitize_error_chain(error.as_ref())
     );
+}
+
+/// The `--frozen` refusal `ocx index sync` and `ocx index update` share.
+///
+/// Was `ocx_lib::Error::PolicyBlocked { operation, policy }` until WP-37
+/// dissolved that enum. It had no tier successor and needs none: the message
+/// renders a CLI verb and a CLI flag, so it is a command-layer refusal that
+/// happened to live in the monolith. The text is byte-identical to the
+/// variant's `#[error]` and `CommandError` carries `ExitCode::PolicyBlocked`,
+/// so the exit code is preserved by construction rather than re-derived
+/// (DEC-23).
+pub(crate) fn policy_blocked(operation: &str, policy: &str) -> crate::app::CommandError {
+    crate::app::CommandError::new(
+        format!("{operation} discovers new digests and cannot run in {policy} mode; re-run it without --{policy}"),
+        ocx_exit::ExitCode::PolicyBlocked,
+    )
 }
 
 /// Says so when a source answers with an empty package set.
@@ -118,15 +133,15 @@ pub(super) fn log_derived_enumeration(registry: &str) {
 /// this needs is `refresh_tags`, and a narrower parameter is one fewer thing a
 /// future edit here can reach for.
 pub(super) async fn refresh_packages(
-    local_index: &index::LocalIndex,
-    index_sources: &[index::OcxIndex],
-    oci_index: &index::Index,
-    packages: &[oci::Identifier],
-) -> Option<ocx_lib::Error> {
+    local_index: &ocx_index::LocalIndex,
+    index_sources: &[ocx_index::OcxIndex],
+    oci_index: &ocx_index::Index,
+    packages: &[ocx_oci::Identifier],
+) -> Option<anyhow::Error> {
     // The stream combinator does not spawn, so a panic in a refresh unwinds this
     // caller directly and the borrow of `local_index` and `packages` is fine
     // without a clone per task. Results arrive out of order, hence the sort below.
-    let results: Vec<(usize, ocx_lib::Result<()>)> = futures::stream::iter(packages.iter().enumerate())
+    let results: Vec<(usize, anyhow::Result<()>)> = futures::stream::iter(packages.iter().enumerate())
         .map(|(input_index, identifier)| async move {
             // Route to the index source that will answer for this package, if
             // any; otherwise refresh against the registry. Asking `jurisdiction`
@@ -137,19 +152,25 @@ pub(super) async fn refresh_packages(
             // nothing.
             let mut selected = None;
             for source in index_sources {
-                if source.jurisdiction(identifier) != index::Jurisdiction::Outside {
-                    selected = Some(index::Index::from_source(source.clone()));
+                if source.jurisdiction(identifier) != ocx_index::Jurisdiction::Outside {
+                    selected = Some(ocx_index::Index::from_source(source.clone()));
                     break;
                 }
             }
             let source = selected.unwrap_or_else(|| oci_index.clone());
-            (input_index, local_index.refresh_tags(identifier, &source).await)
+            (
+                input_index,
+                local_index
+                    .refresh_tags(identifier, &source)
+                    .await
+                    .map_err(anyhow::Error::from),
+            )
         })
         .buffer_unordered(INDEX_REFRESH_CONCURRENCY)
         .collect()
         .await;
 
-    let mut failures: Vec<(usize, ocx_lib::Error)> = Vec::new();
+    let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
     for (input_index, result) in results {
         if let Err(error) = result {
             log_failure("Failed to update index for", &packages[input_index].to_string(), &error);
@@ -167,7 +188,7 @@ pub(super) async fn refresh_packages(
 /// than of the loop's shape is what keeps the exit deterministic. Shared with
 /// `index_regenerate`, whose C-010 states the identical rule — two copies of a
 /// contract are two copies to drift.
-pub(super) fn first_failure(mut failures: Vec<(usize, ocx_lib::Error)>) -> Option<ocx_lib::Error> {
+pub(super) fn first_failure(mut failures: Vec<(usize, anyhow::Error)>) -> Option<anyhow::Error> {
     failures.sort_by_key(|(input_index, _)| *input_index);
     failures.into_iter().next().map(|(_, error)| error)
 }
@@ -188,11 +209,11 @@ pub(super) fn first_failure(mut failures: Vec<(usize, ocx_lib::Error)>) -> Optio
 ///
 /// Takes the manager rather than the whole `Context` for the same reason
 /// [`refresh_packages`] takes the local index.
-pub(super) async fn sync_patch_descriptors(manager: &ocx_lib::package_manager::PackageManager) {
+pub(super) async fn sync_patch_descriptors(manager: &ocx_package_manager::PackageManager) {
     if manager.patches().is_none() || manager.is_offline() {
         return;
     }
-    let host = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+    let host = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
     match manager.sync_patches(&[host]).await {
         Ok(_report) => log::debug!("index refresh: patch descriptor sync completed"),
         Err(error) => {
@@ -230,7 +251,7 @@ mod tests {
         // at compile time whatever `TAG_REFRESH_CONCURRENCY` had become. It is
         // `pub` in ocx_lib for exactly this reason.
         assert_eq!(
-            INDEX_REFRESH_CONCURRENCY * ocx_lib::oci::index::TAG_REFRESH_CONCURRENCY,
+            INDEX_REFRESH_CONCURRENCY * ocx_index::TAG_REFRESH_CONCURRENCY,
             512,
             "C-024 states ≤ 512 in-flight requests; both factors must be read, not restated"
         );
@@ -365,12 +386,9 @@ mod tests {
 
     // ── C-012 / C-010 — the aggregation rule ────────────────────────────────
 
-    /// A distinguishable `ocx_lib::Error` that needs no I/O to build.
-    fn failure(operation: &'static str) -> ocx_lib::Error {
-        ocx_lib::Error::PolicyBlocked {
-            operation,
-            policy: "aggregation-test",
-        }
+    /// A distinguishable error that needs no I/O to build.
+    fn failure(operation: &'static str) -> anyhow::Error {
+        super::policy_blocked(operation, "aggregation-test").into()
     }
 
     #[test]
@@ -413,7 +431,7 @@ mod tests {
             "the subject half carries a foreign catalog key under `index sync`"
         );
         assert!(
-            body.contains("sanitize_error_chain(error)"),
+            body.contains("sanitize_error_chain(error.as_ref())"),
             "the chain half quotes names read off a foreign tree"
         );
         assert_eq!(

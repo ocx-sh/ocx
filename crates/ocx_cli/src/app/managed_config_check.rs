@@ -3,7 +3,7 @@
 
 use std::io::IsTerminal;
 
-use ocx_lib::{env, log};
+use ocx_config::env;
 
 use super::Context;
 
@@ -13,22 +13,22 @@ use super::Context;
 /// Gate skeleton mirrors the update-check hook exactly: kill switch, CI
 /// detection, offline, then stderr-TTY. Suppressed when:
 /// - `OCX_NO_CONFIG_REFRESH` is truthy
-/// - `CI` is truthy (see [`env::is_ci`])
+/// - `CI` is truthy (see [`ocx_util::env::is_ci`])
 /// - `OCX_OFFLINE` is truthy (or `--offline` flag)
 /// - stderr is not a terminal
 ///
 /// Never fails the command — see
-/// [`ocx_lib::package_manager::PackageManager::check_managed_config_refresh`].
+/// [`ocx_package_manager::PackageManager::check_managed_config_refresh`].
 ///
-/// Resolves the effective `[managed]` tier via [`ocx_lib::resolve_managed_target`]
-/// and, unless the tier's `refresh` posture is [`ocx_lib::RefreshPolicy::Manual`],
+/// Resolves the effective `[managed]` tier via [`ocx_config::managed::resolve_managed_target`]
+/// and, unless the tier's `refresh` posture is [`ocx_config::managed::RefreshPolicy::Manual`],
 /// hands off to `check_managed_config_refresh`.
 pub async fn check_for_managed_config_refresh(ctx: &Context) {
-    if env::flag(env::keys::OCX_NO_CONFIG_REFRESH, false) {
+    if ocx_util::env::flag(env::keys::OCX_NO_CONFIG_REFRESH, false) {
         log::debug!("Managed-config refresh skipped: OCX_NO_CONFIG_REFRESH is set");
         return;
     }
-    if env::is_ci() {
+    if ocx_util::env::is_ci() {
         log::debug!("Managed-config refresh skipped: CI environment detected");
         return;
     }
@@ -45,8 +45,9 @@ pub async fn check_for_managed_config_refresh(ctx: &Context) {
 }
 
 async fn probe_managed_config_refresh(ctx: &Context) {
-    use ocx_lib::package_manager::ManagedConfigRefreshOutcome;
-    use ocx_lib::{RefreshPolicy, resolve_managed_target};
+    use ocx_config::managed::RefreshPolicy;
+    use ocx_config::managed::resolve_managed_target;
+    use ocx_package_manager::ManagedConfigRefreshOutcome;
 
     let resolved = match resolve_managed_target(ctx.config(), ctx.managed_config_env_override()) {
         Ok(Some(resolved)) => resolved,

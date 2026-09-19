@@ -11,12 +11,15 @@ Run:
 
 from __future__ import annotations
 
+import ast
 import glob
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 CLAUDE_DIR = ROOT / ".claude"
@@ -44,7 +47,7 @@ GRIMOIRE_LOCK = ROOT / "grimoire.lock"
 
 def _vendored(kind: str) -> frozenset[str]:
     """Names of `[[skill]]` / `[[rule]]` entries in `grimoire.lock`."""
-    lock = tomllib.loads(GRIMOIRE_LOCK.read_text())
+    lock = tomllib.loads(GRIMOIRE_LOCK.read_text(encoding="utf-8"))
     return frozenset(entry["name"] for entry in lock.get(kind, []))
 
 
@@ -80,12 +83,12 @@ def is_vendored(md: Path) -> bool:
 
 @pytest.fixture(scope="module")
 def claude_md_text() -> str:
-    return CLAUDE_MD.read_text()
+    return CLAUDE_MD.read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
 def claude_md_lines() -> list[str]:
-    return CLAUDE_MD.read_text().splitlines()
+    return CLAUDE_MD.read_text(encoding="utf-8").splitlines()
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +135,7 @@ class TestShareableQualityRules:
             path = CLAUDE_DIR / "rules" / name
             if not path.exists():
                 continue  # rule not yet created
-            text = path.read_text()
+            text = path.read_text(encoding="utf-8")
             for forbidden in self._OCX_FORBIDDEN_STRINGS:
                 if forbidden in text:
                     violations.append((name, forbidden))
@@ -188,7 +191,7 @@ class TestShareableQualityRules:
             # Skip historical artifacts + ephemeral state — they preserve old references
             if "artifacts" in rule_file.parts or "state" in rule_file.parts:
                 continue
-            text = rule_file.read_text()
+            text = rule_file.read_text(encoding="utf-8")
             for deleted in deleted_skills:
                 if deleted in text:
                     violations.append((str(rule_file.relative_to(ROOT)), deleted))
@@ -234,7 +237,7 @@ class TestSkillsLayout:
         """Each skill's directory name must equal its frontmatter `name:` field."""
         mismatches = []
         for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
-            text = skill_md.read_text()
+            text = skill_md.read_text(encoding="utf-8")
             if not text.startswith("---"):
                 continue
             _, front, _ = text.split("---", 2)
@@ -290,7 +293,7 @@ class TestSkillsLayout:
         )
         violations: list[tuple[str, str]] = []
         for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
-            text = skill_md.read_text()
+            text = skill_md.read_text(encoding="utf-8")
             if not text.startswith("---"):
                 continue
             _, front, _ = text.split("---", 2)
@@ -327,7 +330,7 @@ class TestRuleGlobs:
     @staticmethod
     def _extract_paths(rule_path: Path) -> list[str]:
         """Parse YAML frontmatter paths: list from a rule file."""
-        text = rule_path.read_text()
+        text = rule_path.read_text(encoding="utf-8")
         if not text.startswith("---"):
             return []
         _, front, _ = text.split("---", 2)
@@ -345,44 +348,57 @@ class TestRuleGlobs:
                     break
         return paths
 
-    def test_all_rule_globs_match_files(self) -> None:
-        """Every paths: glob in .claude/rules/*.md must match >= 1 file.
+    @staticmethod
+    def _is_shareable(rule: Path) -> bool:
+        """Two spellings of "shareable": the `quality-*.md` prefix, and a
+        `repository:` frontmatter field naming the upstream the rule is
+        vendored from (`rust-*.md`, `bazel-quality.md`).
 
-        Shareable rules are exempt: they are designed to match file types that
-        may exist in *other* repositories where the rule gets copied, not just
-        OCX. A missing match in OCX doesn't mean the glob is dead — it means
-        that file type isn't used here. Two spellings of "shareable": the
-        `quality-*.md` prefix, and a `repository:` frontmatter field naming the
-        upstream the rule is vendored from (`rust-*.md`). Dead-glob detection
-        still applies to OCX-specific rules (subsystem-*.md, arch-principles.md,
-        product-context.md, etc.).
+        Scoped to the frontmatter block, not the first N lines: a rule whose
+        *body* happens to open a line with `repository:` would otherwise
+        exempt itself from dead-glob detection silently.
         """
-        shareable_prefixes = ("quality-",)
-        dead_globs = []
-        for rule in sorted(CLAUDE_DIR.glob("rules/*.md")):
-            if rule.name.startswith(shareable_prefixes):
-                continue
-            # Scoped to the frontmatter block, not the first N lines: a rule
-            # whose *body* happens to open a line with `repository:` would
-            # otherwise exempt itself from dead-glob detection silently.
-            text = rule.read_text()
-            frontmatter, closed, _ = text.partition("\n---")
-            if (
-                text.startswith("---")
-                and closed
-                and any(line.startswith("repository:") for line in frontmatter.splitlines())
-            ):
-                continue
-            for pattern in self._extract_paths(rule):
-                matches = glob.glob(str(ROOT / pattern), recursive=True)
-                if not matches:
-                    dead_globs.append((rule.name, pattern))
-        assert not dead_globs, f"Rules with dead glob patterns: {dead_globs}"
+        if rule.name.startswith("quality-"):
+            return True
+        text = rule.read_text(encoding="utf-8")
+        frontmatter, closed, _ = text.partition("\n---")
+        return (
+            text.startswith("---")
+            and bool(closed)
+            and any(line.startswith("repository:") for line in frontmatter.splitlines())
+        )
+
+    @pytest.mark.parametrize(
+        "rule", sorted(CLAUDE_DIR.glob("rules/*.md")), ids=lambda rule: rule.name
+    )
+    def test_all_rule_globs_match_files(self, rule: Path) -> None:
+        """Every paths: glob in this rule must match >= 1 file.
+
+        One test id per rule file, so the crate split's directory moves red
+        the rule whose glob died by name rather than as one entry in a list
+        (plan_crate_split_workspace.md C-024).
+
+        Shareable rules match file types that may exist in *other*
+        repositories where the rule gets copied, not just OCX, so a glob with
+        no match here is not dead — it names a file type this repo does not
+        use. Such a rule skips, and the skip message carries the measured
+        ratio; a shareable rule whose globs all match is a plain pass.
+        Dead-glob detection binds every OCX-specific rule (subsystem-*.md,
+        arch-principles.md, product-context.md, etc.).
+        """
+        patterns = self._extract_paths(rule)
+        dead = [p for p in patterns if not glob.glob(str(ROOT / p), recursive=True)]
+        if dead and self._is_shareable(rule):
+            pytest.skip(
+                f"shareable rule: {len(patterns) - len(dead)}/{len(patterns)} globs match "
+                f"this repository; unmatched here (not dead): {dead}"
+            )
+        assert not dead, f"{rule.name} has dead glob pattern(s): {dead}"
 
     def test_package_manager_glob_not_too_broad(self) -> None:
         """subsystem-package-manager.md should not match unrelated root files.
 
-        Bug captured: crates/ocx_lib/src/*.rs matches 23 unrelated files
+        Bug captured: a `crates/<crate>/src/*.rs` glob matched 23 unrelated files
         (archive.rs, auth.rs, env.rs, etc.) causing the package manager rule
         to load when editing unrelated code.
         """
@@ -399,6 +415,99 @@ class TestRuleGlobs:
 # ---------------------------------------------------------------------------
 # CLAUDE.md consistency
 # ---------------------------------------------------------------------------
+
+
+class TestCrateSplitSweep:
+    """C-075: the AI-config surface names no path inside the dissolved crate.
+
+    `ocx_lib` was deleted at WP-37. A path literal naming it resolves to
+    nothing, and a path that resolves to nothing is the failure this repo keeps
+    finding: a glob that fires never, an instruction that sends the next agent
+    to a directory that is not there, a rule whose `paths:` matches no file.
+
+    The crate *name* in prose is not swept — "extracted from `ocx_lib` at
+    WP-33" is the record of why a seam exists and must survive. What is swept
+    is the **path** under `crates/`, which can only be a pointer.
+
+    `DEAD_PATH` is assembled from two halves on purpose: this file is itself
+    under a swept root, so spelling the run here would make the sweep report
+    its own source and it would be red in every state. Same self-matching
+    family as a `pgrep` whose pattern matches the shell running it.
+    """
+
+    #: Every tracked file under these roots is read. Directories are walked;
+    #: files are taken as they are. `.claude/artifacts/**` is excluded because
+    #: those are historical records — a plan or an ADR describes the tree of
+    #: the day it was written, and re-pointing one would falsify it.
+    SWEPT: tuple[str, ...] = (
+        ".claude",
+        "CLAUDE.md",
+        "CONTRIBUTING.md",
+        "README.md",
+        "AGENTS.md",
+        ".agents/memory/hex.md",
+        ".claude/rules/product-context.md",
+        "website/src/docs/authoring/migration.md",
+        "website/src/docs/in-depth/project.md",
+    )
+
+    DEAD_PATH = "crates/" + "ocx_lib"
+
+    @staticmethod
+    def _tracked_files() -> list[Path]:
+        """The swept set, from `git ls-files` so nothing ignored is read.
+
+        `.pytest_cache/` and `tests/.venv/` live under `.claude` and are
+        gitignored; reading them would sweep generated bytes and make the
+        result depend on whether a test has run.
+        """
+        out = subprocess.run(  # noqa: S603
+            ["git", "ls-files", "-z", "--", *TestCrateSplitSweep.SWEPT],  # noqa: S607
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        return [
+            ROOT / name
+            for name in out.split("\0")
+            if name and "/artifacts/" not in name
+        ]
+
+    def test_the_sweep_reads_the_surface(self) -> None:
+        """Floor the reader, not only its subject.
+
+        An empty file list and a clean surface produce the same green, and the
+        `git ls-files` call is the half that can silently stop returning
+        anything — a moved root, a renamed directory, a pathspec that matches
+        nothing. This says how much was read before the next test says what was
+        in it.
+        """
+        files = self._tracked_files()
+        assert len(files) >= 100, (
+            f"the sweep read {len(files)} tracked file(s) across {len(self.SWEPT)} root(s); "
+            "it has stopped seeing the surface and the assertion below is vacuous"
+        )
+        assert any(f.name == "CLAUDE.md" for f in files), (
+            "CLAUDE.md is not among the files read, so the root list no longer resolves"
+        )
+
+    def test_no_ai_config_file_names_the_dissolved_crate(self) -> None:
+        """C-075: no swept file names the dissolved crate's path after WP-38."""
+        offenders: list[str] = []
+        for path in self._tracked_files():
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for number, line in enumerate(text.splitlines(), 1):
+                if self.DEAD_PATH in line:
+                    offenders.append(f"{path.relative_to(ROOT)}:{number}: {line.strip()[:120]}")
+        assert not offenders, (
+            f"{len(offenders)} AI-config line(s) name `{self.DEAD_PATH}`, which WP-37 deleted — "
+            "a path that resolves to nothing sends the next reader nowhere:\n  "
+            + "\n  ".join(offenders)
+        )
 
 
 class TestClaudeMd:
@@ -478,7 +587,7 @@ class TestFeatureWorkflow:
     def test_swarm_workflow_step_numbers_are_sequential(self) -> None:
         """Bug captured: Steps go 1, 2, 3, 3, 4, 5, 6, 7 (duplicate 3)."""
         path = CLAUDE_DIR / "rules" / "workflow-feature.md"
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
 
         # Extract numbered list items (N. **Label**)
         steps = re.findall(r"^(\d+)\.\s+\*\*", text, re.MULTILINE)
@@ -509,7 +618,7 @@ class TestArtifactPaths:
         """Bug captured: security-auditor says './artifacts/' instead of
         '.claude/artifacts/'."""
         path = CLAUDE_DIR / "skills" / "security-auditor" / "SKILL.md"
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
 
         # Must not reference ./artifacts/ (wrong path)
         wrong_refs = re.findall(r"\./artifacts/", text)
@@ -533,7 +642,7 @@ class TestAgentDefinitions:
     @staticmethod
     def _parse_agent_tools(agent_path: Path) -> set[str]:
         """Extract tools from agent frontmatter."""
-        text = agent_path.read_text()
+        text = agent_path.read_text(encoding="utf-8")
         if not text.startswith("---"):
             return set()
         _, front, _ = text.split("---", 2)
@@ -548,7 +657,7 @@ class TestAgentDefinitions:
         but no Bash tool in frontmatter."""
         agent = CLAUDE_DIR / "agents" / "worker-architecture-explorer.md"
         tools = self._parse_agent_tools(agent)
-        body = agent.read_text()
+        body = agent.read_text(encoding="utf-8")
 
         has_bash_tool = "Bash" in tools
         # Check for shell commands in code blocks
@@ -564,7 +673,7 @@ class TestAgentDefinitions:
         """Bug captured: worker-tester.md doesn't mention 'task verify' as
         required by workflow-swarm.md coordination protocol."""
         agent = CLAUDE_DIR / "agents" / "worker-tester.md"
-        text = agent.read_text()
+        text = agent.read_text(encoding="utf-8")
         assert "task verify" in text, (
             "worker-tester.md must mention 'task verify' per the "
             "workflow-swarm.md coordination protocol"
@@ -581,7 +690,7 @@ class TestAgentDefinitions:
         visible at review.
         """
         agent = CLAUDE_DIR / "agents" / "worker-reviewer.md"
-        text = agent.read_text()
+        text = agent.read_text(encoding="utf-8")
 
         # Must point at the rule catalog
         assert "rules.md" in text, (
@@ -616,7 +725,7 @@ class TestAgentDefinitions:
         step since path-scoped rules auto-load while the agent writes.
         """
         agent = CLAUDE_DIR / "agents" / "worker-builder.md"
-        text = agent.read_text()
+        text = agent.read_text(encoding="utf-8")
 
         assert "rules.md" in text, (
             "worker-builder.md must point at `.claude/rules.md` so the "
@@ -660,7 +769,7 @@ class TestRuleCatalog:
     def test_catalog_covers_all_rules(self) -> None:
         """Every rule file in `.claude/rules/*.md` must be referenced
         somewhere in `.claude/rules.md`."""
-        catalog_text = self.CATALOG.read_text()
+        catalog_text = self.CATALOG.read_text(encoding="utf-8")
         missing = []
         for rule in sorted(CLAUDE_DIR.glob("rules/*.md")):
             if rule.name not in catalog_text:
@@ -673,7 +782,7 @@ class TestRuleCatalog:
     def test_catalog_references_resolve(self) -> None:
         """Every `*.md` reference in the catalog must resolve to a real
         file under `.claude/rules/` (or be a clearly non-rule link)."""
-        text = self.CATALOG.read_text()
+        text = self.CATALOG.read_text(encoding="utf-8")
         # Match backticked rule filenames like `quality-rust.md`
         refs = set(re.findall(r"`([a-z][a-z0-9-]*\.md)`", text))
         missing = []
@@ -688,7 +797,7 @@ class TestRuleCatalog:
     def test_claude_md_points_to_catalog(self) -> None:
         """CLAUDE.md must link to `.claude/rules.md` so the catalog stays
         discoverable for every session."""
-        text = CLAUDE_MD.read_text()
+        text = CLAUDE_MD.read_text(encoding="utf-8")
         assert ".claude/rules.md" in text, (
             "CLAUDE.md must contain a link to `.claude/rules.md` — the "
             "catalog is only valuable if every session sees the pointer."
@@ -713,7 +822,6 @@ class TestRuleCatalog:
         search_dirs = [
             CLAUDE_DIR / "rules",
             CLAUDE_DIR / "agents",
-            CLAUDE_DIR / "references",
             CLAUDE_DIR / "hooks",
             CLAUDE_DIR / "templates",
             CLAUDE_DIR,
@@ -769,22 +877,54 @@ class TestRuleCatalog:
 
         targets: list[Path] = [CLAUDE_MD]
         for md in CLAUDE_DIR.rglob("*.md"):
-            if "artifacts" in md.parts or "state" in md.parts:
+            # Relative to `.claude/`, never absolute: an agent runs this gate
+            # from `.agents/worktrees/<slug>`, so `md.parts` carries `worktrees`
+            # for EVERY file in the tree and the corpus collapsed to `CLAUDE.md`
+            # alone — the floor below caught it, which is the whole reason it is
+            # there. The same shape was latent in the other three names; a
+            # checkout under a directory called `tests` or `state` would have
+            # emptied this the same way, and only on the machine it happened on.
+            parts = md.relative_to(CLAUDE_DIR).parts
+            if "artifacts" in parts or "state" in parts:
                 continue  # historical/ephemeral — preserves old references
-            if "tests" in md.parts:
+            if "tests" in parts:
                 continue  # test file itself doesn't reference rule files
-            if "worktrees" in md.parts or "node_modules" in md.parts:
+            if "worktrees" in parts or "node_modules" in parts:
                 continue  # nested worktrees + their node_modules are not OCX config
             if is_vendored(md):
                 continue  # grim-installed — its internal refs are upstream's
             targets.append(md)
 
         missing: list[tuple[str, str]] = []
+        checked = 0
         for md in targets:
-            text = md.read_text()
+            text = md.read_text(encoding="utf-8")
             for match in ref_pattern.findall(text):
+                checked += 1
                 if not find_file(match):
                     missing.append((str(md.relative_to(ROOT)), match))
+
+        # Floors on the reader, because `assert not missing` below is produced
+        # identically by a clean tree and by a corpus that collapsed to nothing:
+        # one more `continue` in the filter chain above, or a tightened class in
+        # `ref_pattern`, empties this test in silence.
+        #
+        # Sized against the collapse, not against a trim. `.claude/rules/` is 37
+        # of today's 66 files and 268 of its 337 references, so losing it is what
+        # "the corpus collapsed" means here and these floors red on it. Dropping
+        # the 13 non-vendored skills instead leaves 53 and 308 and stays green —
+        # stated rather than papered over, because a floor tight enough to catch
+        # that is a ratchet that reds when someone deletes a skill.
+        assert len(targets) >= 40, (
+            f"only {len(targets)} markdown target(s) collected — the corpus has "
+            "collapsed, and an empty corpus reports the same clean result as a "
+            "tree with no broken references"
+        )
+        assert checked >= 200, (
+            f"only {checked} reference(s) checked across {len(targets)} file(s) — "
+            "the pattern has stopped matching, and checking nothing reports the "
+            "same clean result as checking everything"
+        )
 
         assert not missing, (
             f"Markdown files reference non-existent `.md` files. Each tuple "
@@ -797,8 +937,8 @@ class TestRuleCatalog:
         appear in the catalog's `By subsystem` section. The catalog is
         allowed to list more subsystems than CLAUDE.md (it's the fuller
         reference), but it must never list fewer."""
-        claude_text = CLAUDE_MD.read_text()
-        catalog_text = self.CATALOG.read_text()
+        claude_text = CLAUDE_MD.read_text(encoding="utf-8")
+        catalog_text = self.CATALOG.read_text(encoding="utf-8")
 
         # Extract rule names from CLAUDE.md subsystem table rows
         # Lines look like: "| OCI registry/index | `subsystem-oci.md` | ... |"
@@ -824,7 +964,7 @@ class TestReleaseImplementation:
         """Bug captured: body references 'publish-to-registry.yml' but actual
         file is 'post-release-oci-publish.yml'."""
         rule = CLAUDE_DIR / "rules" / "workflow-release.md"
-        text = rule.read_text()
+        text = rule.read_text(encoding="utf-8")
         workflows_dir = ROOT / ".github" / "workflows"
 
         # Find workflow filenames referenced in context of .github/workflows/
@@ -875,7 +1015,7 @@ class TestHookScript:
         for py_file in sorted(hooks_dir.glob("*.py")):
             if py_file.name == "hook_utils.py":
                 continue  # utils module, not a standalone script
-            text = py_file.read_text()
+            text = py_file.read_text(encoding="utf-8")
             if "# /// script" not in text:
                 missing.append(py_file.name)
         assert not missing, f"Hooks missing PEP 723 header: {missing}"
@@ -883,7 +1023,7 @@ class TestHookScript:
     def test_post_tool_use_tracker_has_try_except(self) -> None:
         """PostToolUse hook must never exit non-zero — needs try/except."""
         hook = CLAUDE_DIR / "hooks" / "post_tool_use_tracker.py"
-        text = hook.read_text()
+        text = hook.read_text(encoding="utf-8")
         assert "try:" in text and "except" in text, (
             "post_tool_use_tracker.py must wrap main logic in try/except "
             "to satisfy the PostToolUse non-blocking contract."
@@ -894,7 +1034,7 @@ class TestHookScript:
         hooks_dir = CLAUDE_DIR / "hooks"
         violations = []
         for py_file in sorted(hooks_dir.glob("*.py")):
-            text = py_file.read_text()
+            text = py_file.read_text(encoding="utf-8")
             if "os.getcwd()" in text or "Path.cwd()" in text:
                 violations.append(py_file.name)
         assert not violations, (
@@ -917,7 +1057,7 @@ class TestTaskfileLint:
         ocx.taskfile.yml template was retired in favour of direct tool calls
         backed by the project toolchain (ocx.toml → direnv / setup-ocx)."""
         taskfile = ROOT / "taskfiles" / "shell.taskfile.yml"
-        text = taskfile.read_text()
+        text = taskfile.read_text(encoding="utf-8")
 
         # Every lint task (shellcheck, shfmt:check, format) must guard against
         # empty file lists. Cheapest invariant: at least one precondition
@@ -991,7 +1131,7 @@ class TestAiConfigOverhaulPhase1:
             f"Expected exactly 4 global rules (no `paths:` frontmatter), "
             f"got {len(globals_found)}: {globals_found}"
         )
-        meta_text = (rules_dir / "meta-ai-config.md").read_text()
+        meta_text = (rules_dir / "meta-ai-config.md").read_text(encoding="utf-8")
         assert "### Current Global Rules" in meta_text, (
             "meta-ai-config.md must contain `### Current Global Rules` "
             "enumeration (Phase 1 T3)"
@@ -1027,7 +1167,7 @@ class TestAiConfigOverhaulPhase1:
             for p in TestRuleGlobs._extract_paths(rule):
                 pattern_owners.setdefault(p, []).append(rule.name)
 
-        catalog = (CLAUDE_DIR / "rules.md").read_text()
+        catalog = (CLAUDE_DIR / "rules.md").read_text(encoding="utf-8")
         # Extract declared pairs from the overlap table: lines like
         # `| \`file-a.md\` + \`file-b.md\` | ...`
         declared_pairs: set[frozenset[str]] = set()
@@ -1113,7 +1253,7 @@ class TestAiConfigOverhaulPhase2:
         so this parser is sufficient. Multi-line (block-scalar) descriptions
         would produce a truncated value, which the CSO tests flag.
         """
-        text = skill_md.read_text()
+        text = skill_md.read_text(encoding="utf-8")
         if not text.startswith("---"):
             return {}
         _, front, _ = text.split("---", 2)
@@ -1243,7 +1383,7 @@ class TestAiConfigOverhaulPhase4:
         """
         gitignore = ROOT / ".gitignore"
         assert gitignore.exists(), "`.gitignore` missing at repo root"
-        text = gitignore.read_text()
+        text = gitignore.read_text(encoding="utf-8")
         assert ".claude/state/" in text, (
             "`.gitignore` must contain `.claude/state/` — per-worktree "
             "learnings store / context samples must not be committed. "
@@ -1254,7 +1394,7 @@ class TestAiConfigOverhaulPhase4:
         """`meta-ai-config.md` must document the Cross-Session Learnings
         Store section and cite the ADR path."""
         meta = CLAUDE_DIR / "rules" / "meta-ai-config.md"
-        text = meta.read_text()
+        text = meta.read_text(encoding="utf-8")
         assert "## Cross-Session Learnings Store" in text, (
             "meta-ai-config.md must contain `## Cross-Session Learnings Store` "
             "header (Phase 4 T4)"
@@ -1313,7 +1453,7 @@ class TestAiConfigOverhaulPhase5:
         carrier_blocks: dict[str, str] = {}
         for carrier in self._CANONICAL_CARRIERS:
             assert carrier.exists(), f"Canonical carrier missing: {carrier}"
-            text = carrier.read_text()
+            text = carrier.read_text(encoding="utf-8")
             begin_count = text.count(self._BEGIN_MARKER)
             end_count = text.count(self._END_MARKER)
             assert begin_count == 1, (
@@ -1350,7 +1490,7 @@ class TestAiConfigOverhaulPhase5:
         illegal_carriers: list[str] = []
         for pointer in self._POINTER_ONLY_FILES:
             assert pointer.exists(), f"Pointer-only file missing: {pointer}"
-            text = pointer.read_text()
+            text = pointer.read_text(encoding="utf-8")
             if self._BEGIN_MARKER in text or self._END_MARKER in text:
                 illegal_carriers.append(str(pointer.relative_to(ROOT)))
         assert not illegal_carriers, (
@@ -1363,7 +1503,7 @@ class TestAiConfigOverhaulPhase5:
         # Pointer-only files must link to the canonical anchor (or equivalent)
         missing_pointer: list[str] = []
         for pointer in self._POINTER_ONLY_FILES:
-            text = pointer.read_text()
+            text = pointer.read_text(encoding="utf-8")
             # Accept any reference to the canonical carrier's Review-Fix Loop
             # section — anchor slug `#review-fix-loop` or direct filename
             # pointer is sufficient.
@@ -1391,7 +1531,7 @@ class TestAiConfigOverhaulPhase5:
             name = skill_md.parent.name
             if name in self._SKILL_BODY_BUDGET_EXCEPTIONS:
                 continue
-            line_count = len(skill_md.read_text().splitlines())
+            line_count = len(skill_md.read_text(encoding="utf-8").splitlines())
             if line_count > 200:
                 violations.append((name, line_count))
         assert not violations, (
@@ -1475,7 +1615,7 @@ class TestPromptRoutingTriggers:
         """
         out: list[tuple[str, dict]] = []
         for skill_md in project_skills():
-            fm = cls._parse_frontmatter(skill_md.read_text())
+            fm = cls._parse_frontmatter(skill_md.read_text(encoding="utf-8"))
             if fm.get("user-invocable") == "true":
                 out.append((skill_md.parent.name, fm))
         return out
@@ -1549,14 +1689,14 @@ class TestUserPromptRouter:
     _HOOK = CLAUDE_DIR / "hooks" / "user_prompt_router.py"
 
     def test_user_prompt_router_has_pep723_header(self) -> None:
-        text = self._HOOK.read_text()
+        text = self._HOOK.read_text(encoding="utf-8")
         assert "# /// script" in text, (
             "user_prompt_router.py must start with a PEP 723 inline "
             "script header (`# /// script` … `# ///`)."
         )
 
     def test_user_prompt_router_uses_project_dir_env(self) -> None:
-        text = self._HOOK.read_text()
+        text = self._HOOK.read_text(encoding="utf-8")
         assert "get_project_dir" in text, (
             "user_prompt_router.py must resolve the project directory via "
             "`hook_utils.get_project_dir()` — not `os.getcwd()` / `Path.cwd()`."
@@ -1571,9 +1711,8 @@ class TestUserPromptRouter:
         The hook is advisory; a non-zero exit would make Claude Code
         treat the prompt as blocked. AST scan to catch future drift.
         """
-        import ast
 
-        tree = ast.parse(self._HOOK.read_text())
+        tree = ast.parse(self._HOOK.read_text(encoding="utf-8"))
         bad: list[tuple[int, str]] = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -1602,7 +1741,7 @@ class TestUserPromptRouter:
         import json
 
         settings_path = CLAUDE_DIR / "settings.json"
-        settings = json.loads(settings_path.read_text())
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
         hooks = settings.get("hooks", {})
         ups = hooks.get("UserPromptSubmit") or []
         commands = [
@@ -1624,9 +1763,8 @@ class TestUserPromptRouter:
         whose literal parts contain no newline. Guards the "zero context
         bloat" invariant from the item 3 design.
         """
-        import ast
 
-        tree = ast.parse(self._HOOK.read_text())
+        tree = ast.parse(self._HOOK.read_text(encoding="utf-8"))
         bad: list[tuple[int, str]] = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -1699,13 +1837,12 @@ class TestPlanStatusBlock:
         # `--error-unmatch` aborts on the first untracked path with exit 128 +
         # empty stdout, which would silently exempt every tracked plan in the
         # same call.
-        import subprocess
         try:
             result = subprocess.run(
                 ["git", "ls-files", "--", *[str(p) for p in candidates]],
                 cwd=ROOT,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
                 check=False,
             )
         except (OSError, FileNotFoundError):
@@ -1737,7 +1874,7 @@ class TestPlanStatusBlock:
         if not plans:
             pytest.skip("No plan files in .claude/state/plans/ (fresh checkout)")
         missing = [
-            p.relative_to(ROOT) for p in plans if "## Status" not in p.read_text()
+            p.relative_to(ROOT) for p in plans if "## Status" not in p.read_text(encoding="utf-8")
         ]
         assert not missing, (
             f"Plans missing `## Status` block: {missing}. "
@@ -1752,7 +1889,7 @@ class TestPlanStatusBlock:
             pytest.skip("No plan files in .claude/state/plans/ (fresh checkout)")
         violations: list[tuple[Path, list[str]]] = []
         for plan in plans:
-            block = self._extract_status_block(plan.read_text())
+            block = self._extract_status_block(plan.read_text(encoding="utf-8"))
             if block is None:
                 # covered by previous test
                 continue
@@ -1771,7 +1908,7 @@ class TestPlanStatusBlock:
             pytest.skip("No plan files in .claude/state/plans/ (fresh checkout)")
         too_late: list[tuple[Path, int]] = []
         for plan in plans:
-            lines = plan.read_text().splitlines()
+            lines = plan.read_text(encoding="utf-8").splitlines()
             for i, line in enumerate(lines[:30], start=1):
                 if line.strip() == "## Status":
                     break
@@ -1794,7 +1931,7 @@ class TestPlanStatusBlock:
         ]
         for tmpl in templates:
             assert tmpl.exists(), f"Template missing: {tmpl}"
-            text = tmpl.read_text()
+            text = tmpl.read_text(encoding="utf-8")
             assert "## Status" in text, (
                 f"{tmpl.relative_to(ROOT)} missing `## Status` block — "
                 f"new plans created from this template would fail "
@@ -1833,7 +1970,7 @@ class TestVerifyDeepBuildMatrix:
         assert self._WORKFLOW.exists(), (
             f"workflow missing: {self._WORKFLOW.relative_to(ROOT)}"
         )
-        text = self._WORKFLOW.read_text()
+        text = self._WORKFLOW.read_text(encoding="utf-8")
         # Locate the `build:` job block. It starts at `^  build:` (2-space
         # indent under `jobs:`) and ends at the next sibling-level job
         # (`^  \w[\w-]*:`) or EOF.
@@ -1978,7 +2115,7 @@ class TestSubsystemCliCommandsTableCoverage:
 
     def _table_cells(self) -> set[str]:
         """Extract the leading-cell tokens from the Command Summary table."""
-        text = self._CLI_COMMANDS_RULE.read_text()
+        text = self._CLI_COMMANDS_RULE.read_text(encoding="utf-8")
         # Find the "Command Summary" section and walk its `|`-delimited rows.
         section_start = text.find("## Command Summary")
         assert section_start != -1, "Command Summary section missing"
@@ -2021,4 +2158,379 @@ class TestSubsystemCliCommandsTableCoverage:
             f"CLI command files without a row in `subsystem-cli-commands.md` "
             f"Command Summary: {missing}. Add a row (one per command) so new "
             f"commands are discoverable from the AI-config catalog."
+        )
+
+
+# ---------------------------------------------------------------------------
+# The retired verify stamp (plan_crate_split_workspace.md WP-40 H8)
+# ---------------------------------------------------------------------------
+
+
+class TestRetiredVerifyStamp:
+    """No tracked `.md` / `.py` / `.yml` instructs the bare-epoch stamp.
+
+    Since the JSON mark (WP-04) a bare integer at
+    `.claude/hooks/.state/<mark file>` reads as *not verified* and overwrites
+    the mark `task verify` wrote — so the old one-liner is a trap, not a
+    shortcut. `task verify` writes the mark; a hand mark is only ever
+    `task verify:mark`.
+
+    The needle is any shell write into the mark file — a redirect or a `tee`
+    followed by its path — assembled from parts, so this file never matches
+    itself; what produced the bytes (`echo`, `date`, `printf`, a wrapped
+    line) is not part of it. The files listed below still name the spelling
+    — each to say it is retired — and are the only ones allowed to: set
+    equality keeps the list honest in both directions (a new carrier reds; a
+    carrier that drops the spelling reds until it is removed here).
+    """
+
+    _MARK_FILE = "commit-" + "verified"
+    _NEEDLE = re.compile(r"(>|\btee\b)\s*\S*" + re.escape(_MARK_FILE))
+    _RETIRED_SPELLING_CARRIERS = frozenset(
+        {
+            # Name the spelling to say it reads as *not verified*.
+            ".claude/rules/workflow-git.md",
+            ".claude/skills/commit/SKILL.md",
+            # The H8 / DX-15 finding text and its execution log.
+            ".claude/artifacts/plan_crate_split_workspace.md",
+            # Pre-JSON archaeology: quotes what workflow-git.md said at v0.6.2.
+            ".claude/artifacts/research_crate_split_archaeology.md",
+            # The design note that retired the stamp (its hint-text finding).
+            ".claude/artifacts/research_crate_split_verification_tiers.md",
+        }
+    )
+
+    def _carriers(self) -> set[str]:
+        """Tracked `.md` / `.py` / `.yml` files whose working-tree text has the needle."""
+        listed = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z", "--", "*.md", "*.py", "*.yml"],
+            capture_output=True,
+            encoding="utf-8",
+            check=True,
+        ).stdout
+        return {
+            rel
+            for rel in listed.split("\0")
+            if rel and self._NEEDLE.search((ROOT / rel).read_text(encoding="utf-8", errors="replace"))
+        }
+
+    @pytest.mark.parametrize(
+        "stamp",
+        [
+            pytest.param("task verify && echo $(date +%s) > .claude/hooks/.state/", id="echo"),
+            pytest.param("date +%s > .claude/hooks/.state/", id="date-alone"),
+            pytest.param("printf '%s' \"$(date +%s)\" > …/", id="printf"),
+            pytest.param("echo $(date +%s) | tee .claude/hooks/.state/", id="tee"),
+            pytest.param("echo $(date\n+%s) > …/", id="line-wrapped"),
+        ],
+    )
+    def test_needle_matches_the_retired_spelling(self, stamp: str) -> None:
+        """The needle's own red state: a drifted regex must not pass the sweep vacuously."""
+        assert self._NEEDLE.search(stamp + self._MARK_FILE)
+        assert not self._NEEDLE.search("`task verify:mark` writes the " + self._MARK_FILE + " mark")
+        assert not self._NEEDLE.search("reads `.claude/hooks/.state/" + self._MARK_FILE + "` as JSON")
+
+    def test_only_the_listed_files_name_the_retired_stamp(self) -> None:
+        found = self._carriers()
+        assert found == self._RETIRED_SPELLING_CARRIERS, (
+            f"files instructing the retired bare-epoch stamp: "
+            f"{sorted(found - self._RETIRED_SPELLING_CARRIERS)} (say `task verify` writes the mark and "
+            f"a hand mark is `task verify:mark`); listed carriers that no longer name it: "
+            f"{sorted(self._RETIRED_SPELLING_CARRIERS - found)} (remove them from the list)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The `verify` summary names what `.verify:lint` / `.verify:build-test` run
+# ---------------------------------------------------------------------------
+
+
+class TestVerifySummary:
+    """`task verify --summary` lists every task the two phases call (WP-40 W22).
+
+    The summary is what a reader consults instead of the two internal tasks,
+    so a task added to `.verify:lint` or `.verify:build-test` and not to the
+    summary is a gate nobody knows runs.
+    """
+
+    _TASKFILE = ROOT / "taskfile.yml"
+    _PHASES = (".verify:lint", ".verify:build-test")
+
+    @classmethod
+    def _tasks(cls) -> dict:
+        """`taskfile.yml`'s `tasks:` mapping, parsed — not read line by line.
+
+        A hand-rolled indentation reader only ever fails *partially*: a step
+        respelled `- cmd: task X` drops out of the list while every other
+        entry keeps it non-empty, so a "did the reader find anything?" guard
+        stays green over a task the summary no longer has to name.
+        """
+        return yaml.safe_load(cls._TASKFILE.read_text(encoding="utf-8"))["tasks"]
+
+    def _summary_and_ran(self) -> tuple[str, list[str]]:
+        tasks = self._tasks()
+        ran: list[str] = []
+        for phase in self._PHASES:
+            body = tasks[phase]
+            entries = [*(body.get("deps") or []), *(body.get("cmds") or [])]
+            assert entries, f"taskfile.yml `{phase}` has no `deps:`/`cmds:` entries"
+            # Per entry, not "some entry survived": every step of a phase is a
+            # `task:` dispatch, so anything else is a gate this reader cannot
+            # name — and the summary is the only place a reader learns it runs.
+            opaque = [entry for entry in entries if not (isinstance(entry, dict) and "task" in entry)]
+            assert not opaque, (
+                f"taskfile.yml `{phase}` entries that are not a `task:` dispatch: {opaque} — "
+                f"the `verify` summary is generated from `task:` entries alone, so a step "
+                f"spelled any other way runs without the summary having to name it"
+            )
+            ran += [entry["task"] for entry in entries]
+        return tasks["verify"]["summary"], ran
+
+    def test_summary_names_every_task_the_phases_run(self) -> None:
+        summary, ran = self._summary_and_ran()
+        missing = [task for task in ran if task not in summary]
+        assert not missing, (
+            f"taskfile.yml `verify` summary does not name {missing}, which "
+            f".verify:lint / .verify:build-test run — add them to the summary"
+        )
+
+    def test_summary_names_no_task_the_phases_do_not_run(self) -> None:
+        """The other containment: a task dropped from a phase must leave the summary too."""
+        summary, ran = self._summary_and_ran()
+        allowed = set(ran) | set(self._PHASES) | {".verify:mark"}
+        named = set(re.findall(r"(?<![\w:])\.?[a-z]+(?::[a-z-]+)+(?![\w:])", summary))
+        stale = sorted(named - allowed)
+        assert not stale, (
+            f"taskfile.yml `verify` summary names {stale}, which neither .verify:lint nor "
+            f".verify:build-test runs — drop them from the summary or add the task"
+        )
+
+    def test_scoped_summary_names_the_escalating_table_rows(self) -> None:
+        """`verify:scoped`'s summary lists TABLE_ESCALATES as scoped_gate.py has it (WP-40 W17).
+
+        The set shrinks when WP-37 moves the verbs out of the CLI crate; the
+        summary must shrink with it.
+        """
+        gate = (ROOT / "scripts" / "scoped_gate.py").read_text(encoding="utf-8")
+        declared = re.search(r"^TABLE_ESCALATES = frozenset\((\{[^}]*\})\)", gate, re.M)
+        assert declared, "scripts/scoped_gate.py no longer declares `TABLE_ESCALATES = frozenset({...})`"
+        expected = set(ast.literal_eval(declared.group(1)))
+        summary = " ".join(self._tasks()["verify:scoped"]["summary"].split())
+        named = re.search(r"TABLE_ESCALATES: ([\w, ]+?) —", summary)
+        assert named, "taskfile.yml `verify:scoped` summary has no `TABLE_ESCALATES: a, b, c —` clause"
+        assert set(named.group(1).split(", ")) == expected, (
+            f"`verify:scoped` summary names {named.group(1)!r}; scoped_gate.py TABLE_ESCALATES is "
+            f"{sorted(expected)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# WP-42 R16: every `*self-test` task is reachable from `task verify`
+# ---------------------------------------------------------------------------
+
+
+class TestSelfTestsRunOnAGate:
+    """A self-test hanging off a task no gate calls is a check nobody runs.
+
+    `TestVerifySummary` above catches a phase member the summary forgets.
+    Nothing caught the other direction: `rust:test:ceiling:self-test` was
+    called only by `rust:verify`, which `taskfile.yml`, `.github/workflows/**`
+    and `scripts/scoped_gate.py` never invoke — so the fixtures that prove the
+    skip-ceiling parser ran nowhere, and a review finding (D24) was closed on
+    them. Fourth recurrence of the class; this is what makes a fifth red.
+
+    The walk follows `task:` dispatches only, which is what a self-test is
+    wired with. A task reached by a bare shell line (`- task rust:x` in a
+    `cmd:`) reads as unreachable here — the strict direction, and `task:` is
+    how every phase member of `verify` is spelled today.
+    """
+
+    _ROOT_TASKFILE = ROOT / "taskfile.yml"
+    # Listed, not discovered-and-waved-through: a new self-test is a task that
+    # must be wired, so it reds this list until someone puts it on a gate and
+    # names it here.
+    _SELF_TESTS = frozenset(
+        {"rust:test:ceiling:self-test", "scripts:self-test", "test:ceilings:self-test"}
+    )
+
+    @classmethod
+    def _graph(cls) -> tuple[dict[str, list[str]], list[str]]:
+        """`{full task name: [full names it dispatches]}` over the root taskfile and its includes.
+
+        Namespacing follows go-task: a name inside an included file resolves
+        against that file first and against the root namespace otherwise, and
+        a leading `:` is always the root namespace.
+        """
+        root = yaml.safe_load(cls._ROOT_TASKFILE.read_text(encoding="utf-8"))
+        files = {"": cls._ROOT_TASKFILE}
+        for prefix, entry in (root.get("includes") or {}).items():
+            path = entry if isinstance(entry, str) else entry.get("taskfile")
+            files[prefix] = ROOT / str(path).lstrip("./")
+
+        bodies: dict[str, dict] = {}
+        owners: dict[str, str] = {}
+        for prefix, path in files.items():
+            if not path.exists():
+                continue
+            for name, body in (yaml.safe_load(path.read_text(encoding="utf-8")).get("tasks") or {}).items():
+                full = f"{prefix}:{name}" if prefix else name
+                bodies[full] = body if isinstance(body, dict) else {}
+                owners[full] = prefix
+
+        def resolve(name: str, prefix: str) -> str:
+            if name.startswith(":"):
+                return name[1:]
+            local = f"{prefix}:{name}" if prefix else name
+            return local if local in bodies else name
+
+        graph = {
+            full: [
+                resolve(entry["task"], owners[full])
+                for entry in [*(body.get("deps") or []), *(body.get("cmds") or [])]
+                if isinstance(entry, dict) and "task" in entry
+            ]
+            for full, body in bodies.items()
+        }
+        return graph, sorted(bodies)
+
+    @classmethod
+    def _reachable_from(cls, entry: str) -> set[str]:
+        graph, _ = cls._graph()
+        seen, queue = set(), [entry]
+        while queue:
+            task = queue.pop()
+            if task in seen:
+                continue
+            seen.add(task)
+            queue += graph.get(task, [])
+        return seen
+
+    def test_the_walk_reads_the_taskfiles(self) -> None:
+        """The reader's own control: the self-tests this class names all exist.
+
+        A typo in `_SELF_TESTS` would otherwise make the reachability test
+        below assert nothing about a task that is really there.
+        """
+        _, defined = self._graph()
+        missing = sorted(self._SELF_TESTS - set(defined))
+        assert not missing, (
+            f"{missing} are not tasks of taskfile.yml or its includes — the names in "
+            f"_SELF_TESTS are stale, or the walk stopped reading a file"
+        )
+        found = {task for task in defined if task.rsplit(":", 1)[-1].endswith("self-test")}
+        assert found == self._SELF_TESTS, (
+            f"self-test tasks in the tree are {sorted(found)}, this class names "
+            f"{sorted(self._SELF_TESTS)} — a new self-test must be wired onto a gate and "
+            f"listed here, a retired one dropped from both"
+        )
+
+    def test_every_self_test_is_reachable_from_verify(self) -> None:
+        reachable = self._reachable_from("verify")
+        orphans = sorted(self._SELF_TESTS - reachable)
+        assert not orphans, (
+            f"{orphans} are not reachable from `task verify` by any `task:` dispatch — a "
+            f"self-test outside every gate is a check nobody runs (WP-42 R16)"
+        )
+
+    def test_rust_verify_is_not_a_gate(self) -> None:
+        """The walk's red half, and the standing decision about `rust:verify`.
+
+        `rust:verify` is the Rust leg a developer runs during a review-fix
+        loop (four subsystem rules and `workflow-feature.md` send them to it,
+        and the split full gate uses it as one leg) — it is not reached by
+        `task verify`, and nothing it runs may be left to it alone. If this
+        reds because `verify` now calls it, the decision changed and the
+        `desc` of `rust:verify` has to say so; if it reds because the walk
+        returns everything, the test above was never asserting anything.
+        """
+        assert "rust:verify" not in self._reachable_from("verify"), (
+            "`task verify` now reaches `rust:verify` — re-read its `desc`, which states "
+            "that no gate calls it and that its members are wired individually"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The catalog's "By auto-load path" table is checked, not merely written (B5R-12)
+# ---------------------------------------------------------------------------
+
+
+class TestCatalogAutoLoadPaths:
+    """`.claude/rules.md`'s auto-load table against the rules' own frontmatter.
+
+    Nothing read this table before. Reverting one of its rows left the whole
+    structural suite passing and byte-identical, while reverting the same
+    change in the rule's frontmatter reddened three tests — so the rows were
+    correct by diligence alone, and the next directory move had nothing
+    catching them.
+
+    Two properties, both derived: the table names exactly the rules that
+    auto-load, and the globs it spells are live. It is deliberately not
+    asserted to *equal* the frontmatter — a row groups several rules under one
+    edit path, which is what makes it readable — so a glob narrower than the
+    rule's own (`test/**/*.py` under `**/*.py`) is correct and stays.
+    """
+
+    _SECTION = "## By auto-load path"
+
+    @staticmethod
+    def _rows(section_heading: str = "## By auto-load path") -> list[tuple[str, str]]:
+        text = (CLAUDE_DIR / "rules.md").read_text(encoding="utf-8")
+        assert section_heading in text, f"`.claude/rules.md` has no `{section_heading}` section"
+        section = text.split(section_heading, 1)[1].split("\n## ", 1)[0]
+        rows = []
+        for line in section.splitlines():
+            if not line.startswith("| ") or "---" in line or line.startswith("| Edit path"):
+                continue
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) >= 2:
+                rows.append((cells[0], cells[-1]))
+        assert len(rows) > 10, f"the auto-load table parsed as {len(rows)} row(s) — the reader stopped matching"
+        return rows
+
+    @staticmethod
+    def _scoped_rules() -> set[str]:
+        return {
+            rule.name
+            for rule in sorted(CLAUDE_DIR.glob("rules/*.md"))
+            if TestRuleGlobs._extract_paths(rule)
+        }
+
+    def test_every_scoped_rule_is_named_in_the_table(self) -> None:
+        """A rule that fires on a path and is absent from the table is a rule
+        nobody knows fires — the catalog exists to answer exactly that."""
+        named = {rule for _, rules in self._rows() for rule in re.findall(r"\[([a-z0-9._-]+\.md)\]", rules)}
+        missing = sorted(self._scoped_rules() - named)
+        assert not missing, (
+            f"`.claude/rules.md` § By auto-load path names no row for {missing}, which declare "
+            f"`paths:` and therefore auto-load — add the row"
+        )
+
+    def test_the_table_claims_auto_load_for_no_unscoped_rule(self) -> None:
+        """The other containment: a rule that lost its `paths:` stops firing,
+        and a row still promising it is the unmatched-glob class in prose."""
+        named = {rule for _, rules in self._rows() for rule in re.findall(r"\[([a-z0-9._-]+\.md)\]", rules)}
+        stale = sorted(named - self._scoped_rules())
+        assert not stale, (
+            f"`.claude/rules.md` § By auto-load path lists {stale} as auto-loading, and they "
+            f"declare no `paths:` — they load globally or not at all"
+        )
+
+    @pytest.mark.parametrize("row", _rows(), ids=lambda row: row[0][:48])
+    def test_every_glob_the_table_spells_is_live(self, row: tuple[str, str]) -> None:
+        """A directory move kills the row's glob as surely as the rule's own.
+
+        The same carve-out `test_all_rule_globs_match_files` makes: a row
+        naming only shareable rules describes file types other repositories
+        have, so an unmatched glob there is not dead.
+        """
+        edit_paths, rules = row
+        named = re.findall(r"\[([a-z0-9._-]+\.md)\]", rules)
+        patterns = re.findall(r"`([^`]+)`", edit_paths)
+        assert patterns, f"auto-load row `{edit_paths}` spells no glob at all"
+        dead = [p for p in patterns if not glob.glob(str(ROOT / p), recursive=True)]
+        if dead and named and all(TestRuleGlobs._is_shareable(CLAUDE_DIR / "rules" / n) for n in named):
+            pytest.skip(f"row names only shareable rules; unmatched here (not dead): {dead}")
+        assert not dead, (
+            f"`.claude/rules.md` § By auto-load path row `{edit_paths}` spells dead glob(s) "
+            f"{dead} — the rule it describes no longer fires on them"
         )

@@ -5,7 +5,7 @@
 The automation/CI counterpart to `ocx self setup --managed-config`: adopts (or
 clears) the `[managed]` tier without bootstrapping the ocx binary, writing env
 shims, or touching shell profiles. Both entry points share the single lib
-implementation (`ocx_lib::setup::apply_managed_config`), so this suite pins the
+implementation (`ocx_setup::apply_managed_config`), so this suite pins the
 config-setup-specific contract:
 
 - ``ocx config setup --managed-config <ref>`` → fence + snapshot, exit 0
@@ -26,6 +26,8 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from src.registry import push_raw_config_package
 from src.runner import OcxRunner
@@ -102,6 +104,7 @@ def _registry_probe(ocx: OcxRunner, **kwargs: object) -> str:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_adopt_writes_fence_and_snapshot(ocx: OcxRunner, unique_repo: str, registry: str) -> None:
     """`ocx config setup --managed-config <ref>` fetches the snapshot and
     writes the `[managed]` seed fence — no binary bootstrap, no profiles."""

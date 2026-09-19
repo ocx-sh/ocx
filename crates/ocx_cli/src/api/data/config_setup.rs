@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::cli::Cell;
-use ocx_lib::setup::ManagedConfigSetupOutcome;
+use ocx_console::Cell;
+use ocx_setup::ManagedConfigSetupOutcome;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -32,7 +32,7 @@ impl ConfigSetupData {
 }
 
 impl Printable for ConfigSetupData {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         printer.print_table(
             &["Field".into(), "Value".into()],
             &[
@@ -45,7 +45,7 @@ impl Printable for ConfigSetupData {
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::setup::ManagedConfigSetupOutcome;
+    use ocx_setup::ManagedConfigSetupOutcome;
     use serde_json::json;
 
     use super::ConfigSetupData;
@@ -56,7 +56,7 @@ mod tests {
     fn adopted_serializes_with_digest() {
         let hex = "a".repeat(64);
         let outcome = ManagedConfigSetupOutcome::Adopted {
-            digest: ocx_lib::oci::Digest::Sha256(hex.clone()),
+            digest: ocx_oci::Digest::Sha256(hex.clone()),
         };
         let value = serde_json::to_value(ConfigSetupData::from_outcome(&outcome)).unwrap();
         assert_eq!(value["managed_config"]["status"], json!("adopted"));
@@ -78,8 +78,8 @@ mod tests {
         let from = "a".repeat(64);
         let to = "b".repeat(64);
         let outcome = ManagedConfigSetupOutcome::Refreshed {
-            from: ocx_lib::oci::Digest::Sha256(from.clone()),
-            to: ocx_lib::oci::Digest::Sha256(to.clone()),
+            from: ocx_oci::Digest::Sha256(from.clone()),
+            to: ocx_oci::Digest::Sha256(to.clone()),
         };
         let value = serde_json::to_value(ConfigSetupData::from_outcome(&outcome)).unwrap();
         assert_eq!(value["managed_config"]["status"], json!("refreshed"));
@@ -97,7 +97,7 @@ mod tests {
     fn refresh_unavailable_serializes_reason() {
         let hex = "c".repeat(64);
         let outcome = ManagedConfigSetupOutcome::RefreshUnavailable {
-            digest: ocx_lib::oci::Digest::Sha256(hex.clone()),
+            digest: ocx_oci::Digest::Sha256(hex.clone()),
             reason: "registry unreachable".to_string(),
         };
         let value = serde_json::to_value(ConfigSetupData::from_outcome(&outcome)).unwrap();
@@ -113,7 +113,7 @@ mod tests {
     fn would_refresh_serializes_digest_only() {
         let hex = "d".repeat(64);
         let outcome = ManagedConfigSetupOutcome::WouldRefresh {
-            digest: ocx_lib::oci::Digest::Sha256(hex.clone()),
+            digest: ocx_oci::Digest::Sha256(hex.clone()),
         };
         let value = serde_json::to_value(ConfigSetupData::from_outcome(&outcome)).unwrap();
         assert_eq!(value["managed_config"]["status"], json!("would_refresh"));
@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn existing_statuses_omit_the_new_optional_fields() {
         let outcome = ManagedConfigSetupOutcome::Adopted {
-            digest: ocx_lib::oci::Digest::Sha256("e".repeat(64)),
+            digest: ocx_oci::Digest::Sha256("e".repeat(64)),
         };
         let value = serde_json::to_value(ConfigSetupData::from_outcome(&outcome)).unwrap();
         assert!(value["managed_config"].get("previous_digest").is_none());

@@ -4,13 +4,12 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{log, oci};
 
 use crate::api;
 
 /// A per-repository tag-fetch outcome, tagged with its input index so failures
 /// can be surfaced in input order.
-type IndexedTagResult = (usize, ocx_lib::Result<(String, Vec<String>)>);
+type IndexedTagResult = (usize, anyhow::Result<(String, Vec<String>)>);
 
 /// How many per-repository tag listings `--tags` keeps in flight.
 ///
@@ -51,7 +50,7 @@ impl IndexCatalog {
         let mut repositories = Vec::new();
         for registry in &registries {
             let repos = context.default_index().list_repositories(registry).await?;
-            repositories.extend(repos.into_iter().map(|r| oci::Repository::new(registry, r)));
+            repositories.extend(repos.into_iter().map(|r| ocx_oci::Repository::new(registry, r)));
         }
         repositories.sort();
 
@@ -74,7 +73,7 @@ impl IndexCatalog {
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(CATALOG_TAG_CONCURRENCY));
         let mut join_set: tokio::task::JoinSet<IndexedTagResult> = tokio::task::JoinSet::new();
         for (index, repo) in repositories.iter().enumerate() {
-            let identifier = oci::Identifier::new_registry(repo.repository(), repo.registry());
+            let identifier = ocx_oci::Identifier::new_registry(repo.repository(), repo.registry());
             let display_name = repo.to_string();
             let context = context.clone();
             // Acquired before the spawn, so a registry listing thousands of
@@ -90,25 +89,30 @@ impl IndexCatalog {
                 // through it and `abort_all` drops it, so neither can strand a
                 // permit and wedge the loop.
                 let _permit = permit;
-                let result = context.default_index().list_tags(&identifier).await.map(|tags| {
-                    let tags = tags.unwrap_or_else(|| {
-                        // Same `repositories` vector as the `error!` below, so
-                        // the same neutralization. `warn!` reaches stderr under
-                        // the default INFO console filter.
-                        log::warn!(
-                            "No tags found for repository '{}'.",
-                            api::data::sanitize_for_terminal(&identifier.to_string())
-                        );
-                        Vec::new()
+                let result = context
+                    .default_index()
+                    .list_tags(&identifier)
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .map(|tags| {
+                        let tags = tags.unwrap_or_else(|| {
+                            // Same `repositories` vector as the `error!` below, so
+                            // the same neutralization. `warn!` reaches stderr under
+                            // the default INFO console filter.
+                            log::warn!(
+                                "No tags found for repository '{}'.",
+                                api::data::sanitize_for_terminal(&identifier.to_string())
+                            );
+                            Vec::new()
+                        });
+                        (display_name, tags)
                     });
-                    (display_name, tags)
-                });
                 (index, result)
             });
         }
 
         let mut tags = std::collections::BTreeMap::new();
-        let mut failures: Vec<(usize, ocx_lib::Error)> = Vec::new();
+        let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
         while let Some(joined) = join_set.join_next().await {
             match joined {
                 Ok((_, Ok((repository, repository_tags)))) => {
@@ -125,7 +129,7 @@ impl IndexCatalog {
                     log::error!(
                         "fetching tags for repository '{}' failed: {}",
                         api::data::sanitize_for_terminal(&repositories[index].to_string()),
-                        api::data::sanitize_error_chain(&e)
+                        api::data::sanitize_error_chain(e.as_ref())
                     );
                     failures.push((index, e));
                 }
@@ -147,7 +151,7 @@ impl IndexCatalog {
         if !failures.is_empty() {
             failures.sort_by_key(|(index, _)| *index);
             let (_, error) = failures.into_iter().next().expect("failures is non-empty");
-            return Err(error.into());
+            return Err(error);
         }
 
         let catalog = api::data::catalog::Catalog::with_tags(tags.into_iter().collect());
@@ -270,7 +274,12 @@ mod tests {
         );
         assert_eq!(
             body.matches("log::error!").count(),
-            body.matches("sanitize_error_chain(&").count(),
+            // `(&` was an artefact of the old argument type: the failures were
+            // `ocx_lib::Error`, so the call read `(&e)`. They are `anyhow::Error`
+            // since WP-37 and the call is `(e.as_ref())` — keeping the `&`
+            // would be a needle that reds on a correct call. The property is
+            // unchanged: one sanitized chain per error log.
+            body.matches("sanitize_error_chain(").count(),
             "every error log must render its chain through `sanitize_error_chain`"
         );
         for interpolation in ["identifier", "repositories[index]"] {

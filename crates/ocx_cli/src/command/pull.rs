@@ -4,8 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::oci;
-use ocx_lib::project::{expand_all_keyword, lazy_mode_for_tool};
+use ocx_project::{expand_all_keyword, lazy_mode_for_tool};
 
 use crate::api;
 use crate::app::project_context::load_project_with_lock_consenting;
@@ -106,7 +105,7 @@ impl Pull {
         // `--platform` omitted → the host native platform.
         let platform = conventions::platform_or_default(self.platform.platform.clone());
         let render_groups = render_groups(&self.groups, &ctx);
-        let selected: Vec<&ocx_lib::project::LockedTool> = if self.groups.is_empty() {
+        let selected: Vec<&ocx_project::LockedTool> = if self.groups.is_empty() {
             ctx.lock.tools.iter().collect()
         } else {
             // Expand `all` → default + every declared `[group.*]` before the
@@ -118,7 +117,7 @@ impl Pull {
                 .filter(|t| expanded.iter().any(|g| g == &t.group))
                 .collect()
         };
-        let mut pinned: Vec<oci::PinnedIdentifier> = Vec::new();
+        let mut pinned: Vec<ocx_oci::PinnedIdentifier> = Vec::new();
         for tool in &selected {
             let id = host_pull_pinned(tool, &platform)?;
             // ponytail: O(n) dedup over tools — tiny.
@@ -139,7 +138,7 @@ impl Pull {
             return run_dry_run(&context, &pinned, platform).await;
         }
 
-        let identifiers: Vec<oci::Identifier> = pinned.iter().cloned().map(Into::into).collect();
+        let identifiers: Vec<ocx_oci::Identifier> = pinned.iter().cloned().map(Into::into).collect();
 
         // ── Phase 5: pull + report ───────────────────────────────────────
 
@@ -153,7 +152,7 @@ impl Pull {
         // so an unmatched group filter or an empty lock both exit 0 with
         // an empty report — there is nothing to pre-warm, that is not a
         // failure.
-        let mut modes: Vec<ocx_lib::lazy::LazyMode> = Vec::with_capacity(identifiers.len());
+        let mut modes: Vec<ocx_project::lazy::LazyMode> = Vec::with_capacity(identifiers.len());
         for (tool, identifier) in selected.iter().zip(identifiers.iter()) {
             modes.push(lazy_mode_for_tool(
                 &ctx.config,
@@ -162,10 +161,10 @@ impl Pull {
                 self.lazy_mode.mode(),
             ));
         }
-        let eager: Vec<oci::Identifier> = identifiers
+        let eager: Vec<ocx_oci::Identifier> = identifiers
             .iter()
             .zip(modes.iter())
-            .filter(|(_, mode)| **mode == ocx_lib::lazy::LazyMode::Never)
+            .filter(|(_, mode)| **mode == ocx_project::lazy::LazyMode::Never)
             .map(|(identifier, _)| identifier.clone())
             .collect();
         let info = context
@@ -176,14 +175,14 @@ impl Pull {
         // interleaves both halves, so a positional cursor into the eager
         // results would depend on `pull_all` returning exactly one entry per
         // input — a guarantee worth reading off the data instead of asserting.
-        let eager_paths: std::collections::HashMap<&oci::Identifier, &_> = eager.iter().zip(info.iter()).collect();
+        let eager_paths: std::collections::HashMap<&ocx_oci::Identifier, &_> = eager.iter().zip(info.iter()).collect();
 
         // Both halves, in lock order, so the report stays a single ordered walk
         // over `identifiers`.
         let mut warmed: Vec<api::data::warmed_paths::WarmedPath> = Vec::with_capacity(identifiers.len());
-        let mut advisories: Vec<ocx_lib::package_manager::LazyAdvisory> = Vec::new();
+        let mut advisories: Vec<ocx_package_manager::LazyAdvisory> = Vec::new();
         for (identifier, mode) in identifiers.iter().zip(modes.iter()) {
-            let entry = if *mode == ocx_lib::lazy::LazyMode::Never {
+            let entry = if *mode == ocx_project::lazy::LazyMode::Never {
                 // A pre-warm that produced no result for an identifier it was
                 // handed is a bug in `pull_all`, not something to report a
                 // fabricated path for — skip it rather than guess.
@@ -201,8 +200,8 @@ impl Pull {
                     .prepare_lazy(identifier, platform.clone())
                     .await
                     .map_err(|kind| {
-                        ocx_lib::package_manager::error::Error::ResolveFailed(vec![
-                            ocx_lib::package_manager::error::PackageError::new(identifier.clone(), kind),
+                        ocx_package_manager::error::Error::ResolveFailed(vec![
+                            ocx_package_manager::error::PackageError::new(identifier.clone(), kind),
                         ])
                     })?;
                 // Both channels, never one: stderr is the human read of a
@@ -253,22 +252,22 @@ impl Pull {
     }
 }
 
-/// Resolve a locked tool to its host-platform pull [`oci::PinnedIdentifier`].
+/// Resolve a locked tool to its host-platform pull [`ocx_oci::PinnedIdentifier`].
 ///
 /// Delegates the V1/V2 host-leaf resolution to
-/// [`ocx_lib::project::host_leaf_identifier`] — the single source of the
+/// [`ocx_project::host_leaf_identifier`] — the single source of the
 /// absent-host-leaf error ([`ProjectErrorKind::NoHostLeaf`], exit 78) — then
 /// asserts the resolved identifier is digest-pinned via `try_into`. The
 /// `ProjectError` is converted to `anyhow::Error` so the chain still classifies
 /// at the `main.rs` boundary.
 ///
-/// [`ProjectErrorKind::NoHostLeaf`]: ocx_lib::project::error::ProjectErrorKind::NoHostLeaf
+/// [`ProjectErrorKind::NoHostLeaf`]: ocx_project::error::ProjectErrorKind::NoHostLeaf
 fn host_pull_pinned(
-    tool: &ocx_lib::project::LockedTool,
-    host: &ocx_lib::oci::Platform,
-) -> anyhow::Result<oci::PinnedIdentifier> {
-    let id = ocx_lib::project::host_leaf_identifier(tool, host).map_err(anyhow::Error::from)?;
-    oci::PinnedIdentifier::try_from(id).map_err(|e| {
+    tool: &ocx_project::LockedTool,
+    host: &ocx_oci::Platform,
+) -> anyhow::Result<ocx_oci::PinnedIdentifier> {
+    let id = ocx_project::host_leaf_identifier(tool, host).map_err(anyhow::Error::from)?;
+    ocx_oci::PinnedIdentifier::try_from(id).map_err(|e| {
         anyhow::anyhow!(
             "locked leaf for binding '{}' is not a valid pinned identifier: {e}",
             tool.name
@@ -292,7 +291,7 @@ fn render_groups(selected: &[String], project: &crate::app::project_context::Pro
     if !selected.is_empty() {
         return expand_all_keyword(selected, &project.config);
     }
-    let mut groups = vec![ocx_lib::project::DEFAULT_GROUP.to_owned()];
+    let mut groups = vec![ocx_project::DEFAULT_GROUP.to_owned()];
     for tool in &project.lock.tools {
         if !groups.iter().any(|group| group == &tool.group) {
             groups.push(tool.group.clone());
@@ -316,7 +315,7 @@ fn render_groups(selected: &[String], project: &crate::app::project_context::Pro
 ///
 /// The **sink** and the offline-quiet degradation are `ocx pull`'s alone — this
 /// command has a user interface and the four mutation commands do not (RUL-53).
-/// Everything else is [`PackageManager::render_home`](ocx_lib::package_manager::PackageManager::render_home),
+/// Everything else is [`PackageManager::render_home`](ocx_package_manager::PackageManager::render_home),
 /// which is D-V8 applied to the render half: `ocx pull` is the command D4 names
 /// the *primary* render trigger, so a second `RenderRequest` producer here
 /// would be the one out of reach of every non-CLI consumer and of unit test —
@@ -332,17 +331,17 @@ async fn render_and_warn(
     context: &crate::app::Context,
     project: &crate::app::project_context::ProjectContext,
     groups: &[String],
-    platform: &oci::Platform,
+    platform: &ocx_oci::Platform,
     dry_run: bool,
 ) {
     let rendered = async {
         let scope = context.toolchain_render_scope(&project.config_path).await?;
-        let render = ocx_lib::package_manager::ToolchainRender {
+        let render = ocx_package_manager::ToolchainRender {
             scope: &scope,
             toolchain_root: context.toolchain_root(),
             platform,
         };
-        let pinned = ocx_lib::package_manager::pinned_for_project(None, &project.config);
+        let pinned = ocx_package_manager::pinned_for_project(None, &project.config);
         anyhow::Ok(
             context
                 .manager()
@@ -354,7 +353,7 @@ async fn render_and_warn(
 
     match rendered {
         Ok(report) => {
-            for line in ocx_lib::package_manager::skipped_render_warnings(&report) {
+            for line in ocx_package_manager::skipped_render_warnings(&report) {
                 context.ui().warn(line);
             }
         }
@@ -362,7 +361,7 @@ async fn render_and_warn(
         // resolve a surface, and that is the ordinary state there rather than a
         // fault worth a line on every prompt.
         Err(error) if context.manager().is_offline() => {
-            ocx_lib::log::debug!("The toolchain home was not rendered: {error:#}");
+            log::debug!("The toolchain home was not rendered: {error:#}");
         }
         Err(error) => context
             .ui()
@@ -388,8 +387,8 @@ type DryRunProbe = (api::data::pull_dry_run::PullStatus, Option<std::path::PathB
 
 async fn run_dry_run(
     context: &crate::app::Context,
-    pinned: &[oci::PinnedIdentifier],
-    platform: oci::Platform,
+    pinned: &[ocx_oci::PinnedIdentifier],
+    platform: ocx_oci::Platform,
 ) -> anyhow::Result<ExitCode> {
     use api::data::pull_dry_run::{DryRunEntry, PullDryRun, PullStatus};
 
@@ -401,7 +400,7 @@ async fn run_dry_run(
     let mut join_set: tokio::task::JoinSet<(usize, anyhow::Result<DryRunProbe>)> = tokio::task::JoinSet::new();
     for (index, id) in pinned.iter().enumerate() {
         let manager = context.manager().clone();
-        let identifier: oci::Identifier = id.clone().into();
+        let identifier: ocx_oci::Identifier = id.clone().into();
         let platform = platform.clone();
         join_set.spawn(async move {
             let result = async {

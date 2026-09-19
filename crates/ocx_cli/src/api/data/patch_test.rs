@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::cli::Cell;
-use ocx_lib::package::metadata::env::var::ModifierKind;
+use ocx_console::Cell;
+use ocx_package::metadata::env::var::ModifierKind;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -73,7 +73,7 @@ fn has_overlay_entry(entries: &[PatchTestEntry]) -> bool {
 }
 
 impl Printable for PatchTestReport {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         if self.companions.is_empty() {
             printer.print_hint(&format!("no companions matched '{}'", self.base));
         } else {

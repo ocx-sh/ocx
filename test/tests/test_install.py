@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from src import (
     OcxRunner,
     PackageInfo,
@@ -15,6 +17,7 @@ _AMD64 = "linux/amd64"
 _ARM64 = "linux/arm64"
 
 
+@pytest.mark.smoke
 def test_install_creates_candidate_symlink(
     ocx: OcxRunner, published_package: PackageInfo
 ):

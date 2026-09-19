@@ -4,9 +4,9 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use ocx_lib::cli::Cell;
-use ocx_lib::package::metadata::IntegrationEntry;
-use ocx_lib::package::metadata::env::var::ModifierKind;
+use ocx_console::Cell;
+use ocx_package::metadata::IntegrationEntry;
+use ocx_package::metadata::env::var::ModifierKind;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -65,7 +65,7 @@ impl fmt::Display for EntrySource {
 /// The optional `separator` field carries the fold separator for a
 /// [`ModifierKind::List`] entry; every other kind omits it. Callers construct
 /// this type from entries that already passed compose-time separator
-/// agreement (`ocx_lib::env::reconcile_list_separators`), so a `list` entry
+/// agreement (`ocx_package::metadata::env::apply::reconcile_list_separators`), so a `list` entry
 /// reaching here never carries a bare `None` unless nothing in the
 /// composition ever declared one.
 #[derive(Serialize, schemars::JsonSchema)]
@@ -92,7 +92,7 @@ pub struct EnvEntry {
 ///
 /// `package` is `Option<String>` — `None` means "attribution unknown," never
 /// "this package has zero binaries." With the current admission model
-/// (`ocx_lib::package_manager::composer::compose`'s admitted-set closure),
+/// (`ocx_package_manager::composer::compose`'s admitted-set closure),
 /// `package` is populated for every entry; the `Option` typing leaves room
 /// for a future no-clean-attribution source without a breaking schema
 /// change. See `adr_declared_binaries_metadata.md` §4 Decision A.
@@ -110,7 +110,7 @@ impl BinaryAttribution {
     /// Shared by `binaries` and `entrypoints` — both are `(PinnedIdentifier, T:
     /// Display)` pairs from `AdmittedClaims`, differing only in the claim
     /// type. See `adr_declared_binaries_metadata.md` §4 Decision A.
-    pub fn from_pairs<T: fmt::Display>(pairs: &[(ocx_lib::oci::PinnedIdentifier, T)]) -> Vec<Self> {
+    pub fn from_pairs<T: fmt::Display>(pairs: &[(ocx_oci::PinnedIdentifier, T)]) -> Vec<Self> {
         pairs
             .iter()
             .map(|(identifier, name)| Self {
@@ -150,7 +150,7 @@ impl IntegrationAttribution {
     /// One row per input pair, in the admitted-set visit order compose
     /// established — never grouped by namespace, never collapsed for a single
     /// root (`adr_package_integrations.md` D2/D18).
-    pub fn from_pairs(pairs: &[(ocx_lib::oci::PinnedIdentifier, IntegrationEntry)]) -> Vec<Self> {
+    pub fn from_pairs(pairs: &[(ocx_oci::PinnedIdentifier, IntegrationEntry)]) -> Vec<Self> {
         pairs
             .iter()
             .map(|(identifier, entry)| Self {
@@ -185,8 +185,8 @@ pub struct LazyAdvisoryReport {
 impl LazyAdvisoryReport {
     /// Projects the library's advisories into the wire shape, preserving the
     /// order the composer raised them in.
-    pub fn from_advisories(advisories: &[ocx_lib::package_manager::LazyAdvisory]) -> Vec<Self> {
-        use ocx_lib::package_manager::LazyAdvisory;
+    pub fn from_advisories(advisories: &[ocx_package_manager::LazyAdvisory]) -> Vec<Self> {
+        use ocx_package_manager::LazyAdvisory;
         advisories
             .iter()
             .map(|advisory| {
@@ -373,7 +373,7 @@ fn has_availability_hint(
 }
 
 impl Printable for EnvVars {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         if has_patch_entry(&self.entries) {
             let mut rows: [Vec<String>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
             for entry in &self.entries {
@@ -415,8 +415,7 @@ impl Printable for EnvVars {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_lib::cli::{DataInterface, Printer};
-    use ocx_lib::oci;
+    use ocx_console::{DataInterface, Printer};
 
     fn entry(key: &str, source: Option<EntrySource>) -> EnvEntry {
         EnvEntry {
@@ -636,10 +635,10 @@ mod tests {
 
     /// A pinned identifier for the `from_pairs` fixtures below — the `env.rs`
     /// sibling of `package_inspect::tests::pinned`.
-    fn pinned(repo: &str, hex_char: char) -> oci::PinnedIdentifier {
-        let id = oci::Identifier::new_registry(repo, "ocx.sh")
-            .clone_with_digest(oci::Digest::Sha256(hex_char.to_string().repeat(64)));
-        oci::PinnedIdentifier::try_from(id).expect("digest-bearing identifier is always pinnable")
+    fn pinned(repo: &str, hex_char: char) -> ocx_oci::PinnedIdentifier {
+        let id = ocx_oci::Identifier::new_registry(repo, "ocx.sh")
+            .clone_with_digest(ocx_oci::Digest::Sha256(hex_char.to_string().repeat(64)));
+        ocx_oci::PinnedIdentifier::try_from(id).expect("digest-bearing identifier is always pinnable")
     }
 
     #[test]

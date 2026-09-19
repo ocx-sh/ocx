@@ -79,6 +79,11 @@ tasks:
             git-cliff --bumped-version --bump "{{.BUMP}}"
           fi
     cmds:
+      # Refuse without a fresh *full* verify mark — the predicate the commit
+      # gate applies to a `release:` subject, run from the same module so the
+      # two cannot drift. `task verify:mark` writes a scoped mark and does not
+      # satisfy it; `task verify` does.
+      - python3 {{.ROOT_DIR}}/scripts/commit_gate.py --require-full-mark {{.ROOT_DIR}}
       - echo "Next version:{{.NEXT_VERSION}}"
       - cargo set-version "{{.NEXT_VERSION | trimPrefix "v"}}"
       - git-cliff --tag "{{.NEXT_VERSION}}" -o CHANGELOG.md

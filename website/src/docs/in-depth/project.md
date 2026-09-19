@@ -327,7 +327,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [sigstore]: https://www.sigstore.dev/
 [schema-project]: https://ocx.sh/schemas/project/v1.json
 [schema-lock]: https://ocx.sh/schemas/project-lock/v3.json
-[composer-source]: https://github.com/ocx-sh/ocx/blob/main/crates/ocx_lib/src/package_manager/composer.rs
+[composer-source]: https://github.com/ocx-sh/ocx/blob/main/crates/ocx_package_manager/src/composer.rs
 
 <!-- commands -->
 [cmd-clean]: ../reference/command-line.md#clean

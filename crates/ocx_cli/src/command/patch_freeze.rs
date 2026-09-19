@@ -10,8 +10,7 @@
 use std::process::ExitCode;
 
 use clap::Args;
-use ocx_lib::oci;
-use ocx_lib::patch::{PATCH_SNAPSHOT_FILE, PatchSnapshot};
+use ocx_package_manager::patch::{PATCH_SNAPSHOT_FILE, PatchSnapshot};
 
 /// Arguments for `ocx [--global] patch freeze`.
 #[derive(Args)]
@@ -36,12 +35,12 @@ impl PatchFreezeArgs {
         // Uses the manager's current `patches` config (from OCX_PATCHES /
         // `[patches]` config tier). When no patch tier is configured, roots is
         // empty and the snapshot records zero companions / descriptors.
-        let host = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+        let host = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         // Record-only: a freeze snapshots LIVE state. Reading through an
         // already-active snapshot would make it re-freeze its own output.
         let roots = context
             .manager()
-            .resolve_site_patch_roots(&host, ocx_lib::package_manager::PatchRootScope::Recorded)
+            .resolve_site_patch_roots(&host, ocx_package_manager::PatchRootScope::Recorded)
             .await
             .map_err(anyhow::Error::new)?;
 

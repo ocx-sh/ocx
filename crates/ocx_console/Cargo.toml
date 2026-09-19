@@ -1,0 +1,44 @@
+[package]
+name = "ocx_console"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# The only `ocx_*` row. `ocx_util::error::SerializationError` is what
+# `DataInterface::print_json` raises; `ocx_exit` is in this crate's allowed set
+# (`scripts/crate_map.toml`) but nothing here names a process outcome, so it is
+# not listed — the console renders, it does not decide what a run costs.
+ocx_util.workspace = true
+
+# `ColorMode` is a `ValueEnum` and `clap_styles` builds a `Styles`, so the
+# `--color` flag and clap's own help rendering share one decision.
+clap_builder.workspace = true
+# Syntax-highlighted JSON on stdout. Returns `serde_json::Result`, which is why
+# the printer needs no error type of its own.
+colored_json.workspace = true
+# Styles, terminal probing, display-width measurement, and the draw target the
+# controlling-terminal progress probe opens.
+console.workspace = true
+# `human_time` / `human_instant` render an instant for a person to read.
+chrono.workspace = true
+# `MultiProgress` plus the bars and the `HumanBytes`/`HumanDuration` formatters.
+indicatif.workspace = true
+# `UserInterface` routes its diagnostics to the `log` facade whenever the
+# process is quiet or non-interactive, and the progress probe logs its own
+# degradation. The facade only — no subscriber (D-009).
+log.workspace = true
+# The no-echo secret prompt.
+rpassword.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `Theme`'s `FromStr` refusal.
+thiserror.workspace = true
+# `task_local!` for the parent bar and `spawn_blocking` for the
+# controlling-terminal probe, which `open(2)` can block on.
+tokio.workspace = true
+
+[lints]
+workspace = true

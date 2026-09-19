@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+//! Witness: one reach into the extracted crate `ocx_project`, for a guard
+//! whose forbidden list names a crate root rather than a module path.
+
+pub fn reaches() -> bool {
+    ocx_project::lock::is_stale()
+}

@@ -1,0 +1,1293 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+//! The two classification traits, and the one case that belongs to no library
+//! crate: `std::io::Error`, which cannot be an impl at all because the trait
+//! and the type would be foreign to each other's crate anywhere else.
+
+use ocx_exit::ExitCode;
+
+/// Classify an error into an [`ExitCode`].
+///
+/// Each library error type gets an impl here, owning the mapping from its own
+/// variants to a process exit code. The default impl returns `None` so types
+/// that do not classify can opt out.
+///
+/// # Composition
+///
+/// A wrapper variant that holds an inner classifiable error can recursively
+/// call `inner.classify()` and either return the inner code as-is (delegate)
+/// or override it based on its own context. This keeps each impl self-
+/// contained: an `OciClientError::Registry` impl can inspect its inner cause
+/// and decide whether to surface it or translate it (e.g. timeout vs. auth).
+pub(crate) trait ClassifyExitCode {
+    /// Return an exit code for this error, or `None` to defer to the next
+    /// link in the source chain.
+    fn classify(&self) -> Option<ExitCode> {
+        None
+    }
+}
+
+/// Infallible variant of [`ClassifyExitCode`] for leaf "kind" enums.
+///
+/// "Kind" enums (e.g. `SignErrorKind`, `VerifyErrorKind`) are pure
+/// discriminants — every variant has a well-defined exit code by construction.
+/// Using a separate trait with a non-`Option` return value forces each impl to
+/// be exhaustive: adding a new variant produces a match-exhaustiveness compile
+/// error in the impl body, keeping the exit-code contract in lockstep with the
+/// enum without a separate table that can silently drift.
+///
+/// Wrapping error types (e.g. `SignError { identifier, kind }`) still implement
+/// [`ClassifyExitCode`] and delegate to `self.kind.exit_code()` wrapped in
+/// `Some(_)`.
+pub(crate) trait ClassifyErrorKind {
+    /// Return the exit code this kind maps to.
+    fn exit_code(&self) -> ExitCode;
+
+    /// Stable snake_case discriminant for `envelope.error.detail`.
+    ///
+    /// Frozen contract C-S1-1 — values must NOT change between releases.
+    /// Consumers pattern-match on this string to dispatch programmatically
+    /// without parsing stderr. The snake_case parallel to `exit_code()`:
+    /// coarse category goes on `exit_code`, fine-grained variant name goes here.
+    ///
+    /// Implementations must be exhaustive (no wildcard `_` arm) so that adding
+    /// a new variant produces a compile error and forces an explicit mapping.
+    fn kind_detail(&self) -> &'static str;
+}
+
+pub(super) fn try_downcast(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
+    // `std::io::Error` is not OCX-owned, so we cannot impl `ClassifyExitCode`
+    // for it (orphan rule). Only `PermissionDenied` maps to a specific code;
+    // everything else falls through to the chain walker.
+    if let Some(io) = cause.downcast_ref::<std::io::Error>()
+        && io.kind() == std::io::ErrorKind::PermissionDenied
+    {
+        return Some(ExitCode::PermissionDenied);
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    use ocx_config::error::ConfigSource;
+    use ocx_config::error::Error as ConfigError;
+    use ocx_oci::client::error::ClientError;
+    use ocx_package_manager::error::{DependencyError, PackageError, PackageErrorKind};
+
+    // Helper: wrap any error into a `Box<dyn std::error::Error + 'static>` and
+    // call classify_error. The turbofish helps when the compiler can't infer
+    // the concrete type.
+    fn classify<E: std::error::Error + 'static>(err: E) -> ExitCode {
+        crate::exit::classify_library_error(&err as &(dyn std::error::Error + 'static))
+    }
+
+    // ── config::Error variants ───────────────────────────────────────────────
+
+    #[test]
+    fn config_file_not_found_maps_to_not_found() {
+        // Plan taxonomy: config::Error::FileNotFound → NotFound (79)
+        let err = ConfigError::FileNotFound {
+            path: PathBuf::from("/nonexistent.toml"),
+            tier: ConfigSource::Config,
+        };
+        assert_eq!(classify(err), ExitCode::NotFound);
+    }
+
+    #[test]
+    fn project_file_not_found_maps_to_not_found() {
+        // Symmetry: project-tier `FileNotFound` also maps to NotFound (79).
+        // Both `--config` and `--project` should exit 79 when the named file
+        // is missing.
+        let err = ConfigError::FileNotFound {
+            path: PathBuf::from("/nonexistent.project.toml"),
+            tier: ConfigSource::Project,
+        };
+        assert_eq!(classify(err), ExitCode::NotFound);
+    }
+
+    #[test]
+    fn project_file_not_found_error_message_points_at_project_flag() {
+        // Regression guard: a missing `--project` file must cite the project
+        // flag/env var, not the config ones. Rendering the Display output
+        // matters because this string is what users see on exit.
+        let err = ConfigError::FileNotFound {
+            path: PathBuf::from("/missing.toml"),
+            tier: ConfigSource::Project,
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--project") && rendered.contains("OCX_PROJECT"),
+            "project-tier FileNotFound must cite --project flag/env, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("--config") && !rendered.contains("OCX_CONFIG"),
+            "project-tier FileNotFound must NOT misdirect to --config, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn config_file_too_large_maps_to_config_error() {
+        // Plan taxonomy: config::Error::FileTooLarge → ConfigError (78)
+        let err = ConfigError::FileTooLarge {
+            path: PathBuf::from("/huge.toml"),
+            size: 100_000,
+            limit: 65_536,
+        };
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    #[test]
+    fn config_parse_error_maps_to_config_error() {
+        // Plan taxonomy: config::Error::Parse → ConfigError (78)
+        let toml_err = toml::from_str::<toml::Value>("invalid =[[[").unwrap_err();
+        let err = ConfigError::Parse {
+            path: PathBuf::from("/bad.toml"),
+            source: toml_err,
+        };
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    #[test]
+    fn config_io_error_maps_to_io_error() {
+        // Plan taxonomy: config::Error::Io → IoError (74)
+        let err = ConfigError::Io {
+            path: PathBuf::from("/config.toml"),
+            tier: ConfigSource::Config,
+            source: std::io::Error::other("read failure"),
+        };
+        assert_eq!(classify(err), ExitCode::IoError);
+    }
+
+    // ── ocx_lib::Error variants ──────────────────────────────────────────────
+
+    #[test]
+    fn lib_offline_mode_maps_to_policy_blocked() {
+        // Plan taxonomy: ocx_package_manager::Error::OfflineMode → PolicyBlocked (81)
+        let err = ocx_package_manager::Error::OfflineMode;
+        assert_eq!(classify(err), ExitCode::PolicyBlocked);
+    }
+
+    // ── std::io::Error with PermissionDenied kind ────────────────────────────
+
+    #[test]
+    fn io_permission_denied_maps_to_permission_denied() {
+        // Plan taxonomy: std::io::ErrorKind::PermissionDenied → PermissionDenied (77)
+        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "EPERM");
+        assert_eq!(classify(err), ExitCode::PermissionDenied);
+    }
+
+    // ── PackageManager three-layer chain ────────────────────────────────────
+
+    #[test]
+    fn lib_package_manager_find_failed_maps_to_not_found() {
+        // Plan taxonomy: three-layer chain — first error wins.
+        // `Error::FindFailed([PackageError{NotFound}])` → ExitCode::NotFound
+        // (79). Locks in "first error wins" behavior across the three-layer
+        // chain. Was routed through `ocx_lib::Error::PackageManager` until
+        // WP-37 dissolved that wrapper; the tier error now reaches the ladder
+        // on its own arm, which is the same code by the same delegation.
+        let identifier = ocx_oci::Identifier::new_registry("pkg", "example.com");
+        let inner = PackageError::new(identifier, PackageErrorKind::NotFound);
+        let pm_err = ocx_package_manager::error::Error::FindFailed(vec![inner]);
+        assert_eq!(classify(pm_err), ExitCode::NotFound);
+    }
+
+    // ── ClientError variants ─────────────────────────────────────────────────
+
+    #[test]
+    fn client_authentication_maps_to_auth_error() {
+        // Plan taxonomy: ClientError::Authentication → AuthError (80)
+        let err = ClientError::Authentication(Box::new(std::io::Error::other("bad creds")));
+        assert_eq!(classify(err), ExitCode::AuthError);
+    }
+
+    #[test]
+    fn client_manifest_not_found_maps_to_not_found() {
+        // Plan taxonomy: ClientError::ManifestNotFound → NotFound (79)
+        let err = ClientError::ManifestNotFound("x/y".into());
+        assert_eq!(classify(err), ExitCode::NotFound);
+    }
+
+    #[test]
+    fn client_invalid_manifest_maps_to_data_error() {
+        // Plan taxonomy: ClientError::InvalidManifest → DataError (65)
+        // (BlobNotFound omitted: requires full PinnedIdentifier construction)
+        let err = ClientError::InvalidManifest("m".into());
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn client_registry_maps_to_unavailable() {
+        // Plan taxonomy: ClientError::Registry → Unavailable (69)
+        let err = ClientError::Registry(Box::new(std::io::Error::other("503")));
+        assert_eq!(classify(err), ExitCode::Unavailable);
+    }
+
+    /// The 75-vs-69 split: a transient registry fault exits 75, which is what
+    /// tells a wrapper the same command may succeed if it is run again. The
+    /// sibling test above keeps the 69 fall-through honest — both must hold, or
+    /// the distinction is decorative.
+    #[test]
+    fn client_registry_transient_maps_to_temp_fail() {
+        let err = ClientError::RegistryTransient(Box::new(std::io::Error::other("connect timed out")));
+        assert_eq!(classify(err), ExitCode::TempFail);
+    }
+
+    /// A destination the transport refused is terminal, and the two codes it
+    /// must NOT be are asserted with it: 69 would tell a retry wrapper to
+    /// re-issue the push against the same hostile `Location` until its budget
+    /// runs out, and 75 would tell it the same and promise success.
+    ///
+    /// `UnfollowedRedirect` shares the code and the argument: a rerun walks the
+    /// same chain to the same answer, whether it ended in a refusal, the hop
+    /// limit, or a `Location` no client could act on.
+    #[test]
+    fn a_refused_destination_and_an_unfollowed_redirect_map_to_65_and_are_not_retryable() {
+        let refusal = || ClientError::UnsafeDestination(Box::new(std::io::Error::other("cross-host session URL")));
+        let redirect = || ClientError::UnfollowedRedirect(Box::new(std::io::Error::other("https -> http hop")));
+        for build in [&refusal as &dyn Fn() -> ClientError, &redirect] {
+            assert_eq!(classify(build()), ExitCode::DataError);
+            assert_ne!(classify(build()), ExitCode::Unavailable);
+            assert_ne!(classify(build()), ExitCode::TempFail);
+        }
+    }
+
+    #[test]
+    fn client_io_maps_to_io_error() {
+        // Plan taxonomy: ClientError::Io → IoError (74)
+        let err = ClientError::Io {
+            path: PathBuf::from("/x"),
+            source: std::io::Error::other("eio"),
+        };
+        assert_eq!(classify(err), ExitCode::IoError);
+    }
+
+    // ── DataError variants across subtypes ───────────────────────────────────
+
+    #[test]
+    fn digest_invalid_maps_to_data_error() {
+        // Plan taxonomy: DigestError::Invalid → DataError (65)
+        let err = ocx_oci::digest::error::DigestError::Invalid("not-a-digest".into());
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn identifier_error_maps_to_data_error() {
+        // Plan taxonomy: IdentifierError (any kind) → DataError (65)
+        let err = ocx_oci::identifier::error::IdentifierError::new(
+            "bad-input",
+            ocx_oci::identifier::error::IdentifierErrorKind::InvalidFormat,
+        );
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn command_resolution_error_maps_to_data_error() {
+        // A package shipping a non-executable binary is malformed content →
+        // DataError (65), parity with BinScanError::DeclaredNotExecutable.
+        // Without the ladder rung this silently degrades to Failure (1).
+        let err = ocx_config::env::CommandResolutionError::NotExecutable {
+            command: "shtool".into(),
+            path: PathBuf::from("/pkg/bin/shtool"),
+            mode: 0o644,
+        };
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn file_structure_missing_digest_maps_to_data_error() {
+        // Plan taxonomy: file_structure::Error::MissingDigest → DataError (65)
+        let err = ocx_store::file_structure::error::Error::MissingDigest("some/pkg:1.0".into());
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn archive_unsupported_format_maps_to_data_error() {
+        // Plan taxonomy: archive::Error::UnsupportedFormat → DataError (65)
+        let err = ocx_util::archive::Error::UnsupportedFormat(".rar".into());
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    // ── DependencyError variants ─────────────────────────────────────────────
+
+    #[test]
+    fn dependency_conflict_maps_to_data_error() {
+        // Plan taxonomy: DependencyError::Conflict → DataError (65)
+        let err = DependencyError::Conflict {
+            repository: ocx_oci::Repository::new("example.com", "pkg"),
+            identifiers: vec![],
+        };
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    // ── OciIndex chain-walk delegation ───────────────────────────────────────
+
+    #[test]
+    fn oci_index_source_walk_failed_delegates_to_inner_auth_error() {
+        // Plan: `OciIndexError::SourceWalkFailed` returns `None` from its own
+        // `classify()` so the chain walker continues via `source()`. The
+        // `#[source]` attribute on the `ArcError` payload surfaces the wrapped
+        // `ocx_lib::Error`, letting the generic `try_classify` ladder downcast
+        // and resolve the inner cause — here a `ClientError::Authentication`
+        // → `ExitCode::AuthError`. Before the fix, `SourceWalkFailed` called
+        // `arc.as_error().classify()` directly, which resolves only one hop
+        // and misses any deeper nesting.
+        let client_err = ClientError::Authentication(Box::new(std::io::Error::other("bad creds")));
+        let inner: ocx_index::error::Error = client_err.into();
+        let arc: ocx_index::error::ArcError = inner.into();
+        let err = ocx_index::error::Error::SourceWalkFailed(arc);
+        assert_eq!(classify(err), ExitCode::AuthError);
+    }
+
+    // ── #155 policy-block classification (offline + frozen) ──────────────────
+
+    #[test]
+    fn oci_index_policy_resolution_blocked_maps_to_policy_blocked() {
+        // Index-layer no-resolve policy block (offline / frozen unpinned-tag
+        // miss) → PolicyBlocked (81).
+        let err = ocx_index::error::Error::PolicyResolutionBlocked {
+            identifier: "registry.test/cmake:3.28".to_string(),
+            policy: "frozen",
+        };
+        assert_eq!(classify(err), ExitCode::PolicyBlocked);
+    }
+
+    #[test]
+    fn project_policy_blocked_maps_to_policy_blocked() {
+        // Project-layer policy block (offline / frozen during lock resolution)
+        // → PolicyBlocked (81), same category as the index-layer block.
+        use ocx_project::error::{ProjectError, ProjectErrorKind};
+        let id = ocx_oci::Identifier::new_registry("cmake", "registry.test");
+        let kind = ProjectErrorKind::PolicyBlocked {
+            identifier: Box::new(id),
+            policy: "offline",
+        };
+        let err = ocx_project::error::Error::Project(ProjectError::new(PathBuf::new(), kind));
+        assert_eq!(classify(err), ExitCode::PolicyBlocked);
+    }
+
+    #[test]
+    fn patch_policy_blocked_maps_to_policy_blocked() {
+        // Patch-tier policy block (offline, companion with no recorded pin) →
+        // PolicyBlocked (81), the same family as the index and project blocks.
+        let id = ocx_oci::Identifier::new_registry("certs/ca-bundle", "patches.test");
+        let err = ocx_package_manager::patch::PatchError::PolicyBlocked {
+            identifier: Box::new(id),
+        };
+        assert_eq!(classify(err), ExitCode::PolicyBlocked);
+    }
+
+    #[test]
+    fn verb_policy_blocked_maps_to_policy_blocked() {
+        // Verb-level policy block (`ocx index update` under --frozen) →
+        // PolicyBlocked (81), so a CI script can `case $?` on it exactly like
+        // the offline refusal it sits beside.
+        //
+        // Reached through `classify_error` rather than the library ladder: the
+        // refusal is CLI-owned since WP-37 dissolved
+        // `ocx_lib::Error::PolicyBlocked`, so it classifies on the CLI-local
+        // pass. Built by the real helper, so a drift in the code it carries
+        // reds here rather than in a local re-statement of it.
+        let err = crate::command::index_common::policy_blocked("`ocx index update`", "frozen");
+        assert_eq!(crate::exit::classify_error(&err), ExitCode::PolicyBlocked);
+    }
+
+    #[test]
+    fn shell_error_falls_through_to_the_same_failure() {
+        // WP-37 retired `ocx_lib::Error::Shell(_) => None` with the crate that
+        // declared it. The baseline row's value was `None`, and `None` is what
+        // an unarmed type already produces: the ladder finds no rung for it and
+        // `classify_library_error` returns `Failure`. So the arm contributed
+        // nothing to classification while it existed, and deleting it is a
+        // no-op by construction — shown here rather than argued. Arming this
+        // type to any code reds this line, which is the red the `DISSOLVED`
+        // row's `FallsThrough` claim could not reach by a name.
+        let err = ocx_shell::shell::error::Error::UnsupportedClapShell(ocx_shell::shell::Shell::Bash);
+        assert_eq!(classify(err), ExitCode::Failure);
+    }
+
+    // ── record::RecordsError exit-code classification ────────────────────────
+
+    /// `try_classify` is a hand-written downcast ladder with no compile-time
+    /// guard: a type with no arm silently falls through to `Failure` (1). For
+    /// records that would turn an unwritable operator sink from exit 74 into
+    /// exit 1, so this test locks in both the arm's presence and every variant's
+    /// code. The variants split across two codes deliberately — an unwritable
+    /// sink is an I/O fault, while everything the operator fixes by editing
+    /// `[records]` (the template, the rendered name, the sink itself) is a
+    /// config fault.
+    #[test]
+    fn records_error_classifies_to_correct_exit_codes() {
+        use ocx_package_manager::record::RecordsError;
+
+        let err = RecordsError::Io {
+            path: PathBuf::from("/var/log/ocx"),
+            source: std::io::Error::other("sink boom"),
+        };
+        assert_eq!(
+            classify(err),
+            ExitCode::IoError,
+            "unwritable sink must map to IoError(74)"
+        );
+
+        let err = RecordsError::Serialize(serde_json::from_str::<u8>("{").expect_err("malformed JSON"));
+        assert_eq!(
+            classify(err),
+            ExitCode::IoError,
+            "serialize failure must map to IoError(74)"
+        );
+
+        let err = RecordsError::TemplateUnknownPlaceholder {
+            placeholder: "nope".to_string(),
+        };
+        assert_eq!(
+            classify(err),
+            ExitCode::ConfigError,
+            "unknown placeholder is a config parse error → ConfigError(78), never IoError(74)"
+        );
+
+        let err = RecordsError::TemplateNotUnique;
+        assert_eq!(
+            classify(err),
+            ExitCode::ConfigError,
+            "a non-unique template must map to ConfigError(78)"
+        );
+
+        let err = RecordsError::NameNotAFilename {
+            name: "../escape.json".to_string(),
+        };
+        assert_eq!(
+            classify(err),
+            ExitCode::ConfigError,
+            "a name that is not a plain filename must map to ConfigError(78)"
+        );
+
+        let err = RecordsError::SinkSymlink {
+            path: PathBuf::from("/var/log/ocx"),
+        };
+        assert_eq!(
+            classify(err),
+            ExitCode::ConfigError,
+            "a symlinked sink is a `[records] dir` misconfiguration → ConfigError(78), not a usage error"
+        );
+    }
+
+    /// The same codes must survive the wrap into the root `Error`, which reaches
+    /// them through a transparent variant rather than its own mapping.
+    #[test]
+    fn records_error_classifies_through_root_error() {
+        use ocx_package_manager::record::RecordsError;
+
+        let err = RecordsError::Io {
+            path: PathBuf::from("/var/log/ocx"),
+            source: std::io::Error::other("sink boom"),
+        };
+        assert_eq!(classify(err), ExitCode::IoError);
+
+        let err = RecordsError::TemplateNotUnique;
+        assert_eq!(
+            classify(err),
+            ExitCode::ConfigError,
+            "the root wrapper must not flatten the template/sink split to one code"
+        );
+    }
+
+    /// `LaunchError` is the type a fail-closed launch actually returns, so the
+    /// ladder needs its own arm for it: it is the node reached first, ahead of
+    /// the `RecordsError` it carries. This test pins the codes to the records
+    /// fault rather than to how the wrapper happens to be spelled — the operator
+    /// branches on 74 and 78, and neither may drift when the wrapper changes.
+    #[test]
+    fn launch_error_records_variant_preserves_the_records_exit_code() {
+        use ocx_package_manager::launch::LaunchError;
+        use ocx_package_manager::record::RecordsError;
+
+        let err = LaunchError::Records(RecordsError::Io {
+            path: PathBuf::from("/var/log/ocx"),
+            source: std::io::Error::other("sink boom"),
+        });
+        assert_eq!(
+            classify(err),
+            ExitCode::IoError,
+            "a fail-closed record write must exit 74 through the launch seam"
+        );
+
+        let err = LaunchError::Records(RecordsError::TemplateNotUnique);
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    /// A spawn failure must classify exactly as it did before the three exec
+    /// sites were folded into the launch seam: delegate to the wrapped
+    /// `io::Error`, so a permission-denied spawn is 77 and anything else falls
+    /// through to `Failure` (1). Locking this in keeps the seam's adoption a
+    /// behaviour-preserving refactor.
+    #[test]
+    fn launch_error_spawn_delegates_to_the_inner_io_error() {
+        use ocx_package_manager::launch::LaunchError;
+
+        let err = LaunchError::Spawn {
+            resolved: PathBuf::from("/usr/bin/cmake"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "EACCES"),
+        };
+        assert_eq!(classify(err), ExitCode::PermissionDenied);
+
+        let err = LaunchError::Spawn {
+            resolved: PathBuf::from("/usr/bin/cmake"),
+            source: std::io::Error::other("exec boom"),
+        };
+        assert_eq!(classify(err), ExitCode::Failure);
+    }
+
+    // ── ocx_util::singleflight::Error exit-code classification ─────────────────────────
+
+    // ── setup::error::Error routing ──────────────────────────────────────────
+
+    #[test]
+    fn setup_io_error_maps_to_io_error() {
+        // Plan contract 6: setup::Error::Io → IoError (74).
+        let err = ocx_setup::error::Error::Io {
+            path: PathBuf::from("/home/dev/.bashrc"),
+            source: std::io::Error::other("write failure"),
+        };
+        assert_eq!(classify(err), ExitCode::IoError);
+    }
+
+    #[test]
+    fn setup_subprocess_error_maps_to_unavailable() {
+        // Plan contract 6: setup::Error::Subprocess → Unavailable (69).
+        let err = ocx_setup::error::Error::Subprocess(std::io::Error::other("pwsh failed"));
+        assert_eq!(classify(err), ExitCode::Unavailable);
+    }
+
+    /// Error taxonomy: `setup::Error::InvalidVersionSpec` → `UsageError` (64).
+    ///
+    /// Clap's `value_parser` produces this variant when the VERSION positional
+    /// fails to parse; it routes to exit 64 so the operator sees a usage error.
+    #[test]
+    fn setup_invalid_version_spec_maps_to_usage_error() {
+        let err = ocx_setup::error::Error::InvalidVersionSpec {
+            input: "1.2.3@".to_string(),
+            reason: "trailing '@' with no digest".to_string(),
+        };
+        assert_eq!(classify(err), ExitCode::UsageError);
+    }
+
+    /// Error taxonomy: `setup::Error::PinDigestMismatch` → `DataError` (65).
+    ///
+    /// A `tag@digest` pin is a fail-closed immutability assertion (plan D9).
+    /// "Found but inconsistent" = exit 65, not "not found" (79).
+    #[test]
+    fn setup_pin_digest_mismatch_maps_to_data_error() {
+        let hex = "a".repeat(64);
+        let hex2 = "b".repeat(64);
+        let expected = ocx_oci::Digest::try_from(format!("sha256:{hex}").as_str()).expect("expected digest must parse");
+        let resolved =
+            ocx_oci::Digest::try_from(format!("sha256:{hex2}").as_str()).expect("resolved digest must parse");
+        let err = ocx_setup::error::Error::PinDigestMismatch {
+            tag: "0.9.2".to_string(),
+            expected,
+            resolved,
+            hint: None,
+        };
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    /// Error taxonomy: `PinDigestMismatch` with a `--frozen` stale-index hint
+    /// still maps to `DataError` (65) — the hint is diagnostic, not a different
+    /// error class.
+    #[test]
+    fn setup_pin_digest_mismatch_with_hint_still_maps_to_data_error() {
+        let hex = "a".repeat(64);
+        let hex2 = "b".repeat(64);
+        let expected = ocx_oci::Digest::try_from(format!("sha256:{hex}").as_str()).expect("expected digest must parse");
+        let resolved =
+            ocx_oci::Digest::try_from(format!("sha256:{hex2}").as_str()).expect("resolved digest must parse");
+        let err = ocx_setup::error::Error::PinDigestMismatch {
+            tag: "0.9.2".to_string(),
+            expected,
+            resolved,
+            hint: Some("run `ocx index update` to refresh the local index".to_string()),
+        };
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn setup_bootstrap_error_delegates_to_inner_offline() {
+        // Plan contract 6: setup::Error::Bootstrap delegates to the inner
+        // package-manager error. An offline-mode bootstrap failure classifies
+        // to PolicyBlocked (81) via the inner cause, not a setup-specific code.
+        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", "ocx.sh");
+        let inner = PackageError::new(
+            identifier,
+            PackageErrorKind::Internal(ocx_package_manager::Error::OfflineMode),
+        );
+        let pm_err = ocx_package_manager::error::Error::InstallFailed(vec![inner]);
+        let err = ocx_setup::error::Error::Bootstrap(pm_err);
+        assert_eq!(classify(err), ExitCode::PolicyBlocked);
+    }
+
+    /// DX-15 / C-010: `setup::Error::ExtraCaCerts` is `#[error(transparent)]`,
+    /// so `source()` skips it and the chain walker never sees the `TlsError`;
+    /// the variant's own `classify()` arm must delegate inline. Inline-origin
+    /// content refusal (the env value holds no certificate) is 78.
+    #[test]
+    fn setup_extra_ca_certs_inline_refusal_maps_to_config_error() {
+        use ocx_config::tls::ExtraRootsSource;
+        use ocx_config::tls::TlsError;
+
+        let err = ocx_setup::error::Error::ExtraCaCerts(TlsError::Empty {
+            origin: ExtraRootsSource::Env,
+        });
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    /// DX-15 / C-010: the file-origin sibling — a path the operator named that
+    /// could not be read as a bounded regular file — is 74 through the same
+    /// transparent wrapper.
+    #[test]
+    fn setup_extra_ca_certs_unreadable_file_maps_to_io_error() {
+        use ocx_config::tls::ExtraRootsSource;
+        use ocx_config::tls::TlsError;
+
+        let err = ocx_setup::error::Error::ExtraCaCerts(TlsError::Unreadable {
+            origin: ExtraRootsSource::EnvPath(std::path::PathBuf::from("/dev/zero")),
+            io: std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
+        });
+        assert_eq!(classify(err), ExitCode::IoError);
+    }
+
+    /// C-010: the rendered-document ceiling refusal (setup's own, not a
+    /// `TlsError`) is a configuration fault — 78.
+    #[test]
+    fn setup_extra_ca_certs_rendered_config_too_large_maps_to_config_error() {
+        let err = ocx_setup::error::Error::RenderedConfigTooLarge {
+            path: std::path::PathBuf::from("/home/x/.ocx/config.toml"),
+            bytes: 70_000,
+        };
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    // ── SignError (Slice 1 — referrers signing) ─────────────────────────────
+
+    #[test]
+    fn sign_error_oidc_token_rejected_maps_to_auth_error() {
+        // Slice 1 C-S1-1: SignError delegates to SignErrorKind; OidcTokenRejected → 80
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::OidcTokenRejected);
+        assert_eq!(classify(err), ExitCode::AuthError);
+    }
+
+    #[test]
+    fn sign_error_transparency_log_unavailable_maps_to_transparency_log_unavailable() {
+        // Slice 1: distinct exit code 83 so operators can distinguish Rekor
+        // outage from registry outage.
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::TransparencyLogUnavailable);
+        assert_eq!(classify(err), ExitCode::TransparencyLogUnavailable);
+    }
+
+    #[test]
+    fn sign_error_referrers_unsupported_maps_to_referrers_unsupported() {
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::ReferrersUnsupported);
+        assert_eq!(classify(err), ExitCode::ReferrersUnsupported);
+    }
+
+    #[test]
+    fn sign_error_offline_sign_refused_maps_to_permission_denied() {
+        // Slice 1 policy: `ocx package sign --offline` is rejected at the CLI.
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::OfflineSignRefused);
+        assert_eq!(classify(err), ExitCode::PermissionDenied);
+    }
+
+    // ── VerifyError (Slice 1 — referrers verify) ────────────────────────────
+
+    #[test]
+    fn verify_error_no_signatures_found_maps_to_not_found() {
+        // Slice 1 C-S1-2: "not signed" must exit 79 so scripts can distinguish
+        // "no signature" from "bad signature" without stderr parsing.
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::NoSignaturesFound);
+        assert_eq!(classify(err), ExitCode::NotFound);
+    }
+
+    #[test]
+    fn verify_error_identity_mismatch_maps_to_permission_denied() {
+        // Slice 1: "verified, but not by the signer you expected" = 77.
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::IdentityMismatch);
+        assert_eq!(classify(err), ExitCode::PermissionDenied);
+    }
+
+    #[test]
+    fn verify_error_issuer_mismatch_maps_to_permission_denied() {
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::IssuerMismatch);
+        assert_eq!(classify(err), ExitCode::PermissionDenied);
+    }
+
+    #[test]
+    fn verify_error_bundle_parse_failed_maps_to_data_error() {
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::BundleParseFailed);
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn verify_error_rekor_set_invalid_maps_to_data_error() {
+        // RekorSetInvalid is a crypto / data integrity failure (tampered bundle),
+        // not a service-unavailability signal. Exit 65 (DataError) so retry
+        // handlers do not retry a tampered SET.
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::RekorSetInvalid);
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    #[test]
+    fn verify_error_trust_root_unavailable_maps_to_config_error() {
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let err = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::TrustRootUnavailable);
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    // ── SignError: IdentityTokenFilePermissive walks the full chain ──────────
+
+    #[test]
+    fn sign_error_identity_token_file_permissive_maps_to_permission_denied() {
+        // B-T1: `classify_error` must walk the full `source()` chain and return
+        // `ExitCode::PermissionDenied` (77) when `SignErrorKind::IdentityTokenFilePermissive`
+        // is buried one level deep under a context wrapper error.
+        //
+        // Motivation: `classify_error` uses `std::iter::successors(Some(err), |e| e.source())`
+        // to walk the chain. This test proves the walker does NOT stop at the outer
+        // wrapper (which has no `ClassifyExitCode` impl) and continues to the `SignError`
+        // carried via `source()`.
+
+        // A minimal wrapper that simulates an `anyhow::context()` layer: it has
+        // a human-readable message and carries its cause via `source()`.
+        #[derive(Debug)]
+        struct ContextWrapper {
+            msg: &'static str,
+            source: ocx_sign::sign::SignError,
+        }
+
+        impl std::fmt::Display for ContextWrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.msg)
+            }
+        }
+
+        impl std::error::Error for ContextWrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.source)
+            }
+        }
+
+        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let sign_err = ocx_sign::sign::SignError::new(
+            id,
+            ocx_sign::sign::SignErrorKind::IdentityTokenFilePermissive {
+                path: std::path::PathBuf::from("/tmp/token"),
+                mode: 0o644,
+            },
+        );
+        // Wrap in a context layer — the outer error has no ClassifyExitCode impl,
+        // so the classifier must descend via source() to find the SignError.
+        let wrapped = ContextWrapper {
+            msg: "reading identity token file for sign operation",
+            source: sign_err,
+        };
+
+        assert_eq!(
+            crate::exit::classify_library_error(&wrapped as &(dyn std::error::Error + 'static)),
+            ExitCode::PermissionDenied,
+        );
+    }
+
+    // ── Fall-through lock-in ─────────────────────────────────────────────────
+
+    #[test]
+    fn unclassified_error_falls_through_to_failure() {
+        // Plan: default fall-through — any error not matched by the dispatch ladder
+        // must return ExitCode::Failure (1), not panic or return a wrong code.
+        // Using a plain std::io::Error with Other kind (not PermissionDenied) as
+        // a representative error that no classifier claims.
+        let err = std::io::Error::other("something unclassified");
+        assert_eq!(classify(err), ExitCode::Failure);
+    }
+
+    // ── Per-layer layout error classification (Part 2) ───────────────────────
+
+    #[test]
+    fn layer_ref_parse_error_maps_to_usage_error() {
+        // A layer-ref string is CLI (publish-side) input, so a malformed one is
+        // a usage error (64) — for both the layout-tail and bare-digest variants.
+        let malformed = ocx_oci::layer_ref::LayerRefParseError::MalformedLayout {
+            spec: "layer.tar.gz:strip=x".to_string(),
+            reason: "strip must be a u8".to_string(),
+        };
+        assert_eq!(classify(malformed), ExitCode::UsageError);
+
+        let bare = ocx_oci::layer_ref::LayerRefParseError::BareDigest(format!("sha256:{}", "a".repeat(64)));
+        assert_eq!(classify(bare), ExitCode::UsageError);
+    }
+
+    #[test]
+    fn layer_layout_error_maps_to_data_error() {
+        // Read-side annotation resolution failure from an untrusted manifest →
+        // DataError (65), for both the strip and prefix variants.
+        let bad_strip = ocx_oci::LayerLayoutError::BadStrip("notanumber".to_string());
+        assert_eq!(classify(bad_strip), ExitCode::DataError);
+
+        let bad_prefix = ocx_oci::LayerLayoutError::BadPrefix(ocx_util::fs::path::PathEscapeError::Escapes);
+        assert_eq!(classify(bad_prefix), ExitCode::DataError);
+    }
+
+    #[test]
+    fn path_escape_error_maps_to_data_error() {
+        // A read-side containment rejection (re-validated hostile annotation) is
+        // malformed input data → DataError (65).
+        let err = ocx_util::fs::path::PathEscapeError::Escapes;
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    /// Regression (exit-code 74 -> 65): a hostile manifest layer annotation
+    /// resolved at pull time is wrapped exactly as `pull.rs` wraps it —
+    /// `PackageErrorKind::Internal(ocx_package_manager::Error::LayerLayout(LayerLayoutError))`.
+    /// Before the fix `pull.rs` wrapped it via `ocx_lib::Error::InternalFile`, whose
+    /// `classify()` hard-returns `IoError` (74) and short-circuits the chain
+    /// walker before it can reach the inner `LayerLayoutError` (65); `io::Error`'s
+    /// `source()` also skips a boxed inner error, so chain-walking alone would not
+    /// recover it. The delegating `ocx_lib::Error::LayerLayout` variant
+    /// (`classify() == None`, `#[source]` carrying the cause) lets the walker
+    /// descend to the layout error → 65. This test reproduces that exact wrapping
+    /// shape and must fail if the read boundary regresses to `InternalFile`.
+    #[test]
+    fn pull_wrapped_layer_layout_error_classifies_to_data_error() {
+        let layout_err = ocx_oci::LayerLayoutError::BadPrefix(ocx_util::fs::path::PathEscapeError::Escapes);
+        let wrapped = PackageErrorKind::Internal(ocx_package_manager::Error::LayerLayout(layout_err));
+        assert_eq!(
+            classify(wrapped),
+            ExitCode::DataError,
+            "a wrapped hostile layout annotation must classify as DataError (65), not IoError (74)"
+        );
+    }
+
+    // ── managed-config error classification ──────────────────────────────────
+
+    /// Error taxonomy: `ManagedConfigError::EmptySource` -> `ConfigError` (78).
+    #[test]
+    fn managed_config_empty_source_maps_to_config_error() {
+        let err = ocx_config::managed::ManagedConfigError::EmptySource;
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    /// Error taxonomy: `ManagedConfigError::SnapshotRequired` -> `ConfigError`
+    /// (78) — a required snapshot that never synced, identical online/offline.
+    #[test]
+    fn managed_config_snapshot_required_maps_to_config_error() {
+        let identifier = ocx_oci::Identifier::new_registry("ocx-config", "corp.example.com");
+        let err = ocx_config::managed::ManagedConfigError::SnapshotRequired {
+            effective_source: identifier,
+        };
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    /// Error taxonomy: `ManagedConfigFetchError::LayerDigestMismatch` ->
+    /// `DataError` (65) — a tampered/corrupt registry response (digest
+    /// re-verification lives in the fetch leg since managed-config v2).
+    #[test]
+    fn managed_config_fetch_digest_mismatch_maps_to_data_error() {
+        let err = ocx_config::managed_config::ManagedConfigFetchError::LayerDigestMismatch {
+            declared: format!("sha256:{}", "a".repeat(64)),
+            computed: format!("sha256:{}", "b".repeat(64)),
+        };
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    /// Error taxonomy: `ManagedConfigPersistError::SnapshotWriteFailed` ->
+    /// `IoError` (74).
+    #[test]
+    fn managed_config_persist_snapshot_write_failed_maps_to_io_error() {
+        let err = ocx_config::managed_config::ManagedConfigPersistError::SnapshotWriteFailed {
+            source: std::io::Error::other("disk full"),
+        };
+        assert_eq!(classify(err), ExitCode::IoError);
+    }
+
+    /// Error taxonomy: a package shape mismatch on fetch -> `DataError` (65)
+    /// — malformed registry data, not a network fault.
+    #[test]
+    fn managed_config_fetch_shape_error_maps_to_data_error() {
+        let err = ocx_config::managed_config::ManagedConfigFetchError::NoAnyPlatformEntry;
+        assert_eq!(classify(err), ExitCode::DataError);
+        let err = ocx_config::managed_config::ManagedConfigFetchError::MissingConfigToml;
+        assert_eq!(classify(err), ExitCode::DataError);
+    }
+
+    /// Error taxonomy: the publish leg's validation rejections -> `ConfigError`
+    /// (78) — an operator payload mistake, caught before any registry write.
+    #[test]
+    fn managed_config_publish_validation_maps_to_config_error() {
+        let err = ocx_package_manager::managed_config::ManagedConfigPublishError::ContainsManagedSection;
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    /// `ManagedConfigUpdateError` delegates to its inner fetch/persist cause.
+    #[test]
+    fn managed_config_update_error_delegates_to_inner_persist_cause() {
+        let inner = ocx_config::managed_config::ManagedConfigPersistError::SnapshotWriteFailed {
+            source: std::io::Error::other("disk full"),
+        };
+        let err = ocx_config::managed_config::ManagedConfigUpdateError::Persist(inner);
+        assert_eq!(classify(err), ExitCode::IoError);
+    }
+
+    /// `ManagedConfigUpdateError::Fetch` wrapping a `FetchFailed` whose inner
+    /// OCI cause is an authentication failure classifies to `AuthError` (80) —
+    /// the update error delegates to the fetch error, which delegates to the
+    /// `ClientError`. A registry-auth rejection while `ocx config update`
+    /// fetches the managed-config snapshot must exit 80, never a generic
+    /// failure.
+    #[test]
+    fn managed_config_update_error_fetch_auth_maps_to_auth_error() {
+        let client_err = ClientError::Authentication(Box::new(std::io::Error::other("bad creds")));
+        let fetch_err = ocx_config::managed_config::ManagedConfigFetchError::FetchFailed { source: client_err };
+        let err = ocx_config::managed_config::ManagedConfigUpdateError::Fetch(fetch_err);
+        assert_eq!(classify(err), ExitCode::AuthError);
+    }
+
+    /// Error taxonomy: `ManagedConfigUpdateError::SourceNotFound` -> `NotFound`
+    /// (79) — the resolved source has no manifest in the registry (a genuinely
+    /// absent ref, not a network/auth fault). Amended post-Codex-gate
+    /// 2026-07-05: this used to be a silent `NotConfigured` success.
+    #[test]
+    fn managed_config_update_error_source_not_found_maps_to_not_found() {
+        let identifier = ocx_oci::Identifier::new_registry("ocx-config", "corp.example.com");
+        let err = ocx_config::managed_config::ManagedConfigUpdateError::SourceNotFound {
+            effective_source: identifier,
+        };
+        assert_eq!(classify(err), ExitCode::NotFound);
+    }
+
+    /// Regression (exit-code 74 -> 64, second instance): the assemble-time D9
+    /// symlinked-intermediate-dir check wraps a `SymlinkWalkError` as
+    /// `PackageErrorKind::Internal(ocx_package_manager::Error::SymlinkWalk(..))`. Before the
+    /// fix it wrapped via `file_error`/`io::Error::other` -> `InternalFile` ->
+    /// `IoError` (74), swallowing the `SymlinkWalkError::Ancestor` -> UsageError
+    /// (64) classification. The delegating `ocx_lib::Error::SymlinkWalk` variant
+    /// (`classify()` delegates to the inner) restores 64. This reproduces the
+    /// exact wrapping shape from `assemble.rs`.
+    #[test]
+    fn assemble_symlink_walk_error_classifies_to_usage_error() {
+        let walk_err = ocx_util::fs::SymlinkWalkError::Ancestor {
+            path: PathBuf::from("/pkg/content/share/lib"),
+            ancestor: PathBuf::from("/pkg/content/share"),
+        };
+        let wrapped = PackageErrorKind::Internal(ocx_package_manager::Error::SymlinkWalk(walk_err));
+        assert_eq!(
+            classify(wrapped),
+            ExitCode::UsageError,
+            "a symlinked-intermediate-dir refusal must classify as UsageError (64), not IoError (74)"
+        );
+    }
+
+    // ── BinScanError registration (regression) ───────────────────────────────
+
+    /// Regression: `BinScanError` (the `--bin-scan` Verify-mode diff error)
+    /// was never registered in the `try_classify` ladder, so `ocx package
+    /// create --bin-scan` printed the right message but exited 1 (Failure)
+    /// instead of 65 (DataError). The type itself always implemented
+    /// `ClassifyExitCode` correctly — the ladder just never downcast to it.
+    #[test]
+    fn bin_scan_error_maps_to_data_error() {
+        use ocx_package::bin_scan::BinScanError;
+        use ocx_package::metadata::binary::BinaryName;
+
+        let name = BinaryName::try_from("cmake").unwrap();
+        let not_executable = BinScanError::DeclaredNotExecutable {
+            name: name.clone(),
+            path: PathBuf::from("/pkg/bin/cmake"),
+        };
+        assert_eq!(classify(not_executable), ExitCode::DataError);
+
+        let undeclared = BinScanError::UndeclaredBinary {
+            name,
+            path: PathBuf::from("/pkg/bin/ninja"),
+        };
+        assert_eq!(classify(undeclared), ExitCode::DataError);
+    }
+
+    /// `BinScanError::Scan` itself returns `None` from `classify()` (see
+    /// `bin_scan.rs`'s `ClassifyExitCode` impl) so the chain walker continues
+    /// via `source()` into the wrapped `ocx_lib::Error`. This test wraps a
+    /// cause with a known, distinct classification (`OfflineMode` ->
+    /// `PolicyBlocked`, not `DataError`/`Failure`) and asserts the *inner*
+    /// cause's exit code wins — locking in the delegation contract rather
+    /// than a hardcoded fallback to `Failure` (1).
+    #[test]
+    fn bin_scan_error_scan_variant_delegates_to_inner_cause() {
+        use ocx_package::bin_scan::BinScanError;
+
+        // The cause is a tier error now: `Scan` carries `package::error::Error`
+        // since the package tier took its own root (E1). `Index` delegates the
+        // same way `ocx_lib::Error::OciIndex` did, and a policy block is still
+        // the distinct code — 81, neither this enum's own `DataError` nor the
+        // `Failure` fallback a hardcoded arm would produce.
+        let err = BinScanError::Scan(ocx_package::error::Error::Index(
+            ocx_index::error::Error::PolicyResolutionBlocked {
+                identifier: "pkg:1.0.0".to_string(),
+                policy: "offline",
+            },
+        ));
+        assert_eq!(
+            classify(err),
+            ExitCode::PolicyBlocked,
+            "BinScanError::Scan must delegate classification to its inner ocx_lib::Error cause"
+        );
+    }
+
+    // ── interpolation template errors ───────────────────────────────────────
+
+    /// A `TemplateError` reaches the classifier bare from one place only:
+    /// `ocx launcher exec` resolving a baked entrypoint arg, where it is
+    /// wrapped in plain `anyhow` context. Env-value resolution instead wraps it
+    /// in `PackageError::EnvVarInterpolation`, whose own `classify()` delegates
+    /// to this same impl — so that path was always correct and this one was
+    /// not, until `TemplateError` joined the ladder. Same defect shape as
+    /// `bin_scan_error_maps_to_data_error` above: a correct `ClassifyExitCode`
+    /// impl the ladder never downcast to, so the ADR's documented 65 came out
+    /// as 1.
+    #[test]
+    fn template_error_maps_to_data_error() {
+        use ocx_package::metadata::template::TemplateError;
+
+        let disallowed = TemplateError::DisallowedToken {
+            token: "${deps.cmake.installPath}".to_string(),
+        };
+        assert_eq!(classify(disallowed), ExitCode::DataError);
+
+        let unknown = TemplateError::UnknownToken {
+            token: "${workspaceFolder}".to_string(),
+            hint: ocx_package::metadata::template::UnknownTokenHint::Escape,
+        };
+        assert_eq!(classify(unknown), ExitCode::DataError);
+    }
+
+    // ── announce error classification (design register C13) ─────────────────
+
+    /// `AnnounceError::Ssrf` classifies through `AnnounceError`'s own
+    /// `classify()`, which delegates to the wrapped `SsrfError` explicitly (see
+    /// `announce/error.rs`) — this pins that the registration in the ladder
+    /// and that delegation agree, not a source-chain walk.
+    #[test]
+    fn announce_ssrf_forbidden_target_maps_to_config_error() {
+        use ocx_announce::announce::AnnounceError;
+        use ocx_oci::ssrf::SsrfError;
+
+        let err = AnnounceError::Ssrf {
+            namespace: "ocx.sh".to_string(),
+            source: SsrfError::ForbiddenTarget {
+                host: "169.254.169.254".to_string(),
+                ip: "169.254.169.254".parse().unwrap(),
+            },
+        };
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    #[test]
+    fn announce_ssrf_resolution_failure_maps_to_unavailable() {
+        use ocx_announce::announce::AnnounceError;
+        use ocx_oci::ssrf::SsrfError;
+
+        let err = AnnounceError::Ssrf {
+            namespace: "ocx.sh".to_string(),
+            source: SsrfError::Resolution {
+                host: "registry.invalid".to_string(),
+                source: std::io::Error::other("dns lookup failed"),
+            },
+        };
+        assert_eq!(classify(err), ExitCode::Unavailable);
+    }
+
+    /// `AnnounceError::Observe`'s `#[source]` field is `Box<ClientError>` (a
+    /// concrete boxed type), so thiserror's `AsDynError` blanket forwarding
+    /// erases it as `Box<ClientError>`, not `ClientError` — a generic
+    /// `downcast_ref::<ClientError>()` in the chain walker would silently
+    /// miss it. `AnnounceError::classify()` delegates explicitly instead
+    /// (`source.classify()`, autoderef through `Box`), which is what this
+    /// locks in.
+    #[test]
+    fn announce_observe_delegates_to_inner_client_error() {
+        use ocx_announce::announce::AnnounceError;
+
+        let client_err = ClientError::Registry(Box::new(std::io::Error::other("503")));
+        let err = AnnounceError::Observe {
+            tag: "1.0.0".to_string(),
+            repository: "oci://ghcr.io/acme/widget".to_string(),
+            source: Box::new(client_err),
+        };
+        assert_eq!(classify(err), ExitCode::Unavailable);
+    }
+
+    #[test]
+    fn announce_unresolved_tag_maps_to_not_found() {
+        use ocx_announce::announce::AnnounceError;
+
+        let err = AnnounceError::UnresolvedTag {
+            tag: "9.9.9".to_string(),
+            repository: "oci://ghcr.io/acme/widget".to_string(),
+        };
+        assert_eq!(classify(err), ExitCode::NotFound);
+    }
+
+    /// `AnnounceError::Forge` is `#[error(transparent)]` — same erasure trap
+    /// as `Ssrf` (see the module doc there). Only correct because
+    /// `AnnounceError::classify()` delegates explicitly to `ForgeError`.
+    #[test]
+    fn announce_forge_status_401_maps_to_auth_error() {
+        use ocx_announce::announce::AnnounceError;
+        use ocx_announce::forge::ForgeError;
+
+        let err = AnnounceError::Forge(ForgeError::Status {
+            url: "https://api.github.com/user".to_string(),
+            status: 401,
+            detail: String::new(),
+        });
+        assert_eq!(classify(err), ExitCode::AuthError);
+    }
+
+    #[test]
+    fn announce_forge_transport_failure_maps_to_unavailable() {
+        use ocx_announce::announce::AnnounceError;
+        use ocx_announce::forge::ForgeError;
+
+        let source = reqwest::Client::new()
+            .get("not a valid url")
+            .build()
+            .expect_err("a malformed URL must fail to build without any network access");
+        let err = AnnounceError::Forge(ForgeError::Transport {
+            url: "https://api.github.com/user".to_string(),
+            source,
+        });
+        assert_eq!(classify(err), ExitCode::Unavailable);
+    }
+
+    // ── toolchain path grammar (WP-1, C-001/D-V14) ───────────────────────────
+
+    /// C-013/C-014's exit 78 must be reachable **through the real classifier**,
+    /// not only through the error type's own `classify()` impl.
+    ///
+    /// This test and `every_toolchain_path_error_variant_classifies_as_config_error`
+    /// in `file_structure/toolchain_store.rs` cover two different failures, which
+    /// is why both exist: removing the `try_downcast!(ToolchainPathError)` entry
+    /// from the ladder leaves that one green — the impl still returns
+    /// `Some(ConfigError)` — while this one reds, because an unregistered type
+    /// falls through the chain walk to `ExitCode::Failure`.
+    #[test]
+    fn toolchain_path_error_is_registered_in_the_classifier() {
+        use ocx_store::file_structure::{ToolchainPathComponent, ToolchainPathError};
+
+        // `Separator`, not the deleted `Reserved`: the sample only has to be a
+        // variant of this type, and re-basing it keeps the ladder check alive —
+        // deleting the test with the variant would delete the only assertion
+        // that catches un-registering `ToolchainPathError` from the ladder.
+        let err = ToolchainPathError::Separator {
+            component: ToolchainPathComponent::Group,
+            value: "a/b".to_string(),
+        };
+        assert_eq!(
+            classify(err),
+            ExitCode::ConfigError,
+            "an unregistered error type falls through to Failure — 78 must come from the ladder"
+        );
+    }
+
+    // ── claim error classification (C-052 / C-071) ──────────────────────────
+
+    /// C-071 — every claim-owned exit code survives the `try_downcast!` ladder.
+    ///
+    /// Driven over a **boxed** `ClaimError` through `classify_error`, never over
+    /// `ClaimError::classify` directly: the impl tested in isolation is green in
+    /// both registration states, which is exactly the check that cannot tell
+    /// registration from its absence. `AnnounceError`'s own module-local tests are
+    /// that shape today, which is why this one is written here instead.
+    ///
+    /// **Two mutations, two halves.** Deleting `try_downcast!(ClaimError)` reds
+    /// the claim-owned rows — and, because `ClaimError::Forge` is
+    /// `#[error(transparent)]` and thiserror forwards `source()` past the wrapped
+    /// error, it reds the forge-derived row too. The plan's stated rationale ("the
+    /// forge-derived codes survive because `ForgeError` is separately registered")
+    /// is false under C-052's own design; the test is stronger than the plan
+    /// claimed, and the fix is emphatically **not** to make `Forge` non-transparent.
+    /// Replacing the arm with `Self::Forge(_) => None` reds only the last row,
+    /// which is what separates the two halves.
+    ///
+    /// `OutputWrite` deliberately carries `ErrorKind::Other`, not
+    /// `PermissionDenied`: this module's bare-`io::Error` walker special-cases
+    /// `PermissionDenied` → 77, so a fixture built from that kind would measure the
+    /// walker rather than the `OutputWrite` arm.
+    #[test]
+    fn claim_error_reaches_classify_error() {
+        use ocx_announce::claim::ClaimError;
+        use ocx_announce::forge::ForgeError;
+
+        let already_claimed = ClaimError::PackageAlreadyClaimed {
+            package: "acme/widget".to_string(),
+            path: "p/acme/widget.json".to_string(),
+            base_ref: "main".to_string(),
+        };
+        assert_eq!(
+            classify(already_claimed),
+            ExitCode::DataError,
+            "65 — go announce instead"
+        );
+
+        let unknown_owner = ClaimError::OwnerUnknown {
+            login: "nobody".to_string(),
+        };
+        assert_eq!(classify(unknown_owner), ExitCode::NotFound, "79 — no such account");
+
+        let bot = ClaimError::BotIdentity {
+            login: "dependabot[bot]".to_string(),
+        };
+        assert_eq!(classify(bot), ExitCode::UsageError, "64 — name a human owner");
+
+        let malformed = ClaimError::MalformedRepository {
+            value: "ghcr.io/acme/widget".to_string(),
+        };
+        assert_eq!(
+            classify(malformed),
+            ExitCode::UsageError,
+            "64 from ClaimError's own arm, not 65 from OciIndexError"
+        );
+
+        let write = ClaimError::OutputWrite {
+            path: "/out/p/acme/widget.json".to_string(),
+            source: std::io::Error::other("no space left on device"),
+        };
+        assert_eq!(
+            classify(write),
+            ExitCode::IoError,
+            "74 — and the fixture kind is Other, so the PermissionDenied walker cannot be what answered"
+        );
+
+        let forge = ClaimError::Forge(ForgeError::Status {
+            url: "https://api.github.com/user".to_string(),
+            status: 401,
+            detail: String::new(),
+        });
+        assert_eq!(
+            classify(forge),
+            ExitCode::AuthError,
+            "80 — only because `Forge(inner) => inner.classify()` is explicit; `source()` skips past a transparent wrapper"
+        );
+    }
+}

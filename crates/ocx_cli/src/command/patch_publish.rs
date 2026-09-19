@@ -14,10 +14,7 @@ use std::process::ExitCode;
 
 use anyhow::Context as _;
 use clap::Args;
-use ocx_lib::{
-    oci,
-    package_manager::tasks::patch_discovery::{global_descriptor_id, patch_descriptor_id},
-};
+use ocx_package_manager::tasks::patch_discovery::{global_descriptor_id, patch_descriptor_id};
 
 use crate::options;
 
@@ -57,10 +54,10 @@ impl PatchPublishArgs {
         // ── Step 2: Read + validate the descriptor JSON file. ──
         let descriptor_bytes = tokio::fs::read(&self.descriptor)
             .await
-            .map_err(|error| ocx_lib::error::file_error(&self.descriptor, error))
+            .map_err(|error| ocx_util::error::FileError::new(&self.descriptor, error))
             .with_context(|| format!("reading descriptor file {}", self.descriptor.display()))?;
         // Validate up front for a clear error before any network work.
-        ocx_lib::patch::PatchDescriptor::from_json_bytes(&descriptor_bytes)
+        ocx_package_manager::patch::PatchDescriptor::from_json_bytes(&descriptor_bytes)
             .with_context(|| format!("validating patch descriptor file {}", self.descriptor.display()))?;
 
         // ── Step 3: Compute the target patch repo identifier. ──
@@ -98,10 +95,10 @@ impl PatchPublishArgs {
 /// `required_unless_present` guarantees it); when both are absent the global
 /// descriptor is used as a safe fallback so the function stays total.
 fn select_publish_target(
-    patches: &ocx_lib::ResolvedPatchConfig,
+    patches: &ocx_config::patch::ResolvedPatchConfig,
     global: bool,
-    base_id: Option<&oci::Identifier>,
-) -> oci::Identifier {
+    base_id: Option<&ocx_oci::Identifier>,
+) -> ocx_oci::Identifier {
     match (global, base_id) {
         (false, Some(base)) => patch_descriptor_id(patches, base),
         // `--global`, or (defensively) no base supplied → the global descriptor.
@@ -112,7 +109,7 @@ fn select_publish_target(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_lib::ResolvedPatchConfig;
+    use ocx_config::patch::ResolvedPatchConfig;
 
     fn patches() -> ResolvedPatchConfig {
         ResolvedPatchConfig {
@@ -150,7 +147,7 @@ mod tests {
     #[test]
     fn select_publish_target_base_is_package_specific_sub_path() {
         let patches = patches();
-        let base = oci::Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base = ocx_oci::Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         let target = select_publish_target(&patches, false, Some(&base));
         assert_eq!(target.registry(), "patches.corp.com");
         assert!(

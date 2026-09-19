@@ -11,7 +11,6 @@
 use std::process::ExitCode;
 
 use clap::Args;
-use ocx_lib::oci;
 
 use crate::options;
 
@@ -63,7 +62,7 @@ impl PatchSyncArgs {
 /// `any`-published companion satisfies every one of the concrete
 /// requirements below by construction (D1's `Any`-offer rule), so a trailing
 /// pseudo-`Any` requirement tier is redundant.
-fn platforms_or_concrete_matrix(explicit: Option<oci::Platform>) -> Vec<oci::Platform> {
+fn platforms_or_concrete_matrix(explicit: Option<ocx_oci::Platform>) -> Vec<ocx_oci::Platform> {
     match explicit {
         Some(platform) => vec![platform],
         None => concrete_ship_platforms(),
@@ -72,7 +71,7 @@ fn platforms_or_concrete_matrix(explicit: Option<oci::Platform>) -> Vec<oci::Pla
 
 /// The five concrete OS/architecture combinations OCX ships and tests, kept
 /// in sync with `product-context.md` "Platform support".
-fn concrete_ship_platforms() -> Vec<oci::Platform> {
+fn concrete_ship_platforms() -> Vec<ocx_oci::Platform> {
     [
         "linux/amd64",
         "linux/arm64",
@@ -113,7 +112,7 @@ mod tests {
     /// platform (no expansion).
     #[test]
     fn explicit_platform_narrows_to_single_value() {
-        let explicit: oci::Platform = "linux/amd64".parse().unwrap();
+        let explicit: ocx_oci::Platform = "linux/amd64".parse().unwrap();
         let resolved = platforms_or_concrete_matrix(Some(explicit.clone()));
         assert_eq!(resolved, vec![explicit]);
     }

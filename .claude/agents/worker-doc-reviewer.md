@@ -23,11 +23,11 @@ Cross-reference every changed file against table. If source change match, verify
 | New `OCX_*` env var anywhere | `reference/environment.md` | New env var section |
 | Changed env var behavior/default | `reference/environment.md` | Env var description |
 | `crates/ocx_schema/**` (new field) | `reference/metadata.md` | Schema field entry |
-| `crates/ocx_lib/src/package_manager/**` (changed logic) | `user-guide.md` | Package lifecycle sections |
-| `crates/ocx_lib/src/oci/platform*` (new platform) | `installation.md`, `user-guide.md` | Platform tables |
-| `crates/ocx_lib/src/oci/client*` (auth change) | `reference/environment.md`, `user-guide.md` | Auth sections |
+| `crates/ocx_package_manager/src/**` (changed logic) | `user-guide.md` | Package lifecycle sections |
+| `crates/ocx_oci/src/platform*` (new platform) | `installation.md`, `user-guide.md` | Platform tables |
+| `crates/ocx_oci/src/client*` (auth change) | `reference/environment.md`, `user-guide.md` | Auth sections |
 | JSON output format changes | `reference/command-line.md` | Output format descriptions |
-| `crates/ocx_lib/src/file_structure/**` | `user-guide.md` | Three-store architecture section |
+| `crates/ocx_store/src/**` | `user-guide.md` | Three-store architecture section |
 | New user-facing feature | `getting-started.md` | If it changes the core workflow |
 | Breaking change | `changelog.md` | Breaking changes section |
 | New CI integration pattern | `user-guide.md` | CI integration section |

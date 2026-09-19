@@ -1,0 +1,66 @@
+[package]
+name = "ocx_announce"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# The seam feature, forwarded the way every other crate here forwards it:
+# test-only surface that must never reach the release binary. This tier's own
+# seams are the forge base-URL and retry-schedule overrides in
+# `forge/{github,gitlab,git_workspace}.rs`; it forwards no sibling's, because
+# nothing it drives is gated anywhere else.
+__testing = []
+
+[dependencies]
+# Every workspace edge below is a row of `scripts/crate_map.toml`'s
+# `ocx_announce` entry; a dependency absent from that row is a defect even when
+# Cargo would accept it. `ocx_lib` is deliberately NOT among them — the tier
+# names no root error, and the one the split dissolved left no successor to
+# reach for.
+ocx_config.workspace = true
+ocx_exit.workspace = true
+ocx_index.workspace = true
+ocx_oci.workspace = true
+ocx_package.workspace = true
+ocx_util.workspace = true
+
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+# `forge/kind.rs` implements `ValueEnum` for `ForgeKind` so the CLI can accept
+# it as a flag value; `clap_builder` is the half of clap that trait lives in.
+clap_builder.workspace = true
+# The forge write transport shells out to the operator's own `git`; `dunce`
+# canonicalises the workspace path it runs in on Windows.
+dunce.workspace = true
+futures.workspace = true
+hex.workspace = true
+log.workspace = true
+percent-encoding.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+which.workspace = true
+
+[dev-dependencies]
+# The FIFO helpers and fixture paths the forge and claim tests drive. Dev-only
+# by construction (`scripts/crate_map.toml` `[dev].allowed_everywhere`).
+ocx_test_support = { path = "../ocx_test_support" }
+# `announce/pipeline.rs`'s tests stand a local HTTP peer up to drive the
+# observe path. Test-only: the production transport is `reqwest`, never a
+# hand-built hyper service.
+hyper-util.workspace = true
+
+[lints]
+workspace = true

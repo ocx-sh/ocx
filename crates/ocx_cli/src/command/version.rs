@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::cli::ColorModeConfig;
+use ocx_console::ColorModeConfig;
 
 use crate::api::data::version::{VerboseVersionData, VersionData};
 use crate::app::ContextOptions;
@@ -29,7 +29,7 @@ impl Version {
     ///
     /// # Hermetic-subprocess invariant
     ///
-    /// `ocx_lib::package_manager::tasks::update_check::query_installed_version`
+    /// `ocx_package_manager::tasks::update_check::query_installed_version`
     /// spawns this command with `env_clear()` to query a previously installed
     /// binary's version during `ocx self update`. This method MUST therefore
     /// NOT depend on `HOME`, `PATH`, or any `OCX_*` env var to produce the
@@ -54,7 +54,12 @@ impl Version {
             // the host-libc cache here so the verbose `host:` row can report
             // the detected family. Only the verbose plain path needs it; the
             // bare/JSON path stays pure for the self-update subprocess parser.
-            ocx_lib::oci::HostCapabilities::detect_and_cache().await;
+            ocx_oci::HostCapabilities::detect_and_cache(
+                ocx_config::home::default_ocx_root()
+                    .map(|root| ocx_store::file_structure::StateStore::new(root.join("state")).host_capabilities_file())
+                    .as_deref(),
+            )
+            .await;
             api.report(&VerboseVersionData(data))?;
         } else {
             api.report(&data)?;

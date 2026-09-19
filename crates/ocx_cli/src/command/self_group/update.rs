@@ -5,8 +5,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
-use ocx_lib::cli::ExitCode as OcxExitCode;
-use ocx_lib::package_manager::{HandoffFailure, SelfUpdateResult, TagProbe, UpdateCheckResult};
+use ocx_exit::ExitCode as OcxExitCode;
+use ocx_package_manager::{HandoffFailure, SelfUpdateResult, TagProbe, UpdateCheckResult};
 
 use crate::api::data::self_update::{SelfUpdateData, UpdateCheckData};
 
@@ -35,7 +35,7 @@ use crate::api::data::self_update::{SelfUpdateData, UpdateCheckData};
 /// |---|---|
 /// | `up_to_date` / `update_available` / `installed` | 0 |
 /// | `pulled` (downloaded, nothing activated) | 75 (sysexits `EX_TEMPFAIL`) |
-/// | `skipped` (any [`SkippedReason`](ocx_lib::package_manager::SkippedReason)) | 75 (sysexits `EX_TEMPFAIL`) |
+/// | `skipped` (any [`SkippedReason`](ocx_package_manager::SkippedReason)) | 75 (sysexits `EX_TEMPFAIL`) |
 ///
 /// `installed` stays 0 even when the hand-off reported a failure: the binary
 /// the user asked for is the one `current` now names, and the advisory says
@@ -184,11 +184,11 @@ fn exit_code_for_update(result: &SelfUpdateResult) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::cli::ExitCode as OcxExitCode;
-    use ocx_lib::package_manager::{SelfUpdateResult, SkippedReason, UpdateCheckResult};
+    use ocx_exit::ExitCode as OcxExitCode;
+    use ocx_package_manager::{SelfUpdateResult, SkippedReason, UpdateCheckResult};
 
     use super::{HandoffAdvisory, advisory_for, exit_code_for_check, exit_code_for_update};
-    use ocx_lib::package_manager::HandoffFailure;
+    use ocx_package_manager::HandoffFailure;
     use std::process::ExitCode;
 
     // ── The hand-off advisory ────────────────────────────────────────────────
@@ -292,8 +292,8 @@ mod tests {
 
     #[test]
     fn check_update_available_is_success() {
-        let identifier = ocx_lib::oci::Identifier::new_registry("ocx/cli", ocx_lib::oci::OCX_SH_REGISTRY)
-            .clone_with_tag("1.2.3".to_string());
+        let identifier =
+            ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY).clone_with_tag("1.2.3".to_string());
         assert!(exit_code_equals(
             exit_code_for_check(&UpdateCheckResult::UpdateAvailable(identifier)),
             0

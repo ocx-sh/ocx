@@ -50,7 +50,7 @@ Canonical form: `ocx --global <subcommand>`.
 - `ocx shell hook`, `ocx shell init`, `ocx shell env` — **DELETED** (handshake §7); tombstones stay valid
 
 ### `ocx config` — managed-configuration group
-- `ocx config setup [--managed-config REF] [--dry-run] [--force]` — adopt (or clear) the `[managed]` tier without bootstrap/shims/profiles; the config-only counterpart to `ocx self setup --managed-config`. Both call `ocx_lib::setup::apply_managed_config` and share the precedence seam `command/config_setup.rs::resolve_managed_config_arg` (flag > `OCX_MANAGED_CONFIG` > seed). Nothing resolved anywhere → exit 64; dirty `[managed]` fence without `--force` → exit 82; `--managed-config ""` clears.
+- `ocx config setup [--managed-config REF] [--dry-run] [--force]` — adopt (or clear) the `[managed]` tier without bootstrap/shims/profiles; the config-only counterpart to `ocx self setup --managed-config`. Both call `ocx_setup::apply_managed_config` and share the precedence seam `command/config_setup.rs::resolve_managed_config_arg` (flag > `OCX_MANAGED_CONFIG` > seed). Nothing resolved anywhere → exit 64; dirty `[managed]` fence without `--force` → exit 82; `--managed-config ""` clears.
 - `ocx config update [VERSION]` — fetch + persist the managed snapshot; `--check` probe-only.
 - `ocx config push` — operator-side publish of a `config.toml` payload.
 
@@ -62,7 +62,7 @@ Canonical form: `ocx --global <subcommand>`.
 
 `Self_` is in the auto-check **skip list** (`app.rs` `should_check_for_update`): `self activate` runs on every shell startup and must not trigger the background update-check. The skip applies to all `Self_` variants — including `self setup`.
 
-**`OCX_NO_MODIFY_PATH` boolean semantics.** Read through `ocx_lib::env::flag` + `BooleanString`. Truthy values: `1`, `y`, `yes`, `on`, `true` (case-insensitive). Falsy values: `0`, `n`, `no`, `off`, `false`. Any other non-empty value emits a `WARN` log and falls back to the default (`false`). Unset → default. "Any non-empty string = true" is NOT the contract.
+**`OCX_NO_MODIFY_PATH` boolean semantics.** Read through `ocx_util::env::flag` + `BooleanString`. Truthy values: `1`, `y`, `yes`, `on`, `true` (case-insensitive). Falsy values: `0`, `n`, `no`, `off`, `false`. Any other non-empty value emits a `WARN` log and falls back to the default (`false`). Unset → default. "Any non-empty string = true" is NOT the contract.
 
 **`ocx self setup` 4C refresh (after `self update`).** After a successful binary swap, `refresh_shell_integration_after_swap` does two best-effort steps: (1) `setup::shims::refresh_shims` rewrites drifted `$OCX_HOME/env.*` shims; (2) `setup::refresh_profiles` re-applies the managed RC block in **heal-only** mode (`apply_target(force=false, heal_only=true)`). Heal-only never *introduces* a block (Fresh + no legacy → `NoOp`, so a `--no-modify-path` install stays untouched) and never clobbers a user-edited block (`SkippedDirty`); it only heals a drifted ocx-authored body (`FormatUpgraded`/`Migrated`). Advisories: a shim drift OR a healed block → "run `ocx self setup`" / "re-source your profile"; a `SkippedDirty` block → "run `ocx self setup --force`"; any refresh failure warns + advises. All non-fatal to the update. Drift is detected by the diff-gate / RC state machine, not a literal `SHIM_CONTRACT_VERSION` comparison. **Timing:** the refresh runs in the *old* binary, so a brand-new block body heals on the *next* update (or a `self setup` re-run), not the hop that introduces it.
 
@@ -390,7 +390,7 @@ Exempted vars (direct `std::env::var` read is compliant, not a forwarding-rule v
 | `OCX_SIGNING_KEY` | `oci/sign/key_backend.rs::PemKeyBackend::open_env`, `trust.rs::compile_key_reference` | The signing key PEM itself, for `--key env://OCX_SIGNING_KEY` — the most sensitive entry here, a raw private key rather than a token |
 | `OCX_ANNOUNCE_GIT_TOKEN` | `forge/credentials.rs::ForgeCredentials::resolve` | The push half of the forge credential pair, presented as the secret of an HTTP Basic pair to `git push`. **Asymmetric against `OCX_ANNOUNCE_TOKEN` below, deliberately:** this one is scrubbed from plugin child environments, its API-half sibling is not, so a plugin-dispatched `ocx-mirror` inherits the API half and not the push half |
 
-Two variables meet the bar and are **deliberately not** on the list; a third is recorded because its name puts it one underscore from a member. They are here so a reviewer does not read an absence as an oversight, and `ocx_lib::env::keys::CREDENTIAL_KEYS` carries the same notes:
+Two variables meet the bar and are **deliberately not** on the list; a third is recorded because its name puts it one underscore from a member. They are here so a reviewer does not read an absence as an oversight, and `ocx_config::env::keys::CREDENTIAL_KEYS` carries the same notes:
 
 | Var | Read site | Why it is not a member |
 |-----|-----------|-----------------------|
@@ -398,7 +398,7 @@ Two variables meet the bar and are **deliberately not** on the list; a third is 
 | `OCX_AUTH_<slug>_TOKEN` | `auth.rs::get_env_auth` | **Known-open, mechanism gap.** A name *pattern*, so a fixed `&[&str]` cannot hold it at all. `script/ocx_module.rs::is_reserved_env_key` already masks this family from Starlark **by prefix** — two credential masks, one of which handles patterns. Closing it means teaching `CREDENTIAL_KEYS` prefixes too. |
 | `OCX_ANNOUNCE_GIT_USERNAME` | `forge/credentials.rs::ForgeCredentials::resolve` | **Not open — a decided no.** The user half of the HTTP Basic pair (default `gitlab-ci-token`). It does not meet the bar at all: holding it authenticates nobody, and listing it would say that it did. |
 
-Reviewers: a direct `std::env::var` read of any var listed above is compliant. Do NOT add these vars to `OcxConfigView`. If a new credential var is introduced, document it in this table in the same PR **and** add it to `ocx_lib::env::keys::CREDENTIAL_KEYS` — whose doc comment carries the membership rule and the four-edit checklist — **and** in `website/src/docs/reference/environment.md`, stating that it is never forwarded to child processes. Where the new member has a sibling that stays out, say so on both rows: an unexplained split inside one family reads as an oversight the next reviewer will "fix".
+Reviewers: a direct `std::env::var` read of any var listed above is compliant. Do NOT add these vars to `OcxConfigView`. If a new credential var is introduced, document it in this table in the same PR **and** add it to `ocx_config::env::keys::CREDENTIAL_KEYS` — whose doc comment carries the membership rule and the four-edit checklist — **and** in `website/src/docs/reference/environment.md`, stating that it is never forwarded to child processes. Where the new member has a sibling that stays out, say so on both rows: an unexplained split inside one family reads as an oversight the next reviewer will "fix".
 
 ### Secret-bearing values: the `env://` convention
 

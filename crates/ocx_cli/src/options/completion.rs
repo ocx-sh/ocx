@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::env;
-
 use super::hook::{Rung, resolve_ladder};
 
 /// Whether to inject shell completions during `ocx self activate`.
@@ -62,7 +60,12 @@ impl Completion {
         } else {
             None
         };
-        resolve_ladder(flag, env::flag("OCX_NO_COMPLETIONS", false), configured, interactive)
+        resolve_ladder(
+            flag,
+            ocx_util::env::flag("OCX_NO_COMPLETIONS", false),
+            configured,
+            interactive,
+        )
     }
 }
 

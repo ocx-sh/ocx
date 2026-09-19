@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::cli::Cell;
+use ocx_console::Cell;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -60,7 +60,7 @@ impl Serialize for PatchWhyReport {
 }
 
 impl Printable for PatchWhyReport {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         if self.entries.is_empty() {
             printer.print_hint(&format!("no patches apply to '{}'", self.base));
             return;

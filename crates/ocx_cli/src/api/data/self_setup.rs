@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::cli::Cell;
-use ocx_lib::setup::{
+use ocx_console::Cell;
+use ocx_setup::{
     BootstrapOutcome, BootstrapStatus, ExtraCaCertsOutcome, ManagedConfigSetupOutcome, ProfileOutcome,
     SessionPathOutcome, SetupOutcome,
 };
@@ -151,13 +151,13 @@ struct BootstrapEntry {
     version: Option<String>,
     /// Resolved content digest; present when pinning produced one.
     ///
-    /// Stringified at this API boundary — lib carries [`ocx_lib::oci::Digest`].
+    /// Stringified at this API boundary — lib carries [`ocx_oci::Digest`].
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     digest: Option<String>,
 }
 
-/// API-layer status discriminant (mirrors `ocx_lib::setup::BootstrapStatus`).
+/// API-layer status discriminant (mirrors `ocx_setup::BootstrapStatus`).
 ///
 /// Named `ApiBootstrapStatus` to avoid shadowing the lib type imported above.
 #[derive(Serialize, schemars::JsonSchema)]
@@ -519,7 +519,7 @@ fn derive_status(outcome: &SetupOutcome) -> StatusKind {
 }
 
 impl Printable for SelfSetupData {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         // Key/value layout: only rows with payload appear (mirrors SelfUpdateData).
         let mut fields: Vec<Cell> = vec!["Status".into(), "Bootstrap".into()];
         let mut values: Vec<Cell> = vec![
@@ -576,7 +576,7 @@ impl Printable for SelfSetupData {
 mod tests {
     use std::path::PathBuf;
 
-    use ocx_lib::setup::{
+    use ocx_setup::{
         BootstrapOutcome, BootstrapStatus, ExtraCaCertsOutcome, ManagedConfigSetupOutcome, ProfileOutcome,
         SessionPathOutcome, SetupOutcome,
     };
@@ -773,7 +773,7 @@ mod tests {
     /// `"sha256:<hex>"` string (plan D7: digest surfaces in JSON on pinned path).
     #[test]
     fn would_pull_with_digest_serializes_digest_field() {
-        use ocx_lib::oci::Digest;
+        use ocx_oci::Digest;
 
         let hex = "a".repeat(64);
         let digest = Digest::Sha256(hex.clone());

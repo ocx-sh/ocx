@@ -12,7 +12,7 @@ These tests encode the acceptance contract from ``adr_clean_project_backlinks.md
 Specification mode (contract-first TDD)
 ---------------------------------------
 The ``ProjectRegistry::register`` stub at
-``crates/ocx_lib/src/project/registry.rs`` returns ``unimplemented!()``.
+``crates/ocx_project/src/registry.rs`` returns ``unimplemented!()``.
 Every test below is therefore expected to FAIL until the Unit 6 implementation
 phase:
 
@@ -786,7 +786,7 @@ def test_clean_survives_departed_project_before_survivor(
     probe-vs-``ProjectLock::from_path`` TOCTOU race — not deterministically
     forceable from a black-box acceptance test. The unit-level OOB precondition
     is therefore pinned by the dense-keying contract documented on
-    ``LoadedLock`` in ``crates/ocx_lib/src/package_manager/tasks/clean.rs``;
+    ``LoadedLock`` in ``crates/ocx_package_manager/src/tasks/clean.rs``;
     this test pins the externally-observable correctness contract (no crash,
     survivor retained) the regression would otherwise break for every
     multi-project user.

@@ -17,13 +17,13 @@
 //! Order of work, which is contract rather than convenience:
 //!
 //! 1. Validate `argv0` — it must parse as a
-//!    [`BinaryName`](ocx_lib::package::metadata::BinaryName) and be a member of
+//!    [`BinaryName`](ocx_package::metadata::BinaryName) and be a member of
 //!    the deferred tool's composed name set. The grammar leg is what stops a
 //!    wire value carrying a path separator from bypassing `PATH` resolution
 //!    entirely; the membership leg is what stops a well-formed name the package
 //!    never claimed from triggering a download.
 //! 2. Materialize the package — the ordinary pull, by digest, through
-//!    [`PackageManager::read_only_view`](ocx_lib::package_manager::PackageManager::read_only_view).
+//!    [`PackageManager::read_only_view`](ocx_package_manager::PackageManager::read_only_view).
 //!    The read-only view is not incidental: a deferred tool is composed from
 //!    `ocx.lock`, so its materialization is the same index-free resolve the
 //!    lock already promises. A writing view would let a lazily composed tool
@@ -58,17 +58,20 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
-use ocx_lib::launch::Launch;
-use ocx_lib::oci::{Identifier, PinnedIdentifier};
-use ocx_lib::package::metadata::BinaryName;
-use ocx_lib::package_manager::Arrival;
-use ocx_lib::package_manager::EnvScope;
-use ocx_lib::package_manager::error::{PackageErrorKind, ShimClaim};
-use ocx_lib::project::ProjectConfig;
-use ocx_lib::record::{RecordInputs, Scope};
-use ocx_lib::{env, launch, lazy, log, oci};
+use ocx_config::env;
+use ocx_oci::{Identifier, PinnedIdentifier};
+use ocx_package::metadata::BinaryName;
+use ocx_package_manager::Arrival;
+use ocx_package_manager::EnvScope;
+use ocx_package_manager::error::{PackageErrorKind, ShimClaim};
+use ocx_package_manager::launch;
+use ocx_package_manager::launch::Launch;
+use ocx_package_manager::record::{RecordInputs, Scope};
+use ocx_project::ProjectConfig;
+use ocx_project::lazy;
 
 use crate::options::LazyReport;
+use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, reconcile_list_separators};
 
 /// Entry point from a generated shim. Validates the invoked name, materializes
 /// the package, then execs the resolved target.
@@ -116,14 +119,14 @@ impl LauncherShim {
         // flag tier — the shim wire ABI carries a pinned identifier and an argv,
         // not options — so the sink comes from the config chain and the
         // environment, exactly as that sibling resolves it.
-        let records = context.records(ocx_lib::record::RecordsOptions::default())?;
+        let records = context.records(ocx_package_manager::record::RecordsOptions::default())?;
 
         // Step 2 — materialize. The report tier is resolved here, at download
         // time, from whatever project this process happens to stand in; the
         // library helper owns the read-only-view routing that keeps `index/` at
         // zero bytes.
         let report = self.report(project_in_scope(&context).await.as_ref());
-        let platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
+        let platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         let found = manager
             .materialize_deferred(&self.identifier, platform.clone(), report)
             .await?;
@@ -155,13 +158,13 @@ impl LauncherShim {
         // settle before applying: this process composes the closure afresh, so
         // two contributors disagreeing on one key's separator has to fail here
         // too rather than fold with a silently chosen one.
-        env::reconcile_list_separators(entries.iter_mut()).map_err(anyhow::Error::new)?;
+        reconcile_list_separators(entries.iter_mut()).map_err(anyhow::Error::new)?;
 
         let mut process_env = env::Env::new();
         // No forwarded payload: a shim is invoked from a bare `PATH` lookup, not
         // from an `ocx exec` parent, so there is no project `[env]` to replay.
         process_env.apply_child_env(
-            env::ChildEnv {
+            ChildEnv {
                 composed: &entries,
                 forwarded: &[],
             },
@@ -186,7 +189,7 @@ impl LauncherShim {
         // claim by construction: no content exists yet.
         let shim_bin = context.file_structure().shims.shim_dir(&self.identifier).bin();
         if let Some(path) = process_env.get("PATH") {
-            let pruned = ocx_lib::utility::path::remove_segment(path, shim_bin.as_os_str());
+            let pruned = ocx_util::path::remove_segment(path, shim_bin.as_os_str());
             process_env.set("PATH", pruned);
         }
 
@@ -486,7 +489,7 @@ mod tests {
 
     /// Asserts a rejected invocation is one ocx reports as **exit 64**.
     ///
-    /// The predicate is not a restatement of the number: `cli::clap::parse`
+    /// The predicate is not a restatement of the number: `clap_parse::parse`
     /// routes every clap failure to `ExitCode::UsageError` (64) *except* the
     /// three display kinds, which it hands to clap's renderer and exit 0. So
     /// "kind is outside that set" is exactly the condition that produces 64,
@@ -637,7 +640,7 @@ mod tests {
     fn the_lazy_report_value_is_case_sensitive_and_mandatory() {
         for form in [&["--lazy-report", "progress"][..], &["--lazy-report=progress"][..]] {
             let parsed = shim(form, &[PINNED, "--", "cmake"]);
-            assert_eq!(parsed.lazy_report.mode(), Some(ocx_lib::lazy::LazyReport::Progress));
+            assert_eq!(parsed.lazy_report.mode(), Some(ocx_project::lazy::LazyReport::Progress));
         }
         for rejected in [&["--lazy-report", "Progress"][..], &["--lazy-report"][..]] {
             let line = argv(rejected, &[PINNED, "--", "cmake"]);
@@ -806,7 +809,7 @@ mod tests {
     fn report_prefers_the_cli_flag_over_every_config_tier() {
         let config = project("lazy-report = \"silent\"\n\n[package.\"ocx.sh/tool/cmake\"]\nlazy-report = \"silent\"\n");
         let parsed = shim(&["--lazy-report", "progress"], &[PINNED, "--", "cmake"]);
-        assert_eq!(parsed.report(Some(&config)), ocx_lib::lazy::LazyReport::Progress);
+        assert_eq!(parsed.report(Some(&config)), ocx_project::lazy::LazyReport::Progress);
     }
 
     #[test]
@@ -814,7 +817,7 @@ mod tests {
         let config =
             project("lazy-report = \"silent\"\n\n[package.\"ocx.sh/tool/cmake\"]\nlazy-report = \"progress\"\n");
         let parsed = shim(&[], &[PINNED, "--", "cmake"]);
-        assert_eq!(parsed.report(Some(&config)), ocx_lib::lazy::LazyReport::Progress);
+        assert_eq!(parsed.report(Some(&config)), ocx_project::lazy::LazyReport::Progress);
     }
 
     /// The package entry is keyed on `registry/repository`, version-
@@ -827,7 +830,7 @@ mod tests {
         let parsed = shim(&[], &[PINNED, "--", "cmake"]);
         assert_eq!(
             parsed.report(Some(&config)),
-            ocx_lib::lazy::LazyReport::Progress,
+            ocx_project::lazy::LazyReport::Progress,
             "a tagless package key must match a tag-and-digest-bearing identifier"
         );
     }
@@ -842,7 +845,7 @@ mod tests {
         let parsed = shim(&[], &[PINNED, "--", "cmake"]);
         assert_eq!(
             parsed.report(Some(&config)),
-            ocx_lib::lazy::LazyReport::Progress,
+            ocx_project::lazy::LazyReport::Progress,
             "an unrelated package entry must not outrank the toolchain tier"
         );
     }
@@ -851,7 +854,7 @@ mod tests {
     fn report_falls_back_to_the_toolchain_tier() {
         let config = project("lazy-report = \"progress\"\n\n[tools]\ncmake = \"ocx.sh/tool/cmake:3.28\"\n");
         let parsed = shim(&[], &[PINNED, "--", "cmake"]);
-        assert_eq!(parsed.report(Some(&config)), ocx_lib::lazy::LazyReport::Progress);
+        assert_eq!(parsed.report(Some(&config)), ocx_project::lazy::LazyReport::Progress);
     }
 
     // ── C-057 / S-010: an unresolvable claim keeps its own message ─────────
@@ -882,8 +885,8 @@ mod tests {
             "the message must attribute the failure to the publisher, got: {message}"
         );
         assert_eq!(
-            ocx_lib::cli::classify_error(error.as_ref()),
-            ocx_lib::cli::ExitCode::DataError,
+            crate::exit::classify_library_error(error.as_ref()),
+            ocx_exit::ExitCode::DataError,
             "C-057: the refusal is 65, the same code a bare resolution failure carries"
         );
     }

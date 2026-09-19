@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::oci::index;
+use ocx_index;
 
 use crate::command::index_common;
 use crate::options;
@@ -48,14 +48,10 @@ impl IndexUpdate {
         // This is the ONLY frozen gate in this command; a second gate beside it
         // is what `exactly_one_frozen_gate` exists to refuse.
         if context.config_view().frozen {
-            return Err(ocx_lib::Error::PolicyBlocked {
-                operation: "`ocx index update`",
-                policy: "frozen",
-            }
-            .into());
+            return Err(index_common::policy_blocked("`ocx index update`", "frozen").into());
         }
 
-        let oci_index = index::Index::from_remote(remote_index.clone());
+        let oci_index = ocx_index::Index::from_remote(remote_index.clone());
         // Per-namespace static-file index sources, when online. A package in an
         // index-bearing namespace refreshes through the two-hop index path
         // rather than the registry (`adr_index_indirection.md` F5a — kind per
@@ -71,7 +67,7 @@ impl IndexUpdate {
         if let Some(error) =
             index_common::refresh_packages(context.local_index(), index_sources, &oci_index, &packages).await
         {
-            return Err(error.into());
+            return Err(error);
         }
 
         // Piggyback: keep the patch tier's descriptors in step with the index
@@ -96,7 +92,7 @@ mod tests {
     use clap::CommandFactory;
 
     /// Parses `argv` (with a leading command name) against this command's own
-    /// clap definition. `cli::clap::parse` turns every non-help clap error into
+    /// clap definition. `clap_parse::parse` turns every non-help clap error into
     /// `ExitCode::UsageError` (64), so an `Err` here is exit 64.
     fn parse(argv: &[&str]) -> Result<clap::ArgMatches, clap::Error> {
         IndexUpdate::command().try_get_matches_from(argv)
@@ -139,7 +135,7 @@ mod tests {
     fn exactly_one_frozen_gate() {
         let body = module_code();
         assert_eq!(
-            body.matches("Error::PolicyBlocked").count(),
+            body.matches("policy_blocked(").count(),
             1,
             "one --frozen gate, ahead of the refresh"
         );

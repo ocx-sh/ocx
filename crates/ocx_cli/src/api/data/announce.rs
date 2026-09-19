@@ -11,9 +11,9 @@
 //! **not** among them: announce records no governance, and C-061 names their
 //! absence.
 
-use ocx_lib::announce::{AnnounceOutcome, AnnounceStatus};
-use ocx_lib::cli::{Cell, Column};
-use ocx_lib::forge::{ForgeCredentials, ForgeKind, WriteTransport};
+use ocx_announce::announce::{AnnounceOutcome, AnnounceStatus};
+use ocx_announce::forge::{ForgeCredentials, ForgeKind, WriteTransport};
+use ocx_console::{Cell, Column};
 use serde::Serialize;
 
 use super::forge_report::{
@@ -184,7 +184,7 @@ impl AnnounceReport {
     /// The plain table's headers and its single row's cells, as text.
     ///
     /// A seam for testability rather than reuse, the same shape the claim
-    /// report already carries: [`ocx_lib::cli::DataInterface::print_table`]
+    /// report already carries: [`ocx_console::DataInterface::print_table`]
     /// writes to the real stdout and neither [`Column`] nor [`Cell`] exposes its
     /// text, so a test that calls [`Printable::print_plain`] can assert nothing
     /// at all — a green indistinguishable from the check never having run
@@ -225,7 +225,7 @@ fn status_label(status: AnnounceStatus) -> &'static str {
 }
 
 impl Printable for AnnounceReport {
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         // One `print_table` call, never two (single-table rule). `print_table`
         // reads its rows column-major — one `Vec<Cell>` per column — so a
         // one-row table is one cell per column.
@@ -238,11 +238,11 @@ impl Printable for AnnounceReport {
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::announce::{AnnounceOutcome, AnnounceStatus};
-    use ocx_lib::cli::{DataInterface, Printer};
-    use ocx_lib::forge::{
+    use ocx_announce::announce::{AnnounceOutcome, AnnounceStatus};
+    use ocx_announce::forge::{
         ForgeCredentials, ForgeKind, ForgeToken, ForkIdentity, PullRequest, PushAccess, WriteTransport,
     };
+    use ocx_console::{DataInterface, Printer};
 
     use super::AnnounceReport;
     use crate::api::Printable as _;
@@ -596,7 +596,7 @@ mod tests {
 
     /// E-10: the plain table's five headers pair with five cells, in one order.
     ///
-    /// [`ocx_lib::cli::DataInterface::print_table`] writes the real stdout and
+    /// [`ocx_console::DataInterface::print_table`] writes the real stdout and
     /// neither [`Column`] nor [`Cell`] exposes its text, so before the
     /// [`AnnounceReport::plain_table`] seam existed a test calling
     /// [`Printable::print_plain`] could assert **nothing at all** — this report

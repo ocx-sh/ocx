@@ -15,7 +15,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::project::{ProjectConfig, ProjectLock};
+use ocx_project::{ProjectConfig, ProjectLock};
 
 use crate::api::data::status::StatusReport;
 

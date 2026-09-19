@@ -394,6 +394,7 @@ def test_the_global_tier_accepts_the_pinned_pair(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_shell_state_json_always_names_the_resolved_toolchain_home(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:

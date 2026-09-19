@@ -5,9 +5,9 @@ use std::process::ExitCode;
 
 use crate::{api, conventions::*, options};
 use clap::Parser;
-use ocx_lib::env;
-use ocx_lib::package_manager::composer::{ComposeRequest, Materialization};
-use ocx_lib::shell::Shell;
+use ocx_package::metadata::env::apply::reconcile_list_separators;
+use ocx_package_manager::composer::{ComposeRequest, Materialization};
+use ocx_shell::shell::Shell;
 
 /// Print the resolved environment variables for one or more installed packages.
 ///
@@ -95,7 +95,7 @@ pub struct Env {
     /// makes the environment available to later pipeline steps. Conflicts with
     /// `--shell`.
     #[arg(long, value_enum, value_name = "PROVIDER", num_args = 0..=1, require_equals = true, conflicts_with = "shell")]
-    ci: Option<Option<ocx_lib::ci::CiFlavor>>,
+    ci: Option<Option<ocx_shell::ci::CiFlavor>>,
 
     /// Write the GitLab export to this file instead of stdout.
     ///
@@ -153,10 +153,10 @@ impl Env {
     /// A method rather than an inline call so a test can drive it on a
     /// clap-parsed `Env`: the absorption is the parser's doing, and a test
     /// that hand-built the fields would prove nothing about it.
-    fn refuse_spaced_ci(&self) -> Result<(), ocx_lib::cli::UsageError> {
+    fn refuse_spaced_ci(&self) -> Result<(), crate::error::UsageError> {
         // `Some(None)` is the bare flag: the `Option<Option<_>>` grammar keeps
         // bare and `--ci=gitlab` apart, so only the former can have lost a value.
-        refuse_spaced_enum_value::<ocx_lib::ci::CiFlavor>(
+        refuse_spaced_enum_value::<ocx_shell::ci::CiFlavor>(
             "--ci",
             matches!(self.ci, Some(None)),
             self.packages.iter().map(ToString::to_string),
@@ -191,8 +191,8 @@ impl Env {
         // A deferred package has no such symlink and cannot acquire one, so the
         // two requests contradict each other; honouring either silently is the
         // worse failure, and a malformed invocation is 64.
-        if mode == ocx_lib::lazy::LazyMode::Always && matches!(materialization, Materialization::Symlink(_)) {
-            return Err(ocx_lib::cli::UsageError::new(
+        if mode == ocx_project::lazy::LazyMode::Always && matches!(materialization, Materialization::Symlink(_)) {
+            return Err(crate::error::UsageError::new(
                 "--candidate/--current cannot be combined with a lazy-mode of 'always': a deferred package has no install symlink to root values in",
             )
             .into());
@@ -208,7 +208,7 @@ impl Env {
             context.ui().warn(advisory.to_string());
         }
         let advisories = composed.advisories;
-        let info: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> = composed.roots;
+        let info: Vec<std::sync::Arc<ocx_package::install_info::InstallInfo>> = composed.roots;
         // `resolve_env_with_attribution` additionally surfaces the admitted-set
         // `binaries`/`entrypoints` claim attribution for the structured report's
         // `binaries`/`entrypoints` arrays; the patch boundary is used the same
@@ -225,7 +225,7 @@ impl Env {
             .resolve_env_with_attribution(
                 &info,
                 self.self_view,
-                ocx_lib::package_manager::EnvScope::Package { env: env_overrides },
+                ocx_package_manager::EnvScope::Package { env: env_overrides },
                 &platform,
             )
             .await?;
@@ -233,7 +233,7 @@ impl Env {
         // downstream branches (`--ci`, `--shell`, structured report) reads
         // `entries` — none of them may show an unreconciled `None` a package
         // separator would otherwise have settled.
-        env::reconcile_list_separators(entries.iter_mut())?;
+        reconcile_list_separators(entries.iter_mut())?;
         // `--ci=<provider>` → CI sink path (persists env for later pipeline
         // steps). Branch BEFORE consuming `entries` via `into_iter()`.
         if let Some(provider) = ci {
@@ -252,7 +252,7 @@ impl Env {
         // overlay is the MIDDLE region — the `--env` overrides compose after it —
         // so the bound-checked accessor is what keeps an override from being
         // mislabelled as a companion's doing (and from indexing past the vector).
-        let overlay = ocx_lib::package_manager::PatchOverlay::new(patch_start, &provenance);
+        let overlay = ocx_package_manager::PatchOverlay::new(patch_start, &provenance);
         let all_entries: Vec<api::data::env::EnvEntry> = entries
             .into_iter()
             .enumerate()
@@ -286,7 +286,7 @@ impl Env {
             context.api().is_json(),
             std::io::IsTerminal::is_terminal(&std::io::stdout()),
         ) {
-            ocx_lib::log::warn!("{advisory}");
+            log::warn!("{advisory}");
         }
 
         let binaries = api::data::env::BinaryAttribution::from_pairs(&attribution.binaries);
@@ -327,7 +327,7 @@ mod ci_flag_tests {
     /// The code the process would exit with, through the same authority
     /// `main.rs` uses.
     fn exit_code(error: &anyhow::Error) -> u8 {
-        crate::app::classify_error(error.as_ref()) as u8
+        crate::exit::classify_error(error.as_ref()) as u8
     }
 
     /// The premise the guard rests on: clap leaves the flag bare and hands the

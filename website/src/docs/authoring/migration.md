@@ -157,7 +157,7 @@ The `ocx_mirror` pipeline pushes packages, not descriptions — `ocx package des
 [cmake]: https://cmake.org/
 [apt-repos]: https://wiki.debian.org/DebianRepository/Format
 [oci-image-spec]: https://github.com/opencontainers/image-spec
-[in-tree-mirror-spec]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
+[in-tree-mirror-spec]: https://github.com/ocx-sh/ocx-mirror
 [catalog]: https://index.ocx.sh
 
 <!-- commands -->

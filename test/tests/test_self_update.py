@@ -48,7 +48,7 @@ def test_version_json_format(ocx: OcxRunner) -> None:
     field whose value matches the plain ``ocx version`` output.
 
     This is the contract that `query_installed_version` in
-    `crates/ocx_lib/src/package_manager/tasks/update_check.rs` relies on when
+    `crates/ocx_package_manager/src/tasks/update_check.rs` relies on when
     it invokes the installed binary to determine the running version.
     """
     # JSON form via OcxRunner.json (prepends --format json).
@@ -88,7 +88,7 @@ def test_version_json_shape(ocx: OcxRunner) -> None:
 
     Pins the wire-format invariant the subprocess consumer
     (`query_installed_version`, in
-    `crates/ocx_lib/src/package_manager/tasks/update_check.rs`) relies
+    `crates/ocx_package_manager/src/tasks/update_check.rs`) relies
     on: it parses ``.get("version")`` and feeds the value to
     ``semver::Version::parse``. Any additional top-level keys
     (``cargo_pkg_version``, ``channel``, ``commit``, ``build``, ``ci``)
@@ -121,7 +121,7 @@ def test_version_json_under_env_clear(ocx: OcxRunner) -> None:
 
     Simulates the exact subprocess invocation shape used by
     ``query_installed_version`` in
-    ``crates/ocx_lib/src/package_manager/tasks/update_check.rs``,
+    ``crates/ocx_package_manager/src/tasks/update_check.rs``,
     which calls ``Command::env_clear()`` before spawning the binary.
     The provenance fields (``commit``, ``build``, ``ci``) are baked at
     compile time via ``option_env!()`` (see
@@ -195,7 +195,7 @@ _skip_on_windows = pytest.mark.skipif(
 _ENV_SHIMS = ("env.sh", "env.fish", "env.ps1", "env.nu", "env.elv")
 
 # Where each platform keeps its session-PATH store, spelled the way
-# `ocx_lib::setup::session_path::stores_for` spells it: the environment
+# `ocx_setup::session_path::stores_for` spells it: the environment
 # variable to root the path at, and the path relative to it.
 #
 # Presence of this file after an update is evidence *about the hand-off*. Only
@@ -214,7 +214,7 @@ _SESSION_PATH_STORES = {
 _HANDOFF_REFUSAL_CODE = 70
 
 # The POSIX fence body `ocx self setup` manages, byte-for-byte identical to
-# `ocx_lib::setup::POSIX_BODY`. Restated here rather than imported from
+# `ocx_setup::POSIX_BODY`. Restated here rather than imported from
 # test_self_setup.py: a test module that seeds a fence has to know what a real
 # one looks like, and a cross-module import would make one suite's fixture a
 # dependency of the other's.
@@ -224,7 +224,7 @@ _FENCE_BODY = (
     "fi"
 )
 
-# The second line of `ocx_lib::setup::shims::ENV_SH`. Enough to tell ocx's own
+# The second line of `ocx_setup::shims::ENV_SH`. Enough to tell ocx's own
 # shim body apart from whatever a drift test seeded, and short enough that a
 # reformat of the shim does not silently stop matching.
 _CANONICAL_SHIM_HEADER = "# Managed by ocx installer - do not edit."
@@ -238,7 +238,7 @@ _RELOAD_ADVISORY = "shell integration refreshed"
 
 
 def _canonical_hash(body: str) -> str:
-    """Mirror ``ocx_lib::setup::rc_block::canonical_hash``.
+    """Mirror ``ocx_setup::rc_block::canonical_hash``.
 
     The opener marker is the low 4 bytes of the SHA-256 of the block body, hex
     encoded, after normalizing line endings to LF and stripping one trailing

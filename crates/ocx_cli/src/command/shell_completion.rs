@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
-use ocx_lib::{log, shell};
+use ocx_shell::shell;
 
 use crate::app::ContextOptions;
 use crate::command::self_group::activate::load_shell_config;

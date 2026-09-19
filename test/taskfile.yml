@@ -65,6 +65,17 @@ vars:
     sh: >-
       dir="${TEST_BASETEMP:-$HOME/.cache/ocx-pytest/$(basename "$(dirname "{{.TASKFILE_DIR}}")")}";
       mkdir -p "$dir"; printf '%s' "$dir"
+  # Where `default` tees the run's terminal output so `.suite-ceilings` can
+  # read the summary line afterwards. A sibling of the basetemp, never inside
+  # it: pytest deletes the basetemp's contents at startup, and `tee` writing
+  # into an unlinked file leaves nothing to parse. Per checkout for the same
+  # reason the basetemp is.
+  TEST_RUN_LOG: '{{.TEST_BASETEMP}}.log'
+  # The smoke tier's wall-clock budget (C-012 / S-004). The local target is
+  # 60 s; 90 s is the ceiling at which a slow test that was marked `smoke`
+  # reds the tier instead of quietly stretching it. A literal, deliberately:
+  # a budget read from the environment could be raised by the run it gates.
+  SMOKE_BUDGET_SECONDS: 90
 
 # Applies to every task in this file, so no pytest leg can miss it.
 env:
@@ -75,12 +86,12 @@ tasks:
     internal: true
     cmds:
       # `--features ocx/__testing` enables internal-only test seams in
-      # `ocx_lib` (currently the `__OCX_SELF_IMAGE` override in
-      # `package_manager::tasks::update_check` that lets
+      # the tier crates (currently the `__OCX_SELF_IMAGE` override in
+      # `ocx_oci::identifier::ocx_cli_identifier` that lets
       # `test_self_update.py::test_self_update_installs_newer_version`
       # redirect the canonical `ocx.sh/ocx/cli` to localhost:5000). The
       # seams are loopback-only-asserted at runtime and compile-gated;
-      # release builds never include them. See `crates/ocx_lib/Cargo.toml`
+      # release builds never include them. See `crates/ocx_cli/Cargo.toml`
       # for the contract.
       - cargo build --release -p ocx -p ocx_shim --features ocx/__testing --locked
       - mkdir -p {{.BIN_DIR}}
@@ -95,8 +106,25 @@ tasks:
       - task: build
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
-      - uv run pytest --basetemp={{.TEST_BASETEMP}} {{.CLI_ARGS | default "-v"}}
-    env:
+      - task: .suite-floor
+      # Before the suite, not after: the ceilings below are read from a parser
+      # whose own red state is a fixture case, and a gate proves its tooling
+      # in the run that depends on it.
+      - task: ceilings:self-test
+      # `set -o pipefail` so pytest's own exit status survives the `tee`; the
+      # tee is what lets `.suite-ceilings` read the summary line of the run
+      # that just happened rather than of some earlier one.
+      - >-
+        set -o pipefail;
+        uv run pytest --basetemp={{.TEST_BASETEMP}} {{.CLI_ARGS | default "-v"}}
+        2>&1 | tee {{.TEST_RUN_LOG}}
+      - task: .suite-ceilings
+    # The environment every host-side pytest leg runs under. `smoke` takes it
+    # by alias (`*pytest-env`), so a leg cannot drift from the other by
+    # forgetting one variable. (An anchor on a top-level `x-shared:` mapping
+    # is decoded by go-task as a variable and refused; on the task it is
+    # plain YAML.)
+    env: &pytest-env
       OCX_COMMAND: "{{.OCX_BINARY}}"
       # _find_shim_binary() honours OCX_SHIM_BINARY first; pointing it at the
       # copied test/bin/ocx-shim{exe} makes test_windows_shim.py a live gate
@@ -109,6 +137,154 @@ tasks:
       # OCX_TEST_REGISTRY_PORT so it cannot drift from what compose bound; CI
       # inherits the REGISTRY env var if set.
       OCX_INSECURE_REGISTRIES: "localhost:{{.REGISTRY_PORT}}"
+
+  # The acceptance suite never shrinks or goes quiet (C-069). Both checks are
+  # `cmds:` entries, never `preconditions:` — `task --force` skips
+  # preconditions (verified on go-task 3.52), and a guard against a silent
+  # degrade must not itself be silently skippable.
+  .suite-floor:
+    internal: true
+    desc: >-
+      Fail when the whole suite collects fewer tests than test/SUITE_FLOOR.
+      The floor only ever rises, in the commit that adds the tests.
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      # Collection only, never a run, and over the whole suite regardless of
+      # the subset a caller passed as CLI_ARGS: the floor is a property of
+      # the tree, not of one invocation. The registry never starts for it.
+      # `--color=no`: with FORCE_COLOR exported the summary arrives wrapped in
+      # escape codes and the count below reads as absent, red on a healthy
+      # tree — nobody reads this collection's output, so it never colours.
+      - >-
+        floor=$(cat SUITE_FLOOR);
+        summary=$(uv run pytest --collect-only -q --color=no 2>&1 | tail -n 1);
+        case "$summary" in *error*)
+          echo "suite floor: collection failed: $summary" >&2; exit 1;;
+        esac;
+        count=$(printf '%s' "$summary" | sed -nE 's/^([0-9]+) tests? collected.*/\1/p');
+        [ -n "$count" ] || { echo "suite floor: no collected count in: $summary" >&2; exit 1; };
+        [ "$count" -ge "$floor" ] || {
+          echo "suite floor: $count tests collected, floor is $floor (test/SUITE_FLOOR) — the suite shrank" >&2; exit 1; };
+        echo "suite floor: $count tests collected (floor $floor)"
+    env:
+      # Collection alone: no fixture runs, so the registry never starts.
+      # `tests/fixtures/cosign.py` resolves the binary at import to
+      # `test/bin/ocx` when OCX_COMMAND is unset — the same file `build`
+      # copies there — so the pytest env block is not needed here.
+      OCX_TESTS_NO_REGISTRY: "1"
+
+  # Not `internal:`, unlike `.suite-floor`: `ceilings:self-test` below drives
+  # this task from the CLI with TEST_RUN_LOG pointed at a fixture log, which
+  # is the only way both polarities of the parser below get re-proved.
+  .suite-ceilings:
+    desc: >-
+      Fail when the run's summary line reports more `skipped` than
+      test/SKIP_CEILING or more `xfailed` than test/XFAIL_CEILING — a skip
+      added to dodge a red is caught here, not by the collected count.
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      # The log is what the terminal saw, escape codes included when a caller
+      # exported FORCE_COLOR, so they are stripped before the summary is
+      # looked for; and the `=` bars are absent under `-q`, so the line is
+      # recognised by its counts alone — the last such line is the summary.
+      # `printf '\033'` rather than `\x1b` in the pattern: BSD sed has no
+      # hex escapes, GNU and BSD both take the literal byte. The count may
+      # open the line (`256 skipped in 1.00s`, the `-q` shape when every test
+      # skipped), so the non-digit before it is `(^|…)`, never required.
+      - >-
+        esc=$(printf '\033');
+        summary=$(sed -E "s/$esc\[[0-9;]*m//g" {{.TEST_RUN_LOG}}
+        | grep -E '(passed|failed|skipped|xfailed|error).* in [0-9.]+s' | tail -n 1);
+        [ -n "$summary" ] || { echo "suite ceilings: no pytest summary line in {{.TEST_RUN_LOG}}" >&2; exit 1; };
+        skipped=$(printf '%s' "$summary" | sed -nE 's/(^|.*[^0-9])([0-9]+) skipped.*/\2/p');
+        xfailed=$(printf '%s' "$summary" | sed -nE 's/(^|.*[^0-9])([0-9]+) xfailed.*/\2/p');
+        skip_ceiling=$(cat SKIP_CEILING); xfail_ceiling=$(cat XFAIL_CEILING);
+        [ "${skipped:-0}" -le "$skip_ceiling" ] || {
+          echo "suite ceilings: $skipped skipped exceeds test/SKIP_CEILING ($skip_ceiling): $summary" >&2; exit 1; };
+        [ "${xfailed:-0}" -le "$xfail_ceiling" ] || {
+          echo "suite ceilings: $xfailed xfailed exceeds test/XFAIL_CEILING ($xfail_ceiling): $summary" >&2; exit 1; };
+        echo "suite ceilings: ${skipped:-0} skipped (ceiling $skip_ceiling), ${xfailed:-0} xfailed (ceiling $xfail_ceiling)"
+
+  ceilings:self-test:
+    desc: Show the suite-ceilings parser red on an over-ceiling pytest summary and green on a clean one
+    summary: |
+      `.suite-ceilings` above is a shell parser, and its red state lived in a
+      commit message — nothing in the tree re-proved it. These two fixture
+      lines are that proof, run by `default` before the suite it gates.
+
+      The red one carries a skipped count no ceiling will ever permit, so the
+      case cannot go vacuous when test/SKIP_CEILING moves. The green one
+      carries `1 skipped, 1 xfailed`, never zeroes, and the case asserts the
+      parser SAYS both counts: `${skipped:-0}` means a sed that stopped
+      matching reports zero, so a zero-count fixture is green whether or not
+      the extraction still works.
+
+      The red half reads the message, not the exit status. `if <task>; then
+      fail` is satisfied by a renamed task, an unreadable log or an argument
+      typo exactly as well as by the ceiling gating, so a parser that never
+      reaches the comparison is green — the assertion below names the
+      comparison's own wording, and says so when the run failed for some
+      other reason.
+
+      The nested call names this taskfile explicitly: entered through the root
+      `test:` include the task is `test:.suite-ceilings`, entered directly it
+      is `.suite-ceilings`, and `-t` is what makes the case indifferent.
+    dir: '{{.TASKFILE_DIR}}'
+    vars:
+      RED_SKIPPED: '999999'
+      RED_SUMMARY: '1 passed, {{.RED_SKIPPED}} skipped in 1.00s'
+      GREEN_SUMMARY: '10 passed, 1 skipped, 1 xfailed in 1.00s'
+      # `-s`: without it go-task echoes the task body to STDERR, and the body
+      # contains the very phrase the red half looks for — the assertion would
+      # then match the script quoting itself and pass for any failure at all.
+      CEILINGS: task -s -t {{.TASKFILE_DIR}}/taskfile.yml .suite-ceilings
+      # Carries the runtime count for the same reason: `$skipped skipped
+      # exceeds …` is in the body, `999999 skipped exceeds …` can only be output.
+      RED_REASON: '{{.RED_SKIPPED}} skipped exceeds test/SKIP_CEILING'
+    cmds:
+      - >-
+        log=$(mktemp); trap 'rm -f "$log"' EXIT;
+        printf '%s\n' '{{.RED_SUMMARY}}' > "$log";
+        status=0;
+        red=$({{.CEILINGS}} TEST_RUN_LOG="$log" 2>&1 >/dev/null) || status=$?;
+        [ "$status" -ne 0 ] || {
+          echo "ceilings self-test: the parser accepted 999999 skipped — it is not gating" >&2; exit 1; };
+        case "$red" in *'{{.RED_REASON}}'*) ;; *)
+          echo "ceilings self-test: the red run exited $status without reaching the ceiling — it failed for another reason: $red" >&2; exit 1;;
+        esac;
+        printf '%s\n' '{{.GREEN_SUMMARY}}' > "$log";
+        green=$({{.CEILINGS}} TEST_RUN_LOG="$log" 2>/dev/null | tail -n 1);
+        case "$green" in *'suite ceilings: 1 skipped'*'1 xfailed'*) ;; *)
+          echo "ceilings self-test: the parser read no counts from a 1-skipped 1-xfailed summary: $green" >&2; exit 1;;
+        esac;
+        echo "ceilings self-test: parser red on 999999 skipped, green reading 1 skipped and 1 xfailed"
+
+  smoke:
+    desc: >-
+      The smoke tier: one marked happy path per visible top-level verb
+      (`-m smoke`, 22 verbs), parallel, registry only — the Sigstore stack never
+      starts. Budgeted at 90 s wall clock; the local target is 60 s.
+    cmds:
+      - task: build
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      # The tier's own coverage contract (every visible verb has a marked
+      # test, none touches the signing surface) is not `smoke`-marked, so the
+      # `-m smoke` selection below never collects it: it runs on its own,
+      # outside the clock and without a registry — it reads source only.
+      - OCX_TESTS_NO_REGISTRY=1 uv run pytest --basetemp={{.TEST_BASETEMP}} tests/test_smoke_coverage.py
+      # `--dist loadgroup` for the same reason `parallel` passes it: a marked
+      # test that carries an `xdist_group` keeps its group. The clock wraps
+      # the pytest invocation only — the build above is not the tier's cost.
+      - >-
+        start=$(date +%s);
+        uv run pytest --basetemp={{.TEST_BASETEMP}} -m smoke -n auto --dist loadgroup
+        {{.CLI_ARGS | default "-v"}};
+        elapsed=$(( $(date +%s) - start ));
+        [ "$elapsed" -le {{.SMOKE_BUDGET_SECONDS}} ] || {
+          echo "smoke tier: ${elapsed}s wall clock exceeds the {{.SMOKE_BUDGET_SECONDS}} s budget" >&2; exit 1; };
+        echo "smoke tier: ${elapsed}s wall clock (budget {{.SMOKE_BUDGET_SECONDS}} s)"
+    env: *pytest-env
 
   quick:
     desc: Run acceptance tests in parallel without rebuilding the binary
@@ -144,6 +320,95 @@ tasks:
           # patch descriptor slot) run serially on one worker while the rest
           # parallelize.
           CLI_ARGS: '-n auto --dist loadgroup {{.CLI_ARGS | default "-v"}}'
+
+  scoped:
+    desc: >-
+      Run the acceptance subset the named crates own (`task test:scoped --
+      ocx_config ocx_shell`). Every glob of a selected row must collect at
+      least one test; a crate without a row, an `escalate` row, or an empty
+      selection fails.
+    vars:
+      # crate → command → test-glob table (plan_crate_split_workspace.md
+      # C-022). Hand-maintained from the ADR crate map's command ownership;
+      # one row per crate, globs relative to test/. A row that reads
+      # `escalate` has the whole suite as its subset — `task verify` — and
+      # scripts/scoped_gate.py TABLE_ESCALATES mirrors those rows so the gate
+      # escalates before spending the per-crate steps (its --self-test keeps
+      # the two in step).
+      SCOPED_ROWS:
+        map:
+          # exit codes / error categories
+          ocx_exit: tests/test_exit_codes.py
+          # fs, archive extraction, TLS roots
+          ocx_util: tests/test_archive_containment.py tests/test_extra_ca_certs.py tests/test_package_create_extract.py
+          # rendering, progress, colour, completion output
+          ocx_console: tests/test_color.py tests/test_progress_channel.py tests/test_pull_progress.py tests/test_completion_ascii.py
+          # registry transport, references, layers, referrers, auth (`login`, `push`, `tag`)
+          ocx_oci: tests/test_layer_layout.py tests/test_multi_layer.py tests/test_push*.py tests/test_referrers_*.py tests/test_proxy_registry.py tests/test_oci_registry_mirror.py tests/test_login.py tests/test_tag_*.py tests/test_registry_startup_retry.py tests/test_resolution_chain_refs.py tests/test_logging.py
+          # signer-identity policy (`trust`)
+          ocx_trust: tests/test_trust_*.py tests/test_logging.py
+          # `sign`, `attest`, `verify`, cosign interop, SBOM referrers
+          ocx_sign: tests/test_sign*.py tests/test_attest.py tests/test_verify.py tests/test_auto_verify.py tests/test_offline_verify.py tests/test_cosign_*.py tests/test_sbom.py
+          # `config`, managed tier, `--frozen`
+          ocx_config: tests/test_config*.py tests/test_managed_config.py tests/test_frozen.py
+          # CAS + symlink namespace (`install`, `uninstall`, `purge`, `clean`, `which`), shim blob
+          ocx_store: tests/test_install.py tests/test_uninstall.py tests/test_purge.py tests/test_clean*.py tests/test_assembly.py tests/test_cross_platform_materialize.py tests/test_cross_repo_dedup.py tests/test_path_idempotency.py tests/test_which.py tests/test_windows_shim.py
+          # `index`, catalog, warm resolve
+          ocx_index: tests/test_index*.py tests/test_catalog_readme.py tests/test_warm_resolve_no_network.py
+          # `package create|push|pull|inspect|copy|cascade|description`, metadata, variants
+          ocx_package: tests/test_package_create_*.py tests/test_package_push*.py tests/test_package_pull.py tests/test_package_info.py tests/test_package_inspect*.py tests/test_package_lifecycle.py tests/test_package_copy.py tests/test_package_cascade.py tests/test_package_receipt.py tests/test_cascade.py tests/test_describe.py tests/test_metadata_forward_compat.py tests/test_variants.py tests/test_platform_pairs.py
+          # `shell`, `ci export`, `direnv`, activation output
+          ocx_shell: tests/test_shell_*.py tests/test_ci_export.py tests/test_direnv.py tests/test_lazy_direnv.py tests/test_toolchain_activate.py tests/test_toolchain_render.py tests/test_completion_ascii.py
+          # `project *`, `lock`, lazy loading, project toolchain, trampoline
+          ocx_project: tests/test_project_*.py tests/test_lazy_loading.py tests/test_lock.py tests/test_toolchain_cli.py tests/test_toolchain_offline_after_pull.py tests/test_global_toolchain.py tests/test_doc_project_toolchain.py tests/test_taplo_project_toolchain.py tests/test_trampoline_exec.py
+          # `env`, `exec`, `run`, `update`, `select`, `status`, `inspect`, `offline`, patches, records, entrypoints
+          ocx_package_manager: tests/test_env*.py tests/test_exec*.py tests/test_patch*.py tests/test_dependencies.py tests/test_deps_interpolation.py tests/test_entrypoints*.py tests/test_launcher_exec.py tests/test_run_global_isolation.py tests/test_update.py tests/test_select.py tests/test_offline*.py tests/test_pinned_offline.py tests/test_install_libc.py tests/test_status.py tests/test_inspect*.py tests/test_toolchain_env.py tests/test_plugin_dispatch.py
+          # `package announce`, `package claim`, forge drivers, git transport
+          ocx_announce: tests/test_announce*.py tests/test_package_claim.py tests/test_transport_git.py tests/test_fake_forge_mergeability.py tests/test_git_http_fixture.py
+          # `package test --script`
+          ocx_script: tests/test_package_test*.py
+          # `self setup|update|activate`, session PATH, update-check throttle
+          ocx_setup: tests/test_self_*.py tests/test_session_path.py tests/test_update_check_throttle.py
+          # dev-dependency-only fixtures: no acceptance subset of its own
+          ocx_test_support: escalate
+          # phase 1: the monolith owns every verb
+          # phase 1: the binary still holds every command file (crates/ocx_cli/src/command/*),
+          # so a change there can touch any verb. Reverts to its own subset — exit codes,
+          # deprecated spellings, command reference, plugin dispatch, smoke coverage —
+          # when the verbs move out.
+          ocx: escalate
+          ocx_schema: tests/test_schema*.py
+          ocx_shim: tests/test_windows_shim.py
+      # Every selected row's globs, space-joined, for the union run below.
+      SELECTED: '{{range splitList " " .CLI_ARGS}}{{index $.SCOPED_ROWS .}} {{end}}'
+    cmds:
+      - '[ -n "{{.CLI_ARGS}}" ] || { echo "test:scoped: no crate named — usage: task test:scoped -- <crate>..." >&2; exit 1; }'
+      # Per crate, per glob: the glob must exist in the table, must not be an
+      # `escalate` row, and must collect at least one test — a stale glob
+      # beside a live one is a failure, never a silent coverage loss.
+      # `--color=no` for the same reason as `.suite-floor`: under FORCE_COLOR
+      # the count arrives wrapped in escape codes and reads as absent.
+      - for: { var: CLI_ARGS }
+        cmd: >-
+          row='{{index .SCOPED_ROWS .ITEM}}';
+          [ -n "$row" ] || { echo "test:scoped: no row for crate '{{.ITEM}}' — add one to SCOPED_ROWS in test/taskfile.yml" >&2; exit 1; };
+          [ "$row" != escalate ] || { echo "test:scoped: {{.ITEM}} row reads escalate — its subset is the whole suite; run 'task verify'" >&2; exit 1; };
+          for glob in $row; do
+            summary=$(uv run pytest --collect-only -q --color=no $glob 2>&1 | tail -n 1);
+            count=$(printf '%s' "$summary" | sed -nE 's/^([0-9]+) tests? collected.*/\1/p');
+            [ -n "$count" ] && [ "$count" -ge 1 ] || { echo "test:scoped: {{.ITEM}} glob '$glob' collects no test: $summary" >&2; exit 1; };
+            echo "test:scoped: {{.ITEM}} $glob -> $count tests";
+          done
+      # The union run goes through `default`, so the binary, the suite floor,
+      # the ceilings and the pytest env are the ones every other leg uses.
+      - task: default
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+          CLI_ARGS: '-n auto --dist loadgroup -v {{.SELECTED}}'
+    env:
+      # Collection only for the per-glob check; the registry never starts
+      # (the same reason `.suite-floor` sets it).
+      OCX_TESTS_NO_REGISTRY: "1"
 
   lint:
     desc: Lint the acceptance suite with ruff (rule set + Python floor in pyproject.toml)
@@ -515,7 +780,7 @@ tasks:
   index-conformance-drift:
     desc: >-
       Fail if the vendored ocx-sh/indexbot conformance fixtures
-      (crates/ocx_lib/tests/fixtures/index_wire/) differ from that repo's current
+      (crates/ocx_index/tests/fixtures/index_wire/) differ from that repo's current
       main. Network-bound and NOT wired into `task verify` — the vendored copy
       exists to keep the test suite offline. Runs on verify-deep.yml's weekly
       schedule, which bounds the drift window to 7 days without adding a network

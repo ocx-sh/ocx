@@ -18,7 +18,7 @@ Rules for efficient multi-agent swarm execution.
 ## Universal Worker Protocol (Critical Steps for Every Build/Test/Review Worker)
 
 1. **Read relevant quality rules FIRST, before any writes.** Path-scoped, auto-load by file type: `.claude/rules/quality-core.md` (universal, always loaded), plus language leaf (`quality-rust.md`, `quality-python.md`, `quality-typescript.md`, `quality-bash.md`, `quality-vite.md`) matching files edited. Python acceptance tests also read `.claude/rules/subsystem-tests.md`. Post-completion self-review no substitute.
-2. **Grep for existing utilities before writing new code.** OCX has `DirWalker`, `PackageDir`, `ReferenceManager`, `DIGEST_FILENAME`, etc. Check `crates/ocx_lib/src/utility/` and related modules with Grep.
+2. **Grep for existing utilities before writing new code.** OCX has `DirWalker`, `PackageDir`, `ReferenceManager`, `DIGEST_FILENAME`, etc. Check `crates/ocx_util/src/` and related modules with Grep.
 3. **If existing utility doesn't fit, extend it — don't work around it.** Workarounds = #1 source of over-engineered iteration loops in prior sessions.
 4. **Report deferred findings instead of oscillating.** Fix needs human judgment or causes regression on re-attempt → stop, report deferred.
 5. **Never auto-commit.** All commits Michael's explicit decision. Workers report `git status` only.

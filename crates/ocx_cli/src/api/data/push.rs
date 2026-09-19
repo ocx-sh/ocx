@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use ocx_lib::{cli::Cell, oci::LayerCounts, publisher::PushOutcome};
+use ocx_console::Cell;
+use ocx_oci::LayerCounts;
+use ocx_package::publisher::PushOutcome;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -312,7 +314,7 @@ impl Printable for PushReport {
     /// `status` has no column because it is always `"pushed"`, and the
     /// keep tags are a count because listing them is 82 columns each.
     /// Both stay in the JSON contract, where `ocx-mirror` reads them.
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         data.print_table(
             &[
                 "Identifier".into(),
@@ -337,19 +339,17 @@ impl Printable for PushReport {
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::{
-        cli::{DataInterface, Printer},
-        oci::{self, LayerCounts},
-        publisher::PushOutcome,
-    };
+    use ocx_console::{DataInterface, Printer};
+    use ocx_oci::{self, LayerCounts};
+    use ocx_package::publisher::PushOutcome;
 
     use super::PushReport;
     use crate::api::Printable as _;
 
     /// A `sha256:` digest whose hex is one repeated character, so a test can
     /// name distinct digests by a single letter and still read them back.
-    fn digest(hex_char: &str) -> oci::Digest {
-        oci::Digest::try_from(format!("sha256:{}", hex_char.repeat(64)).as_str()).expect("digest parses")
+    fn digest(hex_char: &str) -> ocx_oci::Digest {
+        ocx_oci::Digest::try_from(format!("sha256:{}", hex_char.repeat(64)).as_str()).expect("digest parses")
     }
 
     fn outcome(digest_hex: &str, cascade_tags: Vec<String>, keep_tags: Vec<String>) -> PushOutcome {
@@ -569,7 +569,7 @@ mod tests {
 
 #[cfg(test)]
 mod attestation_tests {
-    use ocx_lib::{oci, publisher::PushOutcome};
+    use ocx_package::publisher::PushOutcome;
 
     use super::{AttestationOutcome, PushReport};
 
@@ -580,7 +580,7 @@ mod attestation_tests {
             manifest_digest: format!("sha256:{}", "a".repeat(64)),
             cascade_tags_written: Vec::new(),
             keep_tags_written: Vec::new(),
-            layers: ocx_lib::oci::LayerCounts::default(),
+            layers: ocx_oci::LayerCounts::default(),
             platform_digests: std::collections::BTreeMap::new(),
             annotations_written: std::collections::BTreeMap::new(),
             aliases_written: Vec::new(),
@@ -629,12 +629,12 @@ mod attestation_tests {
     #[test]
     fn the_bare_track_a_push_aliased_is_reported_in_write_order() {
         let outcome = PushOutcome::new(
-            oci::Digest::try_from(format!("sha256:{}", "b".repeat(64)).as_str()).expect("digest parses"),
+            ocx_oci::Digest::try_from(format!("sha256:{}", "b".repeat(64)).as_str()).expect("digest parses"),
             vec!["full-1.2".to_string(), "full-1".to_string()],
             Vec::new(),
             Vec::new(),
             vec!["1.2.3".to_string(), "1.2".to_string(), "1".to_string()],
-            ocx_lib::oci::LayerCounts::default(),
+            ocx_oci::LayerCounts::default(),
         );
 
         let json = serde_json::to_value(PushReport::from_outcome(
@@ -758,13 +758,11 @@ mod signature_row_tests {
     //! `SignatureReport` verbatim so a consumer parsing an `ocx package sign`
     //! document parses one of these rows with the same code, one level down.
 
-    use ocx_lib::oci;
-
     use super::{PushReport, SignedPlatformReport};
     use crate::api::data::signature::{SignatureLegReport, SignatureReport};
 
-    fn digest(hex_char: &str) -> oci::Digest {
-        oci::Digest::try_from(format!("sha256:{}", hex_char.repeat(64)).as_str()).expect("digest parses")
+    fn digest(hex_char: &str) -> ocx_oci::Digest {
+        ocx_oci::Digest::try_from(format!("sha256:{}", hex_char.repeat(64)).as_str()).expect("digest parses")
     }
 
     fn report() -> PushReport {
@@ -774,7 +772,7 @@ mod signature_row_tests {
             manifest_digest: format!("sha256:{}", "a".repeat(64)),
             cascade_tags_written: Vec::new(),
             keep_tags_written: Vec::new(),
-            layers: ocx_lib::oci::LayerCounts::default(),
+            layers: ocx_oci::LayerCounts::default(),
             platform_digests: std::collections::BTreeMap::new(),
             annotations_written: std::collections::BTreeMap::new(),
             aliases_written: Vec::new(),
@@ -783,17 +781,17 @@ mod signature_row_tests {
         }
     }
 
-    fn signature(subject: oci::Digest) -> SignatureReport {
+    fn signature(subject: ocx_oci::Digest) -> SignatureReport {
         SignatureReport::new(
             "registry.example/pkg:1.0".into(),
             subject,
             vec![SignatureLegReport {
-                format: oci::sign::SignatureFormat::Bundle,
+                format: ocx_sign::sign::SignatureFormat::Bundle,
                 payload_digest: Some(digest("b")),
                 manifest_digest: Some(digest("c")),
                 error: None,
             }],
-            Some(&"linux/amd64".parse::<oci::Platform>().expect("platform parses")),
+            Some(&"linux/amd64".parse::<ocx_oci::Platform>().expect("platform parses")),
             String::new(),
             String::new(),
         )

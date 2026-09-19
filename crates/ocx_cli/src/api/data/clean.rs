@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use ocx_lib::cli::Cell;
-use ocx_lib::package_manager::CleanedObject;
+use ocx_console::Cell;
+use ocx_package_manager::CleanedObject;
 
 use crate::api::Printable;
 
@@ -80,7 +80,7 @@ impl Clean {
     /// stale temp directories nor consent stamps are governed by the project
     /// registry (see [`adr_clean_project_backlinks.md`] "`ocx clean` UX").
     ///
-    /// Every field of [`CleanResult`](ocx_lib::package_manager::CleanResult)
+    /// Every field of [`CleanResult`](ocx_package_manager::CleanResult)
     /// is consumed here, `consent` included: a swept stamp that reached no row
     /// would make the sweep silent, which is the one thing its own contract
     /// says it must never be.
@@ -133,7 +133,7 @@ impl Printable for Clean {
     ///   `Type | Path`
     ///
     /// See [`adr_clean_project_backlinks.md`] "Dry-run preview shape (plain)".
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let has_attribution = self.entries.iter().any(|e| !e.held_by.is_empty());
 
         if has_attribution {

@@ -9,8 +9,6 @@
 //! [`super::Completion`] evaluates it with its own flag pair and its own
 //! environment key.
 
-use ocx_lib::env;
-
 /// Flatten into a command with `#[clap(flatten)]` to add the paired
 /// `--hook` / `--no-hook` flags.
 ///
@@ -119,12 +117,12 @@ impl Hook {
         } else {
             None
         };
-        // A bare literal, not an `ocx_lib::env::keys` entry: the sibling this
+        // A bare literal, not an `ocx_config::env::keys` entry: the sibling this
         // ladder mirrors reads `OCX_NO_COMPLETIONS` the same way, and moving
         // one new key into `keys` would change a shipped module for nothing.
         // Negative-only like every other toggle here — `--hook` is the positive
         // channel, and "auto" is what an unset variable already means.
-        resolve_ladder(flag, env::flag("OCX_NO_HOOK", false), configured, interactive)
+        resolve_ladder(flag, ocx_util::env::flag("OCX_NO_HOOK", false), configured, interactive)
     }
 }
 
@@ -253,7 +251,7 @@ mod tests {
     /// and threads `configured` through, proven by owning both keys for the
     /// duration. Consolidated into one test so exactly one test function
     /// mutates the process environment; precedent:
-    /// `ocx_lib::oci::host_capabilities`.
+    /// `ocx_oci::host_capabilities`.
     /// EC-CFG-011 — the hook and completions ladders read their own keys and never each other's.
     #[test]
     fn each_ladder_reads_its_own_environment_key() {

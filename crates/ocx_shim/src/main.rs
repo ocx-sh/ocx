@@ -1830,7 +1830,7 @@ mod tests {
             super::core::WIRE_SUBCOMMAND,
             "launcher exec",
             "the shim's wire subcommand token (any change must also update \
-             `crates/ocx_lib/src/package_manager/launcher/body.rs` `.sh` \
+             `crates/ocx_package_manager/src/launcher/body.rs` `.sh` \
              golden — the shim is the 2nd wire-ABI producer)"
         );
         // And it must appear, byte-for-byte, in the assembled child line in
@@ -1860,7 +1860,7 @@ mod tests {
             super::core::WIRE_SUBCOMMAND_SHIM,
             "launcher shim",
             "the shim's wire subcommand token for a DEFERRED tool (any change \
-             must also update `crates/ocx_lib/src/package_manager/launcher/body.rs` \
+             must also update `crates/ocx_package_manager/src/launcher/body.rs` \
              `unix_shim_body` — the native shim is the 2nd producer of this verb too)"
         );
         // And it must appear byte-for-byte in the assembled child line, in the
@@ -2776,7 +2776,7 @@ mod tests {
             super::core::WIRE_SUBCOMMAND_EXEC,
             "exec",
             "the shim's wire subcommand token for a TRAMPOLINE (any change must also \
-             update `crates/ocx_lib/src/package_manager/launcher/body.rs` \
+             update `crates/ocx_package_manager/src/launcher/body.rs` \
              `unix_trampoline_body` — the native shim is the 2nd producer of this verb too)"
         );
         assert_eq!(

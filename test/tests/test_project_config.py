@@ -11,7 +11,7 @@ Scope boundary:
     - Covered here: path discovery at the CLI boundary for explicit sources.
     - NOT covered: project config *contents* (no parsing yet), project config
       *semantics* (no commands consume the path yet), end-to-end CWD-walk
-      behavior (unit tests in ``crates/ocx_lib/src/config/loader.rs`` cover it).
+      behavior (unit tests in ``crates/ocx_config/src/loader.rs`` cover it).
 
 # TODO(Phase 2+): once ``ProjectConfig`` parsing lands, add content-driven
 # acceptance tests (valid schema → success; malformed → exit 78; unknown

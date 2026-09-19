@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+#
+# git runs this for every commit, however the command was spelled, and hands
+# it the finished message in $1 — so there is no shell string to parse and no
+# spelling to enumerate. Wired by `task git:hooks` (core.hooksPath=.githooks).
+#
+# Two different roots: the gate script sits next to THIS file, while the
+# repository being committed to is wherever git is running. They are the same
+# path in normal use and deliberately not in the self-test, which points a
+# throwaway repo at this directory.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$here/../scripts/commit_gate.py" --check-message "$1" "$(git rev-parse --show-toplevel)"

@@ -1,0 +1,7 @@
+fn where_am_i() -> &'static str {
+    module_path!()
+}
+
+fn which_type<T>(value: &T) -> (&'static str, &'static str) {
+    (std::any::type_name::<T>(), std::any::type_name_of_val(value))
+}

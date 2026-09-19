@@ -40,7 +40,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ocx_lib::project::{
+use ocx_project::{
     ManifestSnapshot, MutationGuard, Origin, ProjectConfig, ProjectLock, SelectedTool, acquire_project_lock_for_file,
     lock::lock_path_for,
 };
@@ -70,9 +70,9 @@ pub struct ProjectContext {
 ///
 /// Variant → exit code mapping:
 /// - `NoProject`   → 64 (`UsageError`)
-/// - `Lock`        → 78 / 65, via [`ocx_lib::project::LockCurrency`]
-/// - `Project`     → propagated via existing `ClassifyExitCode` for `ocx_lib::project::Error`
-/// - `Config`      → propagated via existing `ClassifyExitCode` for `ocx_lib::config::error::Error`
+/// - `Lock`        → 78 / 65, via [`ocx_project::LockCurrency`]
+/// - `Project`     → propagated via existing `ClassifyExitCode` for `ocx_project::Error`
+/// - `Config`      → propagated via existing `ClassifyExitCode` for `ocx_config::error::Error`
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProjectContextError {
@@ -90,32 +90,32 @@ pub enum ProjectContextError {
 
     /// `ocx.toml` was found but its `ocx.lock` is absent, or exists and no
     /// longer describes it. Both states are the library's
-    /// [`ocx_lib::project::LockCurrency`], wrapped rather than restated:
-    /// `activation::SessionError` reports the same two states from a prompt,
+    /// [`ocx_project::LockCurrency`], wrapped rather than restated:
+    /// `ocx_package_manager::activation::SessionError` reports the same two states from a prompt,
     /// and the sentence a user reads must not depend on which one they hit.
     #[error("{0}")]
-    Lock(#[from] ocx_lib::project::LockCurrency),
+    Lock(#[from] ocx_project::LockCurrency),
 
     /// A project-tier library error (parse failure, identifier error, etc.)
-    /// propagated from `ocx_lib::project`. Display delegates to the inner
+    /// propagated from `ocx_project`. Display delegates to the inner
     /// error; `source()` returns the inner so `classify_error`'s chain walker
-    /// reaches `ocx_lib::project::Error` and classifies via its
+    /// reaches `ocx_project::Error` and classifies via its
     /// `ClassifyExitCode` impl. (`#[error(transparent)]` would forward
     /// `source` past the inner, skipping classification.)
     #[error("{0}")]
-    Project(#[from] ocx_lib::project::Error),
+    Project(#[from] ocx_project::Error),
 
     /// A config-tier library error propagated from the config loader
     /// (e.g. `ProjectConfig::resolve` returning a `crate::config::error::Error`
     /// when an explicit `--project` path is absent or unreadable). Same
     /// `#[error("{0}")]` rationale as `Project`.
     #[error("{0}")]
-    Config(#[from] ocx_lib::ConfigError),
+    Config(#[from] ocx_config::error::Error),
 }
 
-impl ocx_lib::cli::ClassifyExitCode for ProjectContextError {
-    fn classify(&self) -> Option<ocx_lib::cli::ExitCode> {
-        use ocx_lib::cli::ExitCode;
+impl crate::exit::ClassifyExitCode for ProjectContextError {
+    fn classify(&self) -> Option<ocx_exit::ExitCode> {
+        use ocx_exit::ExitCode;
         match self {
             // Misuse: the user pointed a project-tier command at a tree with
             // no `ocx.toml`.
@@ -167,7 +167,7 @@ impl ocx_lib::cli::ClassifyExitCode for ProjectContextError {
 /// into the global file with `--global`. (`ocx --global init` scaffolds the
 /// same file explicitly since ocx-sh/ocx#443; this auto-init stays so the
 /// first `ocx --global add` on a fresh machine needs no prior gesture.) Reuses
-/// [`ocx_lib::project::init_project`] rather than re-implementing the
+/// [`ocx_project::init_project`] rather than re-implementing the
 /// scaffold (feedback_extend_dont_duplicate).
 ///
 /// No-op when `context.global()` is false (a CWD-discovered project must
@@ -192,7 +192,7 @@ impl ocx_lib::cli::ClassifyExitCode for ProjectContextError {
 /// Propagates `ProjectContextError::Project` for an I/O failure writing the
 /// scaffold (other than the benign already-exists race).
 pub async fn ensure_global_project_initialized(context: &crate::app::Context) -> Result<(), ProjectContextError> {
-    use ocx_lib::project::error::ProjectErrorKind;
+    use ocx_project::error::ProjectErrorKind;
 
     if !context.global() {
         return Ok(());
@@ -209,15 +209,13 @@ pub async fn ensure_global_project_initialized(context: &crate::app::Context) ->
     }
 
     let init_path = config_path.clone();
-    let result = tokio::task::spawn_blocking(move || ocx_lib::project::init_project(&init_path))
+    let result = tokio::task::spawn_blocking(move || ocx_project::init_project(&init_path))
         .await
         .map_err(|e| {
-            ProjectContextError::Project(ocx_lib::project::Error::Project(
-                ocx_lib::project::error::ProjectError::new(
-                    config_path.clone(),
-                    ProjectErrorKind::Io(std::io::Error::other(e)),
-                ),
-            ))
+            ProjectContextError::Project(ocx_project::Error::Project(ocx_project::error::ProjectError::new(
+                config_path.clone(),
+                ProjectErrorKind::Io(std::io::Error::other(e)),
+            )))
         })?;
 
     match result {
@@ -227,9 +225,7 @@ pub async fn ensure_global_project_initialized(context: &crate::app::Context) ->
         // `symlink_metadata` check. The file the caller wanted now exists,
         // so swallow. (The genuinely-concurrent path never reaches here —
         // it double-writes the identical fixed scaffold; see fn doc.)
-        Err(ocx_lib::project::Error::Project(pe))
-            if matches!(pe.kind, ProjectErrorKind::ConfigAlreadyExists { .. }) =>
-        {
+        Err(ocx_project::Error::Project(pe)) if matches!(pe.kind, ProjectErrorKind::ConfigAlreadyExists { .. }) => {
             Ok(())
         }
         Err(e) => Err(ProjectContextError::Project(e)),
@@ -239,7 +235,7 @@ pub async fn ensure_global_project_initialized(context: &crate::app::Context) ->
 /// The error for a resolution that answered `None`: the explicit selection's
 /// directory when one was in effect, else the directory the walk started at.
 fn no_project(context: &crate::app::Context, walked_from: PathBuf) -> ProjectContextError {
-    match ocx_lib::ConfigLoader::explicit_project(context.project_path()) {
+    match ocx_config::loader::ConfigLoader::explicit_project(context.project_path()) {
         Some(dir) => ProjectContextError::NoProjectIn { dir },
         None => ProjectContextError::NoProject { cwd: walked_from },
     }
@@ -273,13 +269,12 @@ pub async fn resolve_project_paths(
     context: &crate::app::Context,
     walk_from: Option<&Path>,
 ) -> Result<(PathBuf, PathBuf), ProjectContextError> {
-    use ocx_lib::env;
-    use ocx_lib::project::error::{ProjectError, ProjectErrorKind};
+    use ocx_project::error::{ProjectError, ProjectErrorKind};
 
     let start = match walk_from {
         Some(path) => path.to_path_buf(),
-        None => env::current_dir().map_err(|e| {
-            ProjectContextError::Project(ocx_lib::project::Error::Project(ProjectError::new(
+        None => ocx_util::env::current_dir().map_err(|e| {
+            ProjectContextError::Project(ocx_project::Error::Project(ProjectError::new(
                 std::path::PathBuf::new(),
                 ProjectErrorKind::Io(e),
             )))
@@ -292,14 +287,13 @@ pub async fn resolve_project_paths(
 }
 
 pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<ProjectContext, ProjectContextError> {
-    use ocx_lib::env;
-    use ocx_lib::project::error::{ProjectError, ProjectErrorKind};
+    use ocx_project::error::{ProjectError, ProjectErrorKind};
 
     // Resolve `ocx.toml` + sibling `ocx.lock` paths with the full precedence
     // chain: `--global`/`OCX_GLOBAL` selector ▸ `--project` ▸ `OCX_PROJECT`
     // ▸ CWD walk ▸ None.
-    let cwd = env::current_dir().map_err(|e| {
-        ProjectContextError::Project(ocx_lib::project::Error::Project(ProjectError::new(
+    let cwd = ocx_util::env::current_dir().map_err(|e| {
+        ProjectContextError::Project(ocx_project::Error::Project(ProjectError::new(
             std::path::PathBuf::new(),
             ProjectErrorKind::Io(e),
         )))
@@ -321,7 +315,7 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
     let lock = match ProjectLock::from_path(&lock_path).await? {
         Some(l) => l,
         None => {
-            return Err(ocx_lib::project::LockCurrency::Missing { path: lock_path }.into());
+            return Err(ocx_project::LockCurrency::Missing { path: lock_path }.into());
         }
     };
 
@@ -341,8 +335,8 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
     // paid once per loaded `ProjectConfig`. Hot-path callers (`ocx exec`,
     // `ocx pull`) hit this gate on every invocation and previously
     // recomputed the hash from scratch on each call.
-    if ocx_lib::project::lock::is_stale(&lock, &config) {
-        return Err(ocx_lib::project::LockCurrency::Stale { lock_path }.into());
+    if ocx_project::lock::is_stale(&lock, &config) {
+        return Err(ocx_project::LockCurrency::Stale { lock_path }.into());
     }
 
     Ok(ProjectContext {
@@ -364,7 +358,7 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
 /// the caller's already-expanded `-g` set, threaded verbatim.
 ///
 /// The home comes from
-/// [`PackageManager::toolchain_home`](ocx_lib::package_manager::PackageManager::toolchain_home)
+/// [`PackageManager::toolchain_home`](ocx_package_manager::PackageManager::toolchain_home)
 /// over the scope `Context::toolchain_render_scope` derived, never a joined
 /// path — the same two calls `ocx pull` makes, so the emitter and the renderer
 /// cannot disagree about where the tree lives.
@@ -380,14 +374,14 @@ pub async fn toolchain_links(
     context: &crate::app::Context,
     config_path: &Path,
     config: &ProjectConfig,
-    lock: &ocx_lib::project::ProjectLock,
+    lock: &ocx_project::ProjectLock,
     groups: &[String],
     pinned_cli: Option<bool>,
-) -> anyhow::Result<ocx_lib::package_manager::ToolchainLinks> {
+) -> anyhow::Result<ocx_package_manager::ToolchainLinks> {
     let scope = context.toolchain_render_scope(config_path).await?;
     let home = context.manager().toolchain_home(&scope, context.toolchain_root())?;
-    Ok(ocx_lib::package_manager::ToolchainLinks {
-        pinned: ocx_lib::package_manager::pinned_for_project(pinned_cli, config),
+    Ok(ocx_package_manager::ToolchainLinks {
+        pinned: ocx_package_manager::pinned_for_project(pinned_cli, config),
         home,
         scope,
         lock: lock.clone(),
@@ -448,12 +442,8 @@ pub async fn load_project_with_lock_consenting(
 /// beside it: a failure to stamp is logged at WARN and swallowed, because the
 /// worst it costs is one inert prompt until the next explicit command — the
 /// fail-safe direction — while aborting `ocx add` over it is not.
-pub async fn record_activation_consent(
-    config_path: &Path,
-    lock: &ocx_lib::project::ProjectLock,
-    consent: Option<bool>,
-) {
-    record_activation_consent_over(config_path, ocx_lib::project::consent::lock_sources(lock), consent).await;
+pub async fn record_activation_consent(config_path: &Path, lock: &ocx_project::ProjectLock, consent: Option<bool>) {
+    record_activation_consent_over(config_path, ocx_project::consent::lock_sources(lock), consent).await;
 }
 
 /// [`record_activation_consent`] over a source set the caller already holds.
@@ -480,7 +470,7 @@ pub async fn record_activation_consent(
 /// record nothing.
 ///
 /// `ocx shell allow` does not route through here at all — it calls
-/// [`ocx_lib::project::consent::record`] directly, because it *is* the explicit
+/// [`ocx_project::consent::record`] directly, because it *is* the explicit
 /// gesture this variable exists to tell machine invocation apart from. Putting
 /// the gate in `record` instead would disable that command too.
 ///
@@ -491,8 +481,8 @@ pub async fn record_activation_consent_over(
     sources: std::collections::BTreeSet<String>,
     consent: Option<bool>,
 ) {
-    if !consent.unwrap_or_else(|| !ocx_lib::env::flag(ocx_lib::env::keys::OCX_NO_CONSENT, false)) {
-        ocx_lib::log::debug!(
+    if !consent.unwrap_or_else(|| !ocx_util::env::flag(ocx_config::env::keys::OCX_NO_CONSENT, false)) {
+        log::debug!(
             "Shell-activation consent was not recorded for '{}': suppressed by --no-consent or OCX_NO_CONSENT",
             config_path.display()
         );
@@ -504,9 +494,9 @@ pub async fn record_activation_consent_over(
     // Two filesystem resolutions plus an atomic write — all blocking, so the
     // whole seam runs on a blocking thread rather than stalling the runtime.
     let joined = tokio::task::spawn_blocking(move || {
-        let project_dir = ocx_lib::project::consent::canonical_project_dir(&config_path)
+        let project_dir = ocx_project::consent::canonical_project_dir(&config_path)
             .map_err(|e| format!("canonicalize of config path '{}' failed: {e}", config_path.display()))?;
-        ocx_lib::project::consent::record(&project_dir, &sources).map_err(|e| e.to_string())
+        ocx_project::consent::record(&project_dir, &sources).map_err(|e| e.to_string())
     })
     .await;
 
@@ -515,7 +505,7 @@ pub async fn record_activation_consent_over(
         Err(e) => Err(format!("the consent-stamp task panicked or was cancelled: {e}")),
     };
     if let Err(reason) = outcome {
-        ocx_lib::log::warn!("Shell-activation consent was not recorded (non-fatal): {reason}");
+        log::warn!("Shell-activation consent was not recorded (non-fatal): {reason}");
     }
 }
 
@@ -558,9 +548,9 @@ pub async fn record_activation_consent_over(
 /// `true`.
 pub async fn materialize_lock(
     context: &crate::app::Context,
-    lock: &ocx_lib::project::ProjectLock,
+    lock: &ocx_project::ProjectLock,
     eager: bool,
-    platform: ocx_lib::oci::Platform,
+    platform: ocx_oci::Platform,
 ) -> anyhow::Result<()> {
     if !eager {
         return Ok(());
@@ -569,7 +559,7 @@ pub async fn materialize_lock(
     // leaf via `repository.clone_with_digest(leaf)` (host key → `Any`-offer
     // fallback); a genuinely unshipped platform surfaces `NoHostLeaf` (exit
     // 78).
-    let mut identifiers: Vec<ocx_lib::oci::Identifier> = Vec::new();
+    let mut identifiers: Vec<ocx_oci::Identifier> = Vec::new();
     for tool in &lock.tools {
         let identifier = host_materialize_identifier(tool, &platform)?;
         // ponytail: O(n) dedup over tools — tiny (a handful). A HashSet buys
@@ -585,22 +575,22 @@ pub async fn materialize_lock(
     Ok(())
 }
 
-/// Resolve a locked tool to its host-platform pull [`ocx_lib::oci::Identifier`]
+/// Resolve a locked tool to its host-platform pull [`ocx_oci::Identifier`]
 /// for materialization.
 ///
 /// Delegates the V1/V2 host-leaf resolution to
-/// [`ocx_lib::project::host_leaf_identifier`] — the single source of the
+/// [`ocx_project::host_leaf_identifier`] — the single source of the
 /// absent-host-leaf error ([`ProjectErrorKind::NoHostLeaf`], exit 78) — so the
 /// condition classifies identically across `compose_tool_set`, `ocx pull`, and
 /// this materialization path. The `ProjectError` is converted to
 /// `anyhow::Error` so the chain still classifies at the `main.rs` boundary.
 ///
-/// [`ProjectErrorKind::NoHostLeaf`]: ocx_lib::project::error::ProjectErrorKind::NoHostLeaf
+/// [`ProjectErrorKind::NoHostLeaf`]: ocx_project::error::ProjectErrorKind::NoHostLeaf
 fn host_materialize_identifier(
-    tool: &ocx_lib::project::LockedTool,
-    host: &ocx_lib::oci::Platform,
-) -> anyhow::Result<ocx_lib::oci::Identifier> {
-    ocx_lib::project::host_leaf_identifier(tool, host).map_err(anyhow::Error::from)
+    tool: &ocx_project::LockedTool,
+    host: &ocx_oci::Platform,
+) -> anyhow::Result<ocx_oci::Identifier> {
+    ocx_project::host_leaf_identifier(tool, host).map_err(anyhow::Error::from)
 }
 
 /// Reject empty comma segments in a repeatable `--group` value.
@@ -612,7 +602,7 @@ fn host_materialize_identifier(
 pub(crate) fn ensure_group_segments_nonempty(groups: &[String]) -> anyhow::Result<()> {
     if groups.iter().any(String::is_empty) {
         return Err(
-            ocx_lib::cli::UsageError::new("empty group segment in --group value; check for stray commas").into(),
+            crate::error::UsageError::new("empty group segment in --group value; check for stray commas").into(),
         );
     }
     Ok(())
@@ -625,24 +615,24 @@ pub(crate) fn ensure_group_segments_nonempty(groups: &[String]) -> anyhow::Resul
 /// the project-tier paths of `ocx pull` and `ocx env`.
 pub(crate) fn ensure_groups_known(groups: &[String], config: &ProjectConfig) -> anyhow::Result<()> {
     for raw in groups {
-        if raw == ocx_lib::project::DEFAULT_GROUP || raw == ocx_lib::project::ALL_GROUP {
+        if raw == ocx_project::DEFAULT_GROUP || raw == ocx_project::ALL_GROUP {
             continue;
         }
         if !config.groups.contains_key(raw) {
-            return Err(ocx_lib::cli::UsageError::new(format!("unknown group '{raw}' in --group filter")).into());
+            return Err(crate::error::UsageError::new(format!("unknown group '{raw}' in --group filter")).into());
         }
     }
     Ok(())
 }
 
-/// Narrow a [`select_tool_set`](ocx_lib::project::select_tool_set) result to the
+/// Narrow a [`select_tool_set`](ocx_project::select_tool_set) result to the
 /// explicitly-requested binding names.
 ///
 /// Operates on resolution-free [`SelectedTool`]s, reading only `binding` and
 /// `origin`, so host-leaf resolution happens after the narrowing and an
 /// unrelated, unnamed sibling that ships no leaf for this host never aborts the
 /// command. Run
-/// [`check_duplicate_selection`](ocx_lib::project::check_duplicate_selection)
+/// [`check_duplicate_selection`](ocx_project::check_duplicate_selection)
 /// on the result before resolving.
 ///
 /// Empty `names` returns the full set unchanged — every binding in scope
@@ -655,7 +645,7 @@ pub(crate) fn ensure_groups_known(groups: &[String], config: &ProjectConfig) -> 
 ///
 /// # Errors
 ///
-/// Exit 64 ([`ocx_lib::cli::UsageError`]) when a requested name matches nothing
+/// Exit 64 ([`crate::error::UsageError`]) when a requested name matches nothing
 /// in the selected groups, or when it matches entries in two or more selected
 /// groups that resolve it differently — narrow with `-g <group>`.
 pub(crate) fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> anyhow::Result<Vec<SelectedTool>> {
@@ -684,7 +674,7 @@ pub(crate) fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> 
         match hits {
             [] => {
                 return Err(
-                    ocx_lib::cli::UsageError::new(format!("binding '{name}' not found in selected groups")).into(),
+                    crate::error::UsageError::new(format!("binding '{name}' not found in selected groups")).into(),
                 );
             }
             [single] => out.push(selected[*single].clone()),
@@ -700,7 +690,7 @@ pub(crate) fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> 
                     })
                     .collect();
                 let groups_str = groups.join(", ");
-                return Err(ocx_lib::cli::UsageError::new(format!(
+                return Err(crate::error::UsageError::new(format!(
                     "binding '{name}' exists in multiple selected groups: [{groups_str}]; pass `-g <group>` to narrow scope"
                 ))
                 .into());
@@ -729,7 +719,7 @@ pub(crate) fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> 
 ///
 /// Bootstrapping case: when `ocx.toml` exists but `ocx.lock` does
 /// not, [`MutationGuard::previous_lock`] returns `None`. Callers
-/// must use [`ocx_lib::project::resolve_lock`] (full resolve) in
+/// must use [`ocx_project::resolve_lock`] (full resolve) in
 /// that case rather than `resolve_lock_touched`.
 ///
 /// # Errors
@@ -741,14 +731,13 @@ pub(crate) fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> 
 /// `ProjectErrorKind::Locked` (wrapped in `ProjectContextError::Project`)
 /// when another writer holds the flock.
 pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<MutationGuard, ProjectContextError> {
-    use ocx_lib::env;
-    use ocx_lib::project::error::{ProjectError, ProjectErrorKind};
+    use ocx_project::error::{ProjectError, ProjectErrorKind};
 
     // Resolve `ocx.toml` + sibling `ocx.lock` paths via the same precedence
     // chain consumed by `load_project_with_lock`: `--global`/`OCX_GLOBAL`
     // selector ▸ `--project` ▸ `OCX_PROJECT` ▸ CWD walk ▸ None.
-    let cwd = env::current_dir().map_err(|e| {
-        ProjectContextError::Project(ocx_lib::project::Error::Project(ProjectError::new(
+    let cwd = ocx_util::env::current_dir().map_err(|e| {
+        ProjectContextError::Project(ocx_project::Error::Project(ProjectError::new(
             std::path::PathBuf::new(),
             ProjectErrorKind::Io(e),
         )))
@@ -782,9 +771,9 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
     // reading via `flock.read_bytes()` we route through the single
     // lock-owning fd, so the snapshot load is safe regardless of platform.
     let bytes = flock.read_bytes().await.map_err(|e| {
-        ocx_lib::project::Error::Project(ocx_lib::project::error::ProjectError::new(
+        ocx_project::Error::Project(ocx_project::error::ProjectError::new(
             config_path.clone(),
-            ocx_lib::project::error::ProjectErrorKind::Io(std::io::Error::other(e)),
+            ocx_project::error::ProjectErrorKind::Io(std::io::Error::other(e)),
         ))
     })?;
     let config = ProjectConfig::from_toml_bytes_with_path(&bytes, config_path.clone())?;
@@ -793,9 +782,9 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
     // comments and declaration order survive the mutation. Parsing above
     // already established the bytes are UTF-8.
     let text = String::from_utf8(bytes).map_err(|e| {
-        ocx_lib::project::Error::Project(ocx_lib::project::error::ProjectError::new(
+        ocx_project::Error::Project(ocx_project::error::ProjectError::new(
             config_path.clone(),
-            ocx_lib::project::error::ProjectErrorKind::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            ocx_project::error::ProjectErrorKind::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
         ))
     })?;
     let manifest = ManifestSnapshot { config, text };
@@ -810,11 +799,9 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
             Ok(bytes) => Some(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
-                return Err(ocx_lib::project::Error::Project(ProjectError::new(
-                    lock_path.clone(),
-                    ProjectErrorKind::Io(e),
-                ))
-                .into());
+                return Err(
+                    ocx_project::Error::Project(ProjectError::new(lock_path.clone(), ProjectErrorKind::Io(e))).into(),
+                );
             }
         },
         None => None,
@@ -833,17 +820,17 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::oci::{Digest, Identifier, PinnedIdentifier};
-    use ocx_lib::project::ToolSource;
+    use ocx_oci::{Digest, Identifier, PinnedIdentifier};
+    use ocx_project::ToolSource;
 
     use super::*;
 
     /// Finding 11 — the two lock states are one contract, and this enum must
     /// *delegate* to it rather than carry a second copy of the mapping.
     ///
-    /// `ProjectContextError` and `activation::SessionError` used to spell the
+    /// `ProjectContextError` and `ocx_package_manager::activation::SessionError` used to spell the
     /// same two `#[error]` strings and the same 78/65 twice over. They now both
-    /// wrap [`ocx_lib::project::LockCurrency`], so one mutation to that type's
+    /// wrap [`ocx_project::LockCurrency`], so one mutation to that type's
     /// `classify` must red this **and** `app.rs`'s
     /// `c343_the_session_refusals_keep_their_exit_codes_through_anyhow` — which
     /// is what proves the two enums share one mapping rather than agreeing by
@@ -852,8 +839,9 @@ mod tests {
     /// Red state: swap the two arms in `LockCurrency::classify`.
     #[test]
     fn f011_the_lock_states_classify_through_the_shared_currency_type() {
-        use ocx_lib::cli::{ClassifyExitCode as _, ExitCode};
-        use ocx_lib::project::LockCurrency;
+        use crate::exit::ClassifyExitCode as _;
+        use ocx_exit::ExitCode;
+        use ocx_project::LockCurrency;
 
         let missing = ProjectContextError::from(LockCurrency::Missing {
             path: PathBuf::from("/work/proj/ocx.lock"),
@@ -878,7 +866,7 @@ mod tests {
         // that happen to match today.
         assert_eq!(
             missing.to_string(),
-            ocx_lib::activation::SessionError::from(LockCurrency::Missing {
+            ocx_package_manager::activation::SessionError::from(LockCurrency::Missing {
                 path: PathBuf::from("/work/proj/ocx.lock"),
             })
             .to_string(),
@@ -1017,7 +1005,7 @@ mod tests {
     /// is invisible in a diff of either function alone, which is why the
     /// property is asserted over all three at once.
     ///
-    /// Red state: move the `ocx_lib::env::flag` call from
+    /// Red state: move the `ocx_util::env::flag` call from
     /// `record_activation_consent_over` up into `record_activation_consent`.
     #[test]
     fn c400_the_consent_env_var_is_read_only_at_the_seam() {
@@ -1028,7 +1016,7 @@ mod tests {
         // variable too, so a guard that only looked for the spelling would stay
         // green with the read itself deleted.
         assert!(
-            seam.contains("env::flag(ocx_lib::env::keys::OCX_NO_CONSENT"),
+            seam.contains("ocx_util::env::flag(ocx_config::env::keys::OCX_NO_CONSENT"),
             "the seam must be the function that reads the env var, or the guard below is vacuous"
         );
 
@@ -1155,7 +1143,7 @@ mod tests {
             tool("cmake", 'c', "ci"),
         ];
         let result = filter_by_names(selected, &["cmake".into()]).expect("naming an unrelated binding must succeed");
-        ocx_lib::project::check_duplicate_selection(&result).expect("the surviving set carries no conflict");
+        ocx_project::check_duplicate_selection(&result).expect("the surviving set carries no conflict");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].binding, "cmake");
     }

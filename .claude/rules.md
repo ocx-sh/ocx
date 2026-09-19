@@ -38,6 +38,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | CLI command changes | [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
 | Shell activation / per-prompt env reconciliation, consent stamps | [subsystem-cli.md](./rules/subsystem-cli.md) (`ocx shell state`), [subsystem-file-structure.md](./rules/subsystem-file-structure.md) (`state/projects/<key>/` layout), `arch-principles.md` (ADR index + State glossary) |
 | CLI help / `--help` text wording | [quality-cli-help.md](./rules/quality-cli-help.md), [subsystem-cli.md](./rules/subsystem-cli.md), [quality-rust.md](./rules/quality-rust.md) (two-register) |
+| Adding a CLI verb (smoke marker + `SUITE_FLOOR` obligation) | [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) § Command Summary, [subsystem-tests.md](./rules/subsystem-tests.md) § Smoke Tier and Guards |
 | Writing tests | [subsystem-tests.md](./rules/subsystem-tests.md), [quality-python.md](./rules/quality-python.md), [quality-rust.md](./rules/quality-rust.md), skill `qa-engineer` |
 | Diagnosing a slow or hung acceptance run | [subsystem-tests.md](./rules/subsystem-tests.md) "Observing a Running Suite" — the slow-vs-hung discriminator, and the three checks that lie (piped exit codes, `find`, parent CPU time) |
 | Metadata / schema changes | [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md), [subsystem-package.md](./rules/subsystem-package.md) |
@@ -73,13 +74,13 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 
 | Subsystem | Rule | Path scope |
 |---|---|---|
-| OCI registry/index | [subsystem-oci.md](./rules/subsystem-oci.md) | `crates/ocx_lib/src/oci/**`, `external/rust-oci-client/**`, `external/sigstore-rs/**` |
-| Storage/symlinks | [subsystem-file-structure.md](./rules/subsystem-file-structure.md) | `crates/ocx_lib/src/file_structure/**` |
-| Package metadata | [subsystem-package.md](./rules/subsystem-package.md) | `crates/ocx_lib/src/package/**` |
-| Package manager | [subsystem-package-manager.md](./rules/subsystem-package-manager.md) | `crates/ocx_lib/src/package_manager/**` |
+| OCI registry/index | [subsystem-oci.md](./rules/subsystem-oci.md) | `crates/ocx_oci/**`, `crates/ocx_index/**`, `crates/ocx_sign/**`, `external/rust-oci-client/**`, `external/sigstore-rs/**` |
+| Storage/symlinks | [subsystem-file-structure.md](./rules/subsystem-file-structure.md) | `crates/ocx_store/src/**` |
+| Package metadata | [subsystem-package.md](./rules/subsystem-package.md) | `crates/ocx_package/src/**` |
+| Package manager | [subsystem-package-manager.md](./rules/subsystem-package-manager.md) | `crates/ocx_package_manager/src/**` |
 | CLI commands/API | [subsystem-cli.md](./rules/subsystem-cli.md) | `crates/ocx_cli/src/**` |
 | Acceptance tests | [subsystem-tests.md](./rules/subsystem-tests.md) | `test/**` |
-| Script host API | [subsystem-script.md](./rules/subsystem-script.md) | `crates/ocx_lib/src/script/**` |
+| Script host API | [subsystem-script.md](./rules/subsystem-script.md) | `crates/ocx_script/src/**` |
 | Website/docs | [subsystem-website.md](./rules/subsystem-website.md) | `website/**` |
 | CI / workflows | [subsystem-ci.md](./rules/subsystem-ci.md) | `.github/workflows/**` |
 | Dependencies | [subsystem-deps.md](./rules/subsystem-deps.md) | `Cargo.toml`, `deny.toml`, `.licenserc.toml` |
@@ -93,14 +94,14 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `**/Cargo.toml`, `**/Cargo.lock` | [quality-rust.md](./rules/quality-rust.md) |
 | `**/Cargo.toml`, `**/rustfmt.toml`, `**/deny.toml`, `**/rust-toolchain.toml` | [rust-cargo.md](./rules/rust-cargo.md) |
 | `Cargo.toml`, `crates/*/Cargo.toml`, `deny.toml`, `.licenserc.toml` | [subsystem-deps.md](./rules/subsystem-deps.md) |
-| `crates/ocx_lib/src/oci/**`, `external/rust-oci-client/**`, `external/sigstore-rs/**` | + [subsystem-oci.md](./rules/subsystem-oci.md) |
-| `crates/ocx_lib/src/file_structure/**`, `file_structure.rs`, `reference_manager.rs`, `symlink.rs` | + [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
-| `crates/ocx_lib/src/script/**`, `test/tests/test_package_test_script.py` | + [subsystem-script.md](./rules/subsystem-script.md) |
-| `crates/ocx_lib/src/package/**`, `package.rs` | + [subsystem-package.md](./rules/subsystem-package.md) |
-| `crates/ocx_lib/src/package_manager/**`, `package_manager.rs` | + [subsystem-package-manager.md](./rules/subsystem-package-manager.md) |
-| `crates/ocx_lib/src/package/metadata/**`, `crates/ocx_schema/**` | + [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md) |
+| `crates/ocx_oci/**`, `crates/ocx_index/**`, `crates/ocx_sign/**`, `external/rust-oci-client/**`, `external/sigstore-rs/**` | + [subsystem-oci.md](./rules/subsystem-oci.md) |
+| `crates/ocx_store/src/**`, `crates/ocx_util/src/fs/symlink.rs` | + [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
+| `crates/ocx_script/src/**`, `test/tests/test_package_test_script.py` | + [subsystem-script.md](./rules/subsystem-script.md) |
+| `crates/ocx_package/src/**` | + [subsystem-package.md](./rules/subsystem-package.md) |
+| `crates/ocx_package_manager/src/**` | + [subsystem-package-manager.md](./rules/subsystem-package-manager.md) |
+| `crates/ocx_package/src/metadata/**`, `crates/ocx_schema/**` | + [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md) |
 | `crates/ocx_cli/src/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [quality-cli-help.md](./rules/quality-cli-help.md) |
-| `crates/ocx_cli/src/api/**`, `command/**` | + [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
+| `crates/ocx_cli/src/api/**`, `crates/ocx_cli/src/command/**` | + [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
 | `test/**` | [subsystem-tests.md](./rules/subsystem-tests.md) |
 | `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md), [python-quality.md](./rules/python-quality.md) |
 | `**/pyproject.toml`, `**/uv.lock` | [python-packaging.md](./rules/python-packaging.md) |
@@ -108,12 +109,13 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `**/*.ts`, `**/*.tsx`, `**/tsconfig*.json` | [quality-typescript.md](./rules/quality-typescript.md), [typescript-quality.md](./rules/typescript-quality.md) |
 | `**/package.json`, `**/eslint.config.*`, `**/biome.json(c)` | [typescript-packaging.md](./rules/typescript-packaging.md) |
 | `**/vite.config.*`, `**/.vitepress/config.*` | [quality-vite.md](./rules/quality-vite.md) |
-| `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md) |
+| `**/*.sh`, `**/*.bash`, `.githooks/*` | [quality-bash.md](./rules/quality-bash.md) — git only runs a hook whose filename is exactly `commit-msg`, `pre-push` and so on, so those shims can carry no suffix |
 | `**/BUILD.bazel`, `**/*.bzl`, `**/MODULE.bazel`, `**/.bazelrc` | [bazel-quality.md](./rules/bazel-quality.md) |
 | `.github/workflows/**`, `.github/actions/**`, `renovate.json` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
 | `.github/ISSUE_TEMPLATE/**` | [workflow-github.md](./rules/workflow-github.md) |
 | `dist-workspace.toml`, `cliff.toml`, `CHANGELOG.md`, release workflows | [workflow-release.md](./rules/workflow-release.md), [workflow-git.md](./rules/workflow-git.md), [docs-quality.md](./rules/docs-quality.md) |
 | `taskfile.yml`, `taskfiles/**/*.yml`, `**/taskfile.yml` | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
+| `crates/**`, `test/**`, `website/**`, `.claude/**`, `Cargo.toml`, `Cargo.lock` | [workflow-bugfix.md](./rules/workflow-bugfix.md), [workflow-refactor.md](./rules/workflow-refactor.md) — source-work-surface scope per `adr_ai_config_path_scope_correction.md`; co-firing with subsystem rules is intended |
 | `.claude/**` | [meta-ai-config.md](./rules/meta-ai-config.md) |
 | `.claude/agents/**`, `.claude/skills/hex-*/**` | + [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md) |
 

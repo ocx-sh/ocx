@@ -4,7 +4,6 @@
 use std::process::ExitCode;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
-use ocx_lib::{cli, log};
 
 use crate::command;
 use crate::error_envelope::render_error_envelope;
@@ -31,7 +30,7 @@ pub mod build_info;
 
 /// A CLI-local command failure carrying its own exit code.
 ///
-/// Mirrors `ocx_lib::cli::UsageError` (message + fixed classification) but
+/// Mirrors `crate::error::UsageError` (message + fixed classification) but
 /// lets the caller pick the code, for command-boundary validations that map
 /// to exits other than 64 (e.g. `NotFound`, `ConfigError`, `DataError`) and
 /// whose originating type is not a library error. Commands return this
@@ -40,11 +39,11 @@ pub mod build_info;
 #[derive(Debug)]
 pub struct CommandError {
     message: String,
-    code: cli::ExitCode,
+    code: ocx_exit::ExitCode,
 }
 
 impl CommandError {
-    pub fn new(message: impl Into<String>, code: cli::ExitCode) -> Self {
+    pub fn new(message: impl Into<String>, code: ocx_exit::ExitCode) -> Self {
         Self {
             message: message.into(),
             code,
@@ -60,36 +59,10 @@ impl std::fmt::Display for CommandError {
 
 impl std::error::Error for CommandError {}
 
-impl ocx_lib::cli::ClassifyExitCode for CommandError {
-    fn classify(&self) -> Option<cli::ExitCode> {
+impl crate::exit::ClassifyExitCode for CommandError {
+    fn classify(&self) -> Option<ocx_exit::ExitCode> {
         Some(self.code)
     }
-}
-
-/// Classify an error chain into an [`ExitCode`], extending the library
-/// classifier with CLI-local error types.
-///
-/// `ocx_lib::cli::classify_error` only knows library error types — it cannot
-/// downcast `ocx_cli`-local types like [`project_context::ProjectContextError`]
-/// (the dependency only points one way). This wrapper walks the chain for the
-/// CLI-local types first, then delegates the remainder to the library
-/// classifier. It is the single exit-code authority for `main.rs`; commands
-/// must return typed errors rather than hand-mapping exit codes.
-pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> cli::ExitCode {
-    use ocx_lib::cli::ClassifyExitCode as _;
-    for cause in std::iter::successors(Some(err), |e| e.source()) {
-        if let Some(pce) = cause.downcast_ref::<project_context::ProjectContextError>()
-            && let Some(code) = pce.classify()
-        {
-            return code;
-        }
-        if let Some(ce) = cause.downcast_ref::<CommandError>()
-            && let Some(code) = ce.classify()
-        {
-            return code;
-        }
-    }
-    cli::classify_error(err)
 }
 
 #[derive(Parser)]
@@ -126,17 +99,17 @@ impl App {
 
     pub async fn run(self) -> anyhow::Result<ExitCode> {
         // Pre-parse --color before clap so help/error output respects it.
-        let color_mode = cli::ColorMode::from_args();
+        let color_mode = ocx_console::ColorMode::from_args();
         let color_config = color_mode.config();
         color_config.apply();
 
-        let styles = cli::clap_styles(color_config.stdout);
+        let styles = ocx_console::clap_styles(color_config.stdout);
         // Route every clap failure (value-validation, missing args, unknown
-        // flags) through `cli::clap::parse` so backend tools see typed exit
+        // flags) through `clap_parse::parse` so backend tools see typed exit
         // codes (`EX_USAGE` = 64) instead of clap's default `2`. Help, version
         // and `DisplayHelpOnMissingArgumentOrSubcommand` paths still print
         // and exit `0` via clap's renderer inside the helper.
-        let matches = match cli::clap::parse(Cli::command().color(color_mode.into()).styles(styles.clone())) {
+        let matches = match crate::clap_parse::parse(Cli::command().color(color_mode.into()).styles(styles.clone())) {
             Ok(matches) => matches,
             Err(code) => return Ok(code.into()),
         };
@@ -182,7 +155,7 @@ impl App {
                 // `.ok()`: `--reconcile` reaches `Context::try_init` itself and
                 // already holds the global.
                 if result.is_err() {
-                    ocx_lib::cli::LogSettings::default()
+                    crate::tracing_init::LogSettings::default()
                         .with_console_level(cli.context.log_level)
                         .with_stderr_color(color_config.stderr)
                         .init()
@@ -507,7 +480,7 @@ mod tests {
     #[test]
     fn every_record_frame_command_matches_the_canonical_cli_name() {
         use clap::Parser as _;
-        use ocx_lib::record::FrameCommand;
+        use ocx_package_manager::record::FrameCommand;
 
         // The deprecated `ocx run` is deliberately absent: it reports `"run"`
         // through the error envelope (a released binary already emitted that)
@@ -563,26 +536,26 @@ mod tests {
     /// The refusals travel as `anyhow` from `self activate --reconcile`, so
     /// they reach [`classify_error`] as a bare cause: this function's own
     /// downcast ladder does not know `SessionError`, and the code comes from
-    /// `ocx_lib::cli::classify_error`'s registry instead. A `SessionError`
+    /// `crate::exit::classify_library_error`'s registry instead. A `SessionError`
     /// added there without a `try_downcast!` entry silently degrades 78/65 to
     /// the generic failure code, which no other test would notice.
     ///
     /// Red state: delete `try_downcast!(SessionError)` from
-    /// `crates/ocx_lib/src/cli/classify.rs` and both assertions report
+    /// `crates/ocx_cli/src/exit/classify.rs` and both assertions report
     /// `Failure`.
     #[test]
     fn c343_the_session_refusals_keep_their_exit_codes_through_anyhow() {
         use std::path::PathBuf;
 
-        use ocx_lib::activation::SessionError;
-        use ocx_lib::project::LockCurrency;
+        use ocx_package_manager::activation::SessionError;
+        use ocx_project::LockCurrency;
 
         let missing = anyhow::Error::from(SessionError::from(LockCurrency::Missing {
             path: PathBuf::from("/work/proj/ocx.lock"),
         }));
         assert_eq!(
-            super::classify_error(missing.as_ref()),
-            ocx_lib::cli::ExitCode::ConfigError,
+            crate::exit::classify_error(missing.as_ref()),
+            ocx_exit::ExitCode::ConfigError,
             "an absent lock is a configuration gap (78), the same as from `ocx pull`"
         );
 
@@ -590,8 +563,8 @@ mod tests {
             lock_path: PathBuf::from("/work/proj/ocx.lock"),
         }));
         assert_eq!(
-            super::classify_error(stale.as_ref()),
-            ocx_lib::cli::ExitCode::DataError,
+            crate::exit::classify_error(stale.as_ref()),
+            ocx_exit::ExitCode::DataError,
             "a stale lock is stale on-disk data (65), the same as from `ocx pull`"
         );
     }
@@ -869,7 +842,7 @@ mod tests {
     /// predicate that skips everything.
     ///
     /// `Exec` is what a rendered `<home>/toolchain/active/bin/<name>` trampoline
-    /// `exec`s (`package_manager::launcher::body`), `DeprecatedRun` is its
+    /// `exec`s (`ocx_package_manager::launcher::body`), `DeprecatedRun` is its
     /// still-shipped `ocx run` spelling, and `Env`/`Direnv` are what a shell
     /// evaluates — `.envrc` re-runs `ocx direnv export` on every directory
     /// change. On any of them the probe's live tag listing plus `ocx --format

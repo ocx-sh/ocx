@@ -58,16 +58,16 @@ impl Init {
         // - otherwise → `<cwd>/ocx.toml`.
         let toml_path = if context.global() {
             let home = context.file_structure().root();
-            ocx_lib::project::init_project(&ocx_lib::project::ProjectConfig::global_manifest_path(home))?
-        } else if let Some(selected) = ocx_lib::ConfigLoader::explicit_project(context.project_path()) {
+            ocx_project::init_project(&ocx_project::ProjectConfig::global_manifest_path(home))?
+        } else if let Some(selected) = ocx_config::loader::ConfigLoader::explicit_project(context.project_path()) {
             if selected.is_dir() {
-                ocx_lib::project::init_project_at_default(&selected)?
+                ocx_project::init_project_at_default(&selected)?
             } else {
-                ocx_lib::project::init_project(&selected)?
+                ocx_project::init_project(&selected)?
             }
         } else {
-            let cwd = ocx_lib::env::current_dir()?;
-            ocx_lib::project::init_project_at_default(&cwd)?
+            let cwd = ocx_util::env::current_dir()?;
+            ocx_project::init_project_at_default(&cwd)?
         };
 
         // Creating an `ocx.toml` in a directory is at least as deliberate a

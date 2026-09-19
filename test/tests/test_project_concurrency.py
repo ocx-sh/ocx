@@ -14,8 +14,8 @@ concurrent writers must serialize: one wins, the other either retries
 cleanly or exits with `Locked` (TempFail 75).
 
 Spec sources:
-- ``crates/ocx_lib/src/project/mutation.rs`` (MutationGuard contract)
-- ``crates/ocx_lib/src/project/error.rs`` ``ProjectErrorKind::Locked`` →
+- ``crates/ocx_project/src/mutation.rs`` (MutationGuard contract)
+- ``crates/ocx_project/src/error.rs`` ``ProjectErrorKind::Locked`` →
   ``ExitCode::TempFail`` (75)
 - plan_review_fixes_project_toolchain.md Phase 1 step 5
 

@@ -1,0 +1,310 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AuthoringMetadata",
+  "description": "OCX package metadata in authoring (sidecar) form.\n\nThe published [`Metadata`] with one relaxation: dependency digests are\noptional. See the module docs.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "bundle"
+        }
+      },
+      "$ref": "#/$defs/AuthoringBundle",
+      "required": [
+        "type"
+      ]
+    }
+  ],
+  "$defs": {
+    "BundleMetadataVersion": {
+      "description": "Bundle metadata format version.",
+      "type": "integer",
+      "enum": [
+        1
+      ]
+    },
+    "Env": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Var"
+      }
+    },
+    "Var": {
+      "description": "An environment variable declaration.\n\nEach variable has a key (the variable name), a [modifier](Modifier) that\ndetermines how the value is resolved, and a visibility that controls which\nexec surfaces load the entry. The modifier's type and fields are flattened\ninto this object in JSON.\n\n`visibility` defaults to [`Visibility::PRIVATE`] per ADR\n`adr_visibility_two_axis_and_exec_modes.md` Tension 1 (A): publishers must\nopt in explicitly to expose entries on the consumer axis. `\"sealed\"` is\nrejected at parse time — a `Var` invisible on every surface is dead config\n(ADR Tension 4).",
+      "type": "object",
+      "properties": {
+        "key": {
+          "description": "The environment variable name (e.g. `PATH`, `JAVA_HOME`).",
+          "type": "string"
+        },
+        "visibility": {
+          "description": "Visibility on the entry axis — controls which exec surface (interface vs private)\nsees this entry; see the package manager's composer. Defaults to\n`private` — publishers explicitly mark contract entries as `public` or\n`interface` to expose them to consumers. `\"sealed\"` is rejected at parse\ntime (ADR Tension 4).",
+          "type": "string",
+          "enum": [
+            "private",
+            "public",
+            "interface"
+          ],
+          "default": "private"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "oneOf": [
+        {
+          "description": "A path variable is prepended to any existing value of the environment variable.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "path"
+            }
+          },
+          "$ref": "#/$defs/Path",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "A constant variable replaces any existing value of the environment variable.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "constant"
+            }
+          },
+          "$ref": "#/$defs/Constant",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "A list variable is appended to any existing value of the environment\nvariable, joined by its own separator, with earlier occurrences of the\nsame contribution removed.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "list"
+            }
+          },
+          "$ref": "#/$defs/List",
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "Path": {
+      "description": "A path-type environment variable.\n\nPath variables are prepended to any existing value of the environment variable.\nInterpolation tokens in `value` are replaced at resolution time.",
+      "type": "object",
+      "properties": {
+        "required": {
+          "description": "Whether the resolved path must exist on disk. If `true` and the path is missing, installation fails.\nDefaults to `false`.",
+          "type": "boolean",
+          "default": false
+        },
+        "value": {
+          "description": "The value template. `${installPath}` — or its alias `${self.installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ]
+    },
+    "Constant": {
+      "description": "A constant-type environment variable.\n\nConstant variables replace any existing value of the environment variable.\nInterpolation tokens in `value` are replaced at resolution time.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "description": "The value template. `${installPath}` — or its alias `${self.installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value"
+      ]
+    },
+    "List": {
+      "description": "A list-type environment variable.\n\nList variables are appended to any existing value of the environment\nvariable, with every earlier occurrence of the same contribution removed\nfirst, so re-applying moves the contribution to the back rather than\nduplicating it. The consumer resolving duplicates last-wins is what the\ndirection serves. Interpolation tokens in `value` are replaced at\nresolution time.\n\nThe contribution is opaque: ocx never splits it into elements, so a value\ncarrying the separator is still one contribution.",
+      "type": "object",
+      "properties": {
+        "separator": {
+          "description": "The string joining this contribution to the variable's existing value —\na single space for `JDK_JAVA_OPTIONS`, a comma for `GODEBUG`.\n\nRequired in package metadata, and refused there by `ValidMetadata`\nrather than by serde, so the message names the variable instead of a\nfield offset. Typed as optional because `ocx.toml` and `ocx exec --env`\nmay omit it.\n\nDeliberately no `skip_serializing_if`, unlike the tree's other optional\nwire fields: schemars drops a skipped field from `required`, and the\npublished schema is the write contract where \"a list needs a separator\"\nhas to be enforceable. The only value that would be written as `null` is\none `ValidMetadata` refuses to publish.",
+          "type": "string"
+        },
+        "value": {
+          "description": "The value template. `${installPath}` — or its alias `${self.installPath}` — is this package's\ncontent directory, `${deps.NAME.installPath}` a declared dependency's, and `${self.env.KEY}` the\nresolved value of a variable declared earlier in this same list. Append `:native` or `:posix` to\npick the path style. Every other `${...}` is rejected; write `$${` for a literal `${`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "separator",
+        "value"
+      ]
+    },
+    "AuthoringDependencies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AuthoringDependency"
+      }
+    },
+    "AuthoringDependency": {
+      "description": "A dependency in authoring (sidecar) form.\n\nUnlike the published [`Dependency`], the identifier's digest is optional:\na tag-only identifier declares \"resolve me at `ocx package create` time\".\n`create` resolves it against the selected index for its `--platform` and\nattaches the winning platform manifest's digest to the identifier itself,\nso the projection to the published form\n([`AuthoringDependency::to_published`]) is a straight pass-through.",
+      "type": "object",
+      "properties": {
+        "identifier": {
+          "description": "OCX identifier with a required explicit registry. The digest is\noptional in the authoring form: absent means \"pin me at\n`ocx package create` time\". The tag is advisory once a digest is\npresent.",
+          "$ref": "#/$defs/Identifier"
+        },
+        "visibility": {
+          "description": "Controls how this dependency's environment variables propagate.\nDefault: `sealed` — no env contribution.",
+          "$ref": "#/$defs/Visibility",
+          "default": "sealed"
+        },
+        "name": {
+          "description": "Optional name for this dependency used in `${deps.NAME.installPath}`\ninterpolation. Defaults to the last path segment of the repository.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DependencyName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "identifier"
+      ]
+    },
+    "Identifier": {
+      "description": "OCI identifier in the format 'registry/repository[:tag][@digest]'.",
+      "type": "string"
+    },
+    "Visibility": {
+      "type": "string",
+      "enum": [
+        "sealed",
+        "private",
+        "public",
+        "interface"
+      ]
+    },
+    "DependencyName": {
+      "description": "Interpolation name for this dependency. Must match ^[a-z0-9][a-z0-9_-]*$ (max 64 chars).",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "maxLength": 64
+    },
+    "Entrypoints": {
+      "description": "Map of entrypoint names to entrypoint definitions. Each key is the user-invokable command name; the value object carries an optional `command` field naming the binary the generated launcher dispatches to when it differs from the invokable name (omit it and the name is dispatched directly). An optional `args` array supplies fixed leading arguments the generated launcher prepends before user args; each element may carry `${installPath}` (or its alias `${self.installPath}`), optionally suffixed `:native` or `:posix`, while `${deps.*}` and `${self.env.*}` are not permitted in args and every other `${...}` is rejected — write `$${` for a literal `${`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Entrypoint"
+      },
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9_-]*$",
+        "maxLength": 64
+      }
+    },
+    "Entrypoint": {
+      "description": "A single named entrypoint for a package.\n\nThe map key in [`Entrypoints`] supplies the *invocable name* — the\nfilename of the generated launcher. This struct holds the per-entry\nvalue.\n\nThe launcher generated for each entry re-enters via\n`ocx launcher exec '<package-root>' -- <name> [args...]`, preserving\nclean-env execution semantics. `ocx launcher exec` resolves the\n*dispatch command* against the composed `PATH` from the package's `env`\nblock: [`Entrypoint::command`] when set, otherwise the invocable name\nitself (the common case where they coincide).",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "Dispatch target resolved on the composed `PATH`, when it differs from\nthe invocable name. Absent means the entrypoint name *is* the command\n(the common case): a package may expose `hello` while dispatching a\ndifferently named binary such as `hello-bin`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntrypointName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "args": {
+          "description": "Fixed leading arguments the generated launcher prepends before the user's\nown arguments. Each element may carry `${installPath}` — or its alias\n`${self.installPath}` — optionally suffixed `:native` or `:posix`; `${deps.*}`\nand `${self.env.*}` are NOT permitted here, and every other `${...}` is rejected\n(write `$${` for a literal `${`). Absent/empty serializes to nothing\n(wire-compatible with the pre-`args` shape).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "EntrypointName": {
+      "description": "Entrypoint name for invocation by users. Must match ^[a-z0-9][a-z0-9_-]*$ and be at most 64 characters.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "maxLength": 64
+    },
+    "Binaries": {
+      "description": "Publisher-declared, unverified claim of interface-surface executable names exposed on PATH by this package. Absent means undeclared; an empty array means the publisher asserts zero interface binaries. On Windows the claim reflects the default executable-resolution set (.exe/.com/.bat/.cmd); a customized child PATHEXT may resolve fewer.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "Integrations": {
+      "description": "A package's declared `integrations` map: namespace key → opaque payload.\n\nKeys iterate in lexicographic order ([`BTreeMap`]), so every derived\nordering — composed rows, cap-violation reporting, closure namespace lists\n— is deterministic across runs and platforms.\n\nAbsent on the wire and empty are the **same** state (deliberately not\n`binaries`' `Option` tri-state): nothing distinguishes \"declares none\" from\n\"did not say\".",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "AuthoringBundle": {
+      "description": "Bundle package metadata in authoring form.\n\nSame shape as the published [`Bundle`], with authoring-form (digest-optional)\ndependencies.",
+      "type": "object",
+      "properties": {
+        "version": {
+          "description": "The version of the bundle metadata format.",
+          "$ref": "#/$defs/BundleMetadataVersion"
+        },
+        "strip_components": {
+          "description": "Number of leading path components to strip when extracting the bundle.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "env": {
+          "description": "Environment variables the package contributes.",
+          "$ref": "#/$defs/Env"
+        },
+        "dependencies": {
+          "description": "Ordered list of package dependencies in authoring form (digest\noptional). Array order defines the environment import order.",
+          "$ref": "#/$defs/AuthoringDependencies"
+        },
+        "entrypoints": {
+          "description": "Named entrypoints that `ocx package install` generates launchers for.",
+          "$ref": "#/$defs/Entrypoints"
+        },
+        "binaries": {
+          "description": "The interface-binaries claim, hand-authored or baked in by `ocx\npackage create`'s auto-scan step. Mirrors [`Bundle::binaries`] — see\n`adr_declared_binaries_metadata.md` §1, §2.1.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Binaries"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "integrations": {
+          "description": "Vendor-namespaced configuration blocks. Mirrors\n[`Bundle::integrations`] exactly — [`AuthoringMetadata::to_published`]\ncopies it through unchanged, so there is no authoring-form delta here.",
+          "$ref": "#/$defs/Integrations"
+        }
+      },
+      "required": [
+        "version"
+      ]
+    }
+  },
+  "$id": "https://ocx.sh/schemas/metadata/v1.json"
+}

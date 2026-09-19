@@ -20,7 +20,7 @@
 
 use std::collections::BTreeMap;
 
-use ocx_lib::oci::Algorithm;
+use ocx_oci::Algorithm;
 use serde_json::Value;
 
 /// OCI image-spec `v1.1.1`, `schema/image-index-schema.json`. Only the platform
@@ -41,7 +41,7 @@ const SOURCES: &str = include_str!("../specs/SOURCES.md");
 
 /// A definition carrying this description prefix is the OCI platform object,
 /// whatever schemars happened to name it. Written by the hand-authored
-/// `impl JsonSchema for Platform` in `ocx_lib::oci::platform`.
+/// `impl JsonSchema for Platform` in `ocx_oci::platform`.
 pub const PLATFORM_DESCRIPTION_PREFIX: &str = "An OCI image-spec platform object";
 
 fn parse(label: &str, raw: &str) -> Value {

@@ -31,18 +31,20 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::env;
-use ocx_lib::launch::{self, Launch};
-use ocx_lib::package::metadata::env::entry::Entry;
-use ocx_lib::package_manager::composer::{ComposeRequest, Materialization};
-use ocx_lib::project::{
+use ocx_config::env;
+use ocx_package::metadata::env::entry::Entry;
+use ocx_package_manager::composer::{ComposeRequest, Materialization};
+use ocx_package_manager::launch::{self, Launch};
+use ocx_package_manager::record::{PackageBinding, RecordInputs, Scope};
+use ocx_project::{
     DEFAULT_GROUP, Origin, check_duplicate_selection, expand_all_keyword, lazy_mode_for_tool, resolve_selected_tools,
     select_tool_set,
 };
-use ocx_lib::record::{PackageBinding, RecordInputs, Scope};
 
 use crate::app::project_context::{filter_by_names, load_project_with_lock_consenting};
 use crate::options;
+use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, ListSeparatorError, reconcile_list_separators};
+use ocx_shell::shell::reconcile;
 
 /// Run a command with the composed environment from the project toolchain.
 ///
@@ -225,7 +227,7 @@ impl ToolchainExec {
         // for this host or collides with another selected group — cannot abort
         // a narrowly-named run. The host platform is computed here but consumed
         // in Phase F.
-        let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
+        let host = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         let selected = select_tool_set(&ctx.config, Some(&ctx.lock), &expanded, &[])?;
 
         // ── Phase E: NAME filter, then duplicate validation ───────────────
@@ -286,7 +288,7 @@ impl ToolchainExec {
         // — the same vector both feeds the parent's own composition and is
         // forwarded over `OCX_ENV` (Phase G) so a generated launcher's re-entry
         // re-applies it after the package entries instead of reverting to them.
-        let mut project_env = ocx_lib::project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
+        let mut project_env = ocx_project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
         project_env.extend(env_overrides);
         // C-065/C-070: the groups this invocation selected, healed and probed
         // once inside `resolve_env_with_attribution` before any link path is
@@ -304,7 +306,7 @@ impl ToolchainExec {
         )
         .await?;
         let toolchain_home = toolchain.home.clone();
-        let scope = ocx_lib::package_manager::EnvScope::Project {
+        let scope = ocx_package_manager::EnvScope::Project {
             no_patches: no_patches.clone(),
             env: project_env.clone(),
             toolchain: Some(Box::new(toolchain)),
@@ -342,7 +344,7 @@ impl ToolchainExec {
         let mut process_env = if self.clean {
             env::Env::clean()
         } else {
-            env::Env::inherited()
+            reconcile::inherited_env()
         };
         // Inject the project `no-patches` opt-out into the forwarded patch tier:
         // the base `config_view().patches` carries only the config-file tier
@@ -388,7 +390,7 @@ impl ToolchainExec {
         // (stages 4-6) is the forwarded slice, NOT the whole composed set: the
         // launcher re-derives the package entries itself.
         process_env.apply_child_env(
-            env::ChildEnv {
+            ChildEnv {
                 composed: &entries,
                 forwarded: &project_env,
             },
@@ -403,7 +405,7 @@ impl ToolchainExec {
         // canonicalization the project tier already defines, and re-deriving it
         // would need the project config plus file I/O on the exec path.
         let project_root = ctx.config_path.parent().unwrap_or(&ctx.config_path).to_path_buf();
-        let declaration_digest = ocx_lib::oci::Digest::try_from(ctx.lock.metadata.declaration_hash.as_str())?;
+        let declaration_digest = ocx_oci::Digest::try_from(ctx.lock.metadata.declaration_hash.as_str())?;
         let bindings = project_bindings(&resolved, &install_infos);
 
         // clap enforces `last = true, num_args = 1.., required = true` on the
@@ -483,8 +485,8 @@ impl ToolchainExec {
 /// together or not at all. `ocx exec` passes no positionals to `select_tool_set`,
 /// so today the skip is unreachable.
 fn project_bindings(
-    resolved: &[ocx_lib::project::ResolvedTool],
-    install_infos: &[std::sync::Arc<ocx_lib::package::install_info::InstallInfo>],
+    resolved: &[ocx_project::ResolvedTool],
+    install_infos: &[std::sync::Arc<ocx_package::install_info::InstallInfo>],
 ) -> Vec<PackageBinding> {
     resolved
         .iter()
@@ -505,7 +507,7 @@ fn project_bindings(
 /// re-entrant launcher) in one pass (W-11).
 ///
 /// The two are disjoint `Vec`s holding independent [`Entry`] copies: without
-/// chaining them through one [`env::reconcile_list_separators`] call, a
+/// chaining them through one [`reconcile_list_separators`] call, a
 /// package's explicit separator would settle `entries` alone and leave
 /// `project_env`'s own copy at whatever separator it was declared with —
 /// `None` inherits nothing, and a re-entrant launcher would fold it with the
@@ -515,11 +517,11 @@ fn project_bindings(
 ///
 /// # Errors
 ///
-/// [`env::ListSeparatorError`] when two entries for one key declare different
+/// [`ListSeparatorError`] when two entries for one key declare different
 /// explicit separators, or when the separator an entry settles on edges its
 /// value.
-fn reconcile_run_entries(entries: &mut [Entry], project_env: &mut [Entry]) -> Result<(), env::ListSeparatorError> {
-    env::reconcile_list_separators(entries.iter_mut().chain(project_env.iter_mut()))
+fn reconcile_run_entries(entries: &mut [Entry], project_env: &mut [Entry]) -> Result<(), ListSeparatorError> {
+    reconcile_list_separators(entries.iter_mut().chain(project_env.iter_mut()))
 }
 
 /// The trampoline directories this invocation's **lookup** `PATH` excludes
@@ -530,12 +532,12 @@ fn reconcile_run_entries(entries: &mut [Entry], project_env: &mut [Entry]) -> Re
 /// # Derived, never joined
 ///
 /// Every entry comes from the resolver that produced the home —
-/// [`ToolchainStore::bin`](ocx_lib::file_structure::ToolchainStore::bin) and
-/// [`ToolchainStore::shell_bin`](ocx_lib::file_structure::ToolchainStore::shell_bin)
+/// [`ToolchainStore::bin`](ocx_store::file_structure::ToolchainStore::bin) and
+/// [`ToolchainStore::shell_bin`](ocx_store::file_structure::ToolchainStore::shell_bin)
 /// for the global tree, the matching
-/// [`ToolchainHome`](ocx_lib::file_structure::ToolchainHome) accessors for the
+/// [`ToolchainHome`](ocx_store::file_structure::ToolchainHome) accessors for the
 /// project's, the latter through
-/// [`PackageManager::toolchain_home`](ocx_lib::package_manager::PackageManager::toolchain_home)
+/// [`PackageManager::toolchain_home`](ocx_package_manager::PackageManager::toolchain_home)
 /// so `toolchain_dir` is honoured. A literal `join("toolchain").join("bin")`
 /// would compile, pass every fixture, and drift silently the day the tree shape
 /// moves — which is the whole of what C-010 forbids.
@@ -573,8 +575,8 @@ fn reconcile_run_entries(entries: &mut [Entry], project_env: &mut [Entry]) -> Re
 /// `PackageManager::toolchain_home`, the one derivation `ocx pull` also uses)
 /// and hands both trees in.
 fn trampoline_lookup_exclusions(
-    file_structure: &ocx_lib::file_structure::FileStructure,
-    project_home: &ocx_lib::file_structure::ToolchainHome,
+    file_structure: &ocx_store::file_structure::FileStructure,
+    project_home: &ocx_store::file_structure::ToolchainHome,
 ) -> Vec<std::path::PathBuf> {
     // Spelled out rather than imported: a function-local `use` would go unused
     // the moment either physical entry is dropped, so the drop would red as an
@@ -585,8 +587,8 @@ fn trampoline_lookup_exclusions(
         project_home.bin(),
         file_structure
             .toolchain
-            .shell_bin(ocx_lib::file_structure::DEFAULT_SHELL),
-        project_home.shell_bin(ocx_lib::file_structure::DEFAULT_SHELL),
+            .shell_bin(ocx_store::file_structure::DEFAULT_SHELL),
+        project_home.shell_bin(ocx_store::file_structure::DEFAULT_SHELL),
     ]
 }
 
@@ -599,8 +601,8 @@ fn trampoline_lookup_exclusions(
 /// `--project` that is missing is a `config::Error::FileNotFound` (exit 79),
 /// while C-068 requires the three-way contract `ocx exec` already states —
 /// [`ProjectContextError::NoProjectIn`] → **64**,
-/// [`LockCurrency::Missing`](ocx_lib::project::LockCurrency::Missing) → **78**,
-/// [`LockCurrency::Stale`](ocx_lib::project::LockCurrency::Stale) → **65** —
+/// [`LockCurrency::Missing`](ocx_project::LockCurrency::Missing) → **78**,
+/// [`LockCurrency::Stale`](ocx_project::LockCurrency::Stale) → **65** —
 /// with the baked path named in each.
 ///
 /// The two lock arms already classify correctly and already carry a path, and
@@ -626,9 +628,11 @@ fn attribute_to_selected_project(
         // `ProjectConfig::resolve`, which resolves the project tier and nothing
         // else — the `--config` tier was resolved in `Context::try_init`, long
         // before this call.
-        ProjectContextError::Config(ocx_lib::ConfigError::FileNotFound { .. }) => ProjectContextError::NoProjectIn {
-            dir: selected.to_path_buf(),
-        },
+        ProjectContextError::Config(ocx_config::error::Error::FileNotFound { .. }) => {
+            ProjectContextError::NoProjectIn {
+                dir: selected.to_path_buf(),
+            }
+        }
         other => other,
     }
 }
@@ -636,8 +640,8 @@ fn attribute_to_selected_project(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_lib::oci::{Digest, Identifier, Platform};
-    use ocx_lib::project::{LockMetadata, LockVersion, LockedTool, ProjectConfig, ProjectLock};
+    use ocx_oci::{Digest, Identifier, Platform};
+    use ocx_project::{LockMetadata, LockVersion, LockedTool, ProjectConfig, ProjectLock};
     use std::collections::BTreeMap;
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -652,14 +656,14 @@ mod tests {
         Entry {
             key: key.to_owned(),
             value: value.to_owned(),
-            kind: ocx_lib::package::metadata::env::modifier::ModifierKind::List,
+            kind: ocx_package::metadata::env::modifier::ModifierKind::List,
             separator: separator.map(str::to_owned),
         }
     }
 
     /// The motivating case: a package's explicit separator (in `entries`)
     /// must reach the project's own entry for the same key even though it
-    /// lives in the disjoint `project_env` vector — `ocx_lib::env`'s own
+    /// lives in the disjoint `project_env` vector — `ocx_config::env`'s own
     /// `reconcile_spans_two_disjoint_vectors` test proves the underlying
     /// primitive; this proves `toolchain_exec.rs` actually wires it with both vectors.
     #[test]
@@ -686,7 +690,7 @@ mod tests {
 
         let error = reconcile_run_entries(&mut entries, &mut project_env)
             .expect_err("conflicting explicit separators must not both apply");
-        assert!(matches!(&error, env::ListSeparatorError::Conflict { key, .. } if key == "GODEBUG"));
+        assert!(matches!(&error, ListSeparatorError::Conflict { key, .. } if key == "GODEBUG"));
     }
 
     // ── select → filter → resolve (named scope regression) ────────────────────
@@ -818,13 +822,13 @@ mod tests {
     /// surviving spelling proves nothing about the one that left.
     #[test]
     fn the_exclusion_set_is_both_trees_own_bin_directories() {
-        use ocx_lib::file_structure::DEFAULT_SHELL;
+        use ocx_store::file_structure::DEFAULT_SHELL;
 
         let home = std::path::PathBuf::from("/w/.ocx-home");
-        let file_structure = ocx_lib::file_structure::FileStructure::with_root(home);
+        let file_structure = ocx_store::file_structure::FileStructure::with_root(home);
         // A relocated project home: the segment before `bin` is a project key,
         // not the literal `toolchain`.
-        let project_home = ocx_lib::file_structure::ToolchainHome::new("/w/toolchains/0123456789abcdef/toolchain");
+        let project_home = ocx_store::file_structure::ToolchainHome::new("/w/toolchains/0123456789abcdef/toolchain");
 
         let excluded = trampoline_lookup_exclusions(&file_structure, &project_home);
 
@@ -874,7 +878,7 @@ mod tests {
     // ── C-068 — a trampoline's baked home, re-attributed ─────────────────────
 
     use crate::app::project_context::ProjectContextError;
-    use ocx_lib::cli::ExitCode;
+    use ocx_exit::ExitCode;
 
     /// The shipped exit-code authority — `main.rs`'s own classifier, walking
     /// the source chain for CLI-local types before delegating to the library.
@@ -883,13 +887,13 @@ mod tests {
     /// integer, so a mapping that is correct in the enum and lost on the way to
     /// the process's status still reds.
     fn code_of(error: &ProjectContextError) -> ExitCode {
-        crate::app::classify_error(error)
+        crate::exit::classify_error(error)
     }
 
     /// The `config::Error` a *missing* explicit `--project` selection really
     /// produces, from the shipped loader rather than a hand-built variant.
-    async fn selection_error(selected: &std::path::Path) -> ocx_lib::ConfigError {
-        ocx_lib::ConfigLoader::project_path(None, Some(selected))
+    async fn selection_error(selected: &std::path::Path) -> ocx_config::error::Error {
+        ocx_config::loader::ConfigLoader::project_path(None, Some(selected))
             .await
             .expect_err("an explicit --project naming an absent path is an error")
     }
@@ -975,12 +979,12 @@ mod tests {
         let tmp = tempfile::tempdir().expect("a tempdir is creatable");
         let project = tmp.path().to_path_buf();
         std::fs::write(project.join("ocx.toml"), "this is not = = toml").expect("the manifest is writable");
-        let resolved = ocx_lib::ConfigLoader::project_path(None, Some(&project))
+        let resolved = ocx_config::loader::ConfigLoader::project_path(None, Some(&project))
             .await
             .expect("a directory holding an ocx.toml resolves (RUL-55)")
             .expect("the file is present");
         let bytes = tokio::fs::read(&resolved).await.expect("the manifest is readable");
-        let parse_failure = ocx_lib::project::ProjectConfig::from_toml_bytes_with_path(&bytes, resolved)
+        let parse_failure = ocx_project::ProjectConfig::from_toml_bytes_with_path(&bytes, resolved)
             .expect_err("an unparsable manifest is an error");
         let error = ProjectContextError::from(parse_failure);
         let before = code_of(&error);
@@ -1016,7 +1020,7 @@ mod tests {
         let baked = std::path::PathBuf::from("/w/proj");
         let lock_path = baked.join("ocx.lock");
 
-        let missing = ProjectContextError::from(ocx_lib::project::LockCurrency::Missing {
+        let missing = ProjectContextError::from(ocx_project::LockCurrency::Missing {
             path: lock_path.clone(),
         });
         assert_eq!(code_of(&missing), ExitCode::ConfigError, "C-068 — an absent lock is 78");
@@ -1031,7 +1035,7 @@ mod tests {
             "C-068 — each arm names its path: {missing}"
         );
 
-        let stale = ProjectContextError::from(ocx_lib::project::LockCurrency::Stale {
+        let stale = ProjectContextError::from(ocx_project::LockCurrency::Stale {
             lock_path: lock_path.clone(),
         });
         assert_eq!(code_of(&stale), ExitCode::DataError, "C-068 — a stale lock is 65");

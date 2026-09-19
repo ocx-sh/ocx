@@ -264,7 +264,7 @@ A pin is a snapshot of the dependency's platform coverage at the moment `create`
 <!-- external -->
 [oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
 [wasi]: https://wasi.dev/
-[in-tree-mirror-spec]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
+[in-tree-mirror-spec]: https://github.com/ocx-sh/ocx-mirror
 [glibc]: https://www.gnu.org/software/libc/
 [musl]: https://musl.libc.org/
 [gcompat]: https://gitlab.alpinelinux.org/alpine/gcompat
@@ -314,4 +314,4 @@ A pin is a snapshot of the dependency's platform coverage at the moment `create`
 [authoring-bundle-sidecars]: ./bundle-anatomy.md#sidecars
 
 <!-- mirror pipeline -->
-[mirror-pipeline]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
+[mirror-pipeline]: https://github.com/ocx-sh/ocx-mirror

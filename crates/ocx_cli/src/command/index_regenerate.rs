@@ -4,7 +4,6 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{cli, oci::index};
 
 use crate::api::data::index::{RegenerateEntry, RegenerateReport};
 use crate::app::{CommandError, is_published_namespace};
@@ -21,7 +20,7 @@ use crate::command::index_common;
 ///
 /// `ocx_cli` builds no index source and opens no client here; it checks what
 /// only the CLI can see (that each `<REGISTRY>` is a *published* source) and
-/// calls [`index::regenerate_catalog`] per registry. The user-facing help lives
+/// calls [`ocx_index::regenerate_catalog`] per registry. The user-facing help lives
 /// on the `Index::Regenerate` variant, which is what clap renders.
 #[derive(Parser)]
 pub struct IndexRegenerate {
@@ -53,11 +52,12 @@ impl IndexRegenerate {
         // ordering is a contract (C-010), and parallelising this loop is the
         // natural next change now that `index update` next door fans out.
         let mut entries = Vec::with_capacity(self.registries.len());
-        let mut failures: Vec<(usize, ocx_lib::Error)> = Vec::new();
+        let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
         for (input_index, registry) in self.registries.iter().enumerate() {
-            match index::regenerate_catalog(store, registry).await {
+            match ocx_index::regenerate_catalog(store, registry).await {
                 Ok(outcome) => entries.push(RegenerateEntry::from(outcome)),
                 Err(error) => {
+                    let error = anyhow::Error::from(error);
                     // Reported HERE as well as at `main.rs`'s boundary, and the
                     // redundancy is only apparent: `first_failure` propagates the
                     // lowest-index error alone, so in a multi-registry run every
@@ -76,7 +76,7 @@ impl IndexRegenerate {
         // stdout is what `index catalog` and `index update` both refuse to
         // emit, and every failure is already on stderr above.
         if let Some(error) = index_common::first_failure(failures) {
-            return Err(error.into());
+            return Err(error);
         }
 
         context.api().report(&RegenerateReport::new(entries))?;
@@ -96,7 +96,7 @@ impl IndexRegenerate {
 ///
 /// A *derived* (plain-OCI) namespace has no `c/index.json` **by grammar**: its
 /// catalog *is* the `p/` enumeration (`adr_index_indirection.md` A2).
-/// [`index::regenerate_catalog`] would mint one anyway — it takes a store and a
+/// [`ocx_index::regenerate_catalog`] would mint one anyway — it takes a store and a
 /// source name and can see no configuration at all — and under Decision A an
 /// absent `config.json` reads as format version 1, so that subtree would become
 /// both resolvable and enumerable once served: precisely what the grammar
@@ -140,12 +140,12 @@ impl IndexRegenerate {
 ///
 /// # Errors
 ///
-/// [`CommandError`] classified [`cli::ExitCode::ConfigError`] (78) when the
+/// [`CommandError`] classified [`ocx_exit::ExitCode::ConfigError`] (78) when the
 /// registry, or any configured namespace aliasing its directory, resolves to a
 /// derived source — or when it is not configured at all.
 fn ensure_published(
-    config: &ocx_lib::Config,
-    local_mirrors: Option<&std::collections::HashMap<String, ocx_lib::MirrorConfig>>,
+    config: &ocx_config::Config,
+    local_mirrors: Option<&std::collections::HashMap<String, ocx_config::mirror::MirrorConfig>>,
     registry: &str,
 ) -> Result<(), CommandError> {
     let refuse = |reason: String| {
@@ -155,7 +155,7 @@ fn ensure_published(
                  so it has no c/index.json to regenerate. \
                  Set [registries.\"{registry}\"] index = \"<base-url>\" if it should be a published one."
             ),
-            cli::ExitCode::ConfigError,
+            ocx_exit::ExitCode::ConfigError,
         ))
     };
 
@@ -171,10 +171,10 @@ fn ensure_published(
 
     // Slug aliases share the subtree this would write into, so a derived one
     // among them is a derived target reached under a published name.
-    let slug = ocx_lib::file_structure::slugify(registry);
+    let slug = ocx_store::file_structure::slugify(registry);
     for (namespace, entry) in registries {
         if namespace != registry
-            && ocx_lib::file_structure::slugify(namespace) == slug
+            && ocx_store::file_structure::slugify(namespace) == slug
             && !is_published_namespace(entry, namespace, local_mirrors)
         {
             return refuse(format!(
@@ -192,20 +192,21 @@ mod tests {
     //! contract row it pins.
 
     use super::*;
-    use ocx_lib::cli::{ClassifyExitCode, ExitCode};
+    use crate::exit::ClassifyExitCode;
+    use ocx_exit::ExitCode;
 
-    fn config_with(entries: &[(&str, Option<&str>)]) -> ocx_lib::Config {
+    fn config_with(entries: &[(&str, Option<&str>)]) -> ocx_config::Config {
         let mut registries = std::collections::HashMap::new();
         for (namespace, index) in entries {
             registries.insert(
                 (*namespace).to_string(),
-                ocx_lib::RegistryConfig {
+                ocx_config::RegistryConfig {
                     index: index.map(str::to_string),
                     ..Default::default()
                 },
             );
         }
-        ocx_lib::Config {
+        ocx_config::Config {
             registries: Some(registries),
             ..Default::default()
         }
@@ -213,13 +214,13 @@ mod tests {
 
     /// A `[mirrors."<ns>"]` table pinning each namespace's REGISTRY role — the
     /// locally-authored shape that suppresses a compiled-in index default.
-    fn mirrors_pinning(namespaces: &[&str]) -> std::collections::HashMap<String, ocx_lib::MirrorConfig> {
+    fn mirrors_pinning(namespaces: &[&str]) -> std::collections::HashMap<String, ocx_config::mirror::MirrorConfig> {
         namespaces
             .iter()
             .map(|namespace| {
                 (
                     (*namespace).to_string(),
-                    ocx_lib::MirrorConfig {
+                    ocx_config::mirror::MirrorConfig {
                         registry: Some("registry.corp.example".to_string()),
                         ..Default::default()
                     },
@@ -250,7 +251,7 @@ mod tests {
             ("plain.example", config_with(&[("plain.example", None)])),
             ("killed.example", config_with(&[("killed.example", Some(""))])),
             ("absent.example", config_with(&[("other.example", Some("https://i"))])),
-            ("no.table", ocx_lib::Config::default()),
+            ("no.table", ocx_config::Config::default()),
         ];
         for (registry, config) in cases {
             let error = ensure_published(&config, None, registry)
@@ -303,8 +304,8 @@ mod tests {
         // name let the published twin act as a key to the derived one's subtree.
         let config = config_with(&[("a:b", Some("https://i.invalid")), ("a_b", None)]);
         assert_eq!(
-            ocx_lib::file_structure::slugify("a:b"),
-            ocx_lib::file_structure::slugify("a_b"),
+            ocx_store::file_structure::slugify("a:b"),
+            ocx_store::file_structure::slugify("a_b"),
             "fixture: the two namespaces must actually alias, or this proves nothing"
         );
 
@@ -331,17 +332,23 @@ mod tests {
         // are now the same function; this test stays here because C-010 is a
         // contract of THIS command and would otherwise be pinned only by a
         // sibling's test.
-        let failures = vec![
-            (2, ocx_lib::Error::OfflineMode),
+        let failures: Vec<(usize, anyhow::Error)> = vec![
+            (2, ocx_package_manager::Error::OfflineMode.into()),
             (
                 0,
-                ocx_lib::Error::InternalPathInvalid(std::path::PathBuf::from("/first")),
+                ocx_package_manager::Error::InternalPathInvalid(std::path::PathBuf::from("/first")).into(),
             ),
-            (1, ocx_lib::Error::OfflineMode),
+            (1, ocx_package_manager::Error::OfflineMode.into()),
         ];
         let error = index_common::first_failure(failures).expect("a non-empty failure list yields an error");
+        // Downcast rather than `matches!`: the aggregation carries `anyhow::Error`
+        // since WP-37, and the property under test is still which *concrete*
+        // error won, not merely that one did.
         assert!(
-            matches!(&error, ocx_lib::Error::InternalPathInvalid(path) if path == std::path::Path::new("/first")),
+            matches!(
+                error.downcast_ref::<ocx_package_manager::Error>(),
+                Some(ocx_package_manager::Error::InternalPathInvalid(path)) if path == std::path::Path::new("/first")
+            ),
             "input index 0's error must win regardless of completion order, got {error:?}"
         );
         assert!(
@@ -430,11 +437,11 @@ mod tests {
         // structural guards in `chain_refs_tests`.
         //
         // `context.oci_index()` is the offline gate (the accessor itself errors
-        // under `--offline`) and `Error::PolicyBlocked` is the frozen gate;
+        // under `--offline`) and `index_common::policy_blocked` is the frozen gate;
         // neither may appear here. `config_view` is the struct both flags land
         // in, so reading it at all would be the first half of a gate.
         let body = module_code();
-        for forbidden in ["oci_index()", "PolicyBlocked", "config_view("] {
+        for forbidden in ["oci_index()", "policy_blocked(", "config_view("] {
             assert!(
                 !body.contains(forbidden),
                 "`{forbidden}` appears in index_regenerate.rs: C-021 forbids a --frozen or --offline gate here"

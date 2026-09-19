@@ -14,7 +14,7 @@
 //!
 //! **A-44 — `$OCX_HOME` is refused.** The ocx home toolchain is always
 //! consented and never carries a stamp. The guard lives in
-//! [`ocx_lib::project::consent::record`], one point every writer routes
+//! [`ocx_project::consent::record`], one point every writer routes
 //! through; this command reads the answer it returns rather than re-testing
 //! the predicate, so there is exactly one place the invariant is enforced.
 
@@ -22,9 +22,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::activation::ProjectIdentity;
-use ocx_lib::cli;
-use ocx_lib::project::consent::{self, Recorded};
+use ocx_package_manager::activation::ProjectIdentity;
+use ocx_project::consent::{self, Recorded};
 
 use crate::app::CommandError;
 use crate::app::project_context::resolve_project_paths;
@@ -65,7 +64,7 @@ impl ShellAllow {
         // inert for a reason `ocx shell state` already names, and refusing the
         // consent gesture over it would be a second, less informative sentence
         // for the same state.
-        let sources = ocx_lib::project::ProjectLock::from_path(&lock_path)
+        let sources = ocx_project::ProjectLock::from_path(&lock_path)
             .await
             .ok()
             .flatten()
@@ -94,7 +93,7 @@ impl ShellAllow {
                     "{} is the ocx home; the global toolchain is always active and carries no consent stamp",
                     dir.display()
                 ),
-                cli::ExitCode::UsageError,
+                ocx_exit::ExitCode::UsageError,
             )
             .into()),
         }

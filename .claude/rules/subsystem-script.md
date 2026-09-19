@@ -1,11 +1,11 @@
 ---
 paths:
-  - crates/ocx_lib/src/script/**
+  - crates/ocx_script/src/**
 ---
 
 # Script Subsystem — Starlark Host Style Guide
 
-Style rule for OCX's host-side `#[starlark_module]` surface at `crates/ocx_lib/src/script/`. Derivative of the [Bazel `.bzl` style guide](https://bazel.build/rules/bzl-style) — scoped to OCX's authoring of typed Starlark values, host functions, and exposed namespaces. Applies to every host-allocated typed value authored under `crates/ocx_lib/src/script/**`.
+Style rule for OCX's host-side `#[starlark_module]` surface at `crates/ocx_script/src/`. Derivative of the [Bazel `.bzl` style guide](https://bazel.build/rules/bzl-style) — scoped to OCX's authoring of typed Starlark values, host functions, and exposed namespaces. Applies to every host-allocated typed value authored under `crates/ocx_script/src/**`.
 
 The Starlark surface is a small but persistent contract: a script written today must keep running against future OCX versions. Settle conventions once; do not re-litigate per addition.
 
@@ -29,7 +29,7 @@ The Starlark surface is a small but persistent contract: a script written today 
 
 ## Typed Value Authoring
 
-Every host-exposed typed value lives in its own file under `crates/ocx_lib/src/script/`:
+Every host-exposed typed value lives in its own file under `crates/ocx_script/src/`:
 
 - File name: `{type}_value.rs` (`os_value.rs`, `arch_value.rs`, `platform_value.rs`, `run_result.rs`).
 - Wrapper type name: the Starlark-side short form (`OsValue`, `ArchValue`, `PlatformValue`, `RunResultValue`). The wrapper exists to project a Rust type into Starlark; naming it after the Starlark surface keeps the boundary single-named.
@@ -82,7 +82,7 @@ Every variant exposed in a Starlark namespace must be present in the correspondi
 
 The structural test `script.rs::firewall_tests::no_starlark_import_outside_firewall` enforces it; this rule restates it so the constraint is visible while editing.
 
-- No `use starlark*`, `starlark::`, `starlark_syntax`, `starlark_map`, or `starlark_derive` import path may appear outside `crates/ocx_lib/src/script/**`.
+- No `use starlark*`, `starlark::`, `starlark_syntax`, `starlark_map`, or `starlark_derive` import path may appear outside `crates/ocx_script/src/**`.
 - A typed Starlark value type is part of the firewall surface even when it wraps a public `ocx_lib` type — the wrapper itself never escapes.
 
 ## Test Surface (locks the contract)

@@ -30,11 +30,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::activation::{self, ProjectIdentity};
-use ocx_lib::project::consent::{Decision, Reason};
-use ocx_lib::shell::coexistence;
-use ocx_lib::shell::reconcile::{self, CARRIER_KEY, Ledger};
-use ocx_lib::{ShellConsent, consent_entry_defect, consent_path_matches, effective_consent};
+use ocx_config::shell::ShellConsent;
+use ocx_config::shell::consent_entry_defect;
+use ocx_config::shell::consent_path_matches;
+use ocx_config::shell::effective_consent;
+use ocx_package_manager::activation::{self, ProjectIdentity};
+use ocx_project::consent::{Decision, Reason};
+use ocx_shell::shell::coexistence;
+use ocx_shell::shell::reconcile::{self, CARRIER_KEY, Ledger};
 
 use crate::api::data::shell_state::{HookStatus, Note, ShellStateReport, VerboseShellState, WatchMember};
 use crate::app::project_context::{self, ProjectContextError};
@@ -110,7 +113,7 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
 
     // The carrier is untrusted input (C-007): decoding it names the revert set
     // and nothing else. Nothing below builds a path from it.
-    let carrier = ocx_lib::env::var(CARRIER_KEY);
+    let carrier = ocx_util::env::var(CARRIER_KEY);
     let carrier_present = carrier.is_some();
     let carrier_bytes = carrier.as_deref().map_or(0, str::len);
     let ledger = carrier.as_deref().and_then(Ledger::decode);
@@ -135,7 +138,7 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
         // A-12's row is about the *CWD walk*. An explicit `--project`,
         // `OCX_PROJECT` or `--global` follows symlinks by design and skips no
         // candidate, so the walk-limb check is a precondition, not decoration.
-        let env_project = ocx_lib::env::var("OCX_PROJECT");
+        let env_project = ocx_util::env::var("OCX_PROJECT");
         if walked_to_project(context.global(), context.project_path(), env_project.as_deref()) {
             notes.extend(symlinked_candidate_note(&project.identity.config_path, &project.identity.dir).await);
         }
@@ -224,7 +227,7 @@ struct ToolchainState {
     /// [`ShellStateReport::toolchain_bin`].
     bin: PathBuf,
     /// The effective `activate` mode, past the whole ladder.
-    activate: ocx_lib::activate::ActivateMode,
+    activate: ocx_project::activate::ActivateMode,
     /// The effective `pinned` value, past the same ladder.
     pinned: bool,
     /// [`Note::ToolchainManifestUnparsed`], when the `ocx.toml` that answers
@@ -237,7 +240,7 @@ struct ToolchainState {
 /// # The two tiers
 ///
 /// With a project in effect the home is
-/// [`resolve_toolchain_home`](ocx_lib::project::resolve_toolchain_home) over its
+/// [`resolve_toolchain_home`](ocx_project::resolve_toolchain_home) over its
 /// canonical directory and the validated `toolchain_dir` root. With no project
 /// the home is the global `$OCX_HOME/toolchain`, which ignores `toolchain_dir`
 /// (C-016). Either way the `file` tier is **that scope's own `ocx.toml`** —
@@ -288,7 +291,7 @@ async fn toolchain_state(
 ///
 /// That pairing is the whole point. The report used to derive the scope here but
 /// take its `file` tier from the resolved project alone — and
-/// [`ProjectConfig::resolve`](ocx_lib::project::ProjectConfig::resolve) makes a
+/// [`ProjectConfig::resolve`](ocx_project::ProjectConfig::resolve) makes a
 /// CWD-walk miss a hard `None` with no home-tier fallback, so a project-free
 /// shell reported `scope: global` and `toolchain_home: $OCX_HOME/toolchain`
 /// beside an `activate` resolved with **no file tier at all**. Meanwhile the
@@ -309,8 +312,8 @@ fn scope_and_config_path(
     ocx_home: &Path,
     project: Option<&ProjectIdentity>,
     global: bool,
-) -> (ocx_lib::file_structure::RenderStampScope, PathBuf) {
-    use ocx_lib::file_structure::RenderStampScope;
+) -> (ocx_store::file_structure::RenderStampScope, PathBuf) {
+    use ocx_store::file_structure::RenderStampScope;
 
     match project {
         // `identity.dir` is already `canonical_project_dir`'s answer, so the
@@ -321,7 +324,7 @@ fn scope_and_config_path(
         ),
         Some(_) | None => (
             RenderStampScope::Global,
-            ocx_lib::project::ProjectConfig::global_manifest_path(ocx_home),
+            ocx_project::ProjectConfig::global_manifest_path(ocx_home),
         ),
     }
 }
@@ -336,9 +339,9 @@ fn scope_and_config_path(
 /// site that owns that ladder, and the same call the per-prompt hook's
 /// `global_activate_mode` makes over these very bytes. A re-spelled
 /// `Ladder { .. }.resolve(ACTIVATE_FLOOR)` here would be a second floor no
-/// reader of `ocx_lib::activate::ACTIVATE_FLOOR` can see, which is the drift
-/// `ocx_lib::activate`'s module doc names. `pinned` resolves through
-/// [`pinned_for_project`](ocx_lib::package_manager::pinned_for_project) for
+/// reader of `ocx_project::activate::ACTIVATE_FLOOR` can see, which is the drift
+/// `ocx_project::activate`'s module doc names. `pinned` resolves through
+/// [`pinned_for_project`](ocx_package_manager::pinned_for_project) for
 /// exactly the same reason, and through the same call every other resolving
 /// site makes: `ocx shell state` declares no `--pinned`, so the `cli` tier is
 /// `None` here, and an inline `Ladder { .. }.resolve(PINNED_FLOOR)` would be a
@@ -357,18 +360,18 @@ fn scope_and_config_path(
 /// An **absent** file is not a broken one and owes no note: no `ocx.toml` in
 /// `$OCX_HOME` is the ordinary state of every machine that never ran `ocx self
 /// setup --toolchain-activate`.
-async fn toolchain_settings(config_path: &Path) -> (ocx_lib::activate::ActivateMode, bool, Option<Note>) {
-    let (config, note) = match ocx_lib::project::ProjectConfig::from_path(config_path).await {
+async fn toolchain_settings(config_path: &Path) -> (ocx_project::activate::ActivateMode, bool, Option<Note>) {
+    let (config, note) = match ocx_project::ProjectConfig::from_path(config_path).await {
         Ok(config) => (config, None),
-        Err(error) if is_absent(&error) => (ocx_lib::project::ProjectConfig::default(), None),
+        Err(error) if is_absent(&error) => (ocx_project::ProjectConfig::default(), None),
         Err(error) => {
             // `log::debug!` alone would go to a stderr the hook discards
             // (A-21), which is exactly how a typo'd `activate` came to fail
             // open in silence: the prompt must stay lenient, so the diagnostic
             // is where the user gets told.
-            ocx_lib::log::debug!("the toolchain manifest did not parse, so its settings are absent: {error}");
+            log::debug!("the toolchain manifest did not parse, so its settings are absent: {error}");
             (
-                ocx_lib::project::ProjectConfig::default(),
+                ocx_project::ProjectConfig::default(),
                 Some(Note::ToolchainManifestUnparsed {
                     manifest: config_path.to_path_buf(),
                     detail: error.to_string(),
@@ -379,7 +382,7 @@ async fn toolchain_settings(config_path: &Path) -> (ocx_lib::activate::ActivateM
 
     (
         activation::activate_mode(&config),
-        ocx_lib::package_manager::pinned_for_project(None, &config),
+        ocx_package_manager::pinned_for_project(None, &config),
         note,
     )
 }
@@ -390,14 +393,27 @@ async fn toolchain_settings(config_path: &Path) -> (ocx_lib::activate::ActivateM
 /// `$OCX_HOME/ocx.toml` is the ordinary state of a machine that never set the
 /// key, and a note on every such report would be a warning on the commonest
 /// benign state.
-fn is_absent(error: &ocx_lib::project::Error) -> bool {
-    use ocx_lib::project::error::ProjectErrorKind;
+fn is_absent(error: &ocx_project::Error) -> bool {
+    use ocx_project::error::ProjectErrorKind;
 
+    // An exhaustive match, never a `_ => false` arm. The comment this replaces
+    // said a second variant should red here, and at WP-33 four of them did:
+    // `ocx_project::Error` stopped borrowing `ocx_lib::Error` for the failures
+    // it raises itself. The tripwire is kept rather than defused, so a future
+    // variant that could mean "absent" has to be classified here instead of
+    // defaulting to "present".
     match error {
-        ocx_lib::project::Error::Project(error) => {
+        ocx_project::Error::Project(error) => {
             matches!(&error.kind, ProjectErrorKind::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
         }
-        _ => false,
+        // Not reachable from this call site and `false` if it ever were: the
+        // stamp read raises `Project(Io(..))` and nothing else. Before the
+        // move these four were not variants of this type at all, so `false`
+        // is what the pre-WP-33 code did with them.
+        ocx_project::Error::OciClient(_)
+        | ocx_project::Error::OciIndex(_)
+        | ocx_project::Error::Config(_)
+        | ocx_project::Error::InternalFile(_, _) => false,
     }
 }
 
@@ -417,7 +433,7 @@ fn is_absent(error: &ocx_lib::project::Error) -> bool {
 /// so treating a residual error as "installed" keeps the false claim off the
 /// report rather than inventing a second, quieter failure.
 async fn shell_integration_installed(ocx_home: &Path) -> bool {
-    tokio::fs::try_exists(ocx_home.join(ocx_lib::setup::shims::WITNESS_SHIM))
+    tokio::fs::try_exists(ocx_home.join(ocx_setup::shims::WITNESS_SHIM))
         .await
         .unwrap_or(true)
 }
@@ -431,7 +447,7 @@ async fn read_ocx_home(ocx_home: &Path) -> anyhow::Result<bool> {
     match tokio::fs::read_dir(ocx_home).await {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(ocx_lib::Error::InternalFile(ocx_home.to_path_buf(), e).into()),
+        Err(e) => Err(ocx_util::error::FileError::new(ocx_home, e).into()),
     }
 }
 
@@ -534,16 +550,13 @@ async fn resolve_project(context: &crate::app::Context, whitelist: &ShellConsent
 /// this is not the row that explains a broken config — `Note::ProjectUnresolved`
 /// is, and saying "your lock is stale" about a file whose hash cannot be
 /// computed would be a guess.
-async fn lock_refusal(project: &ProjectIdentity, lock: Option<&ocx_lib::project::ProjectLock>) -> Option<String> {
-    let lock_path = ocx_lib::project::lock::lock_path_for(&project.config_path);
+async fn lock_refusal(project: &ProjectIdentity, lock: Option<&ocx_project::ProjectLock>) -> Option<String> {
+    let lock_path = ocx_project::lock::lock_path_for(&project.config_path);
     let Some(lock) = lock else {
-        return Some(ocx_lib::project::LockCurrency::Missing { path: lock_path }.to_string());
+        return Some(ocx_project::LockCurrency::Missing { path: lock_path }.to_string());
     };
-    let config = ocx_lib::project::ProjectConfig::from_path(&project.config_path)
-        .await
-        .ok()?;
-    ocx_lib::project::lock::is_stale(lock, &config)
-        .then(|| ocx_lib::project::LockCurrency::Stale { lock_path }.to_string())
+    let config = ocx_project::ProjectConfig::from_path(&project.config_path).await.ok()?;
+    ocx_project::lock::is_stale(lock, &config).then(|| ocx_project::LockCurrency::Stale { lock_path }.to_string())
 }
 
 /// Whether the CWD walk — rather than an explicit selector — decided the
@@ -610,7 +623,7 @@ fn resolve_hook(context: &crate::app::Context) -> HookStatus {
 async fn symlinked_candidate_note(config_path: &Path, project_dir: &Path) -> Option<Note> {
     // An explicit `--project` / `OCX_PROJECT` follows symlinks by design, so
     // there is no skipped candidate to report when the walk did not run.
-    let cwd = ocx_lib::env::current_dir().ok()?;
+    let cwd = ocx_util::env::current_dir().ok()?;
     let resolved_dir = config_path.parent()?;
 
     let mut current = cwd.as_path();
@@ -797,9 +810,9 @@ async fn watch_set(paths: &[PathBuf]) -> Vec<WatchMember> {
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::project::consent::Grant;
-    use ocx_lib::shell::coexistence::{Observation, Tool};
-    use ocx_lib::shell::reconcile::ScopeId;
+    use ocx_project::consent::Grant;
+    use ocx_shell::shell::coexistence::{Observation, Tool};
+    use ocx_shell::shell::reconcile::ScopeId;
 
     use super::*;
 
@@ -861,8 +874,8 @@ mod tests {
     /// gate's own reason.
     #[tokio::test]
     async fn c050_343_the_reported_reason_is_the_one_the_activation_gate_refused_on() {
-        use ocx_lib::activation::ConsentProof;
-        use ocx_lib::file_structure::PackageStore;
+        use ocx_package_manager::activation::ConsentProof;
+        use ocx_store::file_structure::PackageStore;
 
         // No stamp, no lock, no grant — the ordinary first-encounter refusal,
         // and the one state both commands have to agree about.
@@ -1027,8 +1040,8 @@ mod tests {
             .await
             .expect_err("reading a file as $OCX_HOME must fail");
         assert_eq!(
-            ocx_lib::cli::classify_error(err.as_ref()),
-            ocx_lib::cli::ExitCode::IoError,
+            crate::exit::classify_library_error(err.as_ref()),
+            ocx_exit::ExitCode::IoError,
             "an unreadable $OCX_HOME is the command's only non-zero path, and it is 74"
         );
     }
@@ -1064,7 +1077,7 @@ mod tests {
             "an absent lock refuses composition, and a paths grant makes that reachable: {absent:?}"
         );
 
-        let mut lock = ocx_lib::project::ProjectLock::from_toml_str(
+        let mut lock = ocx_project::ProjectLock::from_toml_str(
             "[metadata]\nlock_version = 3\ndeclaration_hash_version = 1\n\
              declaration_hash = \"sha256:0000000000000000000000000000000000000000000000000000000000000000\"\n\
              generated_by = \"ocx 0.5.8\"\ngenerated_at = \"2026-08-27T00:00:00Z\"\n",
@@ -1077,7 +1090,7 @@ mod tests {
             "a lock recording a hash the config no longer has is stale: {stale:?}"
         );
 
-        let config = ocx_lib::project::ProjectConfig::from_path(&config_path)
+        let config = ocx_project::ProjectConfig::from_path(&config_path)
             .await
             .expect("parse ocx.toml");
         lock.metadata.declaration_hash = config.declaration_hash_cached().to_owned();
@@ -1111,7 +1124,7 @@ mod tests {
             "a home with no env shim is a bare-binary install: setup has not run"
         );
 
-        std::fs::write(home.join(ocx_lib::setup::shims::WITNESS_SHIM), b"# shim\n").expect("write shim");
+        std::fs::write(home.join(ocx_setup::shims::WITNESS_SHIM), b"# shim\n").expect("write shim");
         assert!(
             shell_integration_installed(&home).await,
             "the shim `ocx self setup` writes is the witness that it ran"
@@ -1492,7 +1505,7 @@ mod tests {
         let (scope, config_path) = scope_and_config_path(home.path(), None, false);
         assert_eq!(
             scope,
-            ocx_lib::file_structure::RenderStampScope::Global,
+            ocx_store::file_structure::RenderStampScope::Global,
             "no project and no --global is the global tier"
         );
         assert_eq!(
@@ -1504,7 +1517,7 @@ mod tests {
         let (activate, pinned, note) = toolchain_settings(&config_path).await;
         assert_eq!(
             activate,
-            ocx_lib::activate::ActivateMode::Bin,
+            ocx_project::activate::ActivateMode::Bin,
             "the global file states `bin`, and the hook obeys it, so the report must say it"
         );
         assert!(pinned, "the same read answers `pinned` for the same tier");
@@ -1532,19 +1545,19 @@ mod tests {
         let (scope, config_path) = scope_and_config_path(home.path(), Some(&identity), false);
         assert_eq!(
             scope,
-            ocx_lib::file_structure::RenderStampScope::Project(identity.dir.clone())
+            ocx_store::file_structure::RenderStampScope::Project(identity.dir.clone())
         );
         assert_eq!(config_path, identity.config_path);
         assert_eq!(
             toolchain_settings(&config_path).await.0,
-            ocx_lib::activate::ActivateMode::None,
+            ocx_project::activate::ActivateMode::None,
             "a project in effect answers from its own manifest"
         );
 
         let (scope, config_path) = scope_and_config_path(home.path(), Some(&identity), true);
         assert_eq!(
             scope,
-            ocx_lib::file_structure::RenderStampScope::Global,
+            ocx_store::file_structure::RenderStampScope::Global,
             "--global reports the global tier even standing in a project"
         );
         assert_eq!(
@@ -1570,7 +1583,7 @@ mod tests {
         let home = tempfile::tempdir().expect("tempdir");
 
         let (absent, pinned, note) = toolchain_settings(&home.path().join(PROJECT_FILE)).await;
-        assert_eq!(absent, ocx_lib::activate::ActivateMode::Env, "the floor answers");
+        assert_eq!(absent, ocx_project::activate::ActivateMode::Env, "the floor answers");
         assert!(!pinned, "the `pinned` floor answers too");
         assert!(note.is_none(), "an absent manifest is benign; got {note:#?}");
 
@@ -1578,7 +1591,7 @@ mod tests {
         let (activate, _, note) = toolchain_settings(&home.path().join(PROJECT_FILE)).await;
         assert_eq!(
             activate,
-            ocx_lib::activate::ActivateMode::Env,
+            ocx_project::activate::ActivateMode::Env,
             "the prompt fails open here, so the report must report the mode that actually applies"
         );
         assert!(

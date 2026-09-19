@@ -37,16 +37,14 @@ use std::process::ExitCode;
 use clap::Parser;
 use tokio::io::AsyncWriteExt as _;
 
-use ocx_lib::cli;
-use ocx_lib::cli::ClassifyErrorKind as _;
-use ocx_lib::oci;
-use ocx_lib::oci::attest::predicate::PredicateType;
-use ocx_lib::oci::verify::{
+use crate::exit::ClassifyErrorKind as _;
+use ocx_package_manager::SbomOptions;
+use ocx_sign::attest::predicate::PredicateType;
+use ocx_sign::sbom;
+use ocx_sign::verify::{
     AttestationMatch, RefusedCandidate, TrustRoot, UnverifiedSbom, VerificationMode, VerifyError, VerifyErrorKind,
 };
-use ocx_lib::package_manager::SbomOptions;
-use ocx_lib::sbom;
-use ocx_lib::trust::CompiledPolicy;
+use ocx_trust::CompiledPolicy;
 
 use crate::api::data::sanitize_for_terminal;
 use crate::api::data::sbom::{ListingVerification, RefusedEntry, SbomEntry, SbomListingReport, SbomSummaryOut};
@@ -64,7 +62,7 @@ pub struct PackageSbom {
     /// signature. Given against a reference that resolves to a single manifest,
     /// there is nothing to narrow and the command fails.
     #[clap(short = 'p', long = "platform", value_name = "PLATFORM")]
-    platform: Option<oci::Platform>,
+    platform: Option<ocx_oci::Platform>,
 
     /// Write the SBOM document to PATH ("-" for stdout).
     ///
@@ -190,7 +188,7 @@ impl PackageSbom {
         // rather than a silent pick — before any network request rather than
         // after one. The resolved pin then decides *discovery*: the shape it
         // does not name is never looked for.
-        let signature_format = self.signature_format.pin().map_err(cli::UsageError::from)?;
+        let signature_format = self.signature_format.pin().map_err(crate::error::UsageError::from)?;
 
         // Parsed before any request, so `--key awskms://alias/release` names its
         // unimplemented backend (exit 85) instead of being read as a filename
@@ -236,7 +234,7 @@ impl PackageSbom {
         let trust_root = match verification {
             VerificationMode::Permissive => TrustRoot::default(),
             VerificationMode::Demand => {
-                let rekor_cache_key = ocx_lib::oci::verify::trust_cache::cache_key_for_rekor(&rekor_url);
+                let rekor_cache_key = ocx_sign::verify::trust_cache::cache_key_for_rekor(&rekor_url);
                 package_sign_common::resolve_trust_root(
                     &context,
                     &identifier,
@@ -276,7 +274,7 @@ impl PackageSbom {
                 if let Selected::Unverified(sbom) = &selected {
                     // One line, on stderr, so `--output -` piped to a file is
                     // still byte-exact. Registry-sourced, so sanitized (CWE-150).
-                    ocx_lib::log::warn!(
+                    log::warn!(
                         "SBOM is unverified: no signature over referrer {} was checked, \
                          so nothing vouches for what it says",
                         sanitize_for_terminal(&sbom.referrer_digest.to_string())
@@ -326,8 +324,8 @@ impl PackageSbom {
     async fn mode(
         &self,
         context: &crate::app::Context,
-        identifier: &oci::Identifier,
-        key: Option<&ocx_lib::oci::sign::KeyRef>,
+        identifier: &ocx_oci::Identifier,
+        key: Option<&ocx_trust::key_ref::KeyRef>,
     ) -> anyhow::Result<(VerificationMode, Vec<CompiledPolicy>)> {
         let requested = self.verification.requested();
         if requested == Some(VerificationMode::Permissive) {
@@ -337,7 +335,7 @@ impl PackageSbom {
             // the same contradiction, and the alternative is worse than a
             // usage error: the key would be accepted and silently never used.
             if key.is_some() {
-                return Err(cli::UsageError::new(
+                return Err(crate::error::UsageError::new(
                     "--no-verify cannot be combined with --key: it names a key nothing would check",
                 )
                 .into());
@@ -374,7 +372,7 @@ impl PackageSbom {
         attestations: Vec<AttestationMatch>,
         unverified: Vec<UnverifiedSbom>,
         refused: Vec<RefusedCandidate>,
-        shadowed: &BTreeSet<oci::Digest>,
+        shadowed: &BTreeSet<ocx_oci::Digest>,
     ) -> SbomListingReport {
         let mut entries = Vec::with_capacity(attestations.len() + unverified.len());
         let mut refusals: Vec<RefusedEntry> = refused
@@ -517,7 +515,7 @@ fn refuse_tty_output(destination: &OutputDestination, stdout_is_terminal: bool) 
         return Err(CommandError::new(
             "refusing to write raw predicate bytes to a terminal: the document is publisher-authored \
              and unsanitized; redirect to a file or a pipe",
-            cli::ExitCode::UsageError,
+            ocx_exit::ExitCode::UsageError,
         ));
     }
     Ok(())
@@ -580,7 +578,7 @@ impl Selected<'_> {
 /// actually resolve the ambiguity. `BTreeSet` both dedupes and sorts, so the
 /// message is stable across listing order (DATA-DET-01).
 fn single_document<'a>(
-    identifier: &oci::Identifier,
+    identifier: &ocx_oci::Identifier,
     attestations: &'a [AttestationMatch],
     unverified: &'a [UnverifiedSbom],
     refused: Vec<RefusedCandidate>,
@@ -644,7 +642,7 @@ fn truncation_refusal(refused: Vec<RefusedCandidate>) -> Option<VerifyErrorKind>
 }
 
 /// The `MultipleAttestations` refusal over one trust class's colliding set.
-fn ambiguous(identifier: &oci::Identifier, candidates: Vec<(String, String)>) -> anyhow::Error {
+fn ambiguous(identifier: &ocx_oci::Identifier, candidates: Vec<(String, String)>) -> anyhow::Error {
     VerifyError::new(
         identifier.clone(),
         VerifyErrorKind::MultipleAttestations {
@@ -684,7 +682,7 @@ async fn write_predicate(destination: &OutputDestination, bytes: &[u8]) -> anyho
         OutputDestination::Stdout => write_stream(&mut tokio::io::stdout(), bytes).await?,
         OutputDestination::File(path) => tokio::fs::write(path, bytes)
             .await
-            .map_err(|error| ocx_lib::error::file_error(path, error))?,
+            .map_err(|error| ocx_util::error::FileError::new(path, error))?,
     }
     Ok(())
 }
@@ -705,11 +703,10 @@ async fn write_stream<W: tokio::io::AsyncWrite + Unpin>(sink: &mut W, bytes: &[u
 mod tests {
     use super::*;
     use crate::error_envelope::render_error_envelope;
-    use ocx_lib::Error as LibError;
-    use ocx_lib::package_manager::error::{PackageError, PackageErrorKind};
+    use ocx_package_manager::error::{PackageError, PackageErrorKind};
 
-    fn identifier() -> oci::Identifier {
-        oci::Identifier::parse("registry.example/pkg:1.0").expect("parse identifier")
+    fn identifier() -> ocx_oci::Identifier {
+        ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("parse identifier")
     }
 
     fn envelope(err: &anyhow::Error) -> serde_json::Value {
@@ -723,7 +720,7 @@ mod tests {
     /// [`CommandError`] — so an envelope assertion on one of those reads 1
     /// no matter which code the command chose.
     fn exit_code(err: &anyhow::Error) -> u8 {
-        crate::app::classify_error(err.as_ref()) as u8
+        crate::exit::classify_error(err.as_ref()) as u8
     }
 
     /// The `verify_error_into_anyhow` re-rooting, asserted so it **discriminates**:
@@ -750,7 +747,7 @@ mod tests {
             let id = identifier();
             let package_error = PackageError::new(
                 id.clone(),
-                PackageErrorKind::Internal(LibError::Verify(Box::new(VerifyError::new(id, kind)))),
+                PackageErrorKind::Internal(ocx_package_manager::Error::Verify(Box::new(VerifyError::new(id, kind)))),
             );
             let parsed = envelope(&package_sign_common::verify_error_into_anyhow(package_error));
             assert_eq!(
@@ -1198,22 +1195,22 @@ mod tests {
     /// The same, with a predicate document `--summary` will actually read.
     fn attestation_match_carrying(referrer_hex: &str, predicate_type: &str, predicate: &str) -> AttestationMatch {
         let digest = |hex: &str| {
-            ocx_lib::oci::Digest::try_from(format!("sha256:{}", hex.repeat(64 / hex.len())).as_str())
+            ocx_oci::Digest::try_from(format!("sha256:{}", hex.repeat(64 / hex.len())).as_str())
                 .expect("build test digest")
         };
         AttestationMatch {
-            verify: ocx_lib::oci::verify::VerifyResult {
+            verify: ocx_sign::verify::VerifyResult {
                 subject_digest: digest("a"),
                 referrer_digest: digest(referrer_hex),
-                key_backend: ocx_lib::oci::sign::KeyBackendKind::Keyless,
+                key_backend: ocx_trust::key_ref::KeyBackendKind::Keyless,
                 certificate_identity: Some("you@example.com".into()),
                 certificate_oidc_issuer: Some("https://token.actions.githubusercontent.com".into()),
                 signed_at: Some(1_755_597_600),
-                signature_format: ocx_lib::oci::sign::SignatureFormat::Bundle,
-                discovery_method: ocx_lib::oci::verify::DiscoveryMethod::ReferrersApi,
+                signature_format: ocx_sign::sign::SignatureFormat::Bundle,
+                discovery_method: ocx_sign::verify::DiscoveryMethod::ReferrersApi,
                 rekor_log_index: None,
             },
-            attestation: ocx_lib::oci::verify::VerifiedAttestation {
+            attestation: ocx_sign::verify::VerifiedAttestation {
                 predicate_type: predicate_type.into(),
                 payload: b"{}".to_vec(),
                 predicate: serde_json::value::RawValue::from_string(predicate.to_string()).expect("raw value"),
@@ -1225,7 +1222,7 @@ mod tests {
     /// An SBOM attached with nothing behind it.
     fn unverified_sbom(referrer_hex: &str, predicate_type: &str, document: &str) -> UnverifiedSbom {
         let digest = |hex: &str| {
-            ocx_lib::oci::Digest::try_from(format!("sha256:{}", hex.repeat(64 / hex.len())).as_str())
+            ocx_oci::Digest::try_from(format!("sha256:{}", hex.repeat(64 / hex.len())).as_str())
                 .expect("build test digest")
         };
         UnverifiedSbom {

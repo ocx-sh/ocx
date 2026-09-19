@@ -5,13 +5,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::file_structure::FileStructure;
-use ocx_lib::lazy::LazyMode;
-use ocx_lib::oci;
-use ocx_lib::package_manager::composer::lazy_mode_for_package;
-use ocx_lib::package_manager::error::{PackageError, PackageErrorKind};
-use ocx_lib::package_manager::{self, PackageManager};
-use ocx_lib::utility::fs::path_exists_lossy;
+use ocx_package_manager::composer::lazy_mode_for_package;
+use ocx_package_manager::error::{PackageError, PackageErrorKind};
+use ocx_package_manager::{self, PackageManager};
+use ocx_project::lazy::LazyMode;
+use ocx_store::file_structure::FileStructure;
+use ocx_util::fs::path_exists_lossy;
 use tokio::task::JoinSet;
 
 use crate::api::data::path_kind::PathKind;
@@ -159,8 +158,8 @@ fn located_directory(mode: LazyMode, package_root: Option<PathBuf>, shim_root: O
 async fn locate(
     manager: &PackageManager,
     file_structure: &FileStructure,
-    package: &oci::Identifier,
-    platform: oci::Platform,
+    package: &ocx_oci::Identifier,
+    platform: ocx_oci::Platform,
     mode: LazyMode,
 ) -> Result<Located, PackageErrorKind> {
     let package_root = match manager.find(package, platform.clone()).await {
@@ -197,16 +196,16 @@ async fn locate(
 ///
 /// # Errors
 ///
-/// [`Error::FindFailed`](package_manager::error::Error::FindFailed) carrying one
+/// [`Error::FindFailed`](ocx_package_manager::error::Error::FindFailed) carrying one
 /// [`PackageError`] per failed identifier, in request order — the same envelope
 /// `find_all` produced before this command resolved packages one at a time.
 async fn locate_all(
     manager: &PackageManager,
     file_structure: &FileStructure,
-    packages: &[oci::Identifier],
-    platform: &oci::Platform,
+    packages: &[ocx_oci::Identifier],
+    platform: &ocx_oci::Platform,
     mode: LazyMode,
-) -> Result<Vec<Located>, package_manager::error::Error> {
+) -> Result<Vec<Located>, ocx_package_manager::error::Error> {
     let mut tasks: JoinSet<(usize, Result<Located, PackageErrorKind>)> = JoinSet::new();
     for (index, package) in packages.iter().enumerate() {
         let manager = manager.clone();
@@ -235,7 +234,7 @@ async fn locate_all(
     if !failures.is_empty() {
         failures.sort_by_key(|(index, _)| *index);
         let errors = failures.into_iter().map(|(_, error)| error).collect();
-        return Err(package_manager::error::Error::FindFailed(errors));
+        return Err(ocx_package_manager::error::Error::FindFailed(errors));
     }
 
     Ok(slots
@@ -246,8 +245,9 @@ async fn locate_all(
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::cli::{ClassifyExitCode as _, ExitCode};
-    use ocx_lib::package_manager::error::PackageErrorKind;
+    use crate::exit::ClassifyExitCode as _;
+    use ocx_exit::ExitCode;
+    use ocx_package_manager::error::PackageErrorKind;
 
     use super::*;
 

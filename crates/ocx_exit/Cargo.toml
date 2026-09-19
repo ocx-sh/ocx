@@ -1,0 +1,25 @@
+[package]
+name = "ocx_exit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# The only dependency, runtime or otherwise, that enters a consumer's graph:
+# `ErrorCategory` derives `Serialize` because its snake_case form IS the JSON
+# error envelope's frozen `error.kind` value. `ExitCode` derives nothing from
+# serde — a process status is a number.
+serde.workspace = true
+
+[dev-dependencies]
+# Test-only. The `error.kind` contract is an assertion on serialized *text*
+# (`"forge_capability_unavailable"`), so the tests must render the variants
+# through a real serializer rather than trust the derive. A dev edge is not
+# built by `cargo build --release`, so this never reaches the shipped graph
+# and `[dependencies]` above stays the one-crate list C-050 requires.
+serde_json.workspace = true
+
+[lints]
+workspace = true

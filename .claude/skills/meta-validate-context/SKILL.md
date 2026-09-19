@@ -43,10 +43,10 @@ grep -r "pub struct TypeName" crates/
 grep -r "pub enum TypeName" crates/
 
 # Check if a module still exists
-ls crates/ocx_lib/src/module_name/
+ls crates/ocx_<crate>/src/module_name/
 
 # Check for new public types not in the rule
-grep -rn "^pub struct\|^pub enum\|^pub trait" crates/ocx_lib/src/subsystem/ | grep -v test
+grep -rn "^pub struct\|^pub enum\|^pub trait" crates/ocx_<crate>/src/subsystem/ | grep -v test
 ```
 
 ## Output Format

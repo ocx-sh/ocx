@@ -18,8 +18,8 @@ on:
     # the provenance gate (fresh hermetic build + SHA canary; Codex finding 2).
     paths:
       - 'crates/ocx_shim/**'
-      - 'crates/ocx_lib/src/shims/**'
-      - 'crates/ocx_lib/src/shim.rs'
+      - 'crates/ocx_store/src/shims/**'
+      - 'crates/ocx_store/src/shim.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -32,8 +32,8 @@ on:
     branches: [main]
     paths:
       - 'crates/ocx_shim/**'
-      - 'crates/ocx_lib/src/shims/**'
-      - 'crates/ocx_lib/src/shim.rs'
+      - 'crates/ocx_store/src/shims/**'
+      - 'crates/ocx_store/src/shim.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -74,10 +74,11 @@ jobs:
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
-          # The gate compiles ocx_lib, which pulls the path-vendored starlark
-          # fork; the action's default RUSTFLAGS=-D warnings denies its upstream
-          # lints (Cargo does not auto-cap path deps). Denial is scoped to
-          # [workspace.lints.rust] instead.
+          # The gate compiles the path-vendored sigstore fork
+          # (external/sigstore-rs), reached through both ocx_store and
+          # ocx_package_manager; the action's default RUSTFLAGS=-D warnings
+          # denies its upstream lints (Cargo does not auto-cap path deps).
+          # Denial is scoped to [workspace.lints.rust] instead.
           rustflags: ""
       # actions-rust-lang/setup-rust-toolchain does NOT ship cargo-nextest;
       # the repo provisions it via taiki-e/install-action everywhere it runs
@@ -90,7 +91,7 @@ jobs:
         with:
           tool: cargo-nextest
       - name: Shim + launcher spec tests (host-runnable)
-        run: cargo nextest run -p ocx_shim -p ocx_lib --locked
+        run: cargo nextest run -p ocx_shim -p ocx_store -p ocx_package_manager --locked
 
   build:
     name: Cross-build ${{ matrix.target }}
@@ -168,7 +169,7 @@ jobs:
         run: |
           arch="$(echo '${{ matrix.target }}' | cut -d- -f1)"
           built="target/${{ matrix.target }}/shim/ocx-shim.exe"
-          committed="crates/ocx_lib/src/shims/ocx-shim-${arch}.exe"
+          committed="crates/ocx_store/src/shims/ocx-shim-${arch}.exe"
           echo "built=${built}" >> "$GITHUB_OUTPUT"
           echo "committed=${committed}" >> "$GITHUB_OUTPUT"
 
@@ -211,7 +212,7 @@ jobs:
           fi
           # 2. within the fail-closed size budget declared in shim.rs
           budget_kib="$(grep -oE 'SHIM_SIZE_BUDGET: usize = [0-9]+ \* 1024' \
-            crates/ocx_lib/src/shim.rs | grep -oE '^SHIM_SIZE_BUDGET: usize = [0-9]+' \
+            crates/ocx_store/src/shim.rs | grep -oE '^SHIM_SIZE_BUDGET: usize = [0-9]+' \
             | grep -oE '[0-9]+$')"
           max=$(( budget_kib * 1024 ))
           size=$(stat -c%s "$committed")
@@ -222,13 +223,13 @@ jobs:
           # 3. corruption canary: committed blob == recorded SHIM_SHA256.
           # File order in shim.rs is x86_64 then aarch64.
           shas=$(grep -oE 'SHIM_SHA256: &str = "[0-9a-f]{64}"' \
-            crates/ocx_lib/src/shim.rs | grep -oE '[0-9a-f]{64}')
+            crates/ocx_store/src/shim.rs | grep -oE '[0-9a-f]{64}')
           if [ "$arch" = "x86_64" ]; then want="$(echo "$shas" | sed -n 1p)"; \
             else want="$(echo "$shas" | sed -n 2p)"; fi
           got="$(sha256sum "$committed" | cut -d' ' -f1)"
           if [ "$got" != "$want" ]; then
             echo "::error::${committed} sha256 ${got} != recorded SHIM_SHA256 ${want}"
-            echo "::error::Refresh: download the ocx-shim-fresh-${{ matrix.target }} artifact, replace the blob, update SHIM_SHA256 in crates/ocx_lib/src/shim.rs."
+            echo "::error::Refresh: download the ocx-shim-fresh-${{ matrix.target }} artifact, replace the blob, update SHIM_SHA256 in crates/ocx_store/src/shim.rs."
             exit 1
           fi
           echo "OK: ${committed} valid PE, ${size}B <= ${max}B, sha ${got} matches SHIM_SHA256"
@@ -273,7 +274,7 @@ jobs:
           # sidecar against a one-line parser. Compare the last commit to touch
           # each tree instead: the blobs must be at or after the sources.
           last_src="$(git log -1 --format=%H HEAD -- crates/ocx_shim/)"
-          last_blob="$(git log -1 --format=%H HEAD -- crates/ocx_lib/src/shims/)"
+          last_blob="$(git log -1 --format=%H HEAD -- crates/ocx_store/src/shims/)"
           if [ -z "$last_src" ]; then
             echo "no shim source history; nothing to compare"; exit 0
           fi
@@ -291,7 +292,7 @@ jobs:
           echo "last shim source change: $(git log -1 --format='%h %s' "$last_src")"
           echo "last blob re-cut:        $(git log -1 --format='%h %s' "$last_blob")"
           echo "Re-cut them from THIS run's ocx-shim-fresh-<target> artifacts and update"
-          echo "both SHIM_SHA256 constants in crates/ocx_lib/src/shim.rs (ritual: shim.rs:19-33)."
+          echo "both SHIM_SHA256 constants in crates/ocx_store/src/shim.rs (ritual: shim.rs:19-33)."
           exit 1
 
   # Windows acceptance: the genuinely Win32-dependent shim behaviours

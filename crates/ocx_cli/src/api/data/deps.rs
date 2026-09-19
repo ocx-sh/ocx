@@ -3,17 +3,14 @@
 
 use serde::Serialize;
 
-use ocx_lib::{
-    cli::{Annotation, Cell, Theme, TreeItem},
-    oci,
-    package::metadata::visibility::Visibility,
-};
+use ocx_console::{Annotation, Cell, Theme, TreeItem};
+use ocx_package::metadata::visibility::Visibility;
 
 use crate::api::Printable;
 
 /// `registry/repo[:tag]` with the tag coloured by the theme and the
 /// digest deliberately omitted (it has its own column / annotation).
-fn name_tag(id: &oci::Identifier, theme: &Theme) -> String {
+fn name_tag(id: &ocx_oci::Identifier, theme: &Theme) -> String {
     let mut out = format!("{}/{}", id.registry(), id.repository());
     if let Some(tag) = id.tag() {
         out.push_str(&theme.tag(format!(":{tag}")));
@@ -28,7 +25,7 @@ fn name_tag(id: &oci::Identifier, theme: &Theme) -> String {
 /// by the parent — not the propagated result.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Dependency {
-    pub identifier: oci::Identifier,
+    pub identifier: ocx_oci::Identifier,
     pub repeated: bool,
     pub visibility: Option<Visibility>,
     pub dependencies: Vec<Dependency>,
@@ -62,7 +59,9 @@ impl TreeItem for Dependency {
         // never pushes the short visibility / repeated tags out of eyeline.
         let mut out = Vec::new();
         if let Some(vis) = self.visibility {
-            out.push(Annotation::new(theme.visibility(vis, vis.to_string())));
+            out.push(Annotation::new(
+                theme.visibility(crate::api::data::visibility_style(vis), vis.to_string()),
+            ));
         }
         if self.repeated {
             out.push(Annotation::new(theme.repeated("repeated")));
@@ -76,7 +75,7 @@ impl TreeItem for Dependency {
 
 impl Printable for Dependencies {
     // Tree output is inherently non-tabular, so we use printer.print_tree()
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         for root in &self.roots {
             printer.print_tree(root);
         }
@@ -91,7 +90,7 @@ pub struct FlatDependencies {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct FlatDependency {
-    pub identifier: oci::Identifier,
+    pub identifier: ocx_oci::Identifier,
     pub visibility: Visibility,
 }
 
@@ -102,7 +101,7 @@ impl FlatDependencies {
 }
 
 impl Printable for FlatDependencies {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         // Column-major. Every cell is pre-inked by the theme (same colours
         // as the tree view); cells carry no per-cell style so the renderer
         // emits the styled text verbatim and the colour-off path is
@@ -113,9 +112,10 @@ impl Printable for FlatDependencies {
             // Display identifier without digest — the digest has its own column.
             let id = &entry.identifier;
             rows[0].push(Cell::new(name_tag(id, &theme)));
-            rows[1].push(Cell::new(
-                theme.visibility(entry.visibility, entry.visibility.to_string()),
-            ));
+            rows[1].push(Cell::new(theme.visibility(
+                crate::api::data::visibility_style(entry.visibility),
+                entry.visibility.to_string(),
+            )));
             rows[2].push(Cell::new(
                 id.digest().map_or_else(String::new, |d| theme.digest(d.to_string())),
             ));
@@ -127,20 +127,20 @@ impl Printable for FlatDependencies {
 /// Why view — all paths from roots to a target dependency.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct DependenciesTrace {
-    pub paths: Vec<Vec<oci::Identifier>>,
+    pub paths: Vec<Vec<ocx_oci::Identifier>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub message: Option<String>,
 }
 
 impl DependenciesTrace {
-    pub fn new(paths: Vec<Vec<oci::Identifier>>) -> Self {
+    pub fn new(paths: Vec<Vec<ocx_oci::Identifier>>) -> Self {
         Self { paths, message: None }
     }
 }
 
 impl Printable for DependenciesTrace {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         if self.paths.is_empty() {
             if let Some(ref msg) = self.message {
                 printer.print_hint(msg);
@@ -151,7 +151,10 @@ impl Printable for DependenciesTrace {
         }
         let theme = printer.theme();
         for path in &self.paths {
-            let steps: Vec<String> = path.iter().map(|id| theme.of(id)).collect();
+            let steps: Vec<String> = path
+                .iter()
+                .map(|id| crate::api::data::ink_identifier(&theme, id))
+                .collect();
             printer.print_steps(&steps);
         }
     }
@@ -160,18 +163,18 @@ impl Printable for DependenciesTrace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_lib::cli::TreeItem;
-    use ocx_lib::package::metadata::visibility::Visibility;
+    use ocx_console::TreeItem;
+    use ocx_package::metadata::visibility::Visibility;
 
-    fn make_digest(hex_char: char) -> oci::Digest {
-        oci::Digest::Sha256(hex_char.to_string().repeat(64))
+    fn make_digest(hex_char: char) -> ocx_oci::Digest {
+        ocx_oci::Digest::Sha256(hex_char.to_string().repeat(64))
     }
 
-    fn make_identifier(s: &str) -> oci::Identifier {
-        oci::Identifier::parse_with_default_registry(s, "ocx.sh").unwrap()
+    fn make_identifier(s: &str) -> ocx_oci::Identifier {
+        ocx_oci::Identifier::parse_with_default_registry(s, "ocx.sh").unwrap()
     }
 
-    fn make_node(identifier: &str, digest: oci::Digest, repeated: bool, deps: Vec<Dependency>) -> Dependency {
+    fn make_node(identifier: &str, digest: ocx_oci::Digest, repeated: bool, deps: Vec<Dependency>) -> Dependency {
         Dependency {
             identifier: make_identifier(identifier).clone_with_digest(digest),
             repeated,

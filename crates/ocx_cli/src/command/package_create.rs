@@ -4,7 +4,9 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{archive, compression, log, oci, package, package::metadata::authoring::AuthoringMetadata, prelude::*};
+use ocx_package::metadata::authoring::AuthoringMetadata;
+use ocx_util::prelude::*;
+use ocx_util::{archive, compression};
 
 use crate::options;
 
@@ -43,7 +45,7 @@ pub struct PackageCreate {
     /// under it every dynamically linked binary is refused. Static binaries
     /// need no declaration.
     #[clap(short, long)]
-    platform: Option<oci::Platform>,
+    platform: Option<ocx_oci::Platform>,
     /// Output file or directory, if a directory is provided the filename will be inferred
     #[clap(short, long)]
     output: Option<std::path::PathBuf>,
@@ -136,7 +138,7 @@ impl PackageCreate {
         // 1 `internal` before `create_dir_all` below ever typed anything.
         let exists = tokio::fs::try_exists(&output)
             .await
-            .map_err(|error| ocx_lib::error::file_error(&output, error))?;
+            .map_err(|error| ocx_util::error::FileError::new(&output, error))?;
         if exists && !self.force {
             anyhow::bail!(
                 "output file {} already exists; use --force to overwrite",
@@ -159,9 +161,9 @@ impl PackageCreate {
         // being read. `_create_lock` is held for its `Drop`; only the extract
         // path writes scratch, so the directory-input path takes no lock.
         let (extracted, _create_lock) = if self.extract || self.strip_components.is_some() {
-            let lock = ocx_lib::utility::fs::LockedFile::open_exclusive(
-                ocx_lib::file_structure::TempStore::lock_path_for(&create_root),
-            )
+            let lock = ocx_util::fs::LockedFile::open_exclusive(ocx_store::file_structure::TempStore::lock_path_for(
+                &create_root,
+            ))
             .await?;
             (Some(self.extract_archive(&create_root).await?), Some(lock))
         } else {
@@ -196,7 +198,7 @@ impl PackageCreate {
                 // `unresolvable` and the publisher is told the scope could not
                 // be resolved rather than which token was misspelled. Both
                 // refuse the same publish; only one of them says what is wrong.
-                let valid = package::metadata::validate_for_publish(metadata.to_published()?)?;
+                let valid = ocx_package::metadata::validate_for_publish(metadata.to_published()?)?;
                 // Check what the packaged binaries actually demand of a host
                 // against what `--platform` claims they demand. Runs after
                 // the binaries scan (both read the same content tree) and,
@@ -225,14 +227,14 @@ impl PackageCreate {
                     // create step carries this flag on every leg, and a
                     // warning that fires where nothing was suppressed dilutes
                     // exactly the loudness the escape hatch depends on.
-                    if package::libc_lint::checks_declared_libc(&platform) {
+                    if ocx_package::libc_lint::checks_declared_libc(&platform) {
                         context.ui().warn(format!(
                             "--no-libc-lint: skipped the libc check, so the os.features declared by \
                              {platform} are unverified against the packaged binaries"
                         ));
                     }
                 } else {
-                    package::libc_lint::check_declared_libc(content_root, &metadata, &platform).await?;
+                    ocx_package::libc_lint::check_declared_libc(content_root, &metadata, &platform).await?;
                 }
                 Some(valid)
             }
@@ -242,7 +244,7 @@ impl PackageCreate {
         if let Some(parent) = output.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
-                .map_err(|error| ocx_lib::error::file_error(parent, error))?;
+                .map_err(|error| ocx_util::error::FileError::new(parent, error))?;
         }
         let compression_options =
             compression::CompressionOptions::from_level(self.compression_level.into()).with_threads(self.threads);
@@ -253,7 +255,7 @@ impl PackageCreate {
         );
         {
             let _spin = context.progress().spinner(format!("Bundling {}", self.path.display()));
-            package::bundle::BundleBuilder::from_path(content_root)
+            ocx_package::bundle::BundleBuilder::from_path(content_root)
                 .with_compression(compression_options)
                 .create(&output)
                 .await?;
@@ -269,7 +271,7 @@ impl PackageCreate {
             // file next to the bundle is the compiled, pin-resolved published
             // form.
             let metadata_target = crate::conventions::infer_metadata_file(&output)?;
-            package::metadata::Metadata::from(metadata)
+            ocx_package::metadata::Metadata::from(metadata)
                 .write_json(&metadata_target)
                 .await?;
         }
@@ -289,7 +291,7 @@ impl PackageCreate {
             None => match tokio::fs::remove_file(&receipt_target).await {
                 Ok(()) => log::info!("Removed the stale build receipt at {}", receipt_target.display()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(ocx_lib::error::file_error(&receipt_target, error).into()),
+                Err(error) => return Err(ocx_util::error::FileError::new(&receipt_target, error).into()),
             },
         }
 
@@ -313,7 +315,7 @@ impl PackageCreate {
             .map(|metadata| metadata.is_dir())
             .unwrap_or(false);
         if is_dir {
-            return Err(ocx_lib::cli::UsageError::new(format!(
+            return Err(crate::error::UsageError::new(format!(
                 "--extract needs an archive file, but {} is a directory; drop --extract to bundle a directory",
                 self.path.display()
             ))
@@ -328,11 +330,11 @@ impl PackageCreate {
         let strip_components = self.strip_components.unwrap_or(0);
         tokio::fs::create_dir_all(create_root)
             .await
-            .map_err(|error| ocx_lib::error::file_error(create_root, error))?;
+            .map_err(|error| ocx_util::error::FileError::new(create_root, error))?;
         let target = tempfile::Builder::new()
             .prefix("create-")
             .tempdir_in(create_root)
-            .map_err(|error| ocx_lib::error::file_error(create_root, error))?;
+            .map_err(|error| ocx_util::error::FileError::new(create_root, error))?;
         log::info!(
             "Extracting {} with strip_components {strip_components}",
             self.path.display()
@@ -348,10 +350,10 @@ impl PackageCreate {
         .await?;
         let first_entry = tokio::fs::read_dir(target.path())
             .await
-            .map_err(|error| ocx_lib::error::file_error(target.path(), error))?
+            .map_err(|error| ocx_util::error::FileError::new(target.path(), error))?
             .next_entry()
             .await
-            .map_err(|error| ocx_lib::error::file_error(target.path(), error))?;
+            .map_err(|error| ocx_util::error::FileError::new(target.path(), error))?;
         if first_entry.is_none() {
             return Err(self.empty_extraction_error(strip_components));
         }
@@ -375,7 +377,7 @@ impl PackageCreate {
                 self.path.display()
             )
         };
-        crate::app::CommandError::new(message, ocx_lib::cli::ExitCode::DataError).into()
+        crate::app::CommandError::new(message, ocx_exit::ExitCode::DataError).into()
     }
 
     /// Rejects an explicit `--bin-scan` given without `--metadata` (`-m`):
@@ -385,7 +387,7 @@ impl PackageCreate {
     /// disable.
     fn validate_bin_scan(&self) -> anyhow::Result<()> {
         if self.bin_scan.mode() == options::BinScanMode::Verify && self.metadata.is_none() {
-            return Err(ocx_lib::cli::UsageError::new(
+            return Err(crate::error::UsageError::new(
                 "--bin-scan requires --metadata (-m); nothing to verify without a metadata sidecar",
             )
             .into());
@@ -406,11 +408,11 @@ impl PackageCreate {
     /// from the other corrupts every downstream consumer of the recorded
     /// value, so an absent `--platform` is a usage error rather than a
     /// silent host default.
-    fn declared_platform(&self) -> anyhow::Result<Option<oci::Platform>> {
+    fn declared_platform(&self) -> anyhow::Result<Option<ocx_oci::Platform>> {
         match (&self.metadata, &self.platform) {
             (None, _) => Ok(None),
             (Some(_), Some(platform)) => Ok(Some(platform.clone())),
-            (Some(_), None) => Err(ocx_lib::cli::UsageError::new(
+            (Some(_), None) => Err(crate::error::UsageError::new(
                 "--platform (-p) is required with --metadata (-m); the sidecar records the platform \
                  the packaged content runs on, which cannot be inferred from the build host",
             )
@@ -425,10 +427,10 @@ impl PackageCreate {
         &self,
         metadata: AuthoringMetadata,
         context: &crate::app::Context,
-        platform: &oci::Platform,
+        platform: &ocx_oci::Platform,
     ) -> anyhow::Result<AuthoringMetadata> {
         let _spin = context.progress().spinner("Resolving dependency pins");
-        Ok(package::dependency_pinning::pin_dependencies(metadata, context.default_index(), platform).await?)
+        Ok(ocx_package::dependency_pinning::pin_dependencies(metadata, context.default_index(), platform).await?)
     }
 
     /// Runs the create-time interface-binaries scan/fill/verify step
@@ -438,18 +440,18 @@ impl PackageCreate {
         &self,
         content_root: &std::path::Path,
         metadata: AuthoringMetadata,
-        platform: &oci::Platform,
+        platform: &ocx_oci::Platform,
     ) -> anyhow::Result<AuthoringMetadata> {
         let mode = match self.bin_scan.mode() {
-            options::BinScanMode::Auto => package::bin_scan::ScanMode::Auto,
-            options::BinScanMode::Verify => package::bin_scan::ScanMode::Verify,
-            options::BinScanMode::Off => package::bin_scan::ScanMode::Off,
+            options::BinScanMode::Auto => ocx_package::bin_scan::ScanMode::Auto,
+            options::BinScanMode::Verify => ocx_package::bin_scan::ScanMode::Verify,
+            options::BinScanMode::Off => ocx_package::bin_scan::ScanMode::Off,
         };
-        Ok(package::bin_scan::resolve_binaries(content_root, metadata, platform, mode).await?)
+        Ok(ocx_package::bin_scan::resolve_binaries(content_root, metadata, platform, mode).await?)
     }
 
     /// Infers a filename for the package bundle based on the identifier and platform, or the input path if no identifier is provided.
-    fn infer_filename(&self, identifier: Option<&oci::Identifier>) -> String {
+    fn infer_filename(&self, identifier: Option<&ocx_oci::Identifier>) -> String {
         let mut name = match identifier {
             Some(identifier) => format!("{}-{}", identifier.name(), identifier.tag_or_latest()),
             None => self.inferred_stem(),
@@ -617,8 +619,8 @@ mod tests {
         let create = PackageCreate::try_parse_from(["package-create", "-m", "metadata.json", "."]).expect("parse");
         let error = create.declared_platform().expect_err("rejected above");
         assert_eq!(
-            crate::app::classify_error(error.as_ref()),
-            ocx_lib::cli::ExitCode::UsageError
+            crate::exit::classify_error(error.as_ref()),
+            ocx_exit::ExitCode::UsageError
         );
     }
 
@@ -663,9 +665,9 @@ mod tests {
     #[tokio::test]
     async fn a_held_scratch_lock_makes_clean_skip_the_create_dir() {
         let temp = tempfile::tempdir().unwrap();
-        let store = ocx_lib::file_structure::TempStore::new(temp.path());
+        let store = ocx_store::file_structure::TempStore::new(temp.path());
         let create_root = store.root().join("create");
-        let lock_path = ocx_lib::file_structure::TempStore::lock_path_for(&create_root);
+        let lock_path = ocx_store::file_structure::TempStore::lock_path_for(&create_root);
 
         // With the lock released, `clean` would acquire it and sweep the dir.
         assert!(
@@ -674,9 +676,7 @@ mod tests {
         );
 
         // Hold it exactly as `execute` does; `clean` must now be turned away.
-        let held = ocx_lib::utility::fs::LockedFile::open_exclusive(&lock_path)
-            .await
-            .unwrap();
+        let held = ocx_util::fs::LockedFile::open_exclusive(&lock_path).await.unwrap();
         assert!(
             store.try_acquire(&create_root).unwrap().is_none(),
             "clean must skip temp/create while the scratch lock is held"

@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use std::str::FromStr;
 
 use clap::Parser;
-use ocx_lib::setup::VersionSpec;
+use ocx_setup::VersionSpec;
 
 /// Refresh the managed-config snapshot from the registry.
 ///
@@ -72,8 +72,8 @@ pub struct ConfigUpdateArgs {
 /// plus the `MAX_PAUSE_INTERVAL` ceiling. Malformed or over-cap → clap error
 /// (exit 64).
 fn parse_pause_duration(value: &str) -> Result<std::time::Duration, String> {
-    let duration = ocx_lib::parse_interval(value).map_err(|e| e.to_string())?;
-    if duration > ocx_lib::managed_config::MAX_PAUSE_INTERVAL {
+    let duration = ocx_config::managed::parse_interval(value).map_err(|e| e.to_string())?;
+    if duration > ocx_config::managed_config::MAX_PAUSE_INTERVAL {
         return Err(format!(
             "pause duration '{value}' exceeds the maximum of 7d; use `refresh = \"manual\"` for a permanent hold"
         ));
@@ -83,8 +83,8 @@ fn parse_pause_duration(value: &str) -> Result<std::time::Duration, String> {
 
 impl ConfigUpdateArgs {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        use ocx_lib::package_manager::ManagedConfigUpdateResult;
-        use ocx_lib::resolve_managed_target;
+        use ocx_config::managed::resolve_managed_target;
+        use ocx_package_manager::ManagedConfigUpdateResult;
 
         use crate::api::data::config_update::{ConfigUpdateData, ConfigUpdateStatus};
 
@@ -113,7 +113,7 @@ impl ConfigUpdateArgs {
             return execute_check(&context, &resolved).await;
         }
 
-        let state = &context.file_structure().state;
+        let managed_paths = context.file_structure().state.managed_config();
 
         // `--pause` without a VERSION freezes the on-disk state as-is: write
         // the pause, fetch nothing. The report is the same local-state shape
@@ -122,8 +122,8 @@ impl ConfigUpdateArgs {
         if let Some(duration) = self.pause
             && self.version.is_none()
         {
-            let pause = ocx_lib::managed_config::ManagedConfigPause::for_duration(duration, None);
-            ocx_lib::managed_config::write_pause(state, &pause).await?;
+            let pause = ocx_config::managed_config::ManagedConfigPause::for_duration(duration, None);
+            ocx_config::managed_config::write_pause(&managed_paths, &pause).await?;
             let snapshot = context.managed_config_snapshot();
             context.api().report(&ConfigUpdateData {
                 status: ConfigUpdateStatus::CheckUnavailable,
@@ -152,7 +152,7 @@ impl ConfigUpdateArgs {
             }
             Some(spec) => (spec.apply(resolved.source.clone()), None),
         };
-        let target = ocx_lib::ResolvedManagedConfig {
+        let target = ocx_config::managed::ResolvedManagedConfig {
             source: fetch_source,
             ..resolved.clone()
         };
@@ -166,14 +166,14 @@ impl ConfigUpdateArgs {
         // records the pause (with the pin visible for `--check`); every other
         // explicit update clears any active pause (`--resume` included).
         let paused_until = if let Some(duration) = self.pause {
-            let pause = ocx_lib::managed_config::ManagedConfigPause::for_duration(
+            let pause = ocx_config::managed_config::ManagedConfigPause::for_duration(
                 duration,
                 self.version.as_ref().map(|spec| spec.to_string()),
             );
-            ocx_lib::managed_config::write_pause(state, &pause).await?;
+            ocx_config::managed_config::write_pause(&managed_paths, &pause).await?;
             Some(pause.paused_until)
         } else {
-            ocx_lib::managed_config::clear_pause(state).await?;
+            ocx_config::managed_config::clear_pause(&managed_paths).await?;
             None
         };
 
@@ -224,7 +224,7 @@ impl ConfigUpdateArgs {
 /// observer).
 async fn execute_check(
     context: &crate::app::Context,
-    resolved: &ocx_lib::ResolvedManagedConfig,
+    resolved: &ocx_config::managed::ResolvedManagedConfig,
 ) -> anyhow::Result<ExitCode> {
     use crate::api::data::config_update::ConfigUpdateData;
 
@@ -234,7 +234,7 @@ async fn execute_check(
     let fetched_at = snapshot.map(|snapshot| snapshot.fetched_at.clone());
     let tag = snapshot.and_then(|snapshot| snapshot.tag.clone());
     let policy = resolved.refresh.to_string();
-    let pause = ocx_lib::managed_config::read_pause(&context.file_structure().state).await;
+    let pause = ocx_config::managed_config::read_pause(&context.file_structure().state.managed_config()).await;
 
     // `probe_managed_config_digest` returns `None` for every case where the
     // probe did NOT run (offline / no client / source absent / auth / registry
@@ -269,8 +269,8 @@ async fn execute_check(
 /// [`ConfigUpdateStatus::CheckUnavailable`], never a false-healthy
 /// `already_current`.
 fn derive_check_status(
-    registry_digest: Option<&ocx_lib::oci::Digest>,
-    snapshot_digest: Option<&ocx_lib::oci::Digest>,
+    registry_digest: Option<&ocx_oci::Digest>,
+    snapshot_digest: Option<&ocx_oci::Digest>,
 ) -> (crate::api::data::config_update::ConfigUpdateStatus, Option<bool>) {
     use crate::api::data::config_update::ConfigUpdateStatus;
 
@@ -292,18 +292,18 @@ fn derive_check_status(
 /// `--check`'s report.
 fn active_kill_switches() -> Vec<String> {
     let mut switches = Vec::new();
-    if ocx_lib::env::flag(ocx_lib::env::keys::OCX_NO_CONFIG_REFRESH, false) {
-        switches.push(ocx_lib::env::keys::OCX_NO_CONFIG_REFRESH.to_string());
+    if ocx_util::env::flag(ocx_config::env::keys::OCX_NO_CONFIG_REFRESH, false) {
+        switches.push(ocx_config::env::keys::OCX_NO_CONFIG_REFRESH.to_string());
     }
-    if ocx_lib::env::flag(ocx_lib::env::keys::OCX_NO_CONFIG, false) {
-        switches.push(ocx_lib::env::keys::OCX_NO_CONFIG.to_string());
+    if ocx_util::env::flag(ocx_config::env::keys::OCX_NO_CONFIG, false) {
+        switches.push(ocx_config::env::keys::OCX_NO_CONFIG.to_string());
     }
     switches
 }
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::oci::Digest;
+    use ocx_oci::Digest;
 
     use super::{derive_check_status, parse_pause_duration};
     use crate::api::data::config_update::ConfigUpdateStatus;
@@ -363,7 +363,7 @@ mod tests {
         );
         assert_eq!(
             parse_pause_duration("7d").unwrap(),
-            ocx_lib::managed_config::MAX_PAUSE_INTERVAL,
+            ocx_config::managed_config::MAX_PAUSE_INTERVAL,
             "the cap itself is accepted (inclusive ceiling)"
         );
     }

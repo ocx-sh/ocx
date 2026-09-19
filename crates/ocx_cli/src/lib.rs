@@ -12,7 +12,14 @@
 pub mod api;
 pub mod app;
 pub mod build_receipt;
+// `pub` for the reason its predecessor `ocx_lib::cli::clap` was: `parse` is
+// `pub`, and a `pub` item in a private module is `unreachable_pub` debt with
+// no reader. Only `app::run` drives it.
+pub mod clap_parse;
 pub mod command;
 pub mod conventions;
+pub mod error;
 pub mod error_envelope;
+pub mod exit;
 pub mod options;
+pub mod tracing_init;

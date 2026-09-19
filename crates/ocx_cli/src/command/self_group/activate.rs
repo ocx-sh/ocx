@@ -5,15 +5,17 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
-use ocx_lib::activate::ActivateMode;
-use ocx_lib::activation::{self, Outcome, ProjectIdentity, SessionError, SessionInput};
-use ocx_lib::cli::{ColorModeConfig, Theme};
-use ocx_lib::env::Env;
-use ocx_lib::file_structure::FileStructure;
-use ocx_lib::setup::ocx_install_bin_path;
-use ocx_lib::shell::reconcile::{self, CARRIER_KEY, Ledger, Plan, ScopeId};
-use ocx_lib::shell::{escape, hook};
-use ocx_lib::{ConfigInputs, ConfigLoader, ShellConfig, log, shell::Shell};
+use ocx_config::env::Env;
+use ocx_config::loader::ConfigInputs;
+use ocx_config::loader::ConfigLoader;
+use ocx_config::shell::ShellConfig;
+use ocx_console::{ColorModeConfig, Theme};
+use ocx_package_manager::activation::{self, Outcome, ProjectIdentity, SessionError, SessionInput};
+use ocx_project::activate::ActivateMode;
+use ocx_shell::shell::Shell;
+use ocx_shell::shell::reconcile::{self, CARRIER_KEY, Ledger, Plan, ScopeId};
+use ocx_shell::shell::{escape, hook};
+use ocx_store::file_structure::FileStructure;
 
 use crate::app::ContextOptions;
 use crate::conventions::resolve_shell_arg;
@@ -108,7 +110,7 @@ impl SelfActivate {
             // logs once at debug, and the prompt renders. Nothing reaches the
             // binary's stderr that a user would see anyway: the emitted body
             // discards it (A-21).
-            let carrier = ocx_lib::env::var(CARRIER_KEY);
+            let carrier = ocx_util::env::var(CARRIER_KEY);
             if let Err(error) = self
                 .run_reconcile(options, color_config, &FileStructure::new(), carrier.as_deref())
                 .await
@@ -155,7 +157,7 @@ impl SelfActivate {
         // Constructing FileStructure directly avoids the full Context::try_init
         // overhead (OCI client, OciIndex, PackageManager) on every shell startup.
         let file_structure = FileStructure::new();
-        let bin_path = ocx_install_bin_path(&file_structure);
+        let bin_path = file_structure.ocx_install_bin_path();
         // C-001 — the store owns the spelling; never a literal `toolchain/active/bin`
         // join here.
         let toolchain_bin = file_structure.toolchain.bin();
@@ -409,7 +411,7 @@ impl SelfActivate {
         // shell does not have, and the staleness would then be permanent.
         let regate = watch_fingerprint != ledger.ws;
         let gate = regate
-            .then(|| hook::redefinition(shell, &ocx_binary_path(&ocx_install_bin_path(file_structure)), &watch))
+            .then(|| hook::redefinition(shell, &ocx_binary_path(&file_structure.ocx_install_bin_path()), &watch))
             .flatten();
         // The summary line's ink is decided here and passed down resolved, so
         // `reconcile::summary` asks the environment nothing (A-21).
@@ -554,9 +556,9 @@ fn plan_lines(shell: Shell, plan: &Plan) -> Vec<String> {
 /// `None` arms write `# ocx:` diagnostics to a stderr the emitted hook body
 /// discards unconditionally (A-21). Every entry reaching here has already passed
 /// `plan`'s A-10 gate, so those arms are unreachable on this path anyway.
-fn set_line(shell: Shell, entry: &ocx_lib::package::metadata::env::entry::Entry) -> Option<String> {
-    use ocx_lib::package::metadata::env::list::DEFAULT_SEPARATOR;
-    use ocx_lib::package::metadata::env::modifier::ModifierKind;
+fn set_line(shell: Shell, entry: &ocx_package::metadata::env::entry::Entry) -> Option<String> {
+    use ocx_package::metadata::env::list::DEFAULT_SEPARATOR;
+    use ocx_package::metadata::env::modifier::ModifierKind;
 
     match entry.kind {
         ModifierKind::Path => shell.export_path(&entry.key, &entry.value),
@@ -664,7 +666,7 @@ fn message_lines(
 /// # `bin` and `none` are the same `PATH` at this tier
 ///
 /// C-059 makes the two global session directories
-/// ([`ocx_install_bin_path`] and `$OCX_HOME/toolchain/active/bin`) desired
+/// ([`FileStructure::ocx_install_bin_path`] and `$OCX_HOME/toolchain/active/bin`) desired
 /// unconditionally, in every mode — they are session-level facts, and dropping
 /// them would have `repair_owned_segments` delete the registration `ocx self
 /// setup` just wrote. So at the **global** tier `bin` and `none` both compose
@@ -679,8 +681,8 @@ fn message_lines(
 /// than an `env` one.
 async fn global_prompt_entries(
     context: &crate::app::Context,
-    target: &ocx_lib::oci::Platform,
-) -> anyhow::Result<Vec<ocx_lib::package::metadata::env::entry::Entry>> {
+    target: &ocx_oci::Platform,
+) -> anyhow::Result<Vec<ocx_package::metadata::env::entry::Entry>> {
     // The `env` arm parses `$OCX_HOME/ocx.toml` a second time, inside
     // `resolve_global_pinned_env`, and that is deliberate. Threading this
     // parsed config into that resolver would change its signature and its
@@ -691,7 +693,7 @@ async fn global_prompt_entries(
     // so the net per-prompt cost is favourable; one more small TOML parse is
     // noise against `RECONCILE_BUDGET_MS`. Do not "optimise" this away.
     match global_activate_mode(context.file_structure().root()).await {
-        ocx_lib::activate::ActivateMode::Env => {
+        ocx_project::activate::ActivateMode::Env => {
             Ok(
                 // No CLI tier: the per-prompt hook is not an invocation of
                 // `ocx --global env`, so it has no `--pinned`/`--no-pinned` to
@@ -704,7 +706,7 @@ async fn global_prompt_entries(
                     .map_or_else(Vec::new, |(entries, ..)| entries),
             )
         }
-        ocx_lib::activate::ActivateMode::Bin | ocx_lib::activate::ActivateMode::None => Ok(Vec::new()),
+        ocx_project::activate::ActivateMode::Bin | ocx_project::activate::ActivateMode::None => Ok(Vec::new()),
     }
 }
 
@@ -712,7 +714,7 @@ async fn global_prompt_entries(
 /// own file, read through the one resolver both tiers share.
 ///
 /// [`activation::activate_mode`] is called rather than a re-spelled
-/// `Ladder { .. }.resolve(ACTIVATE_FLOOR)`: `ocx_lib::activate`'s module doc
+/// `Ladder { .. }.resolve(ACTIVATE_FLOOR)`: `ocx_project::activate`'s module doc
 /// names a second spelling of the floor as drift, and one resolver with two
 /// callers is the point.
 ///
@@ -725,11 +727,10 @@ async fn global_prompt_entries(
 /// same posture `resolve_global_pinned_env` takes over the very same bytes
 /// (`Err(_) =>` empty). This is the per-prompt path: it must not turn a
 /// malformed file into an error, a warning on the prompt, or a silent `none`.
-async fn global_activate_mode(home: &Path) -> ocx_lib::activate::ActivateMode {
-    let config =
-        ocx_lib::project::ProjectConfig::from_path(&ocx_lib::project::ProjectConfig::global_manifest_path(home))
-            .await
-            .unwrap_or_default();
+async fn global_activate_mode(home: &Path) -> ocx_project::activate::ActivateMode {
+    let config = ocx_project::ProjectConfig::from_path(&ocx_project::ProjectConfig::global_manifest_path(home))
+        .await
+        .unwrap_or_default();
     activation::activate_mode(&config)
 }
 
@@ -779,7 +780,7 @@ enum Walk {
 /// against the precedence chain. Any failure degrades at debug level, never to a
 /// broken prompt (C-051).
 async fn resolve_walk(options: &ContextOptions, ledger: &Ledger) -> Walk {
-    let cwd = match ocx_lib::env::current_dir() {
+    let cwd = match ocx_util::env::current_dir() {
         Ok(cwd) => Some(cwd),
         // A-11 — the CWD itself was unlinked. Degrade to "no project resolved
         // this prompt", log at debug, and **never** fall back to a cached CWD.
@@ -856,7 +857,7 @@ async fn resolve_walk(options: &ContextOptions, ledger: &Ledger) -> Walk {
 /// pass keeps that property by degrading to "no tier set the rung" (which is
 /// rung 5, auto) rather than propagating.
 pub(crate) async fn load_shell_config(options: &ContextOptions) -> (Option<ShellConfig>, Vec<PathBuf>) {
-    let cwd = ocx_lib::env::current_dir().ok();
+    let cwd = ocx_util::env::current_dir().ok();
     let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
         explicit_path: options.config.as_deref(),
         explicit_project_path: options.project.as_deref(),
@@ -939,7 +940,7 @@ fn ocx_binary_path(bin_path: &Path) -> PathBuf {
 /// # Why the probe is on the physical directory (C-080)
 ///
 /// `Path::is_file` follows **every** component, including the final one, so a
-/// probe on [`ToolchainStore::bin`](ocx_lib::file_structure::ToolchainStore::bin)
+/// probe on [`ToolchainStore::bin`](ocx_store::file_structure::ToolchainStore::bin)
 /// would resolve through the `active` link and answer about whatever that link
 /// currently names. The answer is then baked as the absolute program behind a
 /// shell *function* — which shadows `PATH` outright — for every login on the
@@ -950,7 +951,7 @@ fn wrapper_binary_path(file_structure: &FileStructure, install_bin: &Path) -> Pa
     let pinned = ocx_binary_path(
         &file_structure
             .toolchain
-            .shell_bin(ocx_lib::file_structure::DEFAULT_SHELL),
+            .shell_bin(ocx_store::file_structure::DEFAULT_SHELL),
     );
     if pinned.is_file() {
         pinned
@@ -963,7 +964,7 @@ fn wrapper_binary_path(file_structure: &FileStructure, install_bin: &Path) -> Pa
 ///
 /// A borrowed request struct rather than eight positional parameters, the same
 /// shape and for the same reason as
-/// [`RenderRequest`](ocx_lib::package_manager::tasks::render_toolchain::RenderRequest):
+/// [`RenderRequest`](ocx_package_manager::tasks::render_toolchain::RenderRequest):
 /// a positional list of two paths, two `Option<&str>`s, an `Option<&Path>`, a
 /// slice and a mode reads as nothing at the call site, and `clippy::too_many_arguments`
 /// says so at seven.
@@ -971,14 +972,14 @@ struct LoginStream<'a> {
     /// The shell whose idiom every emitted line is written in.
     shell: Shell,
 
-    /// The installed `ocx`'s own `bin` directory — [`ocx_install_bin_path`]'s
+    /// The installed `ocx`'s own `bin` directory — [`FileStructure::ocx_install_bin_path`]'s
     /// answer, prepended first so it lands **behind** the toolchain trampolines
     /// on `PATH`: it is the floor a bare `ocx` falls back to, not a lid over a
     /// toolchain that pins one (C-060).
     bin_path: &'a Path,
 
     /// The global rendered toolchain's trampolines, `$OCX_HOME/toolchain/active/bin`
-    /// — [`ToolchainStore::bin`](ocx_lib::file_structure::ToolchainStore::bin)'s
+    /// — [`ToolchainStore::bin`](ocx_store::file_structure::ToolchainStore::bin)'s
     /// answer, never a literal join (C-001). Prepended last, so it lands
     /// frontmost of the two.
     toolchain_bin: &'a Path,
@@ -1266,7 +1267,7 @@ fn format_global_env_eval(shell: Shell, binary: &Path) -> String {
         // root `--format json` flag, not a `--shell=NAME` channel.
         Shell::Nushell => [
             "if (which ocx | length) > 0 { try { let _ocx_json = (ocx --format json --global env | from json); ",
-            ocx_lib::setup::shims::NU_ENV_APPLY_LOOP,
+            ocx_setup::shims::NU_ENV_APPLY_LOOP,
             " } catch { } }",
         ]
         .concat(),
@@ -1293,9 +1294,7 @@ fn shell_name_for_eval(shell: Shell) -> &'static str {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use ocx_lib::shell::Shell;
-
-    use ocx_lib::setup::ocx_install_bin_path;
+    use ocx_shell::shell::Shell;
 
     use super::{completion_clap_shell, format_global_env_eval, generate_completion_inline, path_prepend_line};
 
@@ -1459,7 +1458,7 @@ mod tests {
             "nushell must apply constants via load-env; got: {line:?}"
         );
         assert!(
-            line.contains(ocx_lib::setup::shims::NU_ENV_APPLY_LOOP),
+            line.contains(ocx_setup::shims::NU_ENV_APPLY_LOOP),
             "nushell eval line must embed the shared apply loop verbatim (drift guard); got: {line:?}"
         );
         assert!(
@@ -1614,9 +1613,9 @@ mod tests {
     /// `ocx_install_bin_path` must return a path ending with `current/content/bin`.
     #[test]
     fn ocx_install_bin_path_structure() {
-        use ocx_lib::file_structure::FileStructure;
+        use ocx_store::file_structure::FileStructure;
         let fs = FileStructure::with_root(PathBuf::from("/tmp/ocx_home"));
-        let bin_path = ocx_install_bin_path(&fs);
+        let bin_path = fs.ocx_install_bin_path();
         assert!(
             bin_path.ends_with(Path::new("current/content/bin")),
             "bin path must end with current/content/bin; got: {bin_path:?}"
@@ -1633,16 +1632,16 @@ mod reconcile_tests {
     use std::path::{Path, PathBuf};
 
     use clap::{CommandFactory as _, Parser as _};
-    use ocx_lib::cli::Theme;
-    use ocx_lib::env::Env;
-    use ocx_lib::package::metadata::env::entry::Entry;
-    use ocx_lib::package::metadata::env::modifier::ModifierKind;
-    use ocx_lib::project::LockCurrency;
-    use ocx_lib::shell::Shell;
-    use ocx_lib::shell::coexistence::{Observation, Tool, Yield};
-    use ocx_lib::shell::reconcile::{CARRIER_KEY, Ledger, Prior, Verdict};
+    use ocx_config::env::Env;
+    use ocx_console::Theme;
+    use ocx_package::metadata::env::entry::Entry;
+    use ocx_package::metadata::env::modifier::ModifierKind;
+    use ocx_project::LockCurrency;
+    use ocx_shell::shell::Shell;
+    use ocx_shell::shell::coexistence::{Observation, Tool, Yield};
+    use ocx_shell::shell::reconcile::{CARRIER_KEY, Ledger, Prior, Verdict};
 
-    use ocx_lib::activation::{
+    use ocx_package_manager::activation::{
         Outcome, ProjectIdentity, SessionError, SessionPath, is_stat_only, next_ledger, plan_for, yield_messages,
     };
 
@@ -2080,7 +2079,7 @@ mod reconcile_tests {
             constant("2FOO", "x"),
             Entry {
                 key: "TOOLS".to_owned(),
-                value: format!("/a{}/b", ocx_lib::env::PATH_SEPARATOR),
+                value: format!("/a{}/b", ocx_util::env::PATH_SEPARATOR),
                 kind: ModifierKind::Path,
                 separator: None,
             },
@@ -3093,7 +3092,7 @@ mod bare_ocx_tests {
     use std::path::{Path, PathBuf};
 
     use clap::ValueEnum as _;
-    use ocx_lib::shell::{Shell, escape};
+    use ocx_shell::shell::{Shell, escape};
 
     use super::{ActivateMode, activation_lines, format_global_env_eval, generate_completion_inline, ocx_binary_path};
 
@@ -3113,7 +3112,7 @@ mod bare_ocx_tests {
         let arms: Vec<Shell> = Shell::value_variants()
             .iter()
             .copied()
-            .filter(|shell| ocx_lib::shell::hook::wrapper(*shell, &binary).is_some())
+            .filter(|shell| ocx_shell::shell::hook::wrapper(*shell, &binary).is_some())
             .collect();
         assert!(
             !arms.is_empty(),
@@ -3241,11 +3240,11 @@ mod bare_ocx_tests {
     /// on the global tier.
     #[test]
     fn c060_the_wrapper_follows_a_global_ocx_pin_and_falls_back_to_the_install() {
-        use ocx_lib::file_structure::DEFAULT_SHELL;
+        use ocx_store::file_structure::DEFAULT_SHELL;
 
         let home = tempfile::TempDir::new().expect("tempdir");
-        let file_structure = ocx_lib::file_structure::FileStructure::with_root(home.path().to_path_buf());
-        let install_bin = ocx_lib::setup::ocx_install_bin_path(&file_structure);
+        let file_structure = ocx_store::file_structure::FileStructure::with_root(home.path().to_path_buf());
+        let install_bin = file_structure.ocx_install_bin_path();
 
         assert_eq!(
             super::wrapper_binary_path(&file_structure, &install_bin),
@@ -3281,8 +3280,8 @@ mod bare_ocx_tests {
     #[test]
     fn c080_the_wrapper_probe_never_resolves_through_active() {
         let home = tempfile::TempDir::new().expect("tempdir");
-        let file_structure = ocx_lib::file_structure::FileStructure::with_root(home.path().to_path_buf());
-        let install_bin = ocx_lib::setup::ocx_install_bin_path(&file_structure);
+        let file_structure = ocx_store::file_structure::FileStructure::with_root(home.path().to_path_buf());
+        let install_bin = file_structure.ocx_install_bin_path();
 
         let through_active = file_structure.toolchain.bin();
         std::fs::create_dir_all(&through_active).expect("mkdir a real active/bin");
@@ -3366,12 +3365,12 @@ mod ordering_tests {
     use std::path::{Path, PathBuf};
 
     use clap::Parser as _;
-    use ocx_lib::cli::ColorModeConfig;
-    use ocx_lib::file_structure::FileStructure;
-    use ocx_lib::project::consent::{self, Decision, Grant, Reason};
-    use ocx_lib::shell::reconcile::{self, Ledger, Verdict};
+    use ocx_console::ColorModeConfig;
+    use ocx_project::consent::{self, Decision, Grant, Reason};
+    use ocx_shell::shell::reconcile::{self, Ledger, Verdict};
+    use ocx_store::file_structure::FileStructure;
 
-    use ocx_lib::activation::{ConsentProof, authorized_project_env, is_stat_only, walk_is_indeterminate};
+    use ocx_package_manager::activation::{ConsentProof, authorized_project_env, is_stat_only, walk_is_indeterminate};
 
     use super::SelfActivate;
     use crate::app::Cli;
@@ -3406,7 +3405,7 @@ mod ordering_tests {
         // real fold over the real watch set, so the fast path's `fp` comparison
         // is the production one and not a stub.
         let canonical = consent::canonical_project_dir(&project_file).expect("canonicalize");
-        let key = ocx_lib::reference_manager::ReferenceManager::name_for_path(&canonical);
+        let key = ocx_store::reference_manager::ReferenceManager::name_for_path(&canonical);
         let watch = reconcile::watch_paths(&file_structure, Some(&project_file), Some(&key), None);
         let mut ledger = Ledger::empty();
         ledger.fp = reconcile::current_fingerprint(&watch, Some(&canonical));
@@ -3522,12 +3521,12 @@ mod ordering_tests {
     /// flip.
     #[test]
     fn s1_a_namespace_grant_activates_tools_but_contributes_no_project_env() {
-        use ocx_lib::project::ProjectConfig;
+        use ocx_project::ProjectConfig;
 
         // The victim's documented fleet grant, built through the **shipped**
         // consent parser (`OCX_CONSENT_NAMESPACES`' own channel), so this
         // fixture cannot grant something production would have refused.
-        let whitelist = ocx_lib::env_channel(None, Some("ocx.sh/acme-corp"));
+        let whitelist = ocx_config::shell::env_channel(None, Some("ocx.sh/acme-corp"));
         assert!(
             whitelist.namespaces.is_some() && whitelist.paths.is_empty(),
             "the fixture grants a namespace and no path, which is the attack's precondition"
@@ -3543,12 +3542,12 @@ mod ordering_tests {
         ))
         .expect("the attacker's ocx.toml must parse - it is ordinary, valid input");
         let config_path = PathBuf::from("/work/clone/ocx.toml");
-        let groups = vec![ocx_lib::project::DEFAULT_GROUP.to_owned()];
+        let groups = vec![ocx_project::DEFAULT_GROUP.to_owned()];
 
         // The declared set is non-empty, or "withheld nothing" would be
         // indistinguishable from "withheld everything".
         assert!(
-            !ocx_lib::project::project_env_entries(&attacker, &config_path, &groups).is_empty(),
+            !ocx_project::project_env_entries(&attacker, &config_path, &groups).is_empty(),
             "the fixture must declare an [env], or the assertions below are vacuous"
         );
 
@@ -3649,7 +3648,7 @@ mod ordering_tests {
         let seed = super::seed_carrier(std::slice::from_ref(&overlay), &[]).expect("a non-empty tier list seeds");
 
         let stream = super::activation_lines(&super::LoginStream {
-            shell: ocx_lib::shell::Shell::Bash,
+            shell: ocx_shell::shell::Shell::Bash,
             bin_path: &bin,
             toolchain_bin: &PathBuf::from("/tmp/ocx_home/toolchain/bin"),
             activate: super::ActivateMode::Env,
@@ -3662,7 +3661,7 @@ mod ordering_tests {
 
         let carrier = stream
             .iter()
-            .find(|line| line.contains(ocx_lib::shell::reconcile::CARRIER_KEY))
+            .find(|line| line.contains(ocx_shell::shell::reconcile::CARRIER_KEY))
             .unwrap_or_else(|| panic!("the startup stream must export the seed; got: {stream:#?}"));
         let encoded = carrier
             .split_once('=')
@@ -3690,7 +3689,7 @@ mod ordering_tests {
     /// a transient `.git` probe error tears the project scope down.
     #[test]
     fn a011_an_indeterminate_walk_retains_the_scope_a_determinate_one_reverts() {
-        use ocx_lib::shell::reconcile::{ProjectScope, Scopes};
+        use ocx_shell::shell::reconcile::{ProjectScope, Scopes};
 
         let home = tempfile::TempDir::new().expect("tempdir");
         let project_dir = home.path().join("acme");
@@ -3776,12 +3775,12 @@ mod ordering_tests {
 mod emitted_path_tests {
     use std::path::{Path, PathBuf};
 
-    use ocx_lib::activation::{Outcome, ProjectIdentity, SessionPath, next_ledger, plan_for};
-    use ocx_lib::env::Env;
-    use ocx_lib::package::metadata::env::entry::Entry;
-    use ocx_lib::package::metadata::env::modifier::ModifierKind;
-    use ocx_lib::shell::Shell;
-    use ocx_lib::shell::reconcile::Ledger;
+    use ocx_config::env::Env;
+    use ocx_package::metadata::env::entry::Entry;
+    use ocx_package::metadata::env::modifier::ModifierKind;
+    use ocx_package_manager::activation::{Outcome, ProjectIdentity, SessionPath, next_ledger, plan_for};
+    use ocx_shell::shell::Shell;
+    use ocx_shell::shell::reconcile::Ledger;
 
     use super::plan_lines;
 
@@ -3852,7 +3851,7 @@ mod emitted_path_tests {
         let seeded = std::env::join_paths(seed.iter().map(|path| path.as_os_str())).expect("the seed joins");
         let script = format!(
             "PATH='{}'; export PATH\n{}\nprintf '%s' \"$PATH\"\n",
-            ocx_lib::shell::escape::posix_single_quoted(&seeded.to_string_lossy()),
+            ocx_shell::shell::escape::posix_single_quoted(&seeded.to_string_lossy()),
             lines.join("\n")
         );
         let output = std::process::Command::new("bash")
@@ -4010,8 +4009,8 @@ mod emitted_path_tests {
 #[cfg(test)]
 mod global_activate_tests {
     use clap::Parser as _;
-    use ocx_lib::activate::ActivateMode;
-    use ocx_lib::cli::ColorModeConfig;
+    use ocx_console::ColorModeConfig;
+    use ocx_project::activate::ActivateMode;
 
     use super::{global_activate_mode, global_prompt_entries};
     use crate::app::{Cli, Context, ManagedConfigGate};
@@ -4035,7 +4034,7 @@ mod global_activate_tests {
     ///
     /// Red state: collapse the `Bin | None` arm of `global_prompt_entries`'
     /// match into `Env`, or drop `config.activate` from
-    /// `ocx_lib::activation::activate_mode`'s `Ladder`.
+    /// `ocx_package_manager::activation::activate_mode`'s `Ladder`.
     #[tokio::test]
     async fn d3_a_global_file_that_states_a_mode_decides() {
         let home = tempfile::TempDir::new().expect("tempdir");
@@ -4068,7 +4067,7 @@ mod global_activate_tests {
     #[tokio::test]
     async fn d3_the_ladder_is_lenient_and_the_environment_tier_is_the_weakest() {
         let home = tempfile::TempDir::new().expect("tempdir");
-        let key = ocx_lib::env::keys::OCX_TOOLCHAIN_ACTIVATE;
+        let key = ocx_config::env::keys::OCX_TOOLCHAIN_ACTIVATE;
         // SAFETY: `OCX_TOOLCHAIN_ACTIVATE` has no other writer in this crate —
         // the sibling below writes `OCX_HOME`, a different key — and nextest
         // runs one test per process, so no concurrent reader of this key exists
@@ -4133,7 +4132,7 @@ mod global_activate_tests {
     #[tokio::test]
     async fn d3_bin_mode_gates_the_prompt_and_leaves_the_explicit_request_alone() {
         let home = tempfile::TempDir::new().expect("tempdir");
-        // SAFETY: `OCX_HOME` is read through `ocx_lib::env::var`, whose
+        // SAFETY: `OCX_HOME` is read through `ocx_util::env::var`, whose
         // `#[cfg(test)]` override seam is internal to `ocx_lib` and therefore
         // unavailable from this crate; the process variable is the only seam.
         // nextest runs one test per process, so this cannot race a sibling.
@@ -4166,7 +4165,7 @@ mod global_activate_tests {
         );
         let target = crate::conventions::platform_or_default(None);
 
-        let keys = |entries: &[ocx_lib::package::metadata::env::entry::Entry]| -> Vec<String> {
+        let keys = |entries: &[ocx_package::metadata::env::entry::Entry]| -> Vec<String> {
             entries.iter().map(|entry| entry.key.clone()).collect()
         };
 
@@ -4232,15 +4231,15 @@ mod global_activate_tests {
     /// shape the two needles take — the POSIX `eval`, fish's `| source`, pwsh's
     /// `Invoke-Expression`, elvish's capture-then-`eval`, and nushell, the one
     /// arm that consumes `--format json --global env` as data.
-    const GATE_SHELLS: [ocx_lib::shell::Shell; 5] = [
-        ocx_lib::shell::Shell::Bash,
-        ocx_lib::shell::Shell::Fish,
-        ocx_lib::shell::Shell::PowerShell,
-        ocx_lib::shell::Shell::Elvish,
-        ocx_lib::shell::Shell::Nushell,
+    const GATE_SHELLS: [ocx_shell::shell::Shell; 5] = [
+        ocx_shell::shell::Shell::Bash,
+        ocx_shell::shell::Shell::Fish,
+        ocx_shell::shell::Shell::PowerShell,
+        ocx_shell::shell::Shell::Elvish,
+        ocx_shell::shell::Shell::Nushell,
     ];
 
-    fn login_stream(shell: ocx_lib::shell::Shell, activate: ActivateMode) -> Vec<String> {
+    fn login_stream(shell: ocx_shell::shell::Shell, activate: ActivateMode) -> Vec<String> {
         super::activation_lines(&super::LoginStream {
             shell,
             bin_path: &bin_dir(),
@@ -4260,8 +4259,8 @@ mod global_activate_tests {
     /// `eval`, so it consumes the structured `--format json --global env`
     /// output. Same question, different spelling — the needle follows the arm
     /// exactly as `global_env_eval_invokes_global_env_for_any_shell` spells it.
-    fn composes_global_env(stream: &[String], shell: ocx_lib::shell::Shell) -> bool {
-        let needle = if shell == ocx_lib::shell::Shell::Nushell {
+    fn composes_global_env(stream: &[String], shell: ocx_shell::shell::Shell) -> bool {
+        let needle = if shell == ocx_shell::shell::Shell::Nushell {
             "--format json --global env"
         } else {
             "--global env"

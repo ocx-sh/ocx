@@ -14,7 +14,7 @@
 ///
 /// Resolve with [`ModifyPath::explicit`] and hand the `Option<bool>` to the
 /// write seam, which fills a `None` in from
-/// [`OCX_NO_MODIFY_PATH`](ocx_lib::env::keys::OCX_NO_MODIFY_PATH) and then
+/// [`OCX_NO_MODIFY_PATH`](ocx_config::env::keys::OCX_NO_MODIFY_PATH) and then
 /// `config.toml`, before falling through to the default (modify). This type
 /// answers only about the command line — it does not read the environment
 /// itself, so the ladder's lower tiers still get a turn for a user who typed
@@ -40,7 +40,7 @@ impl ModifyPath {
     ///
     /// Only ever `Some(false)` — there is no flag that could produce
     /// `Some(true)`. `None` travels to the write seam so
-    /// [`OCX_NO_MODIFY_PATH`](ocx_lib::env::keys::OCX_NO_MODIFY_PATH) and then
+    /// [`OCX_NO_MODIFY_PATH`](ocx_config::env::keys::OCX_NO_MODIFY_PATH) and then
     /// `config.toml` can still speak for a user who typed nothing; collapsing
     /// absence to `false` here would make the flag's absence outrank both.
     pub fn explicit(&self) -> Option<bool> {

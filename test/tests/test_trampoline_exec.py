@@ -10,7 +10,7 @@ resolve a name on a ``PATH`` that carries one.
 The exit code does not discriminate — assert the wording
 -------------------------------------------------------
 ``CommandResolutionError``'s three variants all classify to ``DataError``
-(``crates/ocx_lib/src/env.rs``, ``impl ClassifyExitCode``), on purpose: the
+(``crates/ocx_config/src/env.rs``, ``impl ClassifyExitCode``), on purpose: the
 code names the *class*, and guard identity lives in the message. A case that
 asserted only "exit 65" could not tell C-010's ``PATH`` exclusion from C-069's
 trampoline refusal, and item 22 requires knowing which fired. So every
@@ -38,7 +38,7 @@ The Windows arm executes the **committed** blob — never a local build
 (``test/tests/test_windows_shim.py``) and CI points it at
 ``target/debug/ocx-shim.exe``, so all twelve tests in that module execute a
 **locally built substitute**: not one has ever executed a byte of
-``crates/ocx_lib/src/shims/ocx-shim-*.exe``, which is what ``include_bytes!``
+``crates/ocx_store/src/shims/ocx-shim-*.exe``, which is what ``include_bytes!``
 ships and what users actually get. The Windows cases below close that gap and
 are the only tests in the tree that do.
 
@@ -298,7 +298,7 @@ def test_item22_a_foreign_home_trampoline_on_path_is_refused_by_identity(
     that — one full compose per hop, forever, with no error and no depth
     counter. Only a predicate over the resolved *file* stops it.
 
-    RED: make ``is_ocx_trampoline`` (``crates/ocx_lib/src/env.rs``) answer
+    RED: make ``is_ocx_trampoline`` (``crates/ocx_config/src/env.rs``) answer
     ``false``. The re-entry becomes the A → B → A loop, so this case reds as
     a :data:`TIMEOUT` rather than as a wrong exit code.
     """
@@ -361,7 +361,7 @@ def test_item22_a_marker_bearing_project_path_is_not_refused(
     make the loosened predicate answer ``false`` too.
 
     RED: replace the ``nth(1)``/whole-line comparison in ``trampoline_signal``
-    (``crates/ocx_lib/src/env.rs``) with ``prefix.windows(..).any(..)`` over the
+    (``crates/ocx_config/src/env.rs``) with ``prefix.windows(..).any(..)`` over the
     marker bytes — this case exits 65 with :data:`TRAMPOLINE_WORDING`.
     """
     label = uuid4().hex[:8]
@@ -493,7 +493,7 @@ def test_item1_a_trampoline_invoked_through_a_symlink_elsewhere_uses_the_baked_h
     from a working directory that is neither project nor link.
 
     RED: replace ``${0##*/}`` with ``$0`` in ``unix_trampoline_body``
-    (``crates/ocx_lib/src/package_manager/launcher/body.rs``) — the recorded
+    (``crates/ocx_package_manager/src/launcher/body.rs``) — the recorded
     line names the symlink's absolute path, and the unpinned half re-executes
     the symlink instead of the tool, which is a loop caught by :data:`TIMEOUT`.
     """
@@ -615,7 +615,7 @@ def test_item36_a_trampoline_whose_home_lost_its_lock_exits_78(
     date" by exit code alone, because each has a different repair.
 
     RED: swap the two arms of ``LockCurrency::classify``
-    (``crates/ocx_lib/src/project/lock.rs``) — this case and its stale sibling
+    (``crates/ocx_project/src/lock.rs``) — this case and its stale sibling
     trade answers, and neither can be caught by the other's assertion.
     """
     project = locked_project(ocx, tmp_path)
@@ -835,7 +835,7 @@ _BLOB_BY_MACHINE = {
 
 
 def _committed_blob() -> Path:
-    """``crates/ocx_lib/src/shims/ocx-shim-<arch>.exe`` — the shipped artefact.
+    """``crates/ocx_store/src/shims/ocx-shim-<arch>.exe`` — the shipped artefact.
 
     Deliberately **not** ``OCX_SHIM_BINARY`` and not a ``target/`` build. This
     is the file ``include_bytes!`` embeds and a user's trampoline slot is a
@@ -849,7 +849,7 @@ def _committed_blob() -> Path:
     machine = platform.machine().lower()
     name = _BLOB_BY_MACHINE.get(machine)
     assert name, f"no committed shim blob for host machine {machine!r}"
-    blob = Path(__file__).resolve().parents[2] / "crates" / "ocx_lib" / "src" / "shims" / name
+    blob = Path(__file__).resolve().parents[2] / "crates" / "ocx_store" / "src" / "shims" / name
     assert blob.is_file(), f"the committed shim blob is missing: {blob}"
     return blob
 
@@ -947,7 +947,7 @@ def test_item15_dispatch_the_committed_blob_builds_the_project_wire_line(
     its two siblings: ``<program> --project "<root>" exec -- "<stem>" <argv…>``.
     User arguments follow the stem verbatim.
 
-    This executes ``crates/ocx_lib/src/shims/ocx-shim-*.exe`` — the shipped
+    This executes ``crates/ocx_store/src/shims/ocx-shim-*.exe`` — the shipped
     bytes — and must never be re-pointed at ``OCX_SHIM_BINARY`` or at
     ``test_windows_shim.py``'s ``shim_entrypoint``; see the module docstring.
 
@@ -1170,7 +1170,7 @@ def test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn(tmp_path: Pa
     line is never consulted and the case would pass against the defect.
 
     RED: drop the second line from ``exec_sidecar_body``
-    (``crates/ocx_lib/src/package_manager/launcher/body.rs``), stop parsing it
+    (``crates/ocx_package_manager/src/launcher/body.rs``), stop parsing it
     in ``parse_exec_sidecar``, or let ``resolve_program`` prefer its literal
     over the baked path (``crates/ocx_shim/src/core.rs``) — the baked log stays
     absent in all three.

@@ -15,6 +15,8 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src.assertions import assert_not_exists
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
@@ -71,6 +73,7 @@ def _packages_present_count(ocx: OcxRunner) -> int:
     return sum(1 for p in base.rglob("content") if p.is_dir())
 
 
+@pytest.mark.smoke
 def test_add_appends_to_tools_table(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:

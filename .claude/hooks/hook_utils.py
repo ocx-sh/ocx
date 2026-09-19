@@ -130,7 +130,7 @@ class StateManager:
             "source": source,
         }
         session_file = self.state_dir / f"session_{short}.json"
-        session_file.write_text(json.dumps(data))
+        session_file.write_text(json.dumps(data), encoding="utf-8")
 
     def remove_session(self, session_id: str) -> None:
         """Remove a session tracking file."""
@@ -164,7 +164,7 @@ class StateManager:
         if not handoff_file.exists():
             return None
         try:
-            data = json.loads(handoff_file.read_text())
+            data = json.loads(handoff_file.read_text(encoding="utf-8"))
             message = data.get("message", "")
             handoff_file.unlink(missing_ok=True)
             return message if message else None
@@ -184,7 +184,7 @@ class StateManager:
         if not lock_file.exists():
             return None
         try:
-            data = json.loads(lock_file.read_text())
+            data = json.loads(lock_file.read_text(encoding="utf-8"))
             lock_session = data.get("session_id", "")
             lock_time = data.get("timestamp", 0)
             if time.time() - lock_time >= ttl_seconds:
@@ -215,7 +215,7 @@ class StateManager:
                 "timestamp": int(time.time()),
                 "tool": tool_name,
             }
-            lock_file.write_text(json.dumps(data))
+            lock_file.write_text(json.dumps(data), encoding="utf-8")
             return True
         finally:
             try:
@@ -229,7 +229,7 @@ class StateManager:
             return
         for lock_file in self.lock_dir.glob("*.lock"):
             try:
-                data = json.loads(lock_file.read_text())
+                data = json.loads(lock_file.read_text(encoding="utf-8"))
                 if data.get("session_id") == session_id:
                     lock_file.unlink()
             except (json.JSONDecodeError, OSError):
@@ -241,7 +241,7 @@ class StateManager:
         """Append a modification entry to the tracker log."""
         self.ensure_dirs()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(self.tracker_file, "a") as f:
+        with open(self.tracker_file, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {tool_name}: {rel_path}\n")
 
     def trim_tracker(
@@ -251,10 +251,11 @@ class StateManager:
         if not self.tracker_file.exists():
             return
         try:
-            lines = self.tracker_file.read_text().splitlines()
+            lines = self.tracker_file.read_text(encoding="utf-8").splitlines()
             if len(lines) > threshold:
                 self.tracker_file.write_text(
-                    "\n".join(lines[-max_lines:]) + "\n"
+                    "\n".join(lines[-max_lines:]) + "\n",
+                    encoding="utf-8",
                 )
         except OSError:
             pass
@@ -267,7 +268,7 @@ class StateManager:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_file = self.state_dir / "subagent.log"
         try:
-            with open(log_file, "a") as f:
+            with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"[{timestamp}] Subagent task completed\n")
         except OSError:
             pass
@@ -278,24 +279,11 @@ class StateManager:
         if not log_file.exists():
             return
         try:
-            lines = log_file.read_text().splitlines()
+            lines = log_file.read_text(encoding="utf-8").splitlines()
             if len(lines) > max_lines:
-                log_file.write_text("\n".join(lines[-max_lines:]) + "\n")
+                log_file.write_text("\n".join(lines[-max_lines:]) + "\n", encoding="utf-8")
         except OSError:
             pass
-
-    # --- Commit verification ---
-
-    def is_recently_verified(self, ttl_seconds: int = 300) -> bool:
-        """Check if commit verification was completed recently."""
-        verify_file = self.state_dir / "commit-verified"
-        if not verify_file.exists():
-            return False
-        try:
-            verified_time = int(verify_file.read_text().strip())
-            return (time.time() - verified_time) < ttl_seconds
-        except (ValueError, OSError):
-            return False
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +367,7 @@ class LearningsStore:
             target = datetime.now(timezone.utc) + timedelta(
                 days=self.DAY30_REVIEW_TARGET_DAYS
             )
-            self.day30_sentinel.write_text(target.isoformat())
+            self.day30_sentinel.write_text(target.isoformat(), encoding="utf-8")
 
     # ---- Helpers ----
 

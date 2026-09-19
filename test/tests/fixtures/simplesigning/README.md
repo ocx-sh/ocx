@@ -1,7 +1,7 @@
 # simplesigning negative fixtures (test only)
 
 Committed bytes for the cosign *simplesigning* read path
-(`crates/ocx_lib/src/oci/verify/simplesigning_read.rs`). Spec D7: simplesigning
+(`crates/ocx_sign/src/verify/simplesigning_read.rs`). Spec D7: simplesigning
 read fixtures are committed bytes, never generated at test time — a fixture a
 test mints is a fixture nobody can review, and a reader that normalises bytes on
 the way in cannot be caught by one.

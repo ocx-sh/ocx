@@ -8,6 +8,10 @@ not copies. Team-shared — commit it.
 - Verification: `CLAUDE.md` › "Build & Development" — run `task verify`
   (full gate) after implementation; `task` = fast check. Subsystem-scoped
   gates per each `.claude/rules/subsystem-*.md` › "Quality Gate".
+- Research artifacts: `.claude/artifacts/research_<topic>.md` (project
+  convention, per `.claude/templates/artifacts/adr.template.md`; committed).
+  `hex-discuss` lanes default to `.agents/research/` (gitignored) — copy into
+  `.claude/artifacts/` before an ADR cites them (re-pointed 2026-09-06).
 - Plan / ADR conventions: `CLAUDE.md` › "Workflow" — planning flow
   ADR → Design Spec → Plan; artifacts in `.claude/artifacts/` (patterns
   `adr_<topic>.md`, `design_spec_<comp>.md`, `plan_<task>.md`), templates
@@ -19,14 +23,17 @@ not copies. Team-shared — commit it.
 - Key rules: catalog `.claude/rules.md` ("By concern" table); architecture
   boundaries + ADR index `.claude/rules/arch-principles.md`.
   Security-sensitive paths: `.github/workflows/**`, `.github/actions/**`
-  (`.claude/rules/quality-security.md`), `crates/ocx_lib/src/oci/**`
-  (auth/SSRF/wire formats per the CLAUDE.md model policy).
+  (`.claude/rules/quality-security.md`), `crates/ocx_oci/**` and
+  `crates/ocx_sign/**` (auth/SSRF/wire formats per the CLAUDE.md model
+  policy), `crates/ocx_trust/**` (who may sign), `crates/ocx_config/**`
+  (which registries may be reached over plain HTTP, which extra CA roots are
+  trusted, which `[shell.consent]` grants stand) and `crates/ocx_store/**`
+  (the on-disk layout every install writes through).
 - Worktrees: default `.agents/worktrees/` (gitignored, `.gitignore:50`).
 - Constitution: `.claude/rules/arch-principles.md` (optional gate; plans
   checked against it when present).
-
-- Discussions: `.agents/discussions/<slug>.md` (hex-discuss artifacts; no
-  project convention documented, default home).
+- Discussions: `.agents/discussions/<slug>.md` (hex-discuss artifacts;
+  research they spawn lands in `.agents/research/`).
 
 ## Preferences
 
@@ -44,7 +51,7 @@ adversary: codex:rescue
 perspectives:
   always:
     - role: reviewer:security
-      when: "{.github/workflows/**,.github/actions/**,crates/ocx_lib/src/oci/**}"
+      when: "{.github/workflows/**,.github/actions/**,crates/ocx_oci/**,crates/ocx_trust/**,crates/ocx_config/**,crates/ocx_store/**,crates/ocx_sign/**}"
 research-axes:
   - registry ecosystems / OCI spec evolution
   - package-manager UX (mise, asdf, volta, proto)
@@ -55,8 +62,100 @@ research-axes:
   encode the CLAUDE.md "MODEL POLICY — NON-NEGOTIABLE" table.
 - Fable/Mythos is the session orchestrator only, never a spawn target
   (CLAUDE.md model policy; matches models.md Rule 4).
+- **`adversary: codex:rescue` is the configured name, not the seat that has run.** Codex has been
+  quota-exhausted since the B4 batch of the crate split (to 2026-09-19), and the gate has been
+  standing up under `copilot`, invoked per-file and read-only from a throwaway worktree, argv-bound
+  at the kernel's 128 KiB cap. It has produced findings no Claude seat reached in every batch it ran.
+  A gate that runs under a substitute is `ran`; a gate that does not run is **`absent`**, never
+  `skipped` — the two words carry different weight in a verdict and the reader cannot recover which
+  one was meant.
+- **`perspectives.always.when` grows one crate per extraction, in the commit that extracts it.**
+  A path-scoped rule whose subject migrates stops firing and nothing reports it — same class as
+  the plan's DEC-30 item 1 and the B5 review's B5-22, one level up. WP-24 added `crates/ocx_oci/**`
+  and **kept** the monolith's own `src/oci/**`: DEC-34 calls that tree the one WP-24 empties, but it
+  does not — `index/`, `sign/`, `attest/`, `verify/` and `simplesigning.rs` stay behind, so a
+  re-point that dropped the old glob would have silently un-guarded the signing tier. The rule is
+  *add the new crate*, and drop a glob only once its tree is genuinely empty. Still owed, each in
+  its own extraction commit. WP-25 added `crates/ocx_trust/**` — trust policy decides *who may
+  sign*, so it belongs in an always-on security perspective even though its old home,
+  the monolith's `src/trust.rs`, was never matched by any path-scoped rule. WP-26 added
+  `crates/ocx_config/**` on the same ground: the config tier decides which registries may be
+  reached over plain HTTP (`insecure`), which extra CA roots are trusted (`tls`), and which
+  `[shell.consent]` grants stand — and, like the trust tree, its old home was matched by no
+  path-scoped rule at all, so this is a property the glob gains rather than one it keeps. WP-27
+  added `crates/ocx_store/**`. WP-31 added `crates/ocx_sign/**` and, for the first time, **dropped**
+  a glob: the monolith's `src/oci/**` is the one tree the rule above says may go, because the
+  extraction took the last four submodules and the `oci.rs` that declared them, so the directory is
+  gone rather than merely thinner. Nothing is owed here now; C-075's WP-38 sweep is the backstop,
+  not the schedule.
 
 ## Memory
+
+- **Active plan (evelynn): `.claude/artifacts/plan_crate_split_workspace.md`** — the
+  crate split ([ADR](../../.claude/artifacts/adr_crate_split_workspace.md) Accepted
+  2026-09-16). **Batch B1 (phase 0 tooling) executed 2026-09-16 by sub-orchestrator
+  `exec-b1`: WP-01, WP-03, WP-02, WP-04, WP-06, WP-05, WP-09 merged on `evelynn`; batch-end
+  `/hex-review xhigh 3538b755..evelynn` (review-b1) returned **Needs Work** (0 Block / 8 High
+  / 28 Warn, cross-model ran) and appended **WP-40**, which sub-orchestrator `exec-b1-fix`
+  executed on 2026-09-16: six file-disjoint sub-WPs (rust, scripts, hooks, taskfiles, docs,
+  ci) + an L2 aggregate fix pass in two more, every H1–H8 / W1–W28 fixed or recorded, owner
+  rulings D1–D11 folded, D12–D18 raised; the cross-model gate was **partial** (Codex usage
+  limit; its five leads reproduced and fixed by an opus seat, DX-43). `State: review`; the `B1-review` token is still
+  HELD. `Next: /hex-review xhigh 0f54991e..evelynn` (B1 delta); only its Approve releases the
+  token and starts B2.** Execution deviations DX-1…DX-42 live in the plan's
+  "## Execution deviations" table; § Schedule log carries every merge SHA and gate quote.
+  Owner questions open: D12–D18 in § Deferred findings. Cap 3 worktrees (2 under 16 GB free);
+  full verifies one at a time; `task verify:scoped --force` escalates to full whenever a root
+  manifest, taskfile or `scripts/**` changed, or a crate in `scoped_gate.py`'s
+  `TABLE_ESCALATES` (`ocx_test_support`, `ocx`; `ocx_lib`'s row left with the crate at
+  WP-37) — ≈ 10 min on this
+  host, the scoped path ≈ 2 min.
+  - Lessons from WP-40 (2026-09-16): (1) the pre-commit hook reads the Bash command TEXT,
+    so a command that merely QUOTES a release-commit example (a heredoc writing docs, a grep
+    pattern) is judged as that commit and refused — write such text through a file, never a
+    heredoc; (2) a regex that decides whether a gate fires at all must match by SHAPE, never
+    by an allow-list of options: `git <any-option> commit` bypassed both commit hooks
+    entirely until the L2 seat probed 16 spellings; (3) `.claude/tests/**` ran under no CI
+    job — every pin an owner ruling rested on was a check CI never executed; grep `.github/`
+    for the task name before believing a structural test guards anything; (4) replacing a
+    hand-rolled parser with a real one (tokenizer → `syn`) is only done when a DIFFERENTIAL
+    over the live tree reports "old-only: 0" — the first cut silently dropped ~30 reaches on
+    a one-token precedence bug; (5) a corpus union hides its members: "> 1 file walked" over
+    21 crates passes with 20 of them gone — assert per subtree; (6) a needle list erodes
+    silently unless the witness carries every needle; (7) `task claude:tests` run from inside
+    `.agents/worktrees/` is half-blind (`test_all_markdown_refs_resolve` skips any path
+    containing `worktrees`) — the post-merge run from the main checkout is the real one.
+  - Perspective hint for the next `/hex-init`: `perspectives.always.when` should
+    be `crates/ocx_{oci,sign,trust,config,store}/**` — the five security-sensitive
+    trees, matching the Pointers line above, which WP-38 rewrote to agree with it.
+    All five crates exist; `ocx_lib` is gone, so no pre-split glob remains to keep
+    beside them.
+  - Lessons from B1 (2026-09-16): (1) the L1 seat fires at every leaf join — three
+    merges ran before their seat and every one came back "needs work" (a real SSRF
+    ratchet bypass, a hook that missed `--message=`/`-F`/`--amend`, a gate that never
+    ran `test_hooks.py`); review before merge, not after; (2) a 130-file `use`-line
+    rewrite dropped the blank line after the SPDX header in two files and the full gate
+    caught it only at hawkeye — audit `-U0 | grep '^-$'` hunks of any sed-shaped WP;
+    (3) a guard's per-WP diff range and its release-base range see different things
+    (in-series files are status `A` forever over the release base): run both, and name
+    the plan-owned structural tests as the only line-check exemption (DX-17); (4) a
+    `TMPDIR` under the repo reds `project_path_walk_without_git_or_ceiling_returns_none`
+    on any tree — builder scratch lives in `~/.cache/`; (5) the plan's literal
+    `OCX_LOG=ocx_cli=debug` could never discriminate — the CLI's target is its package
+    name `ocx`; measure the tool before believing the plan about it; (6) `codex:rescue`
+    can die on the Codex usage limit mid-review — a skip is not a review, say so in the
+    handoff; (7) `task claude:tests` listed one file — the hook and workflow tests were
+    guards nobody ran until an L1 seat asked "which gate runs this?" (DX-13, F2).
+  - Lessons from the plan run: (1) a cross-model adversary on a *plan* found the
+    two defects the three-seat panel missed (an uncompilable two-commit move shape,
+    a sealed trait with out-of-crate test impls) — both were code-path facts the
+    plan had taken from research without opening the file; (2) `/hex-execute`
+    has no batch concept, so a batch boundary must be a non-WP dependency token,
+    never a table column; (3) a "scoped" verify default on a migration whose
+    every WP touches `.claude/**` or `ocx_lib` is full-cost in practice — count the
+    real full runs in a DEC rather than let the label imply savings; (4) a
+    `codex:rescue` adversary spawned as a subagent returns its findings in the
+    conversation and writes no file — the orchestrator writes the triage artifact.
 
 - **Finalized (goat → `feat/extra-ca-certs`): `.claude/artifacts/plan_extra_ca_certs.md`** — extra CA roots for [ocx#448](https://github.com/ocx-sh/ocx/issues/448); `/hex-finalize` on 2026-09-14 recomposed 20 commits into 5 (tree-equality vs `backup/feat/extra-ca-certs-2dcad4ba`, rebased clean onto `main` @ `2cc0f172`), `task verify` 8027/8027 unit + 3435/3436 acceptance (known push-mount red), PR [ocx-sh/ocx#465](https://github.com/ocx-sh/ocx/pull/465) + Deep Verify dispatched; residual findings filed as #466–#471; installer contract on [ocx-sh/www-setup#23](https://github.com/ocx-sh/www-setup/issues/23). Merge is the owner's. Lessons: (1) a "reaches every client" contract is reviewed by enumerating construction sites, not by opinion — the Codex pass found three the four opus leaf seats missed; (2) recompose on the merge-base first and prove tree equality there, then rebase the short series — 5 commits rebase clean where 20 with merges would not, and `git merge-tree origin/main backup` gives a byte-exact proof of the rebase; (3) a helper used only by a `#[cfg]`-gated test must carry the same gate — local Linux green cannot show the `dead_code` red, and the first non-Linux build a series ever gets is the PR's smoke job (cost: one CI round + a series rewrite); per-commit `cargo check --all-targets` remains the cheap bisectability proof. No active plan on `goat`.
 - Review pending: `.claude/artifacts/plan_ci_integration_review_fixes.md` — the
@@ -270,6 +369,37 @@ research-axes:
   nothing. Two reviewers had to read the call graph to find it. When a contract says
   "X refuses", the review question is *where is X called*, not *does X exist*.
 
+- **Design record (hex-architect, 2026-09-06, tier xhigh, dossier fast path):**
+  `.claude/artifacts/adr_crate_split_workspace.md` (Status Proposed) +
+  `.claude/artifacts/system_design_crate_workspace.md`. Dissolves `ocx_lib` into
+  15 library crates + `ocx_test_support`; Option A (layer in place, then extract,
+  weighted 83 vs 66/68/52); `resolve_tiered` stays in `ocx_trust`; exit-code
+  classification in `crates/ocx_cli/src/exit/`; `layer_layout` in `ocx_oci`;
+  `ocx_sign` extracts ninth after store/index/package. Research this run:
+  `research_crate_split_{data_model,performance,operability}.md`; discover
+  `discover_crate_split_workspace.md`. Review: 4 seats + Codex terra → 6 Block /
+  14 High fixed in one pass, spec re-validation pass. Owner-deferred: `ocx_console`
+  below libraries (OQ3), `--cfg ocx_testing` vs feature, deep-suite per-PR trigger
+  (OQ1, `merge_group` recommended), `native_transport` escape hatch for grimoire,
+  pre-existing opt-in SSRF guard (3/4 builders unguarded; relates to PR #409).
+  Follow-ups outside the write surface: ADR index row in `arch-principles.md`;
+  CLAUDE.md "Stability tiers" gains the ecosystem tier (named in the ADR).
+  Lessons: a single-line grep undercounts multi-line `impl` blocks (37 vs 58) —
+  count with a comment-stripped multi-line scan; the Codex job's `status --json`
+  nests under `.job.status`, so a flat parse reads "?" and false-stalls.
+  Preference hint for the next `/hex-init`: research axes "data model /
+  compatibility" and "operability & cost" carried this ADR — worth listing.
+- **Discussion hand-off (hex-discuss, 2026-09-06):**
+  `.agents/discussions/crate-split-and-verify-tiers.md` → `/hex-architect`
+  (tier floor `high`). Decided: dissolve `ocx_lib` into responsibility-derived
+  `ocx_*` crates, layer in place first (boundary tests, then extraction);
+  satellites link library-shaped ops, CLI for workflows; three stability tiers
+  (internal / ecosystem / interface); scoped WP gate ≤ 5 min with full gate at
+  `/hex-review` + `/hex-finalize`; Bazel parked. Addendum: grimoire is a
+  second lockstep consumer (signing stack incl. trust policy, generic OCI);
+  map first, order later, no crate column pre-named. Research index:
+  `.agents/research/research_crate_split_{recon,prior_art,archaeology}.md`,
+  `research_test_impact_adjacent.md`, `research_crate_decomposition_patterns.md`.
 - **Design record (hex-architect, 2026-08-24/25):**
   `.claude/artifacts/adr_shell_env_overhaul.md` — tier high, Status `Proposed`,
   supersedes `adr_live_env_reload.md`. Replaces direnv with a native per-prompt
@@ -843,7 +973,38 @@ research-axes:
   exit-86 acceptance rows asserted only the integer and stderr, with the JSON
   envelope already in hand and never read (DX-93). A gate package that only reports
   would have shipped it red — check both halves at the terminal gate.
+- **The cross-model seat found what the panel missed in SIX consecutive batches of the crate split,
+  and every time it landed on the INSTRUMENTS rather than the code.** B1 through B5 ran six to eight
+  Claude seats apiece — spec, test-coverage, quality, security, performance, docs, architect, SOTA —
+  and in each batch the one-shot cross-model pass returned at least one finding none of them reached:
+  a `--check` that drops unresolved references and still prints a zero; a scan scope that walks the
+  tree the refactor is emptying; a needle list that forbids nothing; an assertion whose expected value
+  is also the fallback. **This is not a general-competence result — it is a blind-spot result.** The
+  Claude panel reads the diff and asks whether the code is right; it inherits the harness's own frame
+  and therefore trusts the harness. A reviewer that did not build the instruments does not inherit that
+  trust, and the defect class it keeps finding is exactly the one the panel is structurally worst at:
+  a check whose green state is indistinguishable from never having run. **Brief the cross-model seat at
+  the instruments explicitly** — guards, ratchets, baselines, gates, allowlists — rather than at the
+  diff, and it will out-earn a seventh Claude seat every time.
+  Two corollaries the same six batches settled: **a cross-model finding is evidence, not a verdict** —
+  B5-28 was reported as a vacuous test and was downgraded after deleting the registration reddened the
+  test on a *different* assertion, so verify by property before recording; and **never relay its
+  diagnosis unopened**, since its stated mechanism has been wrong while its conclusion was right.
 - **Rebase, don't squash, to land a wave on a moved tip.** `git merge --squash`
   re-bases against the branch base and three-way-merges both sides. `git rebase
   --onto <new-tip> <old-base> <branch>` then `merge --ff-only` preserved all three
   wave-6 subjects, which are the changelog entries.
+
+### Cross-model substitute: `copilot` can die producing zero bytes
+
+While Codex is quota-exhausted, `copilot` substitutes. It is argv-bound at 128 KiB, but it can die
+**well below that** producing zero bytes on stdout *and* zero on stderr — no banner, no non-zero
+message, indistinguishable from a model with nothing to say. Observed dying at 69 KB and succeeding
+at 39 KB in the same batch.
+
+**Count invocations against responses.** An uncounted dead seat reports `absent` as `ran`, which is a
+finding *against* the report rather than in it. Go per-file and keep each call under ~40 KB.
+
+Strip `CLAUDE.md`, `.claude/`, `AGENTS.md` and `.mcp.json` from the extract, and confirm with
+`copilot instruction list` printing `No instruction sources found.` — otherwise the second harness
+inherits the first harness's frame, which is the entire reason the seat exists.

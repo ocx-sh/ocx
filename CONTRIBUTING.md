@@ -9,12 +9,15 @@
 
 ## Workspace Layout
 
-Two crates in `crates/`:
+`crates/` holds every workspace member (`members = ["crates/*"]`, 21 today). The library is mid-split — `ocx_lib` is being dissolved into 17 `ocx_*` crates (`.claude/artifacts/adr_crate_split_workspace.md`; `scripts/crate_map.toml` is the dependency map), so treat the shells as the destination and `ocx_lib` as the source:
 
 | Crate | Purpose |
 |-------|---------|
-| `ocx_lib` | Core library: OCI client, file structure, package manager |
+| `ocx_lib` | Core library: OCI client, file structure, package manager (being emptied by extraction) |
 | `ocx_cli` | Thin CLI shell using clap; produces the `ocx` binary |
+| `ocx_schema` | Build-only JSON schema generator |
+| `ocx_shim` | Windows launcher shim |
+| `ocx_*` (17) | The responsibility-derived crates the library becomes; each `README.md` states its tier and what it may depend on |
 
 Three crates are patched to local git submodules under `external/`: `oci-client` (`rust-oci-client`), `docker_credential` and `sigstore` (`sigstore-rs`). Run `git submodule update --init` after cloning.
 

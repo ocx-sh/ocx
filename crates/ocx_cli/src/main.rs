@@ -3,10 +3,9 @@
 
 use std::process::ExitCode;
 
-use ocx_lib::log;
-
 use ocx::api;
-use ocx::app::{self, classify_error};
+use ocx::app;
+use ocx::exit::classify_error;
 
 #[tokio::main]
 async fn main() -> ExitCode {

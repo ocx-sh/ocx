@@ -1,0 +1,83 @@
+[package]
+name = "ocx_index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Internal-only escape hatch, the project's one seam convention
+# (`subsystem-tests.md` "Test-Only Seams"). Gates the `__OCX_TESTING_*` clock
+# and index-host seams: `lib.rs`'s `current_timestamp` (so an announce or
+# claim writes byte-deterministic output) and `ocx_index.rs`'s hosted-index
+# base URL. Forwarded by `ocx_lib`'s and `ocx`'s own `__testing`.
+__testing = []
+
+[dependencies]
+# `$OCX_HOME` and the index-collection root the local index is homed under.
+ocx_config.workspace = true
+# The exit-code vocabulary the tier's own error classifies into.
+ocx_exit.workspace = true
+# Digests, identifiers, manifests, tags and the SSRF-guarded transport policy:
+# what an index entry names and what fetching one is allowed to dial.
+ocx_oci.workspace = true
+# The blob store the index dispatch objects are read back through, and the
+# `file_structure` error this tier absorbs as `Error::Store`.
+ocx_store.workspace = true
+# The bottom tier: `fs` (locks, atomic publish), `error::FileError`, the
+# extension-trait prelude.
+ocx_util.workspace = true
+
+async-trait.workspace = true
+# The `observed` timestamp on a changed tag, in the index bot's seconds-Z form.
+chrono.workspace = true
+futures.workspace = true
+log.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+# `preserve_order`: the canonical index-root serializer (`wire_writer.rs`) emits
+# object keys in the order the bot wrote them, and a re-ordering map would break
+# the byte-for-byte conformance fixtures. `raw_value`: a dispatch object is
+# re-read without re-encoding, so its bytes stay the digest they are named by.
+serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
+# The atomic publish of an index root: temp file in the target's parent, then
+# rename, so a crashed write never leaves a half-written root behind.
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+# The index format's own `config.json` and the project-tier config it reads.
+toml.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# `O_NONBLOCK` on the file transport's read path: opening a FIFO must not block
+# the runtime waiting for a writer that may never come.
+libc.workspace = true
+
+[dev-dependencies]
+# The proxy matcher `ProxyRules` is built from in the transport tests. Built
+# from an injected matcher rather than the environment, because mutating env
+# vars is unsafe in edition 2024 and racy across a test binary's threads.
+hyper-util.workspace = true
+# `ocx_config::sandbox_or_skip`, the store-backed tests' sandbox anchor.
+ocx_config = { workspace = true, features = ["__test_scaffolding"] }
+# `ocx_oci::testing` — the stub transport and the proxy-rule builders these
+# tests drive across the crate boundary. A dev edge enabling `__testing` is
+# allowed from every crate (`scripts/crate_map.toml` `[dev].testing_feature`);
+# resolver v3 keeps the feature out of the normal build.
+ocx_oci = { workspace = true, features = ["__testing"] }
+# The wire-conformance and dispatch harnesses' shared fixture helpers.
+ocx_test_support.workspace = true
+# `ocx_util::env::overrides`, the process-environment table these tests write
+# through. A dev edge enabling `__testing` is allowed from every crate
+# (`scripts/crate_map.toml` `[dev].testing_feature`); resolver v3 keeps the
+# feature out of the normal build, so the runtime row above stays seamless.
+ocx_util = { workspace = true, features = ["__testing"] }
+# `tokio::time::pause()` for the tag-refresh and retry tests' virtual clock.
+tokio = { workspace = true, features = ["test-util"] }
+# The bundled Mozilla root set the index HTTP client seeds, counted by the
+# TLS-roots test.
+webpki-root-certs.workspace = true
+
+[lints]
+workspace = true

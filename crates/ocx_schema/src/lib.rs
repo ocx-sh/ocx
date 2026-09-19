@@ -7,11 +7,11 @@
 //! layer exists so tests can exercise the generator output directly without
 //! shelling out to the compiled binary.
 
-use ocx_lib::Config;
-use ocx_lib::package::metadata::authoring::AuthoringMetadata;
-use ocx_lib::patch::PatchDescriptor;
-use ocx_lib::project::{ProjectConfig, ProjectLock};
-use ocx_lib::record::ExecutionRecord;
+use ocx_config::Config;
+use ocx_package::metadata::authoring::AuthoringMetadata;
+use ocx_package_manager::patch::PatchDescriptor;
+use ocx_package_manager::record::ExecutionRecord;
+use ocx_project::{ProjectConfig, ProjectLock};
 use schemars::generate::SchemaSettings;
 
 pub mod reports;

@@ -428,7 +428,7 @@ without sourcing anything; `--ci=gitlab` writes JSON-lines to `--export-file`.
   prefix of throwaway packages per test; the manual-testing rig instead
   publishes the deterministic `dojo/...` namespace once and reuses it.
 - The bug fix that made `--offline exec` after `rm packages/` work lives in
-  `crates/ocx_lib/src/package_manager/tasks/{find_or_install,pull,pull_local}.rs`
+  `crates/ocx_package_manager/src/tasks/{find_or_install,pull,pull_local}.rs`
   and is regression-tested in `tests/test_offline.py`.
 
 ## Adversarial review

@@ -1,0 +1,5 @@
+use crate::log;
+
+fn noisy() {
+    log::debug!("still routed through the ocx_lib::log shim");
+}

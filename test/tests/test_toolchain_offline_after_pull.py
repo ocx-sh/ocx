@@ -12,7 +12,7 @@ What #424 actually measured
 ---------------------------
 A rendered trampoline re-enters as ``ocx --project '<root>' exec --
 <name> "$@"``. That resolve reached ``resolve_transport_pinned``
-(``crates/ocx_lib/src/package_manager/tasks/resolve.rs``), which asks the
+(``crates/ocx_package_manager/src/tasks/resolve.rs``), which asks the
 index chain for the *physical* transport location of a logical reference.
 With no committed root in ``$OCX_HOME/index`` the chain fell through to the
 source and issued ``GET https://index.ocx.sh/p/<ns>/<pkg>.json`` — **once per

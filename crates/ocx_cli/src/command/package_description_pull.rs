@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use anyhow::Context as _;
 use clap::Parser;
-use ocx_lib::{log, oci, package::description::Description, publisher::Publisher};
+use ocx_package::{description::Description, publisher::Publisher};
 
 use crate::api::data::package_description::{Inner, PackageDescription, PackageDescriptions};
 use crate::options;
@@ -46,7 +46,7 @@ impl PackageDescriptionPull {
         // rule, so it is a runtime usage error.
         if identifiers.len() > 1 && (self.save_readme.is_some() || self.save_logo.is_some()) {
             return Err(
-                ocx_lib::cli::UsageError::new("--save-readme and --save-logo require exactly one package").into(),
+                crate::error::UsageError::new("--save-readme and --save-logo require exactly one package").into(),
             );
         }
 
@@ -64,7 +64,7 @@ impl PackageDescriptionPull {
         // returns `crate::Result<Option<Description>>` (not a PackageManager op),
         // so `drain_package_tasks` does not fit; the index-tagged fan-out is
         // inlined here (same shape as `index update`).
-        let mut join_set: tokio::task::JoinSet<(usize, ocx_lib::Result<Option<Description>>)> =
+        let mut join_set: tokio::task::JoinSet<(usize, Result<Option<Description>, ocx_package::error::Error>)> =
             tokio::task::JoinSet::new();
         for (index, identifier) in identifiers.iter().enumerate() {
             let client = client.clone();
@@ -74,7 +74,7 @@ impl PackageDescriptionPull {
                 let result = async {
                     tokio::fs::create_dir_all(&temp_dir)
                         .await
-                        .map_err(|e| ocx_lib::error::file_error(&temp_dir, e))?;
+                        .map_err(|e| ocx_package::error::file_error(&temp_dir, e))?;
                     let publisher = Publisher::new(client);
                     publisher.pull_description_mirrored(&identifier, &temp_dir).await
                 }
@@ -86,13 +86,13 @@ impl PackageDescriptionPull {
         // Place successes by index; collect failures with their index so the
         // input-order-first error is the one surfaced (deterministic exit code).
         let mut descriptions: Vec<Option<Option<Description>>> = (0..identifiers.len()).map(|_| None).collect();
-        let mut failures: Vec<(usize, ocx_lib::Error)> = Vec::new();
+        let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
         while let Some(joined) = join_set.join_next().await {
             match joined {
                 Ok((index, Ok(desc))) => descriptions[index] = Some(desc),
                 Ok((index, Err(e))) => {
                     log::error!("Failed to fetch description for '{}': {e}", identifiers[index]);
-                    failures.push((index, e));
+                    failures.push((index, e.into()));
                 }
                 Err(join_err) => {
                     join_set.abort_all();
@@ -104,7 +104,7 @@ impl PackageDescriptionPull {
         if !failures.is_empty() {
             failures.sort_by_key(|(index, _)| *index);
             let (_, error) = failures.into_iter().next().expect("failures is non-empty");
-            return Err(error.into());
+            return Err(error);
         }
 
         // Every slot is `Some` once no failure remains.
@@ -128,9 +128,9 @@ impl PackageDescriptionPull {
             .zip(descriptions)
             .map(|((raw, identifier), desc)| {
                 let inner = desc.as_ref().map(|d| Inner {
-                    title: d.annotations.get(oci::annotations::TITLE).cloned(),
-                    description: d.annotations.get(oci::annotations::DESCRIPTION).cloned(),
-                    keywords: d.annotations.get(oci::annotations::KEYWORDS).cloned(),
+                    title: d.annotations.get(ocx_oci::annotations::TITLE).cloned(),
+                    description: d.annotations.get(ocx_oci::annotations::DESCRIPTION).cloned(),
+                    keywords: d.annotations.get(ocx_oci::annotations::KEYWORDS).cloned(),
                 });
                 (raw.raw().to_string(), PackageDescription::new(inner, identifier))
             })
@@ -149,12 +149,12 @@ impl PackageDescriptionPull {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
-                    .map_err(|e| ocx_lib::error::file_error(parent, e))
+                    .map_err(|e| ocx_util::error::FileError::new(parent, e))
                     .with_context(|| format!("failed to create directory {}", parent.display()))?;
             }
             tokio::fs::write(&path, &desc.readme)
                 .await
-                .map_err(|e| ocx_lib::error::file_error(&path, e))
+                .map_err(|e| ocx_util::error::FileError::new(&path, e))
                 .with_context(|| format!("failed to write README to {}", path.display()))?;
         }
 
@@ -164,12 +164,12 @@ impl PackageDescriptionPull {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
-                    .map_err(|e| ocx_lib::error::file_error(parent, e))
+                    .map_err(|e| ocx_util::error::FileError::new(parent, e))
                     .with_context(|| format!("failed to create directory {}", parent.display()))?;
             }
             tokio::fs::write(&path, &logo.data)
                 .await
-                .map_err(|e| ocx_lib::error::file_error(&path, e))
+                .map_err(|e| ocx_util::error::FileError::new(&path, e))
                 .with_context(|| format!("failed to write logo to {}", path.display()))?;
         }
 

@@ -22,6 +22,8 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src.helpers import make_package
 from src.runner import OcxRunner, PackageInfo
 
@@ -60,6 +62,7 @@ def _run_direnv_init(
     )
 
 
+@pytest.mark.smoke
 def test_direnv_init_creates_envrc(ocx: OcxRunner, tmp_path: Path) -> None:
     """Fresh project dir -> .envrc written with the spec content; exit 0."""
     result = _run_direnv_init(ocx, tmp_path)

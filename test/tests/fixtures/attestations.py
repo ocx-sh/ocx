@@ -18,7 +18,7 @@ Both are self-checked by `self_check()` below — run directly:
 
     uv run python3 tests/fixtures/attestations.py
 
-Wire shapes mirror `crates/ocx_lib/src/oci/attest/{dsse,statement}.rs`
+Wire shapes mirror `crates/ocx_sign/src/attest/{dsse,statement}.rs`
 byte-for-byte: `DsseEnvelope` is `{payload, payloadType, signatures: [{sig,
 keyid}]}` (all three payload-bearing fields base64), `Statement` is `{_type,
 subject: [{name, digest}], predicateType, predicate}`. Getting either shape
@@ -45,7 +45,7 @@ _HERE = Path(__file__).parent
 #: byte-compare (S-007, ADR Part III checklist row 2 / red-before-green #4).
 PRETTY_CYCLONEDX_PATH = _HERE / "pretty_cyclonedx.json"
 
-#: Must track `MAX_PREDICATE_FILE_BYTES` in `crates/ocx_lib/src/oci/attest.rs`.
+#: Must track `MAX_PREDICATE_FILE_BYTES` in `crates/ocx_sign/src/attest.rs`.
 #: No cross-language import exists; `self_check()` cannot detect drift, a
 #: human re-reading both sides after either changes can.
 MAX_PREDICATE_FILE_BYTES = 15 * 1024 * 1024

@@ -227,6 +227,34 @@ where a parser exists; a skip whose message names a cause it never observed.
 - Claiming a check works without having seen it red: **Warn-tier**
 - Shipping a check whose red state was never reachable: **Block-tier**
 
+### A green is only as wide as what ran
+
+The scope a result is reported under must be the scope that was checked. Each of
+these greens is *true of what it measured* — the defect is the broader name it
+is filed under, because the breadth is where the trust goes.
+
+One shape, many faces: a filtered run (`--test x -- <two names>`) read as the
+target; a subset gate whose name outran its scope; a gate checking a
+*neighbouring* property (a link checker reporting on doc links while nothing
+compiled a doctest body); a probe reading a stream that is always empty
+(`git merge-base --is-ancestor` writes nothing to stdout, so stdout answers the
+same either way); a counter incremented above the test that would have rejected
+the record; a reader that does not descend where the subject lives (`syn::visit`
+does not enter macro arguments, so a scan of `assert!`-heavy code sees almost
+nothing and reports clean).
+
+- **A filtered or partial run is never evidence for a verdict** — fine for
+  iteration. "Green on the tests I changed" is not green.
+- **Name the scope beside the result.** Unstated scope is read as the name's.
+- **A gate checking a neighbouring property is not the gate.** Say which
+  property it establishes before citing it.
+- **Floor a derived check on its reader, not only its subject** — assert how
+  much it read, or a reader that stopped is indistinguishable from a clean tree.
+- **A corroborating number can corroborate a phantom.** Once a discrepancy is
+  asserted, only a diff that *names its subject* settles it.
+
+- Reporting a green under a scope wider than the one that ran: **Block-tier**
+
 ---
 
 ## See Also — Language-Specific Quality Rules

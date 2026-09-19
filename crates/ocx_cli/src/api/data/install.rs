@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use ocx_lib::cli::Cell;
-use ocx_lib::{oci, package::metadata::Metadata};
+use ocx_console::Cell;
+use ocx_package::metadata::Metadata;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -18,7 +18,7 @@ use crate::api::Printable;
 /// host pointer (issue #179).
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct InstallEntry {
-    pub identifier: oci::Identifier,
+    pub identifier: ocx_oci::Identifier,
     pub metadata: Metadata,
     pub path: Option<PathBuf>,
 }
@@ -47,7 +47,7 @@ impl Installs {
 }
 
 impl Printable for Installs {
-    fn print_plain(&self, printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, printer: &ocx_console::DataInterface) {
         let theme = printer.theme();
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (package, entry) in &self.packages {
@@ -55,7 +55,10 @@ impl Printable for Installs {
             // `Identifier::Display` always appends `@sha256:<64hex>`, which alone
             // is 71 columns — it widens every row of the most-run command for a
             // value the user already pinned. JSON keeps the full form.
-            rows[1].push(theme.of(&entry.identifier.without_digest()));
+            rows[1].push(crate::api::data::ink_identifier(
+                &theme,
+                &entry.identifier.without_digest(),
+            ));
             rows[2].push(
                 entry
                     .path
@@ -73,7 +76,7 @@ impl Printable for Installs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_lib::oci::Identifier;
+    use ocx_oci::Identifier;
 
     fn sample_metadata() -> Metadata {
         serde_json::from_str(r#"{"type":"bundle","version":1}"#).expect("metadata parses")

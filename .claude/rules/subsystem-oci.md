@@ -1,17 +1,23 @@
 ---
 paths:
-  - crates/ocx_lib/src/oci/**
+  - crates/ocx_oci/**
+  - crates/ocx_index/**
+  - crates/ocx_sign/**
   - external/rust-oci-client/**
   - external/sigstore-rs/**
 ---
 
 # OCI Subsystem
 
-OCI registry client, index management, identifiers, platform matching at `crates/ocx_lib/src/oci/`.
+OCI registry client, identifiers, platform matching and the SSRF guard at `crates/ocx_oci/`;
+index management at `crates/ocx_index/`; signing, attestation and verification at
+`crates/ocx_sign/`.
+WP-31 emptied `ocx_lib/src/oci/` — the glob that named it is now `crates/ocx_sign/**`, because
+this rule's signing half has to keep firing where that code went.
 
 ## The local index copy IS the package-tier lock (load-bearing)
 
-Read this before changing anything under `oci/index/**`. Every routing rule below serves it.
+Read this before changing anything in `ocx_index`. Every routing rule below serves it.
 
 `$OCX_HOME/index/` (or `--index`/`OCX_INDEX`) pins **both halves** of what a tag answers: tag →
 digest, and logical → physical routing (a root's `repository` field). Three consequences:
@@ -25,9 +31,9 @@ digest, and logical → physical routing (a root's `repository` field). Three co
    listing, not an update of a *different* package, and there is no implicit whole-index sync in any
    spelling. The one resolve that does move a pin is an explicit `--remote` one — it re-fetches and
    rewrites the tag it touches, the same write an `ocx index update` scoped to that tag would make;
-   a **default**-mode resolve never does. `index sync` moves nothing under `oci/index/**` beyond tag
+   a **default**-mode resolve never does. `index sync` moves nothing under `ocx_index` beyond tag
    pins, dispatch objects and the source's `config.json`; no patch-companion and no managed-config
-   binding is recorded there, and nothing under `oci/index/**` gains the ability to record either.
+   binding is recorded there, and nothing under `ocx_index` gains the ability to record either.
    `ocx index regenerate` moves no pin at all — it re-derives
    `c/index.json` from the roots on disk.
 3. **GC never changes identity.** `ocx clean` may evict blob CONTENT (refetched by digest,
@@ -38,7 +44,7 @@ source is never "named" the way consequence 2 means it — a companion is named 
 descriptor on the operator's behalf, and a managed-config source is not a package at all —
 so neither pins here. They pin in their own tier-scoped state instead:
 `state/patch-companions/` and `state/managed-config/snapshot.json`. Nothing under
-`oci/index/**` may be asked to record either binding; see `subsystem-package-manager.md`
+`ocx_index` may be asked to record either binding; see `subsystem-package-manager.md`
 and `subsystem-file-structure.md` for where that state actually lives.
 
 The tag pointer is not the only thing that would land here. A pinned `tag@digest` pull
@@ -63,7 +69,7 @@ and cannot refuse (the committed answer is the correct one), so a diagnostic the
 hottest path in the binary. Available updates surface exclusively through explicit staleness
 reporting — `ocx index catalog --remote` — never through resolution.
 
-Practical test for a change under `oci/index/**`: name the command the user ran, and the package
+Practical test for a change under `ocx_index`: name the command the user ran, and the package
 they named. If the diff can move a pin (a tag's `content`, or a root's `repository`) for anything
 outside that set, it is wrong however well-motivated the fetch is.
 
@@ -77,12 +83,12 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 
 | Path | Purpose |
 |------|---------|
-| `oci/index.rs` | Public `Index` wrapper; `ChainMode`; `SelectResult`; `fetch_candidates()`, `select()` |
-| `oci/index/index_impl.rs` | Private `IndexImpl` async trait (11 methods — 6 required, 5 default-provided) |
-| `oci/index/chained_index.rs` | `ChainedIndex`: cache + ordered sources + `ChainMode` routing |
-| `oci/index/local_index.rs` | `LocalIndex`: owns the local index collection — wire-grammar, dispatch-object-only CAS (see "LocalIndex" below) |
-| `oci/index/ocx_index.rs` | `OcxIndex`: remote client of a **published** ocx-index — root → dispatch object → `select_best` |
-| `oci/index/oci_index.rs` | `OciIndex`: remote client that **derives** an index from a plain OCI registry's tags API |
+| `ocx_index/src/lib.rs` | Public `Index` wrapper; `ChainMode`; `SelectResult`; `fetch_candidates()`, `select()` |
+| `ocx_index/src/index_impl.rs` | Private `IndexImpl` async trait (11 methods — 6 required, 5 default-provided) |
+| `ocx_index/src/chained_index.rs` | `ChainedIndex`: cache + ordered sources + `ChainMode` routing |
+| `ocx_index/src/local_index.rs` | `LocalIndex`: owns the local index collection — wire-grammar, dispatch-object-only CAS (see "LocalIndex" below) |
+| `ocx_index/src/ocx_index.rs` | `OcxIndex`: remote client of a **published** ocx-index — root → dispatch object → `select_best` |
+| `ocx_index/src/oci_index.rs` | `OciIndex`: remote client that **derives** an index from a plain OCI registry's tags API |
 | `oci/identifier.rs` | `Identifier`: parsed OCI reference with validation |
 | `oci/digest.rs` | `Digest` enum: Sha256, Sha384, Sha512 |
 | `oci/platform.rs` | `Platform`: os/arch matching, `any()` for platform-agnostic packages |
@@ -335,7 +341,7 @@ zero network. Whether a resolve *should* re-consult the source for a yank publis
 is an open semantics question (it trades against the silence principle and against invariant 2) —
 this paragraph describes what happens today and decides nothing.
 
-**Jurisdiction (`Jurisdiction`, `oci/index.rs`) — a configured index owns its WHOLE registry
+**Jurisdiction (`Jurisdiction`, `ocx_index/src/lib.rs`) — a configured index owns its WHOLE registry
 (ocx#251).** Whether a source is asked at all is a *three*-valued question, asked before any fetch —
 never an `Ok(None)` read after one:
 
@@ -621,9 +627,9 @@ prefix. Manifest layer descriptors carry it as `annotations` keys `sh.ocx.layer.
 `<ref>:strip=N,prefix=P` layer-ref (`publisher/layer_ref.rs`) — a default push writes no
 annotations, so manifests stay byte-identical. `resolve_layer_placement(annotations,
 bundle_default)` resolves the fallback chain (`annotation → Bundle.strip_components → 0`)
-into a `utility::fs::LayerPlacement`, called from `pull.rs` before
-`assemble_from_layers_with_layouts` — the boundary exists so `utility/fs` never depends on
-`oci` (DIP).
+into a `file_structure::LayerPlacement`, called from `pull.rs` before
+`assemble_from_layers_with_layouts` — the boundary exists so `file_structure` never depends
+on `oci` (DIP).
 
 ## Gotchas {#gotchas}
 

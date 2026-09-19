@@ -9,12 +9,11 @@
 
 use std::process::ExitCode;
 
+use crate::error::UsageError;
 use clap::Subcommand;
 use futures::stream::{self, StreamExt, TryStreamExt};
-use ocx_lib::cli::UsageError;
-use ocx_lib::oci;
-use ocx_lib::oci::index::{Jurisdiction, OcxIndex};
-use ocx_lib::package::cascade::{gather, graph};
+use ocx_index::{Jurisdiction, OcxIndex};
+use ocx_package::cascade::{gather, graph};
 
 use crate::options;
 
@@ -66,7 +65,7 @@ pub struct PackageAudit {
 impl PackageAudit {
     /// The name to report this package under: the logical one when the
     /// identifier was rewritten, otherwise the repository itself.
-    pub fn package(&self) -> &oci::Identifier {
+    pub fn package(&self) -> &ocx_oci::Identifier {
         self.observation
             .logical
             .as_ref()
@@ -76,7 +75,7 @@ impl PackageAudit {
 
 /// The packages in `audits` whose index staleness layer had no root to run
 /// against - the plain-mode note both commands print.
-pub fn index_layer_skipped(audits: &[PackageAudit]) -> Vec<oci::Identifier> {
+pub fn index_layer_skipped(audits: &[PackageAudit]) -> Vec<ocx_oci::Identifier> {
     audits
         .iter()
         .filter(|audit| audit.index_layer_skipped)
@@ -129,9 +128,9 @@ pub async fn audit_all(
 /// waiting on a network round trip, and reporting it after a full graph read
 /// would be pure latency.
 fn group_requests(
-    identifiers: Vec<oci::Identifier>,
-) -> anyhow::Result<Vec<(oci::Identifier, Vec<Option<graph::AliasTag>>)>> {
-    let mut grouped: Vec<(oci::Identifier, Vec<Option<graph::AliasTag>>)> = Vec::new();
+    identifiers: Vec<ocx_oci::Identifier>,
+) -> anyhow::Result<Vec<(ocx_oci::Identifier, Vec<Option<graph::AliasTag>>)>> {
+    let mut grouped: Vec<(ocx_oci::Identifier, Vec<Option<graph::AliasTag>>)> = Vec::new();
     for identifier in identifiers {
         let request = graph::scope_request(&identifier)
             .map_err(|error| UsageError::with_source(format!("cannot audit '{identifier}'"), error))?;
@@ -148,7 +147,7 @@ fn group_requests(
 /// and diffs it against the fold.
 async fn audit_one(
     context: &crate::app::Context,
-    package: oci::Identifier,
+    package: ocx_oci::Identifier,
     requests: Vec<Option<graph::AliasTag>>,
 ) -> anyhow::Result<PackageAudit> {
     let _spinner = context.progress().spinner(format!("Auditing {package}"));
@@ -192,7 +191,7 @@ async fn audit_one(
 /// same way `ocx index update` routes a package: a source answers `Outside`
 /// for a registry it does not serve, and `Authoritative` for every name in the
 /// one it does. The verdict is a registry comparison, so it costs no I/O.
-fn index_source<'a>(context: &'a crate::app::Context, package: &oci::Identifier) -> Option<&'a OcxIndex> {
+fn index_source<'a>(context: &'a crate::app::Context, package: &ocx_oci::Identifier) -> Option<&'a OcxIndex> {
     context
         .index_sources()
         .iter()
@@ -201,12 +200,13 @@ fn index_source<'a>(context: &'a crate::app::Context, package: &oci::Identifier)
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::cli::{ExitCode as OcxExitCode, classify_error};
+    use crate::exit::classify_library_error as classify_error;
+    use ocx_exit::ExitCode as OcxExitCode;
 
     use super::*;
 
-    fn identifier(reference: &str) -> oci::Identifier {
-        oci::Identifier::parse_with_default_registry(reference, "registry.test").expect("fixture parses")
+    fn identifier(reference: &str) -> ocx_oci::Identifier {
+        ocx_oci::Identifier::parse_with_default_registry(reference, "registry.test").expect("fixture parses")
     }
 
     fn exit_code(error: &anyhow::Error) -> OcxExitCode {

@@ -45,6 +45,7 @@ def _run_init(
     )
 
 
+@pytest.mark.smoke
 def test_init_creates_minimal_ocx_toml(ocx: OcxRunner, tmp_path: Path) -> None:
     """``ocx init`` in an empty directory creates ``ocx.toml`` with a ``[tools]``
     table and exits 0.

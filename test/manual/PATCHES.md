@@ -373,7 +373,7 @@ content directory so the tar layer includes at least one file.
 The `/` was not a real identifier.
 
 **Root cause**: `From<PackageErrorKind> for crate::Error` at
-`crates/ocx_lib/src/error.rs` wraps non-`Internal` error kinds in a
+`crates/ocx_package_manager/src/error.rs` wraps non-`Internal` error kinds in a
 `PackageError::new(Identifier::new_registry("", ""), ...)`. An empty
 registry + empty repository displays as `"/"`.
 

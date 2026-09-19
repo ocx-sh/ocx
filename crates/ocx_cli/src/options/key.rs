@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::oci::sign::{KeyRef, KeyRefError};
+use ocx_trust::key_ref::{KeyRef, KeyRefError};
 
 /// Sign or verify with a key pair instead of keyless Sigstore.
 ///
@@ -83,7 +83,7 @@ impl KeyOpt {
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory as _, Parser as _};
-    use ocx_lib::oci::sign::Scheme;
+    use ocx_trust::key_ref::Scheme;
 
     use super::*;
 

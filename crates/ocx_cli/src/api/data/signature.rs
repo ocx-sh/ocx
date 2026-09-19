@@ -10,8 +10,8 @@
 
 // Consumed by `command/package_sign.rs` in Phase 5.
 
-use ocx_lib::cli::{Cell, ExitCode};
-use ocx_lib::oci;
+use ocx_console::Cell;
+use ocx_exit::ExitCode;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -41,7 +41,7 @@ pub struct SignatureReport {
     /// User-facing identifier string that was signed (echoes the CLI arg).
     pub identifier: String,
     /// Digest of the subject manifest that the bundle signs.
-    pub subject_digest: oci::Digest,
+    pub subject_digest: ocx_oci::Digest,
     /// One entry per wire shape that was written or attempted, in write order.
     ///
     /// `--signature-format both` emits two **independent** signatures, so the
@@ -65,7 +65,7 @@ pub struct SignatureReport {
     /// A consumer can already distinguish `file` from a future `awskms` without
     /// the backends existing, which is the point of freezing the vocabulary
     /// before the implementations (spec §WP9 contract 4).
-    pub key_backend: oci::sign::KeyBackendKind,
+    pub key_backend: ocx_trust::key_ref::KeyBackendKind,
     /// The signing key's cosign hint, in key mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
@@ -87,17 +87,17 @@ pub struct SignatureReport {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SignatureLegReport {
     /// The shape: `bundle` or `simplesigning`.
-    pub format: oci::sign::SignatureFormat,
+    pub format: ocx_sign::sign::SignatureFormat,
     /// Digest of the signed payload blob — the Sigstore bundle under `bundle`,
     /// the simplesigning claim under `simplesigning`. Absent when the leg failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
-    pub payload_digest: Option<oci::Digest>,
+    pub payload_digest: Option<ocx_oci::Digest>,
     /// Digest of the manifest the payload hangs from — the OCI referrer under
     /// `bundle`, the `sha256-<hex>.sig` sidecar under `simplesigning`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
-    pub manifest_digest: Option<oci::Digest>,
+    pub manifest_digest: Option<ocx_oci::Digest>,
     /// Why the leg failed, when it did. `None` means it was written.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
@@ -113,16 +113,16 @@ pub struct SignatureLegReport {
 /// meets one word for one state. Keeping the field a plain string is
 /// deliberate: it is a shipped JSON contract (C-S1-1), and turning it null
 /// would break every consumer reading it unconditionally.
-fn platform_label(platform: Option<&oci::Platform>) -> String {
-    platform.map_or_else(|| "any".to_string(), oci::Platform::to_string)
+fn platform_label(platform: Option<&ocx_oci::Platform>) -> String {
+    platform.map_or_else(|| "any".to_string(), ocx_oci::Platform::to_string)
 }
 
 impl SignatureReport {
     pub fn new(
         identifier: String,
-        subject_digest: oci::Digest,
+        subject_digest: ocx_oci::Digest,
         legs: Vec<SignatureLegReport>,
-        platform: Option<&oci::Platform>,
+        platform: Option<&ocx_oci::Platform>,
         certificate_identity: String,
         certificate_oidc_issuer: String,
     ) -> Self {
@@ -134,7 +134,7 @@ impl SignatureReport {
             signer: "keyless-fulcio".to_string(),
             certificate_identity,
             certificate_oidc_issuer,
-            key_backend: oci::sign::KeyBackendKind::Keyless,
+            key_backend: ocx_trust::key_ref::KeyBackendKind::Keyless,
             public_key_hint: None,
             transparency_log_index: None,
             exit_code: ExitCode::Success,
@@ -159,9 +159,9 @@ impl SignatureReport {
     /// `"keyless-fulcio"` would be a lie in the one field a consumer reads to
     /// tell them apart.
     #[must_use]
-    pub fn with_key_model(mut self, backend: oci::sign::KeyBackendKind, hint: Option<String>) -> Self {
+    pub fn with_key_model(mut self, backend: ocx_trust::key_ref::KeyBackendKind, hint: Option<String>) -> Self {
         self.signer = match backend {
-            oci::sign::KeyBackendKind::Keyless => "keyless-fulcio".to_string(),
+            ocx_trust::key_ref::KeyBackendKind::Keyless => "keyless-fulcio".to_string(),
             other => other.to_string(),
         };
         self.key_backend = backend;
@@ -243,7 +243,7 @@ impl SignatureReport {
 }
 
 impl Printable for SignatureReport {
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         // `subject_digest` is the answer (what was signed) and stays full;
         // `bundle_digest`/`referrer_digest` shorten to 12 hex so only one
         // full sha256:<64hex> earns its row (subsystem-cli-api.md "Plain-Mode
@@ -263,7 +263,7 @@ impl Printable for SignatureReport {
     /// `exit_code` is 0 for a run where every leg landed, and the failing leg's
     /// code for a partial `--signature-format both` run — the same value the
     /// process returns.
-    fn print_json(&self, data: &ocx_lib::cli::DataInterface) -> anyhow::Result<()>
+    fn print_json(&self, data: &ocx_console::DataInterface) -> anyhow::Result<()>
     where
         Self: Sized,
     {
@@ -292,9 +292,9 @@ mod tests {
     /// One written `bundle` leg — the default `--signature-format`.
     fn bundle_leg() -> SignatureLegReport {
         SignatureLegReport {
-            format: oci::sign::SignatureFormat::Bundle,
-            payload_digest: Some(ocx_lib::oci::Digest::Sha256("b".repeat(64))),
-            manifest_digest: Some(ocx_lib::oci::Digest::Sha256("c".repeat(64))),
+            format: ocx_sign::sign::SignatureFormat::Bundle,
+            payload_digest: Some(ocx_oci::Digest::Sha256("b".repeat(64))),
+            manifest_digest: Some(ocx_oci::Digest::Sha256("c".repeat(64))),
             error: None,
         }
     }
@@ -302,7 +302,7 @@ mod tests {
     fn sample_report() -> SignatureReport {
         SignatureReport::new(
             "registry.example/pkg:1.0".into(),
-            ocx_lib::oci::Digest::Sha256("a".repeat(64)),
+            ocx_oci::Digest::Sha256("a".repeat(64)),
             vec![bundle_leg()],
             Some(&"linux/amd64".parse().expect("platform")),
             "signer@example.com".into(),
@@ -314,11 +314,11 @@ mod tests {
     fn partially_failed_report() -> SignatureReport {
         SignatureReport::new(
             "registry.example/pkg:1.0".into(),
-            ocx_lib::oci::Digest::Sha256("a".repeat(64)),
+            ocx_oci::Digest::Sha256("a".repeat(64)),
             vec![
                 bundle_leg(),
                 SignatureLegReport {
-                    format: oci::sign::SignatureFormat::Simplesigning,
+                    format: ocx_sign::sign::SignatureFormat::Simplesigning,
                     payload_digest: None,
                     manifest_digest: None,
                     error: Some("transient registry failure".into()),
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn print_plain_smoke() {
         let report = sample_report();
-        let data = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+        let data = ocx_console::DataInterface::new(ocx_console::Printer::new(false, false));
         report.print_plain(&data);
     }
 
@@ -414,7 +414,7 @@ mod tests {
         let leg = value_for("Signature (bundle)");
         assert_eq!(
             leg,
-            ocx_lib::oci::Digest::Sha256("c".repeat(64)).to_short_string(),
+            ocx_oci::Digest::Sha256("c".repeat(64)).to_short_string(),
             "a leg's manifest digest shortens to 12 hex"
         );
         assert_ne!(
@@ -435,11 +435,11 @@ mod tests {
     fn both_legs_get_a_row_and_a_failed_leg_says_so() {
         let report = SignatureReport::new(
             "registry.example/pkg:1.0".into(),
-            ocx_lib::oci::Digest::Sha256("a".repeat(64)),
+            ocx_oci::Digest::Sha256("a".repeat(64)),
             vec![
                 bundle_leg(),
                 SignatureLegReport {
-                    format: oci::sign::SignatureFormat::Simplesigning,
+                    format: ocx_sign::sign::SignatureFormat::Simplesigning,
                     payload_digest: None,
                     manifest_digest: None,
                     error: Some("registry said no".to_string()),
@@ -480,7 +480,7 @@ mod tests {
     fn rendered_with(hostile: &str) -> Vec<String> {
         let report = SignatureReport::new(
             hostile.to_string(),
-            ocx_lib::oci::Digest::Sha256("a".repeat(64)),
+            ocx_oci::Digest::Sha256("a".repeat(64)),
             vec![bundle_leg()],
             Some(&"linux/amd64".parse().expect("platform")),
             hostile.to_string(),
@@ -593,7 +593,7 @@ mod tests {
             // entry, and a key-mode one may not — so the row exists in both
             // cases and says which happened.
             "none".to_string(),
-            ocx_lib::oci::Digest::Sha256("c".repeat(64)).to_short_string(),
+            ocx_oci::Digest::Sha256("c".repeat(64)).to_short_string(),
         ];
         let rendered: Vec<String> = report.plain_fields().into_iter().map(|(_, value)| value).collect();
         assert_eq!(rendered, expected, "neutralization must be identity on our own values");
@@ -607,7 +607,7 @@ mod tests {
         let hostile = "\u{1b}]52;c;ZXZpbA==\u{7}signer@example.com";
         let report = SignatureReport::new(
             "registry.example/pkg:1.0".into(),
-            ocx_lib::oci::Digest::Sha256("a".repeat(64)),
+            ocx_oci::Digest::Sha256("a".repeat(64)),
             vec![bundle_leg()],
             Some(&"linux/amd64".parse().expect("platform")),
             hostile.to_string(),

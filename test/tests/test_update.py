@@ -39,6 +39,8 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src.assertions import assert_not_exists
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
@@ -162,6 +164,7 @@ def _generated_at(lock_text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_update_bumps_every_tag(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:

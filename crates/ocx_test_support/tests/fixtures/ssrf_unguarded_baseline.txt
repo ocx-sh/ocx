@@ -1,0 +1,34 @@
+# SSRF guard ratchet allowlist (plan C-053, ratchet half).
+#
+# Every `reqwest::Client` / `reqwest::ClientBuilder` construction under
+# `crates/ocx_*/src` (comments, literals and `#[cfg(test)]` items stripped)
+# must seed a `GuardedResolver`, follow a `guard_destination` call in the same
+# function, or be listed here. This list only shrinks: a new unguarded
+# construction fails `workspace_structure::ssrf_guard_ratchet`, and so does a
+# stale entry — delete the line when the site is guarded or removed.
+#
+# One entry per line: `<path relative to crates/> <enclosing fn name> <count>`.
+# Keyed by function, not line, because line numbers rot with every edit; the
+# paths are re-pointed when the files move (`ocx_oci` at WP-24, `ocx_announce`,
+# `ocx_util`). The count is how many constructions that function holds today,
+# so a second one added inside an allow-listed function reds instead of
+# sharing the entry; it only goes down. The reason each site is unguarded
+# today (the #409 gap, out of scope here) sits beside it.
+#
+# git-forge REST client: dials the operator-configured forge host over TLS
+# with redirects refused; no destination guard yet.
+ocx_announce/src/forge/http.rs build_forge_http_client 1
+# Sigstore trust-services client: pins through `PinnedResolver`, which replays
+# the verdicts `resolve_sigstore_url` obtained from `guard_destination` — a
+# guard by a different name, kept as the opt-in it already was.
+ocx_oci/src/endpoint.rs sigstore_client_builder 1
+# The unreachable-in-practice `Client::new()` terminal of the same client.
+ocx_oci/src/endpoint.rs sigstore_http_client 1
+# Static-file index client: hardened (timeouts, no redirects) and gated by
+# `resolve_base_url`'s plain-HTTP check, but it seeds no resolver. Two
+# constructions: the configured builder and its plain fallback.
+ocx_index/src/ocx_index.rs build_index_http_client 2
+# `ExtraRoots::from_pem`'s probe build: built to validate the root set and
+# dropped — it never dials. (WP-19 renamed the function; the construction is
+# the same one, in the same file.)
+ocx_util/src/tls.rs from_pem 1

@@ -12,9 +12,9 @@
 //! newer, more specific report would point the older, more general one at it
 //! for the life of the branch.
 
-use ocx_lib::claim::{ClaimOutcome, ClaimStatus, OwnerIdentitySource, ResolvedOwner};
-use ocx_lib::cli::{Cell, Column};
-use ocx_lib::forge::{ForgeCredentials, ForgeKind, WriteTransport};
+use ocx_announce::claim::{ClaimOutcome, ClaimStatus, OwnerIdentitySource, ResolvedOwner};
+use ocx_announce::forge::{ForgeCredentials, ForgeKind, WriteTransport};
+use ocx_console::{Cell, Column};
 use serde::Serialize;
 
 use super::forge_report::{
@@ -217,7 +217,7 @@ impl ClaimReport {
     /// The plain table's headers and its single row's cells, as text.
     ///
     /// A seam, and the reason it exists is testability rather than reuse:
-    /// [`ocx_lib::cli::DataInterface::print_table`] writes to the real stdout
+    /// [`ocx_console::DataInterface::print_table`] writes to the real stdout
     /// and neither [`Column`] nor [`Cell`] exposes its text, so a test that
     /// calls [`Printable::print_plain`] can assert nothing at all — a green
     /// indistinguishable from the check never having run
@@ -249,7 +249,7 @@ impl ClaimReport {
 }
 
 impl Printable for ClaimReport {
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         // One `print_table` call, never two (single-table rule). `print_table`
         // reads its rows column-major — one `Vec<Cell>` per column — so a
         // one-row table is one cell per column.
@@ -262,8 +262,8 @@ impl Printable for ClaimReport {
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::claim::{ClaimOutcome, ClaimStatus, OwnerIdentitySource, ResolvedOwner};
-    use ocx_lib::forge::{ForgeCredentials, ForgeKind, ForgeToken, PullRequest, PushAccess, WriteTransport};
+    use ocx_announce::claim::{ClaimOutcome, ClaimStatus, OwnerIdentitySource, ResolvedOwner};
+    use ocx_announce::forge::{ForgeCredentials, ForgeKind, ForgeToken, PullRequest, PushAccess, WriteTransport};
 
     use super::ClaimReport;
 

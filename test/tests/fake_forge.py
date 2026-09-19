@@ -9,7 +9,7 @@ against both clients and assert the same outcome, instead of each client
 agreeing with a fixture written for it.
 
 Implements exactly the REST surface `GitHubForge`
-(`crates/ocx_lib/src/forge/github.rs`) calls: repo/fork metadata (also used as
+(`crates/ocx_announce/src/forge/github.rs`) calls: repo/fork metadata (also used as
 the bounded fork-readiness poll target), fork create, the contents API (raw
 bytes), git-ref lookup, the git data API (blobs -> trees -> commits -> refs),
 and pull-request create/list. A minimal in-memory git object graph
@@ -901,7 +901,7 @@ class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
         unconditional projections of declared state, and both clients read one
         named field off a `serde_json::Value` (`github.rs::authenticated_login`,
         `gitlab.rs::authenticated_username`) with no `deny_unknown_fields`
-        anywhere under `crates/ocx_lib/src/forge/`, so the extra keys are inert.
+        anywhere under `crates/ocx_announce/src/forge/`, so the extra keys are inert.
 
         **The consumers, one per arm.** `users_api_status` here is
         `test_package_claim.py::test_owner_asserted_needs_a_gitlab_job_token`'s

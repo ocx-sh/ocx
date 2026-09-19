@@ -36,7 +36,7 @@ Fire at attention even when rules don't auto-load:
 
 ## Before Any Writes
 
-1. Grep existing utilities in `crates/ocx_lib/src/utility/` + relevant modules (`DirWalker`, `PackageDir`, etc.) before new code. Extend existing utilities; no workarounds.
+1. Grep existing utilities in `crates/ocx_util/src/` + relevant modules (`DirWalker`, `PackageDir`, etc.) before new code. Extend existing utilities; no workarounds.
 2. If editing Rust, path-scoped [quality-rust.md](../rules/quality-rust.md) + [arch-principles.md](../rules/arch-principles.md) + subsystem rule auto-load. Cross-subsystem change? Consult [.claude/rules.md](../rules.md) first.
 
 ## Task Runner

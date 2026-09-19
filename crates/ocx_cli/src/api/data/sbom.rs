@@ -20,14 +20,14 @@
 //! certificate SAN and issuer are read out of a Fulcio cert carried in a
 //! bundle a registry served, `predicate_type` is read out of the signed
 //! payload, `RefusedCandidate::referrer_digest` is the registry's own listing
-//! string (never a parsed [`oci::Digest`]), and a refusal reason's Display
+//! string (never a parsed [`ocx_oci::Digest`]), and a refusal reason's Display
 //! text embeds it. All of them route through
 //! [`sanitize_for_terminal`](super::sanitize_for_terminal) in
 //! [`SbomListingReport::plain_rows`], which is the single render boundary this
 //! module has. `--format json` stays verbatim, matching the crate-wide
 //! contract stated on [`sanitize_for_terminal`] — that is a machine channel.
 
-use ocx_lib::cli::{Cell, Column};
+use ocx_console::{Cell, Column};
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -182,8 +182,8 @@ pub struct SbomSummaryOut {
     pub top_level_component: Option<String>,
 }
 
-impl From<ocx_lib::sbom::SbomSummary> for SbomSummaryOut {
-    fn from(summary: ocx_lib::sbom::SbomSummary) -> Self {
+impl From<ocx_sign::sbom::SbomSummary> for SbomSummaryOut {
+    fn from(summary: ocx_sign::sbom::SbomSummary) -> Self {
         Self {
             spec_version: summary.spec_version,
             serial_number: summary.serial_number,
@@ -314,7 +314,7 @@ impl SbomListingReport {
 /// once per view, and `Referrer` already spends it. Falls back to the verbatim
 /// string when the value does not parse — the row still has to render.
 fn short_digest(digest: &str) -> String {
-    ocx_lib::oci::Digest::try_from(digest).map_or_else(|_| digest.to_string(), |parsed| parsed.to_short_string())
+    ocx_oci::Digest::try_from(digest).map_or_else(|_| digest.to_string(), |parsed| parsed.to_short_string())
 }
 
 impl SbomEntry {
@@ -359,7 +359,7 @@ impl SbomEntry {
 }
 
 impl Printable for SbomListingReport {
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         let columns: [Column; 4] = ["Type".into(), "Subject".into(), "Referrer".into(), "Detail".into()];
         let rows = self
             .plain_rows()
@@ -369,7 +369,7 @@ impl Printable for SbomListingReport {
 
     /// Emit a success envelope:
     /// `{"schema_version":1,"command":"package sbom","exit_code":0,"data":{...}}`.
-    fn print_json(&self, data: &ocx_lib::cli::DataInterface) -> anyhow::Result<()>
+    fn print_json(&self, data: &ocx_console::DataInterface) -> anyhow::Result<()>
     where
         Self: Sized,
     {

@@ -12,8 +12,8 @@
 
 use std::process::ExitCode;
 
-use ocx_lib::script::{ScriptOutcome, ScriptOutcomeKind};
-use ocx_lib::{cli, env, oci};
+use ocx_config::env;
+use ocx_script::{ScriptOutcome, ScriptOutcomeKind};
 
 /// Run a Starlark script in an already-composed environment and report it.
 ///
@@ -47,7 +47,7 @@ pub async fn run_script_in_env(
     label: &str,
     package_root: &std::path::Path,
     scratch_root: &std::path::Path,
-    platform: &oci::Platform,
+    platform: &ocx_oci::Platform,
     process_env: env::Env,
     junit: Option<&crate::api::junit::Target<'_>>,
 ) -> anyhow::Result<ExitCode> {
@@ -64,7 +64,7 @@ pub async fn run_script_in_env(
         "run_script requires the multi-thread Tokio runtime (Handle::block_on in block_in_place)"
     );
 
-    let limits = ocx_lib::script::ScriptLimits {
+    let limits = ocx_script::ScriptLimits {
         max_callstack_size: 50,
         wall_clock: std::time::Duration::from_secs(300),
     };
@@ -72,7 +72,7 @@ pub async fn run_script_in_env(
     // run_script is SYNC (Evaluator is !Send): invoke via block_in_place, NOT
     // .await / spawn_blocking.
     let outcome_res = tokio::task::block_in_place(|| {
-        ocx_lib::script::run_script(source, label, package_root, scratch_root, platform, process_env, limits)
+        ocx_script::run_script(source, label, package_root, scratch_root, platform, process_env, limits)
     });
 
     let outcome = match outcome_res {
@@ -95,13 +95,13 @@ pub async fn run_script_in_env(
             if let Some(junit) = junit {
                 crate::api::junit::write(junit, &report).await?;
             }
-            return Ok(cli::ExitCode::Failure.into());
+            return Ok(ocx_exit::ExitCode::Failure.into());
         }
     };
 
     // Emit the structured envelope through the existing report path; the exit
     // code stays authoritative (both emitted).
-    let run_summary = ocx_lib::script::last_run_summary();
+    let run_summary = ocx_script::last_run_summary();
     let report = crate::api::data::script_run::ScriptRunReport::from_outcome(&outcome, run_summary);
     context.api().report(&report)?;
     if let Some(junit) = junit {
@@ -113,20 +113,20 @@ pub async fn run_script_in_env(
 
 /// Maps an engine-neutral [`ScriptOutcome`] to the process exit code.
 ///
-/// The returned `cli::ExitCode` bypasses `main.rs::classify_error` (ADR Exit
+/// The returned `ocx_exit::ExitCode` bypasses `main.rs::classify_error` (ADR Exit
 /// Code Scheme). Engine-internal errors map to `Failure` (1) — no code `2` is
 /// invented.
-pub fn map_script_outcome_to_exit_code(outcome: ScriptOutcome) -> cli::ExitCode {
+pub fn map_script_outcome_to_exit_code(outcome: ScriptOutcome) -> ocx_exit::ExitCode {
     match outcome.kind {
-        ScriptOutcomeKind::Passed => cli::ExitCode::Success,
-        ScriptOutcomeKind::Failed { .. } => cli::ExitCode::Failure,
-        ScriptOutcomeKind::Usage { .. } => cli::ExitCode::UsageError,
-        ScriptOutcomeKind::ScriptError { .. } => cli::ExitCode::DataError,
-        ScriptOutcomeKind::Io { .. } => cli::ExitCode::IoError,
-        ScriptOutcomeKind::Timeout => cli::ExitCode::Failure,
+        ScriptOutcomeKind::Passed => ocx_exit::ExitCode::Success,
+        ScriptOutcomeKind::Failed { .. } => ocx_exit::ExitCode::Failure,
+        ScriptOutcomeKind::Usage { .. } => ocx_exit::ExitCode::UsageError,
+        ScriptOutcomeKind::ScriptError { .. } => ocx_exit::ExitCode::DataError,
+        ScriptOutcomeKind::Io { .. } => ocx_exit::ExitCode::IoError,
+        ScriptOutcomeKind::Timeout => ocx_exit::ExitCode::Failure,
         // `ScriptOutcomeKind` is `#[non_exhaustive]` — unmapped kinds fall to
         // generic failure (locked here, never silently to a new code).
-        _ => cli::ExitCode::Failure,
+        _ => ocx_exit::ExitCode::Failure,
     }
 }
 
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn failed_maps_to_failure_1() {
         let o = outcome(ScriptOutcomeKind::Failed {
-            kind: Some(ocx_lib::script::AssertionKind::Ok),
+            kind: Some(ocx_script::AssertionKind::Ok),
             message: "assertion failed".into(),
             location: None,
         });

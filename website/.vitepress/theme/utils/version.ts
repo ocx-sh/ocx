@@ -1,6 +1,6 @@
 /**
  * TypeScript port of the Rust version parsing and ordering logic.
- * Source of truth: crates/ocx_lib/src/package/version.rs
+ * Source of truth: crates/ocx_package/src/version.rs
  *
  * Handles OCX's variant-prefix tag format: `{variant}-{version}` where
  * variants match `[a-z][a-z0-9.]*` and versions start with a digit.

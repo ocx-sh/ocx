@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PatchDescriptor",
+  "description": "Parsed form of the JSON blob carried in a `__ocx.patch` descriptor layer.\n\n```json\n{ \"version\": 1, \"rules\": [\n  { \"match\": \"*\",             \"packages\": [\"internal.company.com/certs/zscaler-root:latest\"] },\n  { \"match\": \"ocx.sh/java:*\", \"packages\": [\"internal.company.com/java-config/jdk21-truststore:1.0\"],\n    \"required\": false }\n] }\n```\n\nConstructed by deserializing the raw bytes from the `__ocx.patch` layer.\nThe `version` field is a [`PatchDescriptorVersion`] enum — unknown values\nare rejected by `serde_repr` before this struct is constructed.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "description": "Descriptor format version. Only [`PatchDescriptorVersion::V1`] is\ncurrently defined; unknown versions are rejected at deserialization.",
+      "$ref": "#/$defs/PatchDescriptorVersion"
+    },
+    "rules": {
+      "description": "Ordered list of match rules. Rules are evaluated in order; all matching\nrules contribute companions (union), with deduplication by identifier\n(first rule wins for the `required` flag).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PatchRule"
+      }
+    }
+  },
+  "required": [
+    "version",
+    "rules"
+  ],
+  "$defs": {
+    "PatchDescriptorVersion": {
+      "description": "Patch descriptor format version. Currently only 1 is valid.",
+      "type": "integer",
+      "enum": [
+        1
+      ]
+    },
+    "PatchRule": {
+      "description": "A single rule within a [`PatchDescriptor`].\n\nEach rule declares a flat glob `match` pattern (matched over the canonical\nOCI identifier `Display` string) and a list of companion package identifiers\nto apply when the pattern matches.\n\n`required` overrides the tier default (`ResolvedPatchConfig::required`) for\ncompanions produced by this rule. When absent, the tier default applies.",
+      "type": "object",
+      "properties": {
+        "match": {
+          "description": "Flat glob pattern matched over the base identifier's canonical\n`Display` form (`registry/repository:tag[@digest]`).\n\n`*` spans any run of characters including `/`, `:`, `@`. See\n[`crate::patch::matcher`] for full semantics.",
+          "type": "string"
+        },
+        "packages": {
+          "description": "Companion packages to apply when this rule matches.\n\nIdentifiers are stored as strings on the wire and parsed on\ndeserialization. The project-default registry (`ocx.sh`) is used as\nthe fallback when no registry is present in the string.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Identifier"
+          }
+        },
+        "required": {
+          "description": "Per-rule fail posture override.\n\nWhen `Some`, overrides the tier-level `required` from\n`ResolvedPatchConfig`. When `None`, the tier default is used.\n\n- `true` — fail closed: abort if any companion in this rule is unavailable.\n- `false` — fail open: skip with a warning.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "match",
+        "packages"
+      ]
+    },
+    "Identifier": {
+      "description": "OCI identifier in the format 'registry/repository[:tag][@digest]'.",
+      "type": "string"
+    }
+  },
+  "$id": "https://ocx.sh/schemas/patch/v1.json"
+}

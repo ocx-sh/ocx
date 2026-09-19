@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use ocx_lib::package::metadata::env::entry::Entry;
+use ocx_package::metadata::env::entry::Entry;
 
 /// The repeatable `--env KEY[:TYPE[:SEP]]=VALUE` per-invocation override.
 ///
@@ -63,12 +63,12 @@ impl EnvOverride {
     /// of the segment — so it may itself be or contain a colon, and
     /// `K:list::=x` declares the separator `:`. Omitting it leaves the entry's
     /// separator unset for
-    /// [`reconcile_list_separators`](ocx_lib::env::reconcile_list_separators)
+    /// [`reconcile_list_separators`](ocx_package::metadata::env::apply::reconcile_list_separators)
     /// to settle against the other contributors to the same key; that is why
     /// this parser cannot check an omitted separator against the value, and
     /// only rejects a value edged by a separator spelled out here.
     ///
-    /// The grammar is unambiguous because [`ocx_lib::env::is_valid_env_key`]
+    /// The grammar is unambiguous because [`ocx_util::env::is_valid_env_key`]
     /// admits no `:` — a colon in the pre-`=` segment is therefore always the
     /// type marker or part of the separator, and a Windows value like
     /// `C:\tools\bin` is untouched because only that segment is inspected.
@@ -87,7 +87,7 @@ impl EnvOverride {
     ///
     /// # Errors
     ///
-    /// [`ocx_lib::cli::UsageError`] (exit 64) when an argument carries no `=`
+    /// [`crate::error::UsageError`] (exit 64) when an argument carries no `=`
     /// (bare `--env FOO` ambient pass-through is not accepted in v1: it has
     /// meaning only under `--clean`, and admitting it later is purely
     /// additive), when the declared `TYPE` names no modifier, when a `SEP`
@@ -97,10 +97,10 @@ impl EnvOverride {
     /// matches the reserved `OCX_*` / `__OCX_*` namespace — the same gate the
     /// file form applies, so the flag cannot be the way in.
     ///
-    /// [`ModifierKind`]: ocx_lib::package::metadata::env::modifier::ModifierKind
-    pub fn entries(&self, cwd: &Path) -> Result<Vec<Entry>, ocx_lib::cli::UsageError> {
-        use ocx_lib::package::metadata::env::list::{is_separator_edged, separator_is_valid};
-        use ocx_lib::package::metadata::env::modifier::ModifierKind;
+    /// [`ModifierKind`]: ocx_package::metadata::env::modifier::ModifierKind
+    pub fn entries(&self, cwd: &Path) -> Result<Vec<Entry>, crate::error::UsageError> {
+        use ocx_package::metadata::env::list::{is_separator_edged, separator_is_valid};
+        use ocx_package::metadata::env::modifier::ModifierKind;
 
         if self.env.is_empty() {
             return Ok(Vec::new());
@@ -111,7 +111,7 @@ impl EnvOverride {
             // is what makes `--env FOO=a=b` set `FOO` to `a=b` rather than
             // erroring.
             let Some((qualified_key, value)) = argument.split_once('=') else {
-                return Err(ocx_lib::cli::UsageError::new(format!(
+                return Err(crate::error::UsageError::new(format!(
                     "--env value '{argument}' is not KEY[:TYPE[:SEP]]=VALUE; passing an ambient variable through by name is not supported"
                 )));
             };
@@ -130,14 +130,14 @@ impl EnvOverride {
                     };
                     let kind = declared_type
                         .parse::<ModifierKind>()
-                        .map_err(|error| ocx_lib::cli::UsageError::new(format!("--env value '{argument}': {error}")))?;
+                        .map_err(|error| crate::error::UsageError::new(format!("--env value '{argument}': {error}")))?;
                     (key, kind, declared_separator)
                 }
             };
             let separator = match declared_separator {
                 None => None,
                 Some(_) if kind != ModifierKind::List => {
-                    return Err(ocx_lib::cli::UsageError::new(format!(
+                    return Err(crate::error::UsageError::new(format!(
                         "--env value '{argument}': a separator qualifies a `list` value only, not `{kind}`"
                     )));
                 }
@@ -151,24 +151,24 @@ impl EnvOverride {
                 // something unprintable, and echoing a raw newline would split
                 // the error into two lines (CWE-117).
                 Some(separator) if !separator_is_valid(separator) => {
-                    return Err(ocx_lib::cli::UsageError::new(format!(
+                    return Err(crate::error::UsageError::new(format!(
                         "--env value '{argument}': separator {separator:?} must be non-empty and free of '=', newline and carriage return"
                     )));
                 }
                 Some(separator) if is_separator_edged(value, separator) => {
-                    return Err(ocx_lib::cli::UsageError::new(format!(
+                    return Err(crate::error::UsageError::new(format!(
                         "--env value '{argument}': the value {value:?} starts or ends with its separator {separator:?}"
                     )));
                 }
                 Some(separator) => Some(separator.to_owned()),
             };
-            if !ocx_lib::env::is_valid_env_key(key) {
-                return Err(ocx_lib::cli::UsageError::new(format!(
+            if !ocx_util::env::is_valid_env_key(key) {
+                return Err(crate::error::UsageError::new(format!(
                     "--env key '{key}' is not a valid environment variable name"
                 )));
             }
-            if ocx_lib::env::is_reserved_ocx_key(key) {
-                return Err(ocx_lib::cli::UsageError::new(format!(
+            if ocx_util::env::is_reserved_ocx_key(key) {
+                return Err(crate::error::UsageError::new(format!(
                     "--env key '{key}' is reserved; OCX_* and __OCX_* keys cannot be set"
                 )));
             }
@@ -210,7 +210,7 @@ mod tests {
 
     /// Build the flatten struct directly from raw argument strings — the same
     /// shape clap produces — and resolve against [`parse_cwd`].
-    fn parse(arguments: &[&str]) -> Result<Vec<Entry>, ocx_lib::cli::UsageError> {
+    fn parse(arguments: &[&str]) -> Result<Vec<Entry>, crate::error::UsageError> {
         EnvOverride {
             env: arguments.iter().map(|argument| (*argument).to_string()).collect(),
         }
@@ -219,7 +219,7 @@ mod tests {
 
     /// Parse one `--env` argument, for the single-value cases that make up most
     /// of this module.
-    fn parse_one(argument: &str) -> Result<Vec<Entry>, ocx_lib::cli::UsageError> {
+    fn parse_one(argument: &str) -> Result<Vec<Entry>, crate::error::UsageError> {
         parse(&[argument])
     }
 
@@ -234,7 +234,7 @@ mod tests {
     /// meaning is unchanged by the optional `:TYPE` qualifier.
     #[test]
     fn env_override_parses_key_value_as_constant() {
-        use ocx_lib::package::metadata::env::modifier::ModifierKind;
+        use ocx_package::metadata::env::modifier::ModifierKind;
 
         let parsed = parse_one("FOO=bar").expect("KEY=VALUE must parse");
         assert_eq!(parsed.len(), 1);
@@ -309,7 +309,7 @@ mod tests {
     /// `{ type = "constant", … }` form.
     #[test]
     fn env_override_qualifier_selects_the_modifier() {
-        use ocx_lib::package::metadata::env::modifier::ModifierKind;
+        use ocx_package::metadata::env::modifier::ModifierKind;
 
         let parsed = parse_one("JAVA_OPTS:constant=-Xmx2g").expect("an explicit :constant must parse");
         assert_eq!(parsed[0].key, "JAVA_OPTS", "the qualifier must not leak into the key");
@@ -450,7 +450,7 @@ mod tests {
     /// is optional in a way the wire form does not allow.
     #[test]
     fn env_override_list_without_a_separator_leaves_it_unset() {
-        use ocx_lib::package::metadata::env::modifier::ModifierKind;
+        use ocx_package::metadata::env::modifier::ModifierKind;
 
         let parsed = parse_one("JDK_JAVA_OPTIONS:list=-Xmx2g").expect("a bare :list must parse");
         assert_eq!(parsed[0].key, "JDK_JAVA_OPTIONS");

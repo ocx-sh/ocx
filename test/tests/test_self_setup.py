@@ -68,7 +68,7 @@ def _emits_downgrade_warning(stderr: str) -> bool:
 
 # The canonical fenced-block body `ocx self setup` writes on POSIX.
 #
-# Byte-for-byte identical to `ocx_lib::setup::POSIX_BODY`. The block resolves
+# Byte-for-byte identical to `ocx_setup::POSIX_BODY`. The block resolves
 # OCX_HOME with a `${OCX_HOME:-$HOME/.ocx}` fallback and an existence guard so a
 # fresh login shell (where OCX_HOME is not yet exported — env.sh is what exports
 # it) never sources `. "/env.sh"` and fails on startup.
@@ -88,7 +88,7 @@ _ENV_SHIMS = ("env.sh", "env.fish", "env.ps1", "env.nu", "env.elv")
 
 
 def _canonical_hash(body: str) -> str:
-    """Mirror ``ocx_lib::setup::rc_block::canonical_hash``.
+    """Mirror ``ocx_setup::rc_block::canonical_hash``.
 
     The opener marker is the low 4 bytes of the SHA-256 of the block body,
     hex-encoded, after normalizing line endings to LF and stripping a single
@@ -145,6 +145,7 @@ def _setup(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.smoke
 def test_setup_writes_shims_and_fence(ocx: OcxRunner, tmp_path: Path) -> None:
     """A fresh ``ocx self setup`` writes the five env shims and a v1 fence.
 

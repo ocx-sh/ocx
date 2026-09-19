@@ -13,8 +13,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Args;
-use ocx_lib::package::install_info::InstallInfo;
-use ocx_lib::package_manager::EnvScope;
+use ocx_package::install_info::InstallInfo;
+use ocx_package_manager::EnvScope;
 
 use crate::{api, conventions, options};
 

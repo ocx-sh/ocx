@@ -21,7 +21,7 @@
 /// The return stays `Option<bool>` because this is a **ladder tier**, not a
 /// setting: `None` means "neither flag was given", which is what lets `ocx.toml`
 /// and `OCX_TOOLCHAIN_PINNED` speak. Feed it to
-/// [`Ladder::cli`](ocx_lib::ladder::Ladder) and call `resolve(PINNED_FLOOR)`;
+/// [`Ladder::cli`](ocx_project::ladder::Ladder) and call `resolve(PINNED_FLOOR)`;
 /// the floor lives there and nowhere else.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Pinned {

@@ -1,0 +1,123 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# The gate tooling under scripts/ (plan DEC-8): stdlib-only Python scripts,
+# each with a `--self-test` that shows the tool red on every shape it forbids
+# and green on every shape it allows. A self-test that runs on no gate is a
+# check nobody runs, so `verify` here is part of `.verify:lint` and
+# `scripts/scoped_gate.py` routes `scripts/**` to it.
+#
+# `dead_path_sweep.py` spent three batches proving that rule on itself: it was
+# written by DEC-52 to catch a check nobody runs, had no `--self-test`, and was
+# named by no task — `git grep` found it only in the plan and in its own
+# docstring. Adding a script here without both is how that happens.
+
+version: '3'
+
+tasks:
+  verify:
+    desc: Gate-tooling quality gate (ruff over scripts/, then the four self-tests)
+    cmds:
+      - task: lint
+      - task: self-test
+
+  lint:
+    desc: Lint scripts/ with the acceptance suite's pinned ruff (rule set + Python floor from test/pyproject.toml)
+    # The same ruff, config and floor as `test:lint`, not a second toolchain:
+    # `uv run --project test` resolves the ruff pinned in test/uv.lock and
+    # `--config test/pyproject.toml` applies that file's rule set and derives
+    # `target-version` from its `requires-python`, so the two Python trees
+    # cannot drift apart under one gate. `ruff check` only, as `test:lint` —
+    # `ruff format` is not a gate anywhere in this repository.
+    #
+    # No `sources:` cache, for the reason `test:lint` has none: a cached green
+    # cannot be told from a lint that never ran, and this takes a second.
+    dir: '{{.ROOT_DIR}}'
+    cmd: uv run --project test ruff check --config test/pyproject.toml scripts
+
+  self-test:
+    desc: Run the --self-test of every gate script under scripts/ (lint ratchet, scoped gate, test-diff guard, suite census, dead-path sweep, commit gate)
+    # No `sources:` cache, for the reason `ci:actionlint` and `test:lint` have
+    # none: a fingerprint-cached self-test reports the last run's verdict, and
+    # a cached green cannot be told from one that never ran. Seconds each.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - python3 scripts/lint_ratchet.py --self-test
+      - python3 scripts/scoped_gate.py --self-test
+      - python3 scripts/test_diff_guard.py --self-test
+      - python3 scripts/suite_census.py --self-test
+      - python3 scripts/dead_path_sweep.py --self-test
+      # Drives real git against throwaway repositories under .tmp/, pointed at
+      # the real .githooks/ — the defect class it replaces lived in "does the
+      # gate ever get invoked", which a direct function call cannot see.
+      - python3 scripts/commit_gate.py --self-test
+
+  dead-path-sweep:
+    desc: Every `crates/ocx_*/src/...` literal on a live surface that names nothing on disk (DEC-52)
+    summary: |
+      File AND directory forms both — the first version of this sweep required
+      an extension and was structurally blind to `…/file_structure/**`, which
+      is how four dead literals merged, one of them a `CONTEXT_REMINDERS` row
+      that had stopped firing.
+
+      The tolerated survivors live in the script as `BASELINE_DEAD`, named
+      rather than counted and not a flag here: every row predates the sweep and
+      was read and left deliberately, so changing the set should be a
+      reviewable edit to the file that explains it rather than a flag someone
+      widens in passing. It only ever shrinks.
+
+      Named, because a count cannot see a swap — one survivor fixed and one new
+      literal arrived reports the same total and exits 0. Both directions red now:
+      an arrival, and a row the sweep no longer finds, which tolerates nothing
+      and reads as debt.
+
+      No `sources:` cache, for the reason the self-tests have none: a cached
+      green cannot be told from a sweep that never ran, which is the exact
+      defect this script exists to catch.
+    dir: '{{.ROOT_DIR}}'
+    cmd: python3 scripts/dead_path_sweep.py
+
+  suite-census:
+    desc: Fail when the acceptance suite's shape moved — test_ defs, skip, xfail and parametrize decorators (DEC-38)
+    summary: |
+      `ast.parse` over every git-tracked `.py` under `test/`, pinned in
+      scripts/suite_census.py. The crate split's acceptance invariant is that
+      `skipped` and `xfailed` never move and no test is added, removed,
+      renamed or re-marked; `passed` *does* move when a parametrized
+      structural census gains cases, and a `+2` from that is byte-identical
+      in the summary line to a `+2` from two new behavioural tests. This is
+      what tells them apart.
+
+      No `sources:` cache, for the reason `scripts:self-test` has none: a
+      fingerprint-cached census reports an earlier tree's verdict. It parses
+      236 files and takes under a second.
+    dir: '{{.ROOT_DIR}}'
+    cmd: python3 scripts/suite_census.py --check
+
+  test-diff-guard:
+    desc: Refuse a diff that changes what the acceptance suite asserts — merge-base(origin/main)..HEAD, plus RANGE=<base>..<tip> when given
+    summary: |
+      The merge predicate's guard (plan_crate_split_workspace.md C-077,
+      DX-17), run over BOTH ranges each merge:
+
+        task scripts:test-diff-guard                      # merge-base(origin/main)..HEAD
+        task scripts:test-diff-guard BASE=<sha>           # <sha>..HEAD instead of the merge base
+        task scripts:test-diff-guard RANGE=<base>..<tip>  # the WP's own range, after the merge-base one
+        task scripts:test-diff-guard -- --allow test/tests/test_trampoline_exec.py:852
+
+      Over the release base an in-series file is status `A` forever, so the
+      per-WP range is what shows a later assertion edit in it; over the per-WP
+      range a plan-owned structural test reads as an ordinary edit, so the
+      merge-base range is what settles it. Not part of `verify`: on `main`
+      itself the merge-base range is empty and a green there would be a run
+      over nothing.
+    dir: '{{.ROOT_DIR}}'
+    # A task-level var named BASE would shadow a `BASE=<sha>` passed on the
+    # command line (task-level vars beat CLI vars); the merge base gets its
+    # own name and BASE is read only from the caller.
+    vars:
+      MERGE_BASE:
+        sh: git merge-base origin/main HEAD
+    cmds:
+      - python3 scripts/test_diff_guard.py {{.BASE | default .MERGE_BASE}}..HEAD {{.CLI_ARGS}}
+      - if: '[ -n "{{.RANGE}}" ]'
+        cmd: python3 scripts/test_diff_guard.py {{.RANGE}} {{.CLI_ARGS}}

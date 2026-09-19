@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::oci::verify::VerificationMode;
+use ocx_sign::verify::VerificationMode;
 
 /// Whether an SBOM read demands a verifiable signature.
 ///

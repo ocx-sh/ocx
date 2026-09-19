@@ -30,7 +30,7 @@
 //!
 //! Rule 1 alone would be defeated by rule 2's hazard and vice versa; together
 //! they leave no way for output to become shell source. The test derives the
-//! forbidden prefixes from the shipped [`Shell`](ocx_lib::shell::Shell)
+//! forbidden prefixes from the shipped [`Shell`](ocx_shell::shell::Shell)
 //! emitters rather than hard-coding them, so a new arm or a changed emitter
 //! cannot silently widen what counts as "not shell source".
 //!
@@ -44,11 +44,11 @@
 
 use std::path::{Path, PathBuf};
 
-use ocx_lib::activate::ActivateMode;
-use ocx_lib::cli::{DataInterface, Theme, human_bytes, human_instant, human_time};
-use ocx_lib::project::consent::{Grant, Reason};
-use ocx_lib::shell::coexistence::{Observation, Tool};
-use ocx_lib::shell::reconcile::{CARRIER_KEY, Ledger, LedgerEntry, MAX_CARRIER_BYTES, Prior, ScopeId, Verdict};
+use ocx_console::{DataInterface, Theme, human_bytes, human_instant, human_time};
+use ocx_project::activate::ActivateMode;
+use ocx_project::consent::{Grant, Reason};
+use ocx_shell::shell::coexistence::{Observation, Tool};
+use ocx_shell::shell::reconcile::{CARRIER_KEY, Ledger, LedgerEntry, MAX_CARRIER_BYTES, Prior, ScopeId, Verdict};
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -216,7 +216,7 @@ pub enum Note {
     },
     /// A-28 — a `paths` entry that would grant `canonical` if the compare
     /// folded ASCII case, exact or subtree entry alike. Entries are compared
-    /// as literal bytes ([`ocx_lib::consent_path_matches`]), so this is
+    /// as literal bytes ([`ocx_config::shell::consent_path_matches`]), so this is
     /// `Inert`; the row exists to pay off the support cost of that decision.
     PathsNearMiss {
         /// The entry that nearly matched.
@@ -225,7 +225,7 @@ pub enum Note {
         canonical: PathBuf,
     },
     /// A `[shell.consent] paths` entry that can never match any project by
-    /// construction — [`ocx_lib::consent_entry_defect`]'s classification of
+    /// construction — [`ocx_config::shell::consent_entry_defect`]'s classification of
     /// the entry's own bytes, independent of which project is in view.
     /// `namespaces`' sibling grant refuses a pattern this broken at parse
     /// time (A-27); a `paths` entry is an ordinary path and parses
@@ -234,7 +234,7 @@ pub enum Note {
     PathsDefect {
         /// The malformed entry.
         entry: PathBuf,
-        /// [`ocx_lib::EntryDefect`]'s own rendering of what is wrong with it.
+        /// [`ocx_config::shell::EntryDefect`]'s own rendering of what is wrong with it.
         defect: String,
     },
     /// The `ocx.toml` that answers for the reported scope exists but will not
@@ -290,7 +290,7 @@ pub struct ShellStateReport {
     pub ocx_home_present: bool,
 
     /// Whether `ocx self setup` has ever wired this machine's shell — probed
-    /// as [`ocx_lib::setup::shims::WITNESS_SHIM`] under [`Self::ocx_home`].
+    /// as [`ocx_setup::shims::WITNESS_SHIM`] under [`Self::ocx_home`].
     ///
     /// C-050 reason 6's first-prompt half tells the user "the next prompt
     /// applies it". That is true only once the rc/profile fence exists to
@@ -356,7 +356,7 @@ pub struct ShellStateReport {
     /// The resolved answer, never a tier: reporting `ocx.toml`'s raw value would
     /// answer a different question from the one a user asking "why is my shell
     /// not doing anything" is asking.
-    pub activate: ocx_lib::activate::ActivateMode,
+    pub activate: ocx_project::activate::ActivateMode,
 
     /// The **effective** `pinned` value, resolved through the same ladder
     /// (C-056, C-066).
@@ -367,7 +367,7 @@ pub struct ShellStateReport {
     pub pinned: bool,
 
     /// Why the project's `ocx.lock` refuses composition, when it does — the
-    /// `Display` of [`ocx_lib::project::LockCurrency`], rendered as text the
+    /// `Display` of [`ocx_project::LockCurrency`], rendered as text the
     /// same way [`Note::ProjectUnresolved`] carries its detail.
     ///
     /// Consent can say *activate* over a lock that composition then refuses: a
@@ -408,7 +408,7 @@ pub struct ShellStateReport {
     /// stands on disk right now (C-019). `None` when there is no recorded
     /// fingerprint to compare against, **and** when no fold is available to
     /// compare with: the fingerprint is the reconciler's
-    /// ([`ocx_lib::shell::reconcile::fingerprint`], which folds the raw
+    /// ([`ocx_shell::shell::reconcile::fingerprint`], which folds the raw
     /// `OCX_CONSENT_*` values, the recorded config-tier paths and the project's
     /// consent stamp — A-13), and a second fold defined here would produce a
     /// different string and report every fresh shell as stale.
@@ -485,12 +485,7 @@ impl ShellStateReport {
         project
             .applied
             .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.kind,
-                    ocx_lib::package::metadata::env::modifier::ModifierKind::Constant
-                )
-            })
+            .filter(|entry| matches!(entry.kind, ocx_package::metadata::env::modifier::ModifierKind::Constant))
             .map(|entry| PriorStatus {
                 key: entry.key.clone(),
                 intact: project.priors.contains_key(&entry.key),
@@ -1076,7 +1071,7 @@ impl ShellStateReport {
                         headline(out, "the shell integration has never been installed here");
                         out.push(format!(
                             "  no {} under {}: `ocx self setup` has not run",
-                            quoted(ocx_lib::setup::shims::WITNESS_SHIM),
+                            quoted(ocx_setup::shims::WITNESS_SHIM),
                             quoted_path(&self.ocx_home)
                         ));
                         push_fix(theme, out, "run `ocx self setup`, then start a new shell");
@@ -1205,10 +1200,10 @@ impl schemars::JsonSchema for VerboseShellState {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use ocx_lib::cli::Theme;
-    use ocx_lib::package::metadata::env::modifier::ModifierKind;
-    use ocx_lib::shell::Shell;
-    use ocx_lib::shell::reconcile::{ProjectScope, Scopes};
+    use ocx_console::Theme;
+    use ocx_package::metadata::env::modifier::ModifierKind;
+    use ocx_shell::shell::Shell;
+    use ocx_shell::shell::reconcile::{ProjectScope, Scopes};
 
     use super::*;
 
@@ -1499,7 +1494,7 @@ mod tests {
             // it differ from a path already in the report.
             toolchain_home: PathBuf::from("/home/u/toolchains/0123456789abcdef/toolchain"),
             toolchain_bin: PathBuf::from("/home/u/toolchains/0123456789abcdef/toolchain/active/bin"),
-            activate: ocx_lib::activate::ActivateMode::Bin,
+            activate: ocx_project::activate::ActivateMode::Bin,
             pinned: false,
             lock_refusal: None,
             carrier_present: true,
@@ -2056,7 +2051,7 @@ mod tests {
         );
         assert!(unwired.contains("ocx self setup"), "{unwired}");
         assert!(
-            unwired.contains(ocx_lib::setup::shims::WITNESS_SHIM),
+            unwired.contains(ocx_setup::shims::WITNESS_SHIM),
             "the row must name the shim it probed, so the answer is checkable: {unwired}"
         );
         assert!(
@@ -2990,9 +2985,9 @@ mod tests {
     fn both_effective_settings_are_visible_in_the_default_rendering() {
         let mut renderings = std::collections::BTreeSet::new();
         for mode in [
-            ocx_lib::activate::ActivateMode::Env,
-            ocx_lib::activate::ActivateMode::Bin,
-            ocx_lib::activate::ActivateMode::None,
+            ocx_project::activate::ActivateMode::Env,
+            ocx_project::activate::ActivateMode::Bin,
+            ocx_project::activate::ActivateMode::None,
         ] {
             let mut report = base(None);
             report.activate = mode;

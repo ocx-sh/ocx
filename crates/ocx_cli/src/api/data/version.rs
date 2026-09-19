@@ -77,7 +77,7 @@ impl VersionData {
 }
 
 impl Printable for VersionData {
-    fn print_plain(&self, _data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, _data: &ocx_console::DataInterface) {
         println!("{}", self.version);
     }
 }
@@ -98,7 +98,7 @@ impl Printable for VersionData {
 pub struct VerboseVersionData(pub VersionData);
 
 impl Printable for VerboseVersionData {
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         let theme = data.theme();
         let inner = &self.0;
 
@@ -120,12 +120,12 @@ impl Printable for VerboseVersionData {
         // Plain-output only — never added to the `version` JSON wire shape.
         // Suppressed when the host OS/arch is not in OCX's supported set. A
         // host may advertise multiple libc families (e.g. glibc + musl).
-        if let Some(platform) = ocx_lib::oci::Platform::current() {
+        if let Some(platform) = ocx_oci::Platform::current() {
             // Render the bare os/arch base (no `+os_features` suffix); the
             // detected libc is shown separately in the parenthetical below, so
             // `Display` here would duplicate it.
             let base = platform.segments().join("/");
-            let tags = ocx_lib::oci::cached_libc_labels();
+            let tags = ocx_oci::cached_libc_labels();
             let host = if tags.is_empty() {
                 base
             } else {
@@ -192,7 +192,7 @@ impl schemars::JsonSchema for VerboseVersionData {
 #[cfg(test)]
 mod tests {
     use super::{VerboseVersionData, VersionData};
-    use ocx_lib::cli::{DataInterface, Printer};
+    use ocx_console::{DataInterface, Printer};
 
     /// Enriched payload still carries the canonical `version` key — the
     /// self-update parser must keep working.
@@ -267,7 +267,7 @@ mod tests {
     /// libc), but the JSON wire shape must stay identical to plain
     /// `VersionData` — no `libc` or `host` key leaks in. The
     /// `query_installed_version` subprocess parser in
-    /// `ocx_lib::package_manager::tasks::update_check` only ever reads
+    /// `ocx_package_manager::tasks::update_check` only ever reads
     /// `version` out of this payload; a stray key would still be harmless to
     /// that parser today, but its absence is the documented self-update
     /// wire contract and must not silently drift.

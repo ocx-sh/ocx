@@ -74,7 +74,7 @@ BASE_PATH = os.pathsep.join(["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "
 # prompt narrated nothing" become unprovable — not because the behaviour broke,
 # but because the fixture models a shell that cannot exist once `ocx self setup`
 # has run. Mirrored here rather than asked of the binary so the module stays
-# stdlib-only; `crates/ocx_lib/src/setup.rs::session_path_directories` is the
+# stdlib-only; `crates/ocx_setup/src/lib.rs::session_path_directories` is the
 # producer.
 #
 # Both strings are pinned against the binary, one layer out:
@@ -234,7 +234,7 @@ def missing_tool_is_fatal(tool: str) -> bool:
     shell-zoo images, a CI leg that installs them — as ``1``/``all`` for
     everything, or a comma-separated list of names (``fish,pwsh,script``).
     Python-side twin of the Rust seam of the same name in
-    ``crates/ocx_lib/src/shell.rs``.
+    ``crates/ocx_shell/src/shell.rs``.
 
     ``tool`` is any binary the matrix needs, not only a shell arm — the pty
     driver is stdlib (:func:`pty_session`) precisely so no external tool can

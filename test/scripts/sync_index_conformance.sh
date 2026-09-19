@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Vendor the ocx-sh/indexbot conformance fixtures into
-# crates/ocx_lib/tests/fixtures/index_wire/. Prints the resulting working-tree
+# crates/ocx_index/tests/fixtures/index_wire/. Prints the resulting working-tree
 # changes and NEVER commits — review and commit the result yourself.
 #
 #   (no args)     re-vendor at the committed SOURCE_COMMIT pin, so a bare re-run
@@ -21,7 +21,7 @@ IFS=$'\n\t'
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
-dest_rel="crates/ocx_lib/tests/fixtures/index_wire"
+dest_rel="crates/ocx_index/tests/fixtures/index_wire"
 dest="${repo_root}/${dest_rel}"
 commit_file="${dest}/SOURCE_COMMIT"
 src_rel="tests/golden"

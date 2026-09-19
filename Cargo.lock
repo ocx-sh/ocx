@@ -3696,107 +3696,319 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "clap_builder",
  "clap_complete",
  "console",
+ "docker_credential",
  "dunce",
  "futures",
  "libc",
- "ocx_lib",
+ "log",
+ "ocx_announce",
+ "ocx_config",
+ "ocx_console",
+ "ocx_exit",
+ "ocx_index",
+ "ocx_oci",
+ "ocx_package",
+ "ocx_package_manager",
+ "ocx_project",
+ "ocx_script",
+ "ocx_setup",
+ "ocx_shell",
+ "ocx_sign",
+ "ocx_store",
+ "ocx_trust",
+ "ocx_util",
+ "proc-macro2",
  "quick-junit",
+ "quote",
+ "reqwest",
  "schemars 1.2.2",
  "secrecy",
  "serde",
  "serde_json",
  "serde_repr",
+ "sha2 0.11.0",
+ "syn 2.0.119",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "toml",
+ "toml_edit",
  "tracing",
+ "tracing-subscriber",
  "vergen-gix",
  "which",
  "zeroize",
 ]
 
 [[package]]
-name = "ocx_lib"
+name = "ocx_announce"
 version = "0.6.2"
 dependencies = [
- "allocative",
- "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "clap_builder",
+ "dunce",
+ "futures",
+ "hex",
+ "hyper-util",
+ "log",
+ "ocx_config",
+ "ocx_exit",
+ "ocx_index",
+ "ocx_oci",
+ "ocx_package",
+ "ocx_test_support",
+ "ocx_util",
+ "percent-encoding",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "url",
+ "which",
+]
+
+[[package]]
+name = "ocx_config"
+version = "0.6.2"
+dependencies = [
+ "chrono",
+ "dirs",
+ "dunce",
+ "flate2",
+ "futures",
+ "libc",
+ "log",
+ "ocx_oci",
+ "ocx_test_support",
+ "ocx_trust",
+ "ocx_util",
+ "pem",
+ "reqwest",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "which",
+ "x509-cert",
+]
+
+[[package]]
+name = "ocx_console"
+version = "0.6.2"
+dependencies = [
+ "chrono",
+ "clap_builder",
+ "colored_json",
+ "console",
+ "indicatif",
+ "log",
+ "ocx_util",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "ocx_exit"
+version = "0.6.2"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ocx_index"
+version = "0.6.2"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "hyper-util",
+ "libc",
+ "log",
+ "ocx_config",
+ "ocx_exit",
+ "ocx_oci",
+ "ocx_store",
+ "ocx_test_support",
+ "ocx_util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+ "webpki-root-certs",
+]
+
+[[package]]
+name = "ocx_oci"
+version = "0.6.2"
+dependencies = [
  "async-compression",
  "async-trait",
  "base64 0.22.1",
  "bytes",
- "bzip2",
  "chrono",
- "clap_builder",
- "clap_complete",
- "colored_json",
- "console",
- "dirs",
  "docker_credential",
- "dunce",
- "ed25519-dalek",
  "elf",
  "flate2",
- "fs4",
  "futures",
  "h2",
  "hex",
  "http",
  "hyper-util",
- "indexmap 2.14.0",
- "indicatif",
- "junction",
- "libc",
  "liblzma",
+ "log",
  "lzma-rust2",
  "oci-client",
- "p256",
- "packageurl",
- "pem",
- "percent-encoding",
- "regex",
+ "ocx_console",
+ "ocx_exit",
+ "ocx_test_support",
+ "ocx_util",
  "reqwest",
- "rpassword",
- "rustls-pki-types",
  "schemars 1.2.2",
  "secrecy",
  "serde",
- "serde_ignored",
  "serde_json",
- "serde_json_canonicalizer",
+ "serde_repr",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "webpki-root-certs",
+ "zstd",
+]
+
+[[package]]
+name = "ocx_package"
+version = "0.6.2"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clap_builder",
+ "dunce",
+ "elf",
+ "futures",
+ "log",
+ "ocx_config",
+ "ocx_index",
+ "ocx_oci",
+ "ocx_store",
+ "ocx_util",
+ "regex",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
  "serde_repr",
  "serde_yaml_ng",
- "sha2 0.11.0",
- "sigstore",
- "sigstore_protobuf_specs",
- "starlark",
- "starlark_derive",
- "starlark_map",
- "starlark_syntax",
  "strsim 0.11.1",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ocx_package_manager"
+version = "0.6.2"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dunce",
+ "flate2",
+ "futures",
+ "hex",
+ "libc",
+ "log",
+ "ocx_config",
+ "ocx_console",
+ "ocx_index",
+ "ocx_oci",
+ "ocx_package",
+ "ocx_project",
+ "ocx_shell",
+ "ocx_sign",
+ "ocx_store",
+ "ocx_test_support",
+ "ocx_trust",
+ "ocx_util",
+ "p256",
+ "packageurl",
+ "schemars 1.2.2",
+ "serde",
+ "serde_ignored",
+ "serde_json",
+ "serde_repr",
+ "sha2 0.11.0",
  "symlink",
  "sysinfo",
  "tar",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tokio-rustls",
- "tokio-util",
  "toml",
  "toml_edit",
  "tracing",
- "tracing-log",
- "tracing-subscriber",
  "url",
- "webpki-root-certs",
  "which",
- "windows-sys 0.61.2",
- "x509-cert",
  "zeroize",
- "zip",
- "zstd",
+]
+
+[[package]]
+name = "ocx_project"
+version = "0.6.2"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clap_builder",
+ "dunce",
+ "hex",
+ "log",
+ "ocx_config",
+ "ocx_index",
+ "ocx_oci",
+ "ocx_package",
+ "ocx_shell",
+ "ocx_store",
+ "ocx_trust",
+ "ocx_util",
+ "regex",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "serde_repr",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+ "toml_edit",
 ]
 
 [[package]]
@@ -3804,9 +4016,89 @@ name = "ocx_schema"
 version = "0.6.2"
 dependencies = [
  "ocx",
- "ocx_lib",
+ "ocx_config",
+ "ocx_oci",
+ "ocx_package",
+ "ocx_package_manager",
+ "ocx_project",
  "schemars 1.2.2",
  "serde_json",
+]
+
+[[package]]
+name = "ocx_script"
+version = "0.6.2"
+dependencies = [
+ "allocative",
+ "anyhow",
+ "ocx_config",
+ "ocx_oci",
+ "ocx_util",
+ "regex",
+ "starlark",
+ "starlark_derive",
+ "starlark_map",
+ "starlark_syntax",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
+name = "ocx_setup"
+version = "0.6.2"
+dependencies = [
+ "hex",
+ "libc",
+ "log",
+ "ocx_config",
+ "ocx_exit",
+ "ocx_index",
+ "ocx_oci",
+ "ocx_package",
+ "ocx_package_manager",
+ "ocx_shell",
+ "ocx_store",
+ "ocx_test_support",
+ "ocx_util",
+ "pem",
+ "regex",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ocx_shell"
+version = "0.6.2"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "clap_builder",
+ "clap_complete",
+ "console",
+ "hex",
+ "indexmap 2.14.0",
+ "log",
+ "ocx_config",
+ "ocx_console",
+ "ocx_oci",
+ "ocx_package",
+ "ocx_store",
+ "ocx_util",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sysinfo",
+ "tempfile",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -3815,6 +4107,136 @@ version = "0.6.2"
 dependencies = [
  "dunce",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ocx_sign"
+version = "0.6.2"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "clap_builder",
+ "hex",
+ "log",
+ "ocx_exit",
+ "ocx_oci",
+ "ocx_trust",
+ "ocx_util",
+ "p256",
+ "pem",
+ "reqwest",
+ "rustls-pki-types",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "sha2 0.11.0",
+ "sigstore",
+ "sigstore_protobuf_specs",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "url",
+ "x509-cert",
+ "zeroize",
+]
+
+[[package]]
+name = "ocx_store"
+version = "0.6.2"
+dependencies = [
+ "dunce",
+ "hex",
+ "log",
+ "ocx_config",
+ "ocx_oci",
+ "ocx_util",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ocx_test_support"
+version = "0.6.2"
+dependencies = [
+ "dunce",
+ "libc",
+ "p256",
+ "pem",
+ "proc-macro2",
+ "quote",
+ "rustls-pki-types",
+ "serde_json",
+ "sha2 0.10.9",
+ "syn 2.0.119",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "toml",
+ "x509-cert",
+]
+
+[[package]]
+name = "ocx_trust"
+version = "0.6.2"
+dependencies = [
+ "log",
+ "ocx_util",
+ "regex",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sigstore",
+ "tempfile",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
+name = "ocx_util"
+version = "0.6.2"
+dependencies = [
+ "async-trait",
+ "bzip2",
+ "dunce",
+ "flate2",
+ "fs4",
+ "futures",
+ "hex",
+ "junction",
+ "libc",
+ "log",
+ "lzma-rust2",
+ "ocx_test_support",
+ "pem",
+ "regex",
+ "reqwest",
+ "rustls-pki-types",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "symlink",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-rustls",
+ "toml",
+ "tracing",
+ "webpki-root-certs",
+ "windows-sys 0.61.2",
+ "x509-cert",
+ "zip",
+ "zstd",
 ]
 
 [[package]]

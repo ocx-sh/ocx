@@ -1,0 +1,203 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+# The ecosystem-tier gate of the crate split (adr_crate_split_workspace.md
+# § "Stability tiers and the ecosystem contract"): build the lockstep
+# satellite ocx-mirror against this workspace, so a break in an ecosystem
+# crate reds here instead of at the satellite's next pointer bump, and refuse
+# a satellite that links the operations tier (the satellite linking rule).
+# `task verify` does not run it; verify-deep.yml does (plan DEC-4: with
+# `continue-on-error: true` until the mirror re-points).
+
+vars:
+  # The env var wins; the default is the sibling checkout the four worktrees
+  # and CI (`ocx-sh/ocx-mirror` checked out next to this repo) share.
+  MIRROR_DIR: '{{.OCX_MIRROR_DIR | default (printf "%s/../ocx-mirror" .ROOT_DIR)}}'
+  SCRATCH: '{{.ROOT_DIR}}/.tmp/satellite-verify'
+  # A `git worktree` of the mirror, created and removed on every run. The
+  # live checkout is never written to: the overlay lands in the worktree and
+  # the re-resolved Cargo.lock dies with it.
+  MIRROR_WORKTREE: '{{.SCRATCH}}/mirror'
+  # Outlives the worktree so a repeat run is warm.
+  MIRROR_TARGET_DIR: '{{.SCRATCH}}/cargo-target'
+  # The operations tier: what a satellite may not name (ADR § "Stability
+  # tiers", satellite linking rule). `ocx_cli` is the package `ocx` to cargo.
+  OPERATIONS_CRATES: ocx_store ocx_shell ocx_project ocx_package_manager ocx_setup ocx_announce ocx_script ocx_test_support ocx_cli
+
+tasks:
+  verify:
+    desc: Build ocx-mirror (OCX_MIRROR_DIR, default ../ocx-mirror) against this tree in a disposable worktree and refuse operations-tier links (C-018)
+    summary: |
+      1. `git worktree add` of the mirror's HEAD under .tmp/satellite-verify/
+      2. rsync this tree over the worktree's external/ocx (target/, .git,
+         .tmp/, .agents/ and the local tool dirs excluded)
+      3. `cargo build --workspace` there (CARGO_TARGET_DIR persists under
+         .tmp/satellite-verify/cargo-target, so repeats are warm)
+      4. the forward-closure check: `cargo tree -i <crate>` must answer
+         `did not match any packages` for every operations-tier crate —
+         asserted on that text, never the exit code — except ocx_store,
+         whose direct dependents must be a non-empty subset of {ocx_index,
+         ocx_package}: the ecosystem-tier crates with a direct ocx_store edge
+         in scripts/crate_map.toml (ADR § "Stability tiers"; DX-7/DX-11:
+         unlinked is accepted until one of them links it, and the run says
+         which arm matched); and no mirror source or manifest names an
+         operations crate — a walk listing fewer than two files is refused,
+         never read as "nothing named"
+      5. the worktree is removed (a `defer:` covers the failure path)
+      The live mirror checkout ends byte-identical with one worktree entry.
+    cmds:
+      # A `cmds:` entry, not a precondition: `--force` skips preconditions
+      # and a missing checkout must never read as a pass.
+      - >-
+        test -f '{{.MIRROR_DIR}}/Cargo.toml' || {
+          echo "satellite:verify: no ocx-mirror checkout at {{.MIRROR_DIR}} — set OCX_MIRROR_DIR to a checkout of ocx-sh/ocx-mirror" >&2; exit 1; }
+      # Sweep what an interrupted run left behind.
+      - task: .worktree:remove
+      - defer: { task: .worktree:remove }
+      - mkdir -p '{{.SCRATCH}}'
+      - git -C '{{.MIRROR_DIR}}' worktree add --detach '{{.MIRROR_WORKTREE}}' HEAD
+      - mkdir -p '{{.MIRROR_WORKTREE}}/external/ocx'
+      - >-
+        rsync -a --delete
+        --exclude target/ --exclude .git --exclude .tmp/ --exclude .agents/
+        --exclude .task/ --exclude node_modules/ --exclude .venv/ --exclude test/bin/
+        '{{.ROOT_DIR}}/' '{{.MIRROR_WORKTREE}}/external/ocx/'
+      - task: .build
+      - task: .closure
+      # Explicit as well as deferred: a failing deferred command does not
+      # fail the task, and the worktree entry must be gone on a green run.
+      - task: .worktree:remove
+
+  clean:
+    desc: Delete the satellite scratch under .tmp/satellite-verify — the mirror worktree and its cargo target (several GB per checkout)
+    cmds:
+      - task: .worktree:remove
+      - rm -rf '{{.SCRATCH}}'
+
+  .worktree:remove:
+    internal: true
+    # `worktree remove` drops the registration itself; the prune is for the
+    # other two arms — a directory git refused (it is deleted by hand and the
+    # entry goes stale) or one already gone (.tmp/ is swept on this host), where
+    # a stale entry makes the next `worktree add` refuse the path. No mirror
+    # checkout (an agent worktree, a host without ../ocx-mirror) means no
+    # registration to prune: `clean` must still reach the scratch.
+    cmds:
+      - >-
+        if [ -e '{{.MIRROR_WORKTREE}}' ] && git -C '{{.MIRROR_DIR}}' worktree remove --force '{{.MIRROR_WORKTREE}}'; then
+          :;
+        else
+          rm -rf '{{.MIRROR_WORKTREE}}';
+          [ ! -d '{{.MIRROR_DIR}}' ] || git -C '{{.MIRROR_DIR}}' worktree prune;
+        fi
+
+  .build:
+    internal: true
+    dir: '{{.MIRROR_WORKTREE}}'
+    env:
+      CARGO_TARGET_DIR: '{{.MIRROR_TARGET_DIR}}'
+    # No `--locked`: the mirror's Cargo.lock pins ocx_lib's transitive
+    # versions at the submodule pointer, and the overlaid tree may have moved
+    # them — that drift is lock noise, not the ecosystem break this gate is
+    # for. The re-resolve happens in the disposable worktree and is never
+    # written back to the live checkout.
+    cmds:
+      - cargo build --workspace
+
+  .closure:
+    internal: true
+    dir: '{{.MIRROR_WORKTREE}}'
+    cmds:
+      - |
+        set -euo pipefail
+        failed=0
+        needle='did not match any packages'
+        # 1. Nothing in the mirror workspace resolves an operations crate.
+        #    `cargo tree -i` on a package outside the graph exits 101 with
+        #    that sentence; the exit code alone would also accept a broken
+        #    manifest, so the text is what is asserted.
+        for crate in {{.OPERATIONS_CRATES}}; do
+          [ "$crate" = ocx_store ] && continue
+          pkg=$crate
+          [ "$crate" = ocx_cli ] && pkg=ocx
+          err=$(cargo tree --workspace -i "$pkg" 2>&1 >/dev/null) || true
+          case "$err" in
+            *"$needle"*) echo "closure: $crate ($pkg) is not in the mirror graph" ;;
+            *)
+              echo "closure: $crate ($pkg): cargo tree did not answer '$needle' — linked by the mirror workspace (the satellite linking rule forbids it), or the resolve failed:" >&2
+              cargo tree --workspace -i "$pkg" --depth 1 >&2 || printf '%s\n' "$err" >&2
+              failed=1 ;;
+          esac
+        done
+        # 2. ocx_store: its sanctioned direct dependents are ocx_index and
+        #    ocx_package — the ecosystem-tier crates that scripts/crate_map.toml
+        #    gives a direct ocx_store edge (ADR § "Stability tiers": an
+        #    ecosystem crate may depend on the store; a satellite may not, so
+        #    the mirror's own package must never appear here). Depth 1 of the
+        #    inverted tree must be a non-empty subset of those two; stderr is
+        #    read for the needle and stdout for the dependents, so a cargo
+        #    warning is never a phantom dependent.
+        err=$(cargo tree --workspace -i ocx_store --depth 1 --prefix none --format '{p}' 2>&1 >/dev/null) || true
+        case "$err" in
+          *"$needle"*)
+            echo "closure: ocx_store is not in the mirror graph (DX-7 transitional arm — accepted until ocx_index or ocx_package links it)" ;;
+          *)
+            out=$(cargo tree --workspace -i ocx_store --depth 1 --prefix none --format '{p}' 2>/dev/null) || true
+            dependents=$(printf '%s\n' "$out" | awk 'NF && $1 != "ocx_store" { print $1 }' | sort -u)
+            unsanctioned=$(printf '%s\n' "$dependents" | grep -Ev '^(ocx_index|ocx_package)$' || true)
+            if [ -z "$dependents" ]; then
+              echo "closure: ocx_store is in the mirror graph but cargo tree listed no direct dependent:" >&2
+              printf '%s\n' "$out" "$err" >&2
+              failed=1
+            elif [ -n "$unsanctioned" ]; then
+              echo "closure: ocx_store's direct dependents must be a subset of {ocx_index, ocx_package} (scripts/crate_map.toml), got: $(printf '%s' "$dependents" | tr '\n' ' ')" >&2
+              printf '%s\n' "$out" >&2
+              failed=1
+            else
+              echo "closure: ocx_store is linked only through $(printf '%s' "$dependents" | tr '\n' ' ')"
+            fi ;;
+        esac
+        # 3. No mirror source or manifest names an operations crate, comments
+        #    stripped. Sources match only path-root shapes (`use ocx_x`,
+        #    `use ::ocx_x`, `extern crate ocx_x`, `ocx_x::`, `::ocx_x::`): the
+        #    mirror's own `pipeline::ocx_cli` module is legal and is reached
+        #    as `crate::…::ocx_cli::` / `super::ocx_cli::`, never at a path
+        #    root. Manifests match a dependency key (`ocx_x = …`, the dotted
+        #    `ocx_x.path = …`, the table header `[dependencies.ocx_x]`) or a
+        #    `package = "…"` / `package = '…'` rename, the CLI crate under its
+        #    package name `ocx`. Bracket expressions, not backslashes: awk -v
+        #    rewrites escape sequences in the value.
+        names='(store|shell|project|package_manager|setup|announce|script|test_support|cli)'
+        src_re="(^|[^:[:alnum:]_])(::)?ocx_${names}::|(^|[^[:alnum:]_])(use|extern[[:space:]]+crate)[[:space:]]+(::)?ocx_${names}([^[:alnum:]_]|$)"
+        manifest_re="^[[:space:]]*\"?(ocx|ocx_${names})\"?([.][[:alnum:]_-]+)?[[:space:]]*=|^[[:space:]]*[[][^]]*dependencies[.](ocx|ocx_${names})[]]|package[[:space:]]*=[[:space:]]*['\"](ocx|ocx_${names})['\"]"
+        #    The walk is counted before it is scanned: a pathspec that no
+        #    longer matches the mirror's layout would otherwise hand awk no
+        #    file and the negative would hold vacuously. Counted per
+        #    pathspec, never over the union: the mirror's 248 sources are 237
+        #    under src/, 9 under crates/ and 2 under tests/, so any one live
+        #    spec clears a union floor while the other two match nothing —
+        #    the very drift the message names. One file is the floor per
+        #    spec; the root Cargo.toml is a pathspec matching exactly one.
+        scan() {  # <comment-marker ERE> <ERE> <git pathspec>...
+          local marker=$1 re=$2 spec listed
+          shift 2
+          for spec in "$@"; do
+            listed=$(git ls-files -z -- "$spec" | tr -cd '\0' | wc -c)
+            [ "$listed" -ge 1 ] || { echo "closure: the pathspec '$spec' listed no file — it no longer matches the mirror's layout" >&2; return 1; }
+          done
+          git ls-files -z -- "$@" | xargs -0r awk -v marker="$marker" -v re="$re" \
+            '{ code = $0; sub(marker, "", code); if (code ~ re) printf "%s:%d: %s\n", FILENAME, FNR, $0 }'
+        }
+        src_hits=$(scan '//.*$' "$src_re" 'src/*.rs' 'crates/*.rs' 'tests/*.rs') &&
+          manifest_hits=$(scan '#.*$' "$manifest_re" 'Cargo.toml' '*/Cargo.toml') && walked=1 || walked=0
+        if [ "$walked" -eq 0 ]; then
+          failed=1
+        elif [ -n "$src_hits$manifest_hits" ]; then
+          echo "closure: the mirror names an operations-tier crate (satellite linking rule):" >&2
+          printf '%s\n' "$src_hits" "$manifest_hits" | sed '/^$/d' >&2
+          failed=1
+        else
+          echo "closure: no mirror source or manifest names an operations-tier crate"
+        fi
+        exit "$failed"

@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+//! Witness: one reach into `shell::project`, for the two `self::` fixtures.
+
+pub fn reaches() -> bool {
+    crate::shell::project::lock::is_stale()
+}

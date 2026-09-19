@@ -120,11 +120,11 @@ Otherwise, `AskUserQuestion`:
 - Stage files **by name**, never `git add -A` / `.`. Prevents accidentally-committed secrets **and** bug where pre-staged files from previous session get swept into commit whose message doesn't describe them.
 - Warn before staging anything matching `.env*`, `*credentials*`, `*.pem`, `*.key`, or `token` patterns; require explicit confirmation.
 - **`--amend` must fold dirty tree into HEAD.** When `/commit --amend` invoked and working tree has uncommitted changes, those changes **must** be staged and included in amend — `--amend` with nothing staged silently becomes message-only amend that drops user's active work. Always `git add <files>` before `git commit --amend`, even when user only asked to "amend". After amend, run `git show --stat HEAD` and confirm expected files appear in diff stat before reporting success.
-- Pre-commit hook (`pre_commit_verification.py`) blocks commits without fresh `task verify`. When blocks, run `task verify` (not `--no-verify`), then mark state in separate `Bash` call (combining with commit in one `&&` chain does not satisfy hook):
+- Git's own `commit-msg` hook (`.githooks/commit-msg` → `scripts/commit_gate.py`) blocks commits without fresh verify mark. When blocks, run `task verify` or `task verify:scoped --force` (not `--no-verify`) — both write the mark themselves. Only when a passing verify is in hand and just merge context changed since:
   ```sh
-  echo $(date +%s) > .claude/hooks/.state/commit-verified
+  task verify:mark
   ```
-  Then retry. **On retry, re-run `git add` too** — blocked Bash invocation ran nothing, not even part before `&&`, so staging gone if chained.
+  Manual mark is `scoped`: never satisfies `release:` commit or commit on `main` (those need `task verify`). Bare `echo $(date +%s) > …/commit-verified` reads as *not verified* and overwrites JSON mark a verify just wrote. A mark certifies one HEAD **and one working tree** — a sibling agent worktree at the same HEAD must earn its own. Then retry: staging survives, because the gate aborts the commit and never the `git add` before it.
 - Commit with HEREDOC:
 
   ```sh

@@ -1,0 +1,49 @@
+[package]
+name = "ocx_test_support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# `sha2_oid` is a link-config-only dependency (it enables `sha2` 0.10's `oid`
+# feature for `x509-cert`'s certificate builder); it is intentionally never
+# referenced from Rust, so exempt it from unused-dep tooling.
+[package.metadata.cargo-machete]
+ignored = ["sha2_oid"]
+
+[dependencies]
+syn.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
+
+# `pki` — the minted P-256 root/leaf pair and the in-process HTTPS server the
+# extra-CA-roots handshake tests dial (ocx#448). Normal dependencies of this
+# crate because `pki` is part of its public surface; the crate as a whole is
+# only ever a `[dev-dependencies]` entry (C-025).
+p256.workspace = true
+pem.workspace = true
+pki-types.workspace = true
+sha2_oid.workspace = true
+tokio.workspace = true
+tokio-rustls = { workspace = true, default-features = false }
+x509-cert.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# `fifo` — `mkfifo(2)`, the one filesystem object `std::fs` cannot create.
+libc.workspace = true
+
+[dev-dependencies]
+# The structural guards in `tests/workspace_structure.rs` read the crate map
+# (`scripts/crate_map.toml`), every member manifest and `cargo metadata`.
+# They live here, not in package `ocx`, because they are tests of the
+# workspace and not of the CLI: a crate-manifest edit can then be certified
+# by building this crate instead of escalating the whole gate
+# (`scripts/scoped_gate.py` routes `manifests` at C-019 (2)).
+dunce.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

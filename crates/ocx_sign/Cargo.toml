@@ -1,0 +1,96 @@
+[package]
+name = "ocx_sign"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# The distribution-spec tier: references, digests, manifests, the referrers
+# API and the transport every signature and attestation is pushed and pulled
+# over. The widest edge this crate has, by a long way.
+ocx_oci.workspace = true
+# The verification-material tier: `TrustPolicy`, the identity matchers and the
+# certificate/authority vocabulary `verify` decides against.
+ocx_trust.workspace = true
+# The bottom tier: `FileError`, the env-override table, TLS helpers.
+ocx_util.workspace = true
+# `ExitCode`/`ErrorCategory` — the signing and verification error families
+# classify themselves.
+ocx_exit.workspace = true
+
+# Keyless Sigstore signing (issue #194) — see workspace Cargo.toml for the
+# feature/version rationale (including why `native-tls` must stay off).
+#
+# Features are added here rather than at the workspace declaration because they
+# unify additively with it; `serde_json` below uses the same shape.
+#
+# `sigstore-trust-root` is the only one of these that changes the dependency
+# graph: it pulls `tough` (TUF client) for the embedded Sigstore root, which
+# `verify/trust_root.rs` needs. `sign`/`verify`/`fulcio`/`rekor` are already
+# implied by `bundle` in sigstore 0.14.0 (`bundle = ["sign", "verify"]`, and both
+# list `fulcio` + `rekor`), and are named anyway: the requirement is a caret, so
+# a 0.14.x that narrowed `bundle` would silently drop a capability this milestone
+# depends on. Naming them costs nothing in the graph and closes that class.
+sigstore = { workspace = true, features = [
+  "sign",
+  "verify",
+  "fulcio",
+  "rekor",
+  "sigstore-trust-root",
+] }
+sigstore_protobuf_specs.workspace = true
+pki-types.workspace = true
+p256.workspace = true
+x509-cert.workspace = true
+
+# `raw_value`: the attestation path splices a caller-supplied predicate into the
+# in-toto Statement verbatim (`serde_json::value::RawValue`) — re-serializing
+# through a `Value` would renormalize whitespace and number spelling and change
+# the bytes the DSSE signature commits to.
+serde_json = { workspace = true, features = ["raw_value"] }
+# RFC 8785 JCS: the simplesigning payload and the DSSE pre-authentication
+# encoding are canonicalized before they are signed.
+serde_json_canonicalizer.workspace = true
+serde.workspace = true
+schemars.workspace = true
+
+tokio.workspace = true
+async-trait.workspace = true
+# `SignatureFormat` hand-writes `ValueEnum` so the CLI can accept it; the
+# builder crate alone, never the `clap` derive.
+clap_builder.workspace = true
+reqwest.workspace = true
+url.workspace = true
+chrono.workspace = true
+
+base64.workspace = true
+hex.workspace = true
+sha2.workspace = true
+pem.workspace = true
+zeroize.workspace = true
+
+thiserror.workspace = true
+log.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# `ocx_oci::testing`, the transport doubles the sign/attest/verify pipeline
+# tests drive. A dev edge enabling `__testing` is allowed from every crate
+# (`scripts/crate_map.toml` `[dev].testing_feature`); resolver v3 keeps the
+# feature out of the normal build, so the runtime row above stays seamless.
+ocx_oci = { workspace = true, features = ["__testing"] }
+# `ocx_util::env::overrides`, the process-environment table the key-backend
+# tests write through. Same dev-edge allowance as the row above.
+ocx_util = { workspace = true, features = ["__testing"] }
+
+# Test-only. The error-render tests here construct an `anyhow::Error` to stand
+# in for the binary's top-level formatter. Kept out of `[dependencies]` on
+# purpose: the runtime error surface is `thiserror` (quality-rust-errors.md),
+# and a dev-dependency makes any runtime `use anyhow` a compile error.
+anyhow.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

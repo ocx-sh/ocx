@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::oci::sign::SignErrorKind;
+use ocx_sign::sign::SignErrorKind;
 
 /// Whether a signature is recorded in the Rekor transparency log.
 ///
@@ -102,8 +102,8 @@ impl RekorUploadOpt {
 
 #[cfg(test)]
 mod tests {
+    use crate::exit::ClassifyErrorKind as _;
     use clap::Parser as _;
-    use ocx_lib::cli::ClassifyErrorKind as _;
 
     use super::*;
 

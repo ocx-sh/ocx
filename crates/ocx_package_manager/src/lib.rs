@@ -1,0 +1,759 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+//! Resolution, install, environment composition, patches, launch and execution records.
+//!
+//! # The subtree flattened; `ocx_package_manager::package_manager` does not exist
+//!
+//! `ocx_lib::package_manager::**` became this crate's root, so a caller writes
+//! `ocx_package_manager::composer`, not
+//! `ocx_package_manager::package_manager::composer`. `ocx_oci` set the
+//! precedent and `ocx_project` followed it at WP-33. The three siblings that
+//! came along keep their own names — `patch`, `record` and `launch` are not
+//! the package manager, they are what it drives — and none of their names
+//! collides with a flattened child.
+//!
+//! # Error shape is a contract here, not a detail
+//!
+//! This tier's root `Error` reaches `ocx_index` and `ocx_package`, and its
+//! conversions from both are **hand-written flattening** impls. A derived
+//! `#[from]` in their place wraps where the tier flattens, and because the
+//! wrappers are `#[error(transparent)]` a `source()` walk then steps over the
+//! inner error without yielding it — which silently defeats
+//! `downcast_ref::<ClientError>()`, stops retries being spent, and moves an
+//! exit code. `error.rs`'s shape assertions hold that contract; read them
+//! before changing any `From` here.
+
+pub mod launch;
+pub mod patch;
+pub mod record;
+
+pub mod activation;
+pub mod composer;
+pub mod concurrency;
+pub mod error;
+pub mod launcher;
+pub mod managed_config;
+pub mod mutate;
+
+pub mod tasks;
+
+#[cfg(test)]
+pub mod test_support;
+
+#[cfg(test)]
+mod resolve_env_package_root_tests {
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    use ocx_index::{ChainMode, Index, IndexStore, LocalConfig, LocalIndex};
+    use ocx_store::file_structure::FileStructure;
+
+    /// Helper: construct a minimal offline PackageManager for unit testing.
+    fn make_test_manager(ocx_home: &Path) -> super::PackageManager {
+        let fs = FileStructure::with_root(ocx_home.to_path_buf());
+        let local_index = LocalIndex::new(LocalConfig {
+            index_store: IndexStore::new(ocx_home.join("index")),
+        });
+        let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
+        super::PackageManager::new(
+            fs,
+            index,
+            None, // offline — no OCI client
+            "localhost:5000",
+        )
+    }
+
+    /// The host platform — what a launcher hop composes for.
+    fn host_platform() -> ocx_oci::Platform {
+        ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_env_from_missing_package_root_errors() {
+        let tmp = tempdir().unwrap();
+        let manager = make_test_manager(tmp.path());
+        // Non-existent package root — PackageStore cannot read metadata.json.
+        let result = manager
+            .resolve_env_from_package_root(
+                Path::new("/nonexistent/pkg"),
+                false,
+                super::EnvScope::package_tier(),
+                &host_platform(),
+            )
+            .await;
+        assert!(result.is_err(), "missing package root must return Err");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_env_from_package_root_with_missing_metadata_errors() {
+        let tmp = tempdir().unwrap();
+        let pkg_root = tmp.path().join("pkg");
+        // Package root exists, but no metadata.json — must error.
+        tokio::fs::create_dir_all(&pkg_root).await.unwrap();
+        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
+        let manager = make_test_manager(tmp.path());
+        let result = manager
+            .resolve_env_from_package_root(&pkg_root, false, super::EnvScope::package_tier(), &host_platform())
+            .await;
+        assert!(result.is_err(), "missing metadata.json must return Err");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_env_from_package_root_with_missing_resolve_json_errors() {
+        let tmp = tempdir().unwrap();
+        let pkg_root = tmp.path().join("pkg");
+        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
+        // Write metadata.json but no resolve.json.
+        let meta = serde_json::json!({
+            "type": "bundle",
+            "version": 1,
+            "env": [{"key": "PATH", "type": "path", "required": true, "value": "${installPath}/bin"}]
+        });
+        tokio::fs::write(pkg_root.join("metadata.json"), meta.to_string().as_bytes())
+            .await
+            .unwrap();
+        let manager = make_test_manager(tmp.path());
+        let result = manager
+            .resolve_env_from_package_root(&pkg_root, false, super::EnvScope::package_tier(), &host_platform())
+            .await;
+        assert!(result.is_err(), "missing resolve.json must return Err");
+    }
+}
+
+#[cfg(test)]
+mod install_info_identifier_tests {
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    use ocx_index::{ChainMode, Index, IndexStore, LocalConfig, LocalIndex};
+    use ocx_store::file_structure::FileStructure;
+
+    fn make_test_manager(ocx_home: &Path) -> super::PackageManager {
+        let fs = FileStructure::with_root(ocx_home.to_path_buf());
+        let local_index = LocalIndex::new(LocalConfig {
+            index_store: IndexStore::new(ocx_home.join("index")),
+        });
+        let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
+        super::PackageManager::new(fs, index, None, "localhost:5000")
+    }
+
+    /// The guaranteed-local companion / site-patch lookups must read the
+    /// `--index` / `OCX_INDEX` redirected index home when one is injected,
+    /// and fall back to `$OCX_HOME/index` otherwise.
+    #[test]
+    fn effective_index_store_prefers_redirected_home_over_default() {
+        let ocx_home = tempdir().unwrap();
+        let index_home = tempdir().unwrap();
+        let manager = make_test_manager(ocx_home.path());
+
+        // Default: falls back to the file structure's index home.
+        assert_eq!(
+            manager.effective_index_store().root(),
+            IndexStore::machine_local(manager.file_structure()).root(),
+            "without a redirect the lookup reads $OCX_HOME/index"
+        );
+
+        // Redirected: the guaranteed-local lookups follow the redirect.
+        let redirected = IndexStore::new(index_home.path().join("index"));
+        let manager = manager.with_index(redirected.clone());
+        assert_eq!(
+            manager.effective_index_store().root(),
+            redirected.root(),
+            "with a redirect the lookup must read the redirected index home"
+        );
+    }
+
+    /// Write the minimal set of files that make `install_info_from_package_root`
+    /// succeed for a package rooted at `pkg_root` with the given SHA-256 hex.
+    async fn write_minimal_package_root(pkg_root: &std::path::Path, hex: &str) {
+        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
+        // metadata.json — bare Bundle with no env vars (passes ValidMetadata).
+        let meta = serde_json::json!({"type": "bundle", "version": 1, "env": []});
+        tokio::fs::write(pkg_root.join("metadata.json"), meta.to_string().as_bytes())
+            .await
+            .unwrap();
+        // resolve.json — leaf package with no dependencies.
+        let resolve = serde_json::json!({"dependencies": []});
+        tokio::fs::write(pkg_root.join("resolve.json"), resolve.to_string().as_bytes())
+            .await
+            .unwrap();
+        // digest file written in the same format as `write_digest_file`.
+        tokio::fs::write(pkg_root.join("digest"), format!("sha256:{hex}").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    /// Two distinct package roots (as passed to `install_info_from_package_root`)
+    /// must produce distinct repository components so they do not collapse onto
+    /// the same key in the `seen_repos` dedup map inside `resolve_env`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn distinct_package_roots_yield_distinct_identifiers() {
+        let tmp = tempdir().unwrap();
+        let manager = make_test_manager(tmp.path());
+
+        let root_a = tmp.path().join("pkg_a");
+        let root_b = tmp.path().join("pkg_b");
+        // Two distinct 64-char SHA-256 hex digests.
+        let hex_a = "a".repeat(64);
+        let hex_b = "b".repeat(64);
+
+        write_minimal_package_root(&root_a, &hex_a).await;
+        write_minimal_package_root(&root_b, &hex_b).await;
+
+        let info_a = manager
+            .install_info_from_package_root(&root_a)
+            .await
+            .expect("package root A must succeed");
+        let info_b = manager
+            .install_info_from_package_root(&root_b)
+            .await
+            .expect("package root B must succeed");
+
+        assert_ne!(
+            info_a.identifier().repository(),
+            info_b.identifier().repository(),
+            "distinct package roots must have distinct synthetic repository components"
+        );
+        assert!(
+            info_a.identifier().repository().starts_with("file-url-mode/"),
+            "synthetic repository must start with 'file-url-mode/'"
+        );
+        assert!(
+            info_b.identifier().repository().starts_with("file-url-mode/"),
+            "synthetic repository must start with 'file-url-mode/'"
+        );
+    }
+
+    /// Two distinct content digests that share the first 16 hex characters
+    /// must still yield DISTINCT synthetic repository components.
+    ///
+    /// Regression guard: an earlier shape truncated to `digest.hex()[..16]`,
+    /// which collapsed any pair of package roots whose digests collided in
+    /// their first 64 bits onto the same `(registry, repository)` dedup key
+    /// inside `resolve_env`. One side then surfaced as a "conflicting digest"
+    /// warning and was silently dropped. Using the full digest hex makes such
+    /// a collision probabilistically impossible (full SHA-256 keyspace).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pkg_roots_with_same_16char_digest_prefix_do_not_collapse() {
+        let tmp = tempdir().unwrap();
+        let manager = make_test_manager(tmp.path());
+
+        let root_a = tmp.path().join("pkg_a");
+        let root_b = tmp.path().join("pkg_b");
+        // Two 64-char SHA-256 hex digests sharing the first 16 hex chars
+        // ("aaaaaaaaaaaaaaaa") but diverging from char 17 onwards.
+        let prefix = "a".repeat(16);
+        let hex_a = format!("{prefix}{}", "0".repeat(48));
+        let hex_b = format!("{prefix}{}", "f".repeat(48));
+        assert_eq!(&hex_a[..16], &hex_b[..16], "test fixture must share 16-char prefix");
+        assert_ne!(hex_a, hex_b, "test fixture must diverge after the prefix");
+
+        write_minimal_package_root(&root_a, &hex_a).await;
+        write_minimal_package_root(&root_b, &hex_b).await;
+
+        let info_a = manager
+            .install_info_from_package_root(&root_a)
+            .await
+            .expect("package root A must succeed");
+        let info_b = manager
+            .install_info_from_package_root(&root_b)
+            .await
+            .expect("package root B must succeed");
+
+        assert_ne!(
+            info_a.identifier().repository(),
+            info_b.identifier().repository(),
+            "digests sharing the first 16 hex chars must still yield distinct synthetic repositories"
+        );
+        // Sanity: synthetic repo string must include the full 64-char digest hex,
+        // not the truncated 16-char prefix that caused the original collision.
+        assert!(
+            info_a.identifier().repository().ends_with(&hex_a),
+            "synthetic repo for A must embed the full 64-char digest hex"
+        );
+        assert!(
+            info_b.identifier().repository().ends_with(&hex_b),
+            "synthetic repo for B must embed the full 64-char digest hex"
+        );
+    }
+
+    /// Calling `install_info_from_package_root` twice on the same root must
+    /// yield the same repository component (idempotency).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn same_package_root_yields_stable_identifier() {
+        let tmp = tempdir().unwrap();
+        let manager = make_test_manager(tmp.path());
+
+        let root = tmp.path().join("pkg");
+        write_minimal_package_root(&root, &"c".repeat(64)).await;
+
+        let info_first = manager
+            .install_info_from_package_root(&root)
+            .await
+            .expect("first call must succeed");
+        let info_second = manager
+            .install_info_from_package_root(&root)
+            .await
+            .expect("second call must succeed");
+
+        assert_eq!(
+            info_first.identifier().repository(),
+            info_second.identifier().repository(),
+            "repeated calls on the same root must produce a stable identifier"
+        );
+    }
+}
+
+// Re-export types needed by other modules and CLI commands.
+pub use composer::{ToolchainLinks, pinned_for_project, pinned_ladder_for_project};
+pub use concurrency::Concurrency;
+pub use error::DependencyError;
+pub use error::{Error, Result, file_error};
+pub use mutate::{MutationOutcome, ToolchainRender, default_group_roots, skipped_render_warnings};
+pub use tasks::attest::{AttestOptions, AttestReport};
+pub use tasks::auto_verify::{AutoVerify, AutoVerifyInput};
+pub use tasks::clean::{CleanResult, CleanedObject};
+pub use tasks::common::{ClosureEdge, ClosureEnvVar, ClosureNode, WireSelectionOutcome};
+pub use tasks::find_or_install::{Arrival, FoundPackage};
+pub use tasks::inspect::{
+    ClosureConflicts, EntrypointConflict, InspectClosure, InspectOptions, InspectResult, RepositoryConflict, Surface,
+};
+pub use tasks::lazy_advisory::LazyAdvisory;
+pub use tasks::managed_config::{ManagedConfigRefreshOutcome, ManagedConfigUpdateResult};
+pub use tasks::patch_discovery::PatchDiscoveryMode;
+pub use tasks::patch_publish::PatchPublishReport;
+pub use tasks::patch_sync::PatchSyncReport;
+// The request/report vocabulary `ocx_cli` needs to spell a `render_toolchain`
+// call. Every other task's types are re-exported here; these five were the
+// omission (RUL-48) that made `PackageManager::render_toolchain` unreachable
+// from outside the crate.
+pub use tasks::render_toolchain::{RenderOutcome, RenderReport, RenderRequest, RenderedArtifact, RenderedItem};
+pub use tasks::resolve::{
+    AdmittedClaims, ChainBlob, ChainRole, EnvScope, PatchOverlay, PatchProvenance, PatchRootScope, ResolvedChain,
+    SitePatchRoots,
+};
+pub use tasks::sbom::{SbomOptions, SbomReport};
+pub use tasks::sign::{SignOptions, SignReport, SweptOutcome, SweptTag};
+pub use tasks::update_check::{HandoffFailure, SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult};
+pub use tasks::verify::{VerifyOptions, VerifyReport};
+
+use crate::patch::PatchSnapshot;
+use ocx_config::patch::ResolvedPatchConfig;
+use ocx_store::file_structure;
+
+/// Central facade for package operations (find, install, uninstall, etc.).
+///
+/// `PackageManager` holds all the context that tasks need — file structure,
+/// index, OCI client — and is cheap to [`Clone`].
+///
+/// Environment variable resolution uses persisted `resolve.json` files
+/// written at install time — see [`resolve_env`](Self::resolve_env).
+///
+/// Progress is rendered through a span-free [`ProgressManager`]
+/// (`ocx_console::progress`); task code creates RAII bar/spinner guards
+/// from it. See ADR adr_progress_architecture for why progress no longer
+/// rides the `tracing` span tree.
+///
+/// The optional [`ResolvedPatchConfig`] enables the patch-discovery hook
+/// after a user-requested base install. When `None`, the patch tier is
+/// disabled and `discover_and_install_patches` is a no-op.
+#[derive(Clone)]
+pub struct PackageManager {
+    file_structure: file_structure::FileStructure,
+    index: ocx_index::Index,
+    client: Option<ocx_oci::Client>,
+    default_registry: String,
+    progress: ocx_console::progress::ProgressManager,
+    /// Site-tier patch registry configuration.
+    ///
+    /// `None` = no patch tier configured (the `[patches]` section is absent
+    /// from every loaded config tier). When `Some`, `discover_and_install_patches`
+    /// runs after every user-requested base install (online only).
+    patches: Option<ResolvedPatchConfig>,
+    /// Frozen companion pinning snapshot for opt-in determinism.
+    ///
+    /// When `Some`, the compose overlay prefers the snapshot's pinned
+    /// companion digests over live tag lookups.  `None` = live lookups only.
+    /// Set via `OCX_PATCH_SNAPSHOT` / `ocx patch freeze`.
+    patch_snapshot: Option<PatchSnapshot>,
+    /// Dedicated OCI client for fetching the managed-config artifact itself.
+    ///
+    /// Built from the **local-only** mirror view (system/user/home/
+    /// `OCX_CONFIG`/`--config`/`OCX_MIRRORS` — the managed payload's OWN
+    /// `[mirrors]` excluded), so the tier can never redirect or hijack the
+    /// route used to fetch itself (ADR "Mirror posture"). Deliberately
+    /// separate from `client` (which routes through the FULL merged mirror
+    /// map, managed payload included, for every other OCI operation).
+    /// `None` when offline.
+    managed_config_client: Option<ocx_oci::Client>,
+    /// The effective index store home (`--index` / `OCX_INDEX` redirected),
+    /// used by the guaranteed-local companion / site-patch lookups so they read
+    /// the SAME store the main `index` resolves through. `None` (the default)
+    /// falls back to the file structure's machine-local index home — correct for tests and for any
+    /// invocation without a redirect. Set by `Context::try_init`.
+    index_store: Option<ocx_index::IndexStore>,
+    /// Policy-gated auto-verify configuration.
+    ///
+    /// `None` = no trust policy configured; the auto-verify hook in the pull
+    /// pipeline is a no-op. When `Some`, [`maybe_auto_verify`](Self::maybe_auto_verify)
+    /// runs after each package's manifest resolves and before download. Attached
+    /// once on the shared manager in `Context::try_init` via
+    /// [`with_auto_verify`](Self::with_auto_verify), so every install surface
+    /// (install, pull, exec, env, run, patch discovery) inherits it, not just
+    /// install/pull.
+    auto_verify: Option<AutoVerify>,
+}
+
+impl PackageManager {
+    /// Construct a new `PackageManager`.
+    ///
+    /// `patches` comes from `config_view.patches` — pass `None` when no
+    /// `[patches]` section is configured. The patch tier is disabled when
+    /// `None`; discovery is a no-op.
+    pub fn new(
+        file_structure: file_structure::FileStructure,
+        index: ocx_index::Index,
+        client: Option<ocx_oci::Client>,
+        default_registry: impl Into<String>,
+    ) -> Self {
+        let default_registry = default_registry.into();
+        Self {
+            file_structure,
+            index,
+            client,
+            default_registry,
+            progress: ocx_console::progress::ProgressManager::disabled(),
+            patches: None,
+            patch_snapshot: None,
+            managed_config_client: None,
+            index_store: None,
+            auto_verify: None,
+        }
+    }
+
+    /// Inject the effective index collection home (`--index` / `OCX_INDEX`
+    /// redirected). Called from `Context::try_init` so the guaranteed-local
+    /// companion / site-patch lookups read the same store the main `index`
+    /// resolves through, not the default `$OCX_HOME/index`.
+    pub fn with_index(mut self, index_store: ocx_index::IndexStore) -> Self {
+        self.index_store = Some(index_store);
+        self
+    }
+
+    /// The effective index store for guaranteed-local lookups: the
+    /// `--index` / `OCX_INDEX` redirect when set, else the machine-local home.
+    pub(crate) fn effective_index_store(&self) -> ocx_index::IndexStore {
+        self.index_store
+            .clone()
+            .unwrap_or_else(|| ocx_index::IndexStore::machine_local(&self.file_structure))
+    }
+
+    /// Injects the dedicated managed-config-fetch client (built from the
+    /// local-only mirror view). Called from `Context::try_init`. Returns
+    /// `self` for builder-style chaining alongside `with_patches`.
+    pub fn with_managed_config_client(mut self, client: Option<ocx_oci::Client>) -> Self {
+        self.managed_config_client = client;
+        self
+    }
+
+    /// The dedicated managed-config-fetch client, if one was injected — the
+    /// client whose trust set must be the local-only view (D-6, S-006).
+    pub fn managed_config_client(&self) -> Option<&ocx_oci::Client> {
+        self.managed_config_client.as_ref()
+    }
+
+    /// Whether a managed-config fetch can even be attempted: `false` when the
+    /// dedicated managed-config client is absent (offline).
+    ///
+    /// The single predicate for "would a managed-config fetch reach the
+    /// network at all" — `ocx self setup` / `ocx config setup` consult it to
+    /// skip the refresh of an already-adopted seed instead of attempting a
+    /// fetch that can only fail. Whatever narrows the client's construction
+    /// (offline today, `--frozen` later) narrows the refresh with it.
+    pub fn can_fetch_managed_config(&self) -> bool {
+        self.managed_config_client.is_some()
+    }
+
+    /// Inject the policy-gated auto-verify configuration.
+    ///
+    /// Called once from `Context::try_init` with `Some(..)` only when at
+    /// least one operator trust policy is configured; `None` disables the hook
+    /// (no-op). install/pull refine the opt-out from their `--verify`/
+    /// `--no-verify` flag via `conventions::manager_with_verify_flag` — every
+    /// other surface relies on `OCX_NO_VERIFY` alone. Returns `self` for
+    /// builder-style chaining.
+    #[must_use]
+    pub fn with_auto_verify(mut self, auto_verify: Option<AutoVerify>) -> Self {
+        self.auto_verify = auto_verify;
+        self
+    }
+
+    /// The injected auto-verify configuration, if any.
+    pub fn auto_verify(&self) -> Option<&AutoVerify> {
+        self.auto_verify.as_ref()
+    }
+
+    /// Inject the resolved patch configuration into this manager.
+    ///
+    /// Called from `Context::try_init` after `config_view.patches` is resolved.
+    /// Returns `self` for builder-style chaining alongside `with_progress`.
+    pub fn with_patches(mut self, patches: Option<ResolvedPatchConfig>) -> Self {
+        self.patches = patches;
+        self
+    }
+
+    /// Returns the resolved patch configuration, if any.
+    pub fn patches(&self) -> Option<&ResolvedPatchConfig> {
+        self.patches.as_ref()
+    }
+
+    /// Inject the active patch snapshot for opt-in compose determinism.
+    ///
+    /// When `Some`, the compose overlay prefers the snapshot's pinned
+    /// companion digests over live tag lookups. Called from
+    /// `Context::try_init` after loading the snapshot from
+    /// `OCX_PATCH_SNAPSHOT`. Returns `self` for builder-style chaining.
+    pub fn with_patch_snapshot(mut self, patch_snapshot: Option<PatchSnapshot>) -> Self {
+        self.patch_snapshot = patch_snapshot;
+        self
+    }
+
+    /// Returns the active patch snapshot, if any.
+    pub fn patch_snapshot(&self) -> Option<&PatchSnapshot> {
+        self.patch_snapshot.as_ref()
+    }
+
+    /// Sets the shared span-free progress manager. The CLI injects its
+    /// stderr manager here; library/test consumers keep the disabled
+    /// no-op default from [`new`](Self::new).
+    ///
+    /// The client's transfer bars follow the same manager: a manager swapped
+    /// in after construction (`materialize_deferred`'s `lazy-report` channel)
+    /// would otherwise govern the task guards while the download bar kept
+    /// rendering on whatever the process was built with.
+    pub fn with_progress(mut self, progress: ocx_console::progress::ProgressManager) -> Self {
+        self.client = self.client.map(|client| client.with_progress(progress.clone()));
+        self.progress = progress;
+        self
+    }
+
+    /// The shared progress manager. Task code calls
+    /// [`spinner`](ocx_console::progress::ProgressManager::spinner) /
+    /// [`bytes`](ocx_console::progress::ProgressManager::bytes) on it.
+    pub fn progress(&self) -> &ocx_console::progress::ProgressManager {
+        &self.progress
+    }
+
+    pub fn file_structure(&self) -> &file_structure::FileStructure {
+        &self.file_structure
+    }
+
+    pub fn index(&self) -> &ocx_index::Index {
+        &self.index
+    }
+
+    /// A read-only view of the default index that resolves identically but
+    /// writes nothing into the permanent local index (no dispatch object, no
+    /// tag pointer) — content-addressed blob writes still happen. Used by
+    /// read-only commands (`ocx package inspect`) so merely looking at a
+    /// package never grows the committed index. See
+    /// [`ocx_index::Index::read_only_view`].
+    pub fn read_only_index(&self) -> ocx_index::Index {
+        self.index.read_only_view()
+    }
+
+    /// Returns the OCI client as an `Option`. `None` indicates offline mode.
+    /// Callers that need to fail loudly when no client is available should use
+    /// [`require_client`][Self::require_client] instead.
+    pub fn client(&self) -> Option<&ocx_oci::Client> {
+        self.client.as_ref()
+    }
+
+    /// Returns the OCI client, or `Err(OfflineMode)` when no client is
+    /// configured. Use this at sites that genuinely need network access.
+    pub fn require_client(&self) -> crate::Result<&ocx_oci::Client> {
+        self.client.as_ref().ok_or(crate::Error::OfflineMode)
+    }
+
+    pub fn default_registry(&self) -> &str {
+        &self.default_registry
+    }
+
+    pub fn is_offline(&self) -> bool {
+        self.client.is_none()
+    }
+
+    /// Builds an [`InstallInfo`] for an already-installed package whose
+    /// on-disk **package root** is known. Used by `ocx launcher exec <pkg-root>`
+    /// to bypass identifier resolution and read the installed metadata
+    /// directly.
+    ///
+    /// Reads `metadata.json`, `resolve.json`, and the `digest` file from
+    /// `pkg_root`. The returned [`InstallInfo`] holds `pkg_root` itself; env
+    /// resolution interpolates `${installPath}` against `info.dir().content()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `pkg_root` does not exist or any of the required
+    /// files are missing or malformed.
+    pub async fn install_info_from_package_root(
+        &self,
+        pkg_root: &std::path::Path,
+    ) -> crate::Result<ocx_package::install_info::InstallInfo> {
+        use ocx_package::install_info::InstallInfo;
+        use ocx_package::metadata::ValidMetadata;
+        use ocx_package::resolved_package::ResolvedPackage;
+        use ocx_store::file_structure::read_digest_file;
+        use ocx_util::prelude::SerdeExt;
+
+        let objects = &self.file_structure.packages;
+
+        // `*_for_content` accepts either a `content/` path or a package root
+        // (see `package_dir_for_content`), so the same helpers serve both the
+        // install-symlink chase and the `launcher exec` pkg-root flow.
+        let metadata_path = objects.metadata_for_content(pkg_root)?;
+        let resolve_path = objects.resolve_for_content(pkg_root)?;
+        let (metadata_result, resolved_result) = tokio::join!(
+            ocx_package::metadata::Metadata::read_json(&metadata_path),
+            ResolvedPackage::read_json(&resolve_path),
+        );
+        // Centralize publish-time validation at consumption: every on-disk
+        // metadata blob must clear `ValidMetadata::try_from` before flowing
+        // into env resolution (mirrors `tasks/common.rs::load_object_data`).
+        // Catches stale or tampered metadata that predates current rules.
+        let metadata: ocx_package::metadata::Metadata = ValidMetadata::try_from(metadata_result?)?.into();
+        let resolved = resolved_result?;
+
+        // Reconstruct a PinnedIdentifier from the sibling `digest` file.
+        // The identifier is used only for dedup tracking in resolve_env.
+        // Uses the full content digest hex; collision-resistant. The synthetic
+        // repository path is internal-only — never persisted in OCI manifests
+        // and never compared with real registry repositories — so the longer
+        // string is acceptable in exchange for full SHA-256 (~2^256) keyspace,
+        // which makes a `(registry, repository)` collision between two distinct
+        // pkg-roots probabilistically impossible.
+        let digest_path = objects.digest_file_for_content(pkg_root)?;
+        let digest = read_digest_file(&digest_path).await?;
+        let repo_name = format!("file-url-mode/{}", digest.hex());
+        let base_id = ocx_oci::Identifier::new_registry(repo_name, &self.default_registry).clone_with_digest(digest);
+        let pinned = ocx_oci::PinnedIdentifier::try_from(base_id)?;
+
+        Ok(InstallInfo::new(
+            pinned,
+            metadata,
+            resolved,
+            ocx_store::file_structure::PackageDir {
+                dir: pkg_root.to_path_buf(),
+            },
+        ))
+    }
+
+    /// Resolves environment entries for a package known only by its on-disk
+    /// package-root path.
+    ///
+    /// Convenience wrapper around [`Self::install_info_from_package_root`] +
+    /// [`Self::resolve_env`]. Returns the same `Vec<Entry>` shape as
+    /// identifier mode so `ocx launcher exec <pkg-root>` has parity with
+    /// `ocx exec <identifier>`.
+    pub async fn resolve_env_from_package_root(
+        &self,
+        pkg_root: &std::path::Path,
+        self_view: bool,
+        scope: crate::tasks::resolve::EnvScope,
+        platform: &ocx_oci::Platform,
+    ) -> crate::Result<Vec<ocx_package::metadata::env::entry::Entry>> {
+        let info = self.install_info_from_package_root(pkg_root).await?;
+        self.resolve_env(&[std::sync::Arc::new(info)], self_view, scope, platform)
+            .await
+    }
+
+    /// Boundary primitive for hook-style commands (`shell-hook`, `hook-env`,
+    /// future `generate direnv`) that must NOT contact any registry,
+    /// regardless of the global `--remote` / `--offline` flags.
+    ///
+    /// Builds a fresh [`PackageManager`] using the supplied local cache
+    /// `local_index` as the *only* index source: chain mode is forced to
+    /// [`ocx_index::ChainMode::Offline`], and the OCI client is dropped to
+    /// `None`. Any incidental tag/manifest lookup short-circuits to the
+    /// local cache; an attempt to use the (now-absent) client surfaces as
+    /// `Error::OfflineMode`. This is the layer the security boundary docs
+    /// in ADR §5B (decision 5B) reference — see
+    /// `.claude/artifacts/adr_project_toolchain_config.md`.
+    ///
+    /// Caller passes the local-index handle separately because the manager
+    /// holds a type-erased `Index` (which may be `Default`, `Remote`, or
+    /// already `Offline`); reaching back through the type-erased boundary
+    /// would couple this primitive to `ChainedIndex` internals. The CLI
+    /// `Context` already exposes `local_index().clone()`, so the call site
+    /// is `context.manager().offline_view(context.local_index().clone())`.
+    pub fn offline_view(&self, local_index: ocx_index::LocalIndex) -> Self {
+        // Attach the machine-global blob store so a lock-pinned tool's leaf
+        // platform manifest (content, cached in `$OCX_HOME/blobs` at install —
+        // never the local index, A3) resolves offline with zero network: an
+        // an absent dispatch object is recovered from the blob store before the (absent)
+        // source chain (`adr_index_indirection.md` A3 step 2 / B2). Without this
+        // the global-toolchain / direnv exporters silently omit every installed
+        // tool whose leaf is not in `o/`.
+        let offline_index = ocx_index::Index::from_chained_with_content_store(
+            local_index,
+            Vec::new(),
+            ocx_index::ChainMode::Offline,
+            self.file_structure.blobs.clone(),
+        );
+        Self {
+            file_structure: self.file_structure.clone(),
+            index: offline_index,
+            client: None,
+            default_registry: self.default_registry.clone(),
+            progress: self.progress.clone(),
+            // Preserve the patch config. `offline_view` disables the *network*
+            // (client = None → `is_offline()` true), NOT the patch tier. These are
+            // two separate concerns:
+            //
+            // - Phase 3 discovery (`discover_and_install_patches`) requires network
+            //   to fetch descriptor blobs, and already short-circuits on
+            //   `self.is_offline()` — so keeping `patches` here does NOT re-enable
+            //   any network discovery on an offline view.
+            // - Phase 4 site-overlay (`build_site_patch_set`) is compose-time and
+            //   purely local (tag store + descriptor blobs + installed companions).
+            //   It MUST still run on offline env paths (`ocx direnv export`, the
+            //   global toolchain) so already-discovered companion overlays apply,
+            //   and so a `required` companion that is unavailable **fails closed**.
+            //
+            // Dropping `patches` here would silently skip required overlays on
+            // exactly those local-only exporters — a fail-OPEN gap violating the
+            // ADR offline contract (C4 "works offline once synced", C6 zip-`OCX_HOME`
+            // parity, C7 fail-closed). So the tier is carried through unchanged.
+            patches: self.patches.clone(),
+            // Carry the snapshot through so offline env paths (direnv export,
+            // global toolchain) still resolve frozen companion digests when a
+            // snapshot is active.
+            patch_snapshot: self.patch_snapshot.clone(),
+            // An offline view has no network route at all — the managed-config
+            // fetch client is dropped along with the main client.
+            managed_config_client: None,
+            // Carry the effective index-store redirect so an offline view's
+            // guaranteed-local lookups read the same home as the parent.
+            index_store: self.index_store.clone(),
+            // `offline_view` is a hook-command primitive (env export, global
+            // toolchain) that never installs, so the auto-verify hook is never
+            // reached; carry the config through unchanged for parity.
+            auto_verify: self.auto_verify.clone(),
+        }
+    }
+
+    /// A view of this manager whose resolution writes nothing into the
+    /// permanent local index — every index lookup routes through
+    /// [`ocx_index::Index::read_only_view`]. Content still warms the GC-able
+    /// blob cache; the committed index is never grown. Used by
+    /// `ocx package inspect` so a read-only look at a package leaves the index
+    /// untouched. Everything else (client, blob store, patches) is shared with
+    /// the parent unchanged.
+    pub fn read_only_view(&self) -> Self {
+        Self {
+            index: self.index.read_only_view(),
+            ..self.clone()
+        }
+    }
+}

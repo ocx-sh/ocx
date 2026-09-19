@@ -1,0 +1,112 @@
+# The one allowed-dependency table of the crate split (plan C-046).
+#
+# Read by:
+#   - `crates/ocx_test_support/tests/workspace_structure.rs::deps_direction` — every
+#     `ocx_*` edge in the `cargo metadata` resolve graph (C-009);
+#
+# Source: `.claude/artifacts/adr_crate_split_workspace.md` § "Architecture —
+# the crate map" ("May depend on" column) as corrected by
+# `design_spec_crate_split_inversions.md` § A.4 (D-037): `ocx_package_manager`
+# += `ocx_trust`, `ocx_shell`; `ocx_setup` += `ocx_index`, `ocx_package`;
+# `ocx_test_support` = none. A dependency not listed here is a defect even
+# when Cargo would accept it.
+#
+# Keys are Cargo package names (`crates/ocx_cli` is the package `ocx`).
+# Every key must be a workspace member and every value must be a key
+# (`crate_map_toml_matches_rust_table` asserts both).
+
+[allowed]
+# ---- the 17 crates of the map (16 product crates + ocx_test_support) ----
+ocx_exit = []
+ocx_util = []
+ocx_console = ["ocx_exit", "ocx_util"]
+ocx_oci = ["ocx_util", "ocx_console", "ocx_exit"]
+ocx_trust = ["ocx_oci", "ocx_util"]
+ocx_sign = ["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit"]
+ocx_config = ["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit"]
+ocx_store = ["ocx_config", "ocx_oci", "ocx_util", "ocx_exit"]
+ocx_index = ["ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit"]
+ocx_package = ["ocx_index", "ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit"]
+ocx_shell = ["ocx_package", "ocx_config", "ocx_store", "ocx_oci", "ocx_util", "ocx_console", "ocx_exit"]
+ocx_project = [
+    "ocx_shell",
+    "ocx_package",
+    "ocx_index",
+    "ocx_store",
+    "ocx_config",
+    "ocx_trust",
+    "ocx_oci",
+    "ocx_util",
+    "ocx_exit",
+]
+# D-037: += ocx_trust (auto_verify's `TrustPolicy`), += ocx_shell (1.16 moves
+# `activation.rs` here and it drives `shell::reconcile`).
+ocx_package_manager = [
+    "ocx_project",
+    "ocx_package",
+    "ocx_index",
+    "ocx_sign",
+    "ocx_store",
+    "ocx_config",
+    "ocx_oci",
+    "ocx_util",
+    "ocx_console",
+    "ocx_exit",
+    "ocx_trust",
+    "ocx_shell",
+]
+ocx_announce = ["ocx_index", "ocx_package", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit"]
+ocx_script = ["ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_console"]
+# D-037: += ocx_index (setup.rs builds an `Index`), += ocx_package
+# (bootstrap's `Version`).
+ocx_setup = [
+    "ocx_package_manager",
+    "ocx_shell",
+    "ocx_config",
+    "ocx_store",
+    "ocx_oci",
+    "ocx_util",
+    "ocx_exit",
+    "ocx_index",
+    "ocx_package",
+]
+# D-037 / design spec § E: zero `ocx_*` dependencies, dev-dependency only.
+ocx_test_support = []
+
+# ---- transition rows: the crates that exist around the map today ----
+# The CLI (package `ocx`) is the application layer: everything.
+ocx = [
+    "ocx_exit",
+    "ocx_util",
+    "ocx_console",
+    "ocx_oci",
+    "ocx_trust",
+    "ocx_sign",
+    "ocx_config",
+    "ocx_store",
+    "ocx_index",
+    "ocx_package",
+    "ocx_shell",
+    "ocx_project",
+    "ocx_package_manager",
+    "ocx_announce",
+    "ocx_script",
+    "ocx_setup",
+]
+# Build-only schema generator (ADR map + C-067).
+ocx_schema = ["ocx", "ocx_oci", "ocx_config", "ocx_package", "ocx_project", "ocx_package_manager"]
+# The Windows launcher shim: nothing.
+ocx_shim = []
+
+# Dev edges (`[dev-dependencies]`) are judged against this section instead.
+# A dev-only edge never legalises a runtime one: a crate whose dev edge is
+# listed here still fails `deps_direction` the moment the same edge appears
+# under `[dependencies]` or `[build-dependencies]`.
+[dev]
+# May be a dev-dependency of every crate.
+allowed_everywhere = ["ocx_test_support"]
+# A dev edge that enables this feature on its target is allowed from every
+# crate (design spec § E: `ocx_util = { workspace = true, features =
+# ["__testing"] }` under `[dev-dependencies]` is how a test reaches the
+# process-environment override seam).
+testing_feature = "__testing"

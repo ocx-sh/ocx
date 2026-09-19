@@ -19,7 +19,7 @@ pub struct LoginResult {
 }
 
 impl Printable for LoginResult {
-    fn print_plain(&self, _printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, _printer: &ocx_console::DataInterface) {
         // Intentionally empty: success is reported on stderr. Only the JSON
         // path writes to stdout (the data interface).
     }
@@ -36,7 +36,7 @@ pub struct LogoutResult {
 }
 
 impl Printable for LogoutResult {
-    fn print_plain(&self, _printer: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, _printer: &ocx_console::DataInterface) {
         // Intentionally empty: success is reported on stderr.
     }
 }

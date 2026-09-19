@@ -33,12 +33,12 @@ tasks:
       - bash scripts/statusline-install.sh
 
   tests:
-    desc: Validate AI configuration structural integrity (.claude/tests/test_ai_config.py)
+    desc: Validate AI configuration structural integrity (.claude/tests/test_ai_config.py + test_hooks.py + test_workflows.py)
     dir: '{{.TASKFILE_DIR}}'
     cmds:
       - mkdir -p {{.REPORTS_DIR}}
       - >
-        uv run --directory tests pytest test_ai_config.py -v
+        uv run --directory tests pytest test_ai_config.py test_hooks.py test_workflows.py -v
         --junitxml={{.REPORTS_DIR}}/tests.junit.xml
     sources: *claude-sources
     generates:

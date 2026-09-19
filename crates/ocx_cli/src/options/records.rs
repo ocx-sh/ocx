@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::record::RecordsOptions;
+use ocx_package_manager::record::RecordsOptions;
 
 /// Where to write the execution record for this invocation.
 ///

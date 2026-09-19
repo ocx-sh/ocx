@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::activation::ProjectIdentity;
-use ocx_lib::project::consent::{self, Revoked};
+use ocx_package_manager::activation::ProjectIdentity;
+use ocx_project::consent::{self, Revoked};
 
 use crate::app::project_context::resolve_project_paths;
 

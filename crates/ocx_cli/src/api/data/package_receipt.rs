@@ -36,7 +36,7 @@ impl From<&BuildReceipt> for PackageReceipt {
 }
 
 impl Printable for PackageReceipt {
-    fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
+    fn print_plain(&self, data: &ocx_console::DataInterface) {
         let theme = data.theme();
         for (label, value) in [("platform:", &self.platform), ("identifier:", &self.identifier)] {
             if let Some(value) = value {

@@ -231,3 +231,54 @@ def test_pull_rejects_escaping_prefix_annotation(ocx: OcxRunner, unique_repo: st
     # OCX_HOME (a botched implementation would create the escaped path).
     escaped = list(Path(ocx.ocx_home).rglob("evil"))
     assert not escaped, f"escaping prefix wrote outside the package tree: {escaped}"
+
+
+# ---------------------------------------------------------------------------
+# Why `AssembleError::SymlinkWalk` has no CLI-reachable path
+# ---------------------------------------------------------------------------
+
+
+def test_a_prefix_resolving_through_an_earlier_layers_symlink_collides_first(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """The overlap guard pre-empts the symlink guard, and this pins that premise.
+
+    `assemble` refuses a non-empty `prefix` whose ancestor chain under the
+    content root resolves through a symlink (D9/D10) — `AssembleError::
+    SymlinkWalk`, classified 64. Setting that up from the published CLI grammar
+    means one layer planting `d` as a symlink and the next asking for
+    `prefix=d/sub`, and it cannot be done: a prefix contributes its own ancestor
+    directories, so `d` is contributed by both layers and the **cross-layer
+    overlap** check refuses the install first, as 74.
+
+    So `SymlinkWalk` is unreachable by construction rather than merely
+    unexercised, and the reason is a different guard rather than an absent one.
+    This test is that premise's sentinel: if the overlap check ever stops
+    covering a prefix's synthesized ancestors, the install gets far enough to
+    hit the symlink walk, the code becomes 64, and this assertion reds — which
+    is the moment `SymlinkWalk` needs a case of its own.
+    """
+    layer_a = _make_layer_content(tmp_path, "symlinked", {"keep/marker": "planted"})
+    (layer_a / "d").symlink_to("keep", target_is_directory=True)
+    layer_b = _make_layer_content(tmp_path, "through", {"tool": "#!/bin/sh\necho hi\n"})
+    bundle_a = _bundle_layer(ocx, layer_a, tmp_path)
+    bundle_b = _bundle_layer(ocx, layer_b, tmp_path)
+
+    meta = _write_meta(tmp_path)
+    short = f"{unique_repo}:1.0.0"
+    fq = f"{ocx.registry}/{short}"
+    ocx.plain(
+        "package", "push", "-p", current_platform(), "-m", str(meta), "-i", fq,
+        str(bundle_a),
+        f"{bundle_b}:prefix=d/sub",
+    )
+    ocx.plain("index", "update", short)
+
+    result = ocx.plain("package", "install", short, check=False)
+    assert result.returncode == 74, (
+        "the cross-layer overlap check owns this shape and answers 74; a 64 here means the symlink "
+        f"walk was reached instead and now needs its own case. stderr={result.stderr!r}"
+    )
+    assert "cross-layer collision" in result.stderr, (
+        f"the refusal must name the overlap it found, not some other I/O fault; stderr={result.stderr!r}"
+    )

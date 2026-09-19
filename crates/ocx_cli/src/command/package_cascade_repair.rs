@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use anyhow::Context as _;
 use clap::Parser;
-use ocx_lib::package::cascade::{apply, graph};
+use ocx_package::cascade::{apply, graph};
 
 use crate::api::data::package_cascade_repair::RepairEntry;
 use crate::options;
@@ -59,7 +59,7 @@ impl PackageCascadeRepair {
         // would be announced against whichever package the follow-up names,
         // moving the other's index entries to digests it never published.
         if self.tags_file.is_some() && audits.len() > 1 {
-            return Err(ocx_lib::cli::UsageError::new(format!(
+            return Err(crate::error::UsageError::new(format!(
                 "--tags-file holds one package's tags per file, and this run covers {}; \
                  repair each package in its own run",
                 audits.len()
@@ -109,7 +109,7 @@ impl PackageCascadeRepair {
             // file there whether or not this run had anything to move.
             tokio::fs::write(path, announce_tags_body(&report.entries))
                 .await
-                .map_err(|error| ocx_lib::error::file_error(path, error))
+                .map_err(|error| ocx_util::error::FileError::new(path, error))
                 .with_context(|| format!("writing announce tags to {}", path.display()))?;
         }
 
@@ -180,9 +180,9 @@ fn announce_tags_body(entries: &[RepairEntry]) -> String {
 #[cfg(test)]
 mod tests {
     use clap::Parser as _;
-    use ocx_lib::oci;
-    use ocx_lib::package::cascade::graph::{AliasTag, CascadeReport, PlannedWrite};
-    use ocx_lib::package::version::Version;
+
+    use ocx_package::cascade::graph::{AliasTag, CascadeReport, PlannedWrite};
+    use ocx_package::version::Version;
 
     use super::*;
 
@@ -193,7 +193,7 @@ mod tests {
     fn planned(tag: &str) -> PlannedWrite {
         PlannedWrite {
             tag: AliasTag::Version(Version::parse(tag).expect("fixture version parses")),
-            index: oci::ImageIndex {
+            index: ocx_oci::ImageIndex {
                 schema_version: 2,
                 media_type: None,
                 manifests: Vec::new(),
@@ -208,7 +208,7 @@ mod tests {
 
     fn report() -> CascadeReport {
         CascadeReport {
-            identifier: oci::Identifier::parse("registry.test/acme/cmake").expect("fixture parses"),
+            identifier: ocx_oci::Identifier::parse("registry.test/acme/cmake").expect("fixture parses"),
             logical: None,
             aliases: Default::default(),
             rows: Vec::new(),
@@ -227,8 +227,8 @@ mod tests {
         }
     }
 
-    fn digest() -> oci::Digest {
-        oci::Digest::try_from("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+    fn digest() -> ocx_oci::Digest {
+        ocx_oci::Digest::try_from("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
             .expect("fixture digest parses")
     }
 

@@ -4,11 +4,11 @@
 use std::io::{self, Read as _};
 use std::process::ExitCode;
 
+use crate::error::UsageError;
 use anyhow::Context as _;
 use clap::Parser;
-use ocx_lib::auth::login::{OciClientPing, RegistryPing, login};
-use ocx_lib::auth::store::{Credential, DockerCredentialStore, StoreOptions};
-use ocx_lib::cli::error::UsageError;
+use ocx_oci::auth::login::{OciClientPing, RegistryPing, login};
+use ocx_oci::auth::store::{Credential, DockerCredentialStore, StoreOptions};
 use secrecy::SecretString;
 
 use crate::api::data::login::LoginResult;
@@ -181,7 +181,7 @@ struct NoopPing;
 
 #[async_trait::async_trait]
 impl RegistryPing for NoopPing {
-    async fn ping(&self, _registry: &str, _cred: &Credential) -> Result<(), ocx_lib::auth::AuthError> {
+    async fn ping(&self, _registry: &str, _cred: &Credential) -> Result<(), ocx_oci::auth::AuthError> {
         Ok(())
     }
 }
@@ -198,7 +198,7 @@ async fn has_helper_configured(registry: &str) -> bool {
         Err(_) => return false,
     };
     let path = store.config_path().to_path_buf();
-    let canonical = ocx_lib::auth::canonicalize_registry(registry);
+    let canonical = ocx_oci::auth::canonicalize_registry(registry);
     tokio::task::spawn_blocking(move || {
         let Ok(bytes) = std::fs::read(&path) else {
             return false;

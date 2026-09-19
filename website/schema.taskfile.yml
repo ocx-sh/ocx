@@ -3,10 +3,13 @@
 version: '3'
 
 x-shared:
+  # Globbed, not enumerated: ocx_schema's dependency closure is 19 of the 20
+  # workspace members, so a hand-written list is a table that goes stale at the
+  # next extraction, while the glob costs exactly one crate of spurious cache
+  # misses (ocx_shim, the only member outside the closure).
   schema-sources: &schema-sources
-    - '{{.ROOT_DIR}}/crates/ocx_schema/src/**/*.rs'
-    - '{{.ROOT_DIR}}/crates/ocx_lib/src/**/*.rs'
-    - '{{.ROOT_DIR}}/crates/ocx_cli/src/**/*.rs'
+    - '{{.ROOT_DIR}}/crates/*/src/**/*.rs'
+    - '{{.ROOT_DIR}}/crates/*/build.rs'
     - '{{.ROOT_DIR}}/Cargo.lock'
 
 vars:

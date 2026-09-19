@@ -1,0 +1,3453 @@
+{
+ "__README": [
+  "Pre-split variant-to-value baseline for the exit-code classification tables.",
+  "",
+  "Recovered from commit 7adaea627e9de2f0d1e90780c9c9997aea72d3f6 \u2014 the frozen base of WP-10, the last revision at",
+  "which every `ClassifyExitCode` / `ClassifyErrorKind` impl still lived inside",
+  "`ocx_lib` and every match over an OCX-owned error enum was total.",
+  "",
+  "WHY THIS MUST NEVER BE REGENERATED FROM THE CURRENT TREE:",
+  "  This file exists to pin the mapping from each error variant to the exit code",
+  "  and `kind_detail` string `ocx` emitted BEFORE the classification moved out of",
+  "  the library crates. Regenerating it from HEAD would re-baseline the exact",
+  "  thing it exists to detect, and the tests reading it would then pass by",
+  "  construction. A drift against this file is a finding, never a reason to",
+  "  refresh the file.",
+  "",
+  "  A vocabulary census cannot replace it. At the base revision 92 string-valued",
+  "  `kind_detail` arms produce only 83 distinct strings, so many-to-one is already",
+  "  normal and a variant newly collapsing onto an existing string is invisible to",
+  "  any count of distinct literals. Only the variant-to-value pair catches it.",
+  "",
+  "  `ocx` exit codes are a published interface that scripts branch on with",
+  "  `case $?`, and `kind_detail` is the frozen `error.detail` vocabulary of the",
+  "  JSON error envelope (contract C-S1-1). Both are observable; neither may move",
+  "  under a structural refactor.",
+  "",
+  "Consumed by the per-impl table tests in `crates/ocx_cli/src/exit/`. Each row is",
+  "one match arm: `pattern` is the arm's left-hand side as written at the base",
+  "revision, `value` its right-hand side, `source` the file:line it came from.",
+  "`_` as a pattern is a wildcard arm \u2014 there were exactly 4 at the base revision.",
+  "",
+  "SECOND RECOVERY (WP-43, 355 -> 370 arms). The first extractor split each line",
+  "on `=>` without joining an arm whose right-hand side opened a block, so every",
+  "`... => {` arm was discarded rather than recorded. 15 arms were missing, and",
+  "two of them were the only guard their impl had:",
+  "`ManagedConfigPublishError::classify`'s `ExtraCaCertsInvalid | ExtraCaCertsNotUtf8`",
+  "(65) and `PublishGateError::classify`'s `DependencyPinnedToIndex |",
+  "AnyPinNotAdvertisedAsAny` (65) \u2014 both survived a mutation with the whole",
+  "`cargo test -p ocx --lib` run byte-identical. The 15 were re-read from",
+  "7adaea62 itself, never from HEAD, joining each block arm to its matching `}`",
+  "and recording the inside; the consumer's `arms_in` joins the same way, so a",
+  "block arm and the one-line arm it was reflowed from compare equal. The rule",
+  "against regenerating from the current tree is unchanged and applies to these",
+  "rows exactly as it does to the first 355.",
+  "",
+  "THIRD RECOVERY (WP-43, 370 -> 372 arms). Both earlier recoveries read the",
+  "base revision with a line scanner, and a line scanner cannot read Rust. It",
+  "split every body line on `=>`, so a pattern spanning several lines became",
+  "several rows and a value spanning several lines was cut at its first line.",
+  "49 of the 370 rows were wrong in one of five ways, all of which read as",
+  "coverage:",
+  "",
+  "  31  a trailing fragment of a multi-line `|` alternation recorded as if it",
+  "      were a whole arm \u2014 `| Self::ExtractionCapExceeded { .. }` is not a",
+  "      pattern any `match` contains, and the head of its alternation was lost",
+  "   4  the closing line of a multi-line pattern recorded as the pattern, so",
+  "      the two `KeyUnreadable`/`KeyMalformed` carve-outs in verify/error.rs",
+  "      were pinned as `})`",
+  "   3  a value cut at the brace that opens it \u2014 `match inner {`",
+  "   1  a value cut to its first line \u2014 `ProjectErrorKind::RegistryUnreachable`",
+  "      was pinned as `source` where the arm is a five-line downcast chain",
+  "  10  a block-form arm stored without the braces the second recovery stripped",
+  "",
+  "None of the five reddened, because the consumer scanned the relocated tree",
+  "the same broken way: both sides agreed on the same wrong reading, which is",
+  "the shape of a check that asserts the code equals itself.",
+  "",
+  "Re-extracted from 7adaea62 with a `syn` parse \u2014 the impl, its functions, its",
+  "match arms and each arm\u2019s guard read as syntax, never as text. Every row here",
+  "is one real arm: 321 are the committed row kept verbatim, 51 are new or",
+  "corrected. The rule against regenerating from the *current* tree is unchanged",
+  "and was not broken to do this: the source was the base revision, checked out",
+  "from git, exactly as for the first two recoveries.",
+  "",
+  "DEC-46 (2026-09-18): `func` and `match_id` added to every row. This is a",
+  "RESOLUTION change at an UNCHANGED revision, not a re-freeze \u2014 the arms, their",
+  "patterns, their values and their sources are byte-identical to what was",
+  "recovered, and the enrichment is a join on `source`, which is a bijection over",
+  "all 372 rows. It was derived by running the pin's own `arms_in` over the",
+  "7adaea62 sources, which reproduced all rows with zero missing, zero extra and",
+  "zero type or trait disagreement; a second extractor was deliberately not used.",
+  "The premise DEC-43 rests on is untouched: the revision is still 7adaea62, so a",
+  "relocation row's job is still to map today's spelling back to this one.",
+  "",
+  "WHY THE FINER KEY: the comparison keyed on (type, trait, pattern), which merged",
+  "372 arms into 358 keys and compared by MEMBERSHIP \u2014 asking whether the",
+  "baseline's value was among the candidates rather than whether it WAS the value.",
+  "Two arms of one impl matched in different functions therefore satisfied each",
+  "other. With func and match_id the 372 arms are 372 keys, and the comparison is",
+  "equality.",
+  "",
+  "`frozen_columns_sha256` is sha256 over the five columns that existed before",
+  "DEC-46 \u2014 type, trait, pattern, value, source \u2014 tab-joined, newline-terminated,",
+  "in file order. It was computed from the FROZEN file and is checked by",
+  "`the_enrichment_added_columns_and_changed_no_frozen_value`. A bijection on the",
+  "join key says nothing about what a writer does to values, so the claim that",
+  "the enrichment added columns and altered no exit code is a property the tool",
+  "checks rather than a sentence in a commit message."
+ ],
+ "recovered_from": "7adaea627e9de2f0d1e90780c9c9997aea72d3f6",
+ "frozen_columns_sha256": "28d79d6352eb996e2e61ef4828582692f9d42f01c227aedcaa7638c8aea6a096",
+ "arm_count": 372,
+ "arms": [
+  {
+   "type": "ProjectContextError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::NoProject { .. } | Self::NoProjectIn { .. }",
+   "value": "Some(ExitCode::UsageError)",
+   "source": "crates/ocx_cli/src/app/project_context.rs:122",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ProjectContextError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Lock(currency)",
+   "value": "currency.classify()",
+   "source": "crates/ocx_cli/src/app/project_context.rs:125",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ProjectContextError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Project(_) | Self::Config(_)",
+   "value": "None",
+   "source": "crates/ocx_cli/src/app/project_context.rs:129",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "SessionError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Lock(currency)",
+   "value": "currency.classify()",
+   "source": "crates/ocx_lib/src/activation.rs:96",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "SessionError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Library(_) | Self::ListSeparator(_)",
+   "value": "None",
+   "source": "crates/ocx_lib/src/activation.rs:99",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Ssrf { source, .. }",
+   "value": "source.classify()",
+   "source": "crates/ocx_lib/src/announce/error.rs:242",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Forge(inner)",
+   "value": "inner.classify()",
+   "source": "crates/ocx_lib/src/announce/error.rs:243",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Observe { source, .. }",
+   "value": "source.classify()",
+   "source": "crates/ocx_lib/src/announce/error.rs:244",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ObserveDesc { source, .. }",
+   "value": "source.classify()",
+   "source": "crates/ocx_lib/src/announce/error.rs:245",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ListTags { source, .. }",
+   "value": "source.classify()",
+   "source": "crates/ocx_lib/src/announce/error.rs:246",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::DescDisappeared { .. }",
+   "value": "Some(crate::cli::ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/announce/error.rs:253",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::CommittedTagsDropped { .. }",
+   "value": "Some(crate::cli::ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/announce/error.rs:258",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::UnresolvedTag { .. }",
+   "value": "Some(crate::cli::ExitCode::NotFound)",
+   "source": "crates/ocx_lib/src/announce/error.rs:261",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::UnclaimedPackage { .. }",
+   "value": "Some(crate::cli::ExitCode::NotFound)",
+   "source": "crates/ocx_lib/src/announce/error.rs:268",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::TagIsNotAnImageIndex { .. }",
+   "value": "Some(crate::cli::ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/announce/error.rs:273",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::NoCuratedTags { .. }",
+   "value": "Some(crate::cli::ExitCode::UsageError)",
+   "source": "crates/ocx_lib/src/announce/error.rs:279",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::PullRequestUnmergeable { .. }",
+   "value": "Some(crate::cli::ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/announce/error.rs:286",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::OutputWrite { .. }",
+   "value": "Some(crate::cli::ExitCode::IoError)",
+   "source": "crates/ocx_lib/src/announce/error.rs:293",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AnnounceError",
+   "trait": "ClassifyExitCode",
+   "pattern": "_",
+   "value": "None",
+   "source": "crates/ocx_lib/src/announce/error.rs:295",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Io { .. }",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/archive/error.rs:63",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Tar(_) | Self::Zip(_) | Self::EntryEscape(_) | Self::SymlinkEscape { .. } | Self::HardLinkEscape { .. } | Self::UnsupportedFormat(_) | Self::GnuSparseUnsupported(_) | Self::ExtractionCapExceeded { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/archive/error.rs:64",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Internal(_)",
+   "value": "ExitCode::Failure",
+   "source": "crates/ocx_lib/src/archive/error.rs:72",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AuthError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::InvalidType(_) | Self::MissingEnv(_, _)",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/auth/error.rs:61",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AuthError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::DockerCredentialRetrieval(_)",
+   "value": "ExitCode::AuthError",
+   "source": "crates/ocx_lib/src/auth/error.rs:62",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AuthError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::WriteConfigFailed { .. }",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/auth/error.rs:63",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AuthError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Helper(inner)",
+   "value": "match inner { docker_credential::CredentialRetrievalError::NotOnPath { .. } | docker_credential::CredentialRetrievalError::UnsafePath { .. } => ExitCode::ConfigError, docker_credential::CredentialRetrievalError::Timeout { .. } => ExitCode::TempFail, docker_credential::CredentialRetrievalError::InvalidJson(_) => ExitCode::DataError, _ => ExitCode::AuthError, }",
+   "source": "crates/ocx_lib/src/auth/error.rs:64",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AuthError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::NoCredentialStoreAvailable",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/auth/error.rs:71",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AuthError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::LoginRejected { .. }",
+   "value": "ExitCode::AuthError",
+   "source": "crates/ocx_lib/src/auth/error.rs:72",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AuthError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ProbeFailed { source, .. }",
+   "value": "return source.classify()",
+   "source": "crates/ocx_lib/src/auth/error.rs:76",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "AuthError",
+   "trait": "ClassifyExitCode",
+   "pattern": "docker_credential::CredentialRetrievalError::NotOnPath { .. } | docker_credential::CredentialRetrievalError::UnsafePath { .. }",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/auth/error.rs:65",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "AuthError",
+   "trait": "ClassifyExitCode",
+   "pattern": "docker_credential::CredentialRetrievalError::Timeout { .. }",
+   "value": "ExitCode::TempFail",
+   "source": "crates/ocx_lib/src/auth/error.rs:67",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "AuthError",
+   "trait": "ClassifyExitCode",
+   "pattern": "docker_credential::CredentialRetrievalError::InvalidJson(_)",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/auth/error.rs:68",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "AuthError",
+   "trait": "ClassifyExitCode",
+   "pattern": "_",
+   "value": "ExitCode::AuthError",
+   "source": "crates/ocx_lib/src/auth/error.rs:69",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::MissingEnv(_)",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/ci/error.rs:30",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::File { .. } | Self::Write(_)",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/ci/error.rs:31",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ForgeRequired | Self::MissingBaseRef { .. } | Self::MissingHeadRoot { .. }",
+   "value": "None",
+   "source": "crates/ocx_lib/src/claim/error.rs:161",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::MalformedRepository { .. } | Self::NoActingIdentity | Self::InvalidOwnerLogin { .. } | Self::DuplicateOwner { .. } | Self::OwnerIdMismatch { .. } | Self::BotIdentity { .. }",
+   "value": "Some(ExitCode::UsageError)",
+   "source": "crates/ocx_lib/src/claim/error.rs:162",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::PackageAlreadyClaimed { .. }",
+   "value": "Some(ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/claim/error.rs:168",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::OwnerUnknown { .. }",
+   "value": "Some(ExitCode::NotFound)",
+   "source": "crates/ocx_lib/src/claim/error.rs:169",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::OutputWrite { .. }",
+   "value": "Some(ExitCode::IoError)",
+   "source": "crates/ocx_lib/src/claim/error.rs:170",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Forge(inner)",
+   "value": "inner.classify()",
+   "source": "crates/ocx_lib/src/claim/error.rs:174",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::ForgeRequired",
+   "value": "\"forge_required\"",
+   "source": "crates/ocx_lib/src/claim/error.rs:193",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::MalformedRepository { .. }",
+   "value": "\"malformed_repository\"",
+   "source": "crates/ocx_lib/src/claim/error.rs:194",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::PackageAlreadyClaimed { .. }",
+   "value": "\"package_already_claimed\"",
+   "source": "crates/ocx_lib/src/claim/error.rs:195",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::NoActingIdentity",
+   "value": "\"no_acting_identity\"",
+   "source": "crates/ocx_lib/src/claim/error.rs:196",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::InvalidOwnerLogin { .. }",
+   "value": "\"invalid_owner_login\"",
+   "source": "crates/ocx_lib/src/claim/error.rs:197",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::DuplicateOwner { .. }",
+   "value": "\"duplicate_owner\"",
+   "source": "crates/ocx_lib/src/claim/error.rs:198",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::OwnerUnknown { .. }",
+   "value": "\"owner_unknown\"",
+   "source": "crates/ocx_lib/src/claim/error.rs:199",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::OwnerIdMismatch { .. }",
+   "value": "\"owner_id_mismatch\"",
+   "source": "crates/ocx_lib/src/claim/error.rs:200",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::BotIdentity { .. }",
+   "value": "\"bot_identity\"",
+   "source": "crates/ocx_lib/src/claim/error.rs:201",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::MissingBaseRef { .. }",
+   "value": "\"missing_base_ref\"",
+   "source": "crates/ocx_lib/src/claim/error.rs:202",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::MissingHeadRoot { .. }",
+   "value": "\"missing_head_root\"",
+   "source": "crates/ocx_lib/src/claim/error.rs:203",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::OutputWrite { .. }",
+   "value": "\"output_write\"",
+   "source": "crates/ocx_lib/src/claim/error.rs:204",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "ClaimError",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::Forge(_)",
+   "value": "\"forge\"",
+   "source": "crates/ocx_lib/src/claim/error.rs:205",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::UnknownFormat(_) | Self::DecodeOnly(_)",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/compression/error.rs:49",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Open { .. } | Self::Create { .. } | Self::Io(_)",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/compression/error.rs:50",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::EngineInit(_)",
+   "value": "ExitCode::Failure",
+   "source": "crates/ocx_lib/src/compression/error.rs:51",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "EditError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::TooLarge { .. }",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/config/edit.rs:117",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "EditError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Locked { .. }",
+   "value": "ExitCode::TempFail",
+   "source": "crates/ocx_lib/src/config/edit.rs:120",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "EditError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Io { .. } | Self::Parse { .. } | Self::Malformed { .. }",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/config/edit.rs:123",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::FileNotFound { .. }",
+   "value": "ExitCode::NotFound",
+   "source": "crates/ocx_lib/src/config/error.rs:134",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::FileTooLarge { .. } | Self::Parse { .. } | Self::SystemConfig { .. } | Self::AmbiguousExtraCaCerts { .. }",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/config/error.rs:138",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Io { .. }",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/config/error.rs:142",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::InvalidBooleanString { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/config/error.rs:143",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Toolchain(refusal)",
+   "value": "return refusal.classify()",
+   "source": "crates/ocx_lib/src/config/error.rs:147",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ToolchainRootError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Unexpandable { .. } | Self::Relative { .. } | Self::ParentDirComponent { .. } | Self::NoContainmentAnchor { .. } | Self::IsContainmentAnchor { .. } | Self::OutsideHome { .. } | Self::SystemPrefix { .. } | Self::InsideGlobalToolchainHome { .. } | Self::Inaccessible { .. } | Self::NotADirectory { .. } | Self::NotOwnerOwned { .. } | Self::GroupOrWorldWritable { .. }",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/config.rs:733",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "CommandResolutionError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::NotExecutable { .. }",
+   "value": "Some(crate::cli::ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/env.rs:2033",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "CommandResolutionError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::NotFound { .. }",
+   "value": "Some(crate::cli::ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/env.rs:2039",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "CommandResolutionError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::TrampolineRefused { .. }",
+   "value": "Some(crate::cli::ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/env.rs:2044",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::OfflineMode | Self::PolicyBlocked { .. }",
+   "value": "Some(ExitCode::PolicyBlocked)",
+   "source": "crates/ocx_lib/src/error.rs:365",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::InternalFile(_, _)",
+   "value": "Some(ExitCode::IoError)",
+   "source": "crates/ocx_lib/src/error.rs:366",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::LayerLayout(_)",
+   "value": "None",
+   "source": "crates/ocx_lib/src/error.rs:370",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::SymlinkWalk(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:373",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::InternalPathInvalid(_)",
+   "value": "Some(ExitCode::Failure)",
+   "source": "crates/ocx_lib/src/error.rs:374",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::SerializationFailure(_) | Self::UnsupportedMediaType(_, _) | Self::MetadataBlobTooLarge { .. }",
+   "value": "{ Some(ExitCode::DataError) }",
+   "source": "crates/ocx_lib/src/error.rs:375",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Auth(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:379",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Platform(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:380",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Project(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:381",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ProjectRegistry(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:382",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::PackageManager(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:383",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::OciClient(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:384",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Identifier(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:385",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Archive(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:386",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Compression(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:387",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Ci(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:388",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Config(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:389",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Records(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:390",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Package(e)",
+   "value": "e.as_ref().classify()",
+   "source": "crates/ocx_lib/src/error.rs:391",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Shell(_)",
+   "value": "None",
+   "source": "crates/ocx_lib/src/error.rs:393",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::OciIndex(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:394",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::FileStructure(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:395",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Digest(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:396",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Patch(e)",
+   "value": "e.as_ref().classify()",
+   "source": "crates/ocx_lib/src/error.rs:397",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Dependency(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:398",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::PinnedIdentifier(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:399",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Singleflight(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/error.rs:400",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::LauncherUnsafeCharacter { .. }",
+   "value": "Some(ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/error.rs:401",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ToolchainHomeNotAbsolute { .. }",
+   "value": "Some(ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/error.rs:405",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::LauncherPathNotUtf8 { .. }",
+   "value": "Some(ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/error.rs:408",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Sign(e)",
+   "value": "e.as_ref().classify()",
+   "source": "crates/ocx_lib/src/error.rs:409",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Verify(e)",
+   "value": "e.as_ref().classify()",
+   "source": "crates/ocx_lib/src/error.rs:410",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::MissingDigest(_)",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/file_structure/error.rs:70",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::DigestMismatch { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/file_structure/error.rs:71",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::MalformedRootDocument { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/file_structure/error.rs:72",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::RepositoryEscapesIndexHome { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/file_structure/error.rs:73",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::NonUtf8WireName { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/file_structure/error.rs:74",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ToolchainPathError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Empty { .. } | Self::ControlCharacter { .. } | Self::Separator { .. } | Self::PathPrefix { .. } | Self::TrailingDotOrSpace { .. } | Self::Relative { .. }",
+   "value": "Some(ExitCode::ConfigError)",
+   "source": "crates/ocx_lib/src/file_structure/toolchain_store.rs:352",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ForgeError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Status { status, .. } if *status == 401 || *status == 403",
+   "value": "Some(ExitCode::AuthError)",
+   "source": "crates/ocx_lib/src/forge/error.rs:371",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ForgeError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::PushAccessDenied { .. }",
+   "value": "Some(ExitCode::AuthError)",
+   "source": "crates/ocx_lib/src/forge/error.rs:374",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ForgeError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Status { status, .. } if *status == 429",
+   "value": "Some(ExitCode::TempFail)",
+   "source": "crates/ocx_lib/src/forge/error.rs:378",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ForgeError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Status { status, .. } if is_server_fault(*status)",
+   "value": "Some(ExitCode::Unavailable)",
+   "source": "crates/ocx_lib/src/forge/error.rs:383",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ForgeError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Transport { .. }",
+   "value": "Some(ExitCode::Unavailable)",
+   "source": "crates/ocx_lib/src/forge/error.rs:386",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ForgeError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::NonFastForward { .. } | Self::StaleLease { .. } | Self::MergeRequestUnconfirmed { .. }",
+   "value": "{ Some(ExitCode::TempFail) }",
+   "source": "crates/ocx_lib/src/forge/error.rs:393",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ForgeError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::GitUnavailable { .. }",
+   "value": "Some(ExitCode::Unavailable)",
+   "source": "crates/ocx_lib/src/forge/error.rs:400",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ForgeError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::PushRefused { .. }",
+   "value": "Some(ExitCode::PermissionDenied)",
+   "source": "crates/ocx_lib/src/forge/error.rs:405",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ForgeError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::WriteCapabilityUnavailable { .. }",
+   "value": "Some(ExitCode::ForgeCapabilityUnavailable)",
+   "source": "crates/ocx_lib/src/forge/error.rs:412",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ForgeError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ForgeKindUnknown { .. } | Self::NestedNamespaceUnsupported { .. } | Self::SelfForkRefused { .. } | Self::ForkHostMismatch { .. } | Self::InvalidRepoCoordinate { .. } | Self::TransportUnsupported { .. } | Self::TransportOperationUnsupported { .. } | Self::UsersApiUnavailable",
+   "value": "Some(ExitCode::UsageError)",
+   "source": "crates/ocx_lib/src/forge/error.rs:426",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ForgeError",
+   "trait": "ClassifyExitCode",
+   "pattern": "_",
+   "value": "None",
+   "source": "crates/ocx_lib/src/forge/error.rs:440",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "LaunchError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Spawn { .. }",
+   "value": "None",
+   "source": "crates/ocx_lib/src/launch.rs:430",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "LaunchError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::IncompleteRecordInputs { .. }",
+   "value": "Some(ExitCode::Failure)",
+   "source": "crates/ocx_lib/src/launch.rs:435",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "LaunchError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ExemptionRefused { .. }",
+   "value": "Some(ExitCode::IoError)",
+   "source": "crates/ocx_lib/src/launch.rs:439",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "LaunchError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Records(e)",
+   "value": "e.classify()",
+   "source": "crates/ocx_lib/src/launch.rs:443",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigFetchError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::FetchFailed { source }",
+   "value": "source.classify()",
+   "source": "crates/ocx_lib/src/managed_config/persistence.rs:133",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigFetchError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::UnexpectedManifest { .. } | Self::NoAnyPlatformEntry | Self::NoGzipLayer | Self::MissingConfigToml | Self::LayerSizeExceeded { .. } | Self::LayerDigestMismatch { .. } | Self::ConfigEntryTooLarge { .. } | Self::InvalidArchive { .. }",
+   "value": "Some(crate::cli::ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/managed_config/persistence.rs:135",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigPersistError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::InvalidToml { .. }",
+   "value": "Some(crate::cli::ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/managed_config/persistence.rs:191",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigPersistError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::SnapshotWriteFailed { .. }",
+   "value": "Some(crate::cli::ExitCode::IoError)",
+   "source": "crates/ocx_lib/src/managed_config/persistence.rs:192",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigPersistError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ExtraCaCertsInvalid { source }",
+   "value": "source.classify()",
+   "source": "crates/ocx_lib/src/managed_config/persistence.rs:193",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigUpdateError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Fetch(source)",
+   "value": "source.classify()",
+   "source": "crates/ocx_lib/src/managed_config/persistence.rs:238",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigUpdateError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Persist(source)",
+   "value": "source.classify()",
+   "source": "crates/ocx_lib/src/managed_config/persistence.rs:239",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigUpdateError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::SourceNotFound { .. }",
+   "value": "Some(crate::cli::ExitCode::NotFound)",
+   "source": "crates/ocx_lib/src/managed_config/persistence.rs:240",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigUpdateError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::PinDigestMismatch { .. }",
+   "value": "Some(crate::cli::ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/managed_config/persistence.rs:241",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigPublishError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::PayloadTooLarge { .. } | Self::InvalidToml { .. } | Self::ContainsManagedSection | Self::AmbiguousTrustRoot | Self::AmbiguousExtraCaCerts | Self::ManagedConfigKeyByPath | Self::TrustedRootInvalid { .. } | Self::ExtraCaCertsPemInvalid { .. }",
+   "value": "Some(crate::cli::ExitCode::ConfigError)",
+   "source": "crates/ocx_lib/src/managed_config/publish.rs:270",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigPublishError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::InvalidTrustPolicy { source } if source . names_unsupported_backend()",
+   "value": "{ Some(crate::cli::ExitCode::UnsupportedKeyBackend) }",
+   "source": "crates/ocx_lib/src/managed_config/publish.rs:282",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigPublishError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::InvalidTrustPolicy { .. }",
+   "value": "Some(crate::cli::ExitCode::ConfigError)",
+   "source": "crates/ocx_lib/src/managed_config/publish.rs:285",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigPublishError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ExtraCaCertsInvalid { .. } | Self::ExtraCaCertsNotUtf8 { .. }",
+   "value": "{ Some(crate::cli::ExitCode::DataError) }",
+   "source": "crates/ocx_lib/src/managed_config/publish.rs:289",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigPublishError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ReadFailed { source, .. } | Self::TrustedRootReadFailed { source, .. } | Self::ExtraCaCertsReadFailed { source, .. }",
+   "value": "Some(match source . kind() { std::io::ErrorKind::NotFound => crate::cli::ExitCode::NotFound, std::io::ErrorKind::PermissionDenied => crate::cli::ExitCode::PermissionDenied, _ => crate::cli::ExitCode::IoError, })",
+   "source": "crates/ocx_lib/src/managed_config/publish.rs:292",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigPublishError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::StageFailed { .. }",
+   "value": "Some(crate::cli::ExitCode::IoError)",
+   "source": "crates/ocx_lib/src/managed_config/publish.rs:299",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigPublishError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::BundleFailed { source } | Self::ListTagsFailed { source, .. } | Self::PushFailed { source }",
+   "value": "{ source . classify() }",
+   "source": "crates/ocx_lib/src/managed_config/publish.rs:305",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ManagedConfigPublishError",
+   "trait": "ClassifyExitCode",
+   "pattern": "std::io::ErrorKind::NotFound",
+   "value": "crate::cli::ExitCode::NotFound",
+   "source": "crates/ocx_lib/src/managed_config/publish.rs:295",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "ManagedConfigPublishError",
+   "trait": "ClassifyExitCode",
+   "pattern": "std::io::ErrorKind::PermissionDenied",
+   "value": "crate::cli::ExitCode::PermissionDenied",
+   "source": "crates/ocx_lib/src/managed_config/publish.rs:296",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "ManagedConfigPublishError",
+   "trait": "ClassifyExitCode",
+   "pattern": "_",
+   "value": "crate::cli::ExitCode::IoError",
+   "source": "crates/ocx_lib/src/managed_config/publish.rs:297",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "ClientError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Mirrored { source, .. }",
+   "value": "return source.classify()",
+   "source": "crates/ocx_lib/src/oci/client/error.rs:340",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClientError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Authentication(_)",
+   "value": "ExitCode::AuthError",
+   "source": "crates/ocx_lib/src/oci/client/error.rs:341",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClientError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ManifestNotFound(_) | Self::BlobNotFound(_) | Self::RepositoryNotFound(_)",
+   "value": "ExitCode::NotFound",
+   "source": "crates/ocx_lib/src/oci/client/error.rs:342",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClientError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Io { .. }",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/oci/client/error.rs:343",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClientError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Registry(_)",
+   "value": "ExitCode::Unavailable",
+   "source": "crates/ocx_lib/src/oci/client/error.rs:348",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClientError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::RegistryTransient(_)",
+   "value": "ExitCode::TempFail",
+   "source": "crates/ocx_lib/src/oci/client/error.rs:349",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClientError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ShortBlobRead { .. }",
+   "value": "ExitCode::TempFail",
+   "source": "crates/ocx_lib/src/oci/client/error.rs:353",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClientError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ReferrersUnsupported { .. }",
+   "value": "ExitCode::ReferrersUnsupported",
+   "source": "crates/ocx_lib/src/oci/client/error.rs:357",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClientError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::DigestMismatch { .. } | Self::UnsafeDestination(_) | Self::UnfollowedRedirect(_) | Self::DecompressionCapExceeded { .. } | Self::UnexpectedManifestType | Self::InvalidManifest(_) | Self::NotAManifest(_) | Self::InvalidImageIndex(_) | Self::UnexpectedArtifactType { .. } | Self::WrongLayerCount { .. } | Self::UnexpectedLayerMediaType { .. } | Self::LayerSizeExceeded { .. } | Self::TraversalLimitExceeded { .. } | Self::Serialization(_) | Self::InvalidEncoding(_)",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/oci/client/error.rs:358",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "ClientError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Internal(_)",
+   "value": "return None",
+   "source": "crates/ocx_lib/src/oci/client/error.rs:380",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "DigestError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Invalid(_)",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/oci/digest/error.rs:19",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::RemoteManifestNotFound(_) | Self::NoIndexableTag(_) | Self::NotInIndex { .. }",
+   "value": "ExitCode::NotFound",
+   "source": "crates/ocx_lib/src/oci/index/error.rs:385",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::NestedImageIndex { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/oci/index/error.rs:386",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::SourceWalkFailed(arc) | Self::SourceFetchFailed(arc)",
+   "value": "{ return Some(crate::cli::classify_error(arc . as_error())); }",
+   "source": "crates/ocx_lib/src/oci/index/error.rs:392",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::SingleflightFailed(_)",
+   "value": "return None",
+   "source": "crates/ocx_lib/src/oci/index/error.rs:404",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::PolicyResolutionBlocked { .. }",
+   "value": "ExitCode::PolicyBlocked",
+   "source": "crates/ocx_lib/src/oci/index/error.rs:407",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::UnsupportedIndexFormat { .. } | Self::DispatchObjectDigestMismatch { .. } | Self::WalkedDigestMismatch { .. } | Self::YankedRefused { .. } | Self::MalformedPhysicalRef { .. } | Self::RootRepositoryMismatch { .. } | Self::MalformedCatalogKey { .. } | Self::InvalidImageIndex(_) | Self::MalformedIndexDocument { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/oci/index/error.rs:410",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::IndexHttpFailed { .. } | Self::CatalogDocumentAbsent { .. }",
+   "value": "ExitCode::Unavailable",
+   "source": "crates/ocx_lib/src/oci/index/error.rs:428",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::PlainHttpIndexNotAllowed { .. } | Self::InvalidIndexUrl { .. }",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/oci/index/error.rs:430",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Ssrf { source, .. }",
+   "value": "return source.classify()",
+   "source": "crates/ocx_lib/src/oci/index/error.rs:437",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "SignError",
+   "trait": "ClassifyExitCode",
+   "pattern": "SignErrorKind::Internal(_)",
+   "value": "None",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:54",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "SignError",
+   "trait": "ClassifyExitCode",
+   "pattern": "kind",
+   "value": "Some(kind.exit_code())",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:55",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::FulcioBadRequest",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:412",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::ForbiddenRegistryTarget { .. }",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:413",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::OidcTokenRejected",
+   "value": "ExitCode::AuthError",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:414",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::FulcioUnavailable",
+   "value": "ExitCode::TempFail",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:415",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TransparencyLogUnavailable",
+   "value": "ExitCode::TransparencyLogUnavailable",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:416",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::RekorSetMalformed | Self::PredicateNotJson | Self::PredicateTooLarge { .. } | Self::SubjectDigestUnsupported { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:417",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::ReferrersUnsupported",
+   "value": "ExitCode::ReferrersUnsupported",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:421",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TargetNotFound { .. } | Self::TargetNotAnIndex { .. }",
+   "value": "ExitCode::NotFound",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:422",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::UnsupportedKeyBackend(_)",
+   "value": "ExitCode::UnsupportedKeyBackend",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:423",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::KeyBackend(error)",
+   "value": "match error { crate::oci::sign::key_backend::KeyBackendError::Unavailable { .. } => ExitCode::TempFail, crate::oci::sign::key_backend::KeyBackendError::Io(_) => ExitCode::IoError, crate::oci::sign::key_backend::KeyBackendError::MalformedKey { .. } => ExitCode::DataError, crate::oci::sign::key_backend::KeyBackendError::Unsupported { .. } => ExitCode::UnsupportedKeyBackend, }",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:427",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::OidcPreCheckFailed { .. } | Self::OfflineSignRefused | Self::OfflineAttestRefused | Self::IdentityTokenFilePermissive { .. }",
+   "value": "ExitCode::PermissionDenied",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:435",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::InvalidEndpointUrl { reason, .. }",
+   "value": "reason.exit_code()",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:444",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::ProvenanceVersionUnsupported { .. } | Self::UnsignedTypeUnsupported { .. } | Self::SidecarRequiresSignature { .. } | Self::KeyReferenceInvalid(_) | Self::RekorUploadRequiredForKeyless",
+   "value": "ExitCode::UsageError",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:445",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::Internal(_)",
+   "value": "ExitCode::Failure",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:450",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "crate::oci::sign::key_backend::KeyBackendError::Unavailable { .. }",
+   "value": "ExitCode::TempFail",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:428",
+   "func": "exit_code",
+   "match_id": 1
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "crate::oci::sign::key_backend::KeyBackendError::Io(_)",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:429",
+   "func": "exit_code",
+   "match_id": 1
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "crate::oci::sign::key_backend::KeyBackendError::MalformedKey { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:430",
+   "func": "exit_code",
+   "match_id": 1
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "crate::oci::sign::key_backend::KeyBackendError::Unsupported { .. }",
+   "value": "ExitCode::UnsupportedKeyBackend",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:431",
+   "func": "exit_code",
+   "match_id": 1
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::FulcioBadRequest",
+   "value": "\"fulcio_bad_request\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:458",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::OidcTokenRejected",
+   "value": "\"oidc_token_rejected\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:459",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::FulcioUnavailable",
+   "value": "\"fulcio_unavailable\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:460",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TransparencyLogUnavailable",
+   "value": "\"transparency_log_unavailable\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:461",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::RekorSetMalformed",
+   "value": "\"rekor_set_malformed\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:462",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::ReferrersUnsupported",
+   "value": "\"referrers_unsupported\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:463",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TargetNotFound { .. }",
+   "value": "\"target_not_found\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:464",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TargetNotAnIndex { .. }",
+   "value": "\"target_not_an_index\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:465",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::SubjectDigestUnsupported { .. }",
+   "value": "\"subject_digest_unsupported\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:466",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::OidcPreCheckFailed { .. }",
+   "value": "\"oidc_pre_check_failed\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:467",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::ForbiddenRegistryTarget { .. }",
+   "value": "\"forbidden_registry_target\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:468",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::OfflineSignRefused",
+   "value": "\"offline_sign_refused\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:469",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::IdentityTokenFilePermissive { .. }",
+   "value": "\"identity_token_file_permissive\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:470",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::InvalidEndpointUrl { .. }",
+   "value": "\"invalid_endpoint_url\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:471",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::PredicateNotJson",
+   "value": "\"predicate_not_json\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:472",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::PredicateTooLarge { .. }",
+   "value": "\"predicate_too_large\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:473",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::ProvenanceVersionUnsupported { .. }",
+   "value": "\"provenance_version_unsupported\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:474",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::OfflineAttestRefused",
+   "value": "\"offline_attest_refused\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:475",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::UnsignedTypeUnsupported { .. }",
+   "value": "\"unsigned_type_unsupported\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:476",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::SidecarRequiresSignature { .. }",
+   "value": "\"sidecar_requires_signature\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:477",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::UnsupportedKeyBackend(_)",
+   "value": "\"unsupported_key_backend\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:478",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::KeyBackend(_)",
+   "value": "\"key_backend\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:479",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::KeyReferenceInvalid(_)",
+   "value": "\"key_reference_invalid\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:480",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::RekorUploadRequiredForKeyless",
+   "value": "\"rekor_upload_required_for_keyless\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:481",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SignErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::Internal(_)",
+   "value": "\"internal\"",
+   "source": "crates/ocx_lib/src/oci/sign/error.rs:482",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "SsrfError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ForbiddenTarget { .. }",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/oci/ssrf.rs:81",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "SsrfError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Resolution { .. }",
+   "value": "ExitCode::Unavailable",
+   "source": "crates/ocx_lib/src/oci/ssrf.rs:85",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyError",
+   "trait": "ClassifyExitCode",
+   "pattern": "VerifyErrorKind::Internal(_)",
+   "value": "None",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:47",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyError",
+   "trait": "ClassifyExitCode",
+   "pattern": "kind",
+   "value": "Some(kind.exit_code())",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:48",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::NoSignaturesFound | Self::NoUsableBundle | Self::TargetNotFound { .. } | Self::TargetNotAnIndex { .. } | Self::AttestationNotFound",
+   "value": "ExitCode::NotFound",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:707",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::IdentityMismatch | Self::IssuerMismatch | Self::UnsignedRejectedByPolicy",
+   "value": "{ ExitCode::PermissionDenied }",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:712",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::CertChainInvalid | Self::SignatureInvalid | Self::SubjectDigestMismatch | Self::BundleParseFailed | Self::RekorSetInvalid | Self::TransparencyBodyMismatch | Self::RekorInclusionProofAbsent | Self::CandidateLimitExhausted { .. } | Self::PredicateTypeMismatch { .. } | Self::StatementSubjectMismatch { .. } | Self::StatementSubjectAbsent | Self::StatementSubjectWeakAlgorithm { .. } | Self::BuilderMismatch { .. } | Self::StatementTypeUnsupported { .. } | Self::PayloadTypeUnsupported { .. } | Self::SimpleSigningClaimUnsupported { .. } | Self::MultipleSignatures { .. } | Self::MultipleAttestations { .. } | Self::UnsupportedTlogEntryKind { .. } | Self::TlogBindingMismatch | Self::CertificateValidityWindow { .. } | Self::SbomMediaTypeUnsupported { .. } | Self::AttestationTooLarge { .. } | Self::AttestationPayloadTooLarge { .. } | Self::TooManyAttestations { .. } | Self::AttestationBudgetExhausted { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:715",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::RekorSetAbsentTsaPresent | Self::TransparencyLogUnavailable",
+   "value": "ExitCode::TransparencyLogUnavailable",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:750",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::UnsupportedKeyBackend(_)",
+   "value": "ExitCode::UnsupportedKeyBackend",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:751",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TrustPolicyInvalid(error) if error . names_unsupported_backend()",
+   "value": "{ ExitCode::UnsupportedKeyBackend }",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:753",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TrustPolicyInvalid(crate::trust::TrustPolicyError::KeyUnreadable { .. }) | Self::TrustPolicyInvalid(crate::trust::TrustPolicyError::KeyMalformed { fault : crate::trust::KeyFault::Path, .. })",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:763",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TrustPolicyInvalid(crate::trust::TrustPolicyError::KeyMalformed { fault : crate::trust::KeyFault::FileBytes, .. })",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:772",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TrustRootLoad(TrustRootLoadReason::TrustRootUnreadable { .. })",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:782",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TrustRootUnavailable | Self::TrustRootLoad(_) | Self::TrustPolicyInvalid(_) | Self::ForbiddenRegistryTarget { .. }",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:783",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::InvalidEndpointUrl { reason, .. }",
+   "value": "reason.exit_code()",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:792",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::NoIdentityProvided | Self::KeyReferenceInvalid(_)",
+   "value": "ExitCode::UsageError",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:793",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::Internal(_)",
+   "value": "ExitCode::Failure",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:794",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::NoSignaturesFound",
+   "value": "\"no_signatures_found\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:802",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TargetNotFound { .. }",
+   "value": "\"target_not_found\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:803",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TargetNotAnIndex { .. }",
+   "value": "\"target_not_an_index\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:804",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::NoUsableBundle",
+   "value": "\"no_usable_bundle\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:805",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::CandidateLimitExhausted { .. }",
+   "value": "\"candidate_limit_exhausted\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:806",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::IdentityMismatch",
+   "value": "\"identity_mismatch\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:807",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::UnsignedRejectedByPolicy",
+   "value": "\"unsigned_rejected_by_policy\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:808",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::IssuerMismatch",
+   "value": "\"issuer_mismatch\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:809",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::CertChainInvalid",
+   "value": "\"cert_chain_invalid\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:810",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::SignatureInvalid",
+   "value": "\"signature_invalid\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:811",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::SubjectDigestMismatch",
+   "value": "\"subject_digest_mismatch\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:812",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::RekorSetInvalid",
+   "value": "\"rekor_set_invalid\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:813",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TransparencyBodyMismatch",
+   "value": "\"transparency_body_mismatch\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:814",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::RekorInclusionProofAbsent",
+   "value": "\"rekor_inclusion_proof_absent\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:815",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::RekorSetAbsentTsaPresent",
+   "value": "\"rekor_set_absent_tsa_present\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:816",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TransparencyLogUnavailable",
+   "value": "\"transparency_log_unavailable\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:817",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::BundleParseFailed",
+   "value": "\"bundle_parse_failed\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:818",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::ForbiddenRegistryTarget { .. }",
+   "value": "\"forbidden_registry_target\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:819",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TrustRootUnavailable",
+   "value": "\"trust_root_unavailable\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:820",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TrustRootLoad(TrustRootLoadReason::TrustRootUnreadable { .. })",
+   "value": "\"trust_root_unreadable\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:821",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TrustRootLoad(_)",
+   "value": "\"trust_root_load\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:822",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::NoIdentityProvided",
+   "value": "\"no_identity_provided\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:823",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TrustPolicyInvalid(error) if error.names_unsupported_backend()",
+   "value": "\"unsupported_key_backend\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:824",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TrustPolicyInvalid(crate::trust::TrustPolicyError::KeyUnreadable { .. }) | Self::TrustPolicyInvalid(crate::trust::TrustPolicyError::KeyMalformed { fault : crate::trust::KeyFault::Path, .. })",
+   "value": "\"key_unreadable\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:825",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TrustPolicyInvalid(crate::trust::TrustPolicyError::KeyMalformed { fault : crate::trust::KeyFault::FileBytes, .. })",
+   "value": "\"key_malformed\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:830",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TrustPolicyInvalid(_)",
+   "value": "\"trust_policy_invalid\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:834",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::InvalidEndpointUrl { .. }",
+   "value": "\"invalid_endpoint_url\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:835",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::AttestationNotFound",
+   "value": "\"attestation_not_found\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:836",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::PredicateTypeMismatch { .. }",
+   "value": "\"predicate_type_mismatch\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:837",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::StatementSubjectMismatch { .. }",
+   "value": "\"statement_subject_mismatch\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:838",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::StatementSubjectAbsent",
+   "value": "\"statement_subject_absent\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:839",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::StatementSubjectWeakAlgorithm { .. }",
+   "value": "\"statement_subject_weak_algorithm\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:840",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::BuilderMismatch { .. }",
+   "value": "\"builder_mismatch\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:841",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::StatementTypeUnsupported { .. }",
+   "value": "\"statement_type_unsupported\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:842",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::PayloadTypeUnsupported { .. }",
+   "value": "\"payload_type_unsupported\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:843",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::SimpleSigningClaimUnsupported { .. }",
+   "value": "\"simple_signing_claim_unsupported\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:844",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::MultipleSignatures { .. }",
+   "value": "\"multiple_signatures\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:845",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::MultipleAttestations { .. }",
+   "value": "\"multiple_attestations\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:846",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::UnsupportedTlogEntryKind { .. }",
+   "value": "\"unsupported_tlog_entry_kind\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:847",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TlogBindingMismatch",
+   "value": "\"tlog_binding_mismatch\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:848",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::CertificateValidityWindow { .. }",
+   "value": "\"certificate_validity_window\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:849",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::SbomMediaTypeUnsupported { .. }",
+   "value": "\"sbom_media_type_unsupported\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:850",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::AttestationTooLarge { .. }",
+   "value": "\"attestation_too_large\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:851",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::AttestationPayloadTooLarge { .. }",
+   "value": "\"attestation_payload_too_large\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:852",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::TooManyAttestations { .. }",
+   "value": "\"too_many_attestations\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:853",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::AttestationBudgetExhausted { .. }",
+   "value": "\"attestation_budget_exhausted\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:854",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::UnsupportedKeyBackend(_)",
+   "value": "\"unsupported_key_backend\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:855",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::KeyReferenceInvalid(_)",
+   "value": "\"key_reference_invalid\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:856",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "VerifyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::Internal(_)",
+   "value": "\"internal\"",
+   "source": "crates/ocx_lib/src/oci/verify/error.rs:857",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "BinScanError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::UndeclaredBinary { .. } | Self::DeclaredNotExecutable { .. } | Self::Binary(_) | Self::UnsupportedHostScan { .. }",
+   "value": "Some(crate::cli::ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/package/bin_scan.rs:491",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "BinScanError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Scan(_)",
+   "value": "None",
+   "source": "crates/ocx_lib/src/package/bin_scan.rs:496",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "DependencyPinningError",
+   "trait": "ClassifyExitCode",
+   "pattern": "DependencyPinningError::DependencyNotFound { .. }",
+   "value": "Some(ExitCode::NotFound)",
+   "source": "crates/ocx_lib/src/package/dependency_pinning.rs:257",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "DependencyPinningError",
+   "trait": "ClassifyExitCode",
+   "pattern": "DependencyPinningError::NoCompatiblePlatform { .. } | DependencyPinningError::AmbiguousPlatform { .. } | DependencyPinningError::DirectDigestPinInAnyTarget { .. }",
+   "value": "Some(ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/package/dependency_pinning.rs:258",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "DependencyPinningError",
+   "trait": "ClassifyExitCode",
+   "pattern": "DependencyPinningError::Index(_)",
+   "value": "None",
+   "source": "crates/ocx_lib/src/package/dependency_pinning.rs:263",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::VersionInvalid(_) | Self::UnsupportedLogoFormat(_) | Self::InvalidLogoContent { .. } | Self::BuildMeta(_) | Self::EmptyPushSet | Self::UnknownEnvModifier { .. } | Self::MissingListSeparator { .. } | Self::ReservedEnvKey { .. } | Self::InvalidListSeparator { .. } | Self::SeparatorEdgedListValue { .. } | Self::IntegrationNamespaceInvalid { .. } | Self::IntegrationTooLarge { .. } | Self::IntegrationsTooLarge { .. }",
+   "value": "Some(ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/package/error.rs:123",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::RequiredPathMissing(_)",
+   "value": "Some(ExitCode::NotFound)",
+   "source": "crates/ocx_lib/src/package/error.rs:136",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::EnvVarInterpolation { source, .. }",
+   "value": "source.classify()",
+   "source": "crates/ocx_lib/src/package/error.rs:137",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::EntrypointArgInterpolation { source, .. }",
+   "value": "source.classify()",
+   "source": "crates/ocx_lib/src/package/error.rs:138",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::IntegrationInterpolation { source, .. }",
+   "value": "source.classify()",
+   "source": "crates/ocx_lib/src/package/error.rs:139",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "LibcLintError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::UndeclaredLibc { .. } | Self::AgnosticPlatformClaim { .. } | Self::UnparseableElf { .. } | Self::UnrecognizedInterpreter { .. } | Self::UnresolvableScanScope { .. } | Self::ModifierBearingScanScope { .. }",
+   "value": "Some(crate::cli::ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/package/libc_lint.rs:701",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "LibcLintError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Read { .. }",
+   "value": "Some(crate::cli::ExitCode::IoError)",
+   "source": "crates/ocx_lib/src/package/libc_lint.rs:708",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "LibcLintError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Scan(_)",
+   "value": "None",
+   "source": "crates/ocx_lib/src/package/libc_lint.rs:710",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "TemplateError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::UnknownDependencyRef { .. } | Self::AmbiguousDependencyRef { .. } | Self::UnknownToken { .. } | Self::UnknownField { .. } | Self::UnknownModifier { .. } | Self::ModifierNotApplicable { .. } | Self::UndefinedSelfEnvRef { .. } | Self::AmbiguousSelfEnvRef { .. } | Self::DisallowedToken { .. } | Self::ResolvedValueTooLarge { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/package/metadata/template/error.rs:242",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "TemplateError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::DependencyNotInstalled { .. }",
+   "value": "ExitCode::NotFound",
+   "source": "crates/ocx_lib/src/package/metadata/template/error.rs:252",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::SelfCheckFailed(pe)",
+   "value": "pe.kind.classify()",
+   "source": "crates/ocx_lib/src/package_manager/error.rs:382",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::FindFailed(es) | Self::InstallFailed(es) | Self::UninstallFailed(es) | Self::DeselectFailed(es) | Self::ResolveFailed(es) | Self::InspectFailed(es) | Self::SelectFailed(es)",
+   "value": "es . first() . and_then(| pe | pe . kind . classify())",
+   "source": "crates/ocx_lib/src/package_manager/error.rs:383",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PackageErrorKind",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::NotFound | Self::SymlinkNotFound(_) | Self::BlobNotFound(_)",
+   "value": "ExitCode::NotFound",
+   "source": "crates/ocx_lib/src/package_manager/error.rs:397",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PackageErrorKind",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::OfflineManifestMissing(_)",
+   "value": "ExitCode::PolicyBlocked",
+   "source": "crates/ocx_lib/src/package_manager/error.rs:398",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PackageErrorKind",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::SelectionAmbiguous(_) | Self::SymlinkRequiresTag | Self::DigestMissing | Self::EntrypointCollision { .. } | Self::FeatureMismatch { .. } | Self::ShimNamesNotEnumerable { .. } | Self::ShimNameInvalid(_) | Self::ShimNameNotClaimed(_) | Self::ShimClaimUnfulfilled(_)",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/package_manager/error.rs:399",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PackageErrorKind",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::TaskPanicked",
+   "value": "ExitCode::Failure",
+   "source": "crates/ocx_lib/src/package_manager/error.rs:411",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PackageErrorKind",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::RequiredCompanionFailed { source, .. }",
+   "value": "return source.classify()",
+   "source": "crates/ocx_lib/src/package_manager/error.rs:418",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PackageErrorKind",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::PatchDiscovery(inner)",
+   "value": "{ return Some(crate::cli::classify_error(inner as & (dyn std::error::Error + 'static))); }",
+   "source": "crates/ocx_lib/src/package_manager/error.rs:422",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PackageErrorKind",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::ToolchainPath(inner)",
+   "value": "return inner.classify()",
+   "source": "crates/ocx_lib/src/package_manager/error.rs:430",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PackageErrorKind",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Internal(inner)",
+   "value": "return Some(crate::cli::classify_error(inner))",
+   "source": "crates/ocx_lib/src/package_manager/error.rs:433",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "DependencyError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Conflict { .. }",
+   "value": "Some(ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/package_manager/error.rs:441",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "DependencyError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::SetupFailed(_)",
+   "value": "None",
+   "source": "crates/ocx_lib/src/package_manager/error.rs:446",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PatchError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::FetchFailed { source }",
+   "value": "source.classify()",
+   "source": "crates/ocx_lib/src/patch/error.rs:183",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PatchError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::BlobWriteFailed { .. }",
+   "value": "Some(ExitCode::IoError)",
+   "source": "crates/ocx_lib/src/patch/error.rs:185",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PatchError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::PolicyBlocked { .. }",
+   "value": "Some(ExitCode::PolicyBlocked)",
+   "source": "crates/ocx_lib/src/patch/error.rs:187",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PatchError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::InvalidDescriptorJson { .. } | Self::UnsupportedVersion { .. } | Self::UnsupportedSnapshotVersion { .. } | Self::UnexpectedManifest { .. } | Self::UnexpectedArtifactType { .. } | Self::WrongLayerCount { .. } | Self::UnexpectedLayerMediaType { .. } | Self::LayerSizeExceeded { .. } | Self::LayerDigestMismatch { .. } | Self::ManifestDigestMismatch { .. } | Self::DescriptorTooLarge { .. }",
+   "value": "Some(ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/patch/error.rs:189",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Project(e)",
+   "value": "match & e . kind { ProjectErrorKind::Io(_) => ExitCode::IoError, ProjectErrorKind::TomlParse(_) | ProjectErrorKind::TomlSerialize(_) | ProjectErrorKind::ReservedGroupName { .. } | ProjectErrorKind::InvalidToolchainNameCharset { .. } | ProjectErrorKind::ShellSectionInProject | ProjectErrorKind::UnsupportedDeclarationHashVersion { .. } | ProjectErrorKind::FileTooLarge { .. } | ProjectErrorKind::ToolValueMissingRegistry { .. } | ProjectErrorKind::ToolValueInvalid { .. } | ProjectErrorKind::PackageKeyMissingRegistry { .. } | ProjectErrorKind::PackageKeyInvalid { .. } | ProjectErrorKind::GroupHoldsDirectBinding { .. } | ProjectErrorKind::UnknownGroupSection { .. } | ProjectErrorKind::EnvReservedKey { .. } | ProjectErrorKind::EnvInvalidKey { .. } | ProjectErrorKind::EnvUnknownModifier { .. } | ProjectErrorKind::EnvInvalidValue { .. } | ProjectErrorKind::EnvUnknownValueField { .. } | ProjectErrorKind::EnvSeparatorOnNonList { .. } | ProjectErrorKind::EnvInvalidSeparator { .. } | ProjectErrorKind::EnvSeparatorEdgedValue { .. } | ProjectErrorKind::LockRepositoryNotBare { .. } | ProjectErrorKind::ManifestEditParse(_) => ExitCode::ConfigError, ProjectErrorKind::EnvPathSeparatorInValue { .. } => ExitCode::DataError, ProjectErrorKind::ManifestEditDiverged => ExitCode::Failure, ProjectErrorKind::EmptyGroupFilter | ProjectErrorKind::UnknownGroup { .. } | ProjectErrorKind::DuplicateToolAcrossSelectedGroups { .. } | ProjectErrorKind::BindingAmbiguous { .. } => ExitCode::UsageError, ProjectErrorKind::Locked => ExitCode::TempFail, ProjectErrorKind::TagNotFound { .. } => ExitCode::NotFound, ProjectErrorKind::AuthFailure { .. } => ExitCode::AuthError, ProjectErrorKind::RegistryUnreachable { source, .. } => source . downcast_ref::< crate::oci::client::error::ClientError >() . filter(| client | { matches ! (client, crate::oci::client::error::ClientError::RegistryTransient(_)) }) . and_then(ClassifyExitCode::classify) . unwrap_or(ExitCode::Unavailable), ProjectErrorKind::ResolveTimeout { .. } => ExitCode::TempFail, ProjectErrorKind::LockMissing => ExitCode::ConfigError, ProjectErrorKind::UnsupportedLockVersion { .. } => ExitCode::ConfigError, ProjectErrorKind::NoHostLeaf { .. } => ExitCode::ConfigError, ProjectErrorKind::AmbiguousHostLeaf { .. } => ExitCode::DataError, ProjectErrorKind::ToolNotInConfig { .. } => ExitCode::NotFound, ProjectErrorKind::BindingAlreadyExists { .. } => ExitCode::UsageError, ProjectErrorKind::BindingNotFound { .. } => ExitCode::NotFound, ProjectErrorKind::ConfigAlreadyExists { .. } => ExitCode::UsageError, ProjectErrorKind::InvalidGroupName { .. } => ExitCode::UsageError, ProjectErrorKind::InvalidBindingName { .. } => ExitCode::UsageError, ProjectErrorKind::StaleLockOnPartial { .. } => ExitCode::DataError, ProjectErrorKind::DuplicatePlatformKey { .. } => ExitCode::DataError, ProjectErrorKind::NoncanonicalPlatformKey { .. } => ExitCode::DataError, ProjectErrorKind::PolicyBlocked { .. } => ExitCode::PolicyBlocked, }",
+   "source": "crates/ocx_lib/src/project/error.rs:582",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::Io(_)",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/project/error.rs:583",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::TomlParse(_) | ProjectErrorKind::TomlSerialize(_) | ProjectErrorKind::ReservedGroupName { .. } | ProjectErrorKind::InvalidToolchainNameCharset { .. } | ProjectErrorKind::ShellSectionInProject | ProjectErrorKind::UnsupportedDeclarationHashVersion { .. } | ProjectErrorKind::FileTooLarge { .. } | ProjectErrorKind::ToolValueMissingRegistry { .. } | ProjectErrorKind::ToolValueInvalid { .. } | ProjectErrorKind::PackageKeyMissingRegistry { .. } | ProjectErrorKind::PackageKeyInvalid { .. } | ProjectErrorKind::GroupHoldsDirectBinding { .. } | ProjectErrorKind::UnknownGroupSection { .. } | ProjectErrorKind::EnvReservedKey { .. } | ProjectErrorKind::EnvInvalidKey { .. } | ProjectErrorKind::EnvUnknownModifier { .. } | ProjectErrorKind::EnvInvalidValue { .. } | ProjectErrorKind::EnvUnknownValueField { .. } | ProjectErrorKind::EnvSeparatorOnNonList { .. } | ProjectErrorKind::EnvInvalidSeparator { .. } | ProjectErrorKind::EnvSeparatorEdgedValue { .. } | ProjectErrorKind::LockRepositoryNotBare { .. } | ProjectErrorKind::ManifestEditParse(_)",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/project/error.rs:584",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::EnvPathSeparatorInValue { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/project/error.rs:616",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::ManifestEditDiverged",
+   "value": "ExitCode::Failure",
+   "source": "crates/ocx_lib/src/project/error.rs:620",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::EmptyGroupFilter | ProjectErrorKind::UnknownGroup { .. } | ProjectErrorKind::DuplicateToolAcrossSelectedGroups { .. } | ProjectErrorKind::BindingAmbiguous { .. }",
+   "value": "ExitCode::UsageError",
+   "source": "crates/ocx_lib/src/project/error.rs:621",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::Locked",
+   "value": "ExitCode::TempFail",
+   "source": "crates/ocx_lib/src/project/error.rs:625",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::TagNotFound { .. }",
+   "value": "ExitCode::NotFound",
+   "source": "crates/ocx_lib/src/project/error.rs:626",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::AuthFailure { .. }",
+   "value": "ExitCode::AuthError",
+   "source": "crates/ocx_lib/src/project/error.rs:627",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::RegistryUnreachable { source, .. }",
+   "value": "source . downcast_ref::< crate::oci::client::error::ClientError >() . filter(| client | { matches ! (client, crate::oci::client::error::ClientError::RegistryTransient(_)) }) . and_then(ClassifyExitCode::classify) . unwrap_or(ExitCode::Unavailable)",
+   "source": "crates/ocx_lib/src/project/error.rs:637",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::ResolveTimeout { .. }",
+   "value": "ExitCode::TempFail",
+   "source": "crates/ocx_lib/src/project/error.rs:647",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::LockMissing",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/project/error.rs:648",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::UnsupportedLockVersion { .. }",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/project/error.rs:651",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::NoHostLeaf { .. }",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/project/error.rs:655",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::AmbiguousHostLeaf { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/project/error.rs:660",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::ToolNotInConfig { .. }",
+   "value": "ExitCode::NotFound",
+   "source": "crates/ocx_lib/src/project/error.rs:661",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::BindingAlreadyExists { .. }",
+   "value": "ExitCode::UsageError",
+   "source": "crates/ocx_lib/src/project/error.rs:662",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::BindingNotFound { .. }",
+   "value": "ExitCode::NotFound",
+   "source": "crates/ocx_lib/src/project/error.rs:663",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::ConfigAlreadyExists { .. }",
+   "value": "ExitCode::UsageError",
+   "source": "crates/ocx_lib/src/project/error.rs:664",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::InvalidGroupName { .. }",
+   "value": "ExitCode::UsageError",
+   "source": "crates/ocx_lib/src/project/error.rs:665",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::InvalidBindingName { .. }",
+   "value": "ExitCode::UsageError",
+   "source": "crates/ocx_lib/src/project/error.rs:666",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::StaleLockOnPartial { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/project/error.rs:673",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::DuplicatePlatformKey { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/project/error.rs:676",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::NoncanonicalPlatformKey { .. }",
+   "value": "ExitCode::DataError",
+   "source": "crates/ocx_lib/src/project/error.rs:679",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectErrorKind::PolicyBlocked { .. }",
+   "value": "ExitCode::PolicyBlocked",
+   "source": "crates/ocx_lib/src/project/error.rs:682",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "LockCurrency",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Missing { .. }",
+   "value": "Some(ExitCode::ConfigError)",
+   "source": "crates/ocx_lib/src/project/lock.rs:628",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "LockCurrency",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Stale { .. }",
+   "value": "Some(ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/project/lock.rs:630",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Registry(e)",
+   "value": "match & e . kind { ProjectRegistryErrorKind::Io(_) => ExitCode::IoError, }",
+   "source": "crates/ocx_lib/src/project/registry/error.rs:90",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "ProjectRegistryErrorKind::Io(_)",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/project/registry/error.rs:91",
+   "func": "classify",
+   "match_id": 1
+  },
+  {
+   "type": "CopyError",
+   "trait": "ClassifyExitCode",
+   "pattern": "CopyErrorKind::Registry(cause)",
+   "value": "cause.classify()",
+   "source": "crates/ocx_lib/src/publisher/copy.rs:65",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "CopyError",
+   "trait": "ClassifyExitCode",
+   "pattern": "kind",
+   "value": "Some(kind.exit_code())",
+   "source": "crates/ocx_lib/src/publisher/copy.rs:66",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "CopyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::IndexNamedByDigest | Self::PlatformRequired | Self::PlatformAmbiguous | Self::NoMatchingPlatform { .. }",
+   "value": "ExitCode::UsageError",
+   "source": "crates/ocx_lib/src/publisher/copy.rs:126",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "CopyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::Registry(_)",
+   "value": "ExitCode::Failure",
+   "source": "crates/ocx_lib/src/publisher/copy.rs:136",
+   "func": "exit_code",
+   "match_id": 0
+  },
+  {
+   "type": "CopyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::IndexNamedByDigest",
+   "value": "\"index_named_by_digest\"",
+   "source": "crates/ocx_lib/src/publisher/copy.rs:144",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "CopyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::PlatformRequired",
+   "value": "\"platform_required\"",
+   "source": "crates/ocx_lib/src/publisher/copy.rs:145",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "CopyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::PlatformAmbiguous",
+   "value": "\"platform_ambiguous\"",
+   "source": "crates/ocx_lib/src/publisher/copy.rs:146",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "CopyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::NoMatchingPlatform { .. }",
+   "value": "\"no_matching_platform\"",
+   "source": "crates/ocx_lib/src/publisher/copy.rs:147",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "CopyErrorKind",
+   "trait": "ClassifyErrorKind",
+   "pattern": "Self::Registry(_)",
+   "value": "\"registry\"",
+   "source": "crates/ocx_lib/src/publisher/copy.rs:148",
+   "func": "kind_detail",
+   "match_id": 0
+  },
+  {
+   "type": "PublishGateError",
+   "trait": "ClassifyExitCode",
+   "pattern": "PublishGateError::DependencyPinnedToIndex { .. } | PublishGateError::AnyPinNotAdvertisedAsAny { .. }",
+   "value": "{ Some(ExitCode::DataError) }",
+   "source": "crates/ocx_lib/src/publisher/publish_gate.rs:213",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PublishGateError",
+   "trait": "ClassifyExitCode",
+   "pattern": "PublishGateError::DependencyManifestNotFound { .. }",
+   "value": "Some(ExitCode::NotFound)",
+   "source": "crates/ocx_lib/src/publisher/publish_gate.rs:216",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "PublishGateError",
+   "trait": "ClassifyExitCode",
+   "pattern": "PublishGateError::Verification { .. } | PublishGateError::AnyPinProvenanceUnavailable { .. }",
+   "value": "None",
+   "source": "crates/ocx_lib/src/publisher/publish_gate.rs:219",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "RecordsError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Io { .. } | Self::Serialize(_)",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/record/error.rs:89",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "RecordsError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::TemplateUnknownPlaceholder { .. } | Self::TemplateNotUnique | Self::NameNotAFilename { .. } | Self::RequiredWithoutSink",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/record/error.rs:93",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "RecordsError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::SinkSymlink { .. }",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/record/error.rs:104",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Error::Bootstrap(_)",
+   "value": "None",
+   "source": "crates/ocx_lib/src/setup/error.rs:173",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Error::Io { .. }",
+   "value": "Some(ExitCode::IoError)",
+   "source": "crates/ocx_lib/src/setup/error.rs:174",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Error::Subprocess(_)",
+   "value": "Some(ExitCode::Unavailable)",
+   "source": "crates/ocx_lib/src/setup/error.rs:175",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Error::InvalidVersionSpec { .. }",
+   "value": "Some(ExitCode::UsageError)",
+   "source": "crates/ocx_lib/src/setup/error.rs:177",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Error::PinDigestMismatch { .. }",
+   "value": "Some(ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/setup/error.rs:180",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Error::InvalidManagedConfigSource { .. }",
+   "value": "Some(ExitCode::ConfigError)",
+   "source": "crates/ocx_lib/src/setup/error.rs:181",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Error::ManagedConfigUpdateFailed(_)",
+   "value": "None",
+   "source": "crates/ocx_lib/src/setup/error.rs:185",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Error::ManagedConfigLocked(_)",
+   "value": "Some(ExitCode::ConfigError)",
+   "source": "crates/ocx_lib/src/setup/error.rs:187",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Error::SessionPath(inner)",
+   "value": "inner.classify()",
+   "source": "crates/ocx_lib/src/setup/error.rs:192",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Error::ExtraCaCerts(inner)",
+   "value": "inner.classify()",
+   "source": "crates/ocx_lib/src/setup/error.rs:199",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Error::ConfigEdit(inner)",
+   "value": "inner.classify()",
+   "source": "crates/ocx_lib/src/setup/error.rs:200",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Error::ExtraCaCertsNotUtf8 { .. }",
+   "value": "Some(ExitCode::DataError)",
+   "source": "crates/ocx_lib/src/setup/error.rs:201",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Error::RenderedConfigTooLarge { .. }",
+   "value": "Some(ExitCode::ConfigError)",
+   "source": "crates/ocx_lib/src/setup/error.rs:202",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "SessionPathError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Unencodable { .. } | Self::NotUtf8 { .. } | Self::NotAbsolute { .. }",
+   "value": "{ Some(crate::cli::ExitCode::ConfigError) }",
+   "source": "crates/ocx_lib/src/setup/session_path.rs:215",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "TlsError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Unreadable { .. }",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/tls.rs:283",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "TlsError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::TooLarge { origin, .. } if origin.is_file()",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/tls.rs:284",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "TlsError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::TooLarge { .. }",
+   "value": "ExitCode::ConfigError",
+   "source": "crates/ocx_lib/src/tls.rs:285",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "TlsError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::NotACertificate { origin, .. } | Self::Empty { origin } | Self::Malformed { origin, .. } | Self::Truncated { origin, .. }",
+   "value": "{ if origin . is_file() { ExitCode::DataError } else { ExitCode::ConfigError } }",
+   "source": "crates/ocx_lib/src/tls.rs:286",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "EmptyOrAbsentError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::NotADirectory { .. } | Self::NonEmpty { .. }",
+   "value": "ExitCode::UsageError",
+   "source": "crates/ocx_lib/src/utility/fs/empty_or_absent.rs:55",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "EmptyOrAbsentError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Io { .. }",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/utility/fs/empty_or_absent.rs:56",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "SymlinkWalkError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Ancestor { .. }",
+   "value": "ExitCode::UsageError",
+   "source": "crates/ocx_lib/src/utility/fs/symlink_walk.rs:51",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "SymlinkWalkError",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Io { .. }",
+   "value": "ExitCode::IoError",
+   "source": "crates/ocx_lib/src/utility/fs/symlink_walk.rs:52",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Failed(_)",
+   "value": "None",
+   "source": "crates/ocx_lib/src/utility/singleflight.rs:271",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Abandoned",
+   "value": "Some(crate::cli::ExitCode::Failure)",
+   "source": "crates/ocx_lib/src/utility/singleflight.rs:273",
+   "func": "classify",
+   "match_id": 0
+  },
+  {
+   "type": "Error",
+   "trait": "ClassifyExitCode",
+   "pattern": "Self::Timeout | Self::CapacityExceeded { .. }",
+   "value": "Some(crate::cli::ExitCode::TempFail)",
+   "source": "crates/ocx_lib/src/utility/singleflight.rs:275",
+   "func": "classify",
+   "match_id": 0
+  }
+ ]
+}

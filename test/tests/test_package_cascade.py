@@ -4,7 +4,7 @@
 
 The pure fold/diff/plan core (matrices A-E), the concurrent gather/apply
 halves (F/G), and the push-replay equivalence oracle (H) are all covered at
-the unit level in `crates/ocx_lib/src/package/cascade/`. This module is the
+the unit level in `crates/ocx_package/src/cascade/`. This module is the
 outside view: real pushes against the `registry:2` fixture, a hand-corrupted
 alias via direct HTTP PUT, and — for the logical-identifier path — the
 `index.ocx.sh`-shaped `StaticIndexServer` fixture from

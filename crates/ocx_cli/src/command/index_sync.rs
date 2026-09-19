@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{oci, oci::index};
+use ocx_index;
 
 use crate::api::data::index::{CatalogPreview, CatalogPreviewEntry};
 use crate::command::index_common;
@@ -51,14 +51,10 @@ impl IndexSync {
         // This is the ONLY frozen gate in this command, which is what
         // `exactly_one_frozen_gate` exists to refuse a second of.
         if context.config_view().frozen {
-            return Err(ocx_lib::Error::PolicyBlocked {
-                operation: "`ocx index sync`",
-                policy: "frozen",
-            }
-            .into());
+            return Err(index_common::policy_blocked("`ocx index sync`", "frozen").into());
         }
 
-        let oci_index = index::Index::from_remote(remote_index.clone());
+        let oci_index = ocx_index::Index::from_remote(remote_index.clone());
         // Per-namespace static-file index sources, when online. A package in an
         // index-bearing namespace refreshes through the two-hop index path
         // rather than the registry (`adr_index_indirection.md` F5a — kind per
@@ -82,7 +78,7 @@ impl IndexSync {
         let registries: Vec<&String> = self.registries.iter().filter(|r| seen.insert(*r)).collect();
 
         let mut enumerated = Vec::with_capacity(registries.len());
-        let mut failures: Vec<(usize, ocx_lib::Error)> = Vec::new();
+        let mut failures: Vec<(usize, anyhow::Error)> = Vec::new();
         for (input_index, registry) in registries.iter().enumerate() {
             match enumerate_catalog(index_sources, &oci_index, registry).await {
                 Ok(packages) => {
@@ -128,7 +124,7 @@ impl IndexSync {
         // registry at a time.
         if self.dry_run {
             if let Some(error) = index_common::first_failure(failures) {
-                return Err(error.into());
+                return Err(error);
             }
             context.api().report(&CatalogPreview::new(enumerated))?;
             return Ok(ExitCode::SUCCESS);
@@ -144,13 +140,13 @@ impl IndexSync {
         // No second dedup here: the registry list was deduplicated above, and
         // two DIFFERENT registries serving the same repository name are two
         // packages, correctly — the registry is part of the identity.
-        let packages: Vec<oci::Identifier> = enumerated
+        let packages: Vec<ocx_oci::Identifier> = enumerated
             .iter()
             .flat_map(|entry| {
                 entry
                     .packages
                     .iter()
-                    .map(|repository| oci::Identifier::new_registry(repository, &entry.registry))
+                    .map(|repository| ocx_oci::Identifier::new_registry(repository, &entry.registry))
             })
             .collect();
 
@@ -166,7 +162,7 @@ impl IndexSync {
         // with a nonzero exit emits no SUCCESS-shaped payload, and every failure
         // is already on stderr.
         if let Some(error) = index_common::first_failure(failures).or(refresh_failure) {
-            return Err(error.into());
+            return Err(error);
         }
 
         index_common::sync_patch_descriptors(context.manager()).await;
@@ -192,12 +188,12 @@ impl IndexSync {
 /// the authoritative-stop rule: no fall-through to the registry, and never an
 /// empty-set success, which would silently snapshot nothing.
 ///
-/// [`OcxIndex::serves_registry`]: ocx_lib::oci::index::OcxIndex::serves_registry
+/// [`OcxIndex::serves_registry`]: ocx_index::OcxIndex::serves_registry
 async fn enumerate_catalog(
-    index_sources: &[index::OcxIndex],
-    oci_index: &index::Index,
+    index_sources: &[ocx_index::OcxIndex],
+    oci_index: &ocx_index::Index,
     registry: &str,
-) -> ocx_lib::Result<Vec<String>> {
+) -> anyhow::Result<Vec<String>> {
     let mut packages = match index_sources.iter().find(|source| source.serves_registry(registry)) {
         // Published: the site's own `c/index.json`, read live and persisted
         // nowhere. `_strict` because an ABSENT catalog document is not an empty
@@ -236,8 +232,8 @@ async fn enumerate_catalog(
     // parse-and-discard form and reached both a log line and a request URL
     // intact.
     for key in &packages {
-        oci::Identifier::validate_repository(key).map_err(|error| {
-            ocx_lib::oci::index::error::Error::MalformedCatalogKey {
+        ocx_oci::Identifier::validate_repository(key).map_err(|error| {
+            ocx_index::error::Error::MalformedCatalogKey {
                 index_source: registry.to_string(),
                 key: key.clone(),
                 reason: error.to_string(),
@@ -270,7 +266,7 @@ mod tests {
     use clap::{CommandFactory, FromArgMatches};
 
     /// Parses `argv` (with a leading command name) against this command's own
-    /// clap definition. `cli::clap::parse` turns every non-help clap error into
+    /// clap definition. `clap_parse::parse` turns every non-help clap error into
     /// `ExitCode::UsageError` (64), so an `Err` here is exit 64.
     fn parse(argv: &[&str]) -> Result<clap::ArgMatches, clap::Error> {
         IndexSync::command().try_get_matches_from(argv)
@@ -317,7 +313,7 @@ mod tests {
         // `Some(tag) => RootScope::Tag`, `None => RootScope::Package`. C-014
         // wants `Package`, so what this command builds per catalog key must
         // carry no tag — the whole contract turns on this one `None`.
-        let identifier = oci::Identifier::new_registry("kitware/cmake", "ocx.sh");
+        let identifier = ocx_oci::Identifier::new_registry("kitware/cmake", "ocx.sh");
         assert!(
             identifier.tag().is_none(),
             "a tagged identifier would narrow the refresh to one tag (RootScope::Tag)"
@@ -331,7 +327,7 @@ mod tests {
         // package-scoped merge silently became a per-tag one.
         let body = module_code();
         assert!(
-            body.contains("oci::Identifier::new_registry(repository, &entry.registry)"),
+            body.contains("ocx_oci::Identifier::new_registry(repository, &entry.registry)"),
             "the flatten must build the bare form; the behavioural half is S-004"
         );
         for narrowing in ["clone_with_tag", "tag_or_latest", "clone_with_digest"] {
@@ -350,7 +346,7 @@ mod tests {
         // silently drifts from the first.
         let body = module_code();
         assert_eq!(
-            body.matches("Error::PolicyBlocked").count(),
+            body.matches("policy_blocked(").count(),
             1,
             "one --frozen gate, ahead of enumeration and refresh alike"
         );
@@ -448,7 +444,11 @@ mod tests {
         // And the gate must actually return, or ordering buys nothing.
         let gate = &body[aggregation..piggyback];
         assert!(
-            gate.contains("return Err(error.into());"),
+            // `.into()` until WP-37: the failures were `ocx_lib::Error` and the
+            // signature is `anyhow::Result`. They are `anyhow::Error` now, so
+            // the conversion is gone and clippy refuses it — keeping it in the
+            // needle would red on the only spelling that compiles.
+            gate.contains("return Err(error);"),
             "the aggregation gate must return, not merely compute"
         );
     }
@@ -616,7 +616,7 @@ mod tests {
         // the two enumeration lines moved to `index_common` instead.
         //
         // The macro forms are listed alongside `log::` because an alias
-        // (`use ocx_lib::log as logger;`) defeats a prefix check and not a
+        // (`use log as logger;`) defeats a prefix check and not a
         // suffix one.
         for raw in [
             "log::",
@@ -660,7 +660,7 @@ mod tests {
         // ocx_lib.
         let body = module_code();
         assert!(
-            body.contains("oci::Identifier::validate_repository(key)"),
+            body.contains("ocx_oci::Identifier::validate_repository(key)"),
             "the key must be validated as the repository it becomes"
         );
         assert!(

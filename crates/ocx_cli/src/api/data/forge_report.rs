@@ -30,7 +30,7 @@
 //! is deliberately no `Display` impl beside the derive: one wire vocabulary
 //! gets one renderer, and two would be free to drift.
 
-use ocx_lib::forge::{CapabilityCheck, CapabilityName, CheckStatus, ForgeCredentials, WriteTransport};
+use ocx_announce::forge::{CapabilityCheck, CapabilityName, CheckStatus, ForgeCredentials, WriteTransport};
 use serde::{Serialize, Serializer};
 
 /// Serialize a value by its [`std::fmt::Display`] spelling.
@@ -52,9 +52,9 @@ use serde::{Serialize, Serializer};
 /// | [`WriteTransport`] | `write_transport_value_spellings`, paired against clap's `value_variants()` rather than an `ALL` |
 /// | [`ForgeKind`] | **no library-scope spelling test** — `forge/kind.rs` declares no `ALL`. Its `github`/`gitlab` spellings are held only by this crate's golden claim-report document. |
 ///
-/// [`ClaimStatus`]: ocx_lib::claim::ClaimStatus
-/// [`ForgeKind`]: ocx_lib::forge::ForgeKind
-/// [`OwnerIdentitySource`]: ocx_lib::claim::OwnerIdentitySource
+/// [`ClaimStatus`]: ocx_announce::claim::ClaimStatus
+/// [`ForgeKind`]: ocx_announce::forge::ForgeKind
+/// [`OwnerIdentitySource`]: ocx_announce::claim::OwnerIdentitySource
 pub fn serialize_display<T: std::fmt::Display, S: Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.collect_str(value)
 }
@@ -154,7 +154,7 @@ impl CapabilityCheckEntry {
     /// `CapabilityName` declaration order.
     ///
     /// Takes the slice
-    /// [`PushAccess::checks`](ocx_lib::forge::PushAccess::checks) hands out, not
+    /// [`PushAccess::checks`](ocx_announce::forge::PushAccess::checks) hands out, not
     /// a `Vec`: `PushAccess` owns its rows and the privacy of that vector is
     /// what makes "non-empty on every run" unrepresentable-otherwise (C-069).
     /// **Every** row is projected, `Skipped` ones included — filtering the
@@ -220,7 +220,7 @@ pub fn push_credential_kind(credentials: &ForgeCredentials, transport: WriteTran
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::forge::{CapabilityName, CheckStatus, ForgeCredentials, ForgeToken, PushAccess, WriteTransport};
+    use ocx_announce::forge::{CapabilityName, CheckStatus, ForgeCredentials, ForgeToken, PushAccess, WriteTransport};
 
     use super::{CapabilityCheckEntry, CredentialKind, PushCredentialKind, credential_kind, push_credential_kind};
 

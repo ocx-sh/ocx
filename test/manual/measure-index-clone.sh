@@ -7,7 +7,7 @@
 #
 # WHAT IS MEASURED. `git init .` followed by
 # `git fetch --filter=blob:none <remote> <base>:<tracking>` - the operation
-# `GitWorkspace::fetch_refs` in `crates/ocx_lib/src/forge/git_workspace.rs`
+# `GitWorkspace::fetch_refs` in `crates/ocx_announce/src/forge/git_workspace.rs`
 # actually performs. Deliberately NOT `git clone --filter=blob:none`: a clone
 # materialises a working tree, so it backfills nearly every blob reachable from
 # HEAD and transfers several times what ocx does. Measuring a clone would put a

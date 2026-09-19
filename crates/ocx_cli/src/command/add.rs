@@ -8,7 +8,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::project::{ResolveLockOptions, add_binding_in_memory, resolve_lock, resolve_lock_touched};
+use ocx_project::{ResolveLockOptions, add_binding_in_memory, resolve_lock, resolve_lock_touched};
 
 use crate::api::data::lock::{LockEntry, LockReport};
 use crate::app::project_context::{
@@ -86,7 +86,7 @@ impl Add {
         // appears in a valid OCI identifier, so splitting on the FIRST `=` is
         // unambiguous. The name itself is validated by the library
         // (`InvalidBindingName`), so an empty `=foo` fails there, not here.
-        let bindings: Vec<(Option<String>, ocx_lib::oci::Identifier)> = self
+        let bindings: Vec<(Option<String>, ocx_oci::Identifier)> = self
             .identifiers
             .iter()
             .map(|raw| {
@@ -94,7 +94,7 @@ impl Add {
                     Some((name, reference)) => (Some(name.to_owned()), reference),
                     None => (None, raw.as_str()),
                 };
-                let id = ocx_lib::oci::Identifier::parse_with_default_registry(reference, context.default_registry())?;
+                let id = ocx_oci::Identifier::parse_with_default_registry(reference, context.default_registry())?;
                 let id = if id.tag().is_none() && id.digest().is_none() {
                     id.clone_with_tag("latest")
                 } else {
@@ -140,13 +140,11 @@ impl Add {
         let group = self
             .group
             .clone()
-            .unwrap_or_else(|| ocx_lib::project::DEFAULT_GROUP.to_string());
+            .unwrap_or_else(|| ocx_project::DEFAULT_GROUP.to_string());
         let touched: Vec<(String, String)> = bindings
             .iter()
             .map(|(name, identifier)| {
-                let key = name
-                    .clone()
-                    .unwrap_or_else(|| ocx_lib::project::binding_key(identifier));
+                let key = name.clone().unwrap_or_else(|| ocx_project::binding_key(identifier));
                 (group.clone(), key)
             })
             .collect();
@@ -200,7 +198,7 @@ impl Add {
                 guard,
                 staged,
                 new_lock.clone(),
-                ocx_lib::package_manager::ToolchainRender {
+                ocx_package_manager::ToolchainRender {
                     scope: &scope,
                     toolchain_root: context.toolchain_root(),
                     platform: &platform,

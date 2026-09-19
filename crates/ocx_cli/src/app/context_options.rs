@@ -2,9 +2,9 @@
 // Copyright 2026 The OCX Authors
 
 use clap::Parser;
-use ocx_lib::cli::{ColorModeConfig, DataInterface, Printer};
-use ocx_lib::env::OcxConfigView;
-use ocx_lib::{cli, env};
+use ocx_config::env;
+use ocx_config::env::OcxConfigView;
+use ocx_console::{ColorMode, ColorModeConfig, DataInterface, Printer};
 
 use crate::{api, options};
 
@@ -51,7 +51,7 @@ pub struct ContextOptions {
     // `git -C <dir>` and `git commit -C <ref>` coexist. `--global` picks a tier
     // and is typed once per command line; `--group` is typed interactively and
     // keeps the short form. Do not "align" these.
-    #[arg(short = 'g', long, conflicts_with = "project", default_value_t = env::flag(env::keys::OCX_GLOBAL, false))]
+    #[arg(short = 'g', long, conflicts_with = "project", default_value_t = ocx_util::env::flag(env::keys::OCX_GLOBAL, false))]
     pub global: bool,
 
     /// Route mutable lookups (tag list, catalog, tag->manifest) to the
@@ -64,7 +64,7 @@ pub struct ContextOptions {
     /// "pinned-only mode": no source contact, and any tag-addressed
     /// resolution that cannot be satisfied locally errors instead of
     /// silently falling back. Equivalent env var: `OCX_REMOTE`.
-    #[arg(short = 'r', long, default_value_t = env::flag(env::keys::OCX_REMOTE, false))]
+    #[arg(short = 'r', long, default_value_t = ocx_util::env::flag(env::keys::OCX_REMOTE, false))]
     pub remote: bool,
 
     /// Disable all network access.
@@ -73,7 +73,7 @@ pub struct ContextOptions {
     /// digest-pinned identifier; unpinned tags missing from the local
     /// index will error. Useful for hermetic CI runs and air-gapped
     /// environments. Equivalent env var: `OCX_OFFLINE`.
-    #[arg(long, default_value_t = env::flag(env::keys::OCX_OFFLINE, false))]
+    #[arg(long, default_value_t = ocx_util::env::flag(env::keys::OCX_OFFLINE, false))]
     pub offline: bool,
 
     /// Freeze tag resolution to the local index; never fetch an unknown tag.
@@ -91,7 +91,7 @@ pub struct ContextOptions {
     /// disabled; `--offline` alone (which also refuses unpinned tags) matches
     /// Cargo's behavior. Conflicts with `--remote`. Equivalent env var:
     /// `OCX_FROZEN`.
-    #[arg(long, conflicts_with = "remote", default_value_t = env::flag(env::keys::OCX_FROZEN, false))]
+    #[arg(long, conflicts_with = "remote", default_value_t = ocx_util::env::flag(env::keys::OCX_FROZEN, false))]
     pub frozen: bool,
 
     #[clap(flatten)]
@@ -102,7 +102,7 @@ pub struct ContextOptions {
     /// When set, the CLI's structured report (table or JSON) is not printed
     /// and no transfer progress is rendered on stderr.
     /// Equivalent env var: `OCX_QUIET`.
-    #[arg(short = 'q', long, default_value_t = env::flag("OCX_QUIET", false))]
+    #[arg(short = 'q', long, default_value_t = ocx_util::env::flag("OCX_QUIET", false))]
     pub quiet: bool,
 
     /// Maximum number of root packages to pull concurrently.
@@ -133,13 +133,13 @@ pub struct ContextOptions {
 
     /// The log level to use
     #[arg(short, long, value_enum)]
-    pub log_level: Option<cli::LogLevel>,
+    pub log_level: Option<crate::tracing_init::LogLevel>,
 
     // Parsed early in App::run() via ColorMode::from_args(); this field exists
     // so clap recognizes --color and shows it in --help.
     /// When to use ANSI colors in output.
     #[arg(long, value_enum, value_name = "WHEN", default_value_t = Default::default())]
-    pub color: cli::ColorMode,
+    pub color: ColorMode,
 }
 
 impl ContextOptions {
@@ -207,7 +207,7 @@ impl ContextOptions {
             // the config and `OCX_RECORDS_*` tiers fold in above them.
             // `Context::try_init` resolves the block and populates this field on
             // the returned view; the parser tier starts empty.
-            records: ocx_lib::record::RecordsOptions::default(),
+            records: ocx_package_manager::record::RecordsOptions::default(),
             // The effective managed-config source (flag > env > seed) is not
             // derivable from `ContextOptions` alone; `Context::try_init` will
             // populate this field once the managed-config tier is wired in

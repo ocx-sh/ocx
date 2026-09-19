@@ -10,17 +10,20 @@
 //! it. Required companion packages must be resolvable (installed locally or
 //! pulled from the registry); an unresolvable required companion fails.
 
+use ocx_oci::layer_ref::LayerRef;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Args;
-use ocx_lib::launch::{self, ExemptionReason, Launch};
-use ocx_lib::utility::child_process;
-use ocx_lib::{cli::UsageError, env, oci, package, publisher::LayerRef};
+use ocx_package_manager::launch::{self, ExemptionReason, Launch};
+use ocx_util::child_process;
 
+use crate::error::UsageError;
 use crate::{conventions, options};
+use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, reconcile_list_separators};
+use ocx_shell::shell::reconcile;
 
 /// Arguments for `ocx patch test`.
 #[derive(Args)]
@@ -32,7 +35,7 @@ pub struct PatchTestArgs {
     /// Target platform for composing the environment. Defaults to the host
     /// platform.
     #[clap(short, long)]
-    platform: Option<oci::Platform>,
+    platform: Option<ocx_oci::Platform>,
 
     /// Path to a local archive for a companion package, allowing the companion
     /// to be materialized without a registry round-trip. Repeatable.
@@ -95,11 +98,11 @@ impl PatchTestArgs {
 fn build_scratch_manager(
     context: &crate::app::Context,
     scratch_root: &std::path::Path,
-    patches: &ocx_lib::ResolvedPatchConfig,
-) -> ocx_lib::package_manager::PackageManager {
-    use ocx_lib::oci::index::{ChainMode, Index};
+    patches: &ocx_config::patch::ResolvedPatchConfig,
+) -> ocx_package_manager::PackageManager {
+    use ocx_index::{ChainMode, Index};
 
-    let file_structure = ocx_lib::file_structure::FileStructure::with_root(scratch_root.to_path_buf());
+    let file_structure = ocx_store::file_structure::FileStructure::with_root(scratch_root.to_path_buf());
     // Reuse the running context's already-resolved local index — same home
     // precedence `Context::try_init` applies (`--index` ▸ `OCX_INDEX` ▸
     // `$OCX_HOME/index`) — instead of constructing a fresh one bound to the
@@ -117,10 +120,10 @@ fn build_scratch_manager(
     // Offline → no source (the scratch manager is offline too, and
     // required-companion resolution fails closed).
     let (mode, sources): (ChainMode, Vec<Index>) = context.chain_sources();
-    let client: Option<oci::Client> = context.remote_client().ok().cloned();
+    let client: Option<ocx_oci::Client> = context.remote_client().ok().cloned();
     let index = Index::from_chained_with_content_store(local_index, sources, mode, file_structure.blobs.clone());
 
-    ocx_lib::package_manager::PackageManager::new(file_structure, index, client, context.default_registry())
+    ocx_package_manager::PackageManager::new(file_structure, index, client, context.default_registry())
         .with_patches(Some(patches.clone()))
         // Route the guaranteed-local companion / site-patch lookups
         // (`effective_index_store`) through the SAME index home the reused
@@ -137,7 +140,7 @@ fn build_scratch_manager(
 ///
 /// Materializes the base (and the descriptor's matched companions) into a
 /// scratch store, then delegates to
-/// [`ocx_lib::package_manager::PackageManager::seed_and_compose_patch_test`] to
+/// [`ocx_package_manager::PackageManager::seed_and_compose_patch_test`] to
 /// seed the local descriptor and compose the companion overlay onto the base.
 /// Finally either runs a Starlark script, runs a trailing command, or prints the
 /// composed environment.
@@ -148,7 +151,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     let platform = args
         .platform
         .clone()
-        .unwrap_or_else(|| oci::Platform::current().unwrap_or_else(oci::Platform::any));
+        .unwrap_or_else(|| ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any));
     let base_id = args.base.with_domain(context.default_registry())?;
 
     // Parse-level, before any file or registry work.
@@ -159,20 +162,20 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     // ── Step 1: Read + validate the descriptor file. ──
     let descriptor_bytes = tokio::fs::read(&args.descriptor)
         .await
-        .map_err(|error| ocx_lib::error::file_error(&args.descriptor, error))
+        .map_err(|error| ocx_util::error::FileError::new(&args.descriptor, error))
         .with_context(|| format!("reading descriptor file {}", args.descriptor.display()))?;
-    let descriptor = ocx_lib::patch::PatchDescriptor::from_json_bytes(&descriptor_bytes)
+    let descriptor = ocx_package_manager::patch::PatchDescriptor::from_json_bytes(&descriptor_bytes)
         .with_context(|| format!("validating patch descriptor file {}", args.descriptor.display()))?;
 
     // ── Step 2: Provision a scratch FileStructure (tempdir). ──
     let temp_root = context.file_structure().temp.patch_test_root();
     tokio::fs::create_dir_all(&temp_root)
         .await
-        .map_err(|e| ocx_lib::error::file_error(&temp_root, e))?;
+        .map_err(|e| ocx_util::error::FileError::new(&temp_root, e))?;
     let scratch = tempfile::Builder::new()
         .prefix("patch-test-")
         .tempdir_in(&temp_root)
-        .map_err(|e| ocx_lib::error::file_error(&temp_root, e))?;
+        .map_err(|e| ocx_util::error::FileError::new(&temp_root, e))?;
     let scratch_root = scratch.path().to_path_buf();
 
     let manager = build_scratch_manager(&context, &scratch_root, &patches);
@@ -186,7 +189,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     let base_info = manager
         .pull(&base_id, platform.clone())
         .await
-        .map_err(|kind| ocx_lib::Error::package(base_id.clone(), kind))
+        .map_err(|kind| ocx_package_manager::Error::package(base_id.clone(), kind))
         .with_context(|| format!("materializing base '{base_id}' into the scratch store"))?;
     let base_arc = Arc::new(base_info);
 
@@ -205,7 +208,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     let mut composition = manager
         .seed_and_compose_patch_test(&base_arc, &descriptor_bytes, &patches, env_overrides.clone(), &platform)
         .await
-        .map_err(|kind| ocx_lib::Error::package(base_id.clone(), kind))?;
+        .map_err(|kind| ocx_package_manager::Error::package(base_id.clone(), kind))?;
 
     // W-11: `composition.entries` and `env_overrides` are disjoint `Vec`s
     // holding independent copies of the `--env` overrides (mirrors exec.rs /
@@ -213,7 +216,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     // downstream branches (script, command, or the printed report) reads
     // either, so a package- or companion-established `list` separator reaches
     // the forwarded copy.
-    env::reconcile_list_separators(composition.entries.iter_mut().chain(env_overrides.iter_mut()))?;
+    reconcile_list_separators(composition.entries.iter_mut().chain(env_overrides.iter_mut()))?;
 
     // ── Step 6: Build the composed process env (mirrors package_test.rs). ──
     //
@@ -221,9 +224,9 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     // order that is correct — see `Env::apply_child_env`. A base that declares
     // entrypoints resolves through its generated launcher here too, so an
     // unforwarded override would be silently reverted at that hop.
-    let mut process_env = env::Env::inherited();
+    let mut process_env = reconcile::inherited_env();
     process_env.apply_child_env(
-        env::ChildEnv {
+        ChildEnv {
             composed: &composition.entries,
             forwarded: &env_overrides,
         },
@@ -237,7 +240,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
         // `Launch`, so a fail-closed policy would otherwise never see those
         // children. See `launch::exemption_allowed`.
         launch::exemption_allowed(
-            &context.records(ocx_lib::record::RecordsOptions::default())?,
+            &context.records(ocx_package_manager::record::RecordsOptions::default())?,
             ExemptionReason::PatchTest,
         )?;
         // Read the script source and provision the engine sandbox, then delegate
@@ -255,7 +258,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
         let engine_scratch = scratch_root.join("script-scratch");
         tokio::fs::create_dir_all(&engine_scratch)
             .await
-            .map_err(|e| ocx_lib::error::file_error(&engine_scratch, e))?;
+            .map_err(|e| ocx_util::error::FileError::new(&engine_scratch, e))?;
         let package_root = base_arc.dir().root();
 
         crate::command::script_runner::run_script_in_env(
@@ -278,7 +281,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
         // declares its exclusion rather than leaving it implicit — and the
         // resolved posture bounds it, since `Launch::exempt` grants no exemption
         // under `required = true`.
-        let policy = context.records(ocx_lib::record::RecordsOptions::default())?;
+        let policy = context.records(ocx_package_manager::record::RecordsOptions::default())?;
         let launch = Launch::exempt(
             process_env,
             &resolved,
@@ -340,10 +343,10 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
 ///   production would do when an optional companion is not yet published.
 async fn materialize_companions(
     context: &crate::app::Context,
-    manager: &ocx_lib::package_manager::PackageManager,
-    companions: &[ocx_lib::patch::CompanionEntry],
+    manager: &ocx_package_manager::PackageManager,
+    companions: &[ocx_package_manager::patch::CompanionEntry],
     companion_archives: &[PathBuf],
-    platform: &oci::Platform,
+    platform: &ocx_oci::Platform,
 ) -> anyhow::Result<()> {
     // Materialize each supplied local archive via the package-test local path.
     // The archive's sibling metadata file names the identifier the maintainer
@@ -356,7 +359,7 @@ async fn materialize_companions(
     for archive in companion_archives {
         let layer = LayerRef::File {
             path: archive.clone(),
-            layout: oci::LayerLayoutSpec::default(),
+            layout: ocx_oci::LayerLayoutSpec::default(),
             mount_from: None,
         };
         let metadata_path = conventions::resolve_metadata_path(std::slice::from_ref(&layer), None)
@@ -365,10 +368,10 @@ async fn materialize_companions(
         // the maintainer-authored `identifier` field from the same bytes.
         let metadata_bytes = tokio::fs::read(&metadata_path)
             .await
-            .map_err(|error| ocx_lib::error::file_error(&metadata_path, error))
+            .map_err(|error| ocx_util::error::FileError::new(&metadata_path, error))
             .with_context(|| format!("reading companion metadata from {}", metadata_path.display()))?;
         let metadata = parse_companion_metadata(&metadata_path, &metadata_bytes)?;
-        let identifier = ocx_lib::oci::Identifier::parse_with_default_registry(
+        let identifier = ocx_oci::Identifier::parse_with_default_registry(
             metadata_identifier_or_error(&metadata_path, &metadata_bytes)?.as_str(),
             manager.default_registry(),
         )
@@ -377,7 +380,7 @@ async fn materialize_companions(
         // tag — can never satisfy a companion, and the skip below would hide
         // that. Refuse before touching the store.
         cross_check_companion_archive(archive, &identifier, companions)?;
-        let info = package::info::Info {
+        let info = ocx_package::info::Info {
             identifier: identifier.clone(),
             metadata: metadata.into(),
             platform: platform.clone(),
@@ -385,7 +388,7 @@ async fn materialize_companions(
         let key = manager
             .materialize_test_companion(info, std::slice::from_ref(&layer))
             .await
-            .map_err(|kind| ocx_lib::Error::package(identifier.clone(), kind))
+            .map_err(|kind| ocx_package_manager::Error::package(identifier.clone(), kind))
             .with_context(|| format!("materializing companion archive {}", archive.display()))?;
         local_companion_keys.insert(key);
     }
@@ -414,10 +417,10 @@ async fn materialize_companions(
             .install_companion(
                 &companion.identifier,
                 platform.clone(),
-                ocx_lib::package_manager::PatchDiscoveryMode::Lazy,
+                ocx_package_manager::PatchDiscoveryMode::Lazy,
             )
             .await
-            .map_err(|kind| ocx_lib::Error::package(companion.identifier.clone(), kind));
+            .map_err(|kind| ocx_package_manager::Error::package(companion.identifier.clone(), kind));
         match pull_result {
             Ok(_) => {}
             Err(error) if !companion.required => {
@@ -447,8 +450,8 @@ async fn materialize_companions(
 /// just handed over, with no mention of the archive.
 fn cross_check_companion_archive(
     archive: &std::path::Path,
-    identifier: &oci::Identifier,
-    companions: &[ocx_lib::patch::CompanionEntry],
+    identifier: &ocx_oci::Identifier,
+    companions: &[ocx_package_manager::patch::CompanionEntry],
 ) -> anyhow::Result<()> {
     let exact_match = companions.iter().any(|entry| {
         entry.identifier.registry() == identifier.registry()
@@ -467,7 +470,10 @@ fn cross_check_companion_archive(
 
 /// Name the descriptor companion closest to `identifier` and the component that
 /// differs, so a near-miss reads as a near-miss instead of a flat rejection.
-fn nearest_companion_hint(identifier: &oci::Identifier, companions: &[ocx_lib::patch::CompanionEntry]) -> String {
+fn nearest_companion_hint(
+    identifier: &ocx_oci::Identifier,
+    companions: &[ocx_package_manager::patch::CompanionEntry],
+) -> String {
     let same_repository = companions.iter().find(|entry| {
         entry.identifier.registry() == identifier.registry() && entry.identifier.repository() == identifier.repository()
     });
@@ -492,7 +498,7 @@ fn nearest_companion_hint(identifier: &oci::Identifier, companions: &[ocx_lib::p
 
 /// The descriptor's companion identifiers as one line, capped so a descriptor
 /// with a long rule set does not bury its own error message.
-fn listed_companions(companions: &[ocx_lib::patch::CompanionEntry]) -> String {
+fn listed_companions(companions: &[ocx_package_manager::patch::CompanionEntry]) -> String {
     const MAX_LISTED: usize = 5;
 
     let listed = companions
@@ -515,15 +521,15 @@ fn listed_companions(companions: &[ocx_lib::patch::CompanionEntry]) -> String {
 fn parse_companion_metadata(
     metadata_path: &std::path::Path,
     metadata_bytes: &[u8],
-) -> anyhow::Result<package::metadata::ValidMetadata> {
+) -> anyhow::Result<ocx_package::metadata::ValidMetadata> {
     // Typed before `with_context`: a bare `serde_json::Error` is the chain tail,
     // and the classifier's downcast ladder has no rung for it — an operator's
     // trailing comma exits 1 `internal` and reads as an ocx bug. 65, the same
     // code the identical read gets through `SerdeExt::read_json` elsewhere.
-    let metadata = serde_json::from_slice::<package::metadata::Metadata>(metadata_bytes)
-        .map_err(ocx_lib::Error::from)
+    let metadata = serde_json::from_slice::<ocx_package::metadata::Metadata>(metadata_bytes)
+        .map_err(ocx_util::error::SerializationError::from)
         .with_context(|| format!("parsing companion metadata from {}", metadata_path.display()))?;
-    Ok(package::metadata::ValidMetadata::try_from(metadata)?)
+    Ok(ocx_package::metadata::ValidMetadata::try_from(metadata)?)
 }
 
 /// Extract the `identifier` field a maintainer set in a companion metadata file.
@@ -536,7 +542,7 @@ fn metadata_identifier_or_error(metadata_path: &std::path::Path, metadata_bytes:
     // Typed for the same reason as the `Metadata` parse of these same bytes:
     // an untyped `serde_json::Error` reaches the envelope as exit 1.
     let value: serde_json::Value = serde_json::from_slice(metadata_bytes)
-        .map_err(ocx_lib::Error::from)
+        .map_err(ocx_util::error::SerializationError::from)
         .with_context(|| format!("parsing companion metadata {}", metadata_path.display()))?;
     value
         .get("identifier")
@@ -567,13 +573,13 @@ mod tests {
     /// tells an operator which field is missing.
     #[test]
     fn a_malformed_companion_metadata_file_is_65_not_1() {
-        use ocx_lib::cli::ExitCode;
+        use ocx_exit::ExitCode;
 
         let path = std::path::Path::new("/tmp/companion.metadata.json");
         let malformed = metadata_identifier_or_error(path, b"{\"identifier\": \"a/b:1\",}")
             .expect_err("a trailing comma is not JSON");
         assert_eq!(
-            ocx_lib::cli::classify_error(malformed.as_ref()),
+            crate::exit::classify_library_error(malformed.as_ref()),
             ExitCode::DataError,
             "an operator's malformed JSON is 65, the same code `SerdeExt::read_json` answers"
         );
@@ -581,7 +587,7 @@ mod tests {
         let no_identifier =
             metadata_identifier_or_error(path, b"{}").expect_err("metadata with no identifier is refused");
         assert_eq!(
-            ocx_lib::cli::classify_error(no_identifier.as_ref()),
+            crate::exit::classify_library_error(no_identifier.as_ref()),
             ExitCode::UsageError,
             "a well-formed file missing the field stays the usage error that names it"
         );
@@ -593,7 +599,7 @@ mod tests {
         let malformed_struct =
             parse_companion_metadata(path, b"{\"identifier\": \"a/b:1\",}").expect_err("a trailing comma is not JSON");
         assert_eq!(
-            ocx_lib::cli::classify_error(malformed_struct.as_ref()),
+            crate::exit::classify_library_error(malformed_struct.as_ref()),
             ExitCode::DataError,
             "the parse the companion branch actually exits through is 65, not 1"
         );

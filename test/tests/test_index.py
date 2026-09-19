@@ -207,6 +207,7 @@ def test_index_update_partial_failure_exits_nonzero_and_stable(
     )
 
 
+@pytest.mark.smoke
 def test_index_list_shows_tag(
     ocx: OcxRunner, published_package: PackageInfo
 ):

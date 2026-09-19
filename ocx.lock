@@ -2,7 +2,7 @@
 lock_version = 3
 declaration_hash_version = 1
 declaration_hash = "sha256:2a1734c545974479d5cc5c4fa7f1cbf0994da779c6481d972c0939a9c4583277"
-generated_by = "ocx 0.6.1"
+generated_by = "ocx 0.6.2"
 generated_at = "2026-09-09T22:45:21Z"
 
 [[tool]]

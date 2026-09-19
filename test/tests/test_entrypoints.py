@@ -458,7 +458,7 @@ def test_synthetic_entrypoints_path_emitted_after_declared_bin(
     consumer-visible). Both appear and their ordering can be verified.
 
     Acceptance-level mirror of the unit test in
-    `crates/ocx_lib/src/package_manager/composer.rs::emit_root_path_block_declared_bin_precedes_synth_path_consumer_surface`.
+    `crates/ocx_package_manager/src/composer.rs::emit_root_path_block_declared_bin_precedes_synth_path_consumer_surface`.
     """
     pkg = make_package_with_entrypoints(
         ocx,

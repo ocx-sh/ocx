@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+//! OCI Image Specification pre-defined annotation keys.
+//! See: <https://github.com/opencontainers/image-spec/blob/main/annotations.md>
+
+pub const TITLE: &str = "org.opencontainers.image.title";
+pub const VERSION: &str = "org.opencontainers.image.version";
+pub const SOURCE: &str = "org.opencontainers.image.source";
+pub const CREATED: &str = "org.opencontainers.image.created";
+pub const DESCRIPTION: &str = "org.opencontainers.image.description";
+pub const URL: &str = "org.opencontainers.image.url";
+pub const REVISION: &str = "org.opencontainers.image.revision";
+pub const VENDOR: &str = "org.opencontainers.image.vendor";
+pub const AUTHORS: &str = "org.opencontainers.image.authors";
+pub const LICENSES: &str = "org.opencontainers.image.licenses";
+
+// OCX-specific annotations.
+pub const KEYWORDS: &str = "sh.ocx.keywords";
+
+// Per-layer placement annotations carried on a manifest layer descriptor.
+// Written only when the publisher explicitly supplies layout (BC2); read at
+// assemble time via `crate::layer_layout::resolve_layer_placement`.
+pub const LAYER_STRIP_COMPONENTS: &str = "sh.ocx.layer.strip-components";
+pub const LAYER_PREFIX: &str = "sh.ocx.layer.prefix";
