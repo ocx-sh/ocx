@@ -12,9 +12,11 @@
 //! `#[ignore = "lands with WP-nn"]` and un-ignored in that WP — never deleted,
 //! never silently green (`cargo nextest run --run-ignored all` shows them red).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 
 use ocx_test_support::boundary::{
     Reach, Source, Token, assert_no_imports, assert_no_needles, assert_scan, expand_use_tree, flatten, is_cfg_test,
@@ -59,6 +61,47 @@ fn crate_dirs() -> Vec<(String, PathBuf)> {
 fn read_manifest(path: &Path) -> toml::Value {
     let text = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     toml::from_str(&text).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+}
+
+/// One `.rs` file's [`Source`], parsed at most once per process.
+///
+/// [`Source::parse`] reads and parses from disk on every call, and the error
+/// resolver below calls it *per signature*, not per file: `canonical_path`
+/// parses the file the signature is written in, `resolve_in_file` parses every
+/// file a `use` chain walks through, and `alias_error_type` parses the
+/// declaring file once more. `every_utility_error_reaching_the_cli_is_armed`
+/// then runs that resolver three times across all ~600 workspace sources — for
+/// the unresolved-reach assertion, for the stale-exemption set, and inside
+/// `assert_scan` — so the workspace was parsed tens of thousands of times over.
+/// That guard cost **131 s** on this machine and 210 s in CI, an order of
+/// magnitude more than any other test in this file, and every second of it was
+/// re-reading files it had already read.
+///
+/// Memoising the parse changes nothing about what any guard asserts: the key is
+/// the path, the tree is immutable and shared behind an `Rc`, and a file that
+/// cannot be read or parsed still panics on the first attempt — the harness's
+/// property 5, which is where the loudness lives. What goes away is only the
+/// repetition. Callers that hold the `Rc` in a local keep the tree alive for as
+/// long as they borrow out of it.
+///
+/// Thread-local rather than one `static`, because `proc_macro2`'s spans are
+/// neither `Send` nor `Sync` and a [`Source`] carries one per token. Under
+/// `cargo nextest` a test is its own process and the distinction is invisible;
+/// under `cargo test` each test thread simply fills its own copy, which is
+/// still one parse per file per reader instead of thousands.
+fn parsed_source(path: &Path) -> Rc<Source> {
+    thread_local! {
+        static SOURCES: RefCell<BTreeMap<PathBuf, Rc<Source>>> = const { RefCell::new(BTreeMap::new()) };
+    }
+    if let Some(hit) = SOURCES.with_borrow(|cache| cache.get(path).cloned()) {
+        return hit;
+    }
+    // Parsed outside the borrow: `Source::parse` panics on a file it cannot
+    // read, and panicking while the `RefCell` is borrowed would bury that
+    // diagnostic under a borrow error in whatever runs next.
+    let source = Rc::new(Source::parse(path));
+    SOURCES.with_borrow_mut(|cache| cache.insert(path.to_path_buf(), Rc::clone(&source)));
+    source
 }
 
 /// `cargo metadata --format-version 1 --locked <extra>` from the workspace
@@ -2196,7 +2239,8 @@ fn canonical_path(from: &Path, segments: &[String]) -> Vec<String> {
     if !from.is_file() {
         return segments.to_vec();
     }
-    for item in Source::parse(from).file.items {
+    let source = parsed_source(from);
+    for item in &source.file.items {
         let syn::Item::Use(import) = item else { continue };
         if is_cfg_test(&import.attrs) {
             continue;
@@ -2234,8 +2278,8 @@ fn resolve_in_file(file: &Path, name: &str, seen: &mut BTreeSet<(PathBuf, String
     if !file.is_file() || !seen.insert((file.to_path_buf(), name.to_owned())) {
         return None;
     }
-    let parsed = Source::parse(file).file;
-    for item in &parsed.items {
+    let source = parsed_source(file);
+    for item in &source.file.items {
         let declared = match item {
             syn::Item::Struct(declaration) if !is_cfg_test(&declaration.attrs) => Some(&declaration.ident),
             syn::Item::Enum(declaration) if !is_cfg_test(&declaration.attrs) => Some(&declaration.ident),
@@ -2251,7 +2295,7 @@ fn resolve_in_file(file: &Path, name: &str, seen: &mut BTreeSet<(PathBuf, String
             });
         }
     }
-    for item in &parsed.items {
+    for item in &source.file.items {
         let syn::Item::Use(import) = item else { continue };
         if is_cfg_test(&import.attrs) {
             continue;
@@ -2308,7 +2352,8 @@ fn resolve_result_alias(file: &Path, prefix: &[String]) -> Resolved {
 fn alias_error_type(file: &Path, segments: &[String]) -> Option<Resolved> {
     let resolved = resolve_type(file, segments);
     let site = resolved.site?;
-    for item in Source::parse(&site).file.items {
+    let source = parsed_source(&site);
+    for item in &source.file.items {
         let syn::Item::Type(alias) = item else { continue };
         if alias.ident != resolved.name.as_str() || is_cfg_test(&alias.attrs) {
             continue;
@@ -2467,7 +2512,7 @@ fn armed_error_types() -> BTreeSet<String> {
             paths: Vec::new(),
             longhand: file.starts_with(&ladder),
         };
-        arms.visit_file(&Source::parse(&file).file);
+        arms.visit_file(&parsed_source(&file).file);
         armed.extend(arms.paths.iter().map(|path| resolve_type(&file, path).key()));
     }
     // A floor, not just non-emptiness: an extractor that stopped recognising
@@ -2678,7 +2723,7 @@ fn declared_types(subtree: &Path) -> DeclaredTypes {
     let mut types = DeclaredTypes::default();
     let mut derives_anywhere = false;
     for file in &files {
-        let source = Source::parse(file);
+        let source = parsed_source(file);
         derives_anywhere |= source.tokens.iter().any(|token| token.text == "thiserror");
         types.absorb(&source.file);
     }
@@ -2773,7 +2818,7 @@ fn unarmed_boundary_types(
 ) -> BTreeSet<(String, String)> {
     rust_sources(subtree)
         .into_iter()
-        .flat_map(|file| boundary_error_types(&file, &Source::parse(&file).file, declared))
+        .flat_map(|file| boundary_error_types(&file, &parsed_source(&file).file, declared))
         .filter(|reach| !armed.contains(&reach.path))
         .map(|reach| (under_crates(&reach.file), reach.path))
         .collect()
@@ -2843,7 +2888,7 @@ fn every_utility_error_reaching_the_cli_is_armed() {
     let reaches: Vec<Reach> = subtrees
         .iter()
         .flat_map(|subtree| rust_sources(subtree))
-        .flat_map(|file| boundary_error_types(&file, &Source::parse(&file).file, scoped(&file)))
+        .flat_map(|file| boundary_error_types(&file, &parsed_source(&file).file, scoped(&file)))
         .collect();
     let unresolved: Vec<&Reach> = reaches.iter().filter(|reach| reach.path.contains('<')).collect();
     assert!(
