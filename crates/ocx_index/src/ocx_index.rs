@@ -4808,12 +4808,17 @@ mod transport_wire_tests {
         // The absolute values buy nothing here — the claim is a *ratio*: the
         // transfer outlasts a hard deadline of the idle bound's size while no
         // single frame gap approaches that bound. `BODY` is 19 bytes, so the
-        // whole transfer is 19 × `interval` = 570 ms against a 150 ms bound:
-        // non-vacuity clears by 120 ms, and a frame has 120 ms of scheduling
-        // slack before it trips the bound (the old 50/200 pair had 150 ms).
-        let idle_bound = Duration::from_millis(150);
+        // whole transfer is 19 × `interval` = 380 ms against a 110 ms bound,
+        // clearing the `× 3` non-vacuity floor by 50 ms while leaving a frame
+        // 90 ms of scheduling slack before it trips the bound.
+        //
+        // The two margins trade directly against each other — `elapsed >
+        // idle_bound * 3` wants the bound low, the slack wants it high — so
+        // the pair below is near the floor for this body at this `× 3`, and
+        // buying more of either means a longer test, not a free win.
+        let idle_bound = Duration::from_millis(110);
         let endpoint = StubIndexEndpoint::start(vec![Reply::Dribble {
-            interval: Duration::from_millis(30),
+            interval: Duration::from_millis(20),
             body: BODY,
         }])
         .await;
@@ -4925,15 +4930,15 @@ mod transport_wire_tests {
     #[tokio::test]
     async fn a_dribbling_peer_is_ended_by_the_outer_cap() {
         // As above, a ratio rather than absolute values: `interval` must stay
-        // clear of `idle_bound` (210 ms of scheduling slack, against the old
+        // clear of `idle_bound` (150 ms of scheduling slack, against the old
         // 200/500 pair's 300 ms) so only `outer_cap` can end the fetch, and
         // `outer_cap` is what the run actually waits out — the whole cost of
         // the test.
-        let idle_bound = Duration::from_millis(250);
-        let outer_cap = Duration::from_millis(600);
+        let idle_bound = Duration::from_millis(180);
+        let outer_cap = Duration::from_millis(400);
         let endpoint = StubIndexEndpoint::start(vec![Reply::DribbleForever {
             // Comfortably under the idle bound, so the idle bound never fires.
-            interval: Duration::from_millis(40),
+            interval: Duration::from_millis(30),
         }])
         .await;
         let transport = ReqwestIndexTransport::with_hardening(

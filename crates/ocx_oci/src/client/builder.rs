@@ -1086,12 +1086,13 @@ mod read_timeout_tests {
     /// and only one of them is under test: everything before the first body
     /// frame — connect, request, the stub's time-to-first-byte — is a *hard*
     /// deadline this value also has to clear. Against a loopback stub already
-    /// listening that phase is sub-millisecond, so 300 ms leaves two orders of
+    /// listening that phase is sub-millisecond, so 200 ms leaves two orders of
     /// magnitude for an oversubscribed runner before the head arrives late and
     /// the test fails on the wrong line. It is the wall-clock cost of both
     /// tests, so a larger value is paid on every run for headroom nothing on
-    /// loopback needs.
-    const STALL_READ_TIMEOUT: Duration = Duration::from_millis(300);
+    /// loopback needs — and a value too tight fails loudly on
+    /// `pull_blob_streaming`, never as a green.
+    const STALL_READ_TIMEOUT: Duration = Duration::from_millis(200);
 
     /// Generous multiple of [`STALL_READ_TIMEOUT`]: it is only ever reached
     /// when the bound under test failed to fire, i.e. when the client hung,
