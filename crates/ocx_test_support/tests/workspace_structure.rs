@@ -59,13 +59,13 @@ fn fixture(name: &str) -> PathBuf {
 /// never lower them.
 mod floor {
     /// Every `crates/*/src` — 605 files at 2026-09-20.
-    pub const ALL_CRATE_SOURCES: usize = 540;
+    pub(crate) const ALL_CRATE_SOURCES: usize = 540;
     /// `crates/*/src` less the CLI, and the boundary subtrees, which differ by
     /// the three crates not on that boundary — 414 and 403 at 2026-09-20.
-    pub const LIBRARY_SOURCES: usize = 360;
+    pub(crate) const LIBRARY_SOURCES: usize = 360;
     /// `crates/ocx_cli/src`, where the downcast ladder lives — 191 at
     /// 2026-09-20.
-    pub const LADDER_SOURCES: usize = 160;
+    pub(crate) const LADDER_SOURCES: usize = 160;
 }
 
 /// Refuse a walk that came back under `floor`, and return what it found.
