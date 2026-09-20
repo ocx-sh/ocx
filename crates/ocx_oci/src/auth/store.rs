@@ -582,7 +582,8 @@ mod tests {
     fn dockerconfigstore_put_writes_to_creds_store_when_no_per_registry_helper() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (_dir, path) = fresh_config_path();
-        std::fs::write(&path, format!(r#"{{"credsStore":"{}"}}"#, absent_helper("fallback"))).expect("seed config");
+        let fallback = absent_helper("fallback");
+        std::fs::write(&path, format!(r#"{{"credsStore":"{fallback}"}}"#)).expect("seed config");
         let store = DockerCredentialStore::with_path(path, opts(false));
         let cred = Credential::basic("u", SecretString::from("p".to_string()));
         // Helper does not exist; the contract here is that the call routes to
@@ -590,9 +591,15 @@ mod tests {
         // configured, but the failure must be a Helper variant, NOT
         // NoCredentialStoreAvailable.
         let result = rt().block_on(store.put("ghcr.io", &cred));
+        let Err(AuthError::Helper(inner)) = &result else {
+            panic!("credsStore route must reach helper subsystem; got: {result:?}");
+        };
+        // And the helper it reached is the one `credsStore` named — not some
+        // other string the ladder picked up. See the sibling below for why the
+        // name rather than the variant is what gets asserted.
         assert!(
-            matches!(result, Err(AuthError::Helper(_))),
-            "credsStore route must reach helper subsystem; got: {result:?}",
+            inner.to_string().contains(&fallback),
+            "the failure must name the credsStore helper {fallback}, got: {inner}",
         );
     }
 
@@ -600,24 +607,39 @@ mod tests {
     fn dockerconfigstore_put_writes_to_cred_helpers_when_per_registry_set() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (_dir, path) = fresh_config_path();
+        let fallback = absent_helper("fallback");
+        let per_registry = absent_helper("per-registry");
         std::fs::write(
             &path,
-            format!(
-                r#"{{"credsStore":"{}","credHelpers":{{"ghcr.io":"{}"}}}}"#,
-                absent_helper("fallback"),
-                absent_helper("per-registry"),
-            ),
+            format!(r#"{{"credsStore":"{fallback}","credHelpers":{{"ghcr.io":"{per_registry}"}}}}"#),
         )
         .expect("seed config");
         let store = DockerCredentialStore::with_path(path, opts(false));
         let cred = Credential::basic("u", SecretString::from("p".to_string()));
         let result = rt().block_on(store.put("ghcr.io", &cred));
-        // Both names are helpers and both are absent (`absent_helper`), so
-        // the Helper variant pins the routing decision without depending on
-        // what the host has installed.
+        // Both names are helpers and both are absent (`absent_helper`), so the
+        // Helper variant pins the routing decision without depending on what
+        // the host has installed.
+        let Err(AuthError::Helper(inner)) = &result else {
+            panic!("credHelpers route must reach helper subsystem; got: {result:?}");
+        };
+        // The Helper variant alone does NOT pin the precedence this test is
+        // named for: delete the `cred_helpers` lookup and the ladder falls
+        // through to `credsStore`, which is also a helper, and this test stays
+        // green with its own subject removed. Which tier ran is observable only
+        // in the error's payload, and only because the two tiers are seeded
+        // with differently-named absent helpers.
+        //
+        // Asserted through the message rather than the fork's error variant on
+        // purpose. The coupling that earns its keep is behavioural — "the error
+        // names the helper it failed on" — which survives a reworded message
+        // and reds correctly if the fork ever stops naming the helper, because
+        // at that point the two tiers are genuinely indistinguishable. Matching
+        // `CredentialRetrievalError::NotOnPath { .. }` by name would couple a
+        // unit test to a submodule's enum shape and buy nothing extra.
         assert!(
-            matches!(result, Err(AuthError::Helper(_))),
-            "credHelpers route must reach helper subsystem; got: {result:?}",
+            inner.to_string().contains(&per_registry),
+            "the per-registry helper must win over credsStore: the failure must name {per_registry}, got: {inner}",
         );
     }
 
