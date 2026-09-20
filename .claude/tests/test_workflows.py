@@ -505,9 +505,10 @@ _BUILD_TEST_ELSEWHERE = {
     "rust:license:check": ("verify-licenses.yml", "task rust:license:check"),
     "rust:license:deps": ("verify-licenses.yml", "task rust:license:deps"),
     "rust:license:notice:check": ("verify-licenses.yml", "task rust:license:notice:check"),
-    # `task test` is the acceptance suite's own entry point and calls
-    # `test:parallel`; the deep workflow spells it that way.
-    "test:parallel": ("verify-deep.yml", "task test"),
+    # The deep workflow runs the acceptance suite with the same xdist flags
+    # the local gate uses. It once spelled this `task test`, which is the
+    # SERIAL entry point: 21:41 for 3819 tests on an idle four-core runner.
+    "test:parallel": ("verify-deep.yml", "task test:parallel"),
 }
 
 

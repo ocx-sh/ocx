@@ -42,6 +42,16 @@ runs:
       uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
       with:
         save-if: ${{ github.ref == 'refs/heads/main' }}
+    # Compile cache in front of the shared Garage store; the calling job sets
+    # SCCACHE_ENABLED, RUSTC_WRAPPER and the SCCACHE_* / AWS_* env from the org
+    # secrets (see verify-deep.yml `build`). Absent that env — a fork PR, or a
+    # workflow that never opted in — this step is skipped and cargo runs
+    # rustc directly. Complements rust-cache, which keeps target/ (link
+    # outputs sccache never caches); sccache adds hits across jobs, OSes and
+    # developer machines for every dependency crate.
+    - name: sccache
+      if: ${{ env.SCCACHE_ENABLED == 'true' }}
+      uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
     - name: Install Zig
       if: ${{ inputs.use_zigbuild == 'true' }}
       uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1

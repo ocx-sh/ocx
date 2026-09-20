@@ -91,6 +91,14 @@ research-axes:
 
 ## Memory
 
+- **Discussion handed off (hex-discuss, 2026-09-20): `.agents/discussions/bazel-adoption-timing.md`
+  → plan, applied inline on `evelynn`.** Verdict: Bazel deferred until the narrower fix is
+  measured; server half landed (sccache.ocx.sh → Garage, bazel-cache reads closed,
+  herwig-systems/server-hetzner1 #1–#3); ocx half = parallel acceptance in verify-deep,
+  `CARGO_BUILD_TARGET` so schema-generate reuses the build dir, sccache-action with org
+  secrets, the 210 s / 4×30 s unit tests. Research: `.agents/research/research_build_time_recon.md`,
+  `research_build_cache_prior_art.md`, `research_graph_tools_middle_ground.md`. Re-measure
+  verify-deep median (was 3347 s) before running the bazel-adopt gate.
 - **Active plan (evelynn): `.claude/artifacts/plan_crate_split_workspace.md`** — the
   crate split ([ADR](../../.claude/artifacts/adr_crate_split_workspace.md) Accepted
   2026-09-16). **Batch B1 (phase 0 tooling) executed 2026-09-16 by sub-orchestrator
