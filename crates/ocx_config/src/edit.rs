@@ -132,7 +132,7 @@ pub async fn edit<F>(locks_root: &Path, config_path: &Path, dry_run: bool, apply
 where
     F: FnOnce(&mut DocumentMut) -> Result<(), &'static str> + Send + 'static,
 {
-    edit_with(locks_root, config_path, dry_run, move |path, original| {
+    edit_with(locks_root, config_path, dry_run, LOCK_TIMEOUT, move |path, original| {
         let mut document: DocumentMut = original.parse().map_err(|source| EditError::Parse {
             path: path.to_path_buf(),
             source,
@@ -164,7 +164,7 @@ pub async fn edit_text<F>(
 where
     F: FnOnce(&str) -> Result<String, &'static str> + Send + 'static,
 {
-    edit_with(locks_root, config_path, dry_run, move |path, original| {
+    edit_with(locks_root, config_path, dry_run, LOCK_TIMEOUT, move |path, original| {
         apply(original).map_err(|reason| EditError::Malformed {
             path: path.to_path_buf(),
             reason,
@@ -175,7 +175,18 @@ where
 
 /// The shared body of [`edit`] and [`edit_text`]: lock (unless `dry_run`),
 /// then [`edit_blocking`] on the pool with `apply` as the text → text step.
-async fn edit_with<F>(locks_root: &Path, config_path: &Path, dry_run: bool, apply: F) -> Result<EditOutcome, EditError>
+///
+/// `timeout` is [`LOCK_TIMEOUT`] for both public entries — it is a parameter
+/// only so the test that proves a held lock surfaces as [`EditError::Locked`]
+/// can wait out a short one instead of paying the shipped five seconds. The
+/// shipped value is pinned in that same test.
+async fn edit_with<F>(
+    locks_root: &Path,
+    config_path: &Path,
+    dry_run: bool,
+    timeout: Duration,
+    apply: F,
+) -> Result<EditOutcome, EditError>
 where
     F: FnOnce(&Path, &str) -> Result<String, EditError> + Send + 'static,
 {
@@ -201,7 +212,7 @@ where
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|source| io(parent, source))?;
-        let guard = lock_scoped(locks_root, LOCK_SCOPE, parent, &file_name, LOCK_TIMEOUT)
+        let guard = lock_scoped(locks_root, LOCK_SCOPE, parent, &file_name, timeout)
             .await
             .map_err(|error| lock_error(config_path, error))?;
         Some(guard)
@@ -459,26 +470,49 @@ completions = true
         );
     }
 
-    /// An editor that outlives `LOCK_TIMEOUT` surfaces as [`EditError::Locked`]
-    /// on the config file — 75, the ADR's lock-timeout code — never as an
-    /// I/O error on the hashed lock path (review H2).
+    /// An editor that outlives the edit's lock timeout surfaces as
+    /// [`EditError::Locked`] on the config file — 75, the ADR's lock-timeout
+    /// code — never as an I/O error on the hashed lock path (review H2).
+    ///
+    /// Driven through [`edit_with`] with a short timeout rather than [`edit`]
+    /// with the shipped one: the claim is about *which error a timeout
+    /// becomes*, which is identical at 5 s and at 80 ms, and waiting out the
+    /// shipped value cost the unit suite five seconds to observe it. The
+    /// shipped value is pinned below instead, so a change to it still reds
+    /// here.
     ///
     /// **Red-state**: map the timeout to `Io` (or classify `Locked` as 74)
-    /// and either assertion fails. Costs the full timeout, by design.
+    /// and either assertion fails.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_editor_held_past_the_timeout_is_locked_and_exit_75() {
+        assert_eq!(
+            LOCK_TIMEOUT,
+            Duration::from_secs(5),
+            "the shipped edit-lock timeout, which `edit` and `edit_text` pass and this test stands in for"
+        );
+
         let (dir, locks, config) = home();
-        let _held = lock_scoped(&locks, "config-edit", dir.path(), "config.toml", LOCK_TIMEOUT)
+        let timeout = Duration::from_millis(80);
+        let _held = lock_scoped(&locks, "config-edit", dir.path(), "config.toml", timeout)
             .await
             .unwrap();
 
-        let error = edit(&locks, &config, false, set_hook)
-            .await
-            .expect_err("the edit must give up behind a holder that never lets go");
+        let started = std::time::Instant::now();
+        let error = edit_with(&locks, &config, false, timeout, |_, _| {
+            panic!("the apply step must not run behind a held lock")
+        })
+        .await
+        .expect_err("the edit must give up behind a holder that never lets go");
+        let elapsed = started.elapsed();
 
         assert!(
             matches!(&error, EditError::Locked { path } if *path == config),
             "the lock timeout must name the config file: {error:?}"
+        );
+        assert!(
+            elapsed >= timeout,
+            "the edit waited out its own timeout rather than failing for another reason: \
+             {elapsed:?} < {timeout:?}"
         );
         assert!(!config.exists(), "a refused edit writes nothing");
     }

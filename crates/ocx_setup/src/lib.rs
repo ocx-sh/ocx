@@ -993,6 +993,24 @@ const EXEC_POLICY_ADVISORY: &str =
 /// POSIX/dedicated-file set from the real environment and probes the PowerShell
 /// `$PROFILE` via a subprocess.
 async fn resolve_targets(ocx_home: &Path, overrides: Option<&[PathBuf]>) -> Vec<ProfileTarget> {
+    // The probe is the one part of resolution that leaves the process, so it
+    // runs here and the composition below stays a pure function of what it
+    // answered. An override list short-circuits before it: a caller that named
+    // its profiles is not asking which shells are installed.
+    if overrides.is_some() {
+        return compose_targets(ocx_home, overrides, None);
+    }
+    compose_targets(ocx_home, None, profiles::detect_powershell_profile().await)
+}
+
+/// [`resolve_targets`] with the PowerShell probe's answer already in hand.
+///
+/// Split out so the composition is testable without spawning a PowerShell
+/// host: the unit test drove a real `pwsh` on any machine that has one, which
+/// cost a second of the suite's wall clock and made what it asserted depend on
+/// what was installed. `powershell` is the probe's result, `None` when no host
+/// answered.
+fn compose_targets(ocx_home: &Path, overrides: Option<&[PathBuf]>, powershell: Option<PathBuf>) -> Vec<ProfileTarget> {
     if let Some(overrides) = overrides {
         return overrides
             .iter()
@@ -1004,7 +1022,7 @@ async fn resolve_targets(ocx_home: &Path, overrides: Option<&[PathBuf]>) -> Vec<
     }
 
     let mut targets = profiles::detect_targets(&home_env_from_environment(ocx_home));
-    if let Some(profile) = profiles::detect_powershell_profile().await {
+    if let Some(profile) = powershell {
         targets.push(ProfileTarget {
             path: profile,
             kind: ProfileKind::PowerShellFence,
@@ -2500,14 +2518,21 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn absent_profile_list_auto_detects() {
-        // `None` is the third state: no overrides at all, so detection runs —
-        // exactly what an empty `Vec` used to mean before the list could say
-        // "none".
+    /// `None` is the third state: no overrides at all, so detection runs —
+    /// exactly what an empty `Vec` used to mean before the list could say
+    /// "none".
+    ///
+    /// Driven through [`compose_targets`] with the probe's answer supplied,
+    /// rather than [`resolve_targets`] with a real one: spawning a PowerShell
+    /// host cost a second of wall clock and made the appended target depend on
+    /// whether the machine had `pwsh` — so on this one the append was asserted
+    /// and on CI it was not. Supplying it pins the append everywhere.
+    #[test]
+    fn absent_profile_list_auto_detects() {
         let dir = tempfile::tempdir().unwrap();
+        let probed = dir.path().join("Microsoft.PowerShell_profile.ps1");
 
-        let detected = resolve_targets(dir.path(), None).await;
+        let detected = compose_targets(dir.path(), None, Some(probed.clone()));
         let expected = profiles::detect_targets(&home_env_from_environment(dir.path()));
         assert!(
             !expected.is_empty(),
@@ -2516,13 +2541,48 @@ mod tests {
         assert_eq!(
             detected.get(..expected.len()),
             Some(&expected[..]),
-            "`None` must take the auto-detection path (the PowerShell probe may append to it)"
+            "`None` must take the auto-detection path"
+        );
+        assert_eq!(
+            detected.get(expected.len()..),
+            Some(
+                &[ProfileTarget {
+                    path: probed.clone(),
+                    kind: ProfileKind::PowerShellFence,
+                }][..]
+            ),
+            "…and a PowerShell host that answered is appended to it, as a fence target"
+        );
+        assert_eq!(
+            compose_targets(dir.path(), None, None),
+            expected,
+            "…while a host that did not answer appends nothing"
         );
 
         let none: Vec<PathBuf> = Vec::new();
         assert!(
-            resolve_targets(dir.path(), Some(none.as_slice())).await.is_empty(),
-            "…and `Some(&[])` must not, or the two states are indistinguishable"
+            compose_targets(dir.path(), Some(none.as_slice()), Some(probed)).is_empty(),
+            "…and `Some(&[])` must not, or the two states are indistinguishable — not even the \
+             probed profile survives an explicit empty list"
+        );
+    }
+
+    /// The probe runs for `None` and **only** for `None`: an override list is
+    /// not a question about which shells are installed, and
+    /// [`absent_profile_list_auto_detects`] drives the composition below the
+    /// branch that decides it.
+    #[tokio::test]
+    async fn an_override_list_resolves_without_probing_for_a_shell_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let named = dir.path().join("profile.sh");
+
+        assert_eq!(
+            resolve_targets(dir.path(), Some(std::slice::from_ref(&named))).await,
+            vec![ProfileTarget {
+                path: named,
+                kind: ProfileKind::PosixFence,
+            }],
+            "an override list is taken verbatim, with no probed target appended"
         );
     }
 

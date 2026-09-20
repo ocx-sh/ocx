@@ -1023,6 +1023,45 @@ const HEAL_LOCK_SCOPE: &str = "toolchain-heal";
 /// one budget is the drift class D-V14 argues against.
 const TOOLCHAIN_LOCK_TIMEOUT: Duration = super::pull::PULL_LOCAL_LOCK_TIMEOUT;
 
+/// Test-only override of [`TOOLCHAIN_LOCK_TIMEOUT`], in milliseconds.
+///
+/// Why it exists: the budget is 5 s, and the two unit tests that observe a
+/// degradation *caused by* contention — `a_render_lock_timeout_is_a_skip_and_/// never_an_error` (C-050) and `healing_leaves_a_contended_entry_unrepaired_/// and_uncounted` (RUL-36) — can only reach it by waiting the budget out.
+/// That was 10 s of the unit suite's wall clock for a claim about *what a
+/// timeout becomes*, which is identical at 5 s and at 150 ms. The shipped
+/// value is asserted without sleeping, at
+/// `tests::the_shipped_toolchain_lock_timeout_is_the_pull_budget`.
+///
+/// Compile-gated and `__OCX_TESTING_*`-named for the reasons the prefix
+/// exists: absent from release builds, reserved out of
+/// `Env::apply_ocx_config`, and undocumented in
+/// `website/src/docs/reference/environment.md`. Same shape as `ocx_oci`'s
+/// `__OCX_TESTING_HELPER_TIMEOUT_MS`.
+#[cfg(any(test, feature = "__testing"))]
+const TESTING_LOCK_TIMEOUT_ENV: &str = "__OCX_TESTING_TOOLCHAIN_LOCK_TIMEOUT_MS";
+
+/// [`TOOLCHAIN_LOCK_TIMEOUT`], or the [`TESTING_LOCK_TIMEOUT_ENV`] override.
+///
+/// **Panics** on a malformed value rather than falling back to the shipped
+/// budget: a seam that silently ignores what it was handed turns a typo into a
+/// row that quietly out-waits the real deadline and still passes.
+#[cfg(any(test, feature = "__testing"))]
+fn toolchain_lock_timeout() -> Duration {
+    let Some(raw) = ocx_util::env::var(TESTING_LOCK_TIMEOUT_ENV) else {
+        return TOOLCHAIN_LOCK_TIMEOUT;
+    };
+    Duration::from_millis(
+        raw.trim().parse().unwrap_or_else(|_| {
+            panic!("{TESTING_LOCK_TIMEOUT_ENV} must be a whole number of milliseconds, got {raw:?}")
+        }),
+    )
+}
+
+#[cfg(not(any(test, feature = "__testing")))]
+fn toolchain_lock_timeout() -> Duration {
+    TOOLCHAIN_LOCK_TIMEOUT
+}
+
 /// The lock parameters for one render (RUL-38).
 ///
 /// **Discriminated by the stamp key**, so two homes never share a lock and one
@@ -1039,7 +1078,7 @@ pub(crate) fn render_lock_parameters(
         scope: RENDER_LOCK_SCOPE,
         guarded_directory: request.home.root().to_path_buf(),
         discriminator: stamp_key(request.scope),
-        timeout: TOOLCHAIN_LOCK_TIMEOUT,
+        timeout: toolchain_lock_timeout(),
     }
 }
 
@@ -1064,7 +1103,7 @@ pub(crate) fn heal_lock_parameters(
         scope: HEAL_LOCK_SCOPE,
         guarded_directory: group_directory,
         discriminator: entry.to_string(),
-        timeout: TOOLCHAIN_LOCK_TIMEOUT,
+        timeout: toolchain_lock_timeout(),
     }
 }
 
@@ -5788,6 +5827,34 @@ mod tests {
         assert_eq!(tree.bin_entries(), expected_bin_entries(&["cmake"]));
     }
 
+    /// The shipped lock budget, asserted without sleeping: both degradation
+    /// tests above wait out [`TESTING_LOCK_TIMEOUT_ENV`]'s value instead of
+    /// this one, so without this pin a change to the shipped budget would
+    /// red nothing.
+    ///
+    /// Pins the *derivation* too — the render lock waits exactly as long as a
+    /// foreground `ocx pull` does (D-V14, one budget, one spelling).
+    #[test]
+    fn the_shipped_toolchain_lock_timeout_is_the_pull_budget() {
+        assert_eq!(TOOLCHAIN_LOCK_TIMEOUT, super::super::pull::PULL_LOCAL_LOCK_TIMEOUT);
+        assert_eq!(TOOLCHAIN_LOCK_TIMEOUT, Duration::from_secs(5));
+
+        let environment = ocx_util::env::overrides::lock();
+        environment.remove(TESTING_LOCK_TIMEOUT_ENV);
+        assert_eq!(
+            toolchain_lock_timeout(),
+            TOOLCHAIN_LOCK_TIMEOUT,
+            "with no override in play the seam resolves to the shipped budget"
+        );
+        environment.set(TESTING_LOCK_TIMEOUT_ENV, "150");
+        assert_eq!(
+            toolchain_lock_timeout(),
+            Duration::from_millis(150),
+            "…and the override is what the tests above actually wait out, or they are pinning \
+             a value nothing reads"
+        );
+    }
+
     /// C-050/RUL-30/RUL-38, case 52 — a render lock that cannot be acquired
     /// within its timeout is a **skip**, never an error.
     ///
@@ -5796,13 +5863,18 @@ mod tests {
     /// elapsed assertion is what makes this a timeout rather than any other
     /// acquisition failure.
     ///
-    /// It costs the lock's own timeout in wall-clock, deliberately: shortening
-    /// it would mean asserting on a value the render does not use.
+    /// It costs the lock's own timeout in wall-clock — so the timeout it waits
+    /// out is [`TESTING_LOCK_TIMEOUT_ENV`]'s, and the render reads the same
+    /// seam the assertion below reads. The shipped budget is pinned without
+    /// sleeping, at [`the_shipped_toolchain_lock_timeout_is_the_pull_budget`].
     ///
     /// RED: propagate the timeout — `ocx pull` then fails outright because a
     /// second terminal happened to be pulling.
     #[tokio::test]
     async fn a_render_lock_timeout_is_a_skip_and_never_an_error() {
+        let environment = ocx_util::env::overrides::lock();
+        environment.set(TESTING_LOCK_TIMEOUT_ENV, "150");
+
         let tree = Tree::new();
         tree.create_home_root();
 
@@ -7645,11 +7717,14 @@ mod tests {
     ///
     /// Driven through [`heal_lock_parameters`] so the test contends on *the
     /// same* lock. It costs the lock's own timeout in wall-clock, for the same
-    /// reason case 52 does.
+    /// reason case 52 does — and shortens it through the same seam.
     ///
     /// RED: propagate the failure — one busy link then fails the whole compose.
     #[tokio::test]
     async fn healing_leaves_a_contended_entry_unrepaired_and_uncounted() {
+        let environment = ocx_util::env::overrides::lock();
+        environment.set(TESTING_LOCK_TIMEOUT_ENV, "150");
+
         let tree = Tree::new();
         // The per-entry lock keys on the group directory's file identity.
         std::fs::create_dir_all(tree.home.links_group(DEFAULT_GROUP).expect("admitted")).unwrap();
@@ -7668,6 +7743,7 @@ mod tests {
             .await
             .expect("the test can take the same per-entry lock");
 
+        let started = std::time::Instant::now();
         let repaired = heal_links(
             &tree.file_structure,
             &tree.home,
@@ -7678,7 +7754,14 @@ mod tests {
         )
         .await
         .expect("RUL-36 — contention is never an error");
+        let elapsed = started.elapsed();
 
+        assert!(
+            elapsed >= toolchain_lock_timeout(),
+            "the repair actually waited out its own lock timeout rather than skipping the entry \
+             for another reason: {elapsed:?} < {:?}",
+            toolchain_lock_timeout()
+        );
         assert_eq!(
             repaired,
             HealOutcome::Healed(1),
