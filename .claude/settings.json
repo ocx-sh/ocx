@@ -23,21 +23,13 @@
       "mcp__ide__executeCode"
     ],
     "deny": [
-      "// === Destructive File Operations ===",
       "Bash(rm -rf:*)",
       "Bash(rm -r:*)",
       "Bash(sudo:*)",
 
-      "// === Network: Force WebFetch for web access (prompt injection containment) ===",
       "Bash(curl:*)",
       "Bash(wget:*)",
 
-      "// === Git Destructive Operations ===",
-      "// The commit and push gates are git's own hooks (.githooks/, core.hooksPath),",
-      "// so they see every spelling — except --no-verify, which tells git to skip",
-      "// hooks outright. That is the one thing no git-native gate can defend, so it",
-      "// is denied here. Prefix matching only: `git -c x commit --no-verify` slips",
-      "// past. Treated as a guard against the reflex, not against evasion.",
       "Bash(git commit --no-verify:*)",
       "Bash(git commit -n:*)",
       "Bash(git push --no-verify:*)",
@@ -49,12 +41,10 @@
       "Bash(git clean -f:*)",
       "Bash(git clean -fd:*)",
 
-      "// === Infrastructure Destructive Operations ===",
       "Bash(docker system prune:*)",
       "Bash(docker rm:*)",
       "Bash(docker rmi:*)",
 
-      "// === Dangerous Permission Changes ===",
       "Bash(chmod 777:*)"
     ]
   },
