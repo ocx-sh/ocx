@@ -93,12 +93,20 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUITE = REPO_ROOT / "test"
 
-#: The census of this script's parent commit, `0fadc002`. Moved only by a
-#: parametrized structural census gaining cases, and only in a commit that
-#: reconciles the move in `.claude/artifacts/plan_crate_split_workspace.md`
-#: (DEC-38). Every other movement is a test added, removed, renamed or
-#: re-marked, which the crate split forbids outright.
+#: The census of this script's parent commit, `0fadc002`.
 PINNED = {"tests": 2859, "skipped": 105, "xfailed": 4, "parametrized": 150}
+
+#: Which way each number may move on its own. DEC-38 pinned all four to
+#: equality for the duration of the crate split, so that a refactor could not
+#: change the suite underneath itself. That split has landed, and equality had
+#: outlived it: it refused a test *added*, which is ordinary work.
+#:
+#: What it is still worth refusing is a test going away or going quiet —
+#: deleting, skipping or xfailing a test is how a red is silenced, and the
+#: summary line cannot tell that from honest work. So: counts that should only
+#: grow are floors, counts that should only shrink are ceilings, and a
+#: deliberate move is recorded by editing PINNED in the same commit.
+DIRECTION = {"tests": "floor", "parametrized": "floor", "skipped": "ceiling", "xfailed": "ceiling"}
 
 #: A floor on the walk itself. A scope that stopped matching reports zero of
 #: everything, which looks like a suite that vanished rather than like a
@@ -143,18 +151,19 @@ def check(suite: Path = SUITE, pinned: dict[str, int] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    moved = {key: (pinned[key], counts[key]) for key in pinned if pinned[key] != counts[key]}
+    moved = {
+        key: (pinned[key], counts[key])
+        for key in pinned
+        if (counts[key] < pinned[key] if DIRECTION[key] == "floor" else counts[key] > pinned[key])
+    }
     if moved:
         print(
-            f"suite census: {len(moved)} of {len(pinned)} number(s) moved over {len(files)} file(s) "
-            f"— {{key: (pinned, live)}} {moved}.\n"
-            "The acceptance suite must pass unmodified at every commit of the crate split: no test "
-            "added, removed, renamed or re-marked (DEC-38). A parametrized structural census "
-            "gaining cases is the one sanctioned move — `test_logging.py` over LIBRARY_TARGETS is "
-            "the shipping example — and it is recorded by editing PINNED in this file in the same "
-            "commit that causes it, beside the reconciliation in "
-            ".claude/artifacts/plan_crate_split_workspace.md. Anything else is a test change "
-            "wearing a census bump's clothes, which is exactly what the summary line cannot show.",
+            f"suite census: {len(moved)} of {len(pinned)} number(s) moved the wrong way over "
+            f"{len(files)} file(s) — {{key: (pinned, live)}} {moved}.\n"
+            "`tests` and `parametrized` are floors: the suite may grow, never shrink. `skipped` "
+            "and `xfailed` are ceilings: a test may be un-skipped, never quietly skipped. A move "
+            "that is the work, not a silenced red, is recorded by editing PINNED in this file in "
+            "the same commit that causes it.",
             file=sys.stderr,
         )
         return 1
@@ -230,16 +239,20 @@ def self_test() -> int:
         (suite / "tests" / "test_smuggled.py").write_text(
             "def test_added_behaviour():\n    assert True\n", encoding="utf-8"
         )
-        expect(check(suite, pinned) == 1, "a test added must red — this is the whole instrument")
-        pinned["tests"] += 1
-        expect(check(suite, pinned) == 0, "recording the move must green it again")
-        # And the other three move independently: a re-marked test reds on its
-        # own number, which is what tells a census bump from a behaviour change.
+        expect(check(suite, pinned) == 0, "a test ADDED is ordinary work and must pass the floor")
+        # The floor bites the other way: the suite may never shrink.
+        (suite / "tests" / "test_smuggled.py").unlink()
+        (suite / "tests" / "test_pad_0.py").unlink()
+        expect(check(suite, pinned) == 1, "a test removed must red — `tests` is a floor")
+        (suite / "tests" / "test_pad_0.py").write_text("def test_pad():\n    pass\n", encoding="utf-8")
+        expect(check(suite, pinned) == 0, "restoring it must green again")
+        # And the ceiling catches the thing the floor cannot: a test that is
+        # still there and no longer runs.
         (suite / "tests" / "test_smuggled.py").write_text(
             "import pytest\n\n@pytest.mark.skip\ndef test_added_behaviour():\n    assert True\n",
             encoding="utf-8",
         )
-        expect(check(suite, pinned) == 1, "re-marking a test must red on `skipped` alone")
+        expect(check(suite, pinned) == 1, "a newly skipped test must red on `skipped` — the ceiling")
         checks += 1
     print(f"suite census self-test: {checks} checks passed")
     return 0
