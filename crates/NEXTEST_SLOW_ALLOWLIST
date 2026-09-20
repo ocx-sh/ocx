@@ -13,16 +13,19 @@
 #
 # An entry is a DEBT, not a licence. It says "this test is slow and we have not
 # fixed it yet", and every line needs a `#` reason above it saying why. The
-# list only shrinks: `# TODO(fast-unit-tests):` marks the ones already being
-# made fast, so `grep TODO(fast-unit-tests)` is the list of lines to delete.
+# list only shrinks. Every line below is a PERMANENT carve-out: something the
+# world floors, not something nobody got to yet. There is deliberately no debt
+# row left — a temporary entry is marked `# TODO(fast-unit-tests):` so that
+# `grep TODO` names the lines owed, and that grep returning nothing is the
+# state this file is meant to stay in.
 # Never add one to dodge a red you could fix, and never `#[ignore]` a test
 # instead — the skip ceiling catches that, this does not.
 #
 # A line is an `fnmatch` pattern; one carrying no metacharacter is plain
 # equality. A pattern is for a FAMILY that is slow for one structural reason —
 # it is one line that cannot rot into a dozen stale ones as runners get faster
-# and slower. Everything else stays an exact id, so `grep TODO(fast-unit-tests)`
-# remains the list of lines to delete.
+# and slower. Everything else stays an exact id, so a temporary row can always
+# be told from a permanent one by eye.
 #
 # An UNBOUNDED pattern is refused outright by the reader, not merely frowned
 # upon: a line matching `zzz_no_such_crate zzz_no_such_test` — an id belonging
@@ -57,65 +60,51 @@
 # at 0.73-0.84 s that a slower runner will push over.
 ocx_shell *live_*
 
-# --- Debt: being made fast in this change series -------------------------
-# Every row below is owned by a sibling work package and is expected to leave
-# this file in the same series. A row still here when the series lands is a row
-# someone has to answer for. Durations are the CI measurement.
-
-# ocx_test_support — whole-tree source scans, one parse per structural test
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_test_support::workspace_structure every_utility_error_reaching_the_cli_is_armed
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_test_support::workspace_structure ssrf_guard_ratchet
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_test_support::workspace_structure tests_hold_no_inert_loop
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_test_support::workspace_structure no_module_path_in_output
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_test_support::workspace_structure every_source_file_is_reachable
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_test_support::workspace_structure no_log_shim
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_test_support::workspace_structure no_classification_in_libraries
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_test_support::workspace_structure deps_direction
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_test_support::workspace_structure crate_map_toml_matches_rust_table
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_test_support::workspace_structure anyhow_only_in_cli_runtime
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_test_support::workspace_structure release_feature_set_excludes_testing_seams
-
-# ocx_oci / ocx_index — real retry backoffs and read timeouts on the wire
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_oci client::builder::push_wire_tests::exhausted_transient_retries_surface_as_transient
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_oci client::builder::read_timeout_tests::stalled_response_body_read_returns_instead_of_hanging
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_oci client::builder::read_timeout_tests::stalled_registry_read_timeout_classifies_as_transient
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_oci client::builder::push_wire_tests::transient_patch_failure_restarts_the_upload_and_commits_once
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_index ocx_index::transport_wire_tests::a_dribbling_peer_is_ended_by_the_outer_cap
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+# --- Permanent: a wait the HTTP grammar floors ----------------------------
+# RFC 9110 spells `Retry-After` delay-seconds as `1*DIGIT`, and
+# `parse_retry_after` (crates/ocx_oci/src/transport_policy.rs) reads it with
+# `value.parse::<u64>()`, so one second is the smallest interval a real header
+# can state. Getting under the budget would mean either inventing a fractional
+# spelling in the production parser for a test's benefit, or deleting the
+# `RetryDelay::After(stated)` half of the proof — the only thing establishing
+# that the delay is WAITED rather than merely parsed. The clamp sibling at
+# 0.004 s already covers "the header is read and routed"; this covers the wait.
 ocx_index ocx_index::transport_wire_tests::a_retry_after_on_the_wire_is_waited_out
 
-# ocx_config / ocx_package_manager — real lock timeouts
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_package_manager tasks::render_toolchain::tests::healing_leaves_a_contended_entry_unrepaired_and_uncounted
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_package_manager tasks::render_toolchain::tests::a_render_lock_timeout_is_a_skip_and_never_an_error
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_config edit::tests::an_editor_held_past_the_timeout_is_locked_and_exit_75
+# --- Permanent: one whole-tree parse per test process ---------------------
+# These guards each read every `crates/*/src/**` file and parse it with `syn`
+# — 605 files, ~2.4M tokens. The corpus is already parsed once per test rather
+# than the three-to-ten times it was (`perf(test): the workspace structure
+# guards read the tree once, not ten times`), and that one parse is the floor:
+# nextest runs EACH TEST IN ITS OWN PROCESS, so no cache can amortise the walk
+# across the guards no matter where it lives. A global syntax-tree cache was
+# tried and measured HARMFUL — `no_classification_in_libraries` went 0.92 s to
+# 1.82 s on allocator pressure alone from holding 600 trees.
+#
+# Numbers below are a `taskset -c 0-3` proxy of the CI runner, which is the
+# shape that decides this — part of the win is intra-test parallelism, so a
+# 32-core figure doubled would understate a 4-core runner rather than bound it.
+# Uncontended on a 32-core box every one of them is under 0.7 s.
+#
+# Do NOT merge these guards together to share a parse: that trades failure
+# granularity and the test count, and the count is floored by NEXTEST_FLOOR.
+ocx_test_support::workspace_structure every_utility_error_reaching_the_cli_is_armed
+ocx_test_support::workspace_structure no_module_path_in_output
+ocx_test_support::workspace_structure no_classification_in_libraries
+ocx_test_support::workspace_structure no_log_shim
+ocx_test_support::workspace_structure every_source_file_is_reachable
+ocx_test_support::workspace_structure ssrf_guard_ratchet
 
-# ocx_announce — real backoff between the fork resync and the replay
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_announce forge::github::tests::commit_files_resyncs_the_fork_before_replaying_the_sequence
-
-# ocx_setup — probes the ambient home for shell profiles, so its cost is the
-# machine's, not the runner's: 1.103 s on this project's dev box and comfortably
-# under budget on CI. Listed because `task verify` runs this gate locally too,
-# and a gate that reds on a dev box for an environment reason on its first day
-# is a gate someone turns off. On CI it prints as a stale allowlist candidate.
-# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
-ocx_setup tests::absent_profile_list_auto_detects
+# The last two are here for a DIFFERENT reason and would not be helped by any
+# further parse sharing: both are bound by a cargo subprocess, not by the
+# corpus. `release_feature_set_excludes_testing_seams` shells out to
+# `cargo tree -p ocx --edges normal,build --locked`, a full feature
+# resolution. `deps_direction` is the only guard that reads `resolve.nodes`,
+# so it needs the full 3.4 MB `cargo metadata` where its siblings moved to
+# `--no-deps` (129 KB, and 2.23 s -> 0.09 s for doing so) — which left it the
+# sole full-metadata consumer in the binary, paying cold what it used to share
+# warm with two others. That is an accepted trade, not a regression to chase.
+ocx_test_support::workspace_structure release_feature_set_excludes_testing_seams
+# 0.91 s on the proxy, listed because the proxy UNDER-reads real CI by roughly
+# 1.1-1.3x: a latent red is worse than one arguably-unnecessary line.
+ocx_test_support::workspace_structure deps_direction
