@@ -120,7 +120,7 @@ Otherwise, `AskUserQuestion`:
 - Stage files **by name**, never `git add -A` / `.`. Prevents accidentally-committed secrets **and** bug where pre-staged files from previous session get swept into commit whose message doesn't describe them.
 - Warn before staging anything matching `.env*`, `*credentials*`, `*.pem`, `*.key`, or `token` patterns; require explicit confirmation.
 - **`--amend` must fold dirty tree into HEAD.** When `/commit --amend` invoked and working tree has uncommitted changes, those changes **must** be staged and included in amend — `--amend` with nothing staged silently becomes message-only amend that drops user's active work. Always `git add <files>` before `git commit --amend`, even when user only asked to "amend". After amend, run `git show --stat HEAD` and confirm expected files appear in diff stat before reporting success.
-- Git's own `commit-msg` hook (`.githooks/commit-msg` → `scripts/commit_gate.py`) blocks commits without fresh verify mark. When blocks, run `task verify` or `task verify:scoped` (not `--no-verify`) — both write the mark themselves. Only when a passing verify is in hand and just merge context changed since:
+- Git's own `commit-msg` hook (a prek shim → `scripts/commit_gate.py`; `task git:hooks` installs it) blocks commits without fresh verify mark. When blocks, run `task verify` or `task verify:scoped` (not `--no-verify`) — both write the mark themselves. Only when a passing verify is in hand and just merge context changed since:
   ```sh
   task verify:mark
   ```

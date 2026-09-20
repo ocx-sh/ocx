@@ -47,7 +47,7 @@ tasks:
     cmds:
       - git add .
       # A bare timestamp is not a conventional subject, and since the commit
-      # gate moved into git itself (`.githooks/commit-msg`) this task's own
+      # gate moved into git itself (the `commit-msg` hook) this task's own
       # commit is judged like any other.
       # Quoted whole: the `: ` in the subject would otherwise make YAML read
       # the entry as a mapping.
@@ -74,7 +74,7 @@ tasks:
     deps:
       # The repository arms its own git hooks here and in `verify`: those are
       # the two commands everyone working here runs, and the commit/push gate
-      # is worth nothing until `core.hooksPath` points at `.githooks/`.
+      # is worth nothing until those hooks are in git's hooks directory.
       - task: git:hooks
       - task: rust:format:check
       - task: rust:clippy:check
@@ -121,7 +121,7 @@ tasks:
     cmds:
       # Deliberately not named in the summary above: that text is checked
       # against what `.verify:lint` / `.verify:build-test` run, and this is
-      # neither — it is the one-line bootstrap that arms `.githooks/`.
+      # neither — it is the one-line bootstrap that installs the git hooks.
       - task: git:hooks
       - task: .verify:lint
       - task: .verify:build-test

@@ -1,0 +1,26 @@
+# The commit gate, declared for prek (`ocx.sh/prek/prek`), which installs the
+# shim into git's own hooks directory. `task git:hooks` arms it.
+#
+# `.pre-commit-config.yaml` and not `prek.toml`: upstream `pre-commit` reads
+# this file too, so the config outlives the choice of runner.
+#
+# One hook, and deliberately no `pre-commit` stage: lint and format live behind
+# the `task verify` mark, and a second gate on every commit would duplicate it.
+#
+# `pre-push` is NOT here. A declared hook is handed no stdin, and prek skips the
+# pre-push run entirely for a branch delete and for a `--all` that only creates
+# refs — measured, both invisible to it, both of which the gate must refuse. The
+# push gate therefore stays a git-native hook (`scripts/pre-push.sh`), where
+# git's `<local-ref> <local-sha> <remote-ref> <remote-sha>` lines actually
+# arrive.
+default_install_hook_types: [commit-msg]
+repos:
+  - repo: local
+    hooks:
+      - id: commit-gate
+        name: conventional subject and a fresh verify mark
+        language: system
+        stages: [commit-msg]
+        # prek appends the message file as the one filename, relative to the
+        # repository root, and runs the hook from that root.
+        entry: python3 scripts/commit_gate.py --check-message

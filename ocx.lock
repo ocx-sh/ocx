@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:2a1734c545974479d5cc5c4fa7f1cbf0994da779c6481d972c0939a9c4583277"
-generated_by = "ocx 0.6.2"
-generated_at = "2026-09-09T22:45:21Z"
+declaration_hash = "sha256:55b483b8ca2ceb0f3b206971835cdfbae33bf23c9c0a1ab0c1b55febf4227a45"
+generated_by = "ocx 0.6.1"
+generated_at = "2026-09-20T12:20:43Z"
 
 [[tool]]
 name = "actionlint"
@@ -80,6 +80,19 @@ repository = "ocx.sh/lychee/lychee"
 "linux/amd64" = "sha256:fb090cfaa91ba0fcfbe963185add1c72a1a18a4cfcbe560d84bd003ab9ddbb81"
 "linux/arm64" = "sha256:9e78ff5b9e52cc69e8b8245e655663a462abc05c47d98c691e71d8ba1caa87fa"
 "windows/amd64" = "sha256:b0d8f87626a38fa2c58ff6f69671aa6090f7da791e4c3ae59158960eb809fc65"
+
+[[tool]]
+name = "prek"
+group = "default"
+repository = "ocx.sh/prek/prek"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:cad00b1af1f3363b5028a93b0619ae7c463ace00d816a4a4ecaa57e3ab476f16"
+"darwin/arm64" = "sha256:65e2ca60d40f81e4cec763d9add820b7860b2c652342681d3ea5dcda547dc73f"
+"linux/amd64" = "sha256:5f935ecbefb598f465ae422212b964ac643a34df7ce6fdea3ddc3552c9804a1e"
+"linux/arm64" = "sha256:477b00791b064c90d91b6a5d34ab9e94247aebaa96086cdf1288ea266c40c230"
+"windows/amd64" = "sha256:660152984a2d4d0c53bf5a3329431984b44ad22152abf2ceacd1e57c7fd6309e"
+"windows/arm64" = "sha256:676055622702309a72c67bd03db868834f6d94077f5bf3752f45475b27647992"
 
 [[tool]]
 name = "shellcheck"

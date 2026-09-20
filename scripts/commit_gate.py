@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""The commit and push gate git itself runs (`.githooks/`, via `core.hooksPath`).
+"""The commit and push gate git itself runs.
 
-    scripts/commit_gate.py --check-message <msg-file> <repo-root>
+Two entry points, because the two hooks are installed by different owners:
+`commit-msg` is a prek hook declared in `.pre-commit-config.yaml`, and
+`pre-push` is `scripts/pre-push.sh`, copied into git's hooks directory —
+prek hands a declared hook no stdin and skips the pre-push run for a delete
+or a ref-creating `--all`, which the push gate must see. Both armed by
+`task git:hooks`.
+
+    scripts/commit_gate.py --check-message <msg-file>   # prek appends it
     scripts/commit_gate.py --check-push <repo-root>          # git's pre-push stdin
     scripts/commit_gate.py --require-full-mark <repo-root>   # release:prepare's guard
     scripts/commit_gate.py --self-test
@@ -63,10 +70,12 @@ unverified trees — fail-OPEN, inside one 5-minute window. The writer's
 realpath'd working tree is recorded in the mark and compared here.
 
 Stdlib only, and `--self-test` drives real git: it builds throwaway
-repositories under `.tmp/`, points their `core.hooksPath` at the real
-`.githooks/`, and runs actual `git commit` / `git push` through a shell,
-asserting the exit code and the reason text — including with the hook
-disarmed, so a denial is attributable to the gate and not to a broken fixture.
+repositories under `.tmp/`, arms each one the way `task git:hooks` arms a
+clone — `prek install` against the real `.pre-commit-config.yaml`, plus the
+real `scripts/pre-push.sh` — and runs actual `git commit` / `git push`
+through a shell, asserting the exit code and the reason text — including with
+the hooks disarmed, so a denial is attributable to the gate and not to a
+broken fixture.
 """
 
 from __future__ import annotations
@@ -75,6 +84,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -84,7 +94,8 @@ from pathlib import Path
 from scoped_gate import mark_file, read_mark, worktree_id, write_mark
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-GITHOOKS = REPO_ROOT / ".githooks"
+PREK_CONFIG = REPO_ROOT / ".pre-commit-config.yaml"
+PRE_PUSH_SCRIPT = REPO_ROOT / "scripts" / "pre-push.sh"
 
 TTL_SECONDS = 300
 TRUNK_BRANCHES = frozenset({"main", "master"})
@@ -420,10 +431,11 @@ def require_full_mark_cli(repo_root: str) -> int:
 # --self-test
 #
 # Every case drives real git through a real shell against a throwaway
-# repository whose `core.hooksPath` is the REAL `.githooks/`. Nothing here
-# calls `check_message` or `check_push` directly: the defect class this
+# repository armed with the REAL config and the REAL push script. Nothing
+# here calls `check_message` or `check_push` directly: the defect class this
 # replaces lived in "does the gate ever get invoked", which a direct call
-# cannot see.
+# cannot see — and under prek the invocation is a generated shim, so it is
+# even less inspectable and even more worth exercising.
 # ---------------------------------------------------------------------------
 
 
@@ -450,11 +462,50 @@ def _env_for(project_dir: Path) -> dict[str, str]:
     return {**os.environ, "CLAUDE_PROJECT_DIR": str(project_dir)}
 
 
+def _arm(repo: Path) -> None:
+    """Install both hooks into ``repo``, the way `task git:hooks` does.
+
+    The config and the push script are the repository's own, so a case that
+    goes green went green against what a developer actually runs. `prek
+    install` writes its shim into this repo's own `.git/hooks`, and the push
+    script is copied there.
+
+    The config is copied VERBATIM, which means its `entry` stays
+    repository-relative — so `scripts/` is symlinked in rather than rewritten,
+    and a typo in the real `entry` fails these cases instead of hiding behind a
+    fixture that spelled the path its own way. git is told to ignore the
+    symlink so `git add -A` in a case cannot stage it.
+
+    `.claude/` is ignored for a sharper reason, and it is the real
+    `.gitignore:32` rule, not a fixture convenience: prek reverts every
+    tracked-but-unstaged file to its committed content before running a hook
+    and restores it after. A TRACKED mark is therefore read at its committed
+    value, so a scratch repo that let `git add -A` stage the mark judged every
+    commit against a mark two steps old (measured). The real repository
+    ignores the mark, and so must these.
+    """
+    shutil.copyfile(PREK_CONFIG, repo / PREK_CONFIG.name)
+    (repo / "scripts").symlink_to(REPO_ROOT / "scripts")
+    git_dir = Path(_git(repo, "rev-parse", "--absolute-git-dir").stdout.strip())
+    (git_dir / "info").mkdir(exist_ok=True)
+    with (git_dir / "info" / "exclude").open("a", encoding="utf-8") as fh:
+        fh.write("/scripts\n/.pre-commit-config.yaml\n/.claude/\n")
+    subprocess.run(
+        # The same flags `task git:hooks` uses — a fixture that armed the shim
+        # differently would not be exercising what a clone gets.
+        ["prek", "install", "--allow-missing-config"],
+        cwd=str(repo), capture_output=True, encoding="utf-8", check=True,
+    )
+    hooks = Path(_git(repo, "rev-parse", "--absolute-git-dir").stdout.strip()) / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(PRE_PUSH_SCRIPT, hooks / "pre-push")
+    (hooks / "pre-push").chmod(0o755)
+
+
 def _make_repo(path: Path, branch: str = "work") -> Path:
     """A repository seeded with one commit, then armed with the real hooks.
 
-    Armed *after* the seed commit so the seed does not need a mark, and with
-    an absolute `core.hooksPath` so the gate under test is this checkout's.
+    Armed *after* the seed commit so the seed does not need a mark.
     """
     (path / ".claude").mkdir(parents=True)
     _git(path.parent, "init", "-q", "-b", branch, str(path))
@@ -463,7 +514,7 @@ def _make_repo(path: Path, branch: str = "work") -> Path:
     (path / "seed").write_text("seed\n", encoding="utf-8")
     _git(path, "add", "-A")
     _git(path, "commit", "-q", "-m", "seed")
-    _git(path, "config", "core.hooksPath", str(GITHOOKS))
+    _arm(path)
     return path
 
 
@@ -809,13 +860,14 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         )
 
     def the_push_hook_still_feeds_git_lfs() -> str | None:
-        """`.githooks/` takes core.hooksPath over from `git lfs install`.
+        """`scripts/pre-push.sh` owns the hook `git lfs install` would own.
 
-        This repository tracks its images in LFS, so the four hooks that
-        directory used to own are now this one's responsibility. stdin can be
-        read once and two consumers need it, so the shim replays it — and a
-        REFUSED push must not upload objects for a push that will not happen.
-        A stub `git-lfs` earlier on PATH records what it was handed.
+        This repository tracks its images in LFS, so the one hook the gate
+        takes over owes LFS the delegation its generated hook would have done.
+        stdin can be read once and two consumers need it, so the script
+        replays it — and a REFUSED push must not upload objects for a push
+        that will not happen. A stub `git-lfs` earlier on PATH records what it
+        was handed.
         """
         repo = _make_repo(tmp / "lfs", branch="main")
         remote = tmp / "lfs-remote.git"
@@ -855,35 +907,94 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
             return f"git-lfs must get the same refs stdin the gate saw: {handed!r}"
         return None
 
-    def every_lfs_shim_calls_its_own_verb() -> str | None:
-        """`post-checkout`, `post-commit`, `post-merge` are pure delegation.
+    def arming_leaves_git_lfs_its_own_three_hooks() -> str | None:
+        """`post-checkout`, `post-commit` and `post-merge` are LFS's again.
 
-        A typo in any of them breaks Git LFS silently — the working tree checks
-        out pointer files and nobody sees an error. Each is run directly with a
-        stub `git-lfs` on PATH that records its argv, so the check is a
-        handshake and not an assertion about the file's text.
+        They were only ever ours because `core.hooksPath` took them from `git
+        lfs install`; nothing points away from git's hooks directory now, so
+        LFS installs them itself. The regression this guards is silent — the
+        working tree checks out pointer files and nobody sees an error — so it
+        is checked the way `task git:hooks` leaves a clone: LFS installs, then
+        prek, and all four hooks must still be there afterwards.
         """
-        stub_dir = tmp / "lfs-verbs"
-        stub_dir.mkdir()
-        record = tmp / "lfs-verbs.txt"
-        stub = stub_dir / "git-lfs"
-        stub.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> {record}\n', encoding="utf-8")
-        stub.chmod(0o755)
-        env = {**os.environ, "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}"}
-        for name in ("post-checkout", "post-commit", "post-merge"):
-            hook = GITHOOKS / name
-            if not hook.is_file():
-                return f"{name}: LFS owned this hook before `.githooks/` took core.hooksPath over"
-            run = subprocess.run(
-                [str(hook), "arg1", "arg2", "1"], cwd=str(tmp), capture_output=True,
-                encoding="utf-8", env=env, check=False,
-            )
+        if shutil.which("git-lfs") is None:
+            return None  # not installed here; `pre-push` covers the delegation
+        repo = tmp / "lfs-own-hooks"
+        repo.mkdir()
+        _git(repo.parent, "init", "-q", "-b", "work", str(repo))
+        for step in (["lfs", "install", "--local", "--force"],):
+            run = _git(repo, *step)
             if run.returncode != 0:
-                return f"{name}: exited {run.returncode}: {run.stderr!r}"
-            handed = record.read_text(encoding="utf-8") if record.exists() else ""
-            if f"{name} arg1 arg2 1" not in handed:
-                return f"{name}: git-lfs was not handed its own verb and arguments: {handed!r}"
-        return None
+                return f"`git {' '.join(step)}` failed: {run.stderr!r}"
+        _arm(repo)
+        hooks = Path(_git(repo, "rev-parse", "--absolute-git-dir").stdout.strip()) / "hooks"
+        for name in ("post-checkout", "post-commit", "post-merge"):
+            hook = hooks / name
+            if not hook.is_file():
+                return f"{name}: arming removed the hook `git lfs install` wrote"
+            if "git lfs" not in hook.read_text(encoding="utf-8"):
+                return f"{name}: no longer delegates to git-lfs: {hook.read_text(encoding='utf-8')!r}"
+        # The gate's own hook must have won this one: it delegates to LFS
+        # itself, and LFS's generated version does not run the gate.
+        pre_push = (hooks / "pre-push").read_text(encoding="utf-8")
+        return expect(
+            "commit_gate.py" in pre_push,
+            f"pre-push must be the gate's, not LFS's generated one: {pre_push!r}",
+        )
+
+    def a_branch_without_the_config_still_commits() -> str | None:
+        """The hooks directory is shared and absolute; most branches predate it.
+
+        `.githooks` was a RELATIVE hooksPath, so a worktree on a branch without
+        it ran no hook and nobody noticed. The hooks directory git uses now is
+        the common one, so the shim runs in every worktree whatever it has
+        checked out — and prek exits 1 with "No `prek.toml` or
+        `.pre-commit-config.yaml` found" when the tree has neither, which would
+        block every commit on every branch that has not merged this config yet.
+        `--allow-missing-config` is what keeps that a degradation instead of an
+        outage, and this is the case that reds when the flag is dropped.
+        """
+        repo = _make_repo(tmp / "no-config")
+        (repo / PREK_CONFIG.name).unlink()
+        _dirty(repo)
+        _mark(repo, repo, "scoped")
+        commit = _shell(repo, "git commit -m 'chore: x'", repo)
+        if commit.returncode != 0:
+            return f"a tree with no config must commit, not error: {commit.stderr!r}"
+        # And the push gate is a copy in the hooks directory, so it is NOT
+        # branch-dependent: it must still refuse the trunk here.
+        remote = tmp / "no-config-remote.git"
+        _git(tmp, "init", "-q", "--bare", str(remote))
+        _git(repo, "remote", "add", "origin", str(remote))
+        refused = _shell(repo, "git push origin work:main", repo)
+        return expect(
+            refused.returncode != 0,
+            "the push gate is a copy, not read from the tree — it must refuse regardless",
+        )
+
+    def preks_stash_does_not_hide_the_mark() -> str | None:
+        """prek reverts unstaged tracked files around a hook; the mark survives.
+
+        Before running a hook prek writes every tracked-but-unstaged change to
+        a patch, checks the tree out clean, and restores the patch afterwards.
+        Anything the gate reads out of the working tree is therefore read at
+        its COMMITTED value for the duration of the hook. The mark is
+        gitignored (`.gitignore:32`) and so unaffected — this pins that: track
+        the mark and this case reds, which is the whole reason the ignore rule
+        is load-bearing rather than tidy.
+        """
+        repo = _make_repo(tmp / "stash")
+        # An unstaged change to a TRACKED file is what triggers the stash.
+        (repo / "seed").write_text("unstaged\n", encoding="utf-8")
+        _dirty(repo, "staged")
+        _mark(repo, repo, "scoped")
+        allowed = _shell(repo, "git commit -m 'chore: x'", repo)
+        if allowed.returncode != 0:
+            return f"the mark must survive prek's stash: {allowed.stderr!r}"
+        return expect(
+            (repo / "seed").read_text(encoding="utf-8") == "unstaged\n",
+            "prek must restore the unstaged change it saved",
+        )
 
     def a_mark_from_a_sibling_worktree_certifies_nothing() -> str | None:
         """R17, with every control the review asked for.
@@ -895,7 +1006,7 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         a = _make_repo(tmp / "r17")
         b = tmp / "r17-sibling"
         _git(a, "worktree", "add", "-q", str(b), "-b", "sibling")
-        _git(b, "config", "core.hooksPath", str(GITHOOKS))
+        _arm(b)
         head = _git(a, "rev-parse", "HEAD").stdout.strip()
         if _git(b, "rev-parse", "HEAD").stdout.strip() != head:
             return "the sibling worktree must start at the same HEAD"
@@ -979,7 +1090,9 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         ("a paused replay is not a free commit", a_paused_replay_is_not_a_free_commit),
         ("the push gate", the_push_gate),
         ("the push hook still feeds git lfs", the_push_hook_still_feeds_git_lfs),
-        ("every LFS shim calls its own verb", every_lfs_shim_calls_its_own_verb),
+        ("arming leaves git lfs its own three hooks", arming_leaves_git_lfs_its_own_three_hooks),
+        ("a branch without the config still commits", a_branch_without_the_config_still_commits),
+        ("prek's stash does not hide the mark", preks_stash_does_not_hide_the_mark),
         ("a sibling worktree's mark certifies nothing", a_mark_from_a_sibling_worktree_certifies_nothing),
         ("a mark with no writer reads as unverified", a_mark_with_no_writer_reads_as_unverified),
         ("the release:prepare guard", the_release_prepare_guard),
@@ -1014,8 +1127,11 @@ def self_test() -> int:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     mode = parser.add_mutually_exclusive_group(required=True)
+    # prek appends the message file as the one filename and runs the hook from
+    # the repository root, so there is no second argument to pass and none to
+    # trust: the root is where git says it is.
     mode.add_argument(
-        "--check-message", nargs=2, metavar=("MSG_FILE", "REPO_ROOT"), help="the commit-msg hook"
+        "--check-message", nargs=1, metavar="MSG_FILE", help="the commit-msg hook"
     )
     mode.add_argument("--check-push", nargs=1, metavar="REPO_ROOT", help="the pre-push hook")
     mode.add_argument(
@@ -1028,7 +1144,7 @@ def main(argv: list[str]) -> int:
     if ns.require_full_mark:
         return require_full_mark_cli(ns.require_full_mark[0])
     reason = (
-        check_message(*ns.check_message)
+        check_message(ns.check_message[0], git_out(".", "rev-parse", "--show-toplevel") or ".")
         if ns.check_message
         else check_push(sys.stdin.read(), ns.check_push[0])
     )

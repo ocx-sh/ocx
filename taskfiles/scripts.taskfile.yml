@@ -53,9 +53,10 @@ tasks:
       - python3 scripts/test_diff_guard.py --self-test
       - python3 scripts/suite_census.py --self-test
       - python3 scripts/dead_path_sweep.py --self-test
-      # Drives real git against throwaway repositories under .tmp/, pointed at
-      # the real .githooks/ — the defect class it replaces lived in "does the
-      # gate ever get invoked", which a direct function call cannot see.
+      # Drives real git against throwaway repositories under .tmp/, each armed
+      # the way `task git:hooks` arms a clone — the defect class it replaces
+      # lived in "does the gate ever get invoked", which a direct function
+      # call cannot see. Needs `prek` on PATH, as the project toolchain gives.
       - python3 scripts/commit_gate.py --self-test
 
   dead-path-sweep:

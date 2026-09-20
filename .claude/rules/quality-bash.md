@@ -2,7 +2,6 @@
 paths:
   - "**/*.sh"
   - "**/*.bash"
-  - ".githooks/*"
 ---
 
 # Bash Script Quality

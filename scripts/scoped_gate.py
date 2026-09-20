@@ -48,7 +48,7 @@ The mark, `.claude/hooks/.state/commit-verified`, is JSON:
 "crates": [...], "toplevel": "<working tree>"}`. A scoped mark also carries
 `full_head`, the head of the last full mark, so the base of step 1 survives any
 number of scoped runs. `scripts/commit_gate.py` is the reader, run by git
-itself through `.githooks/`; a bare integer (the retired `echo $(date +%s)`
+itself through the hooks `task git:hooks` installs; a bare integer (the retired `echo $(date +%s)`
 stamp) is not a mark, and neither is one with no `toplevel`. Where the file
 lives is `mark_file()`, and it is the reader's `.claude/`, not this script's —
 see there for why an agent worktree made C-021 void without anything looking

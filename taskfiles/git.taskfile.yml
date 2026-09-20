@@ -3,34 +3,71 @@
 version: '3'
 
 tasks:
-  # Point git at the repository's own tracked hook directory, so the commit
-  # and push gates (`.githooks/`, `scripts/commit_gate.py`) run for every
-  # commit and every push however it was spelled. Called by `default` and
-  # `verify` because those are the two things everyone working here runs;
-  # there is no `task setup` to put it in.
+  # Install the two hooks that gate work here, into git's own hooks directory.
+  # Called by `default` and `verify` because those are the two things everyone
+  # working here runs; there is no `task setup` to put it in.
   #
-  # `core.hooksPath` lives in the SHARED `.git/config`, so one run arms every
-  # linked worktree — but the value is relative, so it resolves against each
-  # worktree's own top level and a worktree on a branch without `.githooks`
-  # simply runs no hook instead of erroring. Both measured, not assumed.
+  # Three owners, one directory, in this order:
   #
-  # It also takes the setting over from `git lfs install`, which points it at
-  # an absolute `.git/hooks`. `.githooks/` therefore carries LFS's four hooks
-  # as delegating shims — this repository tracks its images in LFS, and losing
-  # them would check out pointer files and push pointers with no objects.
-  # The relative path cuts both ways: a worktree parked on a branch from
-  # BEFORE this commit has no `.githooks/`, so it loses LFS's hooks as well as
-  # the gate until it moves to a branch that has them. Degradation, not
-  # corruption — the `filter.lfs` smudge driver is config, not a hook — but it
-  # is where a pointer-file surprise on an old branch comes from.
+  #   `git config --unset core.hooksPath` comes first and is why the other two
+  #   land where git looks. `git lfs install` HONOURS an existing hooksPath
+  #   rather than reclaiming it (measured on git-lfs 3.7.1) — which is what let
+  #   `.githooks/` take LFS's hooks over in the first place, and what would
+  #   quietly write all of this into a directory git no longer reads.
+  #
+  #   `git lfs install` writes its four hooks into `.git/hooks`. It runs before
+  #   the two steps after it so they can take the hooks they own; this
+  #   repository tracks its images in LFS, and losing those hooks checks out
+  #   pointer files and pushes pointers with no objects.
+  #
+  #   `prek install` reads `.pre-commit-config.yaml` and writes the `commit-msg`
+  #   shim. Never `--force`: that deletes a `<hook>.legacy` file, and the whole
+  #   reason prek can share a hooks directory is that it chains one.
+  #
+  #   `--allow-missing-config` is load-bearing, not tidiness. The hooks
+  #   directory is shared and the path absolute, so the shim also runs in a
+  #   worktree parked on a branch that predates this config — and prek exits 1
+  #   with "No `prek.toml` or `.pre-commit-config.yaml` found" there, blocking
+  #   every commit on it (measured). The flag restores exactly what the
+  #   relative `.githooks` gave for free: a tree without the gate files runs no
+  #   gate instead of erroring. The push gate is unaffected either way, being a
+  #   copy in the hooks directory rather than anything read out of the tree.
+  #
+  #   `scripts/pre-push.sh` is copied over LFS's generated `pre-push`, because
+  #   it does that delegation itself and the gate has to run before it. It is a
+  #   git-native hook and not a prek hook for a measured reason: prek hands a
+  #   declared hook no stdin, and skips the pre-push run outright for a branch
+  #   delete and for a `--all` that only creates refs — both of which the trunk
+  #   gate must refuse.
+  #
+  # The hooks directory is the COMMON one — `--git-common-dir` answers the same
+  # absolute path from a linked worktree as from the main one (measured), so one
+  # run arms every worktree. Unlike the relative `.githooks` this replaced, a
+  # worktree parked on a branch without these files still runs the gate rather
+  # than silently running nothing.
+  #
+  # `cmp` and not `test -f` in the last status line: the copy is a copy, so it
+  # goes stale the moment the tracked script changes, and a stale gate is worse
+  # than an unarmed one.
+  #
   # Public, not `internal:`: with no `task setup` in this repository, this is
   # the one command that arms a fresh clone, so it belongs in `task --list`.
   hooks:
-    desc: Wire core.hooksPath to the repository's tracked .githooks/ (idempotent)
+    desc: Install the commit and push hooks into git's hooks directory (idempotent)
+    vars:
+      HOOKS:
+        sh: git rev-parse --path-format=absolute --git-common-dir
     status:
-      - test "$(git config --get core.hooksPath)" = .githooks
+      # The token, not merely `prek`: a shim armed without it reads as armed
+      # while blocking every commit on a branch that lacks the config.
+      - grep -q skip-on-missing-config {{.HOOKS}}/hooks/commit-msg
+      - grep -q 'git lfs' {{.HOOKS}}/hooks/post-checkout
+      - cmp -s scripts/pre-push.sh {{.HOOKS}}/hooks/pre-push
     cmds:
-      - git config core.hooksPath .githooks
+      - git config --local --unset-all core.hooksPath || true
+      - git lfs install --local --force
+      - prek install --allow-missing-config
+      - install -m 0755 scripts/pre-push.sh {{.HOOKS}}/hooks/pre-push
 
   # Fast-forward the current branch onto main.
   # Captures the current branch, switches to main, then `git merge --ff-only`.

@@ -188,9 +188,13 @@ class TestShareableQualityRules:
         ]
         violations = []
         for rule_file in CLAUDE_DIR.rglob("*.md"):
+            # Relative to `.claude/`, never absolute — see the same guard below.
+            parts = rule_file.relative_to(CLAUDE_DIR).parts
             # Skip historical artifacts + ephemeral state — they preserve old references
-            if "artifacts" in rule_file.parts or "state" in rule_file.parts:
+            if "artifacts" in parts or "state" in parts:
                 continue
+            if "worktrees" in parts:
+                continue  # another checkout's config, on another branch
             text = rule_file.read_text(encoding="utf-8")
             for deleted in deleted_skills:
                 if deleted in text:

@@ -255,7 +255,8 @@ class TestPreToolUseValidator:
 
 # ---------------------------------------------------------------------------
 # The gate call sites. The gate itself is `scripts/commit_gate.py`, run by
-# git through `.githooks/`, and shown red and green by its own `--self-test`.
+# git through the hooks `task git:hooks` installs, and shown red and green by
+# its own `--self-test`.
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

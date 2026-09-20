@@ -66,7 +66,7 @@ Branch ready to fast-forward onto `main` when **all** hold:
 
 ## Quality Gate
 
-Every commit on branch must pass `task verify` before landing on `main`. Git enforces it itself: `.githooks/commit-msg` runs `scripts/commit_gate.py`, wired by `core.hooksPath` (armed by `task` and `task verify`), so every commit is gated however it was spelled and the index survives a refusal. When it blocks:
+Every commit on branch must pass `task verify` before landing on `main`. Git enforces it itself: the `commit-msg` hook runs `scripts/commit_gate.py` — a prek hook declared in `.pre-commit-config.yaml`, installed into git's hooks directory by `task git:hooks` (armed by `task` and `task verify`) — so every commit is gated however it was spelled and the index survives a refusal. The push gate is `scripts/pre-push.sh`, copied into the same directory. When it blocks:
 
 1. Run `task verify` or `task verify:scoped` (never bypass with `--no-verify`). Both write the verify mark themselves.
 2. Or mark the tree deliberately — `task verify:mark` is an **escape hatch, and using it is allowed**:

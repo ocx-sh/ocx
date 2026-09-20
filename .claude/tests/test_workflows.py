@@ -357,9 +357,15 @@ def _workflow_jobs() -> dict[str, frozenset[str]]:
 def _stale_job_claims() -> set[str]:
     """Every `<path>: <workflow>.yml <job>` claim in `.claude/**` that no workflow satisfies."""
     jobs = _workflow_jobs()
+    claude = ROOT / ".claude"
     return {
         f"{document.relative_to(ROOT).as_posix()}: {workflow} {job}"
-        for document in sorted((ROOT / ".claude").rglob("*.md"))
+        for document in sorted(claude.rglob("*.md"))
+        # A nested worktree is a whole other checkout of this repository, so its
+        # documents claim jobs from ITS branch's workflows, not the ones read
+        # above. Relative to `.claude/`, never absolute — an agent runs this
+        # gate from a path that may itself contain `worktrees`.
+        if "worktrees" not in document.relative_to(claude).parts
         for workflow, job in _JOB_CLAIM.findall(document.read_text(encoding="utf-8"))
         if workflow in jobs and job not in jobs[workflow]
     }

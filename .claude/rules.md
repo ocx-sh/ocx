@@ -109,7 +109,7 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `**/*.ts`, `**/*.tsx`, `**/tsconfig*.json` | [quality-typescript.md](./rules/quality-typescript.md), [typescript-quality.md](./rules/typescript-quality.md) |
 | `**/package.json`, `**/eslint.config.*`, `**/biome.json(c)` | [typescript-packaging.md](./rules/typescript-packaging.md) |
 | `**/vite.config.*`, `**/.vitepress/config.*` | [quality-vite.md](./rules/quality-vite.md) |
-| `**/*.sh`, `**/*.bash`, `.githooks/*` | [quality-bash.md](./rules/quality-bash.md) — git only runs a hook whose filename is exactly `commit-msg`, `pre-push` and so on, so those shims can carry no suffix |
+| `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md) — the one git hook this repository writes lives at `scripts/pre-push.sh` and is *copied* under the name git insists on, so the source keeps its suffix and stays linted |
 | `**/BUILD.bazel`, `**/*.bzl`, `**/MODULE.bazel`, `**/.bazelrc` | [bazel-quality.md](./rules/bazel-quality.md) |
 | `.github/workflows/**`, `.github/actions/**`, `renovate.json` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
 | `.github/ISSUE_TEMPLATE/**` | [workflow-github.md](./rules/workflow-github.md) |
