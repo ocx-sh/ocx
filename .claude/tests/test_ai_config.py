@@ -2350,7 +2350,12 @@ class TestSelfTestsRunOnAGate:
     # must be wired, so it reds this list until someone puts it on a gate and
     # names it here.
     _SELF_TESTS = frozenset(
-        {"rust:test:ceiling:self-test", "scripts:self-test", "test:ceilings:self-test"}
+        {
+            "rust:test:ceiling:self-test",
+            "rust:test:duration:self-test",
+            "scripts:self-test",
+            "test:ceilings:self-test",
+        }
     )
 
     @classmethod

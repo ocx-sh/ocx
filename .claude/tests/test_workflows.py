@@ -468,7 +468,10 @@ def test_deep_build_matrix_covers_the_three_oses() -> None:
 # Keys and values are compared against the whole `run:` line, never as a
 # substring: `task rust:test:ceiling` is a prefix of its own self-test's
 # command, so a substring test would find the proof in place of the gate.
-_CI_SELF_TEST_PAIRS = {"task rust:test:ceiling": "task rust:test:ceiling:self-test"}
+_CI_SELF_TEST_PAIRS = {
+    "task rust:test:ceiling": "task rust:test:ceiling:self-test",
+    "task rust:test:duration": "task rust:test:duration:self-test",
+}
 
 
 @pytest.mark.parametrize(("gate", "proof"), sorted(_CI_SELF_TEST_PAIRS.items()))

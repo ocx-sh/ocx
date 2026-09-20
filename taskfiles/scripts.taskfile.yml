@@ -6,6 +6,13 @@
 # check nobody runs, so `verify` here is part of `.verify:lint` and
 # `scripts/scoped_gate.py` routes `scripts/**` to it.
 #
+# One script under scripts/ deliberately carries no `--self-test`:
+# `unit_test_duration_gate.py` reads a nextest run log, so its fixtures are
+# logs rather than function arguments, and its red/red/green proof lives where
+# the log does — `task rust:test:duration:self-test`, run by the same gate leg
+# as the `rust:test:duration` it judges. The rule is "a proof on a gate", not
+# "a `--self-test` flag"; adding a second one here would prove it twice.
+#
 # `dead_path_sweep.py` spent three batches proving that rule on itself: it was
 # written by DEC-52 to catch a check nobody runs, had no `--self-test`, and was
 # named by no task — `git grep` found it only in the plan and in its own

@@ -228,6 +228,21 @@ jobs:
       # cannot be told from one that stopped matching.
       - name: Ceiling self-test
         run: task rust:test:ceiling:self-test
+      # Inside the floor -> unit -> ceiling bracket on purpose, and after both
+      # halves of it: `Unit-test floor` deletes target/nextest/run.log before
+      # the run, `Test` tee's this run into it, so every duration read here can
+      # only be this run's. Outside the bracket the same step would happily
+      # report on a stale or a subset log and print the same green. The gate's
+      # own reader floor is the second half of that guarantee — it refuses a
+      # log holding fewer result lines than crates/NEXTEST_FLOOR.
+      - name: Unit duration budget
+        run: task rust:test:duration
+      # Beside the budget, never instead of it: the step above is a parser, and
+      # this is the three fixture logs that show it red over budget, red on a
+      # short log, and green on an allowlisted one. Same position as in
+      # `.verify:build-test`.
+      - name: Duration self-test
+        run: task rust:test:duration:self-test
       # nextest runs no doctest, so nothing above this line executes one, and
       # until B5R-4 no workflow in this repository did either — in any
       # spelling. `.verify:build-test` has run it locally since DX-58; a gate

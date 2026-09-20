@@ -103,7 +103,9 @@ tasks:
         rust:doc:ratchet, rust:build,
         then rust:test:unit bracketed by
         rust:test:floor / rust:test:ceiling, that ceiling parser's own
-        red/green fixtures (rust:test:ceiling:self-test), rust:test:doc
+        red/green fixtures (rust:test:ceiling:self-test), the one-second
+        per-test budget over the same run (rust:test:duration) and its own
+        red/red/green fixtures (rust:test:duration:self-test), rust:test:doc
         (nextest runs no doctest, and the scoped gate's per-crate doctest step
         is iterated over an empty CRATES on every escalate), then test:parallel
       Ends with a *full* verify mark (.verify:mark SCOPE=full) — the only
@@ -322,6 +324,16 @@ tasks:
       # gate calls — until R16, so the check that proves the ceiling was itself
       # a check nobody ran.
       - task: rust:test:ceiling:self-test
+      # Same bracket, same log, one question further on: the ceiling asks how
+      # many tests were skipped, this asks whether any of the ones that ran
+      # took a second. `rust:test:floor` deleted the log before the run, so
+      # both read durations that can only be this run's.
+      - task: rust:test:duration
+      # And its own red/red/green fixtures, in the leg that just depended on
+      # it — the budget's red, the reader floor's red (a gate that read a
+      # subset run prints the same green as one over the whole workspace), and
+      # a green asserted on the numbers it reports.
+      - task: rust:test:duration:self-test
       # nextest cannot run doctests, so nothing above this line executes one.
       # The per-crate `cargo test --doc` in `verify:scoped` runs under
       # `for: {var: CRATES}`, and CRATES is empty on an escalate — which a
