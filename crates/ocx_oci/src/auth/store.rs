@@ -452,11 +452,12 @@ fn acquire_config_guard(path: &Path) -> Result<ConfigGuard, AuthError> {
         }
     })?;
     // Tighten file permissions to owner-only on Unix. Re-applied on every
-    // acquire so an externally-relaxed mode is restored before any write
-    // exposes credentials. On a freshly created file the umask default
-    // applies for the brief window between open and `set_permissions`; this
-    // is acceptable because no credentials are written until the subsequent
-    // `replace_bytes_blocking` call.
+    // acquire so an externally-relaxed mode is restored before a read exposes
+    // credentials to anyone who widened it. On a freshly created file the
+    // umask default applies for the brief window between open and
+    // `set_permissions`; this is acceptable because no credentials are written
+    // to that inode at all — `ConfigGuard::write` publishes a fresh `0o600`
+    // tempfile over the path.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -493,22 +494,36 @@ impl ConfigGuard {
         })
     }
 
-    /// Rewrite the docker config in place through the lock-owning handle.
+    /// Publish the docker config by writing a sibling tempfile and renaming it
+    /// over `config.json`, the same way the docker CLI itself saves the file.
     ///
-    /// Truncate + write + sync_data on the locked inode. No tempfile, no
-    /// rename. SIGKILL between `set_len(0)` and `sync_data` can leave
-    /// `config.json` truncated; recovery is manual (`ocx login` again).
+    /// **Not** an in-place rewrite. The lock serialises `ocx` against `ocx`,
+    /// but `config.json` has readers that hold no lock — docker, and any
+    /// script — and a buffered read of it is several `read(2)` calls. Writing
+    /// through the locked handle lets a rewrite land between two of them, so
+    /// the reader splices a complete old document onto the tail of the longer
+    /// new one and sees trailing bytes after valid JSON. A rename leaves the
+    /// reader's descriptor on the inode it opened, so every reader observes
+    /// one whole document. It also removes the truncated-file window a SIGKILL
+    /// used to leave behind.
+    ///
+    /// The rename replaces the locked inode, so this is the last operation the
+    /// guard may perform: reads through `self.locked` afterwards would see the
+    /// orphan. A concurrent acquirer that was waiting on the replaced inode is
+    /// caught by `LockedFile`'s acquire-time identity re-verify and reopens.
+    ///
+    /// The path is resolved first so a symlinked `config.json` keeps its link
+    /// (and the tempfile lands on the link target's filesystem, not the
+    /// link's).
     fn write(&mut self, config: &DockerConfig) -> Result<(), AuthError> {
+        let path = self.locked.path().to_path_buf();
         let serialized = serde_json::to_vec_pretty(config).map_err(|err| AuthError::WriteConfigFailed {
-            path: self.locked.path().to_path_buf(),
+            path: path.clone(),
             source: std::io::Error::new(ErrorKind::InvalidData, err),
         })?;
-        self.locked
-            .replace_bytes_blocking(&serialized)
-            .map_err(|e| AuthError::WriteConfigFailed {
-                path: self.locked.path().to_path_buf(),
-                source: std::io::Error::other(e),
-            })
+        let target = std::fs::canonicalize(&path).unwrap_or(path.clone());
+        ocx_util::fs::write_bytes_atomic(&target, &serialized)
+            .map_err(|source| AuthError::WriteConfigFailed { path, source })
     }
 }
 
@@ -811,6 +826,45 @@ mod tests {
             observed > 0,
             "the reader never completed a locked read of non-empty content, so the torn-JSON check never ran"
         );
+    }
+
+    /// Regression — an unlocked reader that opened `config.json` before a write
+    /// still finishes its read against the document it opened.
+    ///
+    /// The sibling test above serialises its reader behind the same exclusive
+    /// lock, so it can only observe writes that have already finished — it
+    /// asserts the lock, not the file. The docker config has readers that take
+    /// no lock at all (docker itself, any script), and one buffered read is
+    /// several `read(2)` calls. An in-place rewrite landing between two of them
+    /// splices a complete short document onto the tail of the longer one that
+    /// replaced it, which is the `Extra data: line 7 column 2 (char 77)` the
+    /// acceptance suite caught. Publishing by rename keeps the reader's
+    /// descriptor on the inode it opened, so the tail read comes back empty.
+    #[test]
+    fn dockerconfigstore_unlocked_reader_sees_one_document_across_a_split_read() {
+        use std::io::Read as _;
+
+        let (_dir, path) = fresh_config_path();
+        let store = DockerCredentialStore::with_path(path.clone(), opts(true));
+        let cred = Credential::basic("u", SecretString::from("p".to_string()));
+        rt().block_on(store.put("reg0.example", &cred)).expect("first put");
+
+        // Model a buffered reader mid-read: the whole current document is in
+        // hand, the descriptor is still open and one read short of EOF.
+        let first_len = usize::try_from(std::fs::metadata(&path).expect("stat").len()).expect("config size");
+        let mut reader = std::fs::File::open(&path).expect("open unlocked");
+        let mut observed = vec![0u8; first_len];
+        reader.read_exact(&mut observed).expect("read the opened document");
+
+        // A strictly longer document lands before the reader's next read.
+        rt().block_on(store.put("reg1.example", &cred)).expect("second put");
+
+        let mut tail = Vec::new();
+        reader.read_to_end(&mut tail).expect("finish the read");
+        observed.extend_from_slice(&tail);
+
+        serde_json::from_slice::<serde_json::Value>(&observed)
+            .expect("unlocked reader spliced two documents into one read");
     }
 
     // ─── delete ───

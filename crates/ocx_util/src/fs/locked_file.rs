@@ -39,23 +39,35 @@ pub struct LockedFile {
 /// but a lock *file* is addressed by path, so a holder that removes it by path
 /// (then releases) can let an opener that was blocked on the same inode acquire
 /// a lock on a now-dangling inode while the path no longer exists. Comparing the
-/// held handle's `(dev, ino)` against the path's detects exactly that. Always
-/// `true` on Windows, where an open file cannot be unlinked, so the race cannot
-/// arise.
-#[cfg(unix)]
+/// held handle's identity against the path's detects exactly that.
+///
+/// A file that is *replaced* rather than unlinked — by an atomic publish, as
+/// `auth::store` does — is the same race seen from the other side, and Windows
+/// is not exempt from it: `rename` over a target Rust holds open succeeds,
+/// because std opens with `FILE_SHARE_DELETE`. So this is deliberately not
+/// `cfg`-split. `same_file::Handle` is `(dev, ino)` on Unix and
+/// `(volume serial, file index)` on Windows; std's own accessors for the latter
+/// are still unstable (`windows_by_handle`, rust#63010).
+///
+/// Path gone (unlinked mid-acquire) or unreadable: a mismatch, so the caller
+/// reopens and re-materializes the lock file.
 fn lock_matches_path(lock: &mut FileLock, path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (lock.file_mut().metadata(), std::fs::metadata(path)) {
-        (Ok(held), Ok(current)) => held.dev() == current.dev() && held.ino() == current.ino(),
-        // Path gone (unlinked mid-acquire) or unreadable: treat as a mismatch so
-        // the caller reopens and re-materializes the lock file.
+    // `Handle::from_file` consumes the file, so it gets a duplicate. Duplicating
+    // is what makes that safe: `dup(2)` shares the open file description, and
+    // `flock(2)` releases on the last close of *that* description, not of a
+    // descriptor — so dropping the clone leaves the lock held. The same holds
+    // for `DuplicateHandle` and `LockFileEx`, whose locks live on the file
+    // object the duplicate still refers to.
+    let Ok(duplicate) = lock.file_mut().try_clone() else {
+        return false;
+    };
+    match (
+        same_file::Handle::from_file(duplicate),
+        same_file::Handle::from_path(path),
+    ) {
+        (Ok(held), Ok(current)) => held == current,
         _ => false,
     }
-}
-
-#[cfg(not(unix))]
-fn lock_matches_path(_lock: &mut FileLock, _path: &Path) -> bool {
-    true
 }
 
 impl LockedFile {
@@ -305,18 +317,6 @@ impl LockedFile {
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).map_err(|e| FileError::new(path, e))?;
         Ok(buf)
-    }
-
-    /// Synchronous sibling of [`Self::replace_bytes`]. Same semantics, no
-    /// `block_in_place` wrapping — caller is already on a blocking thread.
-    pub fn replace_bytes_blocking(&mut self, bytes: &[u8]) -> Result<(), FileError> {
-        let path = &self.path;
-        let file = self.lock.file_mut();
-        file.set_len(0).map_err(|e| FileError::new(path, e))?;
-        file.seek(SeekFrom::Start(0)).map_err(|e| FileError::new(path, e))?;
-        file.write_all(bytes).map_err(|e| FileError::new(path, e))?;
-        file.sync_data().map_err(|e| FileError::new(path, e))?;
-        Ok(())
     }
 }
 
