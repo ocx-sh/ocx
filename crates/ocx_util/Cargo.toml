@@ -32,6 +32,11 @@ pem.workspace = true
 pki-types.workspace = true
 regex.workspace = true
 reqwest.workspace = true
+# `fs::locked_file`'s acquire-time identity re-verify: "is the file I hold
+# still the file at this path?" is `(dev, ino)` on Unix and
+# `GetFileInformationByHandle` on Windows, whose std accessors are still
+# unstable (`windows_by_handle`, rust#63010). Already in the tree via walkdir.
+same-file.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

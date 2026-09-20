@@ -251,6 +251,7 @@ tokio-util = { version = "0.7", default-features = false, features = ["io", "io-
 tempfile = "3.27.0"
 fs4 = { version = "1.1", features = ["sync"] }
 symlink = "0.1.0"
+same-file = "1.0.6"
 dunce = "1.0.5"
 dirs = "6.0.0"
 which = "8.0.2"
