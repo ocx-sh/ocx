@@ -65,6 +65,11 @@ pub struct GitHubForge {
     client: reqwest::Client,
     credentials: ForgeCredentials,
     base_url: String,
+    /// The backoff before each replay of the git-data commit sequence —
+    /// [`GIT_DATA_RETRY_DELAYS`] for every client this crate builds, and a
+    /// field only so [`Self::with_retry_delays`] can hand a test a shorter
+    /// one. See that method for why.
+    retry_delays: &'static [Duration],
 }
 
 impl GitHubForge {
@@ -116,6 +121,26 @@ impl GitHubForge {
         Self::build(credentials, base_url, &ocx_util::tls::ExtraRoots::default())
     }
 
+    /// Replace the shipped [`GIT_DATA_RETRY_DELAYS`] for one client.
+    ///
+    /// Why it exists: the first replay waits 3 s, and
+    /// `tests::commit_files_resyncs_the_fork_before_replaying_the_sequence`
+    /// can only observe that the re-sync runs *between* two attempts by
+    /// driving a replay — 3 s of the unit suite's wall clock for a claim
+    /// about request **order**, which is identical at 3 s and at 1 ms. The
+    /// schedule's own shape is asserted without sleeping, at
+    /// `tests::the_shipped_git_data_retry_schedule_is_three_delays`.
+    ///
+    /// Compile-gated on the same terms as [`Self::with_base_url`]: release
+    /// artifacts have no way to reach it, so the shipped schedule is the only
+    /// one a real announce can run.
+    #[cfg(any(test, feature = "__testing"))]
+    #[must_use]
+    pub fn with_retry_delays(mut self, delays: &'static [Duration]) -> Self {
+        self.retry_delays = delays;
+        self
+    }
+
     fn build(
         credentials: ForgeCredentials,
         base_url: String,
@@ -125,6 +150,7 @@ impl GitHubForge {
             client: build_forge_http_client(REQUEST_TIMEOUT, extra_roots)?,
             credentials,
             base_url: base_url.trim_end_matches('/').to_string(),
+            retry_delays: &GIT_DATA_RETRY_DELAYS,
         })
     }
 
@@ -832,7 +858,7 @@ impl Forge for GitHubForge {
             .await;
         let cross_repo_base = base.repo != repo;
         let mut sync: Option<String> = None;
-        for delay in GIT_DATA_RETRY_DELAYS {
+        for &delay in self.retry_delays {
             let Err(error) = &outcome else { break };
             if !is_retryable(error) {
                 break;
@@ -1590,6 +1616,38 @@ mod tests {
         assert_eq!(fake.routes(), [format!("POST {MERGE_UPSTREAM_PATH}")]);
     }
 
+    /// The shipped replay schedule, asserted without sleeping: the replay test
+    /// below runs on [`FAST_RETRY_DELAYS`], so without this pin a change to
+    /// the shipped delays would red nothing.
+    #[test]
+    fn the_shipped_git_data_retry_schedule_is_three_delays() {
+        assert_eq!(
+            GIT_DATA_RETRY_DELAYS,
+            [Duration::from_secs(3), Duration::from_secs(9), Duration::from_secs(27)],
+            "three replays, ~39 s at worst (design register X5)"
+        );
+        assert_eq!(
+            GitHubForge::with_base_url(
+                ForgeCredentials::new(ForgeToken::new("token".to_string())),
+                "https://example.invalid".to_string(),
+            )
+            .expect("client builds")
+            .retry_delays,
+            GIT_DATA_RETRY_DELAYS,
+            "an ordinary client replays on the shipped schedule; only `with_retry_delays` changes it"
+        );
+        assert_eq!(
+            FAST_RETRY_DELAYS.len(),
+            GIT_DATA_RETRY_DELAYS.len(),
+            "same shape, shorter waits"
+        );
+    }
+
+    /// The shipped [`GIT_DATA_RETRY_DELAYS`]' shape at a duration a unit test
+    /// can afford. Same length, so a test replaying through it exhausts the
+    /// same number of attempts.
+    const FAST_RETRY_DELAYS: [Duration; 3] = [Duration::from_millis(1); 3];
+
     #[tokio::test(flavor = "multi_thread")]
     async fn commit_files_resyncs_the_fork_before_replaying_the_sequence() {
         // The 2026-08-22 announce failures: the fork sat behind upstream, so the
@@ -1625,6 +1683,7 @@ mod tests {
 
         let commit = fake
             .forge()
+            .with_retry_delays(&FAST_RETRY_DELAYS)
             .commit_files(
                 &test_repo(),
                 BRANCH,
