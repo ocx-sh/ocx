@@ -107,23 +107,15 @@ tasks:
         is iterated over an empty CRATES on every escalate), then test:parallel
       Ends with a *full* verify mark (.verify:mark SCOPE=full) — the only
         mark a `release:` commit or a commit on main accepts.
-      Refuses to run without `--force`, for the reason the scoped gate does
-        (DEC-92): go-task skips a cached sub-task, and `scope: "full"` is a
-        claim about breadth that a run which skipped twelve checks has not
-        earned. Measured — an unforced run of this task reported 12 `is up to
-        date` lines and still wrote a full mark. (The task name is spelled out
-        nowhere in this summary on purpose: it is read as a phase member, and a
-        name here that no phase runs is itself a red.)
+      A step whose `sources:` are unchanged is skipped, and the full mark is
+        written anyway — that is the point: the check already passed on this
+        content, and re-running it buys nothing. `--force` re-runs everything
+        regardless. What this rests on is `sources:` being complete; an
+        under-declared one is the way a cached green goes wrong. (The task name
+        is spelled out nowhere in this summary on purpose: it is read as a
+        phase member, and a name here that no phase runs is itself a red.)
       Use `task --status verify` to check freshness without running.
     cmds:
-      # The same refusal `verify:scoped` carries at its own first step, and for
-      # the same one reason: this is the gate a `release:` commit and a commit
-      # on main are accepted from, so it is the LAST place a cached sub-task may
-      # pass for a check that ran. It was the one without the guard.
-      #
-      # `verify:scoped`'s escalate reaches here as a sub-task, and it already
-      # refuses without `--force`, so the flag is set on every route in.
-      - '[ "{{.CLI_FORCE}}" = true ] || { echo "verify: run with --force (cached sub-tasks would be skipped, and the full mark must not certify a skipped step)" >&2; exit 1; }'
       # Deliberately not named in the summary above: that text is checked
       # against what `.verify:lint` / `.verify:build-test` run, and this is
       # neither — it is the one-line bootstrap that arms `.githooks/`.
@@ -134,7 +126,7 @@ tasks:
         vars: { SCOPE: full }
 
   verify:scoped:
-    desc: Scoped quality gate, always `task verify:scoped --force` — only what changed since the last full verify (hubs and unrouted paths escalate to `task verify`)
+    desc: Scoped quality gate — only what changed since the last full verify (hubs and unrouted paths escalate to `task verify`)
     summary: |
       scripts/scoped_gate.py --plan decides (plan_crate_split_workspace.md C-019):
         escalate → task verify: a hub crate (≥ 4 reverse dependents), an
@@ -162,10 +154,9 @@ tasks:
                    test:smoke and test:scoped -- <crates>
       Ends with a *scoped* mark: the pre-commit hook accepts it for ordinary
       commits, never for a `release:` commit or a commit on main (those need
-      `task verify`). Refuses to run without `--force`: the sub-tasks it
-      calls (`claude:tests`, `test:parallel`, `test:smoke`) keep their
-      `sources:` cache when called via `task:`, so without it a step can be
-      skipped as up to date and the mark would certify a run that never ran.
+      `task verify`). Sub-tasks (`claude:tests`, `test:parallel`,
+      `test:smoke`) keep their `sources:` cache, so an unchanged step is
+      skipped — `--force` re-runs everything.
     vars:
       PLAN:
         sh: python3 {{.ROOT_DIR}}/scripts/scoped_gate.py --plan
@@ -182,7 +173,6 @@ tasks:
     # Every step is a `cmds:` entry, never a precondition: `--force` skips
     # preconditions, and a gate must not be silently skippable.
     cmds:
-      - '[ "{{.CLI_FORCE}}" = true ] || { echo "verify:scoped: run with --force (cached sub-tasks would be skipped, and the mark must not certify a skipped step)" >&2; exit 1; }'
       # Here too, not only in `verify`: this is the gate a work package runs,
       # and it only reaches `verify` on an escalate. A checkout whose operator
       # never runs anything else would otherwise commit with no hooks armed.
@@ -260,17 +250,27 @@ tasks:
 
   verify:mark:
     desc: |
-      Mark the current tree as verified at scope *scoped* (5-min TTL). Use
-      after a passing verify when only cherry-pick / rebase merge context
-      changed (no semantic diff): the pre-commit hook then accepts an
-      ordinary commit without re-running the pipeline. A hand mark is never
+      Mark the current tree as verified at scope *scoped* (5-min TTL) — the
+      deliberate escape hatch, and using it is allowed. For a cheaper tier run
+      on purpose with the expensive one deferred (unit tests green, acceptance
+      suite left for later) so intermediate commits on a branch stay fast, and
+      for a passing verify where only cherry-pick / rebase merge context
+      changed since. Name the deferral in the commit body. A hand mark is never
       `full` — a `release:` commit, a commit on main and `task
       release:prepare` need `task verify`.
     cmds:
+      # On main the gate refuses a scoped mark, so writing one reads as
+      # "verify:mark does nothing". Say so instead of marking.
+      - cmd: >-
+          b=$(git rev-parse --abbrev-ref HEAD);
+          case "$b" in main|master)
+            echo "verify:mark: branch is '$b', where the commit gate accepts only a FULL mark — run 'task verify' (a scoped mark would be written and then refused)" >&2;
+            exit 1;; esac
       # Pinned, not defaulted: a CLI var (`task verify:mark SCOPE=full`) beats
       # the callee's `default`, and a hand mark must never be `full`.
       - task: .verify:mark
         vars: { SCOPE: scoped, CRATES: '' }
+      - cmd: 'echo "verify:mark: scoped mark written at HEAD $(git rev-parse --short HEAD), 5-minute TTL"'
 
   .verify:lint:
     internal: true

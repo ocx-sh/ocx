@@ -35,6 +35,10 @@ x-shared:
   rust-sources: &rust-sources
     - '{{.ROOT_DIR}}/crates/**/*.rs'
     - '{{.ROOT_DIR}}/crates/**/Cargo.toml'
+    # The three patched submodules compile into the binary, so a change there
+    # invalidates exactly what a change under crates/ does.
+    - '{{.ROOT_DIR}}/external/**/*.rs'
+    - '{{.ROOT_DIR}}/external/**/Cargo.toml'
     - '{{.ROOT_DIR}}/Cargo.lock'
     - '{{.ROOT_DIR}}/rustfmt.toml'
     - '{{.ROOT_DIR}}/clippy.toml'
@@ -143,7 +147,6 @@ tasks:
 
   format:check:
     desc: Check Rust formatting
-    sources: *rust-sources
     cmd: cargo fmt --check
 
   format:apply:
@@ -152,7 +155,6 @@ tasks:
 
   clippy:check:
     desc: Run clippy linter
-    sources: *rust-sources
     cmd: cargo clippy --workspace --locked --all-targets -- -D warnings
 
   doc:ratchet:
@@ -209,16 +211,10 @@ tasks:
       at runtime — safe in all non-release binaries. User-facing release
       artifacts come from cargo-dist (release.yml), which does not pass
       this feature flag and therefore physically lacks the seams.
-    sources: *rust-sources
-    # `status:` short-circuits ahead of `sources:`, so a bare `test -f` here
-    # skipped the build forever once the binary existed — acceptance tests then
-    # ran a stale `test/bin/ocx` and reported phantom regressions against code
-    # that was never compiled. Both clauses are needed: the binary must exist,
-    # and nothing it is built from may be newer than it.
-    status:
-      - test -f {{.ROOT_DIR}}/target/release/ocx
-      - test -z "$(find {{.ROOT_DIR}}/crates {{.ROOT_DIR}}/Cargo.lock -newer {{.ROOT_DIR}}/target/release/ocx -print -quit)"
-    method: timestamp
+    # No `sources:`/`status:` — cargo decides what to rebuild, from the inputs
+    # it owns. A hand-written key here once skipped the build forever once the
+    # binary existed, and acceptance tests reported phantom regressions against
+    # code that was never compiled.
     cmd: cargo build --release -p ocx --features ocx/__testing --locked
 
   install:nextest:
