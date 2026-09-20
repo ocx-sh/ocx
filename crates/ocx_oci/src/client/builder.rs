@@ -693,8 +693,21 @@ mod push_wire_tests {
         crate::Digest::Sha256(hex::encode(hasher.finalize()))
     }
 
+    /// Restart backoff injected into every push here.
+    ///
+    /// Not zero: the restart must still go through `tokio::time::sleep`, which
+    /// is the yield point a "retry immediately" rewrite would remove. Small
+    /// because no assertion below reads the wait — they read how many upload
+    /// sessions were opened and which error came back — so out-waiting the
+    /// shipped 1 s + 2 s ladder buys no strength and costs 3 s a run.
+    const TEST_PUSH_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(1);
+
     /// Pushes through the transport the production [`ClientBuilder`] builds, so the
     /// shipped `push_chunk_size` — not a value the test picked — drives the wire.
+    ///
+    /// The one deviation from production is the restart backoff
+    /// ([`TEST_PUSH_RETRY_BACKOFF`]); the shipped value is pinned separately by
+    /// `the_shipped_push_retry_backoff_is_one_second`.
     async fn push_through_production_client(
         stub: &StubRegistry,
         data: Vec<u8>,
@@ -702,10 +715,36 @@ mod push_wire_tests {
         let config = ClientBuilder::new()
             .plain_http_registries(vec![stub.address.clone()])
             .config();
-        let transport = NativeTransport::new(crate::native::Client::new(config), auth::Auth::default());
+        let transport = NativeTransport::new(crate::native::Client::new(config), auth::Auth::default())
+            .with_push_retry_backoff(TEST_PUSH_RETRY_BACKOFF);
         let image = stub_image(stub);
         let digest = sha256_digest(&data);
         transport.push_blob(&image, data, &digest, no_progress()).await
+    }
+
+    /// The shipped restart backoff, pinned where the wire tests override it.
+    ///
+    /// `with_push_retry_backoff` exists so those tests cost milliseconds; the
+    /// failure it makes possible is a refactor that takes the test value for
+    /// the real one and ships a push that hammers a struggling registry three
+    /// times in 3 ms. This is the tripwire — it fails on any change to
+    /// `NativeTransport::new`'s default, including one made to "match the
+    /// tests".
+    #[test]
+    fn the_shipped_push_retry_backoff_is_one_second() {
+        let shipped = NativeTransport::new(
+            crate::native::Client::new(ClientBuilder::new().config()),
+            auth::Auth::default(),
+        );
+        assert_eq!(
+            shipped.push_retry_backoff(),
+            std::time::Duration::from_secs(1),
+            "production must keep the 1 s + 2 s restart ladder — the wire tests' millisecond override is theirs alone"
+        );
+        assert!(
+            shipped.push_retry_backoff() > TEST_PUSH_RETRY_BACKOFF,
+            "a default equal to the test override means the override stopped being one"
+        );
     }
 
     /// The shipped chunk size must never exceed what the strictest known registry
@@ -1041,9 +1080,27 @@ mod read_timeout_tests {
         address
     }
 
+    /// The read timeout injected by both tests below.
+    ///
+    /// The bound governs two things at once (see [`REGISTRY_READ_TIMEOUT`]),
+    /// and only one of them is under test: everything before the first body
+    /// frame — connect, request, the stub's time-to-first-byte — is a *hard*
+    /// deadline this value also has to clear. Against a loopback stub already
+    /// listening that phase is sub-millisecond, so 300 ms leaves two orders of
+    /// magnitude for an oversubscribed runner before the head arrives late and
+    /// the test fails on the wrong line. It is the wall-clock cost of both
+    /// tests, so a larger value is paid on every run for headroom nothing on
+    /// loopback needs.
+    const STALL_READ_TIMEOUT: Duration = Duration::from_millis(300);
+
+    /// Generous multiple of [`STALL_READ_TIMEOUT`]: it is only ever reached
+    /// when the bound under test failed to fire, i.e. when the client hung,
+    /// so its size costs nothing on a passing run.
+    const HANG_GUARD: Duration = Duration::from_secs(5);
+
     /// Reads a blob body from `address` through the real `NativeTransport`,
     /// with `read_timeout` overridden so the test does not wait out the shipped
-    /// 30 s. The override rides the same `.config()` accessor
+    /// 120 s. The override rides the same `.config()` accessor
     /// `push_through_production_client` already uses — no new knob.
     async fn read_stalled_blob_with_timeout(address: &str, read_timeout: Duration) -> std::io::Result<u64> {
         let mut config = ClientBuilder::new()
@@ -1088,22 +1145,15 @@ mod read_timeout_tests {
     /// End-to-end proof that the bound actually fires: a stalled body read
     /// returns an error rather than blocking.
     ///
-    /// The injected 2 s is not only the idle bound — it is also the deadline the
-    /// stub's *response head* must beat (see the const's "two semantics"). A
-    /// value tight enough to be fast is therefore a value an oversubscribed
-    /// runner can trip before the test reaches its real assertion, surfacing as
-    /// a misdirecting failure on `pull_blob_streaming`. 2 s clears that with
-    /// room; the outer guard stays 5× it.
+    /// [`STALL_READ_TIMEOUT`] is what the stall is measured against; its
+    /// doc explains why the value is what it is.
     #[tokio::test]
     async fn stalled_response_body_read_returns_instead_of_hanging() {
         let address = start_stalling_registry().await;
 
-        let outcome = tokio::time::timeout(
-            Duration::from_secs(10),
-            read_stalled_blob_with_timeout(&address, Duration::from_secs(2)),
-        )
-        .await
-        .expect("a read timeout must end the stalled read — timing out here means the client hung");
+        let outcome = tokio::time::timeout(HANG_GUARD, read_stalled_blob_with_timeout(&address, STALL_READ_TIMEOUT))
+            .await
+            .expect("a read timeout must end the stalled read — timing out here means the client hung");
 
         let error = outcome.expect_err("a body that never completes must not read as a successful copy");
         // reqwest wraps the timeout, so the outer `io::ErrorKind` is `Other`.
@@ -1137,13 +1187,13 @@ mod read_timeout_tests {
         let mut config = ClientBuilder::new()
             .plain_http_registries(vec![address.clone()])
             .config();
-        config.read_timeout = Some(Duration::from_secs(2));
+        config.read_timeout = Some(STALL_READ_TIMEOUT);
         let transport = NativeTransport::new(crate::native::Client::new(config), auth::Auth::default());
         let image: crate::native::Reference = format!("{address}/test/blob:latest").parse().unwrap();
         let digest = crate::Digest::Sha256("a".repeat(64));
 
         let outcome = tokio::time::timeout(
-            Duration::from_secs(10),
+            HANG_GUARD,
             crate::client::transport::OciTransport::pull_blob(&transport, &image, &digest),
         )
         .await
