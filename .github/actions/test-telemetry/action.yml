@@ -136,7 +136,13 @@ runs:
         norepo="$workdir/norepo"
         mkdir -p "$norepo"
 
-        # The exit status says nothing. Measured against a local collector:
+        # One failure this DOES exit 1 for, and the likeliest one to appear
+        # later: junit2otlp reads stdin with a 1 MB-per-line scanner and pytest
+        # writes its report on a single line (545 KB for the full acceptance
+        # suite today). Past that it reports `bufio.Scanner: token too long`
+        # and pushes nothing. subsystem-ci.md § Test telemetry names the fix.
+        #
+        # The exit status says nothing otherwise. Measured against a local collector:
         # with the endpoint refusing TLS, junit2otlp logged `traces export:
         # ... connection error` three times and still exited 0 — every export
         # error goes through the OTel error handler, and `main` only fails on
