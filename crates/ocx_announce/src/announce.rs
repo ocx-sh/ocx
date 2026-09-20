@@ -46,7 +46,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use crate::forge::{
-    BranchComparison, CommitBase, Forge, Mergeability, PullRequest, PushAccess, RefUpdate, RepoCoordinate,
+    BranchComparison, CommitBase, FileChange, Forge, Mergeability, PullRequest, PushAccess, RefUpdate, RepoCoordinate,
 };
 use ocx_index::serialize_root;
 use ocx_package::publisher::Publisher;
@@ -554,7 +554,7 @@ struct Rebuilt {
     root_bytes: Vec<u8>,
     /// The atomic file set a commit would carry: the root plus every CAS object
     /// (C15).
-    files: BTreeMap<String, Vec<u8>>,
+    files: BTreeMap<String, FileChange>,
     /// What every curated tag was observed to hold — the C6 "no new CAS object"
     /// input.
     observed: Vec<pipeline::Observed>,
@@ -1288,7 +1288,7 @@ mod tests {
         open_failures: VecDeque<Option<ForgeError>>,
         /// One entry per `commit_files` call: the atomic file set it carried and
         /// the ref update it asked for.
-        commits: Vec<(BTreeMap<String, Vec<u8>>, RefUpdate)>,
+        commits: Vec<(BTreeMap<String, FileChange>, RefUpdate)>,
         opens: usize,
         push_access_probes: usize,
         mergeability_reads: usize,
@@ -1359,7 +1359,7 @@ mod tests {
         }
 
         /// One entry per `commit_files` call, in call order.
-        fn commits(&self) -> Vec<(BTreeMap<String, Vec<u8>>, RefUpdate)> {
+        fn commits(&self) -> Vec<(BTreeMap<String, FileChange>, RefUpdate)> {
             self.state
                 .lock()
                 .expect("the fixture lock is uncontended")
@@ -1387,15 +1387,15 @@ mod tests {
     }
 
     /// The root bytes one recorded `commit_files` call carried.
-    fn committed_root_bytes(commit: &(BTreeMap<String, Vec<u8>>, RefUpdate)) -> String {
-        String::from_utf8(
-            commit
-                .0
-                .get("p/acme/widget.json")
-                .expect("every commit carries the root")
-                .clone(),
-        )
-        .expect("the root is UTF-8")
+    fn committed_root_bytes(commit: &(BTreeMap<String, FileChange>, RefUpdate)) -> String {
+        let FileChange::Put(bytes) = commit
+            .0
+            .get("p/acme/widget.json")
+            .expect("every commit carries the root")
+        else {
+            panic!("the root is written, never deleted")
+        };
+        String::from_utf8(bytes.clone()).expect("the root is UTF-8")
     }
 
     #[async_trait::async_trait]
@@ -1499,7 +1499,7 @@ mod tests {
             _branch: &str,
             _base: CommitBase<'_>,
             _message: &str,
-            files: &BTreeMap<String, Vec<u8>>,
+            files: &BTreeMap<String, FileChange>,
             update: RefUpdate,
         ) -> Result<String, ForgeError> {
             let mut state = self.state.lock().expect("the fixture lock is uncontended");

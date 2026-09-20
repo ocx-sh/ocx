@@ -37,7 +37,9 @@ pub use root::{parse_repository, render_root, root_name};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::forge::{BranchComparison, CommitBase, Forge, ForgeError, PushAccess, RefUpdate, RepoCoordinate};
+use crate::forge::{
+    BranchComparison, CommitBase, FileChange, Forge, ForgeError, PushAccess, RefUpdate, RepoCoordinate,
+};
 
 /// The base branch of the index repository — the ref the C-050 refusal reads and
 /// the ref every claim commit is parented on.
@@ -262,7 +264,7 @@ pub async fn claim(forge: Option<&dyn Forge>, request: ClaimRequest) -> Result<C
         }
     };
 
-    let files = BTreeMap::from([(root_path.clone(), root_bytes)]);
+    let files = BTreeMap::from([(root_path.clone(), FileChange::Put(root_bytes))]);
     let message = request_title(&name);
     let body = request_body(&name, &repository, &branch, &owners, source);
     // Every claim commit is BASED on the index base — the sha read here is the
@@ -454,9 +456,20 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::forge::{
-        BranchComparison, CommitBase, ForgeError, ForgeIdentity, ForkIdentity, Mergeability, PullRequest, PushAccess,
-        RefUpdate, RepoCoordinate,
+        BranchComparison, CommitBase, FileChange, ForgeError, ForgeIdentity, ForkIdentity, Mergeability, PullRequest,
+        PushAccess, RefUpdate, RepoCoordinate,
     };
+
+    /// The root one recorded `commit_files` call wrote, as text.
+    ///
+    /// The payload carries intents now, so reaching the bytes names the `Put`
+    /// arm; a claim's root is always written and never removed.
+    fn committed_root_text(files: &BTreeMap<String, FileChange>) -> String {
+        let Some(FileChange::Put(bytes)) = files.get(ROOT_PATH) else {
+            panic!("the commit carries the root as a write")
+        };
+        String::from_utf8(bytes.clone()).expect("the root is UTF-8")
+    }
 
     pub(crate) const PINNED_INSTANT: &str = "2026-01-02T03:04:05Z";
 
@@ -487,7 +500,7 @@ pub(crate) mod tests {
             base_sha: String,
             base_branch: String,
             update: RefUpdate,
-            files: BTreeMap<String, Vec<u8>>,
+            files: BTreeMap<String, FileChange>,
         },
         OpenOrUpdatePullRequest {
             branch: String,
@@ -673,7 +686,7 @@ pub(crate) mod tests {
             branch: &str,
             base: CommitBase<'_>,
             _message: &str,
-            files: &BTreeMap<String, Vec<u8>>,
+            files: &BTreeMap<String, FileChange>,
             update: RefUpdate,
         ) -> Result<String, ForgeError> {
             self.record(Call::CommitFiles {
@@ -1433,8 +1446,7 @@ pub(crate) mod tests {
         for call in forge.calls() {
             match call {
                 Call::CommitFiles { files, .. } => {
-                    let root = String::from_utf8(files.get(ROOT_PATH).expect("the commit carries the root").clone())
-                        .expect("the root is UTF-8");
+                    let root = committed_root_text(&files);
                     assert!(root.contains("\"login\": \"alice\""), "root: {root}");
                     assert!(
                         !root.contains("AliCe"),
@@ -1592,11 +1604,10 @@ pub(crate) mod tests {
             .calls()
             .into_iter()
             .find_map(|call| match call {
-                Call::CommitFiles { files, .. } => files.get(ROOT_PATH).cloned(),
+                Call::CommitFiles { files, .. } => Some(committed_root_text(&files)),
                 _ => None,
             })
             .expect("the commit carries the root");
-        let root = String::from_utf8(root).expect("the root is UTF-8");
         assert!(
             root.contains("cc @alice"),
             "the disclaimer reaches the root file: {root}"

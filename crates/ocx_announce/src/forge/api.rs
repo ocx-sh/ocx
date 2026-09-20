@@ -118,6 +118,28 @@ pub enum RefUpdate {
     Reset,
 }
 
+/// What one path in a [`Forge::commit_files`] payload asks for.
+///
+/// The payload is an **ordered map of intents**, not of bytes, so a removal
+/// travels in the same commit as the writes that made it necessary — which is
+/// what keeps C15's atomicity when a published root stops referencing a CAS
+/// object. A separate delete call would publish an index whose root and object
+/// set disagree for as long as the second request takes, and would leave them
+/// permanently disagreeing whenever it failed.
+///
+/// A [`Delete`](Self::Delete) of a path that does not exist at the commit's
+/// parent is a **no-op, never an error** — every driver owes that, however its
+/// forge spells removal. The caller computes the orphan set by diffing two
+/// roots, and a root may reference an object some earlier run never committed;
+/// refusing there would fail an announce over a file nobody is missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileChange {
+    /// Write these bytes at the path, creating or replacing.
+    Put(Vec<u8>),
+    /// Remove the path if it is there.
+    Delete,
+}
+
 /// Where a commit's base commit lives.
 ///
 /// The sha alone is not enough. An announce that starts a fresh branch bases it
@@ -637,6 +659,10 @@ pub trait Forge: Send + Sync {
     /// a loop over a single-file API, which would leave a half-written index entry
     /// visible on any failure.
     ///
+    /// Each entry is an intent rather than bytes: a [`FileChange::Delete`] rides
+    /// the same commit as the [`FileChange::Put`]s, and a `Delete` naming a path
+    /// absent at `base` is a no-op rather than a failure. See [`FileChange`].
+    ///
     /// **Dispatches on the transport.** Under `api` it commits and updates the
     /// ref over REST, raising [`ForgeError::NonFastForward`] here. Under `git` it
     /// builds objects and moves a *local* ref and **performs no network write at
@@ -658,7 +684,7 @@ pub trait Forge: Send + Sync {
         branch: &str,
         base: CommitBase<'_>,
         message: &str,
-        files: &BTreeMap<String, Vec<u8>>,
+        files: &BTreeMap<String, FileChange>,
         update: RefUpdate,
     ) -> Result<String, ForgeError>;
 

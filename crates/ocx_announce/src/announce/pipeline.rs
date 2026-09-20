@@ -19,6 +19,7 @@ use serde_json::{Map, Value, json};
 
 use super::error::AnnounceError;
 use super::request::TagSelection;
+use crate::forge::FileChange;
 use ocx_oci::annotations;
 use ocx_oci::client::ReadAddressing;
 use ocx_oci::tag::InternalTag;
@@ -795,14 +796,14 @@ pub fn build_files(
     package_repo: &str,
     observed: &[Observed],
     desc_blobs: &[DescBlob],
-) -> BTreeMap<String, Vec<u8>> {
+) -> BTreeMap<String, FileChange> {
     let mut files = BTreeMap::new();
-    files.insert(root_path.to_string(), root_bytes.to_vec());
+    files.insert(root_path.to_string(), FileChange::Put(root_bytes.to_vec()));
     for entry in observed {
         let (algorithm, hex) = entry.content.parts();
         files.insert(
             format!("p/{package_repo}/o/{algorithm}/{hex}.json"),
-            entry.bytes.clone(),
+            FileChange::Put(entry.bytes.clone()),
         );
     }
     for blob in desc_blobs {
@@ -810,7 +811,7 @@ pub fn build_files(
         let extension = blob.extension;
         files.insert(
             format!("p/{package_repo}/o/{algorithm}/{hex}.{extension}"),
-            blob.bytes.clone(),
+            FileChange::Put(blob.bytes.clone()),
         );
     }
     files
@@ -819,13 +820,34 @@ pub fn build_files(
 /// Write the announce file set under `dir`, returning the written relative
 /// paths (sorted — the `BTreeMap` iterates in key order).
 ///
+/// A [`FileChange::Delete`] removes the path under `dir` and is reported in
+/// neither the return value nor an error when it was not there — the same
+/// no-op the forge drivers owe, so `--out` renders the file set a commit would
+/// have produced rather than a superset of it. `dir` is ordinarily fresh, where
+/// every removal is that no-op; the arm matters for a caller pointing `--out`
+/// at a directory a previous run filled.
+///
 /// # Errors
 ///
-/// [`AnnounceError::OutputWrite`] on any directory-create or file-write failure.
-pub async fn write_out(dir: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<Vec<String>, AnnounceError> {
+/// [`AnnounceError::OutputWrite`] on any directory-create, file-write or
+/// file-remove failure.
+pub async fn write_out(dir: &Path, files: &BTreeMap<String, FileChange>) -> Result<Vec<String>, AnnounceError> {
     let mut written = Vec::with_capacity(files.len());
-    for (relative, bytes) in files {
+    for (relative, change) in files {
         let path = dir.join(relative);
+        let FileChange::Put(bytes) = change else {
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(AnnounceError::OutputWrite {
+                        path: path.display().to_string(),
+                        source,
+                    });
+                }
+            }
+            continue;
+        };
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -848,6 +870,17 @@ pub async fn write_out(dir: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    /// The bytes `build_files` wrote at `path`, or `None` when it wrote none.
+    ///
+    /// The payload is a map of *intents* now, so every assertion on content has
+    /// to name the `Put` arm; a helper keeps that one line rather than five.
+    fn written<'a>(files: &'a BTreeMap<String, FileChange>, path: &str) -> Option<&'a [u8]> {
+        match files.get(path) {
+            Some(FileChange::Put(bytes)) => Some(bytes.as_slice()),
+            Some(FileChange::Delete) | None => None,
+        }
+    }
 
     use super::*;
     use ocx_index::serialize_root;
@@ -1147,7 +1180,7 @@ mod tests {
         let files = build_files("p/x.json", b"root", "x", std::slice::from_ref(&observed), &[]);
         let (algorithm, hex) = served_digest.parts();
         assert_eq!(
-            files.get(&format!("p/x/o/{algorithm}/{hex}.json")).map(Vec::as_slice),
+            written(&files, &format!("p/x/o/{algorithm}/{hex}.json")),
             Some(served_bytes.as_slice()),
             "the CAS filename is the served digest and the file is the served bytes"
         );
@@ -1308,16 +1341,12 @@ mod tests {
 
         let files = build_files("p/acme/widget.json", b"root", "acme/widget", &[], &observed.blobs);
         assert_eq!(
-            files
-                .get(&format!("p/acme/widget/o/sha256/{}.md", readme_digest.hex()))
-                .map(Vec::as_slice),
+            written(&files, &format!("p/acme/widget/o/sha256/{}.md", readme_digest.hex())),
             Some(readme),
             "the readme rides into CAS verbatim, under its own hash and a .md name"
         );
         assert_eq!(
-            files
-                .get(&format!("p/acme/widget/o/sha256/{}.png", logo_digest.hex()))
-                .map(Vec::as_slice),
+            written(&files, &format!("p/acme/widget/o/sha256/{}.png", logo_digest.hex())),
             Some(logo),
             "the logo's extension comes from its layer media type"
         );
@@ -1352,7 +1381,7 @@ mod tests {
         let files = build_files("p/acme/widget.json", b"root", "acme/widget", &[], &observed.blobs);
         let readme_path = format!("p/acme/widget/o/sha256/{}.md", readme_digest.hex());
         assert_eq!(
-            files.get(&readme_path).map(Vec::as_slice),
+            written(&files, &readme_path),
             Some(readme),
             "the root still points at {readme_path}, so the unchanged run must write it too: {:?}",
             files.keys().collect::<Vec<_>>()
@@ -1845,10 +1874,7 @@ mod tests {
             std::slice::from_ref(&entry),
             &[],
         );
-        assert_eq!(
-            files.get("p/acme/widget.json").map(Vec::as_slice),
-            Some(b"root-bytes".as_slice())
-        );
+        assert_eq!(written(&files, "p/acme/widget.json"), Some(b"root-bytes".as_slice()));
         assert!(files.contains_key(&format!("p/acme/widget/o/sha256/{hex}.json")));
     }
 

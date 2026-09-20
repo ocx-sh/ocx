@@ -1259,6 +1259,14 @@ class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
             base_tree_sha = body.get("base_tree")
             merged = dict(self.trees.get(base_tree_sha, {})) if base_tree_sha else {}
             for entry in body.get("tree", []):
+                if entry.get("sha") is None:
+                    # A null `sha` is how the git data API spells a removal
+                    # against `base_tree`. `pop` with a default and not `del`:
+                    # the client owes its caller a no-op for a path the base
+                    # tree does not carry, and a KeyError here would answer that
+                    # with a 500 nothing models.
+                    merged.pop(entry["path"], None)
+                    continue
                 merged[entry["path"]] = entry["sha"]
             tree_sha = self._store_tree_locked(merged)
         handler._reply_json(201, {"sha": tree_sha})
