@@ -5761,8 +5761,18 @@ mod tests {
     /// takes a lock" would be green in a way indistinguishable from never having
     /// run.
     ///
-    /// RED: remove the lock — the render then returns immediately instead of
-    /// waiting for the held guard, and the elapsed assertion reds.
+    /// **Asserted as an ordering, not a duration.** It was `elapsed >= hold`
+    /// over a `tokio::join!` whose other arm sleeps `hold` — which the join
+    /// satisfies whether or not the render ever waited, so the assertion held
+    /// in both states and the test could not tell waiting from sleeping. A
+    /// control that gave every `lock_scoped` key a unique suffix, so nothing
+    /// in the workspace could contend, reddened four sibling lock tests and
+    /// left this one green. The claim is that the render **could not return
+    /// until the holder let go**, which is a fact about order, so the two
+    /// events are recorded and their sequence is what is asserted.
+    ///
+    /// RED: remove the lock, or break the key it contends on — the render then
+    /// returns during the hold and the events arrive the other way round.
     #[tokio::test]
     async fn two_renders_against_one_home_are_serialized_by_the_render_lock() {
         let tree = Tree::new();
@@ -5799,30 +5809,46 @@ mod tests {
 
         let hold = std::time::Duration::from_millis(150);
         let manager = tree.manager();
-        let started = std::time::Instant::now();
+        // The holder records its release *before* it lets go, so a render that
+        // never contended — returning somewhere inside the hold — lands its
+        // event first. That is the whole discriminator.
+        let events: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
         let (rendered, ()) = tokio::join!(
-            manager.render_toolchain(RenderRequest {
-                home: &tree.home,
-                scope: &scope,
-                lock: &lock,
-                surface: &surface,
-                groups: &groups,
-                pinned: false,
-                platform: &platform,
-                dry_run: false,
-            }),
+            async {
+                let outcome = manager
+                    .render_toolchain(RenderRequest {
+                        home: &tree.home,
+                        scope: &scope,
+                        lock: &lock,
+                        surface: &surface,
+                        groups: &groups,
+                        pinned: false,
+                        platform: &platform,
+                        dry_run: false,
+                    })
+                    .await;
+                events
+                    .lock()
+                    .expect("the event log is not poisoned")
+                    .push("render-returned");
+                outcome
+            },
             async {
                 tokio::time::sleep(hold).await;
+                events
+                    .lock()
+                    .expect("the event log is not poisoned")
+                    .push("lock-released");
                 drop(held);
             }
         );
-        let elapsed = started.elapsed();
 
         rendered.expect("the render succeeds once the lock is free");
-        assert!(
-            elapsed >= hold,
-            "RUL-30 — the second render waited for the first's lock rather than interleaving with \
-             it: {elapsed:?}"
+        assert_eq!(
+            *events.lock().expect("the event log is not poisoned"),
+            ["lock-released", "render-returned"],
+            "RUL-30 — the second render returned before the first let go, so it never waited for \
+             the lock; it interleaved with it"
         );
         assert_eq!(tree.bin_entries(), expected_bin_entries(&["cmake"]));
     }
