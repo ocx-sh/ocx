@@ -106,8 +106,29 @@ tasks:
     # and preservation ones). Without this they pass only on a machine where
     # someone ran the website task by hand, and red as invalid JSON on a fresh
     # checkout -- which is not a statement about the tree.
+    #
+    # This is a `deps:` and not a `cmds:` entry because the `status:` guard
+    # below covers only a task's commands: on CI `SKIP_BUILD` defaults to true
+    # (the binary arrives as an artifact) and the schemas must still be
+    # generated for the readers named above. That asymmetry is also why the
+    # binaries live in their own task — a caller that wants only a binary has
+    # to be able to ask for only a binary, or it drags a `cargo run -p
+    # ocx_schema` along with it and needs a workspace that can build.
     deps:
       - task: :website:schema:default
+    cmds:
+      - task: .build-binaries
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+
+  # The binaries alone, with no schema generation. `shells` and `shell-latency`
+  # mount one binary and three Python modules into a container and read no
+  # schema at all, and their CI job checks out WITHOUT submodules on purpose —
+  # so going through `build` there runs `cargo run -p ocx_schema` against
+  # absent `external/` patch sources and reds the job on a tree that is fine.
+  # Anything that runs pytest against the suite wants `build`, not this.
+  .build-binaries:
+    internal: true
     cmds:
       # `--features ocx/__testing` enables internal-only test seams in
       # the tier crates (currently the `__OCX_SELF_IMAGE` override in
@@ -494,7 +515,7 @@ tasks:
         [ -f "{{.TASKFILE_DIR}}/$f" ] || missing="$missing $f";
         done;
         [ -z "$missing" ] || { echo "missing shell-zoo mount source(s):$missing" >&2; exit 1; }
-      - task: build
+      - task: .build-binaries
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
       - docker build -f {{.TASKFILE_DIR}}/{{.SHELLS_DOCKERFILE}} -t {{.SHELLS_IMAGE}} {{.TASKFILE_DIR}}/docker
@@ -552,7 +573,7 @@ tasks:
       LATENCY_OCX_BINARY: '{{.LATENCY_OCX_BINARY | default .OCX_BINARY}}'
       LATENCY_RESULTS_DIR: '{{.LATENCY_RESULTS_DIR | default "bench/results"}}'
     cmds:
-      - task: build
+      - task: .build-binaries
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
       # 1. The pure functions, on inputs nobody has to schedule - the evaluator's
