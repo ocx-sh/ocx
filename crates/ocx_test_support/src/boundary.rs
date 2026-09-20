@@ -51,6 +51,7 @@
 //! a `use` statement written there is re-lexed and expanded rather than left
 //! to a path scan that stops at its group's brace.
 
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -90,13 +91,25 @@ impl std::fmt::Display for Reach {
 /// and its flat token list for needle and macro-argument scans.
 pub struct Source {
     pub file: syn::File,
-    pub tokens: Vec<Token>,
+    /// Filled on the first [`Source::tokens`] call, never by `parse`. Only the
+    /// needle scans and the `thiserror` sweep read tokens; every structural
+    /// walk reads `file` alone, and re-emitting the tree as a token stream
+    /// costs about as much again as parsing it did.
+    tokens: OnceCell<Vec<Token>>,
 }
 
 impl Source {
     /// Read and parse `path`. Panics naming the file and position on any
     /// failure — a file the scanner cannot read is red, not skipped
     /// (property 5).
+    ///
+    /// Deliberately **not** memoised. A guard that re-asks for the same file
+    /// caches what it needs itself, over the small set it re-enters; a cache
+    /// here would have to retain every file of a 19 MB corpus for the whole
+    /// test, and the allocator pressure of holding six hundred syntax trees
+    /// cost the single-pass guards more than the re-parse it saved them
+    /// (`no_classification_in_libraries` went 0.92 s to 1.82 s when this was
+    /// global).
     pub fn parse(path: &Path) -> Self {
         let text = std::fs::read_to_string(path)
             .unwrap_or_else(|error| panic!("boundary harness: read {}: {error}", slashed(path)));
@@ -109,11 +122,19 @@ impl Source {
                 at.column + 1
             )
         });
-        // Re-emitted from the tree rather than lexed a second time: `syn`
-        // carries the original spans, so a line number is the same either
-        // way, and the file is read once.
-        let tokens = flatten(file.to_token_stream());
-        Self { file, tokens }
+        Self {
+            file,
+            tokens: OnceCell::new(),
+        }
+    }
+
+    /// The flat token list, built on first use.
+    ///
+    /// Re-emitted from the tree rather than lexed a second time: `syn`
+    /// carries the original spans, so a line number is the same either
+    /// way, and the file is read once.
+    pub fn tokens(&self) -> &[Token] {
+        self.tokens.get_or_init(|| flatten(self.file.to_token_stream()))
     }
 }
 
@@ -268,7 +289,8 @@ pub fn reaches_in(file: &Path, forbidden: &[&str]) -> Vec<Reach> {
 
 /// [`reaches_in`] for a token-needle guard — the [`assert_no_needles`] half.
 pub fn needles_in(file: &Path, needles: &[&str]) -> Vec<Reach> {
-    needle_hits(&Source::parse(file).tokens, file, needles)
+    let source = Source::parse(file);
+    needle_hits(source.tokens(), file, needles)
 }
 
 /// Assert that no `.rs` file under any of `subtrees` contains any of
@@ -277,7 +299,7 @@ pub fn needles_in(file: &Path, needles: &[&str]) -> Vec<Reach> {
 /// path (`module_path!`, `type_name::<`). A needle is Rust tokens: comments
 /// and literal contents can never match it.
 pub fn assert_no_needles(subtrees: &[PathBuf], needles: &[&str], witness: &Path) {
-    let scan = |file: &Path, source: &Source| needle_hits(&source.tokens, file, needles);
+    let scan = |file: &Path, source: &Source| needle_hits(source.tokens(), file, needles);
     assert_scan(subtrees, witness, &format!("one of {needles:?}"), needles, &scan);
 }
 
@@ -297,8 +319,73 @@ pub fn assert_scan(
     witness: &Path,
     what: &str,
     required: &[&str],
-    scan: &dyn Fn(&Path, &Source) -> Vec<Reach>,
+    scan: &(dyn Fn(&Path, &Source) -> Vec<Reach> + Sync),
 ) {
+    let files = walked_corpus(subtrees);
+    // Property 5 rides in `Source::parse`: a file that does not parse panics
+    // there, before any scan could report a shorter walk as clean.
+    //
+    // The result is one entry per walked file, so the count is checked before
+    // it is flattened: a parallel walk that lost a chunk would otherwise be
+    // indistinguishable from a corpus with no violation in it.
+    let per_file = map_sources(&files, scan);
+    assert_eq!(
+        per_file.len(),
+        files.len(),
+        "boundary harness: the scan answered for {} of {} walked file(s) — it read less than it \
+         walked, and a short read reports as a clean tree",
+        per_file.len(),
+        files.len()
+    );
+    conclude_scan(
+        subtrees,
+        per_file.into_iter().flatten().collect(),
+        witness,
+        what,
+        required,
+        scan,
+    );
+}
+
+/// [`assert_scan`] for a caller that has **already** walked and scanned these
+/// same subtrees, and must not pay for a second pass over them.
+///
+/// Every property [`assert_scan`] holds is held here, and two of them are
+/// checked rather than trusted. The subtrees are re-walked (a directory walk,
+/// no parsing) and `scanned` must name exactly that walk, so a caller that read
+/// a narrower set than this guard's scope reds naming the difference — property
+/// 2, now stated about the caller's own reading. Property 5 was established by
+/// the caller's parse of those very files, which is the set this re-walk just
+/// confirmed. Properties 3 and 4 run here exactly as always: the witness goes
+/// through `scan`, the caller's own scan function, on this side of the call.
+pub fn assert_scan_of(
+    subtrees: &[PathBuf],
+    scanned: &[PathBuf],
+    violations: Vec<Reach>,
+    witness: &Path,
+    what: &str,
+    required: &[&str],
+    scan: &(dyn Fn(&Path, &Source) -> Vec<Reach> + Sync),
+) {
+    let walked = walked_corpus(subtrees);
+    let files: BTreeSet<&Path> = walked.iter().map(PathBuf::as_path).collect();
+    let given: BTreeSet<&Path> = scanned.iter().map(PathBuf::as_path).collect();
+    let unread: Vec<&&Path> = files.difference(&given).collect();
+    let extra: Vec<&&Path> = given.difference(&files).collect();
+    assert!(
+        unread.is_empty() && extra.is_empty(),
+        "boundary harness: the caller scanned a different set than this guard's {} subtree(s) hold \
+         — {} walked file(s) it never read {unread:?}, {} file(s) it read from outside the scope \
+         {extra:?}; its findings cannot stand in for a scan of this scope",
+        subtrees.len(),
+        unread.len(),
+        extra.len()
+    );
+    conclude_scan(subtrees, violations, witness, what, required, scan);
+}
+
+/// The walk behind both entry points, with property 2 on it.
+fn walked_corpus(subtrees: &[PathBuf]) -> Vec<PathBuf> {
     // Property 2: a scope glob that stopped matching must red, not pass.
     let walked: Vec<(&Path, Vec<PathBuf>)> = subtrees
         .iter()
@@ -329,14 +416,18 @@ pub fn assert_scan(
         empty.len(),
         subtrees.len()
     );
+    files
+}
 
-    // Property 5 rides in `Source::parse`: a file that does not parse panics
-    // there, before any scan could report a shorter walk as clean.
-    let mut violations = Vec::new();
-    for file in &files {
-        violations.extend(scan(file, &Source::parse(file)));
-    }
-
+/// Properties 1, 3 and 4, over findings the caller's scan already produced.
+fn conclude_scan(
+    subtrees: &[PathBuf],
+    violations: Vec<Reach>,
+    witness: &Path,
+    what: &str,
+    required: &[&str],
+    scan: &(dyn Fn(&Path, &Source) -> Vec<Reach> + Sync),
+) {
     // Properties 3 and 4: the witness goes through the very same scan.
     let witness_hits = scan(witness, &Source::parse(witness));
     assert!(
@@ -375,6 +466,57 @@ pub fn assert_scan(
         violations.len(),
         subtrees.len()
     );
+}
+
+/// Parse every file of `files` and apply `scan` to it, across the machine's
+/// cores, answering in `files` order.
+///
+/// **Reads exactly `files`, and every one of them.** Threading decides only
+/// *when* a file is parsed, never *whether* — every path handed in is parsed
+/// and scanned, a scan that panics (an unreadable or unparseable file,
+/// property 5) is re-raised here with its original message rather than
+/// swallowed, and the answer is one entry per input file in input order, so a
+/// caller can check the count it got against the walk it handed in. A walk
+/// that came back short is the one failure this cannot be allowed to hide.
+///
+/// A `Source` never leaves the thread that parsed it — `proc_macro2` spans are
+/// thread-local state — so only `T` crosses, and each thread reads its share
+/// of the corpus start to finish by itself.
+///
+/// The thread count is capped well under the core count because the caller is
+/// itself one of `nextest`'s parallel test processes. It is capped at all
+/// because the workspace is ~19 MB of Rust that `syn` parses in ~0.9 s on one
+/// core, which is the whole reason a guard reading all of it cannot fit in a
+/// second.
+pub fn map_sources<T: Send>(files: &[PathBuf], scan: &(dyn Fn(&Path, &Source) -> T + Sync)) -> Vec<T> {
+    /// Enough to put a full-corpus walk under a second, few enough that
+    /// thirty-odd concurrent test processes do not each claim the machine.
+    const MAX_THREADS: usize = 8;
+
+    let run = |chunk: &[PathBuf]| -> Vec<T> { chunk.iter().map(|file| scan(file, &Source::parse(file))).collect() };
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(MAX_THREADS);
+    if threads <= 1 || files.len() <= 1 {
+        return run(files);
+    }
+    let per_thread = files.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = files
+            .chunks(per_thread)
+            .map(|chunk| scope.spawn(move || run(chunk)))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| match handle.join() {
+                Ok(found) => found,
+                // The guard's own refusal, raised on a worker: re-raised
+                // verbatim, so the message a `#[should_panic(expected = …)]`
+                // test matches is the one it always was.
+                Err(panic) => std::panic::resume_unwind(panic),
+            })
+            .collect()
+    })
 }
 
 /// Every `*.rs` file under `subtree`, recursively, sorted. A file path is
@@ -492,7 +634,8 @@ fn reexport_table(src_root: &Path) -> BTreeMap<String, String> {
     if !lib.is_file() {
         return table;
     }
-    let file = Source::parse(&lib).file;
+    let source = Source::parse(&lib);
+    let file = &source.file;
     struct Uses(Vec<syn::UseTree>);
     impl Visit<'_> for Uses {
         fn visit_item_use(&mut self, item: &syn::ItemUse) {
@@ -508,7 +651,7 @@ fn reexport_table(src_root: &Path) -> BTreeMap<String, String> {
         })
         .collect();
     let mut uses = Uses(Vec::new());
-    uses.visit_file(&file);
+    uses.visit_file(file);
     for tree in &uses.0 {
         for (path, alias) in expand_use_tree(tree) {
             let Some(first) = path.first() else { continue };

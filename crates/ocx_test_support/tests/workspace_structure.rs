@@ -12,15 +12,14 @@
 //! `#[ignore = "lands with WP-nn"]` and un-ignored in that WP — never deleted,
 //! never silently green (`cargo nextest run --run-ignored all` shows them red).
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::rc::Rc;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use ocx_test_support::boundary::{
-    Reach, Source, Token, assert_no_imports, assert_no_needles, assert_scan, expand_use_tree, flatten, is_cfg_test,
-    needles_in, reaches_in, rust_sources,
+    Reach, Source, Token, assert_no_imports, assert_no_needles, assert_scan, assert_scan_of, expand_use_tree, flatten,
+    is_cfg_test, map_sources, needles_in, reaches_in, rust_sources,
 };
 use ocx_test_support::syn::visit::Visit;
 use ocx_test_support::{proc_macro2, syn};
@@ -38,6 +37,53 @@ fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/boundaries")
         .join(name)
+}
+
+// ---------------------------------------------------------------------------
+// Reading floors
+// ---------------------------------------------------------------------------
+
+/// How many `.rs` files each workspace-wide walk must still find.
+///
+/// The emptiness checks each guard already carries catch a subtree that
+/// *vanished*. These catch the walk that quietly **shrank**: a `rust_sources`
+/// that stopped descending, a subtree list that lost an entry, a filter that
+/// grew a clause. A guard reading half the tree finds half the violations and
+/// reports the other half as clean, and no assertion downstream of it can tell
+/// the difference — the failure `quality-core.md` names as a reader that
+/// stopped being indistinguishable from a clean tree.
+///
+/// Directional, like `crates/NEXTEST_FLOOR`: each sits under today's count, so
+/// adding a file never edits this file, and losing a crate's worth of them
+/// reds here naming the walk rather than passing as a clean scan. Raise them,
+/// never lower them.
+mod floor {
+    /// Every `crates/*/src` — 605 files at 2026-09-20.
+    pub const ALL_CRATE_SOURCES: usize = 540;
+    /// `crates/*/src` less the CLI, and the boundary subtrees, which differ by
+    /// the three crates not on that boundary — 414 and 403 at 2026-09-20.
+    pub const LIBRARY_SOURCES: usize = 360;
+    /// `crates/ocx_cli/src`, where the downcast ladder lives — 191 at
+    /// 2026-09-20.
+    pub const LADDER_SOURCES: usize = 160;
+}
+
+/// Refuse a walk that came back under `floor`, and return what it found.
+///
+/// Counted from the same `rust_sources` the guard scans with, so the number
+/// checked is the number read — a floor read off anything else would pass
+/// while the scan itself stopped short.
+fn assert_walk_floor(what: &str, subtrees: &[PathBuf], floor: usize) -> usize {
+    let walked: usize = subtrees.iter().map(|subtree| rust_sources(subtree).len()).sum();
+    assert!(
+        walked >= floor,
+        "{what} walked {walked} `.rs` file(s) across {} subtree(s), under its floor of {floor} — \
+         the scan below judges only what this walk found, so a walk this short reports the rest of \
+         the tree as clean. Raise the floor when the tree grows; never lower it to match a walk \
+         that shrank",
+        subtrees.len()
+    );
+    walked
 }
 
 /// Every `crates/*/` directory holding a `Cargo.toml`, as `(package name, dir)`.
@@ -61,47 +107,6 @@ fn crate_dirs() -> Vec<(String, PathBuf)> {
 fn read_manifest(path: &Path) -> toml::Value {
     let text = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     toml::from_str(&text).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
-}
-
-/// One `.rs` file's [`Source`], parsed at most once per process.
-///
-/// [`Source::parse`] reads and parses from disk on every call, and the error
-/// resolver below calls it *per signature*, not per file: `canonical_path`
-/// parses the file the signature is written in, `resolve_in_file` parses every
-/// file a `use` chain walks through, and `alias_error_type` parses the
-/// declaring file once more. `every_utility_error_reaching_the_cli_is_armed`
-/// then runs that resolver three times across all ~600 workspace sources — for
-/// the unresolved-reach assertion, for the stale-exemption set, and inside
-/// `assert_scan` — so the workspace was parsed tens of thousands of times over.
-/// That guard cost **131 s** on this machine and 210 s in CI, an order of
-/// magnitude more than any other test in this file, and every second of it was
-/// re-reading files it had already read.
-///
-/// Memoising the parse changes nothing about what any guard asserts: the key is
-/// the path, the tree is immutable and shared behind an `Rc`, and a file that
-/// cannot be read or parsed still panics on the first attempt — the harness's
-/// property 5, which is where the loudness lives. What goes away is only the
-/// repetition. Callers that hold the `Rc` in a local keep the tree alive for as
-/// long as they borrow out of it.
-///
-/// Thread-local rather than one `static`, because `proc_macro2`'s spans are
-/// neither `Send` nor `Sync` and a [`Source`] carries one per token. Under
-/// `cargo nextest` a test is its own process and the distinction is invisible;
-/// under `cargo test` each test thread simply fills its own copy, which is
-/// still one parse per file per reader instead of thousands.
-fn parsed_source(path: &Path) -> Rc<Source> {
-    thread_local! {
-        static SOURCES: RefCell<BTreeMap<PathBuf, Rc<Source>>> = const { RefCell::new(BTreeMap::new()) };
-    }
-    if let Some(hit) = SOURCES.with_borrow(|cache| cache.get(path).cloned()) {
-        return hit;
-    }
-    // Parsed outside the borrow: `Source::parse` panics on a file it cannot
-    // read, and panicking while the `RefCell` is borrowed would bury that
-    // diagnostic under a borrow error in whatever runs next.
-    let source = Rc::new(Source::parse(path));
-    SOURCES.with_borrow_mut(|cache| cache.insert(path.to_path_buf(), Rc::clone(&source)));
-    source
 }
 
 /// `cargo metadata --format-version 1 --locked <extra>` from the workspace
@@ -129,6 +134,18 @@ fn cargo_metadata(extra: &[&str]) -> serde_json::Value {
         "cargo metadata reported no workspace members"
     );
     metadata
+}
+
+/// `cargo metadata` without the dependency graph — the workspace's own
+/// packages and their declared dependency tables, which is all a guard reading
+/// [`member_names`] or a `[dependencies]` entry needs.
+///
+/// Three quarters of a second of every such guard went on serialising and
+/// re-parsing the resolved graph of ~700 registry packages (3.4 MB of JSON
+/// against 129 KB). `deps_direction` is the one guard that reads
+/// `resolve.nodes` and keeps the full form.
+fn workspace_metadata() -> serde_json::Value {
+    cargo_metadata(&["--no-deps"])
 }
 
 /// Workspace member names, from `cargo metadata`.
@@ -388,7 +405,7 @@ fn crate_map_toml_matches_rust_table() {
     assert_eq!(map.testing_feature, ADR_TESTING_FEATURE);
 
     // Every row is a workspace member and every `ocx*` member has a row.
-    let members = member_names(&cargo_metadata(&[]));
+    let members = member_names(&workspace_metadata());
     for row in &rows {
         assert!(
             members.contains(*row),
@@ -655,7 +672,7 @@ fn deps_direction_refuses_an_empty_member_graph() {
 /// dev edges design spec § E introduces would red it for the wrong reason.)
 #[test]
 fn release_feature_set_excludes_testing_seams() {
-    let members = member_names(&cargo_metadata(&[]));
+    let members = member_names(&workspace_metadata());
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
         .args([
@@ -913,7 +930,7 @@ fn anyhow_kinds(metadata: &serde_json::Value) -> BTreeMap<String, BTreeSet<Strin
 #[test]
 fn anyhow_only_in_cli_runtime() {
     let mut dev_carriers = BTreeSet::new();
-    for (name, kinds) in anyhow_kinds(&cargo_metadata(&[])) {
+    for (name, kinds) in anyhow_kinds(&workspace_metadata()) {
         if name == "ocx" {
             assert!(
                 kinds.contains("normal"),
@@ -1439,8 +1456,10 @@ fn library_subtrees(include_cli: bool) -> Vec<PathBuf> {
 
 #[test]
 fn no_classification_in_libraries() {
+    let subtrees = library_subtrees(false);
+    assert_walk_floor("no_classification_in_libraries", &subtrees, floor::LIBRARY_SOURCES);
     assert_no_needles(
-        &library_subtrees(false),
+        &subtrees,
         &["ClassifyExitCode", "ClassifyErrorKind"],
         &fixture("classify_impl.rs.txt"),
     );
@@ -2118,6 +2137,147 @@ impl Resolved {
     }
 }
 
+/// A type as a declaration or an alias names it, before it is resolved — the
+/// two shapes [`resolve_named`] answers, kept apart from `syn` so the resolver
+/// can share what it read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NamedType {
+    /// A path, as its `::`-separated segments.
+    Path(Vec<String>),
+    /// Anything with no segments to follow — a reference, a boxed trait
+    /// object — rendered whole, exactly as [`quote_type`] renders it.
+    Rendered(String),
+}
+
+/// The three things the type resolver reads off one file's **top-level**
+/// items, and nothing else: its non-`#[cfg(test)]` imports, the type names it
+/// declares, and its one-argument `Result` aliases.
+///
+/// Extracted rather than kept as a `syn::File` because that is what lets the
+/// resolver read each file **once per process**. It re-enters the same
+/// declaring file once per name it chases — `ocx_util/src/error.rs` is read
+/// again for every `Error` in the workspace, and every `use` hop reads the
+/// file it hops through — so the pass over `crates/*/src` parsed a few hundred
+/// files tens of thousands of times, and this guard took 25 s of a 35 s
+/// binary. A `syn::File` cannot be cached across that: it holds `proc_macro2`
+/// streams, which are neither `Send` nor `Sync`, so a per-thread cache is
+/// rebuilt by every parallel walk. These three tables are plain data and are
+/// shared by the whole process.
+///
+/// The filters are the ones the resolver applied for itself, moved one step
+/// earlier and applied once: top-level items only (never a nested `mod`, which
+/// the resolver never descended into either), `#[cfg(test)]` skipped for the
+/// reason the boundary scan skips it, and an alias recorded only when it is
+/// the two-argument `Result` the resolver would have accepted — first
+/// declaration wins, which is the one the item walk stopped at.
+#[derive(Default)]
+struct FileFacts {
+    /// Every `use` path with its alias, in declaration order, expanded and
+    /// **unfiltered**: each reader applies its own rule about globs and
+    /// one-segment paths, as it did when it walked the items itself.
+    imports: Vec<(Vec<String>, Option<String>)>,
+    /// Every `struct`/`enum`/`type`/`union` name declared here.
+    declares: BTreeSet<String>,
+    /// Alias name → the error type of `type A<T> = Result<T, E>`.
+    result_aliases: BTreeMap<String, NamedType>,
+}
+
+impl FileFacts {
+    fn read(parsed: &syn::File) -> Self {
+        let mut facts = Self::default();
+        for item in &parsed.items {
+            match item {
+                syn::Item::Use(import) if !is_cfg_test(&import.attrs) => {
+                    facts.imports.extend(expand_use_tree(&import.tree));
+                }
+                syn::Item::Struct(declaration) if !is_cfg_test(&declaration.attrs) => {
+                    facts.declares.insert(declaration.ident.to_string());
+                }
+                syn::Item::Enum(declaration) if !is_cfg_test(&declaration.attrs) => {
+                    facts.declares.insert(declaration.ident.to_string());
+                }
+                syn::Item::Union(declaration) if !is_cfg_test(&declaration.attrs) => {
+                    facts.declares.insert(declaration.ident.to_string());
+                }
+                syn::Item::Type(alias) if !is_cfg_test(&alias.attrs) => {
+                    facts.declares.insert(alias.ident.to_string());
+                    if let Some(error) = result_alias_error(alias) {
+                        facts.result_aliases.entry(alias.ident.to_string()).or_insert(error);
+                    }
+                }
+                _ => {}
+            }
+        }
+        facts
+    }
+}
+
+/// The error type of `type A<T> = Result<T, E>`, and `None` for any other
+/// alias — an `Option<T>` or a `Vec<T>` is not a boundary crossing.
+fn result_alias_error(alias: &syn::ItemType) -> Option<NamedType> {
+    let syn::Type::Path(typed) = alias.ty.as_ref() else {
+        return None;
+    };
+    let last = typed.path.segments.last()?;
+    if last.ident != "Result" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(arguments) = &last.arguments else {
+        return None;
+    };
+    let named: Vec<&syn::Type> = arguments
+        .args
+        .iter()
+        .filter_map(|argument| match argument {
+            syn::GenericArgument::Type(inner) => Some(inner),
+            _ => None,
+        })
+        .collect();
+    let [_, error] = named.as_slice() else { return None };
+    Some(named_type(error))
+}
+
+/// `ty` as the resolver names it: its segments when it is a path, and
+/// otherwise the rendering a name no arm can write is reported under.
+fn named_type(ty: &syn::Type) -> NamedType {
+    match ty {
+        syn::Type::Path(typed) => NamedType::Path(
+            typed
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect(),
+        ),
+        _ => NamedType::Rendered(quote_type(ty)),
+    }
+}
+
+/// [`FileFacts`] for `file`, read once per process.
+///
+/// Never invalidated: every path handed in is committed source that no guard
+/// rewrites mid-run.
+fn file_facts(file: &Path) -> Arc<FileFacts> {
+    static FACTS: LazyLock<Mutex<BTreeMap<PathBuf, Arc<FileFacts>>>> = LazyLock::new(|| Mutex::new(BTreeMap::new()));
+    let cached = FACTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(file)
+        .map(Arc::clone);
+    if let Some(facts) = cached {
+        return facts;
+    }
+    // Read outside the lock: `Source::parse` panics on a file it cannot read,
+    // and holding the lock across that would poison it for every other
+    // thread's unrelated lookup. A race reads twice and one copy wins.
+    let facts = Arc::new(FileFacts::read(&Source::parse(file).file));
+    FACTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(file.to_path_buf(), Arc::clone(&facts));
+    facts
+}
+
 /// `path` written relative to `crates/`, with `/` separators on every platform.
 fn under_crates(path: &Path) -> String {
     path.strip_prefix(crates_dir())
@@ -2129,14 +2289,30 @@ fn under_crates(path: &Path) -> String {
 /// The `src/` directory of the crate `file` belongs to — the nearest ancestor
 /// holding a `lib.rs` or `main.rs`. `None` for a loose fixture, which then
 /// resolves nothing and keys on bare names.
+///
+/// Memoised on the file's *directory*, because the answer is a property of
+/// that directory and the resolver asks it once per module hop of every type
+/// it chases — each ask walks the ancestors doing two `is_file()` per level.
+/// The tree does not change while a guard runs.
 fn crate_src_root_of(file: &Path) -> Option<PathBuf> {
-    let mut dir = file.parent()?;
-    loop {
-        if dir.join("lib.rs").is_file() || dir.join("main.rs").is_file() {
-            return Some(dir.to_path_buf());
-        }
-        dir = dir.parent()?;
+    static ROOTS: LazyLock<Mutex<BTreeMap<PathBuf, Option<PathBuf>>>> = LazyLock::new(|| Mutex::new(BTreeMap::new()));
+    let start = file.parent()?;
+    if let Some(known) = ROOTS.lock().unwrap_or_else(PoisonError::into_inner).get(start).cloned() {
+        return known;
     }
+    let mut dir = Some(start);
+    let found = loop {
+        let Some(at) = dir else { break None };
+        if at.join("lib.rs").is_file() || at.join("main.rs").is_file() {
+            break Some(at.to_path_buf());
+        }
+        dir = at.parent();
+    };
+    ROOTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(start.to_path_buf(), found.clone());
+    found
 }
 
 /// The module path of `file` under `root`: `src/a/b.rs` → `[a, b]`,
@@ -2217,9 +2393,34 @@ fn module_file_from(from: &Path, prefix: &[String]) -> Option<PathBuf> {
 /// `Result<T>` in `ocx_util` land on the same `(file, name)` pair. Resolution
 /// that runs out — a glob, a type from outside the workspace, a cycle — falls
 /// back to the name written at the use site.
+/// Memoised on `(from, segments)`, which is a pure key: the answer depends on
+/// committed source alone, and the guard asks the identical question once per
+/// `pub fn` — a module with fifty functions returning `Result<T>` chased the
+/// same alias fifty times, each chase re-walking every `use` hop to its
+/// declaration.
 fn resolve_type(from: &Path, segments: &[String]) -> Resolved {
+    /// The question asked: a path, as written, in the file it was written in.
+    type Question = (PathBuf, Vec<String>);
+    static RESOLVED: LazyLock<Mutex<BTreeMap<Question, Resolved>>> = LazyLock::new(|| Mutex::new(BTreeMap::new()));
+    let key = (from.to_path_buf(), segments.to_vec());
+    if let Some(known) = RESOLVED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+        .cloned()
+    {
+        return known;
+    }
+    // Resolved outside the lock: the chase re-enters this function through
+    // `resolve_from`, and holding the lock across that would deadlock.
     let mut seen = BTreeSet::new();
-    resolve_from(from, segments, &mut seen).unwrap_or_else(|| Resolved::bare(&canonical_path(from, segments)))
+    let resolved =
+        resolve_from(from, segments, &mut seen).unwrap_or_else(|| Resolved::bare(&canonical_path(from, segments)));
+    RESOLVED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, resolved.clone());
+    resolved
 }
 
 /// `segments` with its first segment expanded through `from`'s own `use`
@@ -2239,20 +2440,13 @@ fn canonical_path(from: &Path, segments: &[String]) -> Vec<String> {
     if !from.is_file() {
         return segments.to_vec();
     }
-    let source = parsed_source(from);
-    for item in &source.file.items {
-        let syn::Item::Use(import) = item else { continue };
-        if is_cfg_test(&import.attrs) {
+    for (path, alias) in &file_facts(from).imports {
+        let Some(last) = path.last() else { continue };
+        if last == "*" || path.len() < 2 {
             continue;
         }
-        for (path, alias) in expand_use_tree(&import.tree) {
-            let Some(last) = path.last() else { continue };
-            if last == "*" || path.len() < 2 {
-                continue;
-            }
-            if alias.as_deref().unwrap_or(last) == first {
-                return path.iter().chain(segments[1..].iter()).cloned().collect();
-            }
+        if alias.as_deref().unwrap_or(last) == first {
+            return path.iter().chain(segments[1..].iter()).cloned().collect();
         }
     }
     segments.to_vec()
@@ -2278,37 +2472,22 @@ fn resolve_in_file(file: &Path, name: &str, seen: &mut BTreeSet<(PathBuf, String
     if !file.is_file() || !seen.insert((file.to_path_buf(), name.to_owned())) {
         return None;
     }
-    let source = parsed_source(file);
-    for item in &source.file.items {
-        let declared = match item {
-            syn::Item::Struct(declaration) if !is_cfg_test(&declaration.attrs) => Some(&declaration.ident),
-            syn::Item::Enum(declaration) if !is_cfg_test(&declaration.attrs) => Some(&declaration.ident),
-            syn::Item::Type(declaration) if !is_cfg_test(&declaration.attrs) => Some(&declaration.ident),
-            syn::Item::Union(declaration) if !is_cfg_test(&declaration.attrs) => Some(&declaration.ident),
-            _ => None,
-        };
-        if declared.is_some_and(|ident| ident == name) {
-            return Some(Resolved {
-                name: name.to_owned(),
-                site: Some(file.to_path_buf()),
-                written: name.to_owned(),
-            });
-        }
+    let facts = file_facts(file);
+    if facts.declares.contains(name) {
+        return Some(Resolved {
+            name: name.to_owned(),
+            site: Some(file.to_path_buf()),
+            written: name.to_owned(),
+        });
     }
-    for item in &source.file.items {
-        let syn::Item::Use(import) = item else { continue };
-        if is_cfg_test(&import.attrs) {
+    for (segments, alias) in &facts.imports {
+        let Some(last) = segments.last() else { continue };
+        let bound = alias.as_deref().unwrap_or(last);
+        if bound != name || segments.len() < 2 {
             continue;
         }
-        for (segments, alias) in expand_use_tree(&import.tree) {
-            let Some(last) = segments.last() else { continue };
-            let bound = alias.as_deref().unwrap_or(last);
-            if bound != name || segments.len() < 2 {
-                continue;
-            }
-            if let Some(resolved) = resolve_from(file, &segments, seen) {
-                return Some(resolved);
-            }
+        if let Some(resolved) = resolve_from(file, segments, seen) {
+            return Some(resolved);
         }
     }
     None
@@ -2352,51 +2531,17 @@ fn resolve_result_alias(file: &Path, prefix: &[String]) -> Resolved {
 fn alias_error_type(file: &Path, segments: &[String]) -> Option<Resolved> {
     let resolved = resolve_type(file, segments);
     let site = resolved.site?;
-    let source = parsed_source(&site);
-    for item in &source.file.items {
-        let syn::Item::Type(alias) = item else { continue };
-        if alias.ident != resolved.name.as_str() || is_cfg_test(&alias.attrs) {
-            continue;
-        }
-        let syn::Type::Path(typed) = alias.ty.as_ref() else {
-            continue;
-        };
-        let last = typed.path.segments.last()?;
-        if last.ident != "Result" {
-            continue;
-        }
-        let syn::PathArguments::AngleBracketed(arguments) = &last.arguments else {
-            continue;
-        };
-        let named: Vec<&syn::Type> = arguments
-            .args
-            .iter()
-            .filter_map(|argument| match argument {
-                syn::GenericArgument::Type(inner) => Some(inner),
-                _ => None,
-            })
-            .collect();
-        let [_, error] = named.as_slice() else { continue };
-        return Some(resolve_named_type(&site, error));
-    }
-    None
+    let error = file_facts(&site).result_aliases.get(&resolved.name)?.clone();
+    Some(resolve_named(&site, &error))
 }
 
 /// `ty` resolved to its declaration, or rendered whole when it is not a path —
 /// a reference or a boxed trait object has no segments to follow, and a name no
 /// arm can write is exactly the shape this guard exists to surface.
-fn resolve_named_type(from: &Path, ty: &syn::Type) -> Resolved {
+fn resolve_named(from: &Path, ty: &NamedType) -> Resolved {
     match ty {
-        syn::Type::Path(typed) => {
-            let segments: Vec<String> = typed
-                .path
-                .segments
-                .iter()
-                .map(|segment| segment.ident.to_string())
-                .collect();
-            resolve_type(from, &segments)
-        }
-        _ => Resolved::bare(&[quote_type(ty)]),
+        NamedType::Path(segments) => resolve_type(from, segments),
+        NamedType::Rendered(rendered) => Resolved::bare(std::slice::from_ref(rendered)),
     }
 }
 
@@ -2503,18 +2648,32 @@ fn armed_error_types() -> BTreeSet<String> {
     let ladder = crates_dir().join("ocx_cli/src/exit");
     let sources = rust_sources(&crates_dir().join("ocx_cli/src"));
     assert!(
-        sources.len() > 1,
-        "crates/ocx_cli/src walked {} file(s) — every type would then read as unarmed",
-        sources.len()
+        sources.len() >= floor::LADDER_SOURCES,
+        "crates/ocx_cli/src walked {} file(s), under its floor of {} — an arm in the part the walk \
+         stopped reading discharges nothing, so every type it armed reads as unarmed",
+        sources.len(),
+        floor::LADDER_SOURCES
     );
-    for file in sources {
+    let per_file = map_sources(&sources, &|file: &Path, source: &Source| {
         let mut arms = Arms {
             paths: Vec::new(),
             longhand: file.starts_with(&ladder),
         };
-        arms.visit_file(&parsed_source(&file).file);
-        armed.extend(arms.paths.iter().map(|path| resolve_type(&file, path).key()));
-    }
+        arms.visit_file(&source.file);
+        arms.paths
+            .iter()
+            .map(|path| resolve_type(file, path).key())
+            .collect::<Vec<String>>()
+    });
+    assert_eq!(
+        per_file.len(),
+        sources.len(),
+        "the ladder scan answered for {} of {} walked file(s) — an arm read off fewer files than \
+         were walked discharges fewer types, silently",
+        per_file.len(),
+        sources.len()
+    );
+    armed.extend(per_file.into_iter().flatten());
     // A floor, not just non-emptiness: an extractor that stopped recognising
     // *some* invocations would leave the rest of the ladder registered and the
     // scan below would only red on types it happened to drop.
@@ -2560,7 +2719,7 @@ fn result_error_type(from: &Path, ty: &syn::Type) -> Option<(Resolved, usize)> {
     let line = last.ident.span().start().line;
     match (last.ident == "Result", types.as_slice()) {
         (true, [_]) => Some((resolve_result_alias(from, &prefix), line)),
-        (true, [_, error]) => Some((resolve_named_type(from, error), line)),
+        (true, [_, error]) => Some((resolve_named(from, &named_type(error)), line)),
         // A one-argument `Result` alias imported under another name — `use
         // client::Result as ClientResult`, or a crate that declares
         // `type ClientResult<T>` outright. A `pub fn` returning it crosses
@@ -2687,6 +2846,14 @@ impl DeclaredTypes {
         }
         Scan(self).visit_file(file);
     }
+
+    /// Fold another file's — or another chunk of the subtree's — findings in.
+    /// Set union, so a subtree collected across several threads answers
+    /// exactly as it did collected in one pass.
+    fn merge(&mut self, other: Self) {
+        self.declared.extend(other.declared);
+        self.implementing.extend(other.implementing);
+    }
 }
 
 /// Every type `subtree` declares, and which of them are errors.
@@ -2712,31 +2879,75 @@ impl DeclaredTypes {
 ///
 /// The walk is asserted for the reason every walk here is: a subtree that has
 /// moved leaves an empty directory, and an empty directory judges nothing.
-fn declared_types(subtree: &Path) -> DeclaredTypes {
-    let files = rust_sources(subtree);
+/// Collected for **all** `subtrees` in one walk, because one walk per subtree
+/// is one thread fan-out per subtree, and the subtrees are wildly uneven —
+/// the eighty-file crate and the three-file crate each got their own, so the
+/// parse never balanced across them. Every file of every subtree is still
+/// read, and each subtree's set is still its own: the results are keyed back
+/// by the subtree the file sits under, never unioned.
+fn declared_types(subtrees: &[PathBuf]) -> Vec<(PathBuf, DeclaredTypes)> {
+    let walked: Vec<(PathBuf, Vec<PathBuf>)> = subtrees
+        .iter()
+        .map(|subtree| {
+            let files = rust_sources(subtree);
+            assert!(
+                !files.is_empty(),
+                "{} walked no .rs file — the subtree has moved or was never there, and every type \
+                 it should have judged falls out of scope",
+                subtree.display()
+            );
+            (subtree.clone(), files)
+        })
+        .collect();
+    let flat: Vec<PathBuf> = walked.iter().flat_map(|(_, files)| files.iter().cloned()).collect();
     assert!(
-        !files.is_empty(),
-        "{} walked no .rs file — the subtree has moved or was never there, and every type it \
-         should have judged falls out of scope",
-        subtree.display()
+        flat.len() >= floor::LIBRARY_SOURCES,
+        "the type collector walked {} `.rs` file(s) across {} subtree(s), under its floor of {} — a \
+         type declared in the part it stopped reading is not in `declared`, and `admits` then lets \
+         it through as a type this workspace does not own",
+        flat.len(),
+        walked.len(),
+        floor::LIBRARY_SOURCES
     );
-    let mut types = DeclaredTypes::default();
-    let mut derives_anywhere = false;
-    for file in &files {
-        let source = parsed_source(file);
-        derives_anywhere |= source.tokens.iter().any(|token| token.text == "thiserror");
+    // One `DeclaredTypes` per file, merged per subtree: `absorb` is
+    // order-independent, and a per-file answer is what lets the count below be
+    // checked against the walk rather than taken on trust.
+    let per_file = map_sources(&flat, &|_: &Path, source: &Source| {
+        let mut types = DeclaredTypes::default();
         types.absorb(&source.file);
-    }
-    assert!(
-        !derives_anywhere || !types.implementing.is_empty(),
-        "{} derives `thiserror::Error` somewhere across {} file(s), and the collector found none of \
-         the {} type(s) it declares implementing `std::error::Error` — every one of them then falls \
-         out of scope unjudged and this guard passes over a subtree it stopped reading",
-        subtree.display(),
-        files.len(),
-        types.declared.len()
+        (types, source.tokens().iter().any(|token| token.text == "thiserror"))
+    });
+    assert_eq!(
+        per_file.len(),
+        flat.len(),
+        "the type collector answered for {} of {} walked file(s) — the types in the rest fall out \
+         of scope unjudged",
+        per_file.len(),
+        flat.len()
     );
-    types
+    let mut answers = per_file.into_iter();
+    walked
+        .into_iter()
+        .map(|(subtree, files)| {
+            let mut types = DeclaredTypes::default();
+            let mut derives_anywhere = false;
+            for (found, derives) in answers.by_ref().take(files.len()) {
+                derives_anywhere |= derives;
+                types.merge(found);
+            }
+            assert!(
+                !derives_anywhere || !types.implementing.is_empty(),
+                "{} derives `thiserror::Error` somewhere across {} file(s), and the collector found \
+                 none of the {} type(s) it declares implementing `std::error::Error` — every one of \
+                 them then falls out of scope unjudged and this guard passes over a subtree it \
+                 stopped reading",
+                subtree.display(),
+                files.len(),
+                types.declared.len()
+            );
+            (subtree, types)
+        })
+        .collect()
 }
 
 /// The error type every `pub` function in `file` returns, as `Reach`es whose
@@ -2809,18 +3020,21 @@ fn boundary_error_types(path: &Path, file: &syn::File, declared: &DeclaredTypes)
     scan.out
 }
 
-/// Every error type the boundary scan finds under `subtree` that `armed` does
-/// not carry — the exclusion list's own subject, before it is applied.
+/// Every error type the boundary scan found that `armed` does not carry — the
+/// exclusion list's own subject, before it is applied.
+///
+/// A fold over the one scan, not a second walk: `crossings` is already every
+/// walked file mapped to what it crosses, and re-deriving it here re-entered
+/// the type resolver over the whole corpus for an answer that was in hand.
 fn unarmed_boundary_types(
-    subtree: &Path,
+    crossings: &BTreeMap<PathBuf, Vec<Reach>>,
     armed: &BTreeSet<String>,
-    declared: &DeclaredTypes,
 ) -> BTreeSet<(String, String)> {
-    rust_sources(subtree)
-        .into_iter()
-        .flat_map(|file| boundary_error_types(&file, &parsed_source(&file).file, declared))
+    crossings
+        .values()
+        .flatten()
         .filter(|reach| !armed.contains(&reach.path))
-        .map(|reach| (under_crates(&reach.file), reach.path))
+        .map(|reach| (under_crates(&reach.file), reach.path.clone()))
         .collect()
 }
 
@@ -2865,10 +3079,7 @@ fn every_utility_error_reaching_the_cli_is_armed() {
     // picks the set by the longest matching subtree; a file under none — the
     // witness fixture — is judged by the empty set, which admits everything and
     // is the loud direction.
-    let declared: Vec<(PathBuf, DeclaredTypes)> = subtrees
-        .iter()
-        .map(|subtree| (subtree.clone(), declared_types(subtree)))
-        .collect();
+    let declared: Vec<(PathBuf, DeclaredTypes)> = declared_types(&subtrees);
     let empty = DeclaredTypes::default();
     let scoped = |path: &Path| -> &DeclaredTypes {
         declared
@@ -2885,12 +3096,51 @@ fn every_utility_error_reaching_the_cli_is_armed() {
     // resolving keys every `Error` on a string no arm carries, so the reach is
     // reported by name here instead of quietly rejoining the bare `Error` that
     // `downcast_arm!(cause, ocx_lib::Error)` discharges (B5R-1).
-    let reaches: Vec<Reach> = subtrees
-        .iter()
-        .flat_map(|subtree| rust_sources(subtree))
-        .flat_map(|file| boundary_error_types(&file, &parsed_source(&file).file, scoped(&file)))
-        .collect();
-    let unresolved: Vec<&Reach> = reaches.iter().filter(|reach| reach.path.contains('<')).collect();
+    //
+    // Resolved **once per file**, for the three questions below to share. They
+    // asked `boundary_error_types` the same question of the same file three
+    // times over — the reach list, the unarmed set and the `assert_scan` half
+    // are three filters of one answer — and each ask re-entered the type
+    // resolver, which is what made this the slowest test in the repository by
+    // an order of magnitude. `scoped(file)` and `scoped(subtree)` are the same
+    // `DeclaredTypes` for a file under that subtree (the subtrees are the
+    // disjoint `crates/*/src`, so the longest match is the owning one), so the
+    // merged answer is the answer each pass computed for itself.
+    let scanned: Vec<PathBuf> = subtrees.iter().flat_map(|subtree| rust_sources(subtree)).collect();
+    assert!(
+        scanned.len() >= floor::LIBRARY_SOURCES,
+        "the boundary scan walked {} `.rs` file(s) across {} subtree(s), under its floor of {} — an \
+         unarmed error type in the part it stopped reading is what this guard exists to find, and a \
+         short walk reports the tree as fully armed",
+        scanned.len(),
+        subtrees.len(),
+        floor::LIBRARY_SOURCES
+    );
+    let per_file = map_sources(&scanned, &|file: &Path, source: &Source| {
+        (
+            file.to_path_buf(),
+            boundary_error_types(file, &source.file, scoped(file)),
+        )
+    });
+    assert_eq!(
+        per_file.len(),
+        scanned.len(),
+        "the resolver answered for {} of {} walked file(s) — an unanswered file carries no reach \
+         and is indistinguishable from one that crosses nothing",
+        per_file.len(),
+        scanned.len()
+    );
+    let crossings: BTreeMap<PathBuf, Vec<Reach>> = per_file.into_iter().collect();
+    assert_eq!(
+        crossings.len(),
+        scanned.len(),
+        "the resolver's answers collapsed to {} key(s) over {} walked file(s) — two files sharing a \
+         key means one of them is being read out",
+        crossings.len(),
+        scanned.len()
+    );
+    let reaches: Vec<&Reach> = crossings.values().flatten().collect();
+    let unresolved: Vec<&&Reach> = reaches.iter().filter(|reach| reach.path.contains('<')).collect();
     assert!(
         unresolved.is_empty(),
         "the `Result<T>` alias chain resolved nothing for {} of {} reach(es): {unresolved:?}",
@@ -2898,10 +3148,7 @@ fn every_utility_error_reaching_the_cli_is_armed() {
         reaches.len()
     );
 
-    let unarmed: BTreeSet<(String, String)> = subtrees
-        .iter()
-        .flat_map(|subtree| unarmed_boundary_types(subtree, &armed, scoped(subtree)))
-        .collect();
+    let unarmed: BTreeSet<(String, String)> = unarmed_boundary_types(&crossings, &armed);
     let stale: Vec<String> = UNARMED_AT_THE_BOUNDARY
         .iter()
         .filter(|(file, name, _)| !unarmed.contains(&((*file).to_owned(), (*name).to_owned())))
@@ -2913,23 +3160,37 @@ fn every_utility_error_reaching_the_cli_is_armed() {
          no longer finds — armed since, renamed, or gone. An exclusion whose target does not exist \
          forbids nothing and reads as coverage; delete the row"
     );
-
     let exempt: BTreeSet<(&str, &str)> = UNARMED_AT_THE_BOUNDARY
         .iter()
         .map(|(file, name, _)| (*file, *name))
         .collect();
-    assert_scan(
+    // The corpus half of this scan is `crossings`, already resolved above, run
+    // through the same filter the witness is. `assert_scan_of` re-walks the
+    // subtrees and refuses anything but an exact match against `scanned`, so
+    // the set standing in here is provably the set `assert_scan` would have
+    // walked; the parse that made property 5 true is the one this test already
+    // did over those files. The witness sits outside every subtree and is
+    // scanned on the other side of the call, through the closure below — the
+    // very code path the corpus went through, which is what property 3 needs.
+    let unarmed_at = |reach: &Reach| {
+        !armed.contains(&reach.path) && !exempt.contains(&(under_crates(&reach.file).as_str(), reach.path.as_str()))
+    };
+    assert_scan_of(
         &subtrees,
+        &scanned,
+        crossings
+            .values()
+            .flatten()
+            .filter(|r| unarmed_at(r))
+            .cloned()
+            .collect(),
         &fixture("unarmed_boundary_error.rs.txt"),
         "a `pub fn` returning an error type no `downcast_arm!` in crates/ocx_cli/src registers",
         &["NeverArmedError"],
         &|path, source| {
             boundary_error_types(path, &source.file, scoped(path))
                 .into_iter()
-                .filter(|reach| {
-                    !armed.contains(&reach.path)
-                        && !exempt.contains(&(under_crates(&reach.file).as_str(), reach.path.as_str()))
-                })
+                .filter(&unarmed_at)
                 .collect()
         },
     );
@@ -3404,7 +3665,8 @@ fn boundary_guard_calls() -> Vec<GuardCall> {
     let mut scanned = 0;
     for (_, dir) in crate_dirs() {
         for file in test_targets(&dir.join("tests")) {
-            let parsed = Source::parse(&file).file;
+            let source = Source::parse(&file);
+            let parsed = &source.file;
             let mut consts: BTreeMap<String, Vec<String>> = BTreeMap::new();
             for item in &parsed.items {
                 if let syn::Item::Const(declaration) = item
@@ -3437,7 +3699,7 @@ fn boundary_guard_calls() -> Vec<GuardCall> {
                 scanned: BTreeSet::new(),
                 out: Vec::new(),
             };
-            calls.visit_file(&parsed);
+            calls.visit_file(parsed);
             scanned += 1;
             out.extend(calls.out);
         }
@@ -4274,13 +4536,17 @@ fn no_log_shim() {
             .any(|(_, dir)| dir.join("src").join("log.rs").exists()),
         "a log shim module is back in {shims:?} (D-001)"
     );
-    assert_no_imports(&library_subtrees(false), &["log"], &fixture("log_shim.rs.txt"));
+    let subtrees = library_subtrees(false);
+    assert_walk_floor("no_log_shim", &subtrees, floor::LIBRARY_SOURCES);
+    assert_no_imports(&subtrees, &["log"], &fixture("log_shim.rs.txt"));
 }
 
 #[test]
 fn no_module_path_in_output() {
+    let subtrees = library_subtrees(true);
+    assert_walk_floor("no_module_path_in_output", &subtrees, floor::ALL_CRATE_SOURCES);
     assert_no_needles(
-        &library_subtrees(true),
+        &subtrees,
         &["module_path!", "type_name::<", "any::type_name", "type_name_of_val"],
         &fixture("no_module_path_in_output.rs.txt"),
     );
@@ -4290,20 +4556,40 @@ fn no_module_path_in_output() {
 /// in its parent, walking from `lib.rs` / `main.rs` / `bin/*.rs`.
 #[test]
 fn every_source_file_is_reachable() {
+    // One walk for every crate, not one per crate: the `mod` declarations are
+    // read in a single balanced pass and the per-crate reachability walks are
+    // then pure. Fanning a thread pool out per crate meant the three-file
+    // crate and the eighty-file crate each got their own, so the parse never
+    // balanced. Every crate is still walked, and each crate's reachability is
+    // still decided from its own `src/` alone.
+    let crates: Vec<(String, PathBuf)> = crate_dirs()
+        .into_iter()
+        .map(|(name, dir)| (name, dir.join("src")))
+        .collect();
+    let sources: Vec<(PathBuf, Vec<PathBuf>)> =
+        crates.iter().map(|(_, src)| (src.clone(), rust_sources(src))).collect();
+    let declarations = read_module_declarations(&sources);
     let mut orphans = Vec::new();
     let mut walked = 0;
-    for (name, dir) in crate_dirs() {
-        let src = dir.join("src");
-        let (files, unreached) = orphans_under(&src);
+    for ((name, src), (_, files)) in crates.iter().zip(&sources) {
         assert!(
-            files > 0,
+            !files.is_empty(),
             "{}: no `.rs` file — a crate that falls out of the walk leaves `walked` above its floor on the rest",
             src.display()
         );
-        walked += files;
-        orphans.extend(unreached.iter().map(|f| format!("{name}: src/{}", f.display())));
+        walked += files.len();
+        orphans.extend(
+            orphans_under(src, files, &declarations)
+                .iter()
+                .map(|f| format!("{name}: src/{}", f.display())),
+        );
     }
-    assert!(walked > 1, "walked {walked} source file(s) — scanned nothing");
+    assert!(
+        walked >= floor::ALL_CRATE_SOURCES,
+        "every_source_file_is_reachable walked {walked} source file(s), under its floor of {} — an \
+         orphan in the part it stopped reading is exactly what this guard exists to find",
+        floor::ALL_CRATE_SOURCES
+    );
     assert!(
         orphans.is_empty(),
         "source files no `mod` item reaches (a green build hides them):\n  {}",
@@ -4312,8 +4598,51 @@ fn every_source_file_is_reachable() {
 }
 
 /// `(files walked, orphans relative to src)` for one `src/` tree.
-fn orphans_under(src: &Path) -> (usize, Vec<PathBuf>) {
-    let all: BTreeSet<PathBuf> = rust_sources(src).into_iter().collect();
+/// Every walked file's `mod` declarations, read in one pass over every crate.
+///
+/// Read *before* the reachability walks rather than during them. A walk is a
+/// traversal and cannot parse in parallel; this can. It also reads **more**
+/// than the traversals did — an orphan's own declarations were never parsed at
+/// all, so a syntactically broken orphan now reds here instead of passing
+/// unread — while which files a walk then *follows* is unchanged: it still
+/// consults only the entry of a file it has reached.
+fn read_module_declarations(sources: &[(PathBuf, Vec<PathBuf>)]) -> BTreeMap<PathBuf, Vec<PathBuf>> {
+    // The `src/` root a file sits under decides how its `mod x;` resolves, so
+    // each file is read against its own crate's root, never the walk's first.
+    let owner: BTreeMap<PathBuf, PathBuf> = sources
+        .iter()
+        .flat_map(|(src, files)| files.iter().map(|file| (file.clone(), src.clone())))
+        .collect();
+    let flat: Vec<PathBuf> = sources.iter().flat_map(|(_, files)| files.iter().cloned()).collect();
+    let read = map_sources(&flat, &|file: &Path, source: &Source| {
+        let src = owner
+            .get(file)
+            .expect("every walked file belongs to the crate root it was walked from");
+        (file.to_path_buf(), declared_submodules(file, src, &source.file))
+    });
+    assert_eq!(
+        read.len(),
+        flat.len(),
+        "read `mod` declarations for {} of {} walked file(s) — a file read as declaring nothing \
+         orphans every module it names",
+        read.len(),
+        flat.len()
+    );
+    let out: BTreeMap<PathBuf, Vec<PathBuf>> = read.into_iter().collect();
+    assert_eq!(
+        out.len(),
+        flat.len(),
+        "the declarations collapsed to {} key(s) over {} walked file(s) — two files sharing a key \
+         means one crate's module graph is being read for another",
+        out.len(),
+        flat.len()
+    );
+    out
+}
+
+/// The files under `src` that no `mod` item reaches, relative to `src`.
+fn orphans_under(src: &Path, walked: &[PathBuf], declarations: &BTreeMap<PathBuf, Vec<PathBuf>>) -> Vec<PathBuf> {
+    let all: BTreeSet<PathBuf> = walked.iter().cloned().collect();
     let mut reached = BTreeSet::new();
     let mut pending: Vec<PathBuf> = ["lib.rs", "main.rs"]
         .iter()
@@ -4326,17 +4655,15 @@ fn orphans_under(src: &Path) -> (usize, Vec<PathBuf>) {
         if !reached.insert(file.clone()) {
             continue;
         }
-        for child in declared_submodules(&file, src) {
+        for child in declarations.get(&file).into_iter().flatten() {
             if child.is_file() {
-                pending.push(child);
+                pending.push(child.clone());
             }
         }
     }
-    let orphans = all
-        .difference(&reached)
+    all.difference(&reached)
         .map(|f| f.strip_prefix(src).expect("under src").to_path_buf())
-        .collect();
-    (all.len(), orphans)
+        .collect()
 }
 
 /// The orphan detector on a tree with every module spelling it must follow:
@@ -4375,8 +4702,11 @@ fn orphan_detector_follows_every_mod_spelling() {
     write("nested/leaf.rs", "pub fn leaf() {}\n");
     write("orphan.rs", "pub fn nobody_names_me() {}\n");
     write("decoy.rs", "pub fn only_a_comment_names_me() {}\n");
-    let (walked, orphans) = orphans_under(&src);
-    assert_eq!(walked, 9, "the fixture tree has nine files");
+    let walked = rust_sources(&src);
+    let sources = vec![(src.clone(), walked.clone())];
+    let declarations = read_module_declarations(&sources);
+    let orphans = orphans_under(&src, &walked, &declarations);
+    assert_eq!(walked.len(), 9, "the fixture tree has nine files");
     assert_eq!(
         orphans,
         [PathBuf::from("decoy.rs"), PathBuf::from("orphan.rs")],
@@ -4389,7 +4719,7 @@ fn orphan_detector_follows_every_mod_spelling() {
 /// file's directory — inside an inline `mod a { … }` to that module's
 /// directory; otherwise `mod x;` in `lib.rs`/`main.rs`/`mod.rs` looks beside
 /// the file and any other file looks in its own-named subdirectory.
-fn declared_submodules(file: &Path, src: &Path) -> Vec<PathBuf> {
+fn declared_submodules(file: &Path, src: &Path, parsed: &syn::File) -> Vec<PathBuf> {
     let dir = file.parent().expect("has parent").to_path_buf();
     let stem = file.file_stem().expect("stem").to_string_lossy();
     let module_dir =
@@ -4435,7 +4765,7 @@ fn declared_submodules(file: &Path, src: &Path) -> Vec<PathBuf> {
         inline: Vec::new(),
         out: Vec::new(),
     };
-    mods.visit_file(&Source::parse(file).file);
+    mods.visit_file(parsed);
     mods.out
 }
 
@@ -4516,19 +4846,38 @@ fn ssrf_guard_ratchet() {
             "{}: no `.rs` file — a crate that falls out of the walk leaves `walked` above its floor on the rest",
             dir.join("src").display()
         );
-        for file in sources {
-            walked += 1;
+        let per_file = map_sources(&sources, &|file: &Path, source: &Source| {
             let rel = file
                 .strip_prefix(crates_dir())
                 .expect("under crates/")
                 .to_string_lossy()
                 .replace('\\', "/");
-            for (fn_name, _) in unguarded_constructions(&Source::parse(&file).file) {
-                *unguarded.entry(format!("{rel} {fn_name}")).or_default() += 1;
-            }
+            unguarded_constructions(&source.file)
+                .into_iter()
+                .map(|(fn_name, _)| format!("{rel} {fn_name}"))
+                .collect::<Vec<String>>()
+        });
+        assert_eq!(
+            per_file.len(),
+            sources.len(),
+            "{}: the ratchet answered for {} of {} walked file(s) — an unanswered file reads as a \
+             crate with no unguarded construction in it",
+            dir.join("src").display(),
+            per_file.len(),
+            sources.len()
+        );
+        walked += sources.len();
+        for key in per_file.into_iter().flatten() {
+            *unguarded.entry(key).or_default() += 1;
         }
     }
-    assert!(walked > 1, "walked {walked} source file(s) — scanned nothing");
+    assert!(
+        walked >= floor::ALL_CRATE_SOURCES,
+        "ssrf_guard_ratchet walked {walked} source file(s), under its floor of {} — a construction \
+         in the part it stopped reading is not in `unguarded`, and the ratchet then reports the \
+         allowlist entry covering it as stale rather than reporting the construction",
+        floor::ALL_CRATE_SOURCES
+    );
 
     // The witness: one unguarded construction per spelling family the scanner
     // must flag — `builder()` and the `impl Default` form, each in its own fn,
@@ -4849,8 +5198,10 @@ fn unguarded_constructions(file: &syn::File) -> Vec<(String, usize)> {
 /// difference to surface as red rather than as a green that never ran.
 #[test]
 fn tests_hold_no_inert_loop() {
+    let subtrees = library_subtrees(true);
+    assert_walk_floor("tests_hold_no_inert_loop", &subtrees, floor::ALL_CRATE_SOURCES);
     assert_scan(
-        &library_subtrees(true),
+        &subtrees,
         &fixture("inert_test_loop.rs.txt"),
         "a loop in a test whose body can neither fail nor be observed",
         &["for", "while", "loop", "fn"],
