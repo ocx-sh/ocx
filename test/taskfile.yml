@@ -82,6 +82,13 @@ env:
   TMPDIR: "{{.TEST_TMPDIR}}"
 
 tasks:
+  # Silent unless a previous run is still alive in this checkout. Called by
+  # the two entry points that start pytest, so an interrupted run never makes
+  # the next one red for reasons outside the tree.
+  .evict-stale-run:
+    internal: true
+    cmd: python3 {{.TASKFILE_DIR}}/scripts/evict_stale_run.py {{.OCX_BINARY}}
+
   build:
     internal: true
     cmds:
@@ -95,14 +102,18 @@ tasks:
       # for the contract.
       - cargo build --release -p ocx -p ocx_shim --features ocx/__testing --locked
       - mkdir -p {{.BIN_DIR}}
-      - cp {{.ROOT_DIR}}/target/release/ocx{{exeExt}} {{.OCX_BINARY}}
-      - cp {{.ROOT_DIR}}/target/release/ocx-shim{{exeExt}} {{.OCX_SHIM_BINARY}}
+      # Copy beside, then rename: `cp` straight onto a binary another run is
+      # executing fails ETXTBSY, while a rename replaces the directory entry
+      # and leaves that run on the inode it started with.
+      - cp {{.ROOT_DIR}}/target/release/ocx{{exeExt}} {{.OCX_BINARY}}.new && mv {{.OCX_BINARY}}.new {{.OCX_BINARY}}
+      - cp {{.ROOT_DIR}}/target/release/ocx-shim{{exeExt}} {{.OCX_SHIM_BINARY}}.new && mv {{.OCX_SHIM_BINARY}}.new {{.OCX_SHIM_BINARY}}
     status:
       - '{{eq .SKIP_BUILD "true"}}'
 
   default:
     desc: Run acceptance tests (builds binary + starts registry automatically)
     cmds:
+      - task: .evict-stale-run
       - task: build
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
@@ -265,6 +276,7 @@ tasks:
       (`-m smoke`, 22 verbs), parallel, registry only — the Sigstore stack never
       starts. Budgeted at 90 s wall clock; the local target is 60 s.
     cmds:
+      - task: .evict-stale-run
       - task: build
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
@@ -300,18 +312,6 @@ tasks:
 
   parallel:
     desc: Run acceptance tests in parallel
-    sources:
-      - tests/**/*.py
-      - src/**/*.py
-      - conftest.py
-      - tests/conftest.py
-      - pyproject.toml
-      # Doc scripts are executed by the drift-gate collection inside this
-      # parallel run (test_doc_scripts.py), so editing a .sh fixture must
-      # invalidate the cache (Perf F3) — without this a doc-script change
-      # is silently treated as up-to-date and the gate is skipped.
-      - doc_scripts/**/*.sh
-      - '{{.ROOT_DIR}}/target/release/ocx'
     cmds:
       - task: default
         vars:

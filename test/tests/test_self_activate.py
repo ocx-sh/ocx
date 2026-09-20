@@ -952,6 +952,13 @@ def test_real_env_sh_loads_bash_completions_when_interactive(ocx_binary: Path, o
     show the registered completion.
     """
     env_sh, env = _generate_real_env_sh(ocx_binary, ocx_home)
+    # An interactive shell takes the terminal away from whoever runs the suite
+    # unless the worker has none; conftest.pytest_configure detaches it.
+    if "PYTEST_XDIST_WORKER" in os.environ:
+        assert os.getsid(0) == os.getpid(), (
+            "xdist worker must be its own session leader (test/conftest.py "
+            "pytest_configure) before any test spawns an interactive shell"
+        )
     result = subprocess.run(
         ["bash", "-i", "-c", f'. "{env_sh}"; complete -p ocx'],
         capture_output=True,

@@ -1,6 +1,7 @@
 """Shared fixtures and hooks for all test suites (tests/ and recordings/)."""
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import importlib.util
 import os
@@ -51,6 +52,16 @@ def _wait_for_reachable(
         if attempt < attempts - 1:
             sleep(delay_seconds)
     return False
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Each xdist worker gets its own session, so nothing a test spawns can
+    reach the terminal `task verify` runs in -- no tcsetpgrp() steal, no
+    SIGTTIN. The controller keeps it, so Ctrl-C still works.
+    """
+    if hasattr(config, "workerinput"):
+        with contextlib.suppress(OSError):
+            os.setsid()
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
