@@ -56,8 +56,9 @@
 # enumeration: the CI-only over-budget member (1.607 s, 0.978 s here) lives in
 # the one a list written off a local run would never have reached.
 #
-# On CI this covers 11 tests over budget (37.6 s down to 1.6 s) and three more
-# at 0.73-0.84 s that a slower runner will push over.
+# On CI this covers 11 tests over budget and two more just under it that a
+# slower runner will push over — 30.2 s down to 1.8 s over, 0.67 s and 0.62 s
+# under, measured on verify-basic.yml run 35521310964.
 ocx_shell *live_*
 
 # --- Permanent: a wait the HTTP grammar floors ----------------------------
@@ -111,7 +112,18 @@ ocx_test_support::workspace_structure tests_hold_no_inert_loop
 # `--no-deps` (129 KB, and 2.23 s -> 0.09 s for doing so) — which left it the
 # sole full-metadata consumer in the binary, paying cold what it used to share
 # warm with two others. That is an accepted trade, not a regression to chase.
+#
+# Both lines below are now measured on the runner, on verify-basic.yml run
+# 35521310964: `release_feature_set_excludes_testing_seams` 0.898 s,
+# `deps_direction` 2.499 s. The `taskset -c 0-3` proxy read those as ~0.9 s
+# each, so it under-reads by 1.0x on one and 2.7x on the other — a proxy
+# bounds nothing, and that is why the runner is the authority here.
+#
+# `release_feature_set_excludes_testing_seams` sits UNDER the budget on that
+# run, so the gate prints it every time as `stale allowlist candidate`. That
+# line is expected and the entry stays: 0.898 s is 90% of the budget, and the
+# same measurement shows its sibling at 2.7x the proxy's reading. Deleting it
+# on the strength of one sub-budget sample buys nothing and reds the gate on
+# the next slower runner, for a test nobody touched.
 ocx_test_support::workspace_structure release_feature_set_excludes_testing_seams
-# 0.91 s on the proxy, listed because the proxy UNDER-reads real CI by roughly
-# 1.1-1.3x: a latent red is worse than one arguably-unnecessary line.
 ocx_test_support::workspace_structure deps_direction
