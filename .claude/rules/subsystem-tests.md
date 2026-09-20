@@ -138,7 +138,11 @@ the suite an unmodified proof while `ocx_lib` is taken apart. Four mechanisms:
   inertness check on purpose, so commenting an assertion out is refused exactly like deleting
   it; a wholly new test function or `Test*` class, or a new
   `test/tests/**/*.py` module (never `conftest.py`, `__init__.py`, `pytest.ini`, `tox.ini`,
-  `setup.cfg`); edits to `test/pyproject.toml`, `test/taskfile.yml` and the three floor files.
+  `setup.cfg`); a change to any `test/` file a taskfile invokes (tooling the repo drives —
+  `test/scripts/*.sh` and friends — decided by scanning every taskfile's non-prose lines, with a
+  file the collected suite *names* still frozen, so `docker-compose.yml` cannot be thawed by the
+  task that starts it); edits to `test/pyproject.toml`, `test/taskfile.yml` and the three floor
+  files.
   A new def or class is exempt from the line checks but not from the rebinding checks — the
   shapes `scripts/test_diff_guard.py`'s docstring names (that list is the authority; it
   widens as adversaries find shapes). One `--allow <path>:<line>` exempts a single
