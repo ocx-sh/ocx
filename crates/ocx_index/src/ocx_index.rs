@@ -4805,9 +4805,15 @@ mod transport_wire_tests {
     /// old hard total deadline killed.
     #[tokio::test]
     async fn an_honest_slow_body_completes_however_long_it_takes() {
-        let idle_bound = Duration::from_millis(200);
+        // The absolute values buy nothing here — the claim is a *ratio*: the
+        // transfer outlasts a hard deadline of the idle bound's size while no
+        // single frame gap approaches that bound. `BODY` is 19 bytes, so the
+        // whole transfer is 19 × `interval` = 570 ms against a 150 ms bound:
+        // non-vacuity clears by 120 ms, and a frame has 120 ms of scheduling
+        // slack before it trips the bound (the old 50/200 pair had 150 ms).
+        let idle_bound = Duration::from_millis(150);
         let endpoint = StubIndexEndpoint::start(vec![Reply::Dribble {
-            interval: Duration::from_millis(50),
+            interval: Duration::from_millis(30),
             body: BODY,
         }])
         .await;
@@ -4909,20 +4915,25 @@ mod transport_wire_tests {
     /// **C-028 — the contract that makes dropping the total deadline
     /// detectable at all.**
     ///
-    /// The peer dribbles one byte every `idle_bound − ε`: it never trips the
-    /// per-frame bound and never approaches the 32 MiB byte cap, so nothing but
-    /// the outer cap can end it. C-021's two halves pass identically with or
+    /// The peer dribbles one byte per interval, well inside `idle_bound`: it
+    /// never trips the per-frame bound and never approaches the 32 MiB byte
+    /// cap, so nothing but the outer cap can end it. C-021's two halves pass identically with or
     /// without an outer cap, which is why C-021 alone is not enough.
     ///
     /// *Red-reachability:* remove `.timeout(hardening.outer_cap)` from
     /// `build_index_http_client` and this test hangs past the cap.
     #[tokio::test]
     async fn a_dribbling_peer_is_ended_by_the_outer_cap() {
-        let idle_bound = Duration::from_millis(500);
-        let outer_cap = Duration::from_secs(2);
+        // As above, a ratio rather than absolute values: `interval` must stay
+        // clear of `idle_bound` (210 ms of scheduling slack, against the old
+        // 200/500 pair's 300 ms) so only `outer_cap` can end the fetch, and
+        // `outer_cap` is what the run actually waits out — the whole cost of
+        // the test.
+        let idle_bound = Duration::from_millis(250);
+        let outer_cap = Duration::from_millis(600);
         let endpoint = StubIndexEndpoint::start(vec![Reply::DribbleForever {
             // Comfortably under the idle bound, so the idle bound never fires.
-            interval: Duration::from_millis(200),
+            interval: Duration::from_millis(40),
         }])
         .await;
         let transport = ReqwestIndexTransport::with_hardening(

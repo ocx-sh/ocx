@@ -38,11 +38,41 @@ use crate::transport_policy;
 pub(super) struct NativeTransport {
     client: crate::native::Client,
     auth: auth::Auth,
+    /// Wait before the first push restart. [`PUSH_RETRY_INITIAL_BACKOFF`]
+    /// everywhere but the wire tests, which shrink it so proving the restart
+    /// costs milliseconds instead of the shipped seconds.
+    push_retry_backoff: std::time::Duration,
 }
 
 impl NativeTransport {
     pub fn new(client: crate::native::Client, auth: auth::Auth) -> Self {
-        Self { client, auth }
+        Self {
+            client,
+            auth,
+            push_retry_backoff: PUSH_RETRY_INITIAL_BACKOFF,
+        }
+    }
+
+    /// Shrinks the restart backoff for a test that counts *requests*, not
+    /// seconds.
+    ///
+    /// The shipped 1 s + 2 s ladder is a thundering-herd control, and no
+    /// assertion in `push_wire_tests` reads the wait — they read how many
+    /// sessions were opened and which error came back. Waiting it out in real
+    /// time buys nothing and costs 3 s of every run.
+    /// `the_shipped_push_retry_backoff_is_one_second` is what stops this seam
+    /// from silently becoming the production value.
+    #[cfg(test)]
+    pub(super) fn with_push_retry_backoff(mut self, backoff: std::time::Duration) -> Self {
+        self.push_retry_backoff = backoff;
+        self
+    }
+
+    /// The restart backoff this transport will actually use — the seam
+    /// `the_shipped_push_retry_backoff_is_one_second` reads to pin the default.
+    #[cfg(test)]
+    pub(super) fn push_retry_backoff(&self) -> std::time::Duration {
+        self.push_retry_backoff
     }
 
     async fn auth_for(&self, image: &crate::native::Reference) -> crate::native::Auth {
@@ -816,6 +846,12 @@ const PUSH_RETRY_ATTEMPTS: u8 = 2;
 /// No jitter: two retries across at most four concurrent layers is not a
 /// thundering herd, and the spread jitter buys would be invisible against the
 /// per-request timeout.
+///
+/// The default [`NativeTransport::new`] installs into `push_retry_backoff`,
+/// which is the value every production transport carries; the wire tests are
+/// the only thing that ever overrides it, and
+/// `the_shipped_push_retry_backoff_is_one_second` pins this number against
+/// their override leaking back into the default.
 const PUSH_RETRY_INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl NativeTransport {
@@ -899,7 +935,7 @@ impl NativeTransport {
         })?;
 
         let mut attempt: u8 = 0;
-        let mut backoff = PUSH_RETRY_INITIAL_BACKOFF;
+        let mut backoff = self.push_retry_backoff;
         loop {
             let body = body_source.stream(Arc::clone(&on_progress)).await?;
             match self
