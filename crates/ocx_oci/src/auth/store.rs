@@ -545,6 +545,24 @@ mod tests {
             .expect("tokio runtime")
     }
 
+    /// A credential-helper name that cannot resolve to a binary on any host.
+    ///
+    /// Every test below that seeds `credsStore` / `credHelpers` means the same
+    /// thing: *route to the helper subsystem, and fail there because the
+    /// binary is not on PATH*. That only holds while the name is genuinely
+    /// absent — and `ecr-login`, which this module used to name, ships in
+    /// GitHub's Ubuntu runner image as `docker-credential-ecr-login`. The test
+    /// kept passing there for the wrong reason: it exec'd the real helper and
+    /// waited out its credential lookup, 0.79 s on CI against 0.10 s on a host
+    /// without it. Whatever a host happens to have installed is not something
+    /// a unit test may depend on in either direction.
+    ///
+    /// The pid suffix is what turns absence from an assumption about the host
+    /// into a property of the name.
+    fn absent_helper(role: &str) -> String {
+        format!("ocx-absent-{role}-helper-{}", std::process::id())
+    }
+
     // ─── get: empty-store semantics ───
 
     #[test]
@@ -564,7 +582,7 @@ mod tests {
     fn dockerconfigstore_put_writes_to_creds_store_when_no_per_registry_helper() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (_dir, path) = fresh_config_path();
-        std::fs::write(&path, r#"{"credsStore":"test"}"#).expect("seed config");
+        std::fs::write(&path, format!(r#"{{"credsStore":"{}"}}"#, absent_helper("fallback"))).expect("seed config");
         let store = DockerCredentialStore::with_path(path, opts(false));
         let cred = Credential::basic("u", SecretString::from("p".to_string()));
         // Helper does not exist; the contract here is that the call routes to
@@ -584,14 +602,19 @@ mod tests {
         let (_dir, path) = fresh_config_path();
         std::fs::write(
             &path,
-            r#"{"credsStore":"global","credHelpers":{"ghcr.io":"ecr-login"}}"#,
+            format!(
+                r#"{{"credsStore":"{}","credHelpers":{{"ghcr.io":"{}"}}}}"#,
+                absent_helper("fallback"),
+                absent_helper("per-registry"),
+            ),
         )
         .expect("seed config");
         let store = DockerCredentialStore::with_path(path, opts(false));
         let cred = Credential::basic("u", SecretString::from("p".to_string()));
         let result = rt().block_on(store.put("ghcr.io", &cred));
-        // Either ecr-login or global - both are helpers (not on PATH for this
-        // test). Asserting Helper variant pins the routing decision.
+        // Both names are helpers and both are absent (`absent_helper`), so
+        // the Helper variant pins the routing decision without depending on
+        // what the host has installed.
         assert!(
             matches!(result, Err(AuthError::Helper(_))),
             "credHelpers route must reach helper subsystem; got: {result:?}",
@@ -789,7 +812,11 @@ mod tests {
     fn dockerconfigstore_delete_removes_from_cred_helpers() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (_dir, path) = fresh_config_path();
-        std::fs::write(&path, r#"{"credHelpers":{"ghcr.io":"test"}}"#).expect("seed");
+        std::fs::write(
+            &path,
+            format!(r#"{{"credHelpers":{{"ghcr.io":"{}"}}}}"#, absent_helper("per-registry")),
+        )
+        .expect("seed");
         let store = DockerCredentialStore::with_path(path, opts(false));
         // Helper does not exist on PATH; the facade's contract here is that
         // delete swallows helper-not-found / not-on-path errors when there is
@@ -818,7 +845,11 @@ mod tests {
         // covered at the acceptance layer in test_login.py.
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (_dir, path) = fresh_config_path();
-        std::fs::write(&path, r#"{"credHelpers":{"ghcr.io":"test"}}"#).expect("seed");
+        std::fs::write(
+            &path,
+            format!(r#"{{"credHelpers":{{"ghcr.io":"{}"}}}}"#, absent_helper("per-registry")),
+        )
+        .expect("seed");
         let store = DockerCredentialStore::with_path(path, opts(false));
         // No helper on PATH ⇒ Helper(NotOnPath). The acceptance test layer
         // verifies the sentinel-string path with a real mock helper.
@@ -868,7 +899,11 @@ mod tests {
     fn dockerconfigstore_get_returns_credential_from_helper() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (_dir, path) = fresh_config_path();
-        std::fs::write(&path, r#"{"credHelpers":{"ghcr.io":"test"}}"#).expect("seed");
+        std::fs::write(
+            &path,
+            format!(r#"{{"credHelpers":{{"ghcr.io":"{}"}}}}"#, absent_helper("per-registry")),
+        )
+        .expect("seed");
         let store = DockerCredentialStore::with_path(path, opts(false));
         // Mock-helper wiring lives in acceptance tests; here we just exercise
         // the dispatch path without asserting helper behavior.
