@@ -77,12 +77,14 @@ jobs:
       - name: Validate AI configuration
         run: task claude:tests
 
-  # Linux is the only runner here (D5): basic is the tier a draft pull
-  # request pays for, so the Windows and macOS unit legs are
-  # `verify-deep.yml`'s `build` matrix — the same `cargo nextest run
-  # --workspace --profile ci` on every non-draft PR, the merge queue and
-  # every push to `main`. `.claude/tests/test_workflows.py` pins both
-  # halves of that partition.
+  # Linux is the only runner here (D5): basic is the tier a pull request pays
+  # for, so the Windows and macOS unit legs are `verify-deep.yml`'s `build`
+  # matrix — the same `cargo nextest run --workspace --profile ci`, but on
+  # the merge queue, every push to `main` and `workflow_dispatch` only. No
+  # pull request fires the deep tier, so a PR touching `cfg(windows)` or
+  # `cfg(target_os = "macos")` code wants `gh workflow run verify-deep.yml
+  # --ref <branch>`. `.claude/tests/test_workflows.py` pins both halves of
+  # that partition.
   smoke:
     name: Smoke (Linux)
     runs-on: ubuntu-latest
@@ -270,9 +272,10 @@ jobs:
     # The per-verb smoke tier (`task test:smoke`, plan_crate_split_workspace.md
     # C-012 – C-015): one marked happy path per visible top-level verb, run in
     # parallel against the acceptance registry only, inside a 90 s wall-clock
-    # budget, and the only acceptance job of this workflow: the full suite
-    # with the Sigstore stack is `verify-deep.yml`'s `acceptance-tests`, per
-    # non-draft PR. The same setup as that job minus everything the Sigstore
+    # budget, and the only acceptance job any pull request runs: the full
+    # suite with the Sigstore stack is `verify-deep.yml`'s `acceptance-tests`,
+    # which fires on `main`, the queue and `workflow_dispatch` but on no pull
+    # request at all. The same setup as that job minus everything the Sigstore
     # stack needs — no `--profile sigstore`, no readiness gate, no stack
     # logs — because `test_smoke_coverage.py` asserts that no marked
     # test takes the `sigstore_stack` / `identity_token` fixtures. The schema

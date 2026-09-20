@@ -255,7 +255,7 @@ When edit any `.claude/` artifact:
 - **Hook safety**: no `set -e` in PostToolUse hooks, conditional log trim
 - **Taskfile robustness**: empty file list guards for lint tasks
 - **Hook logic** (`test_hooks.py`): the surviving Claude hooks' pure logic, plus the *call sites* of the commit gate (`task release:prepare` asks for a full mark first; `task verify:mark` can never hand-write a `full` one). The gate itself is `scripts/commit_gate.py`, run by git through `.githooks/`, and shown red and green by its own `--self-test` under `task scripts:self-test` — a Claude hook never sees a commit, so it is not tested as one
-- **Workflow shape** (`test_workflows.py`): every `paths:`/`paths-ignore:` entry matches a tracked file; `verify-deep.yml` fires per non-draft PR, in the merge queue and on push to `main`
+- **Workflow shape** (`test_workflows.py`): every `paths:`/`paths-ignore:` entry matches a tracked file; `verify-deep.yml` fires on **no** pull request (opt-in via `workflow_dispatch`), in the merge queue and on push to `main`
 
 ### When to extend the tests
 
