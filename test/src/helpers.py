@@ -78,20 +78,86 @@ def compose_up() -> None:
     )
 
 
+def registry_accepts_writes(registry: str) -> bool:
+    """Return True if the registry can still start a blob upload.
+
+    `GET /v2/` answers 200 from a registry whose storage is full, and the
+    primary one stores to a 2 GB tmpfs that fills up over a day of runs. The
+    suite then pushes into 500s and reds in the thousands with no test naming
+    the cause. This asks the question the suite actually depends on.
+    """
+    request = urllib.request.Request(
+        f"http://{registry}/v2/ocx-write-probe/blobs/uploads/", method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            location = response.headers.get("Location")
+            accepted = response.status in (201, 202)
+    except urllib.error.HTTPError as refusal:
+        return refusal.code in (401, 403, 405)  # answering, just not to us
+    except (urllib.error.URLError, OSError):
+        return False
+    if location:  # do not leave the probe upload behind
+        target = location if location.startswith("http") else f"http://{registry}{location}"
+        try:
+            urllib.request.urlopen(urllib.request.Request(target, method="DELETE"), timeout=5)
+        except (urllib.error.URLError, OSError):
+            pass
+    return accepted
+
+
+def _recycle_registry() -> None:
+    """Recreate the primary registry container, discarding its tmpfs.
+
+    A restart is not enough on some daemons -- the volume is recreated with
+    the container, not with the process. Serialized on the same host-wide lock
+    compose bring-up uses, because a sibling worktree shares this container.
+    """
+    import fcntl  # POSIX-only, imported where used like the bring-up lock below
+
+    _COMPOSE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with _COMPOSE_LOCK.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "rm", "-sf", "registry"],
+            capture_output=True, check=False,
+        )
+        subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "registry"],
+            capture_output=True, check=False,
+        )
+
+
 def start_registry(registry: str) -> None:
-    """Start the registry via docker-compose if it is not already running."""
-    if registry_is_reachable(registry):
+    """Start the registry via docker-compose if it is not already running.
+
+    Reachable is not enough: a registry whose storage is full answers every
+    read and fails every write, so it is recycled rather than handed to the
+    suite.
+    """
+    if registry_is_reachable(registry) and registry_accepts_writes(registry):
         return
 
-    compose_up()
+    if registry_is_reachable(registry):
+        print(
+            f"registry at {registry} is reachable but refuses writes (storage full?) — recreating it",
+            file=sys.stderr,
+        )
+        _recycle_registry()
+    else:
+        compose_up()
 
-    # Wait for the registry to become reachable (up to 15 s).
-    for _ in range(30):
-        if registry_is_reachable(registry):
+    # Wait for the registry to answer and to accept a write (up to 30 s).
+    for _ in range(60):
+        if registry_is_reachable(registry) and registry_accepts_writes(registry):
             return
         time.sleep(0.5)
 
-    raise RuntimeError(f"Registry at {registry} did not become reachable")
+    raise RuntimeError(
+        f"Registry at {registry} did not become writable — reachable="
+        f"{registry_is_reachable(registry)}. Check `docker logs` for "
+        f"'no space left on device': its store is a 2 GB tmpfs."
+    )
 
 
 SIGSTORE_DIR = COMPOSE_FILE.parent / "sigstore"
