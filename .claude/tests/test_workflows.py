@@ -5,19 +5,20 @@ Two shapes the crate split can break without any workflow going red:
 - a `paths:` / `paths-ignore:` entry whose last file moved. The workflow then
   never fires, and a workflow that never fires is a green nobody can tell
   from a pass. Every entry must match at least one tracked file.
-- `verify-deep.yml`'s trigger shape, which is what makes it a per-PR gate:
-  `pull_request` into `main` with `ready_for_review` among its types (GitHub's
-  default types omit it, so without it the workflow never re-fires when a
-  draft is marked ready), `push` to `main` (the one full run over the tree a
-  rebase-only merge actually landed, DX-16), and the draft guard on every job.
+- `verify-deep.yml`'s trigger shape, which is what makes it a manual gate:
+  NO `pull_request` trigger and no job guarding on a `github.event.pull_request`
+  context (a deep run is ≈113 runner-minutes against basic's ≈18, so it is
+  opt-in per branch), `workflow_dispatch` — now the only way a human runs it —
+  and `push` to `main` (the one full run over the tree a rebase-only merge
+  actually landed, DX-16).
 - the merge-queue shape of BOTH tiers — `merge_group` and a
   `cancel-in-progress` that leaves queue runs alone — since either workflow's
   checks can be marked required.
-- the tier partition (D5): `verify-basic.yml` is what a draft pull request
-  pays for, so it runs on Linux only, and the Windows and macOS unit legs
-  are `verify-deep.yml`'s `build` matrix. A leg re-added to basic is a cost
-  every push pays twice; a leg dropped from deep's matrix is a
-  `cfg(windows)` / `cfg(target_os = "macos")` arm nothing compiles.
+- the tier partition (D5): `verify-basic.yml` is what a pull request pays
+  for, so it runs on Linux only, and the Windows and macOS unit legs are
+  `verify-deep.yml`'s `build` matrix. A leg re-added to basic is a cost every
+  push pays twice; a leg dropped from deep's matrix is a `cfg(windows)` /
+  `cfg(target_os = "macos")` arm nothing compiles anywhere.
 
 The workflows are read with PyYAML (D11). One YAML 1.1 trap: the bare key
 `on` loads as the boolean `True`, so `_on` looks it up under both spellings.
@@ -48,18 +49,39 @@ TIERS = (VERIFY_BASIC, VERIFY_DEEP)
 # belong to their family, so a version pin never reads as a lost OS.
 OS_FAMILIES = ("ubuntu", "macos", "windows")
 
-# `merge_group` events carry no `pull_request` object, so the event-name half
-# is what keeps a queue run alive; `draft == false` alone would skip it.
-DRAFT_GUARD = "github.event_name != 'pull_request' || github.event.pull_request.draft == false"
+# No deep job may condition on a pull request any more: the workflow does not
+# fire on one, so such a guard is either dead text or evidence the trigger came
+# back. The whole `github.event.pull_request` context is the needle, so the
+# former draft guard and any other shape of it read the same.
+PULL_REQUEST_CONTEXT = "github.event.pull_request"
+# Both checks below this point are negative — "`pull_request` is not among the
+# triggers", "no job's `if:` names that context" — and a negative over a
+# collection passes identically when the collection is empty, mis-keyed, or
+# read by a loader that returned nothing. The reader self-test that used to
+# floor this file went with the draft-guard parser it proved, so these two sets
+# are the floor instead: each check asserts what it *saw* before asserting what
+# it did not. They are exact rather than a count, so the failure names the
+# drift. Adding a trigger or a job to the deep tier reds one of them, which is
+# the review it deserves.
+DEEP_TRIGGERS = frozenset({"workflow_dispatch", "workflow_call", "push", "merge_group", "schedule"})
+DEEP_JOBS = frozenset(
+    {
+        "index-conformance-drift",
+        "build",
+        "cross-compile",
+        "acceptance-tests",
+        "test-results",
+        "satellite-verify",
+    }
+)
 # A cancelled merge-queue run counts as a failed check and drops the entry
 # from the queue, so queue runs are never cancelled; `main` keeps its carve-out.
 MERGE_QUEUE_SAFE_CANCEL = (
     "${{ !startsWith(github.ref, 'refs/heads/gh-readonly-queue/') && github.ref != 'refs/heads/main' }}"
 )
-PULL_REQUEST_TYPES = frozenset({"opened", "synchronize", "reopened", "ready_for_review"})
-# Exact, not "contains the draft guard": `(event == 'push') && (guard)` keeps
-# the guard test green while no pull request ever reaches the 3-OS matrix.
-DEEP_BUILD_IF = f"(github.event_name != 'schedule' || inputs.full) && ({DRAFT_GUARD})"
+# Exact, not "contains the schedule clause": any wider `if:` can keep that
+# clause and still admit no dispatch, which leaves the 3-OS matrix unreachable.
+DEEP_BUILD_IF = "github.event_name != 'schedule' || inputs.full"
 
 
 def _load(workflow: Path) -> dict:
@@ -129,29 +151,46 @@ def test_path_filters_match_tracked_files(workflow: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# C-016: verify-deep.yml is a per-PR gate that survives the merge queue
+# C-016: verify-deep.yml is a manual gate that survives the merge queue
 # ---------------------------------------------------------------------------
 
 
-def test_deep_pull_request_trigger_includes_ready_for_review() -> None:
-    types = set(_on(VERIFY_DEEP)["pull_request"]["types"])
-    assert PULL_REQUEST_TYPES <= types, (
-        f"verify-deep.yml `on.pull_request.types` is {sorted(types)}, missing "
-        f"{sorted(PULL_REQUEST_TYPES - types)} — without `ready_for_review` the workflow never "
-        f"fires when a draft is marked ready, and the draft guard has nothing to let through"
+def test_deep_does_not_run_on_pull_requests() -> None:
+    """The deep tier is opt-in, not per-PR.
+
+    A deep run is ≈113 runner-minutes against `verify-basic.yml`'s ≈18, most of
+    it Windows and macOS minutes, and every pull request paid it on every push.
+    Re-adding the trigger is a real decision about cost and about what the
+    basic tier is for — so it reds here rather than arriving in a diff nobody
+    reads. The coverage this gives up is named in subsystem-ci.md.
+    """
+    on = _on(VERIFY_DEEP)
+    assert "pull_request" not in on, (
+        f"verify-deep.yml `on` has {sorted(on)}, including `pull_request` — the deep tier "
+        f"is opt-in per branch (`gh workflow run verify-deep.yml --ref <branch>`), and a "
+        f"pull request pays for the basic tier only. If this is deliberate, this assertion "
+        f"and subsystem-ci.md's 'Verification tiers' table change together"
+    )
+    # The floor: the assertion above is a negative, and an `on:` block this
+    # reader got back empty or under a key it does not know would satisfy it
+    # while proving nothing.
+    assert set(on) == DEEP_TRIGGERS, (
+        f"verify-deep.yml `on` is {sorted(on)}, expected exactly {sorted(DEEP_TRIGGERS)} — "
+        f"a trigger gained or lost changes when the deep tier runs, and the `pull_request` "
+        f"assertion above is only evidence if this reader saw the real `on:` block"
     )
 
 
-def test_deep_pull_requests_are_scoped_to_main() -> None:
-    """The branch filter, not only the event. `pull_request` pointed anywhere
-    but `main` leaves every PR into `main` on the basic tier, which has no
-    Windows or macOS leg to fall back on (D5) — and every assertion about the
-    3-OS matrix below stays green while nothing reaches it."""
-    branches = (_on(VERIFY_DEEP)["pull_request"] or {}).get("branches") or []
-    assert "main" in branches, (
-        f"verify-deep.yml `on.pull_request.branches` is {branches}, missing `main` — "
-        f"no pull request into `main` fires the deep tier, so the 3-OS build matrix "
-        f"runs on none of them"
+def test_deep_is_dispatched_by_hand() -> None:
+    """`workflow_dispatch` is now the load-bearing trigger: with `pull_request`
+    gone it is the only way a branch gets Windows, macOS or full-acceptance
+    coverage before it lands. Lose it and the deep tier runs nowhere but on
+    `main`, after the merge."""
+    on = _on(VERIFY_DEEP)
+    assert "workflow_dispatch" in on, (
+        f"verify-deep.yml `on` has {sorted(on)} and no `workflow_dispatch` — the deep tier "
+        f"no longer runs per pull request, so this is the only way a human runs it on a "
+        f"branch; without it nothing deep happens until the merge lands on `main`"
     )
 
 
@@ -180,74 +219,33 @@ def test_each_tier_triggers_in_the_merge_queue(workflow: Path) -> None:
     )
 
 
-def _unwrap(term: str) -> str:
-    """A term without its surrounding whitespace and one enclosing pair of parentheses."""
-    term = term.strip()
-    if term.startswith("(") and term.endswith(")"):
-        return term[1:-1].strip()
-    return term
+def test_no_deep_job_guards_on_a_pull_request() -> None:
+    """The other half of the trigger removal, and the half a diff hides.
 
-
-def _is_conjunct(guard: str, condition: str) -> bool:
-    """True when ``guard`` is the whole ``condition`` or one of its top-level `&&` terms.
-
-    `!(guard)`, `(guard) || x`, `x || (y && guard)` and `(guard && x) || y`
-    all contain the guard and all let a draft through — a depth-0 `||` means
-    the other disjunct reaches the job without it — so any depth-0 `||`
-    disqualifies, and otherwise one depth-0 `&&` term must be the guard.
+    Every job used to carry `github.event_name != 'pull_request' ||
+    github.event.pull_request.draft == false`. With no `pull_request` trigger
+    that term is always true — dead text that reads like a live gate, and the
+    shape someone restoring the trigger would find already in place. The needle
+    is the whole `github.event.pull_request` context rather than that one
+    expression, so a rewritten guard reds too.
     """
-    expression = condition.strip()
-    if expression.startswith("${{") and expression.endswith("}}"):
-        expression = expression[3:-2].strip()
-    if _unwrap(expression) == guard:
-        return True
-    terms: list[str] = []
-    depth = start = index = 0
-    while index < len(expression):
-        char = expression[index]
-        if char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-        elif depth == 0 and expression.startswith("||", index):
-            return False
-        elif depth == 0 and expression.startswith("&&", index):
-            terms.append(expression[start:index])
-            start = index = index + 2
-            continue
-        index += 1
-    terms.append(expression[start:])
-    return any(_unwrap(term) == guard for term in terms)
-
-
-@pytest.mark.parametrize(
-    ("condition", "guarded"),
-    [
-        pytest.param(DRAFT_GUARD, True, id="bare"),
-        pytest.param(f"(x || y) && ({DRAFT_GUARD})", True, id="trailing-conjunct"),
-        pytest.param(f"${{{{ !cancelled() && ({DRAFT_GUARD}) }}}}", True, id="expression-wrapped"),
-        pytest.param(f"!({DRAFT_GUARD})", False, id="negated"),
-        pytest.param(f"({DRAFT_GUARD}) || x", False, id="disjunct"),
-        pytest.param(f"x || {DRAFT_GUARD} && y", False, id="under-an-or"),
-        pytest.param(f"x || (y && {DRAFT_GUARD})", False, id="conjunct-inside-a-disjunct"),
-        pytest.param(f"({DRAFT_GUARD} && x) || y", False, id="guarded-disjunct-beside-an-open-one"),
-        pytest.param("", False, id="absent"),
-    ],
-)
-def test_the_guard_reader_wants_a_conjunct(condition: str, guarded: bool) -> None:
-    assert _is_conjunct(DRAFT_GUARD, condition) is guarded
-
-
-def test_every_deep_job_carries_the_draft_guard() -> None:
     jobs = _load(VERIFY_DEEP)["jobs"]
-    assert jobs, "verify-deep.yml has no jobs"
-    unguarded = [
-        name for name, job in jobs.items() if not _is_conjunct(DRAFT_GUARD, str(job.get("if", "")))
-    ]
-    assert not unguarded, (
-        f"verify-deep.yml jobs without the job-level draft guard `{DRAFT_GUARD}`: {unguarded}. "
-        f"Every job skips a draft pull request — compose it with an existing `if:` as "
-        f"`(existing) && (guard)`"
+    # The floor, before the negative below: a job set this reader got back
+    # empty — or six jobs it read past because the loader returned them under
+    # some other shape — sweeps clean and says nothing.
+    assert set(jobs) == DEEP_JOBS, (
+        f"verify-deep.yml jobs are {sorted(jobs)}, expected exactly {sorted(DEEP_JOBS)} — a "
+        f"job added here must be checked for a pull-request guard by the assertion below, "
+        f"and one removed means this sweep now reads less than it claims to"
+    )
+    guarded = {
+        name: job["if"] for name, job in jobs.items() if PULL_REQUEST_CONTEXT in str(job.get("if", ""))
+    }
+    assert not guarded, (
+        f"verify-deep.yml jobs whose `if:` reads `{PULL_REQUEST_CONTEXT}`: {guarded}. The "
+        f"workflow has no `pull_request` trigger, so that context is never populated: the "
+        f"term is dead text if the trigger is still gone, and a re-added trigger belongs "
+        f"in `test_deep_does_not_run_on_pull_requests` above, not here"
     )
 
 
@@ -422,20 +420,22 @@ def test_basic_runs_on_linux_only() -> None:
     }
     assert not off_linux, (
         f"verify-basic.yml jobs not on a literal `ubuntu-*` runner: {off_linux}. Basic is the "
-        f"tier a draft pays for (D5); Windows and macOS unit coverage is verify-deep.yml's "
-        f"`build` matrix, so a leg here runs the same suite twice per non-draft push"
+        f"tier a pull request pays for (D5); Windows and macOS unit coverage is "
+        f"verify-deep.yml's `build` matrix, so a leg here runs the same suite twice on every "
+        f"push to `main`"
     )
 
 
 def test_deep_build_matrix_covers_the_three_oses() -> None:
-    """The matrix, and everything between a pull request and it: the `if:`
-    that admits non-draft PRs, the `runs-on` that reads the matrix, and no
-    `exclude` carving an OS back out."""
+    """The matrix, and everything between a dispatch and it: the `if:` that
+    admits one, the `runs-on` that reads the matrix, and no `exclude` carving
+    an OS back out."""
     build = _load(VERIFY_DEEP)["jobs"]["build"]
     assert build.get("if") == DEEP_BUILD_IF, (
         f"verify-deep.yml `build.if` is `{build.get('if')}`, expected `{DEEP_BUILD_IF}` — any "
-        f"other shape can keep the draft guard and still admit no pull request, which leaves "
-        f"every PR with zero Windows/macOS coverage (basic has none, D5)"
+        f"other shape can keep the schedule clause and still admit no dispatch, which leaves "
+        f"a branch with zero Windows/macOS coverage (basic has none, D5, and no pull request "
+        f"fires this workflow)"
     )
     assert build.get("runs-on") == "${{ matrix.job.os }}", (
         f"verify-deep.yml `build.runs-on` is `{build.get('runs-on')}`, not "
@@ -537,7 +537,7 @@ def _runs(workflow: str, command: str) -> bool:
     subsystem-ci.md's deliberate shape: `verify-basic.yml`'s lint steps never
     block the test results and the job's last step exits 1 on their outcomes.
 
-    `if:` is deliberately not weighed here. A draft-PR or platform condition
+    `if:` is deliberately not weighed here. A trigger or platform condition
     is scheduling, not disarming, and which events fire which workflow is
     already this file's subject above.
     """

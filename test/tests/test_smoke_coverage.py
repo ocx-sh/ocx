@@ -18,9 +18,11 @@ Both read the test files with `ast`; nothing here imports a test module, so a
 module whose import needs the registry cannot make this file's verdict depend
 on it.
 
-(c) the tier is only the *basic* gate because the deep one still runs per pull
-    request: `verify-deep.yml` fires on every non-draft PR and in the merge
-    queue, which is a trigger shape and so is checked here too.
+(c) the tier is the *whole* automatic pull-request gate, because the deep one
+    is opt-in: `verify-deep.yml` has no `pull_request` trigger, is reached by
+    `workflow_dispatch`, and still runs in the merge queue. That is a trigger
+    shape and so is checked here too — this tier's coverage obligation follows
+    directly from it.
 """
 from __future__ import annotations
 
@@ -334,19 +336,21 @@ def test_smoke_selection_is_disjoint_from_signing() -> None:
 
 
 # ---------------------------------------------------------------------------
-# (c) the deep tier still runs per pull request
+# (c) the deep tier does NOT run per pull request — this tier is the gate
 # ---------------------------------------------------------------------------
 
 
-def test_deep_workflow_runs_per_pull_request_and_in_the_merge_queue() -> None:
-    """`verify-deep.yml` fires on non-draft pull requests and in the merge queue.
+def test_deep_workflow_is_opt_in_and_runs_in_the_merge_queue() -> None:
+    """`verify-deep.yml` has no `pull_request` trigger, so this tier is the gate.
 
-    `pull_request.types` must name `ready_for_review`: GitHub's default types
-    (`opened`, `synchronize`, `reopened`) omit it, and without it the workflow
-    never re-fires when a draft is marked ready — the job-level draft guard
-    then has nothing to let through. `merge_group` is what runs the checks on
-    the queued merge commit. `.claude/tests/test_workflows.py` asserts the
-    same shape plus the guard on every job and the queue-safe cancellation.
+    A deep run is ≈113 runner-minutes against the basic tier's ≈18, so it is
+    opt-in per branch (`gh workflow run verify-deep.yml --ref <branch>`) —
+    which makes `workflow_dispatch` load-bearing rather than incidental. What
+    a pull request now gets automatically is the smoke tier asserted above and
+    nothing else, which is why (a)'s per-verb obligation is not negotiable.
+    `merge_group` is what runs the checks on the queued merge commit.
+    `.claude/tests/test_workflows.py` asserts the same shape plus the absence
+    of any per-job pull-request guard and the queue-safe cancellation.
     """
     import yaml  # a suite dependency (test/pyproject.toml); nothing above needs it
 
@@ -354,17 +358,14 @@ def test_deep_workflow_runs_per_pull_request_and_in_the_merge_queue() -> None:
     # PyYAML reads the bare `on` key as the YAML 1.1 boolean `True`.
     triggers = workflow.get("on", workflow.get(True))
     assert isinstance(triggers, dict), f"verify-deep.yml has no `on:` mapping: {triggers!r}"
-    pull_request = triggers.get("pull_request")
-    assert isinstance(pull_request, dict), (
-        f"verify-deep.yml `on` is {sorted(triggers)} — no `pull_request` trigger, so the deep "
-        f"tier never runs for a pull request and the smoke tier is the only gate"
+    assert "pull_request" not in triggers, (
+        f"verify-deep.yml `on` is {sorted(triggers)}, including `pull_request` — the deep tier "
+        f"is opt-in, and this file's smoke-tier obligations are written on the premise that a "
+        f"pull request gets the basic tier and nothing more. Change both together"
     )
-    required = {"opened", "synchronize", "reopened", "ready_for_review"}
-    types = set(pull_request.get("types") or ())
-    assert required <= types, (
-        f"verify-deep.yml `on.pull_request.types` is {sorted(types)}, missing "
-        f"{sorted(required - types)} — without `ready_for_review` the workflow never fires "
-        f"when a draft is marked ready"
+    assert "workflow_dispatch" in triggers, (
+        f"verify-deep.yml `on` is {sorted(triggers)} — no `workflow_dispatch`, so with no "
+        f"`pull_request` trigger either there is no way to run the deep tier on a branch at all"
     )
     assert "merge_group" in triggers, (
         f"verify-deep.yml `on` is {sorted(triggers)} — no `merge_group`, so nothing runs the "

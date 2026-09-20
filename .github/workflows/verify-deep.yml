@@ -1,6 +1,24 @@
 name: Verify Deep
 
+# The deep tier of the two-tier gate (subsystem-ci.md "Verification tiers"):
+# the 3-OS build + unit matrix, the Windows-arm64 cross-compile, the full
+# acceptance suite with the Sigstore stack, and `satellite-verify`. Runs on
+# demand, on `main`, in the merge queue and weekly — NOT per pull request,
+# because a deep run is ≈113 runner-minutes against the basic tier's ≈18, most
+# of it Windows and macOS minutes (subsystem-ci.md "Cost Factors"), and every
+# PR paid it on every push. `verify-basic.yml` is the whole automatic PR gate
+# now; the deep tier is opt-in per branch:
+#
+#     gh workflow run verify-deep.yml --ref <branch>
+#
+# STATED RESIDUAL — no pull request compiles the `cfg(windows)` /
+# `cfg(target_os = "macos")` arms or runs the full acceptance suite unless
+# someone dispatches this workflow. The push to `main` below is where that
+# coverage lands automatically, which is after the merge, not before it.
+
 on:
+  # The manual invocation, and with the `pull_request` trigger gone the only
+  # way a branch gets deep coverage before it lands.
   workflow_dispatch:
   # Reusable: composed into the pre-release `release-readiness.yml` gate so a
   # single dispatch reports one GO/NO-GO across all platforms.
@@ -10,26 +28,20 @@ on:
         description: Run the build / cross-compile / acceptance matrix, not just the drift check.
         type: boolean
         default: true
-  # The deep tier of the two-tier gate (subsystem-ci.md "Verification tiers"):
-  # every pull request once it is out of draft — the job-level guard below
-  # skips drafts, and `ready_for_review` is listed because GitHub's default
-  # types omit it, so without it the workflow never fires when a draft is
-  # marked ready — the merge queue, so the required checks run again on the
-  # queued merge commit, and every push to `main`: merges are rebase-only and
-  # there is no queue, so a PR verified at its own head lands on a `main` that
-  # moved since, and this is the one full run over the tree that actually
-  # landed (DX-16). `verify-basic.yml` runs its smoke tier on the same push.
+  # Every push to `main`: merges are rebase-only and there is no queue, so a PR
+  # verified at its own head lands on a `main` that moved since, and this is
+  # the one full run over the tree that actually landed (DX-16).
+  # `verify-basic.yml` runs its smoke tier on the same push.
   # remove push: [main] once merge_group is live (D6)
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+  # The merge queue, so a deep check the owner later marks required can still
+  # run on the queued merge commit.
   merge_group: {}
   # Weekly, for `index-conformance-drift` only — it is the one check here that
   # can go stale without anyone touching this repository. The build / cross-compile
   # / acceptance matrix stays off the cron: a cron'd 3-OS build plus Docker
-  # acceptance is real money for a signal the per-PR run already produces.
+  # acceptance is real money for a signal the push to `main` already produces.
   schedule:
     - cron: '0 6 * * 1'
 
@@ -53,11 +65,7 @@ concurrency:
 jobs:
   index-conformance-drift:
     name: Index Conformance Drift
-    # Draft pull requests skip every job of this workflow — each carries this
-    # guard (`.claude/tests/test_workflows.py` checks that). `merge_group`
-    # events have no `pull_request` object, so the event-name half is what
-    # keeps a queue run alive; `draft == false` alone would skip it.
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # Unconditional: this is the job the weekly cron exists for.
     runs-on: ubuntu-latest
     # Reads a public repository through `gh api`; nothing here writes.
     permissions:
@@ -80,7 +88,7 @@ jobs:
     # gains a `schedule:` trigger — a GO verdict over no build at all.
     # `inputs.full` is null on our own dispatch/cron and true (its default) on
     # every call, so the expensive legs are tied to the call, not the trigger.
-    if: (github.event_name != 'schedule' || inputs.full) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    if: github.event_name != 'schedule' || inputs.full
     runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
@@ -183,7 +191,7 @@ jobs:
 
   cross-compile:
     name: Cross-compile (${{ matrix.job.name }})
-    if: (github.event_name != 'schedule' || inputs.full) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    if: github.event_name != 'schedule' || inputs.full
     runs-on: ubuntu-latest
     container:
       image: messense/cargo-xwin
@@ -220,7 +228,6 @@ jobs:
   acceptance-tests:
     name: Acceptance (${{ matrix.job.name }})
     needs: [build, cross-compile]
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
@@ -379,7 +386,7 @@ jobs:
     name: Publish Deep Test Results
     needs: [build, cross-compile, acceptance-tests]
     runs-on: ubuntu-latest
-    if: ${{ !cancelled() && (github.event_name != 'schedule' || inputs.full) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || inputs.full) }}
     steps:
       - name: Download Artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -395,8 +402,9 @@ jobs:
   satellite-verify:
     name: Satellite Verify (ocx-mirror)
     # The schedule clause matches `build`: the weekly cron is the drift check
-    # only, and a mirror build is real money for a signal every PR produces.
-    if: (github.event_name != 'schedule' || inputs.full) && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    # only, and a mirror build is real money for a signal the push to `main`
+    # already produces.
+    if: github.event_name != 'schedule' || inputs.full
     # NON-BLOCKING until ocx-sh/ocx-mirror re-points at the split crates
     # (plan_crate_split_workspace.md DEC-4). The flip is deleting the
     # `continue-on-error` line below and nothing else; the ocx-mirror
