@@ -130,7 +130,8 @@ filed under. One level deep; these files do not point at each other.
 | Writing a `py_*` target, a `python.toolchain()` or `pip.parse()` call, a pytest suite, or running Gazelle for Python | [bazel-quality/python.md](bazel-quality/python.md) |
 | Writing a `ts_project`, `npm_translate_lock`, a pnpm lockfile entry, a JS test target, or running Gazelle for JS | [bazel-quality/typescript.md](bazel-quality/typescript.md) |
 | Writing a `cc_*` target, registering a C++ toolchain, enabling `layering_check` or a sanitizer, or wrapping a CMake or Autotools build | [bazel-quality/cpp.md](bazel-quality/cpp.md) |
-| Editing `Cargo.toml`, `pyproject.toml`, `package.json` or `tsconfig*.json` themselves | `rust-cargo`, `python-packaging`, `typescript-packaging` (sibling sets — see below) |
+| Writing a `java_*` or `kt_jvm_*` target, pinning the JDK version flags, repinning `maven_install.json`, or building a deploy jar | [bazel-quality/java.md](bazel-quality/java.md) |
+| Editing `Cargo.toml`, `pyproject.toml`, `package.json`, `tsconfig*.json`, `build.gradle.kts` or `pom.xml` themselves | `rust-cargo`, `python-packaging`, `typescript-packaging`, `gradle-build`, `maven-build` (sibling sets — see below) |
 | Deciding whether to adopt Bazel, or migrating a repository onto it | the `bazel-adopt` skill |
 | A build that is already slow, missing the cache, nondeterministic, flaky or refetching | the `bazel-diagnose` skill |
 
@@ -151,14 +152,15 @@ set where everything blocks teaches the reader to negotiate with all of it.
 
 ## Siblings
 
-- **`rust-cargo`, `python-packaging`, `typescript-packaging`** — own
-  `Cargo.toml`, `pyproject.toml`, `package.json`, `tsconfig*.json` and the
-  lockfiles beside them. The language depth files here say what a
+- **`rust-cargo`, `python-packaging`, `typescript-packaging`, `gradle-build`,
+  `maven-build`** — own `Cargo.toml`, `pyproject.toml`, `package.json`,
+  `tsconfig*.json`, `build.gradle.kts`, `pom.xml` and the lockfiles beside them. The language depth files here say what a
   *Bazel-specific* edit to one of those files must look like and name the
   file; this set never loads on it.
-- **`rust-quality`, `python-quality`, `typescript-quality`** — own the
-  source files a target here compiles. This set never loads on `*.rs`,
-  `*.py` or `*.ts`, so the two never load together.
+- **`rust-quality`, `python-quality`, `typescript-quality`, `java-quality`,
+  `kotlin-quality`** — own the source files a target here compiles. This set
+  never loads on `*.rs`, `*.py`, `*.ts`, `*.java` or `*.kt`, so the two never
+  load together.
 - **`bazel-adopt`** (skill) — the go/no-go gate and the migration order,
   run once per repository. **`bazel-diagnose`** (skill) — a build that is
   already wrong, routed by symptom. Bundled with this rule as

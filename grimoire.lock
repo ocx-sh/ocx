@@ -4,8 +4,8 @@ agent = []
 lock_version = 1
 declaration_hash_version = 1
 declaration_hash = "sha256:e4370dc135bbe1596c7c86c2cd930a736a68c54bcaa3e437fce8d76d7f242584"
-generated_by = "grim 0.14.0"
-generated_at = "2026-09-06T18:17:32Z"
+generated_by = "grim 0.14.2"
+generated_at = "2026-09-20T10:30:44Z"
 
 [[skill]]
 name = "bazel-adopt"
@@ -87,7 +87,7 @@ bundle_tag = "latest"
 
 [[rule]]
 name = "bazel-quality"
-pinned = "ghcr.io/ocx-sh/lore/bazel-quality@sha256:4e7f68e3aa0b16387c1b0ef7091ab82cb25332010e70ff50bf9a24ccbdf89345"
+pinned = "ghcr.io/ocx-sh/lore/bazel-quality@sha256:a7d36a1e1f8530fefbeaec94f9593325f13aeab5cf90307fbc8133b7b7d05ea4"
 bundle = "ghcr.io/ocx-sh/lore/bazel-essentials"
 bundle_tag = "latest"
 
@@ -143,7 +143,7 @@ bundle_tag = "latest"
 name = "bazel-essentials"
 repo = "ghcr.io/ocx-sh/lore/bazel-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/bazel-essentials@sha256:2bfd71697149be6553e300acfd2e1c8086d9d9d3ec61de938654c197f4f13f6a"
+pinned = "ghcr.io/ocx-sh/lore/bazel-essentials@sha256:0db259091751f23de88cffcc4efeca9b81325e72139dba1dc54509eafa163b08"
 
 [[bundle.member]]
 kind = "skill"
