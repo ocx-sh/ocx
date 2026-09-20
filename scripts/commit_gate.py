@@ -304,7 +304,7 @@ def build_deny_reason(mark: dict, state_path: str, why_full: str | None) -> str:
         how = (
             f"Found {found} at {state_path}.\n"
             "Run `task verify` (format, clippy, lint, license, build, tests) or"
-            " `task verify:scoped --force`; both write the mark. After a passing verify where"
+            " `task verify:scoped`; both write the mark. After a passing verify where"
             " only merge context changed: `task verify:mark`.\n"
         )
     return "BLOCKED: Cannot commit without passing verification.\n\n" + how + "\nThen retry."

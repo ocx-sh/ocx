@@ -68,12 +68,17 @@ Branch ready to fast-forward onto `main` when **all** hold:
 
 Every commit on branch must pass `task verify` before landing on `main`. Git enforces it itself: `.githooks/commit-msg` runs `scripts/commit_gate.py`, wired by `core.hooksPath` (armed by `task` and `task verify`), so every commit is gated however it was spelled and the index survives a refusal. When it blocks:
 
-1. Run `task verify` or `task verify:scoped --force` (never bypass with `--no-verify`). Both write the verify mark themselves.
-2. Only when a passing verify is already in hand and just merge context changed since:
+1. Run `task verify` or `task verify:scoped` (never bypass with `--no-verify`). Both write the verify mark themselves.
+2. Or mark the tree deliberately — `task verify:mark` is an **escape hatch, and using it is allowed**:
    ```sh
    task verify:mark
    ```
-   The manual mark is `scoped` and never satisfies a `release:` commit or a commit on `main` — those need `task verify`. A bare `echo $(date +%s) > …/commit-verified` reads as *not verified* and overwrites the JSON mark a verify just wrote. A mark also certifies exactly one HEAD **and one working tree**: a sibling agent worktree at the same HEAD has to earn its own.
+   It exists so a cheaper tier can be run on purpose and the expensive one deferred: unit tests green
+   and the acceptance suite left for later, intermediate commits on a feature branch kept fast, the
+   full suite run once before the branch lands rather than at every commit. Same hatch when only
+   cherry-pick / rebase merge context changed since a passing verify. Say in the commit body what was
+   deferred. The manual mark is `scoped` and never satisfies a `release:` commit or a commit on
+   `main` — those need `task verify`, which is what makes the deferral end at the branch boundary. A bare `echo $(date +%s) > …/commit-verified` reads as *not verified* and overwrites the JSON mark a verify just wrote. A mark also certifies exactly one HEAD **and one working tree**: a sibling agent worktree at the same HEAD has to earn its own.
 3. Retry commit. Staging survives a refusal — the commit was aborted, not the `git add`.
 
 Carve-outs, all deliberate: a rebase in progress commits ungated (git rewrites HEAD through states no mark can certify); a merge, cherry-pick or revert handed back to you keeps only the *subject* carve-out — the subject git prepared commits as it stands (`git commit --no-edit`), a hand-written one must be conventional, and the mark is required either way, so mark before you merge (`task verify:mark` after a passing verify, or a scoped run) rather than after the refusal; and the subject `Checkpoint` commits without a mark so `task checkpoint` keeps working.
