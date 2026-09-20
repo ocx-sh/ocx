@@ -22,12 +22,17 @@ certify whatever ocx does, which is the failure mode the corpus exists to preven
   not by cross-language parity. Asserted byte-exact by `index_wire_conformance.rs`'s
   `catalog_fixtures_round_trip_byte_exact` (`oci::index::serialize_catalog`) and
   `config_fixtures_round_trip_byte_exact` (`oci::index::serialize_config`).
-- `tag_verdicts.json` — `{tag, reserved, why}` rows for the reserved-tag rule
-  (`adr_oci_index_only_dispatch.md` D7). `tag_verdicts.rs` drives every row
-  through both `Tag::is_reserved` and `Tag::is_reserved_str`. Reservation spans
-  `oci::Algorithm::ALL` = {sha256, sha384, sha512}, deliberately wider than
-  D7:319's sha256-only text — reservation and addressability are different
-  questions, and only reservation widens. `why` is documentation, never asserted.
+- `tag_verdicts.json` — **not in this tree**: the same sync script vendors it to
+  `crates/ocx_package/tests/fixtures/index_wire/`, because `Tag::is_reserved` is
+  package vocabulary and a fixture is vendored next to the test that reads it
+  (`crates/ocx_package/tests/tag_verdicts.rs`). It is listed here because it is
+  one upstream corpus, covered by one drift gate, whatever crate each row lands
+  in. It holds `{tag, reserved, why}` rows for the reserved-tag rule
+  (`adr_oci_index_only_dispatch.md` D7), driven through both `Tag::is_reserved`
+  and `Tag::is_reserved_str`. Reservation spans `oci::Algorithm::ALL` =
+  {sha256, sha384, sha512}, deliberately wider than D7:319's sha256-only text —
+  reservation and addressability are different questions, and only reservation
+  widens. `why` is documentation, never asserted.
 - `cpython/*` — **not** vendored from `ocx-sh/indexbot`: generated locally from
   CPython's `json` module, which is itself the §14 byte authority the bot repo
   implements. They exist because the vendored corpus is a sample of real index
@@ -60,7 +65,8 @@ It is not vendored — read it at the pinned commit in `ocx-sh/indexbot`.
 
 ## Provenance & re-sync
 
-- `SOURCE_COMMIT` pins the `ocx-sh/indexbot` commit these bytes came from.
+- `SOURCE_COMMIT` pins the `ocx-sh/indexbot` commit these bytes came from — for
+  every vendored leaf, including the one that lives under `crates/ocx_package/`.
 - `test/scripts/sync_index_conformance.sh` re-vendors: a bare re-run verifies
   against the pin, `--ref <ref>` vendors and re-pins, `--check` compares the
   vendored tree against `ocx-sh/indexbot@main` without writing to it. It prints the

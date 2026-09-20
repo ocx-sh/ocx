@@ -12,7 +12,9 @@
 #                 does an upstream fixture family that no leaf claims
 #
 # One source root (tests/golden) with explicit leaves, so the sync and the
-# drift gate compare trees of the same shape. The source is a local ocx-sh/indexbot
+# drift gate compare trees of the same shape. Most leaves land in one vendored
+# tree; a leaf whose reader lives in another crate lands beside that reader
+# instead — see foreign_file_leaves. The source is a local ocx-sh/indexbot
 # checkout ($INDEXBOT_REPO_PATH, else ../indexbot) when it carries the requested ref,
 # otherwise the GitHub contents API. --check always reads GitHub: a stale local
 # mirror cannot answer "did upstream move?".
@@ -35,10 +37,20 @@ dir_leaves=(
     "dispatch/sha256|dispatch/sha256"
 )
 file_leaves=(
-    "tag_verdicts.json|tag_verdicts.json"
     "dispatch/expected_platforms.json|dispatch/expected_platforms.json"
     "render/normal/expected/dist/c/index.json|catalog/normal.json"
     "render/normal/expected/dist/config.json|config/normal.json"
+)
+
+# Vendored leaves that do NOT live under ${dest}, "<path under ${src_rel}>|<path
+# under ${repo_root}>". A fixture is vendored next to the test that reads it, and
+# `tag_verdicts.json` is read by `crates/ocx_package/tests/tag_verdicts.rs` —
+# `Tag::is_reserved` is package vocabulary, so the crate split moved the fixture
+# with its reader rather than with its directory-mates. Vendoring it under
+# ${dest} instead would put a second copy on disk that nothing compiles against,
+# and leave the drift gate watching the copy that is not under test.
+foreign_file_leaves=(
+    "tag_verdicts.json|crates/ocx_package/tests/fixtures/index_wire/tag_verdicts.json"
 )
 
 # Paths under ${src_rel} that exist upstream and are deliberately NOT vendored.
@@ -95,7 +107,7 @@ stage_from_github() {
                 die "failed to download ${src}/${name} from ${url}"
         done <<<"${listing}"
     done
-    for leaf in "${file_leaves[@]}"; do
+    for leaf in "${file_leaves[@]}" "${foreign_file_leaves[@]}"; do
         src="${leaf%%|*}"
         mkdir -p -- "$(dirname -- "${stage_dir}/${src_rel}/${src}")"
         url="$(gh api "repos/ocx-sh/indexbot/contents/${src_rel}/${src}?ref=${commit}" --jq '.download_url')" ||
@@ -144,6 +156,35 @@ place_leaves() {
     done
 }
 
+# Copy every foreign leaf from staged source root $1 to its path under the repo.
+place_foreign_leaves() {
+    local source_root="$1" leaf src dst
+    for leaf in "${foreign_file_leaves[@]}"; do
+        src="${leaf%%|*}"
+        dst="${leaf##*|}"
+        [[ -f ${source_root}/${src} ]] || die "index source is missing ${src}"
+        mkdir -p -- "$(dirname -- "${repo_root}/${dst}")"
+        cp -- "${source_root}/${src}" "${repo_root}/${dst}"
+    done
+}
+
+# Fail when a foreign leaf differs from staged source root $1. These are single
+# files at fixed paths, so `diff -r` has nothing to add over comparing each one:
+# what the tree diff catches for ${dest} — a vendored path that disappeared — is
+# caught here by the existence check.
+check_foreign_leaves() {
+    local source_root="$1" commit="$2" leaf src dst
+    for leaf in "${foreign_file_leaves[@]}"; do
+        src="${leaf%%|*}"
+        dst="${leaf##*|}"
+        echo "comparing ${dst} against ocx-sh/indexbot@main (${commit})"
+        [[ -f ${repo_root}/${dst} ]] ||
+            die "${dst} is not vendored; re-run with '--ref main' and review the diff"
+        diff -- "${source_root}/${src}" "${repo_root}/${dst}" ||
+            die "vendored fixtures differ from ocx-sh/indexbot@main (${commit}); re-run with '--ref main' and review the diff"
+    done
+}
+
 # Fail when ocx-sh/indexbot@main grew a fixture family no leaf claims. `diff -r`
 # only ever looks inside the staged leaves, so an added sibling upstream would
 # read as "no drift" forever — the exact silence this gate exists to break.
@@ -161,7 +202,7 @@ assert_every_upstream_path_is_claimed() {
         [[ ${path} == "${src_rel}/"* ]] || continue
         path="${path#"${src_rel}/"}"
         claimed=""
-        for pattern in "${dir_leaves[@]}" "${file_leaves[@]}"; do
+        for pattern in "${dir_leaves[@]}" "${file_leaves[@]}" "${foreign_file_leaves[@]}"; do
             pattern="${pattern%%|*}"
             if [[ ${path} == "${pattern}" || ${path} == "${pattern}/"* ]]; then
                 claimed="yes"
@@ -196,11 +237,12 @@ check_drift() {
     done
     diff -r "${excludes[@]}" -- "${scratch}" "${dest}" ||
         die "vendored fixtures differ from ocx-sh/indexbot@main (${commit}); re-run with '--ref main' and review the diff"
+    check_foreign_leaves "${stage_dir}/${src_rel}" "${commit}"
     echo "no drift: vendored fixtures match ocx-sh/indexbot@main (${commit})"
 }
 
 main() {
-    local mode="sync" ref="" stage_dir commit
+    local mode="sync" ref="" stage_dir commit leaf
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -232,9 +274,14 @@ main() {
 
     commit="$(stage "${ref}" "${stage_dir}")"
     place_leaves "${stage_dir}/${src_rel}" "${dest}"
+    place_foreign_leaves "${stage_dir}/${src_rel}"
     printf '%s\n' "${commit}" >"${commit_file}"
     echo "--- vendored tree changes (review, then commit yourself) ---"
-    git -C "${repo_root}" status --porcelain -- "${dest_rel}" || true
+    local -a vendored_paths=("${dest_rel}")
+    for leaf in "${foreign_file_leaves[@]}"; do
+        vendored_paths+=("${leaf##*|}")
+    done
+    git -C "${repo_root}" status --porcelain -- "${vendored_paths[@]}" || true
 }
 
 main "$@"
