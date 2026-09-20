@@ -136,13 +136,20 @@ runs:
         norepo="$workdir/norepo"
         mkdir -p "$norepo"
 
-        # One failure this DOES exit 1 for, and the likeliest one to appear
-        # later: junit2otlp reads stdin with a 1 MB-per-line scanner and pytest
-        # writes its report on a single line (545 KB for the full acceptance
-        # suite today). Past that it reports `bufio.Scanner: token too long`
-        # and pushes nothing. subsystem-ci.md § Test telemetry names the fix.
-        #
-        # The exit status says nothing otherwise. Measured against a local collector:
+        # Re-emitted one element per line before it is fed in, because
+        # junit2otlp reads stdin with a 1 MB-per-line scanner and both
+        # producers write the whole report on ONE line: the acceptance suite is
+        # already 545 KB that way, over half the ceiling, and past it the tool
+        # exits 1 with `bufio.Scanner: token too long` and pushes nothing at
+        # all. Re-emitting drops the longest line to under a kilobyte whatever
+        # the suite grows to. Whitespace between elements is ignorable in XML,
+        # so what junit2otlp parses is the same document — measured, the
+        # 3819-case acceptance report yields one span per `<testcase>` and not
+        # one more.
+        interpreter=$(command -v python3 || command -v python) \
+          || warn "no python on PATH to re-emit the report"
+
+        # The exit status says nothing. Measured against a local collector:
         # with the endpoint refusing TLS, junit2otlp logged `traces export:
         # ... connection error` three times and still exited 0 — every export
         # error goes through the OTel error handler, and `main` only fails on
@@ -153,13 +160,46 @@ runs:
         : > "$log"
         pushed=0
         for report in "${reports[@]}"; do
+          # Re-emit to a file rather than through a pipe, and have the same
+          # pass count the cases: the count is what sizes the span queue below,
+          # and a second parse to get it would be a second thing to keep in
+          # step with the first. Bytes to `stdout.buffer`/`open(…, "wb")`, not
+          # text: the text form is re-encoded under whatever locale the runner
+          # has, and a non-ASCII test name is then a crash on one runner and
+          # not on the next.
+          # One logical line, because a `-c` program cannot carry leading
+          # indentation and an unindented line would close this block scalar.
+          cases=$("$interpreter" -c 'import sys, xml.dom.minidom; document = xml.dom.minidom.parse(sys.argv[1]); open(sys.argv[2], "wb").write(document.toprettyxml(encoding="utf-8")); print(len(document.getElementsByTagName("testcase")))' "$report" "$workdir/pretty.xml") \
+            || warn "could not re-emit $report"
+
+          # Sized from the report, not pinned to a number that a growing suite
+          # walks past. junit2otlp builds a BatchSpanProcessor and never sets
+          # a queue size, so the SDK default of 2048 applies — and a span
+          # enqueued above it is DROPPED, with no log line, no error and exit
+          # 0. Measured against a local collector: the 3819-case acceptance
+          # report landed 2058 of its 3821 spans at the default and all 3821
+          # with this variable set. That is the failure this whole file exists
+          # to not have — a push that reports success and silently delivers
+          # half the tests.
+          export OTEL_BSP_MAX_QUEUE_SIZE=$((cases + 1024))
+
+          # `--batch-size` is the EXPORT batch, not the queue. Its default of
+          # 10 turns the unit report into 825 gRPC round trips; at 512 it is
+          # 17. One run at the default lost one contiguous batch of exactly
+          # ten spans mid-report with no error logged and exit 0 — not
+          # reproducible, and not explained, which is the argument for making
+          # the tool do seventeen exports instead of hundreds rather than for
+          # trusting any particular account of it.
           "$bin" \
             --service-name ocx-tests \
             --trace-name "ocx-${SUITE}" \
             --repository-path "$norepo" \
+            --batch-size 512 \
             --additional-attributes "$attributes" \
-            < "$report" >> "$log" 2>&1 || warn "junit2otlp failed on $report: $(tail -n 3 "$log")"
+            < "$workdir/pretty.xml" >> "$log" 2>&1 \
+            || warn "junit2otlp failed on $report: $(tail -n 3 "$log")"
           pushed=$((pushed + 1))
+          echo "test telemetry: $report — $cases cases, span queue $OTEL_BSP_MAX_QUEUE_SIZE"
         done
 
         # `failed to upload metrics` is expected and ignored: junit2otlp always

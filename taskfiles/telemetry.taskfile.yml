@@ -43,12 +43,15 @@ tasks:
     silent: true
     cmd: >-
       set -u;
+      set -o pipefail;
       if [ -f "$HOME/.config/ocx-telemetry/env" ]; then
         set -a; . "$HOME/.config/ocx-telemetry/env"; set +a;
       fi;
       [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] || exit 0;
       command -v junit2otlp >/dev/null 2>&1 || exit 0;
       [ -f "{{.JUNIT}}" ] || exit 0;
+      interpreter=$(command -v python3 || command -v python)
+      || { echo "telemetry: no python on PATH to re-emit the report" >&2; exit 0; };
       branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown);
       sha=$(git rev-parse HEAD 2>/dev/null || echo unknown);
       host=$(uname -n 2>/dev/null || echo unknown);
@@ -57,13 +60,18 @@ tasks:
       esac;
       norepo=$(mktemp -d);
       log=$(mktemp);
-      trap 'rm -rf "$norepo" "$log"' EXIT;
+      pretty=$(mktemp);
+      trap 'rm -rf "$norepo" "$log" "$pretty"' EXIT;
+      cases=$("$interpreter" -c 'import sys, xml.dom.minidom; d = xml.dom.minidom.parse(sys.argv[1]); open(sys.argv[2], "wb").write(d.toprettyxml(encoding="utf-8")); print(len(d.getElementsByTagName("testcase")))' "{{.JUNIT}}" "$pretty")
+      || { echo "telemetry: could not re-emit {{.JUNIT}}" >&2; exit 0; };
+      export OTEL_BSP_MAX_QUEUE_SIZE=$((cases + 1024));
       junit2otlp
       --service-name ocx-tests
       --trace-name "ocx-{{.SUITE}}"
       --repository-path "$norepo"
+      --batch-size 512
       --additional-attributes "ocx.suite={{.SUITE}},ocx.source=local,ocx.os=$os,ocx.git.sha=$sha,ocx.git.branch=$branch,host.name=$host"
-      < "{{.JUNIT}}" > "$log" 2>&1
+      < "$pretty" > "$log" 2>&1
       || { echo "telemetry: junit2otlp failed: $(tail -n 3 "$log")" >&2; exit 0; };
       if grep -q 'traces export:' "$log"; then
         echo "telemetry: push did not land: $(grep -m1 'traces export:' "$log")" >&2; exit 0;
