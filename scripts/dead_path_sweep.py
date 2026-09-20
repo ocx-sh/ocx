@@ -99,6 +99,16 @@ EXEMPT_PATTERNS = (
     re.compile(r"scripts/(lint_ratchet|test_diff_guard|dead_path_sweep)\.py$"),
     re.compile(r"crates/ocx_test_support/tests/workspace_structure\.rs$"),
     re.compile(r"\.claude/tests/test_hooks\.py$"),
+    #: Vendored verbatim from ocx-sh/indexbot, byte-for-byte, and checked
+    #: against that repository by `task test:index-conformance-drift`. A path
+    #: literal in here is upstream's prose, not a claim this repository makes,
+    #: so the sweep has nothing to sweep: the only edit that would satisfy it
+    #: is the hand-edit the drift gate exists to forbid — and which it caught
+    #: (`crates/ocx_lib's Tag::is_reserved` survived the crate split inside a
+    #: file nobody may touch). Exempting the file is what keeps the two gates
+    #: from demanding opposite things; correcting the prose is a pull request
+    #: against ocx-sh/indexbot.
+    re.compile(r"tests/fixtures/index_wire/.*\.json$"),
 )
 
 #: Below this the reader has plainly stopped early, and "no dead literals" would
