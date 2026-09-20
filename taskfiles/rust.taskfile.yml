@@ -742,6 +742,31 @@ tasks:
       ~3.5 min on CI, so a handful of second-long tests is a measurable share
       of the whole.
 
+      **Hard on CI, advisory elsewhere.** With `CI` set — which GitHub Actions
+      always sets — an over-budget test no allowlist line covers fails the run.
+      Without it the same findings print and the run exits 0. Wall clock on a
+      shared machine measures a test's neighbours rather than the test: four
+      tests taking 6 ms to 190 ms quiet, and 12 ms to 160 ms on CI, were
+      measured at 1.0-1.2 s on a 32-core box under load 27. Allowlisting those
+      would file a false reason for tests that are fast everywhere it matters,
+      and a gate that reds on a busy laptop for code nobody touched is a gate
+      someone turns off.
+
+      It is not an off-switch, and the mode line says so on every run:
+      `verify-basic.yml`'s smoke job runs on **every pull request** with `CI`
+      set, so the hard mode runs on every change, and `.claude/tests/` asserts
+      that step's presence. Both modes name themselves on every run, green or
+      red — a reader must never have to infer whether the run in front of them
+      could have failed. Only the *budget verdict* is advisory: a log this
+      reader cannot judge and an unbounded allowlist pattern fail in both
+      modes, being wiring faults rather than slow tests.
+
+      A load-average check was the alternative and is the wrong instrument: a
+      nextest run saturates the box by design, so load at gate time describes
+      the gate's own moment, not the conditions each duration was measured
+      under. `CI` is a fact about where this runs; load is a guess about what
+      it meant.
+
       **Headroom.** The budget is 1.0 s of wall clock as observed on the run's
       own log. ubuntu-latest measures roughly 2x this project's dev box for the
       scan-heavy tests and worse for process-spawning ones, and CI is where the
@@ -825,6 +850,15 @@ tasks:
                `<job>\t<step>\t<timestamp>` line prefix, which is what
                `gh run view --log` hands you — the spelling that makes it
                possible to point this gate at a CI log by hand.
+        4b. BOTH MODES, on the same over-budget log. With `CI` set the gate
+           fails; with `CI` unset it prints the identical finding and exits 0.
+           The advisory case asserts the finding is still there — an advisory
+           mode that quietly dropped its findings would be the off-switch it
+           must not become — and both cases assert the run named its own mode,
+           on the green path too, so a reader never has to infer whether the
+           run they are looking at could have failed. Every other case above
+           runs `CI=1` explicitly, so none of them changes verdict with the
+           ambient environment.
         5. the same log green through a PATTERN entry (`ocx_fixture slow::*`)
            rather than an exact id, which is how the `ocx_shell *live_*`
            family is held as one line instead of fifteen.
@@ -880,6 +914,10 @@ tasks:
       GREEN_MATCHED: '1/1 allowlist entries matched, covering 1 test(s)'
       # The count is runtime; the body holds the pattern, never the verdict.
       RED_UNBOUNDED_REASON: '1 unbounded pattern(s)'
+      HARD_MODE_LINE: 'hard mode (CI is set)'
+      ADVISORY_MODE_LINE: 'advisory mode (CI is unset)'
+      # Carries the runtime count, so it cannot be matched by the body.
+      ADVISORY_CLOSER: '1 finding(s) above the budget did NOT fail this run'
       FIXTURE: >-
         python3 -c 'import sys; floor = int(open(sys.argv[1]).read()); spell = sys.argv[2]; esc = {"plain": "", "esc": "\x1b", "caret": "^["}[spell]; c = lambda code: f"{esc}[{code}m" if esc else ""; pre = "Smoke (Linux)\tTest\t2026-09-20T12:19:02.2393027Z " if spell == "caret" else ""; a = c("32;1"); b = c("0"); d = c("35;1"); e = c("36"); g = c("34;1"); row = lambda i, secs, crate, module, name: f"{pre}{a}        PASS{b} [{secs}] ({i:>4}/{floor}) {d}{crate}{b} {e}{module}{b}{e}::{b}{g}{name}{b}"; print("\n".join([row(1, "   7.500s", "ocx_fixture", "slow::tests", "deliberately_over_budget")] + [row(i, "   0.003s", "ocx_fixture", "fixture::tests", f"case_{i}") for i in range(2, floor + 1)]))' {{.ROOT_DIR}}/crates/NEXTEST_FLOOR
     cmds:
@@ -887,7 +925,8 @@ tasks:
         log=$(mktemp); allow=$(mktemp); short=$(mktemp);
         trap 'rm -f "$log" "$allow" "$short"' EXIT;
         floor=$(cat {{.ROOT_DIR}}/crates/NEXTEST_FLOOR);
-        gate() { {{.DURATION}} NEXTEST_RUN_LOG="$1" -- --allowlist "$2" --budget-seconds 1.0; };
+        gate() { env CI=1 {{.DURATION}} NEXTEST_RUN_LOG="$1" -- --allowlist "$2" --budget-seconds 1.0; };
+        advisory() { env -u CI {{.DURATION}} NEXTEST_RUN_LOG="$1" -- --allowlist "$2" --budget-seconds 1.0; };
         {{.FIXTURE}} plain > "$log";
         lines=$(wc -l < "$log");
         [ "$lines" -eq "$floor" ] || {
@@ -943,6 +982,38 @@ tasks:
         case "$red" in *'{{.RED_UNBOUNDED_REASON}}'*) ;; *)
           echo "duration self-test: the unbounded-pattern run exited $status without refusing the pattern — it failed for another reason: $red" >&2; exit 1;;
         esac;
-        {{.DURATION}} NEXTEST_RUN_LOG="$log" -- --budget-seconds 1e9 >/dev/null || {
+        env CI=1 {{.DURATION}} NEXTEST_RUN_LOG="$log" -- --budget-seconds 1e9 >/dev/null || {
           echo "duration self-test: the SHIPPED crates/NEXTEST_SLOW_ALLOWLIST does not survive its own reader — see the refusal above" >&2; exit 1; };
-        echo "duration self-test: gate red on 7.500s unlisted, red on a {{.SHORT_LINES}}-line log, red on a non-matching pattern, red on an unbounded pattern, green reading $floor tests and {{.GREEN_MATCHED}} in all of plain/esc/caret spellings and through a pattern"
+        : > "$allow";
+        status=0;
+        strict=$(gate "$log" "$allow" 2>&1) || status=$?;
+        [ "$status" -ne 0 ] || {
+          echo "duration self-test: hard mode did not fail an over-budget unlisted test — CI=1 enforces nothing" >&2; exit 1; };
+        case "$strict" in *'{{.HARD_MODE_LINE}}'*) ;; *)
+          echo "duration self-test: the hard run never said which mode it ran in, so a reader must infer whether it could have failed: $strict" >&2; exit 1;;
+        esac;
+        case "$strict" in *'{{.RED_BUDGET_REASON}}'*) ;; *)
+          echo "duration self-test: the hard run exited $status without naming the slow test: $strict" >&2; exit 1;;
+        esac;
+        status=0;
+        soft=$(advisory "$log" "$allow" 2>&1) || status=$?;
+        [ "$status" -eq 0 ] || {
+          echo "duration self-test: advisory mode failed the run (exit $status) — off CI it must report and pass: $soft" >&2; exit 1; };
+        case "$soft" in *'{{.ADVISORY_MODE_LINE}}'*) ;; *)
+          echo "duration self-test: the advisory run never said which mode it ran in: $soft" >&2; exit 1;;
+        esac;
+        case "$soft" in *'{{.RED_BUDGET_REASON}}'*) ;; *)
+          echo "duration self-test: the advisory run dropped its findings — an advisory mode that prints nothing is the off-switch this must not become: $soft" >&2; exit 1;;
+        esac;
+        case "$soft" in *'{{.ADVISORY_CLOSER}}'*) ;; *)
+          echo "duration self-test: the advisory run never said that its findings had not failed the run: $soft" >&2; exit 1;;
+        esac;
+        printf '%s\n' '{{.SLOW_TEST}}' > "$allow";
+        for pair in hard advisory; do
+          case "$pair" in hard) shown=$(gate "$log" "$allow" 2>&1); want='{{.HARD_MODE_LINE}}';;
+                          *)    shown=$(advisory "$log" "$allow" 2>&1); want='{{.ADVISORY_MODE_LINE}}';; esac;
+          case "$shown" in *"$want"*) ;; *)
+            echo "duration self-test: a GREEN $pair run did not print its mode line: $shown" >&2; exit 1;;
+          esac;
+        done;
+        echo "duration self-test: gate red on 7.500s unlisted, red on a {{.SHORT_LINES}}-line log, red on a non-matching pattern, red on an unbounded pattern, green reading $floor tests and {{.GREEN_MATCHED}} in all of plain/esc/caret spellings and through a pattern; hard mode fails and advisory mode reports the same finding and passes, both naming their mode on green and on red"

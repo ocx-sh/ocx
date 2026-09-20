@@ -174,6 +174,19 @@ on `.verify:build-test` and in `verify-basic.yml`'s `smoke` job.
   same way. Deep is moving to manual dispatch, so a copy of this gate there
   would be a green nobody could tell from one that never ran — the hole stays
   named.
+- **Hard on CI, advisory elsewhere.** With `CI` set (GitHub Actions always sets
+  it) an over-budget unlisted test fails the run; without it the same findings
+  print and the run exits 0. Wall clock on a shared machine measures a test's
+  neighbours: four tests at 6-190 ms quiet and 12-160 ms on CI were measured at
+  1.0-1.2 s on a 32-core box under load 27, and allowlisting those would file a
+  false reason for tests that are fast everywhere it matters. **Not an
+  off-switch** — *advisory here; the gate is the Linux CI leg of
+  `verify-basic.yml`, which runs on every pull request.* Both modes print which
+  one they ran in, on every run, green or red. Only the budget verdict is
+  advisory: the reader floor and the unbounded-pattern refusal fail in both
+  modes, being wiring faults rather than slow tests. A load-average check is
+  deliberately **not** used — a nextest run saturates the box by design, so
+  load at gate time describes the gate's moment, not the measurement's.
 - **What it asserts.** Every timed result line is parsed (`PASS`, `FAIL`,
   `SLOW`, `LEAK`, `TIMEOUT`, `TRY n FAIL`, `FLAKY n/m`; `[>120.000s]` too), the
   slowest duration per test id wins, and any test at or above the budget that
@@ -217,9 +230,11 @@ on `.verify:build-test` and in `verify-basic.yml`'s `smoke` job.
   the test fake what it is waiting on is the fix.
 - **Seeing it red.** `task rust:test:duration:self-test` shows every state on
   throwaway fixture logs — red over budget, red under the reader floor, red on
-  a pattern that matches nothing, red on an unbounded pattern, and green in all
-  three log spellings and through a pattern entry; it then runs the shipped
-  allowlist through the same reader. By hand against any run log:
+  a pattern that matches nothing, red on an unbounded pattern, green in all
+  three log spellings and through a pattern entry, and the same over-budget log
+  failing under `CI=1` while printing the identical finding and passing without
+  it; it then runs the shipped allowlist through the same reader. By hand
+  against any run log (`CI=1` to see the verdict CI will reach):
 
   ```sh
   python3 scripts/unit_test_duration_gate.py target/nextest/run.log \
