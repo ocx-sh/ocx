@@ -98,9 +98,13 @@ ocx_test_support::workspace_structure tests_hold_no_inert_loop
 
 # The last two are here for a DIFFERENT reason and would not be helped by any
 # further parse sharing: both are bound by a cargo SUBPROCESS, not by the
-# corpus — which also means an in-process CPU measurement understates them,
-# because the child's time is not the parent's. Judge these two by wall clock
-# on the runner, never by the profiler. `release_feature_set_excludes_testing_seams` shells out to
+# corpus. Their wall-to-CPU ratio is about 1.1x locally and 7.5x on CI, and
+# that gap is time spent BLOCKED — cold registry reads, `Cargo.lock` reads and
+# waiting on the cargo package-cache lock — which a local box serves from page
+# cache, so no local instrument sees it at any load. It is NOT a child process
+# an in-process measurement misses: `/usr/bin/time` reports `wait4` rusage and
+# does count reaped descendants, which a control disproved. Judge these two by
+# wall clock on the runner; a profiler here is measuring the wrong machine. `release_feature_set_excludes_testing_seams` shells out to
 # `cargo tree -p ocx --edges normal,build --locked`, a full feature
 # resolution. `deps_direction` is the only guard that reads `resolve.nodes`,
 # so it needs the full 3.4 MB `cargo metadata` where its siblings moved to

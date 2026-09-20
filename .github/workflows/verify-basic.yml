@@ -235,6 +235,12 @@ jobs:
       # report on a stale or a subset log and print the same green. The gate's
       # own reader floor is the second half of that guarantee — it refuses a
       # log holding fewer result lines than crates/NEXTEST_FLOOR.
+      # This is the gate. The step runs with `CI` set, which is the only
+      # environment the script treats as hard: off CI it prints the same
+      # findings and exits 0, because wall clock on a shared machine measures a
+      # test's neighbours rather than the test (6x-170x inflation measured
+      # under load). Every pull request reaches this job, drafts included, so
+      # the advisory local mode defers to a verdict that always gets reached.
       - name: Unit duration budget
         run: task rust:test:duration
       # Beside the budget, never instead of it: the step above is a parser, and
