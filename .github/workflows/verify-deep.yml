@@ -89,6 +89,25 @@ jobs:
           - { os: ubuntu-latest, name: Linux, target: x86_64-unknown-linux-gnu }
           - { os: macos-latest, name: macOS, target: aarch64-apple-darwin }
           - { os: windows-latest, name: Windows, target: x86_64-pc-windows-msvc }
+    env:
+      # One target dir per job: the build passes `--target=`, so a bare
+      # `cargo run` (task schema:generate) landed in target/release and paid a
+      # second full compile of the workspace (5.8 min on Linux, run 35003182482).
+      CARGO_BUILD_TARGET: ${{ matrix.job.target }}
+      # Shared compile cache: sccache in front of the Garage S3 store at
+      # sccache.ocx.sh (herwig-systems/server-hetzner1#2). A fork PR sees no
+      # secrets; then RUSTC_WRAPPER is empty, cargo runs rustc directly and the
+      # sccache step below is skipped — never a build that fails on a missing
+      # cache. The org secrets are SCCACHE_AWS_*; the S3 client reads AWS_*.
+      SCCACHE_ENABLED: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' }}
+      RUSTC_WRAPPER: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID != '' && 'sccache' || '' }}
+      SCCACHE_BUCKET: cache
+      SCCACHE_ENDPOINT: https://sccache.ocx.sh
+      SCCACHE_REGION: garage
+      SCCACHE_S3_KEY_PREFIX: v1
+      SCCACHE_S3_USE_SSL: "true"
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -124,14 +143,15 @@ jobs:
           retention-days: 1
       # Ship the binary `task schema:generate` just built, so the acceptance job
       # never compiles: it carries no Rust cache, so a build there is a cold full
-      # compile of ocx_lib that stalls the run with no failing test to blame
-      # (test_schema_generation.py skips when the binary is absent).
+      # compile of the workspace that stalls the run with no failing test to
+      # blame (test_schema_generation.py skips when the binary is absent). The
+      # path carries the target triple because CARGO_BUILD_TARGET is set above.
       - name: Upload Schema Binary
         if: matrix.job.name == 'Linux'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ocx-schema-binary
-          path: target/release/ocx_schema
+          path: target/${{ matrix.job.target }}/release/ocx_schema
           compression-level: 0
           retention-days: 1
       - name: Upload Test Results
@@ -297,7 +317,11 @@ jobs:
         # same. Fails closed: any value but empty or `0` arms the gate.
         env:
           __OCX_TESTING_REQUIRE_ENVIRONMENT_D: "1"
-        run: task test -- --junit-xml=results/junit.xml
+        # `test:parallel`, not `test`: the serial run took 21:41 for 3819 tests
+        # at a 0.1 s median (run 35469230124) on a runner whose cores sat idle.
+        # Same xdist flags local `task verify` uses; `--dist loadgroup` keeps
+        # the registry-contended modules on one worker.
+        run: task test:parallel -- --junit-xml=results/junit.xml
       - name: Stop Registry
         if: ${{ always() }}
         shell: bash
