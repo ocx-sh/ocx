@@ -1,29 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Acquires the project mutation lock directly on `ocx.toml`.
+//! Acquires the project mutation lock, keyed by `ocx.toml` but never held
+//! *on* it.
 //!
-//! WHY IN-PLACE: the lock target is the data file itself. Writers must
-//! rewrite `ocx.toml` through the lock-owning handle
-//! ([`LockedFile::replace_bytes`]) — never through a separate tempfile
-//! that is then renamed over the data file. A rename would rotate
-//! `ocx.toml`'s inode and strand the lock fd on the orphan, breaking
-//! mutual exclusion on Windows (where `LockFileEx` is per-handle and
-//! mandatory).
-//!
-//! Trade-off accepted: in-place truncate+write loses the kill-9
-//! atomicity that tempfile+rename provides. A SIGKILL between
-//! `set_len(0)` and `sync_data` leaves `ocx.toml` truncated or partial.
-//! Recovery is manual (restore from VCS / re-run the mutator). The
-//! design rule for the project: in-place lock for the canonical
-//! project config file; no sidecar, no rename.
+//! `ocx.toml` is published by atomic rename ([`super::mutate`]'s
+//! `atomic_write`), so its inode rotates on every mutation and a lock taken on
+//! the data file would strand on the inode the rename orphaned. Per the
+//! arch-principles Locking Policy the mutex is therefore an
+//! [`ocx_util::fs::lock_scoped`] entry under `$OCX_HOME/locks`, keyed by the
+//! config file's parent directory identity and its file name — never a
+//! `ocx.toml.lock` sidecar, which would be litter in a VCS-tracked project
+//! root. `ocx_config::edit` is the same shape for `config.toml`.
 //!
 //! Readers (`ProjectLock::load`, `ProjectLock::from_path`,
-//! `ProjectConfig::from_path`) never take a lock — concurrent reads are
-//! always allowed.
+//! `ProjectConfig::from_path`) never take a lock — concurrent reads are always
+//! allowed, and rename-publish is what makes them safe: a reader holding an
+//! open descriptor keeps reading the document it opened rather than having a
+//! writer truncate it underneath.
 //!
-//! `init_project` does NOT call this function — `ocx.toml` does not exist
-//! yet when `init_project` runs, so there is nothing to lock.
+//! `init_project` does NOT call this function — it publishes a file that does
+//! not exist yet, and refuses outright when one does.
 
 use std::path::Path;
 
@@ -32,8 +29,11 @@ use ocx_util::fs::LockedFile;
 use super::Error;
 use super::error::{ProjectError, ProjectErrorKind};
 
-/// How long a contended acquire keeps retrying before reporting
-/// [`ProjectErrorKind::Locked`], and the interval between attempts.
+/// The `scope` every project-mutation lock is taken under.
+const LOCK_SCOPE: &str = "project-mutate";
+
+/// How long a contended acquire keeps waiting before reporting
+/// [`ProjectErrorKind::Locked`].
 ///
 /// A contended `flock` does not always mean a live writer. `flock` is held by
 /// the *open file description*, and `fork` duplicates every descriptor into
@@ -50,9 +50,8 @@ use super::error::{ProjectError, ProjectErrorKind};
 /// the lock for longer still surfaces `Locked` — the budget smooths transient
 /// contention, it does not wait out a real one.
 const CONTENTION_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
-const CONTENTION_TICK: std::time::Duration = std::time::Duration::from_millis(25);
 
-/// Acquire an exclusive advisory lock on `<project_root>/ocx.toml`.
+/// Acquire the exclusive mutation lock for `<project_root>/ocx.toml`.
 ///
 /// Convenience wrapper around [`acquire_project_lock_for_file`] for the
 /// canonical `ocx.toml` case. Use [`acquire_project_lock_for_file`]
@@ -62,102 +61,92 @@ const CONTENTION_TICK: std::time::Duration = std::time::Duration::from_millis(25
 /// # Errors
 ///
 /// See [`acquire_project_lock_for_file`].
-pub async fn acquire_project_lock(project_root: &Path) -> Result<LockedFile, Error> {
-    acquire_project_lock_for_file(&project_root.join("ocx.toml")).await
+pub async fn acquire_project_lock(project_root: &Path, locks_root: &Path) -> Result<LockedFile, Error> {
+    acquire_project_lock_for_file(&project_root.join("ocx.toml"), locks_root).await
 }
 
-/// Acquire an exclusive advisory lock on the project config file at
-/// `config_path`.
+/// Acquire the exclusive mutation lock for the project config file at
+/// `config_path`, under the machine-global `locks_root` (`$OCX_HOME/locks`).
 ///
-/// The file is created if it does not yet exist. Every open attempt is
-/// preceded by a symlink refusal ([`refuse_symlink_at`]) — `ocx.toml` is the
-/// canonical project declaration, never a symlink target.
+/// The lock file is the [`ocx_util::fs::lock_scoped`] entry for
+/// `(parent directory identity, "project-mutate", file name)`. `config_path`
+/// itself is neither created nor opened: an absent config file is the
+/// create case for the writers, which publish by rename.
 ///
-/// Polls [`LockedFile::try_exclusive`] and maps the three outcomes:
+/// The config file's parent directory is created when absent — `lock_scoped`
+/// keys off that directory's filesystem identity, and `set_activate` writes
+/// `$OCX_HOME/ocx.toml` on machines where `$OCX_HOME` has never existed.
 ///
-/// - `Ok(Some(guard))` → lock acquired; returns the guard.
-/// - `Ok(None)` → contended; retried every [`CONTENTION_TICK`] until
-///   [`CONTENTION_BUDGET`] is exhausted, then [`ProjectErrorKind::Locked`].
-/// - `Err(e)` → I/O error (e.g., permission denied); returns
-///   [`ProjectErrorKind::Io`].
+/// A symlink at `config_path` is refused ([`refuse_symlink_at`]) before the
+/// guard is handed back, so the read every caller performs next cannot be
+/// redirected at an attacker-chosen file.
 ///
-/// The returned guard holds the exclusive lock until it is dropped.
-/// All blocking work runs on a `spawn_blocking` thread so the async
-/// runtime is not stalled.
+/// The returned guard holds the exclusive lock until it is dropped. All
+/// blocking work runs on a `spawn_blocking` thread so the async runtime is not
+/// stalled.
 ///
 /// # Errors
 ///
-/// - [`ProjectErrorKind::Locked`] — a writer still held the exclusive lock
-///   after [`CONTENTION_BUDGET`] of retrying.
-/// - [`ProjectErrorKind::Io`] — the file could not be opened or created
-///   (e.g., permission denied, or the path is a symlink).
-pub async fn acquire_project_lock_for_file(config_path: &Path) -> Result<LockedFile, Error> {
-    // Acquire an exclusive lock on ocx.toml itself. LockedFile::try_exclusive
-    // creates the file if absent and returns Ok(None) on contention; retry a
-    // contended acquire for CONTENTION_BUDGET before giving up (see the
-    // constant for why a single refusal is not evidence of a live writer).
-    //
-    // Deliberately a try-loop rather than LockedFile::open_exclusive_with_timeout:
-    // that helper runs a blocking flock inside spawn_blocking and abandons the
-    // task on timeout, so the orphan later acquires the lock and drops it —
-    // which would manufacture exactly the spurious contention this loop exists
-    // to absorb. The try-loop also preserves the three-way outcome
-    // (acquired / contended / I/O error) that the Locked-vs-Io mapping needs.
-    let deadline = std::time::Instant::now() + CONTENTION_BUDGET;
-    loop {
-        // Inside the loop, not ahead of it: the refusal guards an open, and
-        // this loop performs up to CONTENTION_BUDGET / CONTENTION_TICK of them.
-        refuse_symlink_at(config_path).await?;
+/// - [`ProjectErrorKind::Locked`] — another writer still held the lock after
+///   [`CONTENTION_BUDGET`] of waiting.
+/// - [`ProjectErrorKind::Io`] — the lock file could not be created or locked,
+///   the parent directory could not be created, or `config_path` is a symlink.
+pub async fn acquire_project_lock_for_file(config_path: &Path, locks_root: &Path) -> Result<LockedFile, Error> {
+    let io = |path: &Path, error: std::io::Error| Error::Project(ProjectError::new(path, ProjectErrorKind::Io(error)));
 
-        let maybe_guard = LockedFile::try_exclusive(config_path).await.map_err(|e| {
-            // crate::Error::InternalFile → unwrap into ProjectError::Io so the
-            // caller sees a consistent ProjectErrorKind.
-            Error::Project(ProjectError::new(
-                config_path.to_path_buf(),
-                ProjectErrorKind::Io(std::io::Error::other(e)),
-            ))
+    let parent = config_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    // `lock_scoped` keys off the guarded directory's (device, inode), so the
+    // directory has to exist before it can be identified.
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|error| io(parent, error))?;
+    let file_name = config_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let guard = ocx_util::fs::lock_scoped(locks_root, LOCK_SCOPE, parent, &file_name, CONTENTION_BUDGET)
+        .await
+        .map_err(|error| {
+            // A timeout is contention — the caller may retry. Anything else is
+            // the lock file's own I/O failure.
+            if error.cause.kind() == std::io::ErrorKind::TimedOut {
+                return Error::Project(ProjectError::new(config_path, ProjectErrorKind::Locked));
+            }
+            io(&error.path, error.cause)
         })?;
 
-        match maybe_guard {
-            Some(guard) => return Ok(guard),
-            None if std::time::Instant::now() < deadline => {
-                tokio::time::sleep(CONTENTION_TICK).await;
-            }
-            None => {
-                return Err(Error::Project(ProjectError::new(
-                    config_path.to_path_buf(),
-                    ProjectErrorKind::Locked,
-                )));
-            }
-        }
-    }
+    // Once, under the lock, before the caller reads: the writers replace
+    // `config_path` by rename, so a planted symlink is overwritten rather than
+    // written through (CWE-59), but an unrefused one would still redirect the
+    // read that every caller performs next.
+    refuse_symlink_at(config_path).await?;
+
+    Ok(guard)
 }
 
-/// Refuse a symlink at `config_path` before the caller opens it.
+/// Refuse a symlink at `config_path` before the caller reads it.
 ///
-/// `O_NOFOLLOW` discipline for the data file, applied by hand: [`LockedFile`]
-/// takes no `OpenOptions`, so the refusal is a `symlink_metadata` check on
-/// every platform rather than an open flag. `ocx.toml` is the canonical project
-/// declaration the invoking user owns; a symlink there is a misconfiguration at
-/// best and, at worst, a redirect that `MutationGuard::commit` would truncate
-/// and rewrite through the lock-owning handle (CWE-59).
+/// `O_NOFOLLOW` discipline for the data file, applied by hand: the read is an
+/// ordinary bounded read and the publish is a rename, so neither carries an
+/// open flag that would express this. `ocx.toml` is the canonical project
+/// declaration the invoking user owns; a symlink there is a misconfiguration
+/// at best and, at worst, a redirect that hands the mutator an attacker-chosen
+/// document to edit and re-publish.
 ///
-/// Must run before **every** open, which is why
-/// [`acquire_project_lock_for_file`] calls it inside its retry loop rather than
-/// once ahead of it. A contended acquire reopens the path up to
-/// [`CONTENTION_BUDGET`] / [`CONTENTION_TICK`] times, and anyone who can write
-/// the project directory can hold an `flock` on `ocx.toml` to *force* exactly
-/// that, then swap a symlink in during a tick (CWE-367).
-///
-/// A window survives — check and open are two syscalls, and only `O_NOFOLLOW`
-/// on [`LockedFile`]'s own open would close it — but it is one scheduling gap
-/// wide, not the whole contention budget.
+/// Runs once, after the lock is held — the lock no longer polls `config_path`,
+/// so there is no reopen loop for a racing symlink to be planted into. A
+/// window survives between this check and the caller's read, one scheduling
+/// gap wide, and closing it would need `O_NOFOLLOW` on that read itself.
 ///
 /// # Errors
 ///
 /// - [`ProjectErrorKind::Io`] — the path is a symlink, or its metadata could
-///   not be read. `NotFound` is not an error: `LockedFile::try_exclusive`
-///   creates the file.
+///   not be read. `NotFound` is not an error: an absent config file is the
+///   create case for `set_activate` and for the bootstrapping mutators.
 async fn refuse_symlink_at(config_path: &Path) -> Result<(), Error> {
     let refusal = |io_error| Error::Project(ProjectError::new(config_path, ProjectErrorKind::Io(io_error)));
     match tokio::fs::symlink_metadata(config_path).await {
@@ -166,7 +155,7 @@ async fn refuse_symlink_at(config_path: &Path) -> Result<(), Error> {
             "ocx.toml path is a symlink",
         ))),
         Ok(_) => Ok(()),
-        // NotFound is fine — LockedFile::try_exclusive will create the file.
+        // NotFound is fine — the writers create the file by publishing it.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         // Any other metadata error is an I/O failure on the config path.
         Err(error) => Err(refusal(error)),
@@ -177,41 +166,66 @@ async fn refuse_symlink_at(config_path: &Path) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use tempfile::tempdir;
 
     use super::*;
 
     /// Helper: create a minimal ocx.toml at `dir/ocx.toml`.
-    fn write_ocx_toml(dir: &std::path::Path) -> PathBuf {
+    fn write_ocx_toml(dir: &Path) -> PathBuf {
         let path = dir.join("ocx.toml");
         std::fs::write(&path, "[tools]\n").expect("write ocx.toml");
         path
     }
 
-    /// Confirm that acquiring the lock does NOT create a sidecar `.lock` file
-    /// next to `ocx.toml`, and that `ocx.toml` itself is left byte-identical.
+    /// Every `.lock` file reachable under `dir`, recursively.
+    fn lock_files_under(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return found;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(lock_files_under(&path));
+            } else if path.extension().is_some_and(|extension| extension == "lock") {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    /// The lock never lands beside the data: no `.lock` file anywhere in the
+    /// project directory, and `ocx.toml` itself byte-identical afterwards.
+    ///
+    /// Same contract as when the lock was taken in place on `ocx.toml` — a
+    /// `ocx.toml.lock` in a VCS-tracked project root is litter either way.
+    /// What changed is how it is satisfied: the lock file is a content-keyed
+    /// entry under `$OCX_HOME/locks`, which this also asserts, because "no
+    /// sidecar" is vacuously true of a lock that was never taken at all.
     #[tokio::test(flavor = "multi_thread")]
     async fn acquire_project_lock_leaves_no_sidecar() {
+        let home = tempdir().unwrap();
+        let locks_root = home.path().join("locks");
         let dir = tempdir().unwrap();
         let config_path = write_ocx_toml(dir.path());
-        let sidecar_path = config_path.with_added_extension("lock");
 
-        let guard = acquire_project_lock_for_file(&config_path)
+        let guard = acquire_project_lock_for_file(&config_path, &locks_root)
             .await
             .expect("first lock acquisition must succeed");
 
-        // No sidecar file must appear.
         assert!(
-            !sidecar_path.exists(),
-            "in-place lock must not create a sidecar .lock file"
+            lock_files_under(dir.path()).is_empty(),
+            "the project mutation lock must not write a .lock file into the project directory; found {:?}",
+            lock_files_under(dir.path())
+        );
+        assert!(
+            guard.path().starts_with(&locks_root),
+            "the lock file must live under the locks root; got {}",
+            guard.path().display()
         );
 
-        // Release the guard BEFORE raw verification reads. On Windows `LockFileEx`
-        // is per-handle; a second raw read against the locked range hits
-        // `ERROR_LOCK_VIOLATION (33)`. Tests must drop the guard before any
-        // out-of-band `std::fs::read*` of ocx.toml.
         drop(guard);
 
         // ocx.toml content is unmodified by the lock acquisition.
@@ -222,20 +236,20 @@ mod tests {
         );
     }
 
-    /// Two `acquire_project_lock_for_file` attempts; second returns
-    /// `ProjectErrorKind::Locked`. The contended file is `ocx.toml` itself.
+    /// Two acquires for the same config file; the second reports
+    /// [`ProjectErrorKind::Locked`] once the contention budget is spent.
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_mutation_contention_blocks_second_writer() {
+        let home = tempdir().unwrap();
+        let locks_root = home.path().join("locks");
         let dir = tempdir().unwrap();
         let config_path = write_ocx_toml(dir.path());
 
-        // First acquisition must succeed.
-        let guard = acquire_project_lock_for_file(&config_path)
+        let guard = acquire_project_lock_for_file(&config_path, &locks_root)
             .await
             .expect("first exclusive lock must succeed");
 
-        // Second attempt must fail with Locked.
-        let err = acquire_project_lock_for_file(&config_path)
+        let err = acquire_project_lock_for_file(&config_path, &locks_root)
             .await
             .expect_err("second lock attempt must fail while first holds");
 
@@ -244,8 +258,6 @@ mod tests {
             "expected ProjectErrorKind::Locked on contention; got: {err}"
         );
 
-        // Release the guard BEFORE raw verification reads (see
-        // `acquire_project_lock_leaves_no_sidecar` for the Windows F1 rationale).
         drop(guard);
 
         // ocx.toml is untouched by the lock machinery.
@@ -253,23 +265,47 @@ mod tests {
         assert_eq!(toml_content, "[tools]\n", "ocx.toml must be unmodified");
     }
 
+    /// Two projects contend independently: a lock held on one project's
+    /// `ocx.toml` must not refuse a mutation of another's.
+    ///
+    /// The key is the *guarded directory's* identity, so this is what proves
+    /// the discriminator is wired at all — a lock keyed on the locks root
+    /// alone would serialise every project on the machine and still pass every
+    /// other test here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_projects_do_not_contend_with_each_other() {
+        let home = tempdir().unwrap();
+        let locks_root = home.path().join("locks");
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+
+        let _held = acquire_project_lock_for_file(&write_ocx_toml(first.path()), &locks_root)
+            .await
+            .expect("the first project's lock must be acquirable");
+
+        acquire_project_lock_for_file(&write_ocx_toml(second.path()), &locks_root)
+            .await
+            .expect("a second project's lock must not contend with the first's");
+    }
+
     /// Regression: a lock released while the acquirer is waiting must be
     /// picked up, not reported as `Locked`.
     ///
-    /// The one-shot `try_exclusive` this replaced failed on the first refusal,
-    /// which made every transient hold a hard error. Transient holds are not
-    /// hypothetical: `flock` lives on the open file description, `fork`
-    /// duplicates it into the child, and `O_CLOEXEC` only drops it at `execve`
-    /// — so a subprocess spawned anywhere in the process keeps this lock alive
-    /// for the child's fork→exec window even after the guard here is dropped.
-    /// A 60 ms hold stands in for that window; it exceeds `CONTENTION_TICK`,
-    /// so the acquire must genuinely retry rather than win on the first try.
+    /// Transient holds are not hypothetical: `flock` lives on the open file
+    /// description, `fork` duplicates it into the child, and `O_CLOEXEC` only
+    /// drops it at `execve` — so a subprocess spawned anywhere in the process
+    /// keeps this lock alive for the child's fork→exec window even after the
+    /// guard here is dropped. A 60 ms hold stands in for that window; it
+    /// exceeds the acquire's own 25 ms poll tick, so the acquire must
+    /// genuinely wait rather than win on the first try.
     #[tokio::test(flavor = "multi_thread")]
     async fn acquire_waits_out_a_transient_holder() {
+        let home = tempdir().unwrap();
+        let locks_root = home.path().join("locks");
         let dir = tempdir().unwrap();
         let config_path = write_ocx_toml(dir.path());
 
-        let guard = acquire_project_lock_for_file(&config_path)
+        let guard = acquire_project_lock_for_file(&config_path, &locks_root)
             .await
             .expect("first lock acquisition must succeed");
         tokio::spawn(async move {
@@ -277,122 +313,44 @@ mod tests {
             drop(guard);
         });
 
-        acquire_project_lock_for_file(&config_path)
+        acquire_project_lock_for_file(&config_path, &locks_root)
             .await
             .expect("a lock released mid-wait must be acquired, not reported as Locked");
     }
 
-    /// Unix-only: an in-place rewrite via the lock-owning handle MUST keep
-    /// `ocx.toml`'s inode stable (no rename, no orphan inode, no lock-fd
-    /// stranding). This is the core property that makes the in-place design
-    /// F2-safe on Windows.
+    /// A symlink at `ocx.toml` is refused rather than followed.
+    ///
+    /// The publish is a rename, so a planted symlink is *replaced* rather than
+    /// written through — the CWE-59 truncation this once guarded is closed by
+    /// construction. What the refusal still buys is the read: every caller
+    /// reads `ocx.toml` immediately after this acquire, and an unrefused
+    /// symlink would hand the mutator an attacker-chosen document to edit and
+    /// then publish back under the project's own name.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn replace_bytes_keeps_ocx_toml_inode_stable() {
-        use std::os::unix::fs::MetadataExt;
-
+    async fn a_symlink_at_ocx_toml_is_refused() {
+        let home = tempdir().unwrap();
+        let locks_root = home.path().join("locks");
         let dir = tempdir().unwrap();
-        let config_path = write_ocx_toml(dir.path());
-
-        let mut guard = acquire_project_lock_for_file(&config_path)
-            .await
-            .expect("lock acquisition must succeed");
-
-        let toml_inode_before = std::fs::metadata(&config_path).expect("ocx.toml must exist").ino();
-
-        // Rewrite ocx.toml in place through the lock-owning handle. This is the
-        // primitive `MutationGuard::commit` calls — it must NOT rotate the inode.
-        guard
-            .replace_bytes(b"[tools]\n# updated\n")
-            .await
-            .expect("replace_bytes through lock-owning handle must succeed");
-
-        let toml_inode_after = std::fs::metadata(&config_path)
-            .expect("ocx.toml must still exist after replace_bytes")
-            .ino();
-        assert_eq!(
-            toml_inode_before, toml_inode_after,
-            "in-place replace_bytes must NOT rotate the ocx.toml inode (lock fd remains valid)"
-        );
-
-        // Content reflects the new bytes.
-        let toml_content = std::fs::read_to_string(&config_path).unwrap();
-        assert_eq!(toml_content, "[tools]\n# updated\n");
-
-        drop(guard);
-    }
-
-    /// Windows cfg-gated: hold the in-place lock and rewrite `ocx.toml`
-    /// through the lock-owning handle. The lock fd never strands (no rename
-    /// happens), so the rewrite must not hit os error 33
-    /// (`ERROR_LOCK_VIOLATION`).
-    #[cfg(target_os = "windows")]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn replace_bytes_via_locked_handle_no_lock_violation() {
-        let dir = tempdir().unwrap();
-        let config_path = write_ocx_toml(dir.path());
-
-        let mut guard = acquire_project_lock_for_file(&config_path)
-            .await
-            .expect("lock acquisition must succeed");
-
-        // Rewrite through the lock-owning handle — F2-safe by construction.
-        for i in 0u32..10 {
-            guard
-                .replace_bytes(format!("[tools]\n# iteration {i}\n").as_bytes())
-                .await
-                .expect("replace_bytes through lock-owning handle must not hit os error 33");
-        }
-
-        drop(guard);
-    }
-
-    /// Regression: the symlink refusal must re-run before **every** open, not
-    /// once before the retry loop.
-    ///
-    /// The loop reopens `ocx.toml` up to 21 times across `CONTENTION_BUDGET`,
-    /// so a refusal hoisted out of it guards the first open and none of the
-    /// other twenty. Anyone who can write the project directory can take an
-    /// `flock` on `ocx.toml` to *force* the retry, plant a symlink during a
-    /// tick, and be handed a lock-owning handle on the target — which
-    /// `MutationGuard::commit` then truncates and rewrites through
-    /// `LockedFile::replace_bytes` (CWE-59 / CWE-367).
-    ///
-    /// The holder is never released, so the acquire can only ever return `Ok`
-    /// by following the planted symlink: a success here is the vulnerability,
-    /// not a race the test lost.
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_symlink_planted_during_the_retry_loop_is_refused() {
-        let dir = tempdir().unwrap();
-        let config_path = write_ocx_toml(dir.path());
+        let config_path = dir.path().join("ocx.toml");
         let victim_path = dir.path().join("victim.toml");
         std::fs::write(&victim_path, "[victim]\n").expect("write the symlink target");
+        std::os::unix::fs::symlink(&victim_path, &config_path).expect("plant the symlink");
 
-        // Never dropped: this is the attacker's `flock`, and it is what forces
-        // the acquire below into the retry loop.
-        let _holder = acquire_project_lock_for_file(&config_path)
+        let err = acquire_project_lock_for_file(&config_path, &locks_root)
             .await
-            .expect("first lock acquisition must succeed");
-
-        let planted_at = config_path.clone();
-        let planted_to = victim_path.clone();
-        tokio::spawn(async move {
-            // One tick in, leaving ~460 ms of the 500 ms budget to be caught in.
-            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-            std::fs::remove_file(&planted_at).expect("unlink ocx.toml");
-            std::os::unix::fs::symlink(&planted_to, &planted_at).expect("plant the symlink");
-        });
-
-        let err = acquire_project_lock_for_file(&config_path)
-            .await
-            .expect_err("a symlink planted mid-retry must be refused, not followed");
+            .expect_err("a symlink at ocx.toml must be refused, not followed");
 
         assert!(
             matches!(&err, Error::Project(project_error)
                 if matches!(&project_error.kind, ProjectErrorKind::Io(io_error)
                     if io_error.to_string().contains("symlink"))),
             "expected the symlink refusal; got: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim_path).unwrap(),
+            "[victim]\n",
+            "the symlink target must be untouched"
         );
     }
 }

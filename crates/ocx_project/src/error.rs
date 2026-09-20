@@ -398,12 +398,12 @@ pub enum ProjectErrorKind {
     #[error("file too large: {size} bytes exceeds limit of {limit} bytes")]
     FileTooLarge { size: u64, limit: u64 },
 
-    /// Another writer holds the exclusive advisory flock on `ocx.toml`.
+    /// Another writer holds the project mutation lock for this config file.
     ///
-    /// Surfaced from [`crate::acquire_project_lock`] when
-    /// `FileLock::try_exclusive` finds the lock already held. Distinct from
-    /// [`Self::Io`] so callers can retry with backoff or surface a
-    /// human-readable "another OCX process is writing" message.
+    /// Surfaced from [`crate::acquire_project_lock`] when the scoped lock
+    /// under `$OCX_HOME/locks` is still held after the contention budget.
+    /// Distinct from [`Self::Io`] so callers can retry with backoff or
+    /// surface a human-readable "another OCX process is writing" message.
     #[error("ocx.toml is locked by another process")]
     Locked,
 

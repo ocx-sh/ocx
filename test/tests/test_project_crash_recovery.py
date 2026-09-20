@@ -31,6 +31,7 @@ import os
 import signal
 import subprocess
 import time
+import tomllib
 from pathlib import Path
 from uuid import uuid4
 
@@ -171,6 +172,67 @@ def test_kill_mid_add_leaves_recoverable_state(
     assert repo_b in toml_text, (
         f"recovery add must land its binding in ocx.toml; got:\n{toml_text}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 1b. SIGKILL mid-add leaves ocx.toml whole
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="SIGKILL not available on Windows; equivalent path is TerminateProcess",
+)
+def test_kill_mid_add_leaves_ocx_toml_intact(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A SIGKILL during ``ocx add`` leaves ``ocx.toml`` byte-identical and
+    parseable — never truncated, never half-written.
+
+    ``ocx.toml`` is published by atomic rename, so the manifest a killed
+    process leaves behind is whole: either the document that was there before
+    or the replacement, and here the kill lands before the publish, so it is
+    the former. The comments, the schema directive and the existing binding
+    all survive, and no temp file is left in the project.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_kill_intact"
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    body = (
+        "#:schema https://ocx.sh/schemas/project/v1.json\n"
+        "# hand-written, must survive a kill\n"
+        "\n"
+        "[tools]\n"
+    )
+    toml_path = _write_ocx_toml(project, body)
+    before = toml_path.read_bytes()
+
+    proc = _spawn_in(
+        ocx,
+        project,
+        "add",
+        f"{ocx.registry}/{repo}:1.0.0",
+        extra_env={"OCX_TEST_FAULT": "pause_before_manifest_write"},
+    )
+    time.sleep(2.0)
+    proc.send_signal(signal.SIGKILL)
+    proc.wait(timeout=10)
+
+    after = toml_path.read_bytes()
+    assert after == before, (
+        f"a killed mutation must leave ocx.toml byte-identical; before={before!r}, after={after!r}"
+    )
+    tomllib.loads(after.decode())
+
+    strays = sorted(
+        path.name
+        for path in project.iterdir()
+        if path.is_file() and path.name not in {"ocx.toml", "ocx.lock"}
+    )
+    assert not strays, f"a killed mutation must leave no staged temp file behind; found {strays}"
 
 
 # ---------------------------------------------------------------------------

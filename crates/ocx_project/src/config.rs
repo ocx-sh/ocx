@@ -584,11 +584,11 @@ impl ProjectConfig {
 
     /// Parse a [`ProjectConfig`] from pre-read bytes attributed to `path`.
     ///
-    /// Used by callers that already hold the file open (e.g.
-    /// `load_project_for_mutate`, which reads through its exclusive
-    /// `LockedFile` handle to avoid the Windows F1 (`ERROR_LOCK_VIOLATION`)
-    /// that a second raw open would trigger). Enforces the same 64 KiB size
-    /// cap as [`Self::from_path`] and surfaces the same structured errors.
+    /// Used by callers that already hold the bytes — the mutation path's
+    /// `read_manifest_snapshot` (a bounded read taken under the scoped
+    /// mutation lock) and the toolchain exec path. Enforces the same 64 KiB
+    /// size cap as [`Self::from_path`] and surfaces the same structured
+    /// errors.
     pub fn from_toml_bytes_with_path(bytes: &[u8], path: PathBuf) -> Result<Self, super::Error> {
         let limit = super::internal::FILE_SIZE_LIMIT_BYTES;
         if bytes.len() as u64 > limit {

@@ -3,10 +3,12 @@
 
 //! `ocx.lock` schema: the machine-written, committed lock file.
 //!
-//! Locking model: writers acquire an exclusive advisory flock on `ocx.toml`
-//! via [`crate::acquire_project_lock`] before mutating the project
-//! state. Readers (`load`, `from_path`, `ProjectConfig::from_path`) never
-//! take a lock — concurrent reads are always allowed.
+//! Locking model: writers acquire the project mutation lock via
+//! [`crate::acquire_project_lock`] — a scoped entry under `$OCX_HOME/locks`,
+//! never a handle on the data — before mutating the project state. Readers
+//! (`load`, `from_path`, `ProjectConfig::from_path`) never take a lock:
+//! both files are published by atomic rename, so a concurrent read always
+//! sees one whole document.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -1863,29 +1865,26 @@ repository = "ocx.sh/cmake"
 
     /// `acquire_project_lock` must reject a second concurrent acquire while the
     /// first guard is alive, then succeed once the first guard is dropped.
-    /// Proves the exclusive flock on `ocx.toml` serialises concurrent writers.
-    ///
-    /// `fs4` uses `flock(2)` on Unix (per-fd semantics): a second open fd on the
-    /// same path cannot acquire exclusive while the first fd holds it, even within
-    /// the same process.
+    /// Proves the scoped mutation lock serialises concurrent writers.
     #[tokio::test]
     async fn acquire_project_lock_blocks_second_writer() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // Create the ocx.toml so acquire_project_lock can open it.
+        // The manifest the lock is keyed by; the lock file itself lives
+        // under the locks root, never beside it.
         std::fs::write(dir.path().join("ocx.toml"), "[tools]\n").expect("write ocx.toml");
 
-        let first_guard = crate::acquire_project_lock(dir.path())
+        let first_guard = crate::acquire_project_lock(dir.path(), &dir.path().join(".ocx-home").join("locks"))
             .await
             .expect("first acquire must succeed");
 
-        let err = crate::acquire_project_lock(dir.path())
+        let err = crate::acquire_project_lock(dir.path(), &dir.path().join(".ocx-home").join("locks"))
             .await
             .expect_err("second acquire must fail while first guard is held");
         assert_kind!(err, ProjectErrorKind::Locked);
 
         drop(first_guard);
 
-        crate::acquire_project_lock(dir.path())
+        crate::acquire_project_lock(dir.path(), &dir.path().join(".ocx-home").join("locks"))
             .await
             .expect("acquire after release must succeed");
     }
@@ -1894,10 +1893,10 @@ repository = "ocx.sh/cmake"
     /// `ProjectErrorKind::Io`, not `Locked`, and must NOT follow the symlink
     /// to its target.
     ///
-    /// The lock target is `ocx.toml` itself (in-place lock — see ADR §Decision 3).
-    /// A planted symlink at `ocx.toml` could redirect the lock and the
-    /// subsequent in-place rewrite to an attacker-chosen file, so we reject it
-    /// with `InvalidInput` before calling `LockedFile::try_exclusive`.
+    /// The publish is a rename, so a planted symlink is replaced rather than
+    /// written through — but every mutator *reads* the config immediately
+    /// after this acquire, and an unrefused symlink would hand it an
+    /// attacker-chosen document to edit and publish back.
     #[tokio::test]
     async fn acquire_project_lock_rejects_symlink_at_ocx_toml() {
         #[cfg(unix)]
@@ -1918,7 +1917,7 @@ repository = "ocx.sh/cmake"
             return;
         }
 
-        let err = crate::acquire_project_lock(dir.path())
+        let err = crate::acquire_project_lock(dir.path(), &dir.path().join(".ocx-home").join("locks"))
             .await
             .expect_err("acquire_project_lock must fail when ocx.toml is a symlink");
 
@@ -1932,12 +1931,13 @@ repository = "ocx.sh/cmake"
         );
     }
 
-    /// While a writer holds the exclusive flock on `ocx.toml`,
+    /// While a writer holds the project mutation lock,
     /// `ProjectLock::from_path` (the unlocked read path) must complete promptly.
     ///
-    /// Readers open `ocx.lock` directly without any flock — only writers
-    /// coordinate via the flock on `ocx.toml`. Readers always observe a complete
-    /// file via the atomic-rename guarantee, so they never need to wait.
+    /// Readers open `ocx.lock` directly without any lock — only writers
+    /// coordinate, through the scoped mutation lock under `$OCX_HOME/locks`.
+    /// Readers always observe a complete file via the atomic-rename
+    /// guarantee, so they never need to wait.
     ///
     /// A regression where the reader blocks would exceed the 500 ms timeout.
     #[tokio::test]
@@ -1946,25 +1946,25 @@ repository = "ocx.sh/cmake"
         std::fs::write(dir.path().join("ocx.toml"), "[tools]\n").expect("write ocx.toml");
         let lock_path = dir.path().join("ocx.lock");
 
-        // Acquire the exclusive writer lock on ocx.toml.
-        let _writer_guard = crate::acquire_project_lock(dir.path())
+        // Acquire the exclusive writer lock for this project.
+        let _writer_guard = crate::acquire_project_lock(dir.path(), &dir.path().join(".ocx-home").join("locks"))
             .await
             .expect("first exclusive acquire must succeed");
 
-        // ProjectLock::from_path opens ocx.lock directly — no flock acquired.
-        // It must not wait on the writer's flock on ocx.toml.
+        // ProjectLock::from_path opens ocx.lock directly — no lock acquired.
+        // It must not wait on the writer's mutation lock.
         let reader_result = tokio::time::timeout(
             std::time::Duration::from_millis(500),
             ProjectLock::from_path(&lock_path),
         )
         .await
-        .expect("reader must not block: timeout exceeded while writer holds flock on ocx.toml");
+        .expect("reader must not block: timeout exceeded while the writer holds the mutation lock");
 
         // On a fresh dir the lock file does not exist — None is expected.
         match reader_result {
             Ok(None) => {}    // expected: lock file absent
             Ok(Some(_)) => {} // also acceptable: lock file existed from another test
-            Err(e) => panic!("reader must not error while writer holds flock; got: {e}"),
+            Err(e) => panic!("reader must not error while the writer holds the mutation lock; got: {e}"),
         }
     }
 

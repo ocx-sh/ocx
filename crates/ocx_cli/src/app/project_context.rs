@@ -41,8 +41,7 @@
 use std::path::{Path, PathBuf};
 
 use ocx_project::{
-    ManifestSnapshot, MutationGuard, Origin, ProjectConfig, ProjectLock, SelectedTool, acquire_project_lock_for_file,
-    lock::lock_path_for,
+    MutationGuard, Origin, ProjectConfig, ProjectLock, SelectedTool, acquire_project_lock_for_file, lock::lock_path_for,
 };
 
 /// Result of resolving the project tier: owned paths, parsed config, parsed lock.
@@ -703,11 +702,11 @@ pub(crate) fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> 
 
 /// Mutation-side counterpart to [`load_project_with_lock`].
 ///
-/// Acquires the project flock, loads the current [`ProjectConfig`]
+/// Acquires the project mutation lock, loads the current [`ProjectConfig`]
 /// snapshot and the optional predecessor [`ProjectLock`], and returns
 /// a [`MutationGuard`] that callers use to stage in-memory mutations
 /// and commit them atomically across `ocx.toml` + `ocx.lock`. The
-/// guard's flock is held until commit / rollback / drop.
+/// guard's lock is held until commit / rollback / drop.
 ///
 /// Unlike [`load_project_with_lock`], the staleness gate is NOT
 /// enforced here: mutators (`ocx add`, `ocx remove`, `ocx lock`,
@@ -729,7 +728,7 @@ pub(crate) fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> 
 /// variants as [`load_project_with_lock`] when the project cannot be
 /// resolved or its files cannot be loaded. Surfaces
 /// `ProjectErrorKind::Locked` (wrapped in `ProjectContextError::Project`)
-/// when another writer holds the flock.
+/// when another writer holds the mutation lock.
 pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<MutationGuard, ProjectContextError> {
     use ocx_project::error::{ProjectError, ProjectErrorKind};
 
@@ -749,45 +748,27 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
         None => return Err(no_project(context, cwd)),
     };
 
-    // Acquire the exclusive flock on the resolved config file BEFORE loading
+    // Acquire the mutation lock for the resolved config file BEFORE loading
     // the snapshot so a concurrent writer cannot race us between read and
-    // commit. The flock target is the config file itself (typically
+    // commit. The lock is keyed by the config file's own path (typically
     // `ocx.toml`, but may be a custom name when `--project=<custom>.toml`
-    // is in effect) — using the actual file path is what makes the flock
-    // honour custom config names instead of silently locking a sibling
-    // `ocx.toml`. The lock_path derivation in `MutationGuard` continues to
-    // use the resolver's `lock_path_for` so the two stay consistent.
+    // is in effect) so a custom config name gets its own lock rather than
+    // silently sharing a sibling `ocx.toml`'s; the lock *file* is a
+    // content-keyed entry under `$OCX_HOME/locks`, because the manifest is
+    // published by rename and a lock on the data file would strand on the
+    // orphaned inode. The lock_path derivation in `MutationGuard` continues
+    // to use the resolver's `lock_path_for` so the two stay consistent.
     debug_assert_eq!(
         lock_path,
         lock_path_for(&config_path),
         "lock_path must be derived from config_path"
     );
-    let mut flock = acquire_project_lock_for_file(&config_path).await?;
+    let mutate_lock = acquire_project_lock_for_file(&config_path, &context.file_structure().locks).await?;
 
-    // Load the current `ocx.toml` snapshot THROUGH the lock-owning handle.
-    // On Windows `LockFileEx` is per-handle and mandatory: opening a second
-    // raw handle on the locked range (which is what `ProjectConfig::from_path`
-    // does via `tokio::fs::File::open`) hits `ERROR_LOCK_VIOLATION (33)`. By
-    // reading via `flock.read_bytes()` we route through the single
-    // lock-owning fd, so the snapshot load is safe regardless of platform.
-    let bytes = flock.read_bytes().await.map_err(|e| {
-        ocx_project::Error::Project(ocx_project::error::ProjectError::new(
-            config_path.clone(),
-            ocx_project::error::ProjectErrorKind::Io(std::io::Error::other(e)),
-        ))
-    })?;
-    let config = ProjectConfig::from_toml_bytes_with_path(&bytes, config_path.clone())?;
-    // Keep the verbatim text alongside the parsed form: the commit path edits
-    // the document the user wrote rather than re-serializing the struct, so
-    // comments and declaration order survive the mutation. Parsing above
-    // already established the bytes are UTF-8.
-    let text = String::from_utf8(bytes).map_err(|e| {
-        ocx_project::Error::Project(ocx_project::error::ProjectError::new(
-            config_path.clone(),
-            ocx_project::error::ProjectErrorKind::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
-        ))
-    })?;
-    let manifest = ManifestSnapshot { config, text };
+    // Load the current `ocx.toml` snapshot: a plain bounded read under the
+    // held lock, through the same helper the library mutators use, so the
+    // size cap, the absent-file case and the parse errors have one shape.
+    let manifest = ocx_project::mutate::read_manifest_snapshot(&config_path).await?;
 
     // Optional predecessor lock — `None` is the bootstrap case. Capture the
     // raw on-disk bytes verbatim alongside the parsed lock so the commit
@@ -808,7 +789,7 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
     };
 
     Ok(MutationGuard::from_parts(
-        flock,
+        mutate_lock,
         config_path,
         lock_path,
         home,
