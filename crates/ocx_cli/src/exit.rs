@@ -582,20 +582,31 @@ mod tests {
     /// any `=>` inside a closure, a string or a comment; and a block-form arm
     /// recorded `{` as its value.
     fn arms_in(source: &str) -> Vec<ClassifierArm> {
-        let file = syn::parse_file(source).expect("a classifier source file parses as Rust");
+        arms_in_file(&syn::parse_file(source).expect("a classifier source file parses as Rust"))
+    }
+
+    /// [`arms_in`] over a tree someone else parsed.
+    ///
+    /// The split exists because the pin reads every classifier source twice —
+    /// once for the trait impls, once for the `downcast_arm!` ladder — and
+    /// `syn::parse_file` is that test's entire cost. One parse, two readers.
+    fn arms_in_file(file: &syn::File) -> Vec<ClassifierArm> {
         let mut scan = ImplScan { out: Vec::new() };
-        syn::visit::Visit::visit_file(&mut scan, &file);
+        syn::visit::Visit::visit_file(&mut scan, file);
         scan.out
     }
 
     /// Every type the `downcast_arm!` ladder registers, as written.
     ///
-    /// A rung is not a `match` arm, so [`arms_in`] cannot see it — and after
-    /// WP-37 a rung is the only surviving form of some baseline delegations.
-    /// Read as syntax rather than grepped: a macro invocation inside a
-    /// function body is a `syn::Macro`, and the commented-out or
+    /// A rung is not a `match` arm, so [`arms_in_file`] cannot see it — and
+    /// after WP-37 a rung is the only surviving form of some baseline
+    /// delegations. Read as syntax rather than grepped: a macro invocation
+    /// inside a function body is a `syn::Macro`, and the commented-out or
     /// string-embedded spellings a text scan would count are not.
-    fn armed_types_in(source: &str) -> Vec<String> {
+    ///
+    /// Takes a parsed tree, like [`arms_in_file`] — see that function for why
+    /// the parse is separated from the read.
+    fn armed_types_in_file(file: &syn::File) -> Vec<String> {
         struct MacroScan {
             out: Vec<String>,
         }
@@ -613,9 +624,8 @@ mod tests {
                 syn::visit::visit_macro(self, node);
             }
         }
-        let file = syn::parse_file(source).expect("a classifier source file parses as Rust");
         let mut scan = MacroScan { out: Vec::new() };
-        syn::visit::Visit::visit_file(&mut scan, &file);
+        syn::visit::Visit::visit_file(&mut scan, file);
         scan.out
     }
 
@@ -699,6 +709,47 @@ mod tests {
         walk(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
         files.sort();
         files
+    }
+
+    /// The three spellings a classifier is written with.
+    ///
+    /// Both readers compare the **last path segment** against one of these
+    /// literal idents — [`ImplScan`] against the trait name, `MacroScan`
+    /// against `downcast_arm`. So a file whose text carries none of them
+    /// cannot hold anything either reader would find, including through an
+    /// aliased `use`: an alias is invisible to the visitors for exactly the
+    /// reason it is invisible to this filter. The filter has the readers' own
+    /// blind spots and no others, which is what makes skipping the parse sound
+    /// rather than a text shortcut standing in for a parser.
+    const CLASSIFIER_SPELLINGS: [&str; 3] = ["ClassifyExitCode", "ClassifyErrorKind", "downcast_arm"];
+
+    /// How many of the crate's sources may carry a classifier, and their parsed
+    /// trees — plus how many files were walked to find them.
+    ///
+    /// Parsing every source of this crate twice was the whole cost of
+    /// [`every_classification_matches_the_pre_split_baseline`]: 191 files, two
+    /// `syn::parse_file` calls each. Twenty-nine of them mention a classifier
+    /// at all, so the pin now parses those once and reads both scans off one
+    /// tree.
+    ///
+    /// The walked count is returned rather than discarded because a filter
+    /// that stopped matching and a tree that genuinely lost its classifiers
+    /// produce the same short list; the caller floors both numbers.
+    fn parsed_classifier_sources() -> (usize, Vec<(PathBuf, syn::File)>) {
+        let paths = classifier_sources();
+        let walked = paths.len();
+        let parsed = paths
+            .into_iter()
+            .filter_map(|path| {
+                let source = std::fs::read_to_string(&path).expect("a classifier source file is readable");
+                if !CLASSIFIER_SPELLINGS.iter().any(|spelling| source.contains(spelling)) {
+                    return None;
+                }
+                let file = syn::parse_file(&source).expect("a classifier source file parses as Rust");
+                Some((path, file))
+            })
+            .collect();
+        (walked, parsed)
     }
 
     /// Every [`EXTRACTED_MODULES`] row renames onto a name nothing else answers
@@ -1082,9 +1133,27 @@ mod tests {
         // some other crate's `AuthError` — the name-match that keeps costing
         // this plan findings.
         let mut armed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for path in classifier_sources() {
-            let source = std::fs::read_to_string(&path).expect("a classifier source file is readable");
-            for ty in armed_types_in(&source) {
+        let (walked, sources) = parsed_classifier_sources();
+        // Floored on the reader, twice. A walk that found no files and a
+        // filter that stopped matching both shorten this list, and either
+        // leaves every comparison below ranging over nothing — the shape the
+        // baseline's own row floor cannot tell from a tree that lost its
+        // classifications.
+        assert!(
+            walked > 150,
+            "the source walk read {walked} file(s); this crate carries well over a hundred, so the \
+             walk stopped and the arms below are whatever it happened to reach"
+        );
+        assert!(
+            sources.len() > 20,
+            "only {} of {walked} source(s) were parsed for classifiers; the tree carries around \
+             thirty, so the spelling filter stopped matching and the clean comparison below \
+             would mean nothing",
+            sources.len()
+        );
+
+        for (path, parsed) in &sources {
+            for ty in armed_types_in_file(parsed) {
                 let file = path
                     .file_name()
                     .expect("a source path has a file name")
@@ -1092,7 +1161,7 @@ mod tests {
                     .into_owned();
                 armed.entry(ty).or_default().insert(file);
             }
-            for arm in arms_in(&source) {
+            for arm in arms_in_file(parsed) {
                 arm_count += 1;
                 let (pattern, value) = canonical_row(&arm.pattern, &arm.value, &arm.target).unwrap_or_else(|error| {
                     panic!(
@@ -1240,6 +1309,10 @@ mod tests {
         let mut unparsed = Vec::new();
         let mut baseline_keys: BTreeSet<(String, String, String, usize, String)> = BTreeSet::new();
         let mut baseline_raw: BTreeMap<String, (String, String)> = BTreeMap::new();
+        // Incremented at the comparison itself, never above it: a counter
+        // raised before the step that would have rejected the row counts
+        // intent rather than work done.
+        let mut compared = 0usize;
         for row in rows {
             let declared = row["type"].as_str().expect("every row names a type");
             let source = row["source"].as_str().expect("every row names its source");
@@ -1282,6 +1355,7 @@ mod tests {
             // second value can only come from a fold the collapse check above
             // already refuses, so a set of any other shape is reported rather
             // than tolerated.
+            compared += 1;
             match index.get(&(
                 target.clone(),
                 trait_name.clone(),
@@ -1307,6 +1381,27 @@ mod tests {
             "{} baseline row(s) are not parseable Rust and so assert nothing:\n  {}",
             unparsed.len(),
             unparsed.join("\n  ")
+        );
+
+        // How many classifications were *compared*, floored twice. `rows`
+        // bounds the table; this bounds what the loop did with it. A shortcut
+        // that skipped rows — a filter, an early `continue`, a narrowed
+        // selection — leaves the table its full size and the coverage
+        // narrowed, and every assertion above is satisfied by whatever
+        // survived. The literal floor is the row count the baseline was
+        // frozen with: this table only ever grows by relocation, never by
+        // shrinking.
+        assert_eq!(
+            compared,
+            rows.len(),
+            "{compared} of the baseline's {} classification(s) reached the comparison; the rest \
+             assert nothing",
+            rows.len()
+        );
+        assert!(
+            compared >= 372,
+            "{compared} classification(s) were compared; the baseline was frozen with 372 and a \
+             row is never dropped to make a red go away"
         );
 
         // ------------------------------------------------------------------
