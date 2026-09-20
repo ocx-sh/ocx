@@ -752,10 +752,10 @@ class GitLabRoutes:
                 if kind == "create" and present:
                     handler._reply_json(400, {"message": f"A file with the name {path} already exists"})
                     return
-                if kind == "update" and not present:
+                if kind in ("update", "delete") and not present:
                     handler._reply_json(400, {"message": f"A file with the name {path} doesn't exist"})
                     return
-                if kind == "update":
+                if kind in ("update", "delete"):
                     # The compare-and-swap. `last_commit_id` names the commit the
                     # editor based its version on; anything newer means somebody
                     # else changed this file first.
@@ -776,6 +776,13 @@ class GitLabRoutes:
                             },
                         )
                         return
+                if kind == "delete":
+                    # The removal carries no content; the entry simply leaves
+                    # the tree the commit is built from. `file_last_commit` is
+                    # derived from that tree at commit time, so the path drops
+                    # out of the compare-and-swap bookkeeping with it.
+                    del tree[path]
+                    continue
                 content = base64.b64decode(action.get("content", ""))
                 tree[path] = self._store_blob_locked(content)
 

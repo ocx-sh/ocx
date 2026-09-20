@@ -36,7 +36,8 @@ use super::git_push_options::{escape_newlines, render_push_options};
 use super::git_stderr::{GitInvocation, classify_push_failure, classify_remote_failure};
 use super::poll::{PollSchedule, backoff_delays};
 use super::{
-    BranchComparison, CommitBase, ForgeError, GitBinary, GitPushCredential, PullRequest, PushAccess, RefUpdate,
+    BranchComparison, CommitBase, FileChange, ForgeError, GitBinary, GitPushCredential, PullRequest, PushAccess,
+    RefUpdate,
 };
 
 /// The remote-tracking namespace every fetch writes into.
@@ -473,6 +474,12 @@ impl GitWorkspace {
     /// `mktree`, which builds one flat tree and would need a hand-rolled
     /// `ls-tree`/`mktree` per level for the three-component path a claim writes.
     ///
+    /// A [`FileChange::Delete`] rides the same index as the writes, as
+    /// `update-index --force-remove`, which drops the entry the `read-tree`
+    /// brought in from the parent. `--force-remove` is also what makes C-001's
+    /// no-op free here: measured against git 2.54.0, it exits 0 on a path the
+    /// index does not carry, so no existence read is spent.
+    ///
     /// The parent is chosen exactly as the REST arm chooses `start_sha`: the
     /// index base when the branch does not exist yet or when a spent branch is
     /// being rebuilt, and the branch's own head when accumulating onto a live
@@ -512,7 +519,7 @@ impl GitWorkspace {
         branch: &str,
         base: CommitBase<'_>,
         message: &str,
-        files: &BTreeMap<String, Vec<u8>>,
+        files: &BTreeMap<String, FileChange>,
         update: RefUpdate,
     ) -> Result<String, ForgeError> {
         // Read **before** anything is built: this is the value the compare-and-swap
@@ -539,22 +546,32 @@ impl GitWorkspace {
             .await
             .map_err(|error| self.write_failed(STAGING_DIRECTORY, &error))?;
 
+        let mut written: Vec<&str> = Vec::with_capacity(files.len());
+        let mut removed: Vec<&str> = Vec::new();
         let mut staged = Vec::with_capacity(files.len());
-        for (position, (path, contents)) in files.iter().enumerate() {
+        for (path, change) in files {
+            let FileChange::Put(contents) = change else {
+                removed.push(path.as_str());
+                continue;
+            };
             // The staged name is the position, never the caller's path: the file
             // is read once by `hash-object` and its name reaches no tree, so
             // nothing is gained by reproducing a path the index entry carries
             // anyway — and a caller's path is the one input that could climb out
-            // of the staging directory.
+            // of the staging directory. The position counts *written* files, so
+            // the staged names stay dense when a removal sits between two of
+            // them — `hash-object` is handed exactly this list.
+            let position = written.len();
             tokio::fs::write(staging.join(position.to_string()), contents)
                 .await
                 .map_err(|error| self.write_failed(path, &error))?;
+            written.push(path.as_str());
             staged.push(format!("{STAGING_DIRECTORY}/{position}"));
         }
 
         let blobs = self.hash_staged_files(&staged).await?;
         self.run_local("read-tree", &[], &[&parent]).await?;
-        if !files.is_empty() {
+        if !written.is_empty() {
             // One `update-index` carrying every entry, not one per file. git
             // applies repeated `--cacheinfo` in order (measured against 2.54.0),
             // and each entry is the *value* of a flag rather than a positional —
@@ -567,11 +584,22 @@ impl GitWorkspace {
             // the `--index-info` form that would have been the other way to batch
             // is tab-delimited and *would* have added a no-tab-in-path premise,
             // which is why it is not used.
-            let entries = self.index_entries(files, &blobs)?;
+            let entries = self.index_entries(&written, &blobs)?;
             let mut flags = Vec::with_capacity(entries.len() + 1);
             flags.push("--add");
             flags.extend(entries.iter().map(String::as_str));
             self.run_local("update-index", &flags, &[]).await?;
+        }
+        if !removed.is_empty() {
+            // Its own invocation rather than more flags on the one above:
+            // `--force-remove` is a mode that applies to every *positional* path
+            // after it, while `--cacheinfo` carries its path as a flag value, so
+            // one argv mixing the two reads in an order a future edit could
+            // silently get wrong. Two calls have no such premise — and this one
+            // is the only place the argv builder's `--end-of-options` sits in an
+            // `update-index`, which is what keeps a path beginning with `-` a
+            // path (accepted by git 2.54.0).
+            self.run_local("update-index", &["--force-remove"], &removed).await?;
         }
         // `--missing-ok` because the fetch is blobless (C-036): every entry here
         // either came from the server's own base tree or was just written by
@@ -972,11 +1000,11 @@ impl GitWorkspace {
     ///
     /// **The arity check is the load-bearing part, and it is why this is a
     /// function rather than a loop inside the caller.** The pairing is positional
-    /// — `files` is a `BTreeMap`, so its key order is the order the staged paths
-    /// were written and therefore the order git was given them — so a short list
-    /// commits each file's bytes under the *next* file's path. That is silent
-    /// corruption of a published index root, and no assertion on the process
-    /// count can see it.
+    /// — `paths` is the caller's written set in `BTreeMap` key order, which is
+    /// the order the staged files were written and therefore the order git was
+    /// given them — so a short list commits each file's bytes under the *next*
+    /// file's path. That is silent corruption of a published index root, and no
+    /// assertion on the process count can see it.
     ///
     /// A real `git` cannot produce the short list: it exits non-zero on a path it
     /// cannot hash, so the caller fails first. That makes the arity refusal
@@ -988,19 +1016,19 @@ impl GitWorkspace {
     ///
     /// Returns [`ForgeError::GitCommandFailed`] when `blobs` does not name one
     /// object per file.
-    fn index_entries(&self, files: &BTreeMap<String, Vec<u8>>, blobs: &[String]) -> Result<Vec<String>, ForgeError> {
-        if blobs.len() != files.len() {
+    fn index_entries(&self, paths: &[&str], blobs: &[String]) -> Result<Vec<String>, ForgeError> {
+        if blobs.len() != paths.len() {
             return Err(self.unreadable(
                 "hash-object",
                 &format!(
                     "{} object names came back for {} staged files",
                     blobs.len(),
-                    files.len()
+                    paths.len()
                 ),
             ));
         }
-        let mut entries = Vec::with_capacity(files.len() * 2);
-        for (path, blob) in files.keys().zip(blobs) {
+        let mut entries = Vec::with_capacity(paths.len() * 2);
+        for (path, blob) in paths.iter().zip(blobs) {
             entries.push("--cacheinfo".to_string());
             entries.push(format!("100644,{blob},{path}"));
         }
@@ -1750,11 +1778,11 @@ mod tests {
         }
 
         /// One file at the three-component path a claim writes.
-        pub fn claim_files() -> BTreeMap<String, Vec<u8>> {
+        pub fn claim_files() -> BTreeMap<String, FileChange> {
             let mut files = BTreeMap::new();
             files.insert(
                 "p/acme/widget.json".to_string(),
-                b"{\"name\":\"ocx.sh/acme/widget\"}\n".to_vec(),
+                FileChange::Put(b"{\"name\":\"ocx.sh/acme/widget\"}\n".to_vec()),
             );
             files
         }
@@ -3479,6 +3507,84 @@ mod tests {
         }
     }
 
+    // ── C-001: the commit payload can express a removal ──────────────────────
+
+    /// A `Delete` drops the path from the committed tree, and a `Delete` of a
+    /// path the parent never carried is a no-op rather than a failure.
+    ///
+    /// `base.json` is the seed commit's own file, so the first removal is real:
+    /// the `read-tree` brings the entry in and the `--force-remove` has to take
+    /// it back out. `never-committed.json` is in the same commit because that is
+    /// the state the orphan diff routinely produces — a root may reference an
+    /// object some earlier run never wrote — and a driver that refused there
+    /// would fail an ordinary announce.
+    ///
+    /// The tree is the assertion rather than the argv: a build that produced the
+    /// right argv and the wrong tree is the failure worth catching, and
+    /// `ls-tree -r` names every surviving path, so a removal that took the
+    /// *written* file with it reds here too.
+    ///
+    /// Reds on: dropping the `--force-remove` call (`base.json` survives);
+    /// removing the wrong path; handing the whole payload to `hash-object`
+    /// (a `Delete` has no bytes to stage, and the arity guard fires).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_delete_drops_the_path_and_an_absent_one_is_a_no_op() {
+        let fixture = Fixture::new().await;
+        let base = fixture.remote_sha("main").await;
+        let workspace = GitWorkspace::open(&fixture.shim, &fixture.remote(), "main", None, None)
+            .await
+            .expect("open");
+
+        let coordinate = "acme/index"
+            .parse::<crate::forge::RepoCoordinate>()
+            .expect("a coordinate");
+        let files = BTreeMap::from([
+            (
+                "p/acme/widget.json".to_string(),
+                FileChange::Put(b"{\"name\":\"ocx.sh/acme/widget\"}\n".to_vec()),
+            ),
+            ("base.json".to_string(), FileChange::Delete),
+            ("never-committed.json".to_string(), FileChange::Delete),
+        ]);
+
+        let sha = workspace
+            .commit_files(
+                "claim",
+                CommitBase {
+                    repo: &coordinate,
+                    sha: &base,
+                    branch: "main",
+                },
+                "announce acme/widget",
+                &files,
+                RefUpdate::Accumulate,
+            )
+            .await
+            .expect("a removal of an absent path must not fail the commit chain");
+
+        let listed = fixture
+            .git(workspace.directory(), &["ls-tree", "-r", "--name-only", &sha])
+            .await;
+        assert_eq!(
+            listed.lines().collect::<Vec<_>>(),
+            vec!["p/acme/widget.json"],
+            "the seed file is removed and the written path is all that is left, got {listed:?}"
+        );
+
+        let removals = fixture
+            .calls("update-index")
+            .into_iter()
+            .filter(|invocation| invocation.args.iter().any(|argument| argument == "--force-remove"))
+            .collect::<Vec<_>>();
+        assert_eq!(removals.len(), 1, "every removal rides one invocation, not one each");
+        assert!(
+            removals[0].args.iter().any(|argument| argument == "--end-of-options"),
+            "the separator keeps a path beginning with `-` a path: {:?}",
+            removals[0].args
+        );
+    }
+
     // ── One process per commit, not one per file ─────────────────────────────
 
     /// Three files cost one `hash-object` and one `update-index`, and each file's
@@ -3510,7 +3616,10 @@ mod tests {
         let paths = ["p/acme/alpha.json", "p/acme/beta.json", "p/zulu/gamma.json"];
         let mut files = BTreeMap::new();
         for path in paths {
-            files.insert(path.to_string(), format!("{{\"name\":\"{path}\"}}\n").into_bytes());
+            files.insert(
+                path.to_string(),
+                FileChange::Put(format!("{{\"name\":\"{path}\"}}\n").into_bytes()),
+            );
         }
 
         let coordinate = "acme/index"
@@ -3587,14 +3696,11 @@ mod tests {
             .await
             .expect("open");
 
-        let mut files = BTreeMap::new();
-        for path in ["p/acme/alpha.json", "p/acme/beta.json", "p/zulu/gamma.json"] {
-            files.insert(path.to_string(), b"{}\n".to_vec());
-        }
+        let paths = ["p/acme/alpha.json", "p/acme/beta.json", "p/zulu/gamma.json"];
         let blob = |tag: char| std::iter::repeat_n(tag, 40).collect::<String>();
 
         let entries = workspace
-            .index_entries(&files, &[blob('a'), blob('b'), blob('c')])
+            .index_entries(&paths, &[blob('a'), blob('b'), blob('c')])
             .expect("one object per file is the shape git returns");
         assert_eq!(
             entries,
@@ -3617,7 +3723,7 @@ mod tests {
             ),
             (Vec::new(), "no object names at all"),
         ] {
-            match workspace.index_entries(&files, &blobs) {
+            match workspace.index_entries(&paths, &blobs) {
                 Err(ForgeError::GitCommandFailed { command, .. }) => {
                     assert_eq!(
                         command, "hash-object",

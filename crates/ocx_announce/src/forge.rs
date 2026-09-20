@@ -54,8 +54,8 @@ mod kind;
 mod poll;
 
 pub use api::{
-    BranchComparison, CapabilityCheck, CapabilityName, CheckStatus, CommitBase, Forge, ForgeIdentity, Mergeability,
-    PushAccess, RefUpdate,
+    BranchComparison, CapabilityCheck, CapabilityName, CheckStatus, CommitBase, FileChange, Forge, ForgeIdentity,
+    Mergeability, PushAccess, RefUpdate,
 };
 pub use credentials::{ForgeCredentials, GitPushCredential};
 // `is_server_fault` is the 5xx rung of the exit-code ladder, which lives in

@@ -53,8 +53,9 @@ use super::http::build_forge_http_client;
 use super::identity::{fork_identity_from_path, verify_fork_namespace, verify_gitlab_fork};
 use super::poll::{PollSchedule, backoff_delays};
 use super::{
-    BranchComparison, CapabilityName, CheckStatus, CommitBase, Forge, ForgeCredentials, ForgeError, ForgeIdentity,
-    ForkIdentity, GitBinary, Mergeability, PullRequest, PushAccess, RefUpdate, RepoCoordinate, WriteTransport,
+    BranchComparison, CapabilityName, CheckStatus, CommitBase, FileChange, Forge, ForgeCredentials, ForgeError,
+    ForgeIdentity, ForkIdentity, GitBinary, Mergeability, PullRequest, PushAccess, RefUpdate, RepoCoordinate,
+    WriteTransport,
 };
 
 /// Canonical GitLab host — every other host is a self-managed instance.
@@ -1174,13 +1175,19 @@ impl GitLabForge {
     }
 
     /// One attempt at the single-request atomic commit.
+    ///
+    /// The per-path existence read at the base decides all three actions, not
+    /// just `create` versus `update`: a [`FileChange::Delete`] naming a path the
+    /// base does not carry contributes **no action at all**, because GitLab
+    /// answers `delete` on an absent file with a 400 that would fail the whole
+    /// commit — and C-001 owes the caller a no-op there.
     async fn commit_files_once(
         &self,
         repo: &RepoCoordinate,
         branch: &str,
         base: CommitBase<'_>,
         message: &str,
-        files: &BTreeMap<String, Vec<u8>>,
+        files: &BTreeMap<String, FileChange>,
         update: RefUpdate,
     ) -> Result<String, ForgeError> {
         let target_id = self.project_id(repo).await?;
@@ -1188,25 +1195,31 @@ impl GitLabForge {
         let branch_exists = self.branch_sha(repo, branch).await?.is_some();
 
         let mut actions = Vec::with_capacity(files.len());
-        for (path, contents) in files {
+        for (path, change) in files {
             // Whether a path already exists decides `create` versus `update`;
             // GitLab has no upsert, and guessing wrong fails the whole commit.
             // The question is asked at the BASE, because that is the tree the new
             // commit is built on.
             let existing = self.file_last_commit(base_id, path, base.sha).await?;
-            let mut action = json!({
-                "file_path": path,
-                "content": BASE64_STANDARD.encode(contents),
-                "encoding": "base64",
-            });
-            match existing {
-                Some((last_commit_id, _)) => {
-                    action["action"] = json!("update");
-                    // The C4 compare-and-swap. Omitting this is what turns a
-                    // concurrent announce into a silent overwrite.
-                    action["last_commit_id"] = json!(last_commit_id);
+            let mut action = match change {
+                FileChange::Put(contents) => json!({
+                    "file_path": path,
+                    "content": BASE64_STANDARD.encode(contents),
+                    "encoding": "base64",
+                    "action": if existing.is_some() { "update" } else { "create" },
+                }),
+                FileChange::Delete => {
+                    if existing.is_none() {
+                        continue;
+                    }
+                    json!({ "file_path": path, "action": "delete" })
                 }
-                None => action["action"] = json!("create"),
+            };
+            // The C4 compare-and-swap. Omitting this is what turns a concurrent
+            // announce into a silent overwrite — and a `delete` races the same
+            // way a rewrite does, so it carries the same field.
+            if let Some((last_commit_id, _)) = existing {
+                action["last_commit_id"] = json!(last_commit_id);
             }
             actions.push(action);
         }
@@ -1645,7 +1658,7 @@ impl Forge for GitLabForge {
         branch: &str,
         base: CommitBase<'_>,
         message: &str,
-        files: &BTreeMap<String, Vec<u8>>,
+        files: &BTreeMap<String, FileChange>,
         update: RefUpdate,
     ) -> Result<String, ForgeError> {
         if self.transport == WriteTransport::Git {
@@ -2443,15 +2456,18 @@ mod tests {
 
     /// One recorded request against [`FakeGitLab`].
     ///
-    /// Headers and the **raw request target** are captured, unlike the GitHub
-    /// client's sibling harness which records method, path and body: C-026 is a
+    /// Headers and the **raw request target** are captured beside the body, a
+    /// wider set than the GitHub client's sibling harness keeps: C-026 is a
     /// statement about the exact header set, and both the login lookup and the
-    /// allowlist walk carry their arguments in the query string.
+    /// allowlist walk carry their arguments in the query string. The body is
+    /// read here anyway to drain the socket, so keeping it costs nothing and is
+    /// what lets a commit's `actions` array be asserted on.
     #[derive(Clone)]
     struct Recorded {
         method: String,
         target: String,
         headers: BTreeMap<String, String>,
+        body: String,
     }
 
     impl Recorded {
@@ -2580,6 +2596,7 @@ mod tests {
             method,
             target,
             headers,
+            body: String::from_utf8_lossy(&body).into_owned(),
         })
     }
 
@@ -5101,6 +5118,104 @@ mod tests {
             .collect()
     }
 
+    /// C-001 on GitLab: a `Delete` is a `delete` action carrying the file's own
+    /// `last_commit_id`, and a `Delete` of a path absent at the base contributes
+    /// **no action**.
+    ///
+    /// The existence read this driver already spends to choose `create` versus
+    /// `update` answers the removal question too, so the no-op costs nothing —
+    /// and it is not optional: GitLab answers `delete` on a file it does not
+    /// have with a 400 that fails the *whole* commit, taking the root and every
+    /// CAS object with it.
+    ///
+    /// `last_commit_id` on the removal is the same C4 compare-and-swap a rewrite
+    /// carries. Without it a concurrent announce that rewrote the object between
+    /// our read and our commit is deleted anyway, silently.
+    ///
+    /// Both halves in one commit: the `delete` action alone passes for a build
+    /// that emits one unconditionally, and the absent half alone passes for a
+    /// build that drops every removal.
+    ///
+    /// Reds on: ignoring `FileChange::Delete`; emitting a `delete` for the
+    /// absent path; dropping `last_commit_id` from the removal.
+    #[tokio::test]
+    async fn a_delete_is_a_delete_action_and_an_absent_path_contributes_none() {
+        const PRESENT: &str = "p/acme/widget/o/sha256/present.json";
+        const ABSENT: &str = "p/acme/widget/o/sha256/absent.json";
+        const LAST_COMMIT: &str = "1a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d";
+
+        // A file path travels as ONE percent-encoded segment, dots included, so
+        // the fixture matches the encoding the client actually sends rather than
+        // the plain path — a substring of the plain form matches nothing and
+        // would answer 404 for every read, which is the shape that makes the
+        // whole assertion below pass for the wrong reason.
+        let present_segment = encode_segment(PRESENT);
+        let fake = FakeGitLab::start(move |method, target| {
+            if method == "POST" {
+                return (201, json!({ "id": "newcommit" }).to_string());
+            }
+            if target.contains("/repository/branches") {
+                // The LIST endpoint: an unmatched search is 200 with an empty
+                // array, so the branch reads as absent and the commit starts at
+                // the base.
+                return (200, json!([]).to_string());
+            }
+            if target.contains("/repository/files/") {
+                if target.contains(&present_segment) {
+                    return (200, json!({ "last_commit_id": LAST_COMMIT }).to_string());
+                }
+                return (404, json!({ "message": "404 File Not Found" }).to_string());
+            }
+            (200, pushable_project().to_string())
+        })
+        .await;
+
+        let repo = index_repo();
+        let files = BTreeMap::from([
+            ("p/acme/widget.json".to_string(), FileChange::Put(b"{}".to_vec())),
+            (PRESENT.to_string(), FileChange::Delete),
+            (ABSENT.to_string(), FileChange::Delete),
+        ]);
+
+        fake.forge(ForgeCredentials::new(ForgeToken::new("token".to_string())))
+            .commit_files(
+                &repo,
+                "indexbot-announce-acme-widget",
+                CommitBase {
+                    repo: &repo,
+                    sha: BRANCH_HEAD,
+                    branch: "main",
+                },
+                "announce acme/widget",
+                &files,
+                RefUpdate::FastForward,
+            )
+            .await
+            .expect("a removal of an absent path must not fail the commit");
+
+        let body: Value = fake
+            .recorded()
+            .iter()
+            .find(|call| call.method == "POST" && call.target.contains("/repository/commits"))
+            .map(|call| serde_json::from_str(&call.body).expect("the commit body is JSON"))
+            .expect("a commit was posted");
+        let actions = body["actions"].as_array().expect("the actions are an array");
+
+        assert_eq!(
+            actions,
+            &vec![
+                json!({
+                    "file_path": "p/acme/widget.json",
+                    "content": BASE64_STANDARD.encode(b"{}"),
+                    "encoding": "base64",
+                    "action": "create",
+                }),
+                json!({ "file_path": PRESENT, "action": "delete", "last_commit_id": LAST_COMMIT }),
+            ],
+            "the committed orphan is removed under its own last commit, and the absent one is not named at all"
+        );
+    }
+
     /// Under `git`, a commit is built in the clone and **no** REST commit is
     /// posted.
     ///
@@ -5133,7 +5248,7 @@ mod tests {
             fake.base_url.clone(),
         )
         .expect("client builds");
-        let files = BTreeMap::from([("p/acme/widget.json".to_string(), b"{}".to_vec())]);
+        let files = BTreeMap::from([("p/acme/widget.json".to_string(), FileChange::Put(b"{}".to_vec()))]);
         let error = forge
             .commit_files(
                 &index_repo(),

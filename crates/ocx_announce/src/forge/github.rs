@@ -29,8 +29,8 @@ use super::http::build_forge_http_client;
 use super::identity::{verify_fork_namespace, verify_github_fork};
 use super::poll::{PollSchedule, backoff_delays};
 use super::{
-    BranchComparison, CapabilityName, CheckStatus, CommitBase, Forge, ForgeCredentials, ForgeError, ForgeIdentity,
-    ForkIdentity, Mergeability, PullRequest, PushAccess, RefUpdate, RepoCoordinate,
+    BranchComparison, CapabilityName, CheckStatus, CommitBase, FileChange, Forge, ForgeCredentials, ForgeError,
+    ForgeIdentity, ForkIdentity, Mergeability, PullRequest, PushAccess, RefUpdate, RepoCoordinate,
 };
 
 /// Canonical github.com REST base URL — a dedicated API origin, not a path on
@@ -421,20 +421,41 @@ impl GitHubForge {
 
     /// One attempt at the [`Forge::commit_files`] sequence: base tree -> blobs ->
     /// tree -> commit -> fast-forward-only ref update.
+    ///
+    /// A [`FileChange::Delete`] is a tree entry whose `sha` is `null`, which is
+    /// how the git data API spells a removal against `base_tree`. The path is
+    /// **read first** and an absent one contributes no entry at all: GitHub's
+    /// contract does not say what a null for a path the base tree never carried
+    /// answers, and C-001 owes the caller a no-op rather than whatever that
+    /// turns out to be.
     async fn commit_files_once(
         &self,
         repo: &RepoCoordinate,
         branch: &str,
         base_sha: &str,
         message: &str,
-        files: &BTreeMap<String, Vec<u8>>,
+        files: &BTreeMap<String, FileChange>,
         update: RefUpdate,
     ) -> Result<String, ForgeError> {
         let base_tree_sha = self.base_tree_sha(repo, base_sha).await?;
         let mut tree_entries = Vec::with_capacity(files.len());
-        for (path, contents) in files {
-            let blob_sha = self.create_blob(repo, contents).await?;
-            tree_entries.push(json!({ "path": path, "mode": "100644", "type": "blob", "sha": blob_sha }));
+        for (path, change) in files {
+            match change {
+                FileChange::Put(contents) => {
+                    let blob_sha = self.create_blob(repo, contents).await?;
+                    tree_entries.push(json!({ "path": path, "mode": "100644", "type": "blob", "sha": blob_sha }));
+                }
+                // ponytail: one read per deleted path. One
+                // `GET /git/trees/<base>?recursive=1` is the upgrade path if a
+                // run ever removes many at once — it carries a truncation
+                // premise (GitHub caps that response) this form does not.
+                FileChange::Delete => {
+                    if self.get_file_contents(repo, path, base_sha).await?.is_none() {
+                        continue;
+                    }
+                    tree_entries.push(json!({ "path": path, "mode": "100644", "type": "blob", "sha": Value::Null }));
+                }
+            }
         }
         let tree_sha = self.create_tree(repo, &base_tree_sha, tree_entries).await?;
         let commit_sha = self.create_commit(repo, message, &tree_sha, base_sha).await?;
@@ -850,7 +871,7 @@ impl Forge for GitHubForge {
         branch: &str,
         base: CommitBase<'_>,
         message: &str,
-        files: &BTreeMap<String, Vec<u8>>,
+        files: &BTreeMap<String, FileChange>,
         update: RefUpdate,
     ) -> Result<String, ForgeError> {
         let mut outcome = self
@@ -1679,7 +1700,7 @@ mod tests {
             namespace: "acme".to_string(),
             project: "index".to_string(),
         };
-        let files = BTreeMap::from([("packages/acme/widget.json".to_string(), b"{}".to_vec())]);
+        let files = BTreeMap::from([("packages/acme/widget.json".to_string(), FileChange::Put(b"{}".to_vec()))]);
 
         let commit = fake
             .forge()
@@ -1711,6 +1732,104 @@ mod tests {
                 format!("POST {COMMITS_PATH}"),
                 format!("PATCH {UPDATE_PATH}"),
             ]
+        );
+    }
+
+    /// C-001 on GitHub: a `Delete` is a tree entry whose `sha` is `null`, and a
+    /// `Delete` of a path the base tree does not carry contributes **no entry**.
+    ///
+    /// Both halves in one commit on purpose. The null entry alone would pass for
+    /// a build that emits one unconditionally — and that build fails a real
+    /// announce the first time an orphan set names an object some earlier run
+    /// never committed, which is the ordinary case once a root is rewritten more
+    /// than once. The absent half alone would pass for a build that drops every
+    /// removal on the floor.
+    ///
+    /// The probe count is asserted too, because it is the *reason* the absent
+    /// half holds: a `Put` must not pay for a read, and a `Delete` must.
+    ///
+    /// Reds on: ignoring `FileChange::Delete` (no null entry, one tree entry);
+    /// emitting the entry without the probe (the absent path joins the tree);
+    /// probing on the `Put` arm (the contents-read count).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delete_is_a_null_tree_entry_and_an_absent_path_contributes_none() {
+        const CONTENTS_PREFIX: &str = "/repos/forkuser/index/contents/";
+        const PRESENT: &str = "p/acme/widget/o/sha256/present.json";
+        const ABSENT: &str = "p/acme/widget/o/sha256/absent.json";
+
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("GET", BASE_COMMIT_PATH) => (200, r#"{"tree":{"sha":"treesha"}}"#.to_string()),
+            ("GET", target) if target.starts_with(CONTENTS_PREFIX) => {
+                if target.contains("present.json") {
+                    (200, "{}".to_string())
+                } else {
+                    (404, r#"{"message":"Not Found"}"#.to_string())
+                }
+            }
+            ("POST", BLOBS_PATH | TREES_PATH | COMMITS_PATH) => (201, r#"{"sha":"newsha"}"#.to_string()),
+            ("PATCH", UPDATE_PATH) => (200, r#"{"object":{"sha":"newsha"}}"#.to_string()),
+            _ => (599, r#"{"message":"unexpected request"}"#.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        let repo = test_repo();
+        let files = BTreeMap::from([
+            ("p/acme/widget.json".to_string(), FileChange::Put(b"{}".to_vec())),
+            (PRESENT.to_string(), FileChange::Delete),
+            (ABSENT.to_string(), FileChange::Delete),
+        ]);
+
+        fake.forge()
+            .commit_files(
+                &repo,
+                BRANCH,
+                CommitBase {
+                    repo: &repo,
+                    sha: "basesha",
+                    branch: "main",
+                },
+                "announce acme/widget",
+                &files,
+                RefUpdate::FastForward,
+            )
+            .await
+            .expect("a removal of an absent path must not fail the commit");
+
+        let recorded = fake.recorded();
+        let tree_body: Value = recorded
+            .iter()
+            .find(|call| call.route() == format!("POST {TREES_PATH}"))
+            .map(|call| serde_json::from_str(&call.body).expect("the tree body is JSON"))
+            .expect("a tree was posted");
+        let entries = tree_body["tree"].as_array().expect("the tree is an array");
+
+        assert_eq!(
+            entries,
+            &vec![
+                json!({ "path": "p/acme/widget.json", "mode": "100644", "type": "blob", "sha": "newsha" }),
+                json!({ "path": PRESENT, "mode": "100644", "type": "blob", "sha": Value::Null }),
+            ],
+            "the written path carries its blob, the committed orphan a null sha, and the absent one nothing"
+        );
+
+        let probes: Vec<&str> = recorded
+            .iter()
+            .filter(|call| call.method == "GET" && call.path.starts_with(CONTENTS_PREFIX))
+            .map(|call| call.path.as_str())
+            .collect();
+        assert_eq!(
+            probes.len(),
+            2,
+            "one read per removal and none for the write, got {probes:?}"
+        );
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|call| call.route() == format!("POST {BLOBS_PATH}"))
+                .count(),
+            1,
+            "a removal mints no blob"
         );
     }
 
