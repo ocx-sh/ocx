@@ -49,15 +49,25 @@ pub struct LockedFile {
 /// `(volume serial, file index)` on Windows; std's own accessors for the latter
 /// are still unstable (`windows_by_handle`, rust#63010).
 ///
+/// Both Windows claims are measured, not inferred from the Unix rule — a
+/// standalone probe run as a native process reported the rename over a held-open
+/// target succeeding, the replacement detected afterwards, and the lock still
+/// held across the duplicate below. Scope: a `windows-gnu` build under WSL
+/// interop, so it establishes the platform behaviour of three ABI-independent
+/// Win32 calls, not the `windows-msvc` build CI ships. The msvc answer comes
+/// from the un-gated tests in this file.
+///
 /// Path gone (unlinked mid-acquire) or unreadable: a mismatch, so the caller
 /// reopens and re-materializes the lock file.
 fn lock_matches_path(lock: &mut FileLock, path: &Path) -> bool {
     // `Handle::from_file` consumes the file, so it gets a duplicate. Duplicating
     // is what makes that safe: `dup(2)` shares the open file description, and
     // `flock(2)` releases on the last close of *that* description, not of a
-    // descriptor — so dropping the clone leaves the lock held. The same holds
-    // for `DuplicateHandle` and `LockFileEx`, whose locks live on the file
-    // object the duplicate still refers to.
+    // descriptor — so dropping the clone leaves the lock held. `DuplicateHandle`
+    // and `LockFileEx` behave the same way, whose locks live on the file object
+    // the duplicate still refers to — measured on Windows, not inferred from the
+    // Unix rule (see above), and asserted by
+    // `try_exclusive_blocking_returns_none_under_contention`.
     let Ok(duplicate) = lock.file_mut().try_clone() else {
         return false;
     };
@@ -203,7 +213,7 @@ impl LockedFile {
     /// Test-only: does the held handle still name the file at `self.path`?
     /// Exposes [`lock_matches_path`] so a test can drive both outcomes of the
     /// flock+unlink verify predicate directly.
-    #[cfg(all(test, unix))] // its only callers are the unix-gated predicate tests
+    #[cfg(test)]
     fn handle_matches_path(&mut self) -> bool {
         let path = self.path.clone();
         lock_matches_path(&mut self.lock, &path)
@@ -548,7 +558,11 @@ mod tests {
     // dangling/replaced case; these drive both of its outcomes directly.
 
     /// GREEN side: a freshly acquired lock's handle names the file at its path.
-    #[cfg(unix)]
+    ///
+    /// Runs on Windows too, where it is also the cheapest check that acquiring
+    /// did not *lose* the lock: `try_exclusive_blocking` calls the predicate
+    /// before it returns, so by this line a duplicate handle has been made and
+    /// dropped (see `lock_matches_path`).
     #[test]
     fn handle_matches_path_is_true_for_a_live_lock() {
         let dir = tempfile::tempdir().unwrap();
@@ -559,6 +573,11 @@ mod tests {
 
     /// RED side: once the lock file is unlinked (what a racing sweep does), the
     /// held handle points at a dangling inode and no longer matches the path.
+    ///
+    /// Stays Unix-gated for a named reason, not a generic one: `DeleteFileW` on
+    /// a handle Rust still holds leaves the name in place as delete-pending
+    /// rather than unlinking it, so the state this drives does not exist on
+    /// Windows. Replacement there is a rename, covered below on both platforms.
     #[cfg(unix)]
     #[test]
     fn handle_matches_path_is_false_after_unlink() {
@@ -572,27 +591,38 @@ mod tests {
         );
     }
 
-    /// RED side: if the lock file is replaced by a different inode at the same
-    /// path (unlink + recreate, the two-step a racer performs), the old handle
-    /// must not match the new file.
-    #[cfg(unix)]
+    /// RED side: when a different file takes over the path, the stale handle
+    /// must not match it.
+    ///
+    /// Replacement **by rename**, not by unlink-and-recreate: that is what
+    /// `fs::write_bytes_atomic` does when `auth::store` publishes the docker
+    /// config, so it is the case the predicate now has to catch. It is also the
+    /// only executable form of the claim in `lock_matches_path`'s doc comment —
+    /// that a rename over a target Rust holds open succeeds on Windows too,
+    /// because std opens with `FILE_SHARE_DELETE`. If that were wrong, the
+    /// `expect` below is where it says so, on the platform rather than in prose.
     #[test]
     fn handle_matches_path_is_false_after_replacement() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("replaced.lock");
         let mut old = LockedFile::try_exclusive_blocking(&path).unwrap().expect("acquire");
-        std::fs::remove_file(&path).unwrap();
-        // A fresh file at the same path — a different inode.
-        std::fs::write(&path, b"").unwrap();
+        let fresh = dir.path().join("fresh");
+        std::fs::write(&fresh, b"").unwrap();
+        std::fs::rename(&fresh, &path).expect("rename over a target held open");
         assert!(
             !old.handle_matches_path(),
-            "a replaced lock file (new inode) must not match the stale handle"
+            "a replaced lock file must not match the stale handle"
         );
     }
 
     /// The verify-and-retry loop must still return `None` on genuine contention
     /// (a live holder in the same process), not spin or falsely re-acquire.
-    #[cfg(unix)]
+    ///
+    /// The duplicate-drop detector. `lock_matches_path` hands the held file to
+    /// `same_file::Handle` through a `try_clone`, and that duplicate is dropped
+    /// on the way out of the first acquire above. If dropping it released the
+    /// lock, the second acquire would succeed and this reds. Do not re-gate it:
+    /// the failure mode it covers is a Windows one.
     #[test]
     fn try_exclusive_blocking_returns_none_under_contention() {
         let dir = tempfile::tempdir().unwrap();
