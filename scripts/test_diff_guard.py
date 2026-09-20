@@ -18,6 +18,14 @@ unmodified at every commit. So under `test/` a merge may only
     `__init__.py`, and never a `pytest.ini` / `tox.ini` / `setup.cfg`
     (pytest prefers any of those over `pyproject.toml`, so a new one
     silently replaces `--strict-markers`, `testpaths` and `pythonpath`),
+  - change a `test/` file that a taskfile invokes — tooling the repo drives,
+    not part of the pytest proof this guard freezes. `test/scripts/*.sh` is
+    the case: `task test:index-conformance-drift` runs
+    `sync_index_conformance.sh` and `verify-deep.yml` runs that task, so the
+    "neither collected, imported nor run" rule below was false for it and
+    forbade ever maintaining it. A file the collected suite *names* stays
+    frozen even when a task also runs it, so this cannot thaw
+    `test/docker-compose.yml`,
   - edit `test/pyproject.toml`, `test/taskfile.yml` and the floor files
     (`test/SUITE_FLOOR`, `test/SKIP_CEILING`, `test/XFAIL_CEILING`) — except
     that an added non-comment line there may not carry a pytest selection
@@ -1197,6 +1205,90 @@ def _named_by_the_suite(repo: Path, head: str, path: str) -> bool | None:
     return any(needle in git(repo, "show", f"{head}:{p}") for p in readers)
 
 
+#: The reader floor for `_invoked_by_a_taskfile`, a *name* for the same reason
+#: `_SUITE_READER_WITNESS` is one: this file exists in every tree that has an
+#: acceptance suite at all, so its absence means the scan failed.
+_TASKFILE_WITNESS = "test/taskfile.yml"
+
+#: go-task keys whose value is prose, not a command. Their values are removed
+#: before the search, and that removal is the difference between a signal and a
+#: bypass: `test/taskfile.yml` is an ALLOWED_CONFIG file, so anyone may add a
+#: line to it — and if a `desc:` counted, writing `desc: syncs fixtures/x.json`
+#: would free `fixtures/x.json` from this guard in the same permitted edit.
+_TASKFILE_PROSE_KEYS = frozenset({"desc", "summary", "msg"})
+
+
+def _command_text(source: str) -> str:
+    """`source` with comments and the values of `_TASKFILE_PROSE_KEYS` removed.
+
+    A deliberately small reader, and the point is which way it is wrong. It
+    keeps every line that is not prose, so a file merely *mentioned* by a
+    `dir:` or an `env:` reads as invoked — a false positive whose only
+    consequence is that a `test/` asset becomes maintainable, which is a
+    reviewable line in a taskfile. It drops text it cannot classify (an inline
+    ` #` inside a command), so a genuine invocation can read as absent — a
+    false negative that leaves the old, stricter classification in place. Both
+    errors point away from freeing something silently.
+
+    What it therefore proves: *some taskfile names this file outside prose*.
+    What it does not prove: that the naming line is a `cmd:`, that the task is
+    reachable from a gate, or that it ever runs. The claim in the branch below
+    is scoped to match.
+    """
+    kept: list[str] = []
+    prose_indent: int | None = None
+    for line in source.splitlines():
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if prose_indent is not None:
+            # A block scalar's body is indented past its key; the first line at
+            # or left of the key ends it.
+            if stripped and indent <= prose_indent:
+                prose_indent = None
+            else:
+                continue
+        if stripped.startswith("#"):
+            continue
+        key, sep, _ = stripped.partition(":")
+        if sep and key.lstrip("- ") in _TASKFILE_PROSE_KEYS:
+            prose_indent = indent
+            continue
+        kept.append(line.split(" #", 1)[0])
+    return "\n".join(kept)
+
+
+def _invoked_by_a_taskfile(repo: Path, head: str, path: str) -> bool | None:
+    """Does a taskfile name this `test/` file outside prose?
+
+    `None` means the reader found nothing to read. It is returned rather than
+    `False` because the two are the same answer with opposite meanings: `False`
+    reads as "no task runs this", which is the over-strict classification this
+    route exists to correct, arriving with no message to say the scan broke.
+
+    Two floors, both fail-loud. The first is `_TASKFILE_WITNESS`: no taskfile
+    in the tree, no judgement. The second is that the scan found *some* file
+    under `test/` named by some taskfile — a reader that stopped matching (a
+    needle rule that drifted, a taskfile grammar this misses) would otherwise
+    answer `False` for every path and be indistinguishable from a repository
+    whose tasks genuinely run nothing under `test/`.
+    """
+    tracked = git(repo, "ls-tree", "-r", "--name-only", head).split()
+    taskfiles = [
+        p for p in tracked
+        if p == "taskfile.yml" or p.endswith("/taskfile.yml")
+        or (p.startswith("taskfiles/") and p.endswith((".yml", ".yaml")))
+    ]
+    if _TASKFILE_WITNESS not in taskfiles:
+        return None
+    commands = "\n".join(_command_text(git(repo, "show", f"{head}:{p}")) for p in taskfiles)
+    under_test = [p for p in tracked if p == "test" or p.startswith("test/")]
+    if _unambiguous_needle(path, under_test) in commands:
+        return True
+    if not any(_unambiguous_needle(p, under_test) in commands for p in under_test):
+        return None
+    return False
+
+
 def check_relocation_only(
     repo: Path, base: str, head: str, path: str, allow: frozenset[tuple[str, int]]
 ) -> list[str]:
@@ -1250,6 +1342,35 @@ def check_relocation_only(
                     "runs it — frozen outright, exactly like the modules that name it"
                 )
             ]
+        # Checked only after `named`, and the order is the rule: a file the
+        # collected suite names stays frozen even when a task also runs it, so
+        # `test/docker-compose.yml` cannot be freed by the task that starts the
+        # registry. DEC-69's hole stays closed.
+        #
+        # Below that, "neither collected, imported nor run" was simply false
+        # for `test/scripts/*.sh`: `task test:index-conformance-drift` executes
+        # `sync_index_conformance.sh` and `verify-deep.yml` runs that task, so
+        # the relocation-only rule — calibrated for an inert data asset that
+        # merely carries crate paths the split moves — forbade ever maintaining
+        # a live script. The fix for a days-old CI red arrived as ten hunks and
+        # could not land; `--allow` is line-scoped and one-for-one, so it
+        # cannot express them.
+        #
+        # The claim this branch makes is exactly what `_command_text` supports:
+        # a taskfile names this file outside prose, so it is tooling the repo
+        # drives rather than part of the pytest proof — the proof being what
+        # this guard freezes. It is NOT a claim that the task is on a gate.
+        invoked = _invoked_by_a_taskfile(repo, head, path)
+        if invoked is None:
+            return [
+                (
+                    f"{path}: refusing to judge — the taskfile scan found no {_TASKFILE_WITNESS} "
+                    "or no invocation of anything under test/, so 'no task runs it' and 'the scan "
+                    "read nothing' are indistinguishable here"
+                )
+            ]
+        if invoked:
+            return []
 
     diff = git(repo, "diff", "--no-color", "--no-renames", "--unified=0", base, head, "--", path)
     problems: list[str] = []
@@ -1460,6 +1581,25 @@ _BASE_TREE: dict[str, str] = {
     # collected module through its distinctive suffix; the other by nothing.
     "test/tests/fixtures/simplesigning/README.md": "see `crates/ocx_lib/src/a.rs`\n",
     "test/fixtures/pinned/README.md": "a fixture nothing imports\n",
+    # A taskfile that INVOKES something under test/, which is what puts
+    # `_invoked_by_a_taskfile` above its reader floor for every case. It lives
+    # outside `test/` deliberately: `check_range` judges only `test/`, so the
+    # fixture can carry a realistic invocation without `taskfile_adds_the_smoke_tier`
+    # having to preserve it when it rewrites `test/taskfile.yml` wholesale.
+    #
+    # Its `desc:` names `inert_asset.json` and nothing else does. That is the
+    # prose false positive `_command_text` must not fall for — and it is not
+    # hypothetical, `test/taskfile.yml` being an ALLOWED_CONFIG file anyone may
+    # add a line to.
+    "taskfile.yml": (
+        "version: '3'\n"
+        "tasks:\n"
+        "  drift:\n"
+        "    desc: keeps fixtures/pinned/inert_asset.json in step with upstream\n"
+        "    cmd: ./test/scripts/sync_thing.sh --check\n"
+    ),
+    "test/scripts/sync_thing.sh": '#!/bin/sh\ndest="crates/ocx_lib/tests/fixtures"\n',
+    "test/fixtures/pinned/inert_asset.json": '{"src": "crates/ocx_lib/src/a.rs"}\n',
     "crates/ocx_lib/src/lib.rs": "pub fn x() {}\n",
 }
 
@@ -1736,6 +1876,35 @@ SELF_TEST_CASES: list[Case] = [
         "test/scripts/vendor.sh": '#!/bin/sh\ndest="crates/ocx_index/tests/fixtures"\nrm -rf "$dest"\n',
     }, allow=["test/scripts/vendor.sh:2"],
        base={"test/scripts/vendor.sh": '#!/bin/sh\ndest="crates/ocx_lib/tests/fixtures"\n'}),
+    # ---- a test/ file a taskfile runs is tooling, not an inert asset ----
+    # `vendor.sh` above is invoked by nothing and keeps the relocation rule;
+    # `sync_thing.sh` is invoked by the fixture's root taskfile and may be
+    # maintained. Both live in `test/scripts/`, so the discriminator is the
+    # invocation and not the directory.
+    Case("taskfile_invoked_script_may_be_rewritten", False, {
+        "test/scripts/sync_thing.sh": (
+            '#!/bin/sh\nset -eu\ndest="crates/ocx_index/tests/fixtures"\n'
+            'mkdir -p "$dest"\nrsync -a upstream/ "$dest"\n'
+        ),
+    }),
+    # The same rewrite on a file whose ONLY mention in a taskfile is a `desc:`.
+    # Prose is not invocation; without that rule a permitted one-line edit to a
+    # taskfile would free any asset it names.
+    # Allow-listed AND a rewrite, so the red can only be the relocation rule:
+    # were prose counted as invocation this file would take the free route and
+    # the case would be green.
+    Case("asset_named_only_in_taskfile_prose_is_not_invoked", True, {
+        "test/fixtures/pinned/inert_asset.json": '{"src": "crates/ocx_index/src/a.rs"}\n{"added": true}\n',
+    }, allow=["test/fixtures/pinned/inert_asset.json:1"]),
+    # And the ordering: a task running it does not thaw a file the collected
+    # suite names. DEC-69's hole (`docker-compose.yml`) stays closed.
+    Case("taskfile_invoked_script_named_by_a_collected_module_stays_frozen", True, {
+        "test/scripts/sync_thing.sh": '#!/bin/sh\ndest="crates/ocx_index/tests/fixtures"\n',
+    }, base={
+        "test/tests/test_reads_sync.py": (
+            "def test_reads():\n    assert open('scripts/sync_thing.sh')\n"
+        ),
+    }),
     # Unchanged: an asset edit nobody allow-listed still reds.
     Case("session_conftest_edited", True, {
         "test/conftest.py": "# session fixtures, reworded\n",
@@ -2350,6 +2519,78 @@ def _run_case(case: Case, scratch: Path) -> tuple[bool, list[str]]:
     return bool(problems), problems
 
 
+def _probe_repo(scratch: Path, name: str, files: dict[str, str]) -> tuple[Path, str]:
+    """A throwaway repository holding exactly `files`; `(repo, head)`."""
+    repo = scratch / name
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "config", "user.email", "guard@example.invalid")
+    git(repo, "config", "user.name", "guard")
+    git(repo, "config", "commit.gpgsign", "false")
+    _write_tree(repo, files)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "base")
+    return repo, git(repo, "rev-parse", "HEAD").strip()
+
+
+def _floor_probes(scratch: Path) -> list[tuple[str, bool, str]]:
+    """`_invoked_by_a_taskfile` shown refusing to judge, and shown judging.
+
+    The refusals are the point: a reader that quietly matched nothing would
+    answer `False` for every path, which reads as "no task runs this" and is
+    the over-strict classification this route was added to correct — arriving
+    with no message to say the scan broke. Both floors must therefore answer
+    `None`, and the control beneath them is what makes that non-vacuous: a
+    reader stuck on `None` would satisfy the refusals and prove nothing.
+
+    Direct rather than through `Case`: a floor is a property of a *tree* that
+    lacks something, and the case harness only ever adds to `_BASE_TREE`.
+    """
+    script = "test/scripts/sync_thing.sh"
+    asset = "test/fixtures/pinned/inert_asset.json"
+    contents = {script: "#!/bin/sh\n", asset: "{}\n"}
+    invoking = "version: '3'\ntasks:\n  drift:\n    cmd: ./test/scripts/sync_thing.sh --check\n"
+    probes: list[tuple[str, bool, str]] = []
+
+    repo, head = _probe_repo(scratch, "floor-no-taskfile", contents | {"taskfile.yml": invoking})
+    answer = _invoked_by_a_taskfile(repo, head, script)
+    probes.append((
+        "no test/taskfile.yml in the tree refuses to judge",
+        answer is None,
+        f"answered {answer!r}, not None — a tree with no acceptance suite was judged anyway",
+    ))
+
+    repo, head = _probe_repo(scratch, "floor-no-invocation", contents | {
+        "test/taskfile.yml": "version: '3'\n",
+        "taskfile.yml": "version: '3'\ntasks:\n  build:\n    cmd: cargo build\n",
+    })
+    answer = _invoked_by_a_taskfile(repo, head, script)
+    probes.append((
+        "taskfiles that invoke nothing under test/ refuse to judge",
+        answer is None,
+        (
+            f"answered {answer!r}, not None — 'no task runs it' would be indistinguishable "
+            "from a scan that read nothing"
+        ),
+    ))
+
+    repo, head = _probe_repo(scratch, "floor-control", contents | {
+        "test/taskfile.yml": "version: '3'\n",
+        "taskfile.yml": invoking,
+    })
+    invoked = _invoked_by_a_taskfile(repo, head, script)
+    inert = _invoked_by_a_taskfile(repo, head, asset)
+    probes.append((
+        "the control reads True for the invoked script and False for the asset beside it",
+        (invoked, inert) == (True, False),
+        (
+            f"answered {(invoked, inert)!r}, not (True, False) — the refusals above would "
+            "hold for a reader stuck on one answer"
+        ),
+    ))
+    return probes
+
+
 def self_test() -> int:
     scratch_root = REPO_ROOT / ".tmp"
     scratch_root.mkdir(exist_ok=True)
@@ -2366,7 +2607,13 @@ def self_test() -> int:
                 print(f"       expected {'red' if case.expect_red else 'green'}")
             for p in problems:
                 print(f"       {p}")
-    total = len(SELF_TEST_CASES)
+        probes = _floor_probes(Path(tmp))
+        for name, ok, detail in probes:
+            failures += not ok
+            print(f"{'ok  ' if ok else 'FAIL'} probe {name}")
+            if not ok:
+                print(f"       {detail}")
+    total = len(SELF_TEST_CASES) + len(probes)
     print(f"self-test: {total - failures}/{total} shapes behave ({failures} wrong)")
     return 1 if failures else 0
 
