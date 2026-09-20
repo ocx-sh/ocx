@@ -91,6 +91,13 @@ tasks:
 
   build:
     internal: true
+    # The JSON schemas are generated and gitignored, and several modules read
+    # them straight off disk (test_schema.py, test_project_init.py, the taplo
+    # and preservation ones). Without this they pass only on a machine where
+    # someone ran the website task by hand, and red as invalid JSON on a fresh
+    # checkout -- which is not a statement about the tree.
+    deps:
+      - task: :website:schema:default
     cmds:
       # `--features ocx/__testing` enables internal-only test seams in
       # the tier crates (currently the `__OCX_SELF_IMAGE` override in

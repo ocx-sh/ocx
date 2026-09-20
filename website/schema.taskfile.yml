@@ -32,49 +32,49 @@ tasks:
     sources: *schema-sources
     cmds:
       - mkdir -p {{.METADATA_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- metadata > {{.METADATA_SCHEMA_DIR}}/v1.json
+      - cargo run -p ocx_schema --release -- metadata > {{.METADATA_SCHEMA_DIR}}/v1.json.new && mv {{.METADATA_SCHEMA_DIR}}/v1.json.new {{.METADATA_SCHEMA_DIR}}/v1.json
 
   generate-config:
     desc: Generate JSON Schema for config.toml
     sources: *schema-sources
     cmds:
       - mkdir -p {{.CONFIG_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- config > {{.CONFIG_SCHEMA_DIR}}/v1.json
+      - cargo run -p ocx_schema --release -- config > {{.CONFIG_SCHEMA_DIR}}/v1.json.new && mv {{.CONFIG_SCHEMA_DIR}}/v1.json.new {{.CONFIG_SCHEMA_DIR}}/v1.json
 
   generate-project:
     desc: Generate JSON Schema for ocx.toml
     sources: *schema-sources
     cmds:
       - mkdir -p {{.PROJECT_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- project > {{.PROJECT_SCHEMA_DIR}}/v1.json
+      - cargo run -p ocx_schema --release -- project > {{.PROJECT_SCHEMA_DIR}}/v1.json.new && mv {{.PROJECT_SCHEMA_DIR}}/v1.json.new {{.PROJECT_SCHEMA_DIR}}/v1.json
 
   generate-project-lock:
     desc: Generate JSON Schema for ocx.lock
     sources: *schema-sources
     cmds:
       - mkdir -p {{.PROJECT_LOCK_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- project-lock > {{.PROJECT_LOCK_SCHEMA_DIR}}/v3.json
+      - cargo run -p ocx_schema --release -- project-lock > {{.PROJECT_LOCK_SCHEMA_DIR}}/v3.json.new && mv {{.PROJECT_LOCK_SCHEMA_DIR}}/v3.json.new {{.PROJECT_LOCK_SCHEMA_DIR}}/v3.json
 
   generate-patch:
     desc: Generate JSON Schema for patch descriptor files (ocx patch publish --descriptor)
     sources: *schema-sources
     cmds:
       - mkdir -p {{.PATCH_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- patch > {{.PATCH_SCHEMA_DIR}}/v1.json
+      - cargo run -p ocx_schema --release -- patch > {{.PATCH_SCHEMA_DIR}}/v1.json.new && mv {{.PATCH_SCHEMA_DIR}}/v1.json.new {{.PATCH_SCHEMA_DIR}}/v1.json
 
   generate-reports:
     desc: Generate the JSON Schema for every --format json report
     sources: *schema-sources
     cmds:
       - mkdir -p {{.REPORTS_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- reports > {{.REPORTS_SCHEMA_DIR}}/v1.json
+      - cargo run -p ocx_schema --release -- reports > {{.REPORTS_SCHEMA_DIR}}/v1.json.new && mv {{.REPORTS_SCHEMA_DIR}}/v1.json.new {{.REPORTS_SCHEMA_DIR}}/v1.json
 
   generate-execution-record:
     desc: Generate JSON Schema for execution records (ocx exec / package exec / launcher exec / launcher shim)
     sources: *schema-sources
     cmds:
       - mkdir -p {{.EXECUTION_RECORD_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- execution-record > {{.EXECUTION_RECORD_SCHEMA_DIR}}/v1.json
+      - cargo run -p ocx_schema --release -- execution-record > {{.EXECUTION_RECORD_SCHEMA_DIR}}/v1.json.new && mv {{.EXECUTION_RECORD_SCHEMA_DIR}}/v1.json.new {{.EXECUTION_RECORD_SCHEMA_DIR}}/v1.json
 
   specs:refresh:
     desc: >-
