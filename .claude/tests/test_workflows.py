@@ -14,6 +14,10 @@ Two shapes the crate split can break without any workflow going red:
 - the merge-queue shape of BOTH tiers — `merge_group` and a
   `cancel-in-progress` that leaves queue runs alone — since either workflow's
   checks can be marked required.
+- the shell zoo's checkout and its task graph, which are one contract: that
+  job omits `submodules:` on purpose, so a task it runs must not reach
+  `:website:schema:default` and through it a cargo build of a workspace whose
+  `external/` patch sources are not on disk.
 - the tier partition (D5): `verify-basic.yml` is what a pull request pays
   for, so it runs on Linux only, and the Windows and macOS unit legs are
   `verify-deep.yml`'s `build` matrix. A leg re-added to basic is a cost every
@@ -652,3 +656,112 @@ def test_the_shim_gate_names_every_crate_that_owns_the_blob() -> None:
         f"{workflow.name}: the shim gate selects {sorted(selected)} but the committed "
         f"blob is pinned in {missing} — those tests do not run, and the gate is green anyway"
     )
+
+
+# ---------------------------------------------------------------------------
+# The shell zoo's checkout and its task graph are one contract
+# ---------------------------------------------------------------------------
+
+SHELL_ACTIVATION = ROOT / ".github" / "workflows" / "shell-activation.yml"
+TEST_TASKFILE = ROOT / "test" / "taskfile.yml"
+# `test:build`'s `deps:` entry. It is a cross-taskfile reference, so it never
+# resolves to a task defined in `test/taskfile.yml` — the name in the graph is
+# the whole signal.
+SCHEMA_TASK = ":website:schema:default"
+
+
+def _test_tasks() -> dict[str, dict]:
+    return yaml.safe_load(TEST_TASKFILE.read_text(encoding="utf-8"))["tasks"]
+
+
+def _task_closure(tasks: dict[str, dict], root: str) -> set[str]:
+    """Every task name reachable from `root` through `deps:` and `cmds:`.
+
+    A name with no definition here (`:website:schema:default`) is recorded and
+    not descended into — which is the point: the foreign name is what the
+    caller must not reach.
+    """
+    seen: set[str] = set()
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        body = tasks.get(current) or {}
+        for key in ("deps", "cmds"):
+            for entry in body.get(key) or []:
+                if isinstance(entry, dict) and "task" in entry:
+                    stack.append(str(entry["task"]))
+    return seen
+
+
+def test_the_shell_zoo_runs_no_task_its_checkout_cannot_build() -> None:
+    """The zoo job checks out without submodules, so its tasks must not run cargo.
+
+    `test:build` generates the JSON schemas through a `deps:` entry, and a
+    `deps:` is not covered by the `status:` guard that `SKIP_BUILD=true` sets
+    — deliberately, because CI's acceptance legs download the binary and still
+    need the schemas. The shell-zoo legs pass the same `SKIP_BUILD=true` but
+    mount one binary and three Python modules into a container and read no
+    schema at all, and their checkout omits `submodules:` on purpose. Reaching
+    `test:build` from there runs `cargo run -p ocx_schema` against absent
+    `external/` patch sources and reds the job on a tree that is fine — which
+    is how both legs failed on `main`.
+
+    The positive control is in this same test: `default` MUST still reach the
+    schema task, or the check would pass just as well with the schemas
+    generated nowhere.
+    """
+    jobs = _load(SHELL_ACTIVATION)["jobs"]
+    tasks = _test_tasks()
+
+    # Floors, before the negative below. An empty job set, an empty task table,
+    # or a zoo job this reader failed to recognise all sweep clean in silence.
+    assert tasks, f"{TEST_TASKFILE}: no `tasks:` mapping — the reader found nothing"
+    assert SCHEMA_TASK in _task_closure(tasks, "default"), (
+        f"`test:default` no longer reaches `{SCHEMA_TASK}` — the acceptance suite's "
+        "schema readers are back to passing only where someone ran the website task "
+        "by hand, and the negative below would pass for the wrong reason"
+    )
+
+    zoo = {
+        name: job
+        for name, job in jobs.items()
+        if any(
+            "task test:shells" in str(step.get("run", ""))
+            for step in (job.get("steps") or [])
+        )
+    }
+    assert zoo, (
+        f"{SHELL_ACTIVATION.name}: no job runs `task test:shells` — the reader that "
+        "finds the shell-zoo job found nothing, which is not the same as it being safe"
+    )
+
+    for name, job in zoo.items():
+        checkout = next(
+            (
+                step
+                for step in (job.get("steps") or [])
+                if "actions/checkout" in str(step.get("uses", ""))
+            ),
+            None,
+        )
+        assert checkout is not None, f"{name}: no checkout step to read `submodules:` from"
+        submodules = (checkout.get("with") or {}).get("submodules")
+
+        invoked = {
+            task
+            for step in (job.get("steps") or [])
+            for task in re.findall(r"\btask\s+test:([A-Za-z0-9:_-]+)", str(step.get("run", "")))
+        }
+        assert invoked, f"{name}: runs `task test:shells` but no task name parsed out of it"
+
+        needs_cargo = sorted(t for t in invoked if SCHEMA_TASK in _task_closure(tasks, t))
+        if submodules:
+            continue  # A job that checks the submodules out may build whatever it likes.
+        assert not needs_cargo, (
+            f"{SHELL_ACTIVATION.name}: job `{name}` checks out without submodules but runs "
+            f"test:{', test:'.join(needs_cargo)}, which reach `{SCHEMA_TASK}` and so run cargo "
+            f"against the `external/` patch sources that checkout did not fetch"
+        )
