@@ -317,17 +317,6 @@ impl LockedFile {
         }
         Ok(None)
     }
-
-    /// Synchronous sibling of [`Self::read_bytes`]. Same semantics, no
-    /// `block_in_place` wrapping — caller is already on a blocking thread.
-    pub fn read_bytes_blocking(&mut self) -> Result<Vec<u8>, FileError> {
-        let path = &self.path;
-        let file = self.lock.file_mut();
-        file.seek(SeekFrom::Start(0)).map_err(|e| FileError::new(path, e))?;
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf).map_err(|e| FileError::new(path, e))?;
-        Ok(buf)
-    }
 }
 
 // ── Codec wrappers ────────────────────────────────────────────────────────────
