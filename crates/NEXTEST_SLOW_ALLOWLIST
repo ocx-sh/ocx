@@ -1,0 +1,121 @@
+# Unit tests the one-second budget tolerates, one nextest test id per line.
+#
+# The budget is 1.000 s of wall clock as observed on the run's own log, held by
+# `task rust:test:duration` (scripts/unit_test_duration_gate.py). A test at or
+# above it that no line here covers reds the gate.
+#
+# Numbers below are measured on CI — verify-basic.yml `Smoke (Linux)`,
+# ubuntu-latest 4-core — never on a dev box. That runner is roughly 2x slower
+# than this project's development machine for the scan-heavy tests and much
+# worse for process-spawning ones, and CI is where the gate actually gates. A
+# test sitting above ~0.7 s there is a latent red, not a pass; the budget does
+# NOT get raised above 1.0 s to buy it headroom. 1.0 s is the contract.
+#
+# An entry is a DEBT, not a licence. It says "this test is slow and we have not
+# fixed it yet", and every line needs a `#` reason above it saying why. The
+# list only shrinks: `# TODO(fast-unit-tests):` marks the ones already being
+# made fast, so `grep TODO(fast-unit-tests)` is the list of lines to delete.
+# Never add one to dodge a red you could fix, and never `#[ignore]` a test
+# instead — the skip ceiling catches that, this does not.
+#
+# A line is an `fnmatch` pattern; one carrying no metacharacter is plain
+# equality. A pattern is for a FAMILY that is slow for one structural reason —
+# it is one line that cannot rot into a dozen stale ones as runners get faster
+# and slower. Everything else stays an exact id, so `grep TODO(fast-unit-tests)`
+# remains the list of lines to delete.
+#
+# An UNBOUNDED pattern is refused outright by the reader, not merely frowned
+# upon: a line matching `zzz_no_such_crate zzz_no_such_test` — an id belonging
+# to no crate — allows every test in the workspace, and one fat-fingered `*`
+# would disable this gate while the file still read as a careful list. Pin the
+# crate or a name fragment.
+#
+# A line that matches nothing at or above the budget is not a failure: the
+# `live_powershell_*` tests need `pwsh` on PATH and a machine-dependent red is
+# worse than a stale line. The gate prints those as
+# `stale allowlist candidate: <line>` instead.
+#
+# Ids are exactly as nextest prints them after the progress counter:
+# `<binary id> <test name>`.
+
+# --- Permanent: real external interpreters -------------------------------
+# Each of these spawns a real external interpreter (pwsh, nu, elvish, fish);
+# the cost is process start, not test logic, and no amount of test work removes
+# it. `.config/nextest.toml` already names this family in the `live-shell`
+# test-group and serialises it, because concurrent .NET process starts corrupt
+# each other's assembly loading. Anchored on the `live_` naming convention, so
+# an ordinary ocx_shell unit test that goes slow is still caught — deliberately,
+# and it hides nothing today: of the 316 non-`live_` ocx_shell tests the slowest
+# is 0.271 s on this dev box and 0.020 s on CI.
+#
+# The pattern also spans two module paths (`shell::tests::live_*` and
+# `shell::hook::live_shell_tests::*`), which is the second reason it is not an
+# enumeration: the CI-only over-budget member (1.607 s, 0.978 s here) lives in
+# the one a list written off a local run would never have reached.
+#
+# On CI this covers 11 tests over budget (37.6 s down to 1.6 s) and three more
+# at 0.73-0.84 s that a slower runner will push over.
+ocx_shell *live_*
+
+# --- Debt: being made fast in this change series -------------------------
+# Every row below is owned by a sibling work package and is expected to leave
+# this file in the same series. A row still here when the series lands is a row
+# someone has to answer for. Durations are the CI measurement.
+
+# ocx_test_support — whole-tree source scans, one parse per structural test
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_test_support::workspace_structure every_utility_error_reaching_the_cli_is_armed
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_test_support::workspace_structure ssrf_guard_ratchet
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_test_support::workspace_structure tests_hold_no_inert_loop
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_test_support::workspace_structure no_module_path_in_output
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_test_support::workspace_structure every_source_file_is_reachable
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_test_support::workspace_structure no_log_shim
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_test_support::workspace_structure no_classification_in_libraries
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_test_support::workspace_structure deps_direction
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_test_support::workspace_structure crate_map_toml_matches_rust_table
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_test_support::workspace_structure anyhow_only_in_cli_runtime
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_test_support::workspace_structure release_feature_set_excludes_testing_seams
+
+# ocx_oci / ocx_index — real retry backoffs and read timeouts on the wire
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_oci client::builder::push_wire_tests::exhausted_transient_retries_surface_as_transient
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_oci client::builder::read_timeout_tests::stalled_response_body_read_returns_instead_of_hanging
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_oci client::builder::read_timeout_tests::stalled_registry_read_timeout_classifies_as_transient
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_oci client::builder::push_wire_tests::transient_patch_failure_restarts_the_upload_and_commits_once
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_index ocx_index::transport_wire_tests::a_dribbling_peer_is_ended_by_the_outer_cap
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_index ocx_index::transport_wire_tests::a_retry_after_on_the_wire_is_waited_out
+
+# ocx_config / ocx_package_manager — real lock timeouts
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_package_manager tasks::render_toolchain::tests::healing_leaves_a_contended_entry_unrepaired_and_uncounted
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_package_manager tasks::render_toolchain::tests::a_render_lock_timeout_is_a_skip_and_never_an_error
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_config edit::tests::an_editor_held_past_the_timeout_is_locked_and_exit_75
+
+# ocx_announce — real backoff between the fork resync and the replay
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_announce forge::github::tests::commit_files_resyncs_the_fork_before_replaying_the_sequence
+
+# ocx_setup — probes the ambient home for shell profiles, so its cost is the
+# machine's, not the runner's: 1.103 s on this project's dev box and comfortably
+# under budget on CI. Listed because `task verify` runs this gate locally too,
+# and a gate that reds on a dev box for an environment reason on its first day
+# is a gate someone turns off. On CI it prints as a stale allowlist candidate.
+# TODO(fast-unit-tests): sibling WP is making this fast — delete this line at integration
+ocx_setup tests::absent_profile_list_auto_detects

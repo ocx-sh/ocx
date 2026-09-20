@@ -88,6 +88,9 @@ tasks:
        10. cargo nextest run
        11. the ignored/skipped ceiling over that run (Linux; test:ceiling)
        12. that ceiling parser's own red/green fixtures (Linux; test:ceiling:self-test)
+       13. the one-second per-test budget over that run (Linux; test:duration)
+       14. that budget reader's own red/red/green fixtures (Linux;
+           test:duration:self-test)
       Use during review-fix loops when only Rust code changed.
     cmds:
       - task: format:check
@@ -102,6 +105,8 @@ tasks:
       - task: test:unit
       - task: test:ceiling
       - task: test:ceiling:self-test
+      - task: test:duration
+      - task: test:duration:self-test
 
   check:windows-cfg:
     desc: Type-check the cfg(windows)-only code the host gate cannot see
@@ -707,3 +712,237 @@ tasks:
           echo "ceiling self-test: the parser read no skipped count from a 1-skipped Summary: $green" >&2; exit 1;;
         esac;
         echo "ceiling self-test: parser red on 999999 skipped, green reading 1 skipped"
+
+  test:duration:
+    desc: Fail when a unit test in the last run took a second or more and is not in crates/NEXTEST_SLOW_ALLOWLIST (Linux)
+    summary: |
+      The one-second budget over every unit test, read off the same
+      target/nextest/run.log `test:ceiling` parses and from inside the same
+      bracket — `test:floor` deletes the log, so a duration read here can only
+      be this run's. Run `task rust:test:floor` then `task rust:test:unit`
+      first.
+
+      **What a green here claims, exactly: every unit test that runs in the
+      Linux unit suite is under 1 second.** Not "every unit test on every
+      platform" — `platforms: [linux]`, the guard `test:floor` and
+      `test:ceiling` already carry because cfg-gated tests make the counts
+      platform-dependent. The gap is real and named rather than papered over:
+      `verify-deep.yml`'s `Build & Unit Test` matrix runs **raw**
+      `cargo nextest run --workspace --target=… --profile ci --locked` on
+      Linux, macOS and Windows, not through `task`, so this gate never judges
+      the macOS or Windows legs; `build-windows-shims.yml` runs three crates
+      the same way. Extending the gate there would be worse than the gap: deep
+      is moving to manual dispatch, so a copy of this step living on it would
+      be a green nobody can tell from one that never ran.
+
+      A unit test is a function call with its dependencies faked; one that
+      takes a second is waiting on something real — a lock timeout, a retry
+      backoff, a process start, a whole-tree scan — and every gate run on every
+      runner pays for it again. The suite is 8215 tests, 81 s on a dev box and
+      ~3.5 min on CI, so a handful of second-long tests is a measurable share
+      of the whole.
+
+      **Headroom.** The budget is 1.0 s of wall clock as observed on the run's
+      own log. ubuntu-latest measures roughly 2x this project's dev box for the
+      scan-heavy tests and worse for process-spawning ones, and CI is where the
+      gate gates — so a test sitting above ~0.7 s on CI is a latent red, not a
+      pass. Once the allowlist's debt rows land fast, the slowest unlisted test
+      on CI is about 0.8 s, which is thin on purpose. The budget does NOT get
+      raised above 1.0 s to buy headroom; 1.0 s is the contract.
+
+      `crates/NEXTEST_SLOW_ALLOWLIST` is the tolerated set, one line per entry
+      with a `#` reason above it. A line is an `fnmatch` pattern, which for an
+      entry carrying no metacharacter is plain equality — a pattern is for a
+      family slow for one structural reason, so `ocx_shell *live_*` holds the
+      whole live-interpreter family as one line that cannot rot into a dozen
+      stale ones. Those spawn a real pwsh, nu, elvish or fish and their cost is
+      process start; everything else stays an exact id marked
+      `# TODO(fast-unit-tests):`, so that grep remains the deletion list. An
+      `#[ignore]` added to dodge this gate is not a fix and lands on
+      `test:ceiling` instead.
+
+      A pattern is also a new way for a gate to go silently permissive, so an
+      UNBOUNDED one is refused by the reader rather than trusted: a line
+      matching an id that belongs to no crate allows the whole workspace, and
+      one fat-fingered `*` would disable this gate while the file still read as
+      a careful list. `test:duration:self-test` shows that refusal red, shows a
+      pattern matching nothing still redding the slow test, and runs the
+      shipped allowlist through the same reader.
+
+      scripts/unit_test_duration_gate.py refuses to report on a log whose timed
+      result lines number fewer than crates/NEXTEST_FLOOR: a subset run, a
+      truncated log or a nextest grammar reshape each leave it with nothing to
+      complain about, and a reader that read nothing is not a green.
+      `test:duration:self-test` below is that state's red, and the budget's.
+
+      It also reads a log fetched with `gh run view --log` — the line prefix
+      and the `^[` spelling of the escape — so a CI run can be investigated by
+      hand: `python3 scripts/unit_test_duration_gate.py <fetched-log>`.
+    platforms: [linux]
+    # `{{.CLI_ARGS}}` is how the self-test points the script at fixture
+    # overrides (`-- --allowlist <file> --budget-seconds 1.0`); on this route
+    # it is empty and the script's own defaults apply.
+    cmd: python3 {{.ROOT_DIR}}/scripts/unit_test_duration_gate.py {{.NEXTEST_RUN_LOG}} {{.CLI_ARGS}}
+
+  test:duration:self-test:
+    desc: Show the unit-duration gate red on an over-budget test, a short log, a non-matching pattern and an unbounded one, and green across all three log spellings (Linux)
+    summary: |
+      `test:duration` above is a parser over a log, and every way it can fail
+      is a way it can also go quietly vacuous. Fixture logs written to mktemp
+      and thrown away hold its states — run by `.verify:build-test` (so by
+      `task verify` and by `task verify:scoped`'s escalation) right after the
+      `test:duration` they judge, and by verify-basic.yml's `Duration
+      self-test` step beside its `Unit duration budget`. Same reason
+      `test:ceiling:self-test` exists: a green nobody can tell from a parser
+      that stopped matching is not a check.
+
+      The states, and what each one alone would miss:
+
+        1. an over-budget test that is NOT allowlisted — the budget's red. The
+           fixture log satisfies the floor, so this case cannot pass for the
+           floor's reason, and it pins `--budget-seconds 1.0` explicitly so it
+           cannot go vacuous if the script's default ever moves.
+        2. a log of three result lines — the READER floor's red. Without it,
+           every green this gate prints is indistinguishable from one over a
+           subset run, which is the failure mode the floor exists for.
+        3. the same log with the slow test allowlisted — green, asserted on
+           the numbers AND on the test id it reports, not on exit 0. The log
+           carries exactly NEXTEST_FLOOR result lines and exactly one
+           allowlisted entry, both read back out of the success line at
+           runtime.
+        4. the same log in each of the three spellings a real run log comes in.
+           This is a REGRESSION case, not a completeness gesture — every field
+           nextest prints is right-aligned, and `\(\d+/\d+\)` matched none of
+           the 8215 padded counters on a real CI log while reporting a clean
+           parse, because an optional group that fails to match just glues
+           `(   1/8215)` onto the front of the id. The fixture therefore puts
+           the OVER-BUDGET line at counter 1, where the padding is, and every
+           case asserts the gate names that id clean. The three spellings:
+             - plain, as `tee` writes it with no TTY;
+             - real `ESC [ … m`, as `tee` writes it with one, colour codes
+               sitting inside the id (`<esc>ocx<esc> <esc>api::tests<esc>…`);
+             - the two literal characters `^[` plus the
+               `<job>\t<step>\t<timestamp>` line prefix, which is what
+               `gh run view --log` hands you — the spelling that makes it
+               possible to point this gate at a CI log by hand.
+        5. the same log green through a PATTERN entry (`ocx_fixture slow::*`)
+           rather than an exact id, which is how the `ocx_shell *live_*`
+           family is held as one line instead of fifteen.
+        6. a pattern that matches nothing (`ocx_other other::*`) — the slow
+           test must still red. A pattern is a new way for the gate to go
+           silently permissive, and (5) alone cannot tell "the pattern matched"
+           from "patterns allow whatever they are handed".
+        7. an unbounded pattern (`*`) — refused outright, by its own wording.
+           One fat-fingered line would otherwise allow every test in the
+           workspace while the file still read as a careful list. The shipped
+           `crates/NEXTEST_SLOW_ALLOWLIST` is then run through the same reader
+           (at an unreachable budget, so only the reader can speak), which is
+           the other half: the refusal exists AND the file we ship survives it.
+
+      Every assertion reads the gate's own wording, never merely the exit
+      status: `if <task>; then fail` is satisfied by a renamed task, an
+      unreadable log or an argument typo exactly as well as by the budget
+      gating. Each red case says so when the run failed for some other reason.
+
+      The counts in the assertions are built in the shell from
+      crates/NEXTEST_FLOOR rather than written here, so a floor bump cannot
+      leave a literal behind that the gate no longer prints.
+
+      `-s` on the nested call: without it go-task echoes the task body to
+      stderr, and the body holds the very phrases the assertions look for — the
+      red half would then match the script quoting itself and pass for any
+      failure at all. The nested call names the root taskfile explicitly for
+      the reason `test:ceiling:self-test` does: entered through the root
+      `rust:` include, a bare `task` resolves against whichever taskfile it
+      finds above the current directory.
+    platforms: [linux]
+    vars:
+      SLOW_TEST: ocx_fixture slow::tests::deliberately_over_budget
+      SLOW_GLOB: ocx_fixture slow::*
+      # A pattern that is a pattern and still matches nothing here: it proves
+      # the glob path is not simply allowing everything it is handed.
+      MISSING_GLOB: ocx_other other::*
+      # The fat-finger. One of these in the shipped file would allow every test
+      # in the workspace while the file still read as a careful list.
+      UNBOUNDED_GLOB: '*'
+      SHORT_LINES: '3'
+      DURATION: task -s -t {{.ROOT_DIR}}/taskfile.yml rust:test:duration
+      # The duration and the id glued together with two spaces is a shape only
+      # the gate's own failure listing produces — the fixture line spells the
+      # same numbers inside `[   7.500s]` and a counter, so an assertion on
+      # either half alone could match the fixture rather than the output.
+      RED_BUDGET_REASON: '7.500s {{.SLOW_TEST}}'
+      RED_FLOOR_REASON: '{{.SHORT_LINES}} timed result lines read, floor is'
+      # `slowest <id> at <duration>` is the whole point of case 4: a counter
+      # left on the front of the id, or an unstripped colour code inside it,
+      # changes this string and nothing else in the run would notice.
+      GREEN_SLOWEST: 'slowest {{.SLOW_TEST}} at 7.500s'
+      GREEN_MATCHED: '1/1 allowlist entries matched, covering 1 test(s)'
+      # The count is runtime; the body holds the pattern, never the verdict.
+      RED_UNBOUNDED_REASON: '1 unbounded pattern(s)'
+      FIXTURE: >-
+        python3 -c 'import sys; floor = int(open(sys.argv[1]).read()); spell = sys.argv[2]; esc = {"plain": "", "esc": "\x1b", "caret": "^["}[spell]; c = lambda code: f"{esc}[{code}m" if esc else ""; pre = "Smoke (Linux)\tTest\t2026-09-20T12:19:02.2393027Z " if spell == "caret" else ""; a = c("32;1"); b = c("0"); d = c("35;1"); e = c("36"); g = c("34;1"); row = lambda i, secs, crate, module, name: f"{pre}{a}        PASS{b} [{secs}] ({i:>4}/{floor}) {d}{crate}{b} {e}{module}{b}{e}::{b}{g}{name}{b}"; print("\n".join([row(1, "   7.500s", "ocx_fixture", "slow::tests", "deliberately_over_budget")] + [row(i, "   0.003s", "ocx_fixture", "fixture::tests", f"case_{i}") for i in range(2, floor + 1)]))' {{.ROOT_DIR}}/crates/NEXTEST_FLOOR
+    cmds:
+      - >-
+        log=$(mktemp); allow=$(mktemp); short=$(mktemp);
+        trap 'rm -f "$log" "$allow" "$short"' EXIT;
+        floor=$(cat {{.ROOT_DIR}}/crates/NEXTEST_FLOOR);
+        gate() { {{.DURATION}} NEXTEST_RUN_LOG="$1" -- --allowlist "$2" --budget-seconds 1.0; };
+        {{.FIXTURE}} plain > "$log";
+        lines=$(wc -l < "$log");
+        [ "$lines" -eq "$floor" ] || {
+          echo "duration self-test: the fixture log holds $lines lines, not the floor's $floor — the cases below would judge the wrong thing" >&2; exit 1; };
+        : > "$allow";
+        status=0;
+        red=$(gate "$log" "$allow" 2>&1 >/dev/null) || status=$?;
+        [ "$status" -ne 0 ] || {
+          echo "duration self-test: the gate accepted a 7.500s test with an empty allowlist — it is not gating" >&2; exit 1; };
+        case "$red" in *'{{.RED_BUDGET_REASON}}'*) ;; *)
+          echo "duration self-test: the over-budget run exited $status without naming the slow test — it failed for another reason: $red" >&2; exit 1;;
+        esac;
+        head -n {{.SHORT_LINES}} "$log" > "$short";
+        status=0;
+        red=$(gate "$short" "$allow" 2>&1 >/dev/null) || status=$?;
+        [ "$status" -ne 0 ] || {
+          echo "duration self-test: the gate reported on a {{.SHORT_LINES}}-line log — the reader floor is not gating, so every green it prints could be a subset run" >&2; exit 1; };
+        case "$red" in *'{{.RED_FLOOR_REASON}}'*) ;; *)
+          echo "duration self-test: the short-log run exited $status without naming the reader floor — it failed for another reason: $red" >&2; exit 1;;
+        esac;
+        printf '%s\n' '{{.SLOW_TEST}}' > "$allow";
+        for spelling in plain esc caret; do
+          {{.FIXTURE}} "$spelling" > "$log";
+          green=$(gate "$log" "$allow" 2>/dev/null | tail -n 1);
+          case "$green" in *"$floor tests read (floor $floor)"*) ;; *)
+            echo "duration self-test: the $spelling log did not report $floor tests read against floor $floor: $green" >&2; exit 1;;
+          esac;
+          case "$green" in *'{{.GREEN_SLOWEST}}'*) ;; *)
+            echo "duration self-test: the $spelling log left the counter or a colour code on the test id — the gate named a different slowest test: $green" >&2; exit 1;;
+          esac;
+          case "$green" in *'{{.GREEN_MATCHED}}'*) ;; *)
+            echo "duration self-test: the $spelling log did not report the one allowlist entry as matched: $green" >&2; exit 1;;
+          esac;
+        done;
+        printf '%s\n' '{{.SLOW_GLOB}}' > "$allow";
+        green=$(gate "$log" "$allow" 2>/dev/null | tail -n 1);
+        case "$green" in *'{{.GREEN_SLOWEST}}'*'{{.GREEN_MATCHED}}'*) ;; *)
+          echo "duration self-test: the pattern entry did not cover the slow test: $green" >&2; exit 1;;
+        esac;
+        printf '%s\n' '{{.MISSING_GLOB}}' > "$allow";
+        status=0;
+        red=$(gate "$log" "$allow" 2>&1 >/dev/null) || status=$?;
+        [ "$status" -ne 0 ] || {
+          echo "duration self-test: a pattern matching nothing still allowed the 7.500s test — the glob path is allowing whatever it is handed" >&2; exit 1; };
+        case "$red" in *'{{.RED_BUDGET_REASON}}'*) ;; *)
+          echo "duration self-test: the non-matching-pattern run exited $status without naming the slow test — it failed for another reason: $red" >&2; exit 1;;
+        esac;
+        printf '%s\n' '{{.UNBOUNDED_GLOB}}' > "$allow";
+        status=0;
+        red=$(gate "$log" "$allow" 2>&1 >/dev/null) || status=$?;
+        [ "$status" -ne 0 ] || {
+          echo "duration self-test: an unbounded pattern was accepted — one fat-fingered line would disable the whole gate" >&2; exit 1; };
+        case "$red" in *'{{.RED_UNBOUNDED_REASON}}'*) ;; *)
+          echo "duration self-test: the unbounded-pattern run exited $status without refusing the pattern — it failed for another reason: $red" >&2; exit 1;;
+        esac;
+        {{.DURATION}} NEXTEST_RUN_LOG="$log" -- --budget-seconds 1e9 >/dev/null || {
+          echo "duration self-test: the SHIPPED crates/NEXTEST_SLOW_ALLOWLIST does not survive its own reader — see the refusal above" >&2; exit 1; };
+        echo "duration self-test: gate red on 7.500s unlisted, red on a {{.SHORT_LINES}}-line log, red on a non-matching pattern, red on an unbounded pattern, green reading $floor tests and {{.GREEN_MATCHED}} in all of plain/esc/caret spellings and through a pattern"

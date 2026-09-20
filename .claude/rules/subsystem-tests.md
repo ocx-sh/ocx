@@ -148,6 +148,82 @@ the suite an unmodified proof while `ocx_lib` is taken apart. Four mechanisms:
 - **Adding a verb** (see `subsystem-cli-commands.md`): its acceptance test carries a `smoke`
   row, or `test_smoke_coverage.py` reds; `SUITE_FLOOR` rises in the same commit.
 
+## Unit-Test Duration Budget (Rust)
+
+Not this suite — the *unit* suite, recorded here because it is the other half
+of the bracket around `cargo nextest` and the two are read together.
+
+Every Rust unit test must run in **under 1.000 s**. `task rust:test:duration`
+(`scripts/unit_test_duration_gate.py`) asserts it over the run log
+`rust:test:unit` tee'd to `target/nextest/run.log`, inside the same
+`rust:test:floor` → `rust:test:unit` → `rust:test:ceiling` bracket: the floor
+step deletes the log, so a duration read there can only be that run's. It runs
+on `.verify:build-test` and in `verify-basic.yml`'s `smoke` job.
+
+- **What a green claims, exactly.** *Every unit test that runs in the Linux
+  unit suite is under 1 second.* Not "every unit test on every platform" —
+  `platforms: [linux]`, the guard the sibling floor/ceiling tasks carry because
+  cfg-gated tests make counts platform-dependent. The uncovered legs, named
+  rather than papered over: `verify-deep.yml`'s `Build & Unit Test` matrix runs
+  **raw** `cargo nextest run --workspace --target=…`, not through `task`, on
+  Linux, macOS and Windows; `build-windows-shims.yml` runs three crates the
+  same way. Deep is moving to manual dispatch, so a copy of this gate there
+  would be a green nobody could tell from one that never ran — the hole stays
+  named.
+- **What it asserts.** Every timed result line is parsed (`PASS`, `FAIL`,
+  `SLOW`, `LEAK`, `TIMEOUT`, `TRY n FAIL`, `FLAKY n/m`; `[>120.000s]` too), the
+  slowest duration per test id wins, and any test at or above the budget that
+  no allowlist line covers reds the gate, listed slowest first. Every numeric
+  field nextest prints is right-aligned, counter included (`(   1/8215)`), and
+  the log comes in three spellings — plain, real `ESC`, and the `^[` plus
+  line-prefix form `gh run view --log` hands you, which the gate also reads so
+  a CI run can be investigated by hand.
+- **Headroom.** 1.0 s is wall clock on the run's own log. ubuntu-latest
+  measures roughly 2x this project's dev box for scan-heavy tests and worse for
+  process-spawning ones, and CI is where the gate gates — a test above ~0.7 s
+  there is a latent red, not a pass. After the current debt rows land fast the
+  slowest unlisted test on CI is about 0.8 s. **The budget is never raised
+  above 1.0 s to buy headroom; 1.0 s is the contract.**
+- **Reader floor.** The gate refuses a log holding fewer timed lines than
+  `crates/NEXTEST_FLOOR`, naming both numbers. A subset run, a truncated log or
+  a nextest grammar reshape each leave a duration reader with nothing to
+  complain about — and a reader that read nothing prints the same green as a
+  fast suite. There is deliberately no flag that lowers it.
+- **The allowlist.** `crates/NEXTEST_SLOW_ALLOWLIST`, one line per entry
+  (`<binary id> <test name>`, exactly as nextest prints it after the progress
+  counter), `#` comments ignored. A line is an `fnmatch` pattern; one with no
+  metacharacter is plain equality. Use a pattern only for a family slow for one
+  structural reason — `ocx_shell *live_*` is the whole live-interpreter family
+  as one line that cannot rot into a dozen stale ones, spans both module paths
+  the family lives in, and is anchored on the `live_` convention so an ordinary
+  `ocx_shell` test that goes slow is still caught (the slowest non-`live_` one
+  is 0.271 s here, 0.020 s on CI). **An unbounded pattern is refused outright**
+  — a line matching an id belonging to no crate allows the whole workspace, and
+  one fat-fingered `*` would disable the gate while the file still read as a
+  careful list. Every debt row stays an exact id so
+  `grep TODO(fast-unit-tests)` remains the deletion list.
+  An entry is a **debt, not a licence**: it needs a one-line reason above it,
+  measured on CI, and the list only shrinks. Rows marked
+  `# TODO(fast-unit-tests):` are being made fast. A line matching nothing at or
+  above the budget prints as `stale allowlist candidate: <line>` rather than
+  failing — `live_powershell_*` needs `pwsh` on PATH, and a machine-dependent
+  red is worse than a stale line.
+- **Never `#[ignore]` a test to get under the budget.** That lands on
+  `rust:test:ceiling` instead, which is the gate for exactly that move. Making
+  the test fake what it is waiting on is the fix.
+- **Seeing it red.** `task rust:test:duration:self-test` shows every state on
+  throwaway fixture logs — red over budget, red under the reader floor, red on
+  a pattern that matches nothing, red on an unbounded pattern, and green in all
+  three log spellings and through a pattern entry; it then runs the shipped
+  allowlist through the same reader. By hand against any run log:
+
+  ```sh
+  python3 scripts/unit_test_duration_gate.py target/nextest/run.log \
+      --allowlist /dev/null          # red: every slow test is now unlisted
+  python3 scripts/unit_test_duration_gate.py <(head -n 5 target/nextest/run.log)
+                                     # red: the reader floor
+  ```
+
 ## Observing a Running Suite
 
 An acceptance run that has gone quiet is either **slow** or **hung**, and the two
