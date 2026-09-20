@@ -113,17 +113,20 @@ ocx_test_support::workspace_structure tests_hold_no_inert_loop
 # sole full-metadata consumer in the binary, paying cold what it used to share
 # warm with two others. That is an accepted trade, not a regression to chase.
 #
-# Both lines below are now measured on the runner, on verify-basic.yml run
-# 35521310964: `release_feature_set_excludes_testing_seams` 0.898 s,
-# `deps_direction` 2.499 s. The `taskset -c 0-3` proxy read those as ~0.9 s
-# each, so it under-reads by 1.0x on one and 2.7x on the other — a proxy
-# bounds nothing, and that is why the runner is the authority here.
+# Both lines below are measured on the runner, across two verify-basic.yml
+# runs — 35521310964 and 35524469736, whose runners differed by about 1.2x:
 #
-# `release_feature_set_excludes_testing_seams` sits UNDER the budget on that
-# run, so the gate prints it every time as `stale allowlist candidate`. That
-# line is expected and the entry stays: 0.898 s is 90% of the budget, and the
-# same measurement shows its sibling at 2.7x the proxy's reading. Deleting it
-# on the strength of one sub-budget sample buys nothing and reds the gate on
-# the next slower runner, for a test nobody touched.
+#   release_feature_set_excludes_testing_seams   0.898 s   0.958 s
+#   deps_direction                               2.499 s   4.076 s
+#
+# The `taskset -c 0-3` proxy read both as ~0.9 s, so it under-reads by 1.0x on
+# one and 2.7-4.5x on the other. A proxy bounds nothing; the runner is the
+# authority here.
+#
+# `release_feature_set_excludes_testing_seams` is UNDER the budget on both, so
+# the gate prints it every run as `stale allowlist candidate`. That line is
+# expected and the entry stays. Two samples are why: 90% of the budget on one
+# runner and 96% on a slightly slower one is not headroom, it is a red waiting
+# for a third runner — and it would land on a test nobody touched.
 ocx_test_support::workspace_structure release_feature_set_excludes_testing_seams
 ocx_test_support::workspace_structure deps_direction
