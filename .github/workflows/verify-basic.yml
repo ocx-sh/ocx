@@ -98,6 +98,11 @@ jobs:
       SCCACHE_S3_USE_SSL: "true"
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
+      # Test telemetry (subsystem-ci.md § Test telemetry), lifted into the job
+      # env for the same reason the sccache credentials are: `secrets` is not a
+      # context a composite action's `if:` can read. Empty on a fork PR, and
+      # the push step's guard skips it rather than failing.
+      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -240,6 +245,18 @@ jobs:
         with:
           files: target/nextest/ci/junit.xml
           check_name: "Unit Test Results"
+      # Per-test timings to otel.ocx.sh. `!cancelled()` rather than
+      # `success()`: a failing suite still writes the report, and a red run's
+      # timings are the ones worth having. The action turns each of its own
+      # failures into a warning; `continue-on-error` covers the rest.
+      - name: Push unit test timings
+        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: ./.github/actions/test-telemetry
+        with:
+          junit: target/nextest/ci/junit.xml
+          suite: unit
       - name: Check lint results
         if: ${{ !cancelled() }}
         run: |
@@ -268,6 +285,9 @@ jobs:
     # leaves room for the registry bring-up, the artifact download and
     # `setup-ocx` ahead of the tier itself.
     timeout-minutes: 10
+    env:
+      # Test telemetry, same guard as the `smoke` job above.
+      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -310,10 +330,22 @@ jobs:
           # object store is runner-executable content.
           cache: false
       - name: Run Smoke Tier
-        run: task test:smoke -- --junit-xml=results/junit-smoke.xml
+        # The JUnit report is not asked for here any more: the task writes
+        # `test/results/junit-smoke.xml` on every run, local ones included, so
+        # one flag in one place (test/taskfile.yml `SMOKE_JUNIT_XML`) feeds
+        # both the check below and the timings a developer's run pushes.
+        run: task test:smoke
       - name: Publish Smoke Results
         if: ${{ !cancelled() }}
         uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
         with:
           files: test/results/junit-smoke.xml
           check_name: "Smoke Acceptance Results"
+      - name: Push smoke test timings
+        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: ./.github/actions/test-telemetry
+        with:
+          junit: test/results/junit-smoke.xml
+          suite: smoke

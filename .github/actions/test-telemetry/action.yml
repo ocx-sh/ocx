@@ -1,0 +1,166 @@
+name: Test Telemetry
+description: >-
+  Push per-test timings from a JUnit report to otel.ocx.sh as OTLP traces, so
+  Grafana can name the tests that accumulate the most wall clock. Never decides
+  a job: every failure is a warning annotation and exit 0.
+
+inputs:
+  junit:
+    description: >-
+      Path to the JUnit XML report, or a glob matching several. Every match is
+      pushed as its own trace. No match is a warning, not a failure — the report
+      is produced by a test step that may itself have failed before writing one.
+    required: true
+  suite:
+    description: '`ocx.suite`: unit | acceptance | smoke. Dashboards group by it.'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # One step, not three: the tolerance contract ("warn, never fail") is the
+    # same for the download, the digest, the extraction and the push, and
+    # splitting it would mean repeating that guard in each of them.
+    - name: Push test timings
+      shell: bash
+      env:
+        JUNIT: ${{ inputs.junit }}
+        SUITE: ${{ inputs.suite }}
+        # OTLP/gRPC, and the scheme is load-bearing. junit2otlp builds
+        # `otlptracegrpc` (there is no HTTP exporter and no flag to pick one),
+        # and the Go SDK reads this variable as a URL: `https` selects TLS,
+        # `http` selects plaintext, and a bare `host:port` fails outright with
+        # `dns resolver: missing address` (all three measured against a local
+        # collector). The port is explicit so nothing depends on grpc-go's
+        # default-port behaviour.
+        OTEL_EXPORTER_OTLP_ENDPOINT: https://otel.ocx.sh:443
+        JUNIT2OTLP_VERSION: 0.1.2
+      run: |
+        set -uo pipefail
+
+        # Telemetry never decides a job, but it never disappears quietly
+        # either: every exit from here leaves one line in the log.
+        warn() { echo "::warning title=Test telemetry::$*"; exit 0; }
+
+        # The caller's `if:` already skips this action when the org secret is
+        # unset (a fork PR sees no secrets). Repeated here because a composite
+        # action is copied into new callers faster than its guard is.
+        if [ -z "${OTEL_OTLP_AUTH:-}" ]; then
+          echo "test telemetry: OTEL_OTLP_AUTH is empty, nothing pushed"
+          exit 0
+        fi
+        # The secret is the whole header value (`Basic <base64 of ci:password>`).
+        # It is read from the environment and never interpolated into the YAML,
+        # never echoed, and never passed as an argument.
+        export OTEL_EXPORTER_OTLP_HEADERS="Authorization=${OTEL_OTLP_AUTH}"
+
+        case "$RUNNER_OS" in
+          Linux)   goos=linux;   ocx_os=linux   ;;
+          macOS)   goos=darwin;  ocx_os=macos   ;;
+          Windows) goos=windows; ocx_os=windows ;;
+          *) warn "unknown RUNNER_OS '$RUNNER_OS'" ;;
+        esac
+        case "$RUNNER_ARCH" in
+          X64)   goarch=x86_64 ;;
+          ARM64) goarch=arm64  ;;
+          *) warn "unsupported RUNNER_ARCH '$RUNNER_ARCH'" ;;
+        esac
+
+        # Pinned here, not fetched from the release's own checksums.txt: a
+        # digest downloaded beside the artifact it describes verifies that the
+        # two arrived together, which is not the property this check is for.
+        # Copied from the v0.1.2 checksums.txt; refresh both together on a bump.
+        case "${goos}_${goarch}" in
+          linux_x86_64)   sha=edd9d4a8197e792565bd0501ce6df73083d6d7fc61f7dfc5c107d760d541dd6d ;;
+          linux_arm64)    sha=1f6335afa3815fd81cc5ac11e48b88e810ceb2c5d23a4fe50717f80549d978dc ;;
+          darwin_x86_64)  sha=e6dfdeb1b04662c49339a079498e0a8bc249cd42d1ca9fa6c3c2820d6b20d121 ;;
+          darwin_arm64)   sha=84a5bf2d68ec53ac972c4f3db86518e96b35b773d9f4551b4f10861476af9c8d ;;
+          windows_x86_64) sha=03f448c024daf740b0d432bc061245760ecfa739395eba01947a08308ff8660e ;;
+          windows_arm64)  sha=67590b24ff4c5d3b601917443bed999ff262b6afccb625481aca48e993951f00 ;;
+          *) warn "no pinned digest for ${goos}_${goarch}" ;;
+        esac
+
+        # `mktemp -d`, not `$RUNNER_TEMP`: on a Windows runner that variable
+        # holds a backslash path (`D:\a\_temp`) and this step's bash is Git
+        # Bash, where whether it resolves is a property of the MSYS path
+        # translation rather than of anything asserted here.
+        workdir=$(mktemp -d) || warn "could not create a working directory"
+        tarball="$workdir/junit2otlp.tar.gz"
+        url="https://github.com/mdelapenya/junit2otlp/releases/download/v${JUNIT2OTLP_VERSION}/junit2otlp_${goos}_${goarch}.tar.gz"
+        curl -fsSL --retry 3 --retry-all-errors -o "$tarball" "$url" \
+          || warn "could not download $url"
+
+        # macOS runners have `shasum` and no `sha256sum`; Linux and the Windows
+        # Git Bash have `sha256sum`.
+        if command -v sha256sum >/dev/null 2>&1; then
+          actual=$(sha256sum "$tarball" | cut -d' ' -f1)
+        else
+          actual=$(shasum -a 256 "$tarball" | cut -d' ' -f1)
+        fi
+        [ "$actual" = "$sha" ] \
+          || warn "sha256 mismatch for junit2otlp_${goos}_${goarch}.tar.gz: expected $sha, got $actual"
+
+        tar -xzf "$tarball" -C "$workdir" || warn "could not extract $tarball"
+        bin="$workdir/junit2otlp"
+        [ -f "$bin" ] || bin="$workdir/junit2otlp.exe"
+        [ -f "$bin" ] || warn "no junit2otlp binary in $tarball"
+        chmod +x "$bin"
+
+        # Values may contain neither `=` nor `,`: junit2otlp splits the list on
+        # `,` and each pair on `=`, and refuses a pair that yields anything but
+        # two fields — that refusal is one of the few things it exits non-zero
+        # for. None of these can carry either character. `GITHUB_HEAD_REF` is
+        # the pull request's source branch and empty off a pull request, where
+        # `GITHUB_REF_NAME` is the branch; taking the merge ref's `N/merge`
+        # would put every PR of a repository under one branch name.
+        attributes="ocx.suite=${SUITE}"
+        attributes="${attributes},ocx.source=ci"
+        attributes="${attributes},ocx.os=${ocx_os}"
+        attributes="${attributes},ocx.git.sha=${GITHUB_SHA}"
+        attributes="${attributes},ocx.git.branch=${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+        attributes="${attributes},ocx.ci.run_id=${GITHUB_RUN_ID}"
+        attributes="${attributes},ocx.ci.job=${GITHUB_JOB}"
+        attributes="${attributes},host.name=${RUNNER_NAME:-unknown}"
+
+        reports=()
+        while IFS= read -r match; do
+          reports+=("$match")
+        done < <(compgen -G "$JUNIT" || true)
+        [ ${#reports[@]} -gt 0 ] || warn "no JUnit report matched '$JUNIT' — nothing to push"
+
+        # `--repository-path` points at an empty directory on purpose. Pointed
+        # at the checkout, junit2otlp reads it with go-git to add `scm.*`
+        # attributes that duplicate the `ocx.git.*` ones above, and it does so
+        # over a clone whose depth and detached head are decided elsewhere.
+        # A path that is not a repository makes it skip the contributor.
+        norepo="$workdir/norepo"
+        mkdir -p "$norepo"
+
+        # The exit status says nothing. Measured against a local collector:
+        # with the endpoint refusing TLS, junit2otlp logged `traces export:
+        # ... connection error` three times and still exited 0 — every export
+        # error goes through the OTel error handler, and `main` only fails on
+        # a bad argument or unparseable XML. So the log is the signal, and it
+        # is captured to a file of its own rather than grepped out of this
+        # step's log, which already contains the word being looked for.
+        log="$workdir/push.log"
+        : > "$log"
+        pushed=0
+        for report in "${reports[@]}"; do
+          "$bin" \
+            --service-name ocx-tests \
+            --trace-name "ocx-${SUITE}" \
+            --repository-path "$norepo" \
+            --additional-attributes "$attributes" \
+            < "$report" >> "$log" 2>&1 || warn "junit2otlp failed on $report: $(tail -n 3 "$log")"
+          pushed=$((pushed + 1))
+        done
+
+        # `failed to upload metrics` is expected and ignored: junit2otlp always
+        # builds a metric exporter (OTEL_METRICS_EXPORTER is not read), and the
+        # server runs no metrics receiver, so every push logs one UNIMPLEMENTED
+        # — non-retryable, and measured at no added wall clock.
+        if grep -q 'traces export:' "$log"; then
+          warn "trace push to otel.ocx.sh did not land: $(grep -m1 'traces export:' "$log")"
+        fi
+        echo "test telemetry: pushed $pushed report(s) as suite '${SUITE}' on ${ocx_os}"
