@@ -22,20 +22,20 @@
 //! there was none). The reverse failure (lock write fails, manifest
 //! untouched) leaves the existing on-disk state unchanged.
 //!
-//! The guard owns the exclusive advisory flock on `ocx.toml` itself,
-//! acquired via [`crate::acquire_project_lock`]. The commit
-//! body rewrites `ocx.toml` IN PLACE through the lock-owning handle
-//! ([`ocx_util::fs::LockedFile::replace_bytes`]) — no tempfile,
-//! no rename, no orphan inode. This keeps mutual exclusion on Windows
-//! intact (`LockFileEx` is per-handle; a rename would strand the lock
-//! fd on the orphan inode). See `project_lock.rs` module-doc and
-//! `adr_file_lock_unification.md §Decision 3` for the full rationale.
+//! The guard owns the project mutation lock, acquired via
+//! [`crate::acquire_project_lock`] — a scoped entry under `$OCX_HOME/locks`,
+//! keyed by the config file, never held on the file itself. The commit body
+//! publishes `ocx.toml` by atomic rename, exactly as it publishes `ocx.lock`,
+//! so an unlocked reader (`ocx status`, the per-prompt reconciler, direnv,
+//! git, an editor) never observes a short or spliced manifest and a SIGKILL
+//! mid-write leaves the previous document intact. See `project_lock.rs`
+//! module-doc and `arch-principles.md §Locking Policy`.
 //!
 //! The guard is intentionally neither [`Clone`] nor [`Copy`]: a project
 //! can have at most one in-flight mutation transaction at a time, and
-//! the flock lifetime tracks the guard's. Drop semantics: dropping a
+//! the lock's lifetime tracks the guard's. Drop semantics: dropping a
 //! guard without [`MutationGuard::commit`] or
-//! [`MutationGuard::rollback`] releases the flock and discards any
+//! [`MutationGuard::rollback`] releases the lock and discards any
 //! staged in-memory mutation.
 //!
 //! Typical use (from a CLI mutator):
@@ -74,31 +74,30 @@ pub struct ManifestSnapshot {
 
 /// RAII handle to an in-flight project-tier mutation transaction.
 ///
-/// Holds the exclusive advisory flock on `ocx.toml` itself, an
-/// immutable snapshot of the current [`ProjectConfig`] on disk, the optional
-/// predecessor [`ProjectLock`], and the absolute paths of both files.
+/// Holds the project mutation lock, an immutable snapshot of the current
+/// [`ProjectConfig`] on disk, the optional predecessor [`ProjectLock`], and
+/// the absolute paths of both files.
 ///
 /// Constructed only via the CLI shim
 /// `ocx_cli::app::project_context::load_project_for_mutate` (which
 /// resolves the project-context precedence chain and acquires the
-/// flock). Library consumers that need a guard for testing should
+/// lock). Library consumers that need a guard for testing should
 /// stage the prerequisite filesystem layout themselves and call
 /// [`Self::from_parts`] (test-only constructor — see `#[cfg(test)]`
 /// block below).
 ///
-/// Not `Clone` / `Copy` by design: the flock has unique ownership and
+/// Not `Clone` / `Copy` by design: the lock has unique ownership and
 /// a project supports at most one in-flight mutation transaction at a
 /// time. Sharing a guard across tasks would race the staged-then-commit
 /// invariant; pass references through the staging closure instead.
 #[non_exhaustive]
 pub struct MutationGuard {
-    /// Exclusive advisory flock on `ocx.toml` itself. Released on drop.
+    /// The project mutation lock for this config file. Released on drop.
     ///
-    /// The lock target IS the data file. [`Self::commit`] rewrites `ocx.toml`
-    /// in place via [`LockedFile::replace_bytes`] (truncate + write through the
-    /// lock-owning handle). No tempfile, no rename — the inode stays stable so
-    /// `LockFileEx` on Windows never strands on an orphan inode.
-    flock: LockedFile,
+    /// A [`ocx_util::fs::lock_scoped`] entry under `$OCX_HOME/locks`, not a
+    /// lock on `ocx.toml`: [`Self::commit`] publishes the manifest by rename,
+    /// so a lock held on the data file would strand on the orphaned inode.
+    mutate_lock: LockedFile,
     /// Absolute path to `ocx.toml`.
     config_path: PathBuf,
     /// Absolute path to the sibling `ocx.lock`.
@@ -242,22 +241,19 @@ impl MutationGuard {
     }
 
     /// Atomically commit `staged` plus a freshly resolved
-    /// [`ProjectLock`] to disk under the guard's flock.
+    /// [`ProjectLock`] to disk under the guard's mutation lock.
     ///
     /// Ordering is **lock-first**: `ocx.lock` is rewritten via the
     /// existing tempfile-and-rename helper in
     /// [`crate::lock::ProjectLock::save`] (which respects
     /// the `previous` byte-for-byte preservation contract), then
-    /// `ocx.toml` is rewritten IN PLACE through the lock-owning handle
-    /// via [`LockedFile::replace_bytes`]. The `ocx.lock` write uses
-    /// `tempfile + rename + parent fsync`; the `ocx.toml` rewrite is a
-    /// truncate-and-write on the locked inode so mutual exclusion on
-    /// Windows remains intact (no inode rotation under a held
-    /// `LockFileEx`).
+    /// `ocx.toml` is published the same way, by
+    /// `tempfile + rename + parent fsync` (`super::mutate`'s `atomic_write`).
     ///
-    /// Kill-9 trade-off: a SIGKILL between the `ocx.toml` `set_len(0)`
-    /// and `sync_data` leaves the file truncated or partial.
-    /// Recovery is manual.
+    /// Both files are therefore all-or-nothing under a SIGKILL: the kill
+    /// leaves whichever document was last published whole, never a truncated
+    /// or partial one, and an unlocked reader mid-read finishes against the
+    /// inode it opened.
     ///
     /// - Lock write fails → return error, `ocx.toml` untouched on disk.
     /// - Lock write succeeds, manifest write fails → roll the lock
@@ -267,7 +263,7 @@ impl MutationGuard {
     /// - Both succeed → register the lock in `ProjectRegistry`
     ///   (non-fatal) and return [`MutationCommit`].
     ///
-    /// The flock held by the guard is released when this method
+    /// The mutation lock held by the guard is released when this method
     /// returns (success or failure) — the guard is consumed.
     ///
     /// # Errors
@@ -283,7 +279,7 @@ impl MutationGuard {
     /// *original* error is surfaced; rollback failures log at WARN and do
     /// not mask the primary failure. This matches the design principle that
     /// callers should always see the first thing that went wrong.
-    pub async fn commit(mut self, staged: StagedMutation, new_lock: ProjectLock) -> Result<MutationCommit, Error> {
+    pub async fn commit(self, staged: StagedMutation, new_lock: ProjectLock) -> Result<MutationCommit, Error> {
         // Defense-in-depth coherence gate: the lock the caller hands us
         // must claim the same `declaration_hash` as the candidate config
         // we are about to write. If the resolver path produced a lock
@@ -336,24 +332,22 @@ impl MutationGuard {
         let post_rename: Result<(), Error> = async {
             // Stage 2: post-lock-write fault — return Err to exercise the
             // mid-failure path. The on-disk lock has been renamed; manifest
-            // is untouched until the spawn_blocking write below.
+            // is untouched until the publish below.
             maybe_inject_fault(fault.as_deref(), CommitStage::AfterLockWrite).await?;
 
             // Stage 3: optional pause — block here until the release file
             // appears so an external test can SIGKILL the process between
-            // the lock rename and the manifest rewrite.
+            // the lock rename and the manifest publish.
             maybe_inject_fault(fault.as_deref(), CommitStage::PauseBeforeManifestWrite).await?;
 
-            // Stage 4: rewrite ocx.toml IN PLACE through the lock-owning
-            // handle. Only when the staging closure actually changed the
-            // manifest — lock-only commits (`lock`, `update`) legitimately
-            // want to leave ocx.toml byte-identical.
+            // Stage 4: publish ocx.toml by rename. Only when the staging
+            // closure actually changed the manifest — lock-only commits
+            // (`lock`, `update`) legitimately want to leave ocx.toml
+            // byte-identical.
             if staged.manifest_changed {
                 let serialized =
                     super::document::render_preserving(&self.manifest.text, &staged.candidate, &self.config_path)?;
-                self.flock.replace_bytes(serialized.as_bytes()).await.map_err(|e| {
-                    ProjectError::new(self.config_path.clone(), ProjectErrorKind::Io(std::io::Error::other(e)))
-                })?;
+                super::mutate::atomic_write_async(&self.config_path, serialized).await?;
             }
             Ok(())
         }
@@ -371,11 +365,13 @@ impl MutationGuard {
         // commit (next `ocx lock` re-registers).
         super::registry::register_project_dir_best_effort(&self.config_path, &self.home).await;
 
+        // Explicit, and at the one point that matters: the mutation lock is
+        // released only after both files have landed on disk.
+        drop(self.mutate_lock);
         Ok(MutationCommit {
             config_path: self.config_path,
             lock_path: self.lock_path,
         })
-        // Guard's flock released here on drop.
     }
 
     /// Drop the guard without writing anything.
@@ -383,7 +379,7 @@ impl MutationGuard {
     /// Equivalent to `let _ = guard;` but documents intent at the
     /// call site: the caller decided not to commit (e.g. validation
     /// failed after staging, the user passed `--dry-run`, etc.).
-    /// Releases the flock; the on-disk `ocx.toml` and `ocx.lock` are
+    /// Releases the mutation lock; the on-disk `ocx.toml` and `ocx.lock` are
     /// untouched.
     pub fn rollback(self) {
         // No-op: the `Drop` impl on `FileLock` releases the OS lock
@@ -430,15 +426,15 @@ impl StagedMutation {
 // in `ocx_cli` (a different crate) and therefore must reach the
 // constructor through a `pub` API. The associated function below is
 // `pub` for that reason but documents the invariants the shim is
-// expected to uphold: in particular, the flock must already have been
-// acquired via `acquire_project_lock` (the only sanctioned ingress —
+// expected to uphold: in particular, the mutation lock must already have
+// been acquired via `acquire_project_lock` (the only sanctioned ingress —
 // constructing a `MutationGuard` without one would silently let a
 // second writer race the commit).
 
 impl MutationGuard {
     /// Assemble a [`MutationGuard`] from already-validated parts.
     ///
-    /// Callers MUST have already acquired the exclusive advisory flock on
+    /// Callers MUST have already acquired the project mutation lock for
     /// `ocx.toml` via [`crate::acquire_project_lock`]
     /// and loaded both the current [`ManifestSnapshot`] (parsed config plus the
     /// verbatim text it was parsed from — the commit path edits that document
@@ -448,16 +444,16 @@ impl MutationGuard {
     /// path can restore it byte-for-byte instead of re-serializing); it MUST
     /// be `Some` exactly when `previous_lock` is `Some`. The constructor does
     /// not re-validate these inputs — it merely packages them into a guard
-    /// whose drop glue releases the flock.
+    /// whose drop glue releases the mutation lock.
     ///
     /// The only sanctioned external ingress is the CLI shim
     /// `ocx_cli::app::project_context::load_project_for_mutate`, which
     /// is the only call site that performs the full prologue
-    /// (precedence chain, flock acquisition, config + lock load,
+    /// (precedence chain, lock acquisition, config + lock load,
     /// staleness gate). Library consumers should reach the guard
     /// through that shim rather than calling `from_parts` directly.
     pub fn from_parts(
-        flock: LockedFile,
+        mutate_lock: LockedFile,
         config_path: PathBuf,
         lock_path: PathBuf,
         home: PathBuf,
@@ -466,7 +462,7 @@ impl MutationGuard {
         previous_lock_bytes: Option<Vec<u8>>,
     ) -> Self {
         Self {
-            flock,
+            mutate_lock,
             config_path,
             lock_path,
             home,

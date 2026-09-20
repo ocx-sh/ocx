@@ -550,11 +550,11 @@ mod tests {
         async fn staged(&self, text: &str, tools: Vec<LockedTool>) -> (MutationGuard, StagedMutation, ProjectLock) {
             std::fs::write(self.config_path(), text).expect("the project manifest is writable");
             let config = ProjectConfig::from_toml_str(text).expect("the fixture manifest parses");
-            let flock = acquire_project_lock(&self.project_dir)
+            let mutate_lock = acquire_project_lock(&self.project_dir, &self.file_structure.locks)
                 .await
                 .expect("an uncontended project lock is acquirable");
             let guard = MutationGuard::from_parts(
-                flock,
+                mutate_lock,
                 self.config_path(),
                 self.lock_path(),
                 self.ocx_home.clone(),
@@ -634,9 +634,8 @@ mod tests {
     /// Mutation that reds it: a `commit_and_render` that only calls
     /// `guard.commit(...)` — the four-copies-of-a-two-step-sequence defect D-V8
     /// exists to prevent — leaves `render == None` and `bin/stale` on disk.
-    // `MutationGuard::commit` writes through `LockedFile::replace_bytes`,
-    // whose `block_in_place` panics on a current-thread runtime — the flavour
-    // its own doc comment requires of every test that reaches it.
+    // Multi-thread flavour: `MutationGuard::commit` fans its two publishes
+    // (`ocx.lock`, then `ocx.toml`) onto the blocking pool.
     #[tokio::test(flavor = "multi_thread")]
     async fn commit_and_render_reconciles_bin_after_the_commit_lands() {
         let tree = Tree::new();
@@ -687,9 +686,8 @@ mod tests {
     /// Mutation that reds it: deriving the render's `groups` from the lock's
     /// declared groups (`["ci"]` here) instead of passing the whole home leaves
     /// `bin_in_scope == false` and the stale entry in place.
-    // `MutationGuard::commit` writes through `LockedFile::replace_bytes`,
-    // whose `block_in_place` panics on a current-thread runtime — the flavour
-    // its own doc comment requires of every test that reaches it.
+    // Multi-thread flavour: `MutationGuard::commit` fans its two publishes
+    // (`ocx.lock`, then `ocx.toml`) onto the blocking pool.
     #[tokio::test(flavor = "multi_thread")]
     async fn commit_and_render_covers_bin_even_when_the_lock_declares_no_default_group() {
         let tree = Tree::new();
@@ -735,9 +733,8 @@ mod tests {
     /// Mutation that reds it: propagating the render's error out of
     /// `commit_and_render` (the obvious `?`), or restoring the predecessor lock
     /// on a render failure.
-    // `MutationGuard::commit` writes through `LockedFile::replace_bytes`,
-    // whose `block_in_place` panics on a current-thread runtime — the flavour
-    // its own doc comment requires of every test that reaches it.
+    // Multi-thread flavour: `MutationGuard::commit` fans its two publishes
+    // (`ocx.lock`, then `ocx.toml`) onto the blocking pool.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_render_that_cannot_resolve_leaves_the_committed_lock_in_place() {
         let tree = Tree::new();

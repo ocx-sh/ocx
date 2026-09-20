@@ -1,33 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Acceptance tests for project-tier mutation flock serialization.
+"""Acceptance tests for project-tier mutation locking and reader safety.
 
-Cluster A (mutation transactionality) — Codex H2 / Architect H2 fixes.
+Two halves of one contract (ocx#494):
 
-Project-tier mutators (`ocx add`, `ocx remove`, `ocx update`, `ocx lock`,
-`ocx init`) must hold an exclusive advisory flock on `ocx.toml` for the
-duration of the staged → resolve → commit transaction (in-place lock
-per ADR `adr_file_lock_unification.md` §Decision 3 — `ocx.toml` is
-rewritten in place through the lock-owning handle, no tempfile, no
-rename, so the lock fd never strands on an orphan inode). Two
+*Writers serialize.* Project-tier mutators (`ocx add`, `ocx remove`,
+`ocx update`, `ocx lock`, `ocx init`) hold the project mutation lock for
+the duration of the staged → resolve → commit transaction. That lock is a
+content-keyed entry under ``$OCX_HOME/locks`` — never a handle on
+``ocx.toml`` and never a ``ocx.toml.lock`` sidecar in the project. Two
 concurrent writers must serialize: one wins, the other either retries
-cleanly or exits with `Locked` (TempFail 75).
+cleanly or exits with ``Locked`` (TempFail 75).
+
+*Readers never tear.* ``ocx.toml`` is published by atomic rename, so a
+reader that takes no lock at all — ``ocx status``, the per-prompt
+reconciler, direnv, git, an editor — finishes its read against the
+document it opened. It never observes a short one, and never a splice of
+two.
 
 Spec sources:
-- ``crates/ocx_project/src/mutation.rs`` (MutationGuard contract)
+- ``crates/ocx_project/src/mutate.rs`` (``atomic_write``, the one writer)
+- ``crates/ocx_project/src/project_lock.rs`` (the scoped mutation lock)
 - ``crates/ocx_project/src/error.rs`` ``ProjectErrorKind::Locked`` →
   ``ExitCode::TempFail`` (75)
-- plan_review_fixes_project_toolchain.md Phase 1 step 5
-
-These tests are SPECIFICATION mode: they encode the contract before the
-implementation lands. Expected to FAIL or be flaky against today's
-naive sequential-write mutators (which can corrupt either file).
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import time
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
@@ -92,20 +95,36 @@ def _write_ocx_toml(project_dir: Path, body: str) -> Path:
     return path
 
 
+def _mutation_lock_path(ocx: OcxRunner, project_dir: Path) -> Path:
+    """The lock file ``ocx`` takes for ``project_dir/ocx.toml``.
+
+    Mirrors ``ocx_util::fs::lock_scoped``: SHA-256 over
+    ``"{dev}:{ino}:{scope}:{discriminator}"`` of the *guarded directory*,
+    sharded two hex digits deep under ``$OCX_HOME/locks``. Spelling it here
+    is what lets a test hold the real lock from the outside — and, held
+    against a run that just succeeded, what proves the derivation still
+    matches the implementation rather than pointing at a path nobody writes.
+    """
+    stat = project_dir.stat()
+    key = f"{stat.st_dev}:{stat.st_ino}:project-mutate:ocx.toml"
+    digest = hashlib.sha256(key.encode()).hexdigest()
+    return ocx.ocx_home / "locks" / digest[:2] / f"{digest[2:]}.lock"
+
+
 # ---------------------------------------------------------------------------
 # 1. Two concurrent `ocx add` — exactly one wins, no corruption
 # ---------------------------------------------------------------------------
 
 
-def test_concurrent_add_serialized_by_flock(
+def test_concurrent_add_serialized_by_the_mutation_lock(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """Two ``ocx add`` invocations against the same ``ocx.toml`` must serialize.
 
     Either:
-    - Both succeed sequentially (winner finishes fast, loser retries inside
-      the flock acquisition timeout), and the final ``ocx.toml`` contains
-      both bindings in stable order.
+    - Both succeed sequentially (winner finishes fast, loser waits inside
+      the mutation-lock contention budget), and the final ``ocx.toml``
+      contains both bindings in stable order.
     - One succeeds, the other exits with ``EXIT_TEMP_FAIL`` (75 — Locked).
 
     No partial / interleaved write may corrupt ``ocx.toml`` or ``ocx.lock``.
@@ -181,7 +200,7 @@ def test_concurrent_lock_command_serialized(
 ) -> None:
     """``ocx lock`` and ``ocx add`` against the same project must serialize.
 
-    Whichever wins first holds the flock; the other either waits and
+    Whichever wins first holds the mutation lock; the other either waits and
     succeeds (acceptable) or exits ``EXIT_TEMP_FAIL`` (Locked).
 
     Neither file may end up corrupted regardless of who wins.
@@ -239,7 +258,7 @@ def test_concurrent_lock_command_serialized(
 
 
 # ---------------------------------------------------------------------------
-# 3. External flock holder blocks `ocx add` — exit 75
+# 3. The lock lives under $OCX_HOME/locks, not on ocx.toml
 # ---------------------------------------------------------------------------
 
 
@@ -247,44 +266,159 @@ def test_concurrent_lock_command_serialized(
     os.name == "nt",
     reason="POSIX flock(2) advisory contract; Windows uses LockFileEx with different semantics",
 )
-def test_lock_holder_blocks_other_writers(
+def test_mutation_lock_holder_blocks_other_writers(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """An external process holding the exclusive flock makes ``ocx add`` exit 75.
+    """Holding the project's entry under ``$OCX_HOME/locks`` makes ``ocx add``
+    exit 75, and no ``.lock`` file is ever written into the project.
 
-    Uses ``flock(1)`` from the host shell to hold the advisory lock on
-    ``ocx.toml`` itself (the canonical lock target in the in-place lock
-    design — see ADR §Decision 3), then invokes ``ocx add``. The mutator
-    must exit ``EXIT_TEMP_FAIL`` rather than block forever or silently
-    overwrite.
+    The first ``ocx add`` is the premise check: it must materialize exactly the
+    lock file this test computes. Without it, a derivation that drifted from
+    ``lock_scoped`` would leave the holder squatting on a path nobody writes
+    and the contention assertion below would be testing nothing.
     """
+    short = uuid4().hex[:8]
+    repo_first = f"t_{short}_lockfile_first"
+    repo_second = f"t_{short}_lockfile_second"
+    make_package(ocx, repo_first, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_second, "1.0.0", tmp_path, cascade=False)
+
     project = tmp_path / "proj"
     project.mkdir()
     _write_ocx_toml(project, "[tools]\n")
 
-    # Hold the exclusive flock on ocx.toml itself from a sleeping
-    # subshell. `flock -x` (blocking) wraps a multi-second sleep so the
-    # holder lives long enough for the contending `ocx add` to observe
-    # contention and surface Locked → TempFail.
-    toml_path = project / "ocx.toml"
-    holder = subprocess.Popen(
-        ["flock", "-x", str(toml_path), "-c", "sleep 10"],
+    first = _run_in(ocx, project, "add", f"{ocx.registry}/{repo_first}:1.0.0")
+    assert first.returncode == EXIT_SUCCESS, (
+        f"the premise add must succeed; rc={first.returncode}, stderr={first.stderr!r}"
     )
 
-    try:
-        # Give flock(1) a moment to acquire.
-        time.sleep(0.5)
+    lock_file = _mutation_lock_path(ocx, project)
+    assert lock_file.is_file(), (
+        "a successful mutation must have taken its lock under $OCX_HOME/locks at "
+        f"{lock_file}; the derivation no longer matches lock_scoped"
+    )
+    # `ocx.lock` is the project's resolved snapshot, not a lock file. Anything
+    # else ending in `.lock` inside the project is the sidecar this design
+    # exists to not write.
+    sidecars = sorted(
+        path.name for path in project.rglob("*.lock") if path.name != "ocx.lock"
+    )
+    assert not sidecars, (
+        f"the mutation lock must never land beside the data; found {sidecars} in the project"
+    )
 
-        result = _run_in(
-            ocx,
-            project,
-            "add",
-            f"{ocx.registry}/foo:1.0",
-        )
+    holder = subprocess.Popen(["flock", "-x", str(lock_file), "-c", "sleep 10"])
+    try:
+        time.sleep(0.5)
+        result = _run_in(ocx, project, "add", f"{ocx.registry}/{repo_second}:1.0.0")
         assert result.returncode == EXIT_TEMP_FAIL, (
-            f"ocx add must exit {EXIT_TEMP_FAIL} when flock is held by another process; "
+            f"ocx add must exit {EXIT_TEMP_FAIL} while another process holds the mutation "
+            f"lock; got {result.returncode}; stderr={result.stderr!r}"
+        )
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX flock(2) advisory contract; Windows uses LockFileEx with different semantics",
+)
+def test_flock_on_ocx_toml_itself_does_not_block_a_mutation(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A lock held on ``ocx.toml`` itself must not wedge ``ocx add``.
+
+    The inverse of the test above, and the one that states what moved: the
+    manifest is published by rename, so it is not the lock target any more.
+    An editor, a ``flock(1)`` wrapper or a descriptor a crashed process left
+    behind cannot stop a mutation.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_toml_squat"
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    toml_path = _write_ocx_toml(project, "[tools]\n")
+
+    holder = subprocess.Popen(["flock", "-x", str(toml_path), "-c", "sleep 10"])
+    try:
+        time.sleep(0.5)
+        result = _run_in(ocx, project, "add", f"{ocx.registry}/{repo}:1.0.0")
+        assert result.returncode == EXIT_SUCCESS, (
+            "a flock on ocx.toml must not block the mutation lock; "
             f"got {result.returncode}; stderr={result.stderr!r}"
         )
     finally:
         holder.terminate()
         holder.wait(timeout=5)
+
+    assert repo in toml_path.read_text(), "the binding must have landed"
+
+
+# ---------------------------------------------------------------------------
+# 4. An unlocked reader mid-read never observes a torn manifest
+# ---------------------------------------------------------------------------
+
+
+def test_unlocked_reader_sees_one_document_across_a_split_read(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A reader holding ``ocx.toml`` open across an ``ocx add`` finishes its
+    read against the document it opened — never a splice of two.
+
+    One buffered read is several ``read(2)`` calls. Under an in-place rewrite
+    the tail of the longer replacement lands on the head of the document the
+    reader had already buffered, and the result is a manifest nobody ever
+    wrote — which may very well still parse. So the assertion is identity with
+    one of the two documents, not parseability. Publishing by rename keeps the
+    reader's descriptor on the inode it opened, so its tail read is empty.
+    """
+    short = uuid4().hex[:8]
+    repo_seed = f"t_{short}_split_seed"
+    repo_grouped = f"t_{short}_split_grouped"
+    repo_added = f"t_{short}_split_added"
+    for repo in (repo_seed, repo_grouped, repo_added):
+        make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    # A section *after* the insertion point, so the mutation shifts bytes the
+    # reader has already buffered. Seeded with a bare `[tools]` the added key
+    # lands at the very end, the new document shares its whole prefix with the
+    # old one, and an in-place rewrite splices back together into exactly the
+    # new document — a test that could not tell the two designs apart.
+    toml_path = _write_ocx_toml(
+        project,
+        f"[tools]\n{repo_seed} = \"{ocx.registry}/{repo_seed}:1.0.0\"\n"
+        f"\n[group.ci.tools]\n{repo_grouped} = \"{ocx.registry}/{repo_grouped}:1.0.0\"\n",
+    )
+    before = toml_path.read_bytes()
+
+    # A reader mid-read: the whole current document is in hand, the descriptor
+    # is still open and one read short of EOF.
+    with toml_path.open("rb") as reader:
+        observed = reader.read(len(before))
+        assert observed == before, "the fixture reader must start with the whole current document"
+
+        result = _run_in(ocx, project, "add", f"{ocx.registry}/{repo_added}:1.0.0")
+        assert result.returncode == EXIT_SUCCESS, (
+            f"the add must succeed; rc={result.returncode}, stderr={result.stderr!r}"
+        )
+        after = toml_path.read_bytes()
+        assert len(after) > len(before), (
+            "the fixture must publish a strictly longer document for a splice to be observable"
+        )
+        assert after[: len(before)] != before, (
+            "the fixture must differ within the reader's first read, or a splice is invisible"
+        )
+
+        observed += reader.read()
+
+    assert observed in (before, after), (
+        "the unlocked reader observed neither document whole — it spliced two:\n"
+        f"{observed.decode(errors='replace')}"
+    )
+    # And whichever it saw is a manifest, not a fragment.
+    tomllib.loads(observed.decode())

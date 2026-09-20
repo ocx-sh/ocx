@@ -110,7 +110,7 @@
   "crates/ocx_project/src/error.rs::rustdoc::private_intra_doc_links": 2,
   "crates/ocx_project/src/lib.rs::rustdoc::private_intra_doc_links": 2,
   "crates/ocx_project/src/lock.rs::rustdoc::private_intra_doc_links": 4,
-  "crates/ocx_project/src/project_lock.rs::rustdoc::private_intra_doc_links": 4,
+  "crates/ocx_project/src/project_lock.rs::rustdoc::private_intra_doc_links": 2,
   "crates/ocx_project/src/registry.rs::rustdoc::broken_intra_doc_links": 1,
   "crates/ocx_project/src/registry.rs::rustdoc::private_intra_doc_links": 5,
   "crates/ocx_project/src/resolve.rs::rustdoc::broken_intra_doc_links": 1,

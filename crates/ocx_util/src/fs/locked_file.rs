@@ -158,6 +158,10 @@ impl LockedFile {
     /// Read the full file contents under the lock, through the lock-owning
     /// handle. Seeks to position 0 first. Empty file returns an empty `Vec`.
     ///
+    /// Crate-private: the codec wrappers below are the only callers. The
+    /// project tier held the one cross-crate use until ocx#494 moved `ocx.toml`
+    /// to rename-publish, which needs no lock-owning handle to read through.
+    ///
     /// Uses `tokio::task::block_in_place` so the blocking syscalls do not
     /// starve other async tasks on the current thread without requiring
     /// ownership transfer to a separate blocking thread (which would prevent
@@ -169,7 +173,7 @@ impl LockedFile {
     /// Calling this method from a `current_thread` runtime will panic with
     /// "can call blocking only when running on the multi-threaded runtime".
     /// Tests that exercise `LockedFile` must use `#[tokio::test(flavor = "multi_thread")]`.
-    pub async fn read_bytes(&mut self) -> Result<Vec<u8>, FileError> {
+    pub(crate) async fn read_bytes(&mut self) -> Result<Vec<u8>, FileError> {
         let path = &self.path;
         let file = self.lock.file_mut();
         tokio::task::block_in_place(|| {
@@ -184,6 +188,12 @@ impl LockedFile {
     /// through the lock-owning handle. Order: `set_len(0)` → `seek(0)` →
     /// `write_all` → `sync_data`. Caller must hold an exclusive lock.
     ///
+    /// Crate-private, and **not** a publish primitive: an in-place rewrite is
+    /// observable mid-flight by any unlocked reader. Correct only where the
+    /// file *is* its own lock target and has no such reader — the codec
+    /// wrappers below. Anything with outside readers publishes by rename
+    /// ([`super::write_bytes_atomic`], or a mode-preserving equivalent).
+    ///
     /// Uses `tokio::task::block_in_place` so the blocking syscalls do not
     /// starve other async tasks without requiring ownership transfer.
     ///
@@ -193,7 +203,7 @@ impl LockedFile {
     /// Calling this method from a `current_thread` runtime will panic with
     /// "can call blocking only when running on the multi-threaded runtime".
     /// Tests that exercise `LockedFile` must use `#[tokio::test(flavor = "multi_thread")]`.
-    pub async fn replace_bytes(&mut self, bytes: &[u8]) -> Result<(), FileError> {
+    pub(crate) async fn replace_bytes(&mut self, bytes: &[u8]) -> Result<(), FileError> {
         let path = &self.path;
         let file = self.lock.file_mut();
         tokio::task::block_in_place(|| {
@@ -400,7 +410,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedJsonFile<T> {
     }
 
     /// Serialize `value` as pretty-printed JSON and write it to the file via
-    /// [`LockedFile::replace_bytes`].
+    /// `LockedFile::replace_bytes`.
     pub async fn write(&mut self, value: &T) -> crate::error::Result<()> {
         let bytes = serde_json::to_vec_pretty(value).map_err(SerializationError::from)?;
         Ok(self.inner.replace_bytes(&bytes).await?)
@@ -498,7 +508,7 @@ impl<T: serde::Serialize + serde::de::DeserializeOwned> LockedTomlFile<T> {
     }
 
     /// Serialize `value` as TOML and write it to the file via
-    /// [`LockedFile::replace_bytes`].
+    /// `LockedFile::replace_bytes`.
     pub async fn write(&mut self, value: &T) -> Result<(), FileError> {
         let text = toml::to_string(value).map_err(|e| FileError::new(self.inner.path(), std::io::Error::other(e)))?;
         self.inner.replace_bytes(text.as_bytes()).await

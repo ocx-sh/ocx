@@ -1,25 +1,49 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Mutating writes to the project config file. Atomic full-file rewrite
-//! under an exclusive advisory flock on the config file itself.
+//! Mutating writes to the project config file. Every write publishes the
+//! whole file by atomic rename, under the scoped mutation lock
+//! ([`crate::acquire_project_lock_for_file`]).
 //!
 //! Public mutation helpers ([`add_binding`], [`remove_binding`],
 //! [`init_project`], [`set_activate`]) take the **resolved config file path** — typically
 //! `<project_root>/ocx.toml` but may be `<project_root>/<custom>.toml`
-//! when the caller passed `--project=<custom>.toml`. The flock target is
-//! always the config file itself, never a hard-coded `ocx.toml`.
+//! when the caller passed `--project=<custom>.toml`. The lock is keyed by that
+//! path, never hard-coded to `ocx.toml`, and lives under `$OCX_HOME/locks`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::Error;
 use crate::error::{ProjectError, ProjectErrorKind};
+use crate::mutation::ManifestSnapshot;
 use crate::project_lock::acquire_project_lock_for_file;
 use ocx_oci::Identifier;
 
-/// Atomic write of `content` to `path` via a tempfile + rename in the same
-/// directory — mirrors `ProjectLock::save`'s tempfile-and-rename pattern.
+/// Publish `content` as the entire contents of `path` by atomic rename: a
+/// tempfile in the same directory, the existing file's Unix mode carried onto
+/// it, [`ocx_util::fs::persist_temp_file`], then a parent-directory fsync so
+/// the rename entry is durable.
+///
+/// This is the *only* writer of `ocx.toml`. Rename-publish is what lets the
+/// unlocked readers — `ocx status`, the per-prompt reconciler, direnv, git, an
+/// editor — never observe a short or spliced document: a reader that has the
+/// file open keeps reading the inode it opened, where an in-place
+/// truncate-and-write would splice the tail of the new document onto the head
+/// of the old one it had already buffered (ocx#494, and ocx#441 for the same
+/// bug in `config.json`).
+///
+/// **Not `ocx_util::fs::write_bytes_atomic`**: that one publishes `0o600`,
+/// which is right for a credential file and wrong for a VCS-committed project
+/// manifest. The existing file's mode is carried over instead, so a `0644`
+/// `ocx.toml` stays `0644` — applied with `fchmod` on the open temp file
+/// rather than at create time, which `umask` would clip. An absent file gets
+/// the `tempfile` default (`0600`): unchanged for `ocx init`, which always
+/// staged through a temp file; for `set_activate` on a fresh `$OCX_HOME` the
+/// create case moves from umask-derived to `0600`, the same mode the global
+/// manifest's sibling state files carry.
+///
+/// Blocking: call [`atomic_write_async`] from an async context.
 ///
 /// # Panics
 ///
@@ -27,7 +51,7 @@ use ocx_oci::Identifier;
 /// already-resolved config-file path (typically `<project_root>/ocx.toml`,
 /// or a custom `<project_root>/<custom>.toml` when `--project=<custom>.toml`
 /// is in effect); both forms have a parent component.
-fn atomic_write(path: &Path, content: &str) -> Result<(), Error> {
+pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), Error> {
     // SAFETY: all callers resolve a config-file path with a parent component
     // (project root is always absolute when produced by the CLI shim, and
     // the in-tree tests construct their fixture under a tempdir).
@@ -43,11 +67,12 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), Error> {
         .map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
     tmp.write_all(content.as_bytes())
         .map_err(|e| ProjectError::new(tmp.path().to_path_buf(), ProjectErrorKind::Io(e)))?;
+    carry_existing_mode(path, &tmp)?;
     tmp.as_file()
         .sync_data()
         .map_err(|e| ProjectError::new(tmp.path().to_path_buf(), ProjectErrorKind::Io(e)))?;
-    tmp.persist(path)
-        .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::Io(e.error)))?;
+    ocx_util::fs::persist_temp_file(tmp, path)
+        .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::Io(e)))?;
 
     // Fsync the parent directory so the rename entry is durable.
     // parent is always non-empty (see SAFETY comment above).
@@ -56,6 +81,55 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+/// Carry the mode of the file currently at `path` onto `tmp`, so publishing
+/// the replacement does not silently change the manifest's permissions.
+///
+/// `symlink_metadata` deliberately does not follow: a symlink at `path` is
+/// refused by the lock acquire, and its own `0o777` mode is not what a
+/// published `ocx.toml` should wear even if one slipped through. An absent
+/// file leaves the `tempfile` default in place.
+///
+/// `set_permissions` on the *open* temp file is `fchmod(2)`, which is not
+/// clipped by `umask` — passing the mode to `tempfile::Builder` would be, and
+/// a `0664` group-writable manifest would come back `0644`.
+#[cfg(unix)]
+fn carry_existing_mode(path: &Path, tmp: &tempfile::NamedTempFile) -> Result<(), Error> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    if !metadata.is_file() {
+        return Ok(());
+    }
+    let mode = metadata.permissions().mode() & 0o7777;
+    tmp.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(mode))
+        .map_err(|e| ProjectError::new(tmp.path().to_path_buf(), ProjectErrorKind::Io(e)))?;
+    Ok(())
+}
+
+/// No-op off Unix: Windows ACLs are inherited from the parent directory by the
+/// temp file already, and there is no mode to carry.
+#[cfg(not(unix))]
+fn carry_existing_mode(_path: &Path, _tmp: &tempfile::NamedTempFile) -> Result<(), Error> {
+    Ok(())
+}
+
+/// [`atomic_write`] from an async caller: the blocking publish goes to the
+/// pool rather than stalling the runtime.
+pub(crate) async fn atomic_write_async(path: &Path, content: String) -> Result<(), Error> {
+    let target = path.to_path_buf();
+    let error_path = path.to_path_buf();
+    match tokio::task::spawn_blocking(move || atomic_write(&target, &content)).await {
+        Ok(result) => result,
+        Err(join) => Err(Error::Project(ProjectError::new(
+            error_path,
+            ProjectErrorKind::Io(std::io::Error::other(format!("manifest publish task panicked: {join}"))),
+        ))),
+    }
 }
 
 // ── read-modify-write helpers ─────────────────────────────────────────────
@@ -181,46 +255,68 @@ fn invalid_group_name(name: &str, path: &Path) -> Error {
 
 // ── public API ────────────────────────────────────────────────────────────
 
-/// Read and parse the project config file THROUGH the lock-owning handle.
+/// Read the project config file at `config_path` into a
+/// [`ManifestSnapshot`]: the parsed configuration and the verbatim text it
+/// came from.
 ///
-/// Reading via a *second* handle (e.g. `std::fs::read_to_string`) while the
-/// exclusive advisory lock is held works on POSIX (flock is advisory) but hits
-/// `ERROR_LOCK_VIOLATION` on Windows, where `LockFileEx` blocks reads of the
-/// locked range by other handles. Reading through `guard` (the lock owner)
-/// avoids the second handle. Enforces the same 64 KiB size cap as the former
-/// `load_config`.
+/// An ordinary bounded read — no lock handle. The mutation lock is a scoped
+/// entry under `$OCX_HOME/locks` and the file is published by rename, so
+/// there is no lock-owning descriptor to route through and (on Windows) no
+/// `ERROR_LOCK_VIOLATION` for a second handle to hit. Callers that intend to
+/// write hold [`crate::acquire_project_lock_for_file`] across this read and
+/// the publish that follows it.
 ///
-/// Returns the verbatim text alongside the parsed config: the write-back path
-/// edits that document rather than re-serializing the parsed form, so the
-/// user's comments and declaration order survive the mutation.
-async fn read_config_via_guard(
-    guard: &mut ocx_util::fs::LockedFile,
-    config_path: &Path,
-) -> Result<(String, crate::config::ProjectConfig), Error> {
-    let bytes = guard.read_bytes().await.map_err(|e| {
-        Error::Project(ProjectError::new(
-            config_path.to_path_buf(),
-            ProjectErrorKind::Io(std::io::Error::other(e)),
-        ))
-    })?;
+/// The text travels with the parsed form because the write-back path edits
+/// that document rather than re-serializing the parsed config, so the user's
+/// comments and declaration order survive the mutation.
+///
+/// **An absent file reads as an empty document.** That is the create case for
+/// [`set_activate`] on a machine with no `$OCX_HOME/ocx.toml`, and for the
+/// bootstrapping mutators; every other read error is real and surfaces.
+///
+/// # Errors
+///
+/// - [`ProjectErrorKind::FileTooLarge`] — over the 64 KiB `FILE_SIZE_LIMIT_BYTES`.
+/// - [`ProjectErrorKind::Io`] — unreadable, not a regular file, or not UTF-8.
+/// - [`ProjectErrorKind::TomlParse`] — the text is not a project config.
+pub async fn read_manifest_snapshot(config_path: &Path) -> Result<ManifestSnapshot, Error> {
+    use ocx_util::fs::BoundedReadError;
+
     let limit = crate::internal::FILE_SIZE_LIMIT_BYTES;
-    if bytes.len() as u64 > limit {
-        return Err(Error::Project(ProjectError::new(
-            config_path.to_path_buf(),
-            ProjectErrorKind::FileTooLarge {
-                size: bytes.len() as u64,
-                limit,
-            },
-        )));
-    }
+    let bytes = match ocx_util::fs::read_bounded_async(config_path, limit).await {
+        Ok(bytes) => bytes,
+        // The create case: nothing on disk is an empty document, not a failure.
+        Err(BoundedReadError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(BoundedReadError::TooLarge { cap, .. }) => {
+            // `read_bounded` refuses without reporting how far over the file
+            // is; the refusal itself establishes the floor, and the exact
+            // size only ever reaches a message.
+            let size = tokio::fs::metadata(config_path)
+                .await
+                .map(|metadata| metadata.len())
+                .unwrap_or(cap + 1);
+            return Err(Error::Project(ProjectError::new(
+                config_path.to_path_buf(),
+                ProjectErrorKind::FileTooLarge { size, limit: cap },
+            )));
+        }
+        Err(error) => {
+            return Err(Error::Project(ProjectError::new(
+                config_path.to_path_buf(),
+                ProjectErrorKind::Io(error.into_io_error()),
+            )));
+        }
+    };
+
+    let config = crate::config::ProjectConfig::from_toml_bytes_with_path(&bytes, config_path.to_path_buf())?;
+    // The parse above already established the bytes are UTF-8.
     let text = String::from_utf8(bytes).map_err(|e| {
         Error::Project(ProjectError::new(
             config_path.to_path_buf(),
             ProjectErrorKind::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
         ))
     })?;
-    let config = crate::config::ProjectConfig::from_toml_str(&text)?;
-    Ok((text, config))
+    Ok(ManifestSnapshot { config, text })
 }
 
 /// Apply an `add` binding mutation to a [`crate::config::ProjectConfig`]
@@ -228,7 +324,7 @@ async fn read_config_via_guard(
 ///
 /// Pure: validates inputs, mutates `config` in place, returns the derived
 /// binding key on success. Performs NO filesystem I/O — callers handle
-/// flock acquisition + atomic write separately (see
+/// lock acquisition + the rename publish separately (see
 /// [`crate::MutationGuard`] for the transactional commit path
 /// or [`add_binding`] for the legacy disk-touching API).
 ///
@@ -320,8 +416,9 @@ pub fn add_binding_in_memory(
 /// key (`None` derives it from the identifier — see
 /// [`add_binding_in_memory`]).
 ///
-/// Acquires an exclusive advisory flock on the config file itself for
-/// the duration of the read-modify-write cycle.
+/// Holds the scoped mutation lock under `locks_root` (`$OCX_HOME/locks`)
+/// for the duration of the read-modify-write cycle, then publishes the whole
+/// file by rename via `atomic_write`.
 ///
 /// # Errors
 ///
@@ -340,10 +437,11 @@ pub fn add_binding_in_memory(
 /// - [`ProjectErrorKind::BindingAlreadyExists`] — the binding key already
 ///   exists in the target group. The same name may exist in other groups
 ///   without error.
-/// - [`ProjectErrorKind::Locked`] — another process holds the exclusive flock
-///   on the config file; the caller should retry with backoff.
+/// - [`ProjectErrorKind::Locked`] — another process holds the mutation lock
+///   for this config file; the caller should retry with backoff.
 pub async fn add_binding(
     config_path: &Path,
+    locks_root: &Path,
     identifier: &Identifier,
     name: Option<&str>,
     group: Option<&str>,
@@ -354,27 +452,21 @@ pub async fn add_binding(
         validate_group_name(group_name, config_path)?;
     }
 
-    let mut guard = acquire_project_lock_for_file(config_path).await?;
+    let _guard = acquire_project_lock_for_file(config_path, locks_root).await?;
 
-    let (original, mut config) = read_config_via_guard(&mut guard, config_path).await?;
+    let ManifestSnapshot {
+        mut config,
+        text: original,
+    } = read_manifest_snapshot(config_path).await?;
 
-    // Compose: in-memory mutation + write-back through the lock-owning handle.
+    // Compose: in-memory mutation + a rename-published write-back.
     add_binding_in_memory(&mut config, config_path, identifier, name, group)?;
 
     let serialized = super::document::render_preserving(&original, &config, config_path)?;
-    // Rewrite ocx.toml IN PLACE through the lock-owning handle. A tempfile +
-    // rename would rotate the file's inode and strand the lock fd on the
-    // orphan, breaking mutual exclusion on Windows (where LockFileEx is
-    // per-handle and rename-over-open-file is refused). See project_lock.rs
-    // module docs ("WHY IN-PLACE").
-    guard.replace_bytes(serialized.as_bytes()).await.map_err(|e| {
-        Error::Project(ProjectError::new(
-            config_path.to_path_buf(),
-            ProjectErrorKind::Io(std::io::Error::other(e)),
-        ))
-    })?;
+    atomic_write_async(config_path, serialized).await?;
 
     Ok(())
+    // The mutation lock is released here, after the rename has landed.
 }
 
 /// Remove a binding from the project config file at `config_path`.
@@ -389,8 +481,9 @@ pub async fn add_binding(
 /// make a binding added under an explicit `NAME=IDENTIFIER` alias
 /// unremovable by its own name.
 ///
-/// Acquires an exclusive advisory flock on the config file itself for
-/// the duration of the read-modify-write cycle.
+/// Holds the scoped mutation lock under `locks_root` (`$OCX_HOME/locks`)
+/// for the duration of the read-modify-write cycle, then publishes the whole
+/// file by rename via `atomic_write`.
 ///
 /// # Errors
 ///
@@ -407,23 +500,25 @@ pub async fn add_binding(
 /// - [`ProjectErrorKind::BindingAmbiguous`] — `group` is `None` and the
 ///   binding name appears in more than one group; pass `--group` to
 ///   disambiguate.
-/// - [`ProjectErrorKind::Locked`] — another process holds the exclusive flock
-///   on the config file; the caller should retry with backoff.
-pub async fn remove_binding(config_path: &Path, name: &str, group: Option<&str>) -> Result<(), Error> {
-    let mut guard = acquire_project_lock_for_file(config_path).await?;
+/// - [`ProjectErrorKind::Locked`] — another process holds the mutation lock
+///   for this config file; the caller should retry with backoff.
+pub async fn remove_binding(
+    config_path: &Path,
+    locks_root: &Path,
+    name: &str,
+    group: Option<&str>,
+) -> Result<(), Error> {
+    let _guard = acquire_project_lock_for_file(config_path, locks_root).await?;
 
-    let (original, mut config) = read_config_via_guard(&mut guard, config_path).await?;
+    let ManifestSnapshot {
+        mut config,
+        text: original,
+    } = read_manifest_snapshot(config_path).await?;
 
     remove_binding_in_memory(&mut config, config_path, name, group)?;
 
     let serialized = super::document::render_preserving(&original, &config, config_path)?;
-    // Rewrite in place through the lock-owning handle (see add_binding).
-    guard.replace_bytes(serialized.as_bytes()).await.map_err(|e| {
-        Error::Project(ProjectError::new(
-            config_path.to_path_buf(),
-            ProjectErrorKind::Io(std::io::Error::other(e)),
-        ))
-    })?;
+    atomic_write_async(config_path, serialized).await?;
     Ok(())
 }
 
@@ -619,12 +714,12 @@ pub fn init_project_at_default(project_root: &Path) -> Result<PathBuf, Error> {
 /// that survives `ocx add` must survive this too, and two editors of one file
 /// format is how that stops being true.
 ///
-/// **The create-when-absent case needs no branch.** `LockedFile::try_exclusive`
-/// creates the file it locks, so an absent `$OCX_HOME/ocx.toml` is read back as
-/// empty text, and the render inserts one scalar into an empty document — no
-/// `[tools]` table, no template, only the key. The same acquire also runs the
-/// shipped symlink refusal, so a symlink planted at the path is refused rather
-/// than followed.
+/// **The create-when-absent case needs no branch.** [`read_manifest_snapshot`]
+/// reads an absent file as empty text, and the render inserts one scalar into
+/// an empty document — no `[tools]` table, no template, only the key; the
+/// publish then creates the file by rename. The acquire also runs the shipped
+/// symlink refusal, so a symlink planted at the path is refused rather than
+/// followed.
 ///
 /// **This does not stale `ocx.lock`.** [`super::declaration_hash`] covers
 /// `tools` and `group.*.tools` only, so writing `activate` cannot force a
@@ -637,10 +732,17 @@ pub fn init_project_at_default(project_root: &Path) -> Result<PathBuf, Error> {
 /// [`ProjectErrorKind::Io`], [`ProjectErrorKind::FileTooLarge`],
 /// [`ProjectErrorKind::TomlParse`], [`ProjectErrorKind::ManifestEditParse`],
 /// [`ProjectErrorKind::ManifestEditDiverged`], [`ProjectErrorKind::Locked`].
-pub async fn set_activate(config_path: &Path, mode: crate::activate::ActivateMode) -> Result<(), Error> {
-    let mut guard = acquire_project_lock_for_file(config_path).await?;
+pub async fn set_activate(
+    config_path: &Path,
+    locks_root: &Path,
+    mode: crate::activate::ActivateMode,
+) -> Result<(), Error> {
+    let _guard = acquire_project_lock_for_file(config_path, locks_root).await?;
 
-    let (original, mut config) = read_config_via_guard(&mut guard, config_path).await?;
+    let ManifestSnapshot {
+        mut config,
+        text: original,
+    } = read_manifest_snapshot(config_path).await?;
     if config.activate == Some(mode) {
         // Already what was asked for: leave the bytes alone rather than
         // re-render them, so a re-run cannot disturb decor or mtime.
@@ -649,13 +751,7 @@ pub async fn set_activate(config_path: &Path, mode: crate::activate::ActivateMod
     config.activate = Some(mode);
 
     let serialized = super::document::render_preserving(&original, &config, config_path)?;
-    // Rewrite in place through the lock-owning handle (see `add_binding`).
-    guard.replace_bytes(serialized.as_bytes()).await.map_err(|e| {
-        Error::Project(ProjectError::new(
-            config_path.to_path_buf(),
-            ProjectErrorKind::Io(std::io::Error::other(e)),
-        ))
-    })?;
+    atomic_write_async(config_path, serialized).await?;
 
     Ok(())
 }
@@ -669,7 +765,6 @@ mod tests {
     use super::*;
     use crate::{ProjectConfig, ProjectErrorKind};
     use ocx_oci::Identifier;
-    use ocx_util::fs::LockedFile;
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -679,6 +774,14 @@ mod tests {
 
     fn write_minimal_toml(dir: &std::path::Path, body: &str) {
         fs::write(dir.join("ocx.toml"), body).unwrap();
+    }
+
+    /// The fixture's stand-in for `$OCX_HOME/locks` — the machine-global lock
+    /// root every mutator keys its scoped lock into. Deliberately not the
+    /// project directory: a lock file there is the sidecar litter the scoped
+    /// lock exists to avoid.
+    fn locks(dir: &std::path::Path) -> PathBuf {
+        dir.join(".ocx-home").join("locks")
     }
 
     fn reload_config(dir: &std::path::Path) -> ProjectConfig {
@@ -701,7 +804,9 @@ mod tests {
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
 
-        add_binding(&toml(dir.path()), &id, None, None).await.unwrap();
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, None)
+            .await
+            .unwrap();
 
         let cfg = reload_config(dir.path());
         assert!(
@@ -717,7 +822,9 @@ mod tests {
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
 
-        add_binding(&toml(dir.path()), &id, None, Some("ci")).await.unwrap();
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, Some("ci"))
+            .await
+            .unwrap();
 
         let cfg = reload_config(dir.path());
         assert!(
@@ -737,8 +844,10 @@ mod tests {
         let id = test_id("example.com", "cmake", "3.28");
 
         // Dup in default group → error when re-added to default.
-        add_binding(&toml(dir.path()), &id, None, None).await.unwrap();
-        let err = add_binding(&toml(dir.path()), &id, None, None)
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, None)
+            .await
+            .unwrap();
+        let err = add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, None)
             .await
             .expect_err("second add to default must fail");
         assert!(
@@ -749,8 +858,10 @@ mod tests {
         // Dup in [group.ci] → error only when re-added to [group.ci],
         // NOT when added to [group.staging].
         let id2 = test_id("example.com", "ninja", "1.11");
-        add_binding(&toml(dir.path()), &id2, None, Some("ci")).await.unwrap();
-        let err2 = add_binding(&toml(dir.path()), &id2, None, Some("ci"))
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id2, None, Some("ci"))
+            .await
+            .unwrap();
+        let err2 = add_binding(&toml(dir.path()), &locks(dir.path()), &id2, None, Some("ci"))
             .await
             .expect_err("second add to ci must fail");
         assert!(
@@ -758,7 +869,7 @@ mod tests {
             "expected BindingAlreadyExists with group=ci; got: {err2}"
         );
         // Same name in [group.staging] must succeed.
-        add_binding(&toml(dir.path()), &id2, None, Some("staging"))
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id2, None, Some("staging"))
             .await
             .expect("same name in staging must succeed");
     }
@@ -771,10 +882,10 @@ mod tests {
         let id = test_id("example.com", "cmake", "3.28");
         let id2 = test_id("example.com", "cmake", "3.29");
 
-        add_binding(&toml(dir.path()), &id, None, None)
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, None)
             .await
             .expect("add cmake to default must succeed");
-        add_binding(&toml(dir.path()), &id2, None, Some("ci"))
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id2, None, Some("ci"))
             .await
             .expect("add cmake to [group.ci] must succeed");
 
@@ -799,7 +910,7 @@ mod tests {
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "gitlab/cli", "1.0");
 
-        add_binding(&toml(dir.path()), &id, Some("glab"), None)
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, Some("glab"), None)
             .await
             .expect("explicit name must be accepted");
 
@@ -825,10 +936,10 @@ mod tests {
         let gitlab = test_id("example.com", "gitlab/cli", "1.0");
         let github = test_id("example.com", "github/cli", "2.0");
 
-        add_binding(&toml(dir.path()), &gitlab, None, None)
+        add_binding(&toml(dir.path()), &locks(dir.path()), &gitlab, None, None)
             .await
             .expect("first add derives the basename key");
-        add_binding(&toml(dir.path()), &github, Some("cli2"), None)
+        add_binding(&toml(dir.path()), &locks(dir.path()), &github, Some("cli2"), None)
             .await
             .expect("colliding basename must succeed under an explicit name");
 
@@ -845,10 +956,10 @@ mod tests {
         let first = test_id("example.com", "gitlab/cli", "1.0");
         let second = test_id("example.com", "github/cli", "2.0");
 
-        add_binding(&toml(dir.path()), &first, Some("glab"), None)
+        add_binding(&toml(dir.path()), &locks(dir.path()), &first, Some("glab"), None)
             .await
             .unwrap();
-        let err = add_binding(&toml(dir.path()), &second, Some("glab"), None)
+        let err = add_binding(&toml(dir.path()), &locks(dir.path()), &second, Some("glab"), None)
             .await
             .expect_err("second add under the same explicit name must fail");
 
@@ -881,7 +992,7 @@ mod tests {
             "_leading",
             too_long.as_str(),
         ] {
-            let err = add_binding(&toml(dir.path()), &id, Some(candidate), None)
+            let err = add_binding(&toml(dir.path()), &locks(dir.path()), &id, Some(candidate), None)
                 .await
                 .expect_err("invalid explicit name must be rejected");
             assert!(
@@ -909,7 +1020,7 @@ mod tests {
         let over_long = "a".repeat(ocx_package::metadata::slug::SLUG_MAX_LEN + 1);
         let id = test_id("example.com", &format!("acme/{over_long}"), "1.0");
 
-        let err = add_binding(&toml(dir.path()), &id, None, None)
+        let err = add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, None)
             .await
             .expect_err("a derived key past the length cap must be rejected");
         assert!(
@@ -935,7 +1046,7 @@ mod tests {
         for candidate in ["bin", "Bin", "BIN"] {
             let dir = tempdir().unwrap();
             write_minimal_toml(dir.path(), "[tools]\n");
-            add_binding(&toml(dir.path()), &id, Some(candidate), None)
+            add_binding(&toml(dir.path()), &locks(dir.path()), &id, Some(candidate), None)
                 .await
                 .unwrap_or_else(|e| panic!("C-073 — tool {candidate:?} must be accepted; got {e}"));
             assert!(
@@ -945,7 +1056,7 @@ mod tests {
 
             let dir = tempdir().unwrap();
             write_minimal_toml(dir.path(), "[tools]\n");
-            add_binding(&toml(dir.path()), &id, None, Some(candidate))
+            add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, Some(candidate))
                 .await
                 .unwrap_or_else(|e| panic!("C-073 — group {candidate:?} must be accepted; got {e}"));
             assert!(
@@ -958,7 +1069,7 @@ mod tests {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
         let derived = test_id("example.com", "acme/bin", "1.0");
-        add_binding(&toml(dir.path()), &derived, None, None)
+        add_binding(&toml(dir.path()), &locks(dir.path()), &derived, None, None)
             .await
             .expect("C-073 — a derived `bin` key must be accepted");
         assert!(
@@ -978,7 +1089,7 @@ mod tests {
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
 
-        let err = add_binding(&toml(dir.path()), &id, None, Some("café"))
+        let err = add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, Some("café"))
             .await
             .expect_err("a non-ASCII group name must be rejected");
         // RUL-73 — refused by the reader's charset, reported as the *usage*
@@ -990,7 +1101,7 @@ mod tests {
             "expected InvalidGroupName for a Unicode group name; got: {err}"
         );
 
-        add_binding(&toml(dir.path()), &id, None, Some("my.tools"))
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, Some("my.tools"))
             .await
             .expect("a dotted group name is legal to the reader and must be legal to the writer");
         let cfg = reload_config(dir.path());
@@ -1012,7 +1123,7 @@ mod tests {
         let id = test_id("example.com", "cmake", "3.28");
 
         for candidate in ["Default", "DEFAULT", "All", "ALL"] {
-            let err = add_binding(&toml(dir.path()), &id, None, Some(candidate))
+            let err = add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, Some(candidate))
                 .await
                 .expect_err("a case variant of a reserved selector must be rejected");
             assert!(
@@ -1034,7 +1145,9 @@ mod tests {
         let target = toml(dir.path());
         assert!(!target.exists(), "the fixture starts with no ocx.toml");
 
-        set_activate(&target, ActivateMode::Bin).await.expect("write succeeds");
+        set_activate(&target, &locks(dir.path()), ActivateMode::Bin)
+            .await
+            .expect("write succeeds");
 
         assert_eq!(fs::read_to_string(&target).unwrap(), "activate = \"bin\"\n");
         assert_eq!(reload_config(dir.path()).activate, Some(ActivateMode::Bin));
@@ -1054,7 +1167,7 @@ mod tests {
                         cmake    =    \"example.com/cmake:3.28\"  # pinned\n";
         write_minimal_toml(dir.path(), original);
 
-        set_activate(&toml(dir.path()), ActivateMode::None)
+        set_activate(&toml(dir.path()), &locks(dir.path()), ActivateMode::None)
             .await
             .expect("write succeeds");
 
@@ -1078,9 +1191,13 @@ mod tests {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
 
-        set_activate(&toml(dir.path()), ActivateMode::Env).await.unwrap();
+        set_activate(&toml(dir.path()), &locks(dir.path()), ActivateMode::Env)
+            .await
+            .unwrap();
         let first = fs::read_to_string(toml(dir.path())).unwrap();
-        set_activate(&toml(dir.path()), ActivateMode::Env).await.unwrap();
+        set_activate(&toml(dir.path()), &locks(dir.path()), ActivateMode::Env)
+            .await
+            .unwrap();
         assert_eq!(fs::read_to_string(toml(dir.path())).unwrap(), first);
     }
 
@@ -1098,7 +1215,9 @@ mod tests {
         write_minimal_toml(dir.path(), "[tools]\ncmake = \"example.com/cmake:3.28\"\n");
         let before = declaration_hash(&reload_config(dir.path()));
 
-        set_activate(&toml(dir.path()), ActivateMode::Bin).await.unwrap();
+        set_activate(&toml(dir.path()), &locks(dir.path()), ActivateMode::Bin)
+            .await
+            .unwrap();
 
         assert_eq!(declaration_hash(&reload_config(dir.path())), before);
     }
@@ -1148,7 +1267,9 @@ mod tests {
             write_minimal_toml(dir.path(), "[tools]\n");
             let id = test_id("example.com", "acme/tool", "1.0");
 
-            let written = add_binding(&toml(dir.path()), &id, Some(candidate), None).await.is_ok();
+            let written = add_binding(&toml(dir.path()), &locks(dir.path()), &id, Some(candidate), None)
+                .await
+                .is_ok();
             let read =
                 ProjectConfig::from_toml_str(&format!("[tools]\n\"{candidate}\" = \"example.com/acme/tool:1.0\"\n"))
                     .is_ok();
@@ -1169,12 +1290,14 @@ mod tests {
         let gitlab = test_id("example.com", "gitlab/cli", "1.0");
         let github = test_id("example.com", "github/cli", "2.0");
 
-        add_binding(&toml(dir.path()), &gitlab, None, None).await.unwrap();
-        add_binding(&toml(dir.path()), &github, Some("glab"), None)
+        add_binding(&toml(dir.path()), &locks(dir.path()), &gitlab, None, None)
+            .await
+            .unwrap();
+        add_binding(&toml(dir.path()), &locks(dir.path()), &github, Some("glab"), None)
             .await
             .unwrap();
 
-        remove_binding(&toml(dir.path()), "glab", None)
+        remove_binding(&toml(dir.path()), &locks(dir.path()), "glab", None)
             .await
             .expect("remove by explicit name must succeed");
 
@@ -1195,9 +1318,13 @@ mod tests {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
-        add_binding(&toml(dir.path()), &id, None, None).await.unwrap();
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, None)
+            .await
+            .unwrap();
 
-        remove_binding(&toml(dir.path()), "cmake", None).await.unwrap();
+        remove_binding(&toml(dir.path()), &locks(dir.path()), "cmake", None)
+            .await
+            .unwrap();
 
         let cfg = reload_config(dir.path());
         assert!(
@@ -1212,9 +1339,13 @@ mod tests {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
-        add_binding(&toml(dir.path()), &id, None, Some("ci")).await.unwrap();
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, Some("ci"))
+            .await
+            .unwrap();
 
-        remove_binding(&toml(dir.path()), "cmake", None).await.unwrap();
+        remove_binding(&toml(dir.path()), &locks(dir.path()), "cmake", None)
+            .await
+            .unwrap();
 
         let cfg = reload_config(dir.path());
         let gone = cfg
@@ -1231,7 +1362,7 @@ mod tests {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
 
-        let err = remove_binding(&toml(dir.path()), "cmake", None)
+        let err = remove_binding(&toml(dir.path()), &locks(dir.path()), "cmake", None)
             .await
             .expect_err("remove_binding on absent entry must fail");
 
@@ -1251,11 +1382,15 @@ mod tests {
         let id2 = test_id("example.com", "cmake", "3.29");
 
         // Same binding name in default and [group.ci].
-        add_binding(&toml(dir.path()), &id, None, None).await.unwrap();
-        add_binding(&toml(dir.path()), &id2, None, Some("ci")).await.unwrap();
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, None)
+            .await
+            .unwrap();
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id2, None, Some("ci"))
+            .await
+            .unwrap();
 
         // Remove from ci only.
-        remove_binding(&toml(dir.path()), "cmake", Some("ci"))
+        remove_binding(&toml(dir.path()), &locks(dir.path()), "cmake", Some("ci"))
             .await
             .expect("targeted remove from ci must succeed");
 
@@ -1277,10 +1412,14 @@ mod tests {
         let id = test_id("example.com", "cmake", "3.28");
         let id2 = test_id("example.com", "cmake", "3.29");
 
-        add_binding(&toml(dir.path()), &id, None, None).await.unwrap();
-        add_binding(&toml(dir.path()), &id2, None, Some("ci")).await.unwrap();
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, None)
+            .await
+            .unwrap();
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id2, None, Some("ci"))
+            .await
+            .unwrap();
 
-        let err = remove_binding(&toml(dir.path()), "cmake", None)
+        let err = remove_binding(&toml(dir.path()), &locks(dir.path()), "cmake", None)
             .await
             .expect_err("remove_binding without --group on ambiguous entry must fail");
         assert!(
@@ -1295,9 +1434,11 @@ mod tests {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
-        add_binding(&toml(dir.path()), &id, None, Some("ci")).await.unwrap();
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, Some("ci"))
+            .await
+            .unwrap();
 
-        remove_binding(&toml(dir.path()), "cmake", None)
+        remove_binding(&toml(dir.path()), &locks(dir.path()), "cmake", None)
             .await
             .expect("unique binding without --group must succeed");
 
@@ -1392,43 +1533,237 @@ mod tests {
         assert!(path.is_file(), "default init must create <dir>/ocx.toml");
     }
 
+    // ── rename-publish (ocx#494) ─────────────────────────────────────────────
+
+    /// `ocx.toml` is published by rename, so every mutation rotates its inode.
+    ///
+    /// The inverse of what the in-place design asserted. Inode stability was
+    /// the property that made a lock *on* the data file sound; rotating it is
+    /// the property that makes an unlocked reader sound, and the two cannot
+    /// both hold. The lock moved to `$OCX_HOME/locks` so this one can.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publishing_ocx_toml_rotates_its_inode() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let config_path = toml(dir.path());
+        let before = fs::metadata(&config_path).expect("ocx.toml must exist").ino();
+
+        let id = test_id("example.com", "cmake", "3.28");
+        add_binding(&config_path, &locks(dir.path()), &id, None, None)
+            .await
+            .expect("the mutation must land");
+
+        let after = fs::metadata(&config_path)
+            .expect("ocx.toml must still exist after the publish")
+            .ino();
+        assert_ne!(
+            before, after,
+            "a rename-published ocx.toml must rotate its inode; an unchanged inode means the write went in place"
+        );
+        assert!(
+            reload_config(dir.path()).tools.contains_key("cmake"),
+            "the published document must carry the mutation"
+        );
+    }
+
+    /// The published replacement wears the mode the file already had.
+    ///
+    /// Without this, publishing through `ocx_util::fs::write_bytes_atomic`
+    /// (`0o600`, correct for a credential file) or through a bare
+    /// `NamedTempFile` (`0o600` by `tempfile` default) would silently turn
+    /// every VCS-committed project manifest owner-only on the first `ocx add`.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_published_manifest_keeps_its_unix_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for mode in [0o644u32, 0o600u32] {
+            let dir = tempdir().unwrap();
+            write_minimal_toml(dir.path(), "[tools]\n");
+            let config_path = toml(dir.path());
+            fs::set_permissions(&config_path, fs::Permissions::from_mode(mode)).expect("chmod the fixture");
+
+            let id = test_id("example.com", "cmake", "3.28");
+            add_binding(&config_path, &locks(dir.path()), &id, None, None)
+                .await
+                .expect("the mutation must land");
+
+            let published = fs::metadata(&config_path)
+                .expect("ocx.toml must exist")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                published, mode,
+                "a {mode:o} ocx.toml must still be {mode:o} after a mutation; got {published:o}"
+            );
+        }
+    }
+
+    /// Regression (ocx#494, the ocx#441 shape): an unlocked reader that opened
+    /// `ocx.toml` before a mutation still finishes its read against the
+    /// document it opened.
+    ///
+    /// `ocx.toml` has readers that take no lock at all — `ocx status`, the
+    /// per-prompt reconciler, direnv, git, an editor — and one buffered read
+    /// is several `read(2)` calls. An in-place rewrite landing between two of
+    /// them splices the tail of the longer replacement onto the head of the
+    /// document the reader had already buffered. Publishing by rename keeps
+    /// the reader's descriptor on the inode it opened, so its tail read comes
+    /// back empty.
+    ///
+    /// The assertion is *identity with one of the two documents*, not
+    /// "parses": a splice of two TOML fragments can very well parse, and then
+    /// the reader acts on a manifest nobody ever wrote.
+    ///
+    /// `cfg(unix)` for the reason the `ocx_oci::auth::store` sibling names: on
+    /// Windows the publish is *refused* rather than torn while another handle
+    /// holds the destination, which is the better failure but not the one this
+    /// asserts.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unlocked_reader_sees_one_document_across_a_split_read() {
+        use std::io::Read as _;
+
+        let dir = tempdir().unwrap();
+        // A section *after* the insertion point, so the mutation shifts bytes
+        // the reader has already buffered. Without it the added key lands at
+        // the very end, the new document shares its whole prefix with the old
+        // one, and an in-place rewrite splices back together into exactly the
+        // new document — a test that could not tell the two designs apart.
+        write_minimal_toml(
+            dir.path(),
+            "[tools]\nzlib = \"example.com/zlib:1.3\"\n\n[group.ci.tools]\nninja = \"example.com/ninja:1.11\"\n",
+        );
+        let config_path = toml(dir.path());
+        let before = fs::read(&config_path).expect("read the seeded manifest");
+
+        // Model a buffered reader mid-read: the whole current document is in
+        // hand, the descriptor is still open and one read short of EOF.
+        let mut reader = fs::File::open(&config_path).expect("open unlocked");
+        let mut observed = vec![0u8; before.len()];
+        reader.read_exact(&mut observed).expect("read the opened document");
+
+        // A strictly longer document lands before the reader's next read.
+        let id = test_id("example.com", "cmake", "3.28");
+        add_binding(&config_path, &locks(dir.path()), &id, None, None)
+            .await
+            .expect("the mutation must land");
+        let after = fs::read(&config_path).expect("read the published manifest");
+        assert!(
+            after.len() > before.len(),
+            "the fixture must publish a strictly longer document for the splice to be observable"
+        );
+        assert_ne!(
+            after[..before.len()],
+            before[..],
+            "the fixture must differ within the reader's first read, or a splice is invisible"
+        );
+
+        let mut tail = Vec::new();
+        reader.read_to_end(&mut tail).expect("finish the read");
+        observed.extend_from_slice(&tail);
+
+        assert!(
+            observed == before || observed == after,
+            "the unlocked reader observed neither document whole — it spliced two:\n{}",
+            String::from_utf8_lossy(&observed)
+        );
+    }
+
+    /// Windows: publishing `ocx.toml` while this process holds the project
+    /// mutation lock must not hit os error 33 (`ERROR_LOCK_VIOLATION`).
+    ///
+    /// That error is what a rename over a *locked* destination raised under
+    /// the in-place design, and is the whole reason the lock could not live on
+    /// the data file. With the lock on a content-keyed file under the locks
+    /// root, the rename has nothing of ours to collide with.
+    #[cfg(target_os = "windows")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_succeeds_while_the_mutation_lock_is_held() {
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let config_path = toml(dir.path());
+
+        let _held = crate::acquire_project_lock_for_file(&config_path, &locks(dir.path()))
+            .await
+            .expect("the mutation lock must be acquirable");
+
+        for i in 0u32..10 {
+            atomic_write(&config_path, &format!("[tools]\n# iteration {i}\n"))
+                .expect("a publish under the held mutation lock must not hit os error 33");
+        }
+
+        assert_eq!(
+            fs::read_to_string(&config_path).unwrap(),
+            "[tools]\n# iteration 9\n",
+            "the last publish must be the one on disk"
+        );
+    }
+
     // ── advisory lock integration ─────────────────────────────────────────────
 
-    /// `add_binding` returns `Locked` when another task holds the exclusive
-    /// lock on `ocx.toml` itself (in-place lock design — no sidecar).
+    /// `add_binding` returns `Locked` when another task holds the project
+    /// mutation lock for the same config file.
     ///
-    /// The lock target IS the data file: `MutationGuard::commit` rewrites
-    /// `ocx.toml` through the lock-owning handle via
-    /// `LockedFile::replace_bytes` (no rename, no orphan inode). A second
-    /// `try_exclusive` on the same path returns `None` while the first
-    /// handle's lock is held, surfacing as `ProjectErrorKind::Locked`.
-    ///
-    /// This works because `fs4` uses `flock(2)` on Unix (per-fd semantics), so
-    /// a second open fd on the same path cannot acquire exclusive even within
-    /// the same process.
+    /// The lock is the scoped entry under the locks root, not a handle on
+    /// `ocx.toml` — the manifest is published by rename, so a lock on the data
+    /// file would strand on the inode the rename orphans.
     #[tokio::test(flavor = "multi_thread")]
-    async fn add_binding_returns_locked_when_ocx_toml_already_locked() {
+    async fn add_binding_returns_locked_when_the_mutation_lock_is_held() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
 
-        // Acquire an exclusive flock directly on `ocx.toml` from this task.
-        let toml_path = dir.path().join("ocx.toml");
-        let _guard = LockedFile::try_exclusive(&toml_path)
+        let _held = crate::acquire_project_lock_for_file(&toml(dir.path()), &locks(dir.path()))
             .await
-            .unwrap()
-            .expect("first exclusive lock on ocx.toml must succeed");
+            .expect("the first mutation lock must be acquirable");
 
-        // add_binding internally calls acquire_project_lock_for_file, which
-        // attempts LockedFile::try_exclusive on ocx.toml. Because the first
-        // guard holds that lock, try_exclusive returns None → Locked.
         let id = test_id("example.com", "cmake", "3.28");
-        let err = add_binding(&toml(dir.path()), &id, None, None)
+        let err = add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, None)
             .await
-            .expect_err("add_binding must fail with Locked while ocx.toml is exclusively held");
+            .expect_err("add_binding must fail with Locked while the mutation lock is held");
 
         assert!(
             matches!(&err, Error::Project(pe) if matches!(pe.kind, ProjectErrorKind::Locked)),
             "expected ProjectErrorKind::Locked; got: {err}"
+        );
+    }
+
+    /// A flock held on `ocx.toml` itself does **not** block a mutation.
+    ///
+    /// The inverse of the test above, and the one that states what moved: the
+    /// data file is no longer the lock target, so an editor, a `flock(1)`
+    /// wrapper or a stale descriptor on `ocx.toml` cannot wedge `ocx add`.
+    /// Mutual exclusion lives entirely in the locks root.
+    ///
+    /// POSIX only: `flock(2)` is advisory, so the publish reads and renames
+    /// past it. Windows' `LockFileEx` is mandatory and refuses the read
+    /// (error 33), which is the documented divergence the acceptance twin
+    /// skips on Windows for.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_flock_on_ocx_toml_itself_does_not_block_a_mutation() {
+        use ocx_util::fs::LockedFile;
+
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+
+        let _squatter = LockedFile::try_exclusive(&toml(dir.path()))
+            .await
+            .unwrap()
+            .expect("an exclusive flock on ocx.toml must be takeable");
+
+        let id = test_id("example.com", "cmake", "3.28");
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, None)
+            .await
+            .expect("a flock on the data file must not block the mutation lock");
+
+        assert!(
+            reload_config(dir.path()).tools.contains_key("cmake"),
+            "the binding must have landed"
         );
     }
 
@@ -1444,7 +1779,7 @@ mod tests {
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
 
-        let err = add_binding(&toml(dir.path()), &id, None, Some("all"))
+        let err = add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, Some("all"))
             .await
             .expect_err("add_binding with group 'all' must fail");
 
@@ -1464,7 +1799,7 @@ mod tests {
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
 
-        let err = add_binding(&toml(dir.path()), &id, None, Some("default"))
+        let err = add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, Some("default"))
             .await
             .expect_err("add_binding with group 'default' must fail");
 
@@ -1483,7 +1818,7 @@ mod tests {
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "cmake", "3.28");
 
-        add_binding(&toml(dir.path()), &id, None, Some("ci"))
+        add_binding(&toml(dir.path()), &locks(dir.path()), &id, None, Some("ci"))
             .await
             .expect("add_binding with group 'ci' must succeed");
 
@@ -1554,7 +1889,7 @@ mod tests {
         fs::write(&elsewhere, "[tools]\n").unwrap();
         std::os::unix::fs::symlink(&elsewhere, toml(dir.path())).unwrap();
 
-        let err = set_activate(&toml(dir.path()), ActivateMode::Bin)
+        let err = set_activate(&toml(dir.path()), &locks(dir.path()), ActivateMode::Bin)
             .await
             .expect_err("a symlink at the config path must be refused, not followed");
 
@@ -1569,37 +1904,30 @@ mod tests {
         );
     }
 
-    /// C-042 / E-C10: another process holding the flock yields
+    /// C-042 / E-C10: another process holding the mutation lock yields
     /// [`ProjectErrorKind::Locked`] after the contention budget — never a
     /// half-written file. The sibling of
-    /// `add_binding_returns_locked_when_ocx_toml_already_locked`, asserted for
-    /// the new writer because it is a second entry into the same lock.
+    /// `add_binding_returns_locked_when_the_mutation_lock_is_held`, asserted
+    /// for the new writer because it is a second entry into the same lock.
     #[tokio::test(flavor = "multi_thread")]
-    async fn set_activate_returns_locked_when_ocx_toml_already_locked() {
+    async fn set_activate_returns_locked_when_the_mutation_lock_is_held() {
         use crate::activate::ActivateMode;
 
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
-        let guard = LockedFile::try_exclusive(&toml(dir.path()))
+        let _held = crate::acquire_project_lock_for_file(&toml(dir.path()), &locks(dir.path()))
             .await
-            .unwrap()
-            .expect("first exclusive lock on ocx.toml must succeed");
+            .expect("the first mutation lock must be acquirable");
 
-        let err = set_activate(&toml(dir.path()), ActivateMode::Bin)
+        let err = set_activate(&toml(dir.path()), &locks(dir.path()), ActivateMode::Bin)
             .await
-            .expect_err("set_activate must fail with Locked while ocx.toml is exclusively held");
+            .expect_err("set_activate must fail with Locked while the mutation lock is held");
 
         assert!(
             matches!(&err, Error::Project(pe) if matches!(pe.kind, ProjectErrorKind::Locked)),
             "expected ProjectErrorKind::Locked; got: {err}"
         );
 
-        // Released before the file is read back. `flock` is advisory, but
-        // Windows' `LockFileEx` is mandatory over the locked range and fails an
-        // unrelated handle's read with `ERROR_LOCK_VIOLATION` — so reading
-        // through the live guard measures the platform's lock semantics, not
-        // whether the contended write left a byte.
-        drop(guard);
         assert_eq!(
             fs::read_to_string(toml(dir.path())).unwrap(),
             "[tools]\n",
@@ -1621,7 +1949,7 @@ mod tests {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "# how the toolchain reaches PATH");
 
-        set_activate(&toml(dir.path()), ActivateMode::Env)
+        set_activate(&toml(dir.path()), &locks(dir.path()), ActivateMode::Env)
             .await
             .expect("write succeeds");
 
@@ -1647,7 +1975,9 @@ mod tests {
             let dir = tempdir().unwrap();
             write_minimal_toml(dir.path(), "[tools]\ncmake = \"example.com/cmake:3.28\"\n");
 
-            set_activate(&toml(dir.path()), mode).await.expect("write succeeds");
+            set_activate(&toml(dir.path()), &locks(dir.path()), mode)
+                .await
+                .expect("write succeeds");
 
             let cfg = reload_config(dir.path());
             assert_eq!(cfg.activate, Some(mode), "for {mode}");
@@ -1668,7 +1998,7 @@ mod tests {
         let original = "#:schema https://ocx.sh/schemas/project/v1.json\nactivate = \"env\"\n\n[tools]\ncmake = \"example.com/cmake:3.28\"\n";
         write_minimal_toml(dir.path(), original);
 
-        set_activate(&toml(dir.path()), ActivateMode::None)
+        set_activate(&toml(dir.path()), &locks(dir.path()), ActivateMode::None)
             .await
             .expect("write succeeds");
 

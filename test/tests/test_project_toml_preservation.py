@@ -13,9 +13,12 @@ everything else in the file comes back byte-for-byte.
 from __future__ import annotations
 
 import difflib
+import os
 import subprocess
 from pathlib import Path
 from uuid import uuid4
+
+import pytest
 
 from src.helpers import PackageInfo, make_package
 from src.runner import OcxRunner
@@ -58,6 +61,30 @@ def _publish(
 def _assert_contains_all(content: str, fragments: list[str], context: str) -> None:
     missing = [fragment for fragment in fragments if fragment not in content]
     assert not missing, f"{context} lost {missing!r}; got:\n{content}"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix file modes; Windows uses inherited ACLs")
+def test_add_preserves_the_manifest_file_mode(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A ``0644`` ``ocx.toml`` is still ``0644`` after ``ocx add``.
+
+    The manifest is published by rename, so the replacement gets whatever mode
+    it is created with rather than the one the file had. ``ocx.toml`` is a
+    VCS-committed, group-readable declaration; publishing it through the
+    credential-file helper (``0600``) would make every project manifest
+    owner-only on the first mutation, silently.
+    """
+    added = _publish(ocx, tmp_path, "mode")
+    project_dir = _project(tmp_path, "[tools]\n")
+    manifest = project_dir / "ocx.toml"
+    manifest.chmod(0o644)
+
+    result = _run_cmd(ocx, project_dir, "add", added.fq)
+    assert result.returncode == EXIT_SUCCESS, f"add failed: {result.stderr}"
+
+    mode = manifest.stat().st_mode & 0o777
+    assert mode == 0o644, f"ocx.toml must still be 0644 after a mutation; got {mode:o}"
 
 
 def test_add_preserves_comments_and_schema_directive(

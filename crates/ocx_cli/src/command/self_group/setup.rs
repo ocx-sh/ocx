@@ -292,7 +292,7 @@ impl SelfSetup {
             );
             return Ok(());
         }
-        ocx_project::set_activate(&config_path, mode).await?;
+        ocx_project::set_activate(&config_path, &context.file_structure().locks, mode).await?;
         Ok(())
     }
 }
