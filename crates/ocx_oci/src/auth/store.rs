@@ -72,7 +72,11 @@ fn helper_timeout() -> Duration {
 /// must route (Windows `LockFileEx` is per-handle; opening a second fd on
 /// the locked range from the same process hits `ERROR_LOCK_VIOLATION`).
 struct ConfigGuard {
-    locked: LockedFile,
+    /// The lock, held on `config.json.lock` — never on the data file. See
+    /// [`acquire_config_guard`] for why the sidecar is not optional.
+    _locked: LockedFile,
+    /// The data file this guard serialises access to.
+    path: std::path::PathBuf,
 }
 
 /// Credential persisted to docker config / credential helper.
@@ -437,17 +441,29 @@ fn clone_credential(cred: &Credential) -> Credential {
     }
 }
 
-/// Acquire an exclusive lock directly on `config.json` and return the
-/// lock-owning handle.
+/// Acquire the docker-config write lock, held on a `config.json.lock`
+/// sidecar, and return a guard over the data file.
 ///
 /// Every read-modify-write op of the docker config routes its I/O through
-/// this guard so concurrent `ocx login` invocations serialise without torn
-/// writes. Sync — runs inside a `spawn_blocking` task. No sidecar lock
-/// file; the data file IS the lock target.
+/// this guard so concurrent `ocx login` invocations serialise. Sync — runs
+/// inside a `spawn_blocking` task.
+///
+/// **The sidecar is not a style choice.** `ConfigGuard::write` publishes by
+/// renaming a tempfile over `config.json`, and on Windows `MoveFileEx` needs
+/// delete access to the destination, which a `LockFileEx` lock on that same
+/// file denies — every `put` fails with `ERROR_ACCESS_DENIED`. Locking the
+/// data file and atomically replacing it are mutually exclusive there, so the
+/// lock target and the data file have to be different files. On Unix the
+/// conflict does not arise (`flock` is advisory, `rename(2)` ignores it), but
+/// one arrangement for both platforms beats a `cfg` split down the middle of
+/// a credential path.
 fn acquire_config_guard(path: &Path) -> Result<ConfigGuard, AuthError> {
-    let locked = LockedFile::open_exclusive_blocking_with_timeout(path, Duration::from_secs(5)).map_err(|e| {
+    let mut lock_name = path.as_os_str().to_os_string();
+    lock_name.push(".lock");
+    let lock_path = std::path::PathBuf::from(lock_name);
+    let locked = LockedFile::open_exclusive_blocking_with_timeout(&lock_path, Duration::from_secs(5)).map_err(|e| {
         AuthError::WriteConfigFailed {
-            path: path.to_path_buf(),
+            path: lock_path.clone(),
             source: std::io::Error::other(e),
         }
     })?;
@@ -459,7 +475,7 @@ fn acquire_config_guard(path: &Path) -> Result<ConfigGuard, AuthError> {
     // to that inode at all — `ConfigGuard::write` publishes a fresh `0o600`
     // tempfile over the path.
     #[cfg(unix)]
-    {
+    if path.exists() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|source| {
             AuthError::WriteConfigFailed {
@@ -468,28 +484,39 @@ fn acquire_config_guard(path: &Path) -> Result<ConfigGuard, AuthError> {
             }
         })?;
     }
-    Ok(ConfigGuard { locked })
+    Ok(ConfigGuard {
+        _locked: locked,
+        path: path.to_path_buf(),
+    })
 }
 
 impl ConfigGuard {
-    /// Read the docker config through the lock-owning handle.
+    /// Read the docker config, under the lock but not through it.
     ///
-    /// Empty file (freshly created by [`LockedFile::open_exclusive_blocking_with_timeout`])
-    /// yields [`DockerConfig::default()`]. Unparseable JSON surfaces as
-    /// [`AuthError::WriteConfigFailed`] with `ErrorKind::InvalidData`.
+    /// The lock lives on the sidecar, so this is an ordinary read of the data
+    /// file — and it is safe precisely because every writer publishes by
+    /// rename: a reader either sees the whole previous document or the whole
+    /// new one. An absent or empty file yields [`DockerConfig::default()`];
+    /// that is the first-login case, since the guard no longer creates
+    /// `config.json` as a side effect of taking the lock. Unparseable JSON
+    /// surfaces as [`AuthError::WriteConfigFailed`] with
+    /// `ErrorKind::InvalidData`.
     fn read(&mut self) -> Result<DockerConfig, AuthError> {
-        let bytes = self
-            .locked
-            .read_bytes_blocking()
-            .map_err(|e| AuthError::WriteConfigFailed {
-                path: self.locked.path().to_path_buf(),
-                source: std::io::Error::other(e),
-            })?;
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(DockerConfig::default()),
+            Err(source) => {
+                return Err(AuthError::WriteConfigFailed {
+                    path: self.path.clone(),
+                    source,
+                });
+            }
+        };
         if bytes.is_empty() {
             return Ok(DockerConfig::default());
         }
         serde_json::from_slice(&bytes).map_err(|err| AuthError::WriteConfigFailed {
-            path: self.locked.path().to_path_buf(),
+            path: self.path.clone(),
             source: std::io::Error::new(ErrorKind::InvalidData, err),
         })
     }
@@ -507,16 +534,16 @@ impl ConfigGuard {
     /// one whole document. It also removes the truncated-file window a SIGKILL
     /// used to leave behind.
     ///
-    /// The rename replaces the locked inode, so this is the last operation the
-    /// guard may perform: reads through `self.locked` afterwards would see the
-    /// orphan. A concurrent acquirer that was waiting on the replaced inode is
-    /// caught by `LockedFile`'s acquire-time identity re-verify and reopens.
+    /// The lock is held on the `config.json.lock` sidecar, not on this file, so
+    /// the rename replaces no inode anyone holds and the guard stays valid
+    /// afterwards. That separation is what makes the publish work on Windows at
+    /// all — see [`acquire_config_guard`].
     ///
     /// The path is resolved first so a symlinked `config.json` keeps its link
     /// (and the tempfile lands on the link target's filesystem, not the
     /// link's).
     fn write(&mut self, config: &DockerConfig) -> Result<(), AuthError> {
-        let path = self.locked.path().to_path_buf();
+        let path = self.path.clone();
         let serialized = serde_json::to_vec_pretty(config).map_err(|err| AuthError::WriteConfigFailed {
             path: path.clone(),
             source: std::io::Error::new(ErrorKind::InvalidData, err),
@@ -768,66 +795,6 @@ mod tests {
         let _: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON after 10 concurrent puts");
     }
 
-    /// Concurrent writers run under exclusive flock on `config.json` (the
-    /// data file IS the lock target — no sidecar). Readers that respect the
-    /// same lock see only fully-formed JSON, never a torn intermediate from
-    /// the writer's `set_len(0)` → `write_all` → `sync_data` sequence.
-    ///
-    /// Lockless readers (raw `read_to_string`) are NOT a supported client
-    /// and CAN observe the truncate-window — see `ConfigGuard::write`
-    /// docstring. This test asserts the locked-reader contract.
-    #[test]
-    fn dockerconfigstore_locked_reader_never_observes_torn_json() {
-        let (_dir, path) = fresh_config_path();
-        let store = std::sync::Arc::new(DockerCredentialStore::with_path(path.clone(), opts(true)));
-        let runtime = std::sync::Arc::new(rt());
-        // Spawn the reader first.
-        let path_for_reader = path.clone();
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop_for_reader = stop.clone();
-        let reader = std::thread::spawn(move || {
-            let mut iters = 0;
-            let mut observed = 0usize;
-            // The cap is a hang guard, not a budget: the reader stops when the
-            // writers signal `stop`. Capping it at the writer count let a fast
-            // reader exhaust its rounds before the first write landed.
-            while !stop_for_reader.load(std::sync::atomic::Ordering::SeqCst) && iters < 1_000_000 {
-                iters += 1;
-                // Losing the lock race is not the property under test. A hundred
-                // back-to-back writers on a loaded runner can starve the reader
-                // past the timeout, and panicking there asserts "the reader
-                // always wins within 5s" -- which this test never meant to
-                // claim. Skip the round; the `observed` assertion below is what
-                // keeps a fully starved reader from passing vacuously.
-                let Ok(mut locked) =
-                    LockedFile::open_exclusive_blocking_with_timeout(&path_for_reader, Duration::from_secs(5))
-                else {
-                    continue;
-                };
-                let bytes = locked.read_bytes_blocking().expect("reader reads under lock");
-                if !bytes.is_empty() {
-                    let _: serde_json::Value =
-                        serde_json::from_slice(&bytes).expect("locked reader never observes torn JSON");
-                    observed += 1;
-                }
-                drop(locked);
-            }
-            observed
-        });
-        let s = store.clone();
-        let r = runtime.clone();
-        let cred = Credential::basic("u", SecretString::from("p".to_string()));
-        for i in 0..100 {
-            r.block_on(s.put(&format!("reg{i}.example"), &cred)).expect("put");
-        }
-        stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        let observed = reader.join().expect("reader join");
-        assert!(
-            observed > 0,
-            "the reader never completed a locked read of non-empty content, so the torn-JSON check never ran"
-        );
-    }
-
     /// Regression — an unlocked reader that opened `config.json` before a write
     /// still finishes its read against the document it opened.
     ///
@@ -840,6 +807,18 @@ mod tests {
     /// replaced it, which is the `Extra data: line 7 column 2 (char 77)` the
     /// acceptance suite caught. Publishing by rename keeps the reader's
     /// descriptor on the inode it opened, so the tail read comes back empty.
+    ///
+    /// `cfg(unix)` for a named reason. On Windows the publish is *refused*
+    /// rather than torn: `MoveFileEx` cannot replace a destination another
+    /// handle holds without delete sharing, so `put` returns
+    /// `ERROR_ACCESS_DENIED` instead of splicing two documents. That is the
+    /// better failure — a caller sees an error instead of silent corruption —
+    /// and `ocx_util::fs::persist_temp_file` already retries that class
+    /// (5 and 32, 100/400/800 ms) so a real reader, which holds the file for
+    /// microseconds, does not fail a login. This test holds its reader open
+    /// across every retry on purpose, so on Windows it asserts something the
+    /// platform will not do, and would be a permanent red rather than a guard.
+    #[cfg(unix)]
     #[test]
     fn dockerconfigstore_unlocked_reader_sees_one_document_across_a_split_read() {
         use std::io::Read as _;
