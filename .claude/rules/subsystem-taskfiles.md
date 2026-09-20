@@ -26,6 +26,7 @@ paths:
 | `taskfiles/coverage.taskfile.yml` | cross-cutting | `coverage:` |
 | `taskfiles/duplo.taskfile.yml` | cross-cutting | `duplo:` |
 | `taskfiles/release.taskfile.yml` | cross-cutting | `release:` |
+| `taskfiles/telemetry.taskfile.yml` | cross-cutting | `telemetry:` -- `push` sends a JUnit report to otel.ocx.sh as OTLP traces; called at the tail of `rust:test:unit` and the pytest legs, and a silent no-op unless the machine is configured for it (subsystem-ci.md § Test telemetry) |
 | `.claude/taskfile.yml` | `.claude/` subsystem | `claude:` |
 | `test/taskfile.yml` | acceptance tests | `test:` |
 | `website/taskfile.yml` | website | `website:` (includes schema, sbom, recordings internally) |

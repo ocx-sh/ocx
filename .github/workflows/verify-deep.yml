@@ -108,6 +108,12 @@ jobs:
       SCCACHE_S3_USE_SSL: "true"
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
+      # Test telemetry (subsystem-ci.md § Test telemetry). Lifted into the job
+      # env for the same reason the sccache credentials are: `secrets` is not
+      # a context a composite action's `if:` can read, and the step below
+      # guards on `env.OTEL_OTLP_AUTH != ''` so a fork PR — which sees no
+      # secrets — skips the push instead of failing it.
+      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -160,6 +166,20 @@ jobs:
         with:
           name: deep-unit-${{ matrix.job.name }}
           path: target/nextest/ci/junit.xml
+      # Per-test timings to otel.ocx.sh, so the dashboards can name which unit
+      # tests accumulate the wall clock on which OS. `!cancelled()` rather than
+      # `success()`: a failing suite still writes the report, and its timings
+      # are the ones worth looking at. Tolerated twice over — the action turns
+      # every one of its own failures into a warning, and this guards the case
+      # where the runner kills it.
+      - name: Push unit test timings
+        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: ./.github/actions/test-telemetry
+        with:
+          junit: target/nextest/ci/junit.xml
+          suite: unit
 
   cross-compile:
     name: Cross-compile (${{ matrix.job.name }})
@@ -218,6 +238,11 @@ jobs:
           # "windows") unit tests. See ADR adr_file_lock_unification.md §CI
           # Integration. Revisit if a stable Windows registry option appears.
           - { os: ubuntu-latest, name: Linux, target: x86_64-unknown-linux-gnu, ext: "" }
+    env:
+      # Test telemetry, same guard as the `build` job above: `secrets` is not
+      # readable from a composite action's `if:`, so the value is lifted here
+      # and the push step tests `env.OTEL_OTLP_AUTH != ''`.
+      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -320,8 +345,12 @@ jobs:
         # `test:parallel`, not `test`: the serial run took 21:41 for 3819 tests
         # at a 0.1 s median (run 35469230124) on a runner whose cores sat idle.
         # Same xdist flags local `task verify` uses; `--dist loadgroup` keeps
-        # the registry-contended modules on one worker.
-        run: task test:parallel -- --junit-xml=results/junit.xml
+        # the registry-contended modules on one worker. The JUnit report is
+        # not asked for here any more: the task writes `test/results/junit.xml`
+        # on every run, local ones included, so the timings this workflow
+        # publishes and the ones a developer's run pushes come from one flag
+        # in one place (test/taskfile.yml `JUNIT_XML`).
+        run: task test:parallel
       - name: Stop Registry
         if: ${{ always() }}
         shell: bash
@@ -335,6 +364,16 @@ jobs:
         with:
           name: deep-acceptance-${{ matrix.job.name }}
           path: test/results/junit.xml
+      # The acceptance suite is the long half of the run; these are the
+      # timings the dashboards exist for. Same tolerance as the unit push.
+      - name: Push acceptance test timings
+        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: ./.github/actions/test-telemetry
+        with:
+          junit: test/results/junit.xml
+          suite: acceptance
 
   test-results:
     name: Publish Deep Test Results

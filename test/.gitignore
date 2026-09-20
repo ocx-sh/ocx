@@ -1,3 +1,6 @@
 bin/
 bench/results/
+# JUnit reports. Every pytest leg writes one now (taskfile.yml `JUNIT_XML`),
+# so this is output of an ordinary `task test`, not a CI-only artefact.
+results/
 candidate.toml

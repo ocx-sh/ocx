@@ -71,6 +71,16 @@ vars:
   # into an unlinked file leaves nothing to parse. Per checkout for the same
   # reason the basetemp is.
   TEST_RUN_LOG: '{{.TEST_BASETEMP}}.log'
+  # Where the pytest legs write their JUnit report, on every run rather than
+  # only when a caller passes the flag. Two consumers: CI uploads it and
+  # publishes the check, and `task telemetry:push` turns it into per-test
+  # timings on otel.ocx.sh — and a report that exists only under a
+  # CI-supplied argument is one no local run ever produces, so the local half
+  # of that dashboard would be empty. Absolute, because these tasks run from
+  # the `test:` include's directory and the telemetry task from the root.
+  # `results/` is gitignored; pytest creates the directory itself.
+  JUNIT_XML: '{{.TASKFILE_DIR}}/results/junit.xml'
+  SMOKE_JUNIT_XML: '{{.TASKFILE_DIR}}/results/junit-smoke.xml'
   # The smoke tier's wall-clock budget (C-012 / S-004). The local target is
   # 60 s; 90 s is the ceiling at which a slow test that was marked `smoke`
   # reds the tier instead of quietly stretching it. A literal, deliberately:
@@ -134,9 +144,18 @@ tasks:
       # that just happened rather than of some earlier one.
       - >-
         set -o pipefail;
-        uv run pytest --basetemp={{.TEST_BASETEMP}} {{.CLI_ARGS | default "-v"}}
+        uv run pytest --basetemp={{.TEST_BASETEMP}} --junit-xml={{.JUNIT_XML}}
+        {{.CLI_ARGS | default "-v"}}
         2>&1 | tee {{.TEST_RUN_LOG}}
       - task: .suite-ceilings
+      # Per-test timings to otel.ocx.sh; a silent no-op unless this machine is
+      # configured for it (taskfiles/telemetry.taskfile.yml). Reached only by a
+      # green run — a red one stops at the pytest step above, and in CI the
+      # push is the `test-telemetry` action's, which runs on a failed suite too.
+      - task: :telemetry:push
+        vars:
+          JUNIT: '{{.JUNIT_XML}}'
+          SUITE: acceptance
     # The environment every host-side pytest leg runs under. `smoke` takes it
     # by alias (`*pytest-env`), so a leg cannot drift from the other by
     # forgetting one variable. (An anchor on a top-level `x-shared:` mapping
@@ -297,12 +316,19 @@ tasks:
       # the pytest invocation only — the build above is not the tier's cost.
       - >-
         start=$(date +%s);
-        uv run pytest --basetemp={{.TEST_BASETEMP}} -m smoke -n auto --dist loadgroup
+        uv run pytest --basetemp={{.TEST_BASETEMP}} --junit-xml={{.SMOKE_JUNIT_XML}}
+        -m smoke -n auto --dist loadgroup
         {{.CLI_ARGS | default "-v"}};
         elapsed=$(( $(date +%s) - start ));
         [ "$elapsed" -le {{.SMOKE_BUDGET_SECONDS}} ] || {
           echo "smoke tier: ${elapsed}s wall clock exceeds the {{.SMOKE_BUDGET_SECONDS}} s budget" >&2; exit 1; };
         echo "smoke tier: ${elapsed}s wall clock (budget {{.SMOKE_BUDGET_SECONDS}} s)"
+      # Outside the timed block above on purpose: the budget measures the
+      # tier, not what this repository does with its report.
+      - task: :telemetry:push
+        vars:
+          JUNIT: '{{.SMOKE_JUNIT_XML}}'
+          SUITE: smoke
     env: *pytest-env
 
   quick:

@@ -8,6 +8,13 @@
 [profile.default]
 test-threads = 8
 
+# Local runs emit the same JUnit report CI's `ci` profile does, at
+# target/nextest/default/junit.xml. It is what `task telemetry:push` reads at
+# the tail of `rust:test:unit` -- without it the per-test timings a developer's
+# run produces would exist only in nextest's terminal output.
+[profile.default.junit]
+path = "junit.xml"
+
 # A hang must report. Gate 7 of WP-33 ran past 420 s on two tests and died by
 # `SIGTERM` with no `verify_exit` marker in its log -- a gate that cannot say
 # what happened, which is worse than a red (DEC-87). `terminate-after` turns

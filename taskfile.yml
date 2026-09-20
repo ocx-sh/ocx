@@ -16,6 +16,7 @@ includes:
   release: ./taskfiles/release.taskfile.yml
   satellite: ./taskfiles/satellite.taskfile.yml
   scripts: ./taskfiles/scripts.taskfile.yml
+  telemetry: ./taskfiles/telemetry.taskfile.yml
   claude:
     taskfile: ./.claude/taskfile.yml
     dir: ./.claude

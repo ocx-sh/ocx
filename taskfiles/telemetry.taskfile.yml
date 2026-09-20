@@ -1,0 +1,73 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# Test telemetry: per-test timings from a JUnit report, pushed to
+# https://otel.ocx.sh as OTLP traces so Grafana can name the tests that
+# accumulate the most wall clock. The CI half of the same contract is
+# `.github/actions/test-telemetry`; both are described in
+# `.claude/rules/subsystem-ci.md` § Test telemetry.
+#
+# OFF BY DEFAULT, and silently: with no endpoint configured and no
+# `junit2otlp` on PATH this task prints nothing and changes nothing, so
+# `task verify` on a fresh checkout is unaffected.
+#
+# To turn it on for this machine:
+#
+#   1. Install junit2otlp 0.1.2 onto PATH, from the release tarball for your
+#      platform (`junit2otlp_{linux,darwin,windows}_{x86_64,arm64}.tar.gz`):
+#
+#        https://github.com/mdelapenya/junit2otlp/releases/tag/v0.1.2
+#
+#   2. Write ~/.config/ocx-telemetry/env, mode 600 — it holds a password:
+#
+#        OTEL_EXPORTER_OTLP_ENDPOINT=https://otel.ocx.sh:443
+#        OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64 of ci:password>
+#
+#      The scheme and port are load-bearing. junit2otlp speaks OTLP over gRPC
+#      only, and the Go SDK reads the endpoint as a URL: `https` selects TLS,
+#      `http` selects plaintext, and a bare `host:port` fails outright with
+#      `dns resolver: missing address`.
+#
+# The file is sourced by this task, so it works whether or not the shell you
+# run `task` from has it loaded. Nothing here echoes its contents.
+
+version: '3'
+
+tasks:
+  push:
+    desc: >-
+      Push one JUnit report to otel.ocx.sh as OTLP traces (JUNIT=<path>
+      SUITE=unit|acceptance|smoke). A no-op, silently, unless the machine is
+      configured for it — see the header of this file.
+    # The body is long and this task runs at the tail of every test task; go-task
+    # would otherwise echo the whole script on each one.
+    silent: true
+    cmd: >-
+      set -u;
+      if [ -f "$HOME/.config/ocx-telemetry/env" ]; then
+        set -a; . "$HOME/.config/ocx-telemetry/env"; set +a;
+      fi;
+      [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] || exit 0;
+      command -v junit2otlp >/dev/null 2>&1 || exit 0;
+      [ -f "{{.JUNIT}}" ] || exit 0;
+      branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown);
+      sha=$(git rev-parse HEAD 2>/dev/null || echo unknown);
+      host=$(uname -n 2>/dev/null || echo unknown);
+      case "$(uname -s)" in
+        Linux) os=linux;; Darwin) os=macos;; *) os=windows;;
+      esac;
+      norepo=$(mktemp -d);
+      log=$(mktemp);
+      trap 'rm -rf "$norepo" "$log"' EXIT;
+      junit2otlp
+      --service-name ocx-tests
+      --trace-name "ocx-{{.SUITE}}"
+      --repository-path "$norepo"
+      --additional-attributes "ocx.suite={{.SUITE}},ocx.source=local,ocx.os=$os,ocx.git.sha=$sha,ocx.git.branch=$branch,host.name=$host"
+      < "{{.JUNIT}}" > "$log" 2>&1
+      || { echo "telemetry: junit2otlp failed: $(tail -n 3 "$log")" >&2; exit 0; };
+      if grep -q 'traces export:' "$log"; then
+        echo "telemetry: push did not land: $(grep -m1 'traces export:' "$log")" >&2; exit 0;
+      fi;
+      echo "telemetry: pushed {{.SUITE}} timings from {{.JUNIT}}"
+    requires:
+      vars: [JUNIT, SUITE]

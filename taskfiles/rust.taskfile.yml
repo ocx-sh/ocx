@@ -244,6 +244,15 @@ tasks:
         set -o pipefail;
         cargo nextest run --workspace --release --locked {{.CLI_ARGS}}
         2>&1 | tee {{.NEXTEST_RUN_LOG}}
+      # Per-test timings to otel.ocx.sh; a silent no-op unless this machine is
+      # configured for it (taskfiles/telemetry.taskfile.yml). The default
+      # profile's path, so a run passing `-- --profile ci` pushes nothing —
+      # that profile writes to target/nextest/ci/, and in CI the push is the
+      # `test-telemetry` action's, not this one's.
+      - task: :telemetry:push
+        vars:
+          JUNIT: '{{.ROOT_DIR}}/target/nextest/default/junit.xml'
+          SUITE: unit
 
   test:doc:
     desc: Run the workspace doctests

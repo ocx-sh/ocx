@@ -121,6 +121,29 @@ Workflow YAML is linted by [actionlint](https://github.com/rhysd/actionlint) (pr
 - Embedded shellcheck severity floor = `--severity=warning` (`SHELLCHECK_OPTS` in the task), matching `shell:shellcheck`. Info/style findings are not gated.
 - The cargo-dist-generated `release.yml` is excluded via `.github/actionlint.yaml` (`paths:` ignore-all) — never hand-edited, drift policed by `verify-release-ci.yml`.
 
+## Test telemetry
+
+Every unit and acceptance run — in CI and on a developer machine — pushes its JUnit report to `https://otel.ocx.sh` as OTLP traces, so Grafana can name the tests that accumulate the most wall clock. One converter, `junit2otlp` 0.1.2, on both routes: the composite action `.github/actions/test-telemetry` in CI, the `telemetry:push` task locally.
+
+**What is pushed.** Resource `service.name=ocx-tests`. Span attributes, on every span: `ocx.suite` (`unit` / `acceptance` / `smoke`), `ocx.source` (`ci` / `local`), `ocx.os`, `ocx.git.sha`, `ocx.git.branch`, `ocx.ci.run_id`, `ocx.ci.job` (CI only), `host.name` (the runner name, or the hostname locally). The tool adds `tests.case.duration` and `tests.suite.duration` in **milliseconds**, plus `code.function`, `tests.case.classname` and `tests.case.status`. `OTEL_RESOURCE_ATTRIBUTES` is not read, so none of these can be moved onto the resource without patching the tool.
+
+**Three properties that decide how this is read and wired**, all measured against a local collector rather than assumed:
+
+- **The span's own duration is not the test's.** Each test span is created and ended in the same instant (under a microsecond wide); the real figure is the `tests.case.duration` attribute. A dashboard aggregating span duration reports nothing.
+- **The exit status says nothing.** Export errors go through the OTel error handler, so a push that lands nowhere still exits 0 — three `traces export: ... connection error` lines and `$? == 0`. Both routes therefore grep the tool's own output for `traces export:` and warn; neither trusts the status.
+- **The endpoint must carry a scheme.** The tool builds `otlptracegrpc` and has no HTTP exporter, and the Go SDK reads the endpoint as a URL: `https://otel.ocx.sh:443` selects TLS, `http://` selects plaintext, and a bare `host:port` fails with `dns resolver: missing address`. It also always builds a metric exporter (`OTEL_METRICS_EXPORTER` is not read); with no metrics receiver that logs one `Unimplemented` per push, which is non-retryable and costs no measurable time.
+
+**Auth** is nginx basic auth. The header value (`Basic <base64 of ci:password>`) lives in the org secret `OTEL_OTLP_AUTH` and reaches the tool as `OTEL_EXPORTER_OTLP_HEADERS`. It is lifted into job `env:` rather than read from `secrets` in the step, for the reason the sccache credentials are: `secrets` is not a context a composite action can read, and the guard `env.OTEL_OTLP_AUTH != ''` is what makes a fork PR — which sees no secrets — skip the push instead of failing it. Every push step is also `continue-on-error: true` with `timeout-minutes: 5`: telemetry never decides a job. They run under `if: ${{ !cancelled() && … }}`, so a red suite pushes its timings too.
+
+Wired after the JUnit-producing step of `verify-deep.yml`'s `build` matrix (`target/nextest/ci/junit.xml`, all three OSes) and its `acceptance-tests` job (`test/results/junit.xml`), and of `verify-basic.yml`'s `smoke` and `smoke-acceptance` jobs.
+
+**Enabling it locally** (off by default, and silently — no endpoint and no binary means no output and no failure):
+
+1. Install `junit2otlp` 0.1.2 onto `PATH` from the [release tarball](https://github.com/mdelapenya/junit2otlp/releases/tag/v0.1.2) for your platform.
+2. Write `~/.config/ocx-telemetry/env`, **mode 600** — it holds a password — with `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS`. `taskfiles/telemetry.taskfile.yml` sources it itself, so it works from a shell that has not loaded it.
+
+`task verify` then pushes: `rust:test:unit` reads `target/nextest/default/junit.xml` (the `[profile.default.junit]` entry in `.config/nextest.toml`), and the pytest legs read `test/results/junit.xml` / `junit-smoke.xml`, which they write on every run rather than only when CI passes the flag — a report produced only under a CI-supplied argument is one no local run has.
+
 ## Cost Factors
 
 | Factor | Impact | Guidance |
