@@ -430,6 +430,32 @@ mod tests {
         }
     }
 
+    /// The patch registry every test that dials through [`make_online_manager`]
+    /// points at: a loopback port nothing can be listening on.
+    ///
+    /// Port 1 is privileged, so no unprivileged process can bind it and the
+    /// kernel refuses the connect on the first SYN — no DNS lookup, no route,
+    /// no wait, the same answer on every machine.
+    ///
+    /// These tests used to leave [`test_patch_config`]'s `patches.corp.com` in
+    /// place, which made "there is no registry" a property of whatever network
+    /// the test ran on. Where the lookup or the route *black-holes* instead of
+    /// refusing — a sandbox with no DNS egress is the ordinary case — the
+    /// connect cannot fail until `ocx_oci`'s `REGISTRY_CONNECT_TIMEOUT` expires,
+    /// and that is a flat 30 s per test: exactly what CI measured for the four
+    /// tests below. Every one of them asserts that the descriptor fetch was
+    /// *attempted* and found nothing, never which transport error came back, so
+    /// a refused port witnesses the same property in a millisecond.
+    const UNREACHABLE_PATCH_REGISTRY: &str = "127.0.0.1:1";
+
+    /// [`test_patch_config`] aimed at [`UNREACHABLE_PATCH_REGISTRY`].
+    fn unreachable_patch_config() -> ResolvedPatchConfig {
+        ResolvedPatchConfig {
+            registry: UNREACHABLE_PATCH_REGISTRY.to_string(),
+            ..test_patch_config()
+        }
+    }
+
     // ── D4: offline sync_patches returns OfflineMode error ────────────────────
 
     /// `sync_patches` must return `Err(OfflineMode)` when the manager is offline.
@@ -625,7 +651,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sync_patches_one_installed_base_reports_correct_bases_checked() {
         let tmp = TempDir::new().unwrap();
-        let manager = make_online_manager(tmp.path()).with_patches(Some(test_patch_config()));
+        let manager = make_online_manager(tmp.path()).with_patches(Some(unreachable_patch_config()));
         assert!(!manager.is_offline(), "setup: manager must be online");
 
         // Seed one installed base as a candidate symlink:
@@ -676,7 +702,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sync_patches_does_not_modify_base_resolve_json() {
         let tmp = TempDir::new().unwrap();
-        let manager = make_online_manager(tmp.path()).with_patches(Some(test_patch_config()));
+        let manager = make_online_manager(tmp.path()).with_patches(Some(unreachable_patch_config()));
 
         // Write a minimal resolve.json in a synthetic package directory.
         let pkg_dir = tmp.path().join("fake_pkg");
@@ -877,7 +903,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sync_mode_refetches_looked_no_descriptor_state() {
         let tmp = TempDir::new().unwrap();
-        let patch_config = test_patch_config();
+        let patch_config = unreachable_patch_config();
 
         // Offline manager — we use it for the LAZY test.
         let offline_manager = make_offline_manager(tmp.path()).with_patches(Some(patch_config.clone()));
@@ -986,7 +1012,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sync_mode_refetches_looked_has_descriptor_state() {
         let tmp = TempDir::new().unwrap();
-        let patch_config = test_patch_config();
+        let patch_config = unreachable_patch_config();
 
         let fs = ocx_store::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
         let blob_store = &fs.blobs;
@@ -1008,12 +1034,16 @@ mod tests {
         let manifest_bytes = manifest_json.as_bytes();
         let manifest_digest = ocx_oci::Algorithm::Sha256.hash(manifest_bytes);
 
+        // Seeded under the configured patch registry, not a literal: the CAS
+        // namespace is derived from it, so a seed written elsewhere is a
+        // descriptor the manager can never load and the `LookedHasDescriptor`
+        // precondition this test is named for would be half-built.
         blob_store
-            .write_blob("patches.corp.com", &manifest_digest, manifest_bytes)
+            .write_blob(UNREACHABLE_PATCH_REGISTRY, &manifest_digest, manifest_bytes)
             .await
             .unwrap();
         blob_store
-            .write_blob("patches.corp.com", &layer_digest, layer_bytes)
+            .write_blob(UNREACHABLE_PATCH_REGISTRY, &layer_digest, layer_bytes)
             .await
             .unwrap();
 
