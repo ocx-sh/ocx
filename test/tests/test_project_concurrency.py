@@ -19,7 +19,7 @@ document it opened. It never observes a short one, and never a splice of
 two.
 
 Spec sources:
-- ``crates/ocx_project/src/mutate.rs`` (``atomic_write``, the one writer)
+- ``crates/ocx_project/src/mutate.rs`` (``publish_by_rename``, the one writer of both project files)
 - ``crates/ocx_project/src/project_lock.rs`` (the scoped mutation lock)
 - ``crates/ocx_project/src/error.rs`` ``ProjectErrorKind::Locked`` →
   ``ExitCode::TempFail`` (75)

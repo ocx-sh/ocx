@@ -356,10 +356,9 @@ pub async fn read_manifest_snapshot(config_path: &Path) -> Result<ManifestSnapsh
 /// in memory.
 ///
 /// Pure: validates inputs, mutates `config` in place, returns the derived
-/// binding key on success. Performs NO filesystem I/O — callers handle
-/// lock acquisition + the rename publish separately (see
-/// [`crate::MutationGuard`] for the transactional commit path
-/// or [`add_binding`] for the legacy disk-touching API).
+/// binding key on success. Performs NO filesystem I/O — lock acquisition and
+/// the rename publish belong to [`crate::MutationGuard`], the one transactional
+/// commit path, which every `ocx add` goes through.
 ///
 /// `path` is used solely for error context (`ProjectError::new(path, ...)`)
 /// when surfacing structured errors; it is NOT read from or written to.
@@ -371,8 +370,9 @@ pub async fn read_manifest_snapshot(config_path: &Path) -> Result<ManifestSnapsh
 ///
 /// # Errors
 ///
-/// Same set as [`add_binding`] minus the I/O / parse variants
-/// (`Io`, `FileTooLarge`, `TomlParse`, `TomlSerialize`, `Locked`):
+/// The binding-specific refusals only — the I/O, parse and lock variants
+/// (`Io`, `FileTooLarge`, `TomlParse`, `TomlSerialize`, `Locked`) belong to
+/// the guard that reads and publishes the file, not to this:
 ///
 /// - [`ProjectErrorKind::InvalidGroupName`] — `group` is a reserved selector
 ///   (`default` or `all`, ASCII-case-folded).
@@ -448,126 +448,17 @@ pub fn add_binding_in_memory(
     Ok(key)
 }
 
-/// Append a binding to the project config file at `config_path`. If
-/// `group` is `None`, lands in the implicit default `[tools]` table;
-/// otherwise lands under `[group.<group>]`. `name` is the explicit binding
-/// key (`None` derives it from the identifier — see
-/// [`add_binding_in_memory`]).
-///
-/// Holds the scoped mutation lock under `locks_root` (`$OCX_HOME/locks`)
-/// for the duration of the read-modify-write cycle, then publishes the whole
-/// file by rename via [`publish_by_rename`].
-///
-/// # Errors
-///
-/// - [`ProjectErrorKind::InvalidGroupName`] — `group` is a reserved selector
-///   (`default` or `all`, ASCII-case-folded).
-/// - [`ProjectErrorKind::InvalidToolchainNameCharset`] — `group`, or the key
-///   this mutation would write, is not a name the reader accepts.
-/// - [`ProjectErrorKind::Io`] — the config file could not be read or written.
-/// - [`ProjectErrorKind::FileTooLarge`] — the config file exceeds the 64 KiB cap.
-/// - [`ProjectErrorKind::TomlParse`] — the config could not be parsed from TOML.
-/// - [`ProjectErrorKind::ManifestEditParse`] — the on-disk `ocx.toml` did not
-///   parse as an editable document during the format-preserving write-back.
-/// - [`ProjectErrorKind::ManifestEditDiverged`] — the format-preserving edit
-///   produced a document that no longer describes the staged configuration;
-///   the write is abandoned rather than falling back to a whole-file rewrite.
-/// - [`ProjectErrorKind::BindingAlreadyExists`] — the binding key already
-///   exists in the target group. The same name may exist in other groups
-///   without error.
-/// - [`ProjectErrorKind::Locked`] — another process holds the mutation lock
-///   for this config file; the caller should retry with backoff.
-pub async fn add_binding(
-    config_path: &Path,
-    locks_root: &Path,
-    identifier: &Identifier,
-    name: Option<&str>,
-    group: Option<&str>,
-) -> Result<(), Error> {
-    // Validate the group name before acquiring the lock so invalid input is
-    // rejected cheaply — no filesystem operations needed.
-    if let Some(group_name) = group {
-        validate_group_name(group_name, config_path)?;
-    }
-
-    let _guard = acquire_project_lock_for_file(config_path, locks_root).await?;
-
-    let ManifestSnapshot {
-        mut config,
-        text: original,
-    } = read_manifest_snapshot(config_path).await?;
-
-    // Compose: in-memory mutation + a rename-published write-back.
-    add_binding_in_memory(&mut config, config_path, identifier, name, group)?;
-
-    let serialized = super::document::render_preserving(&original, &config, config_path)?;
-    publish_by_rename_async(config_path, serialized.into_bytes()).await?;
-
-    Ok(())
-    // The mutation lock is released here, after the rename has landed.
-}
-
-/// Remove a binding from the project config file at `config_path`.
-///
-/// When `group` is `Some("default")` or `Some("<name>")` the removal is
-/// scoped to that specific group. When `group` is `None`, all groups are
-/// searched: 0 hits → `BindingNotFound`, 1 hit → removed, 2+ hits →
-/// `BindingAmbiguous` (caller should re-invoke with `--group`).
-///
-/// `name` is the binding key verbatim — the TOML `[tools]` key. Callers that
-/// hold an identifier derive it with [`binding_key`]; deriving it here would
-/// make a binding added under an explicit `NAME=IDENTIFIER` alias
-/// unremovable by its own name.
-///
-/// Holds the scoped mutation lock under `locks_root` (`$OCX_HOME/locks`)
-/// for the duration of the read-modify-write cycle, then publishes the whole
-/// file by rename via [`publish_by_rename`].
-///
-/// # Errors
-///
-/// - [`ProjectErrorKind::Io`] — the config file could not be read or written.
-/// - [`ProjectErrorKind::FileTooLarge`] — the config file exceeds the 64 KiB cap.
-/// - [`ProjectErrorKind::TomlParse`] — the config could not be parsed from TOML.
-/// - [`ProjectErrorKind::ManifestEditParse`] — the on-disk `ocx.toml` did not
-///   parse as an editable document during the format-preserving write-back.
-/// - [`ProjectErrorKind::ManifestEditDiverged`] — the format-preserving edit
-///   produced a document that no longer describes the staged configuration;
-///   the write is abandoned rather than falling back to a whole-file rewrite.
-/// - [`ProjectErrorKind::BindingNotFound`] — `name` was not found in the
-///   targeted group (or any group when `group` is `None`).
-/// - [`ProjectErrorKind::BindingAmbiguous`] — `group` is `None` and the
-///   binding name appears in more than one group; pass `--group` to
-///   disambiguate.
-/// - [`ProjectErrorKind::Locked`] — another process holds the mutation lock
-///   for this config file; the caller should retry with backoff.
-pub async fn remove_binding(
-    config_path: &Path,
-    locks_root: &Path,
-    name: &str,
-    group: Option<&str>,
-) -> Result<(), Error> {
-    let _guard = acquire_project_lock_for_file(config_path, locks_root).await?;
-
-    let ManifestSnapshot {
-        mut config,
-        text: original,
-    } = read_manifest_snapshot(config_path).await?;
-
-    remove_binding_in_memory(&mut config, config_path, name, group)?;
-
-    let serialized = super::document::render_preserving(&original, &config, config_path)?;
-    publish_by_rename_async(config_path, serialized.into_bytes()).await?;
-    Ok(())
-}
-
 /// Apply a `remove` binding mutation to a [`crate::config::ProjectConfig`]
 /// in memory.
 ///
-/// Pure counterpart to [`remove_binding`] — mutates `config` in place,
-/// performs NO filesystem I/O. `path` is used only for error context.
-/// See [`add_binding_in_memory`] for the full library/CLI split rationale.
+/// The `remove` sibling of [`add_binding_in_memory`] — mutates `config` in
+/// place, performs NO filesystem I/O. `path` is used only for error context.
+/// See that function for the full library/CLI split rationale.
 ///
-/// `name` is the binding key verbatim (see [`remove_binding`]).
+/// `name` is the binding key **verbatim** — the TOML `[tools]` key. Callers
+/// holding an identifier derive it with [`binding_key`]; deriving it here would
+/// make a binding added under an explicit `NAME=IDENTIFIER` alias unremovable
+/// by its own name.
 ///
 /// # Errors
 ///
@@ -747,7 +638,8 @@ pub fn init_project_at_default(project_root: &Path) -> Result<PathBuf, Error> {
 /// declarations the user did not make.
 ///
 /// Every write goes through [`acquire_project_lock_for_file`] and the shared
-/// format-preserving render, exactly as [`add_binding`] does. There is no
+/// format-preserving render, exactly as a [`crate::MutationGuard`] commit does.
+/// There is no
 /// second `toml_edit` site: a comment, a key order or a spacing convention
 /// that survives `ocx add` must survive this too, and two editors of one file
 /// format is how that stops being true.
@@ -766,7 +658,7 @@ pub fn init_project_at_default(project_root: &Path) -> Result<PathBuf, Error> {
 ///
 /// # Errors
 ///
-/// The [`add_binding`] set minus the binding-specific variants:
+/// The read-modify-write set, minus the binding-specific variants:
 /// [`ProjectErrorKind::Io`], [`ProjectErrorKind::FileTooLarge`],
 /// [`ProjectErrorKind::TomlParse`], [`ProjectErrorKind::ManifestEditParse`],
 /// [`ProjectErrorKind::ManifestEditDiverged`], [`ProjectErrorKind::Locked`].
@@ -831,6 +723,95 @@ mod tests {
     /// mutation API (which takes a config-file path, not a directory).
     fn toml(dir: &std::path::Path) -> std::path::PathBuf {
         dir.join("ocx.toml")
+    }
+
+    // ── the production mutation path, as a fixture ───────────────────────────
+
+    /// Run `mutate` through the sequence every binding command actually runs:
+    /// acquire the scoped mutation lock, snapshot `ocx.toml`, stage the
+    /// in-memory mutator against a clone, and commit — `ocx.lock` first, then
+    /// the format-preserving `ocx.toml` publish.
+    ///
+    /// This is the fixture the tests below drive instead of the `add_binding` /
+    /// `remove_binding` pair they used to call. That pair was `pub`, took the
+    /// filesystem itself, and had no production caller left once `ocx add` and
+    /// `ocx remove` moved onto [`MutationGuard`] — so every assertion here was
+    /// guarding a second write path nothing shipped. Routing them through the
+    /// guard makes the same assertions cover the code that runs.
+    ///
+    /// The resolver is the one production step not reproduced: it needs a
+    /// registry, and nothing below asserts on `ocx.lock`'s tool list. The lock
+    /// handed to `commit` is therefore an empty one carrying the candidate's
+    /// declaration hash — which is exactly what the commit's coherence gate
+    /// checks, so that gate is exercised rather than bypassed.
+    ///
+    /// `home` is derived as `locks_root`'s parent, matching the [`locks`]
+    /// fixture's `<dir>/.ocx-home/locks` layout.
+    async fn commit_through_guard<F>(config_path: &Path, locks_root: &Path, mutate: F) -> Result<(), Error>
+    where
+        F: FnOnce(&mut ProjectConfig) -> Result<(), Error>,
+    {
+        use crate::lock::{LockMetadata, LockVersion, ProjectLock};
+        use crate::mutation::MutationGuard;
+
+        let lock_path = crate::lock::lock_path_for(config_path);
+        let home = locks_root.parent().unwrap_or(locks_root).to_path_buf();
+
+        let mutate_lock = crate::acquire_project_lock_for_file(config_path, locks_root).await?;
+        let manifest = read_manifest_snapshot(config_path).await?;
+        let previous_bytes = tokio::fs::read(&lock_path).await.ok();
+        let previous = ProjectLock::from_path(&lock_path).await?;
+
+        let guard = MutationGuard::from_parts(
+            mutate_lock,
+            config_path.to_path_buf(),
+            lock_path,
+            home,
+            manifest,
+            previous,
+            previous_bytes,
+        );
+        let staged = guard.stage(mutate)?;
+
+        let new_lock = ProjectLock {
+            metadata: LockMetadata {
+                lock_version: LockVersion::V3,
+                declaration_hash_version: crate::DECLARATION_HASH_VERSION,
+                declaration_hash: staged.config().declaration_hash_cached().to_owned(),
+                generated_by: "ocx (test fixture)".to_owned(),
+                generated_at: "2026-01-01T00:00:00Z".to_owned(),
+            },
+            tools: Vec::new(),
+        };
+
+        guard.commit(staged, new_lock).await.map(|_| ())
+    }
+
+    /// Append a binding through the production path — the `ocx add` shape.
+    async fn add_binding(
+        config_path: &Path,
+        locks_root: &Path,
+        identifier: &Identifier,
+        name: Option<&str>,
+        group: Option<&str>,
+    ) -> Result<(), Error> {
+        commit_through_guard(config_path, locks_root, |config| {
+            add_binding_in_memory(config, config_path, identifier, name, group).map(|_| ())
+        })
+        .await
+    }
+
+    /// Drop a binding through the production path — the `ocx remove` shape.
+    async fn remove_binding(
+        config_path: &Path,
+        locks_root: &Path,
+        name: &str,
+        group: Option<&str>,
+    ) -> Result<(), Error> {
+        commit_through_guard(config_path, locks_root, |config| {
+            remove_binding_in_memory(config, config_path, name, group)
+        })
+        .await
     }
 
     // ── add_binding ──────────────────────────────────────────────────────────
