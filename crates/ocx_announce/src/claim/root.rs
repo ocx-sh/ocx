@@ -67,17 +67,46 @@ pub fn parse_repository(value: &str) -> Result<String, ClaimError> {
         })
 }
 
-/// Render the claim root's bytes (C-047).
+/// The claim root as a [`Value`], in C-047's fixed nine-field order (D-4).
+///
+/// A [`Value`] rather than bytes because a claim rewrites `desc` from the
+/// registry observation *after* the root is assembled and before it is
+/// serialized: parsing rendered bytes back would need its own failure mode for
+/// a document this function just produced, and a second `Map`-building site is
+/// exactly the field-order divergence the module doc warns about. The caller
+/// hands the result to `ocx_index::serialize_root`; there is no second
+/// serializer. That is observable, and it is what carries `ensure_ascii`: a
+/// non-ASCII scalar anywhere in the root emits as `\uXXXX`, and the document ends
+/// in exactly one `\n`.
 ///
 /// `created` is read from `ocx_index::current_date()` — a **date**, not a
 /// timestamp — so both renderings derive from one instant and one seam.
 ///
-/// The bytes go through `ocx_index::serialize_root`; there is no second
-/// serializer. That is observable, and it is what carries `ensure_ascii`: a
-/// non-ASCII scalar anywhere in the root emits as `\uXXXX`, and the document ends
-/// in exactly one `\n`.
+/// **`carried` is the committed root, not a set of overrides.** D-3's field
+/// table, in the order the fields are emitted:
+///
+/// | Field | Rule |
+/// |---|---|
+/// | `name`, `repository` | Always the arguments — the caller has already refused a committed root that disagrees. |
+/// | `owners` | Always the argument; the committed-first union is computed by the caller, which is where the resolved ids are. |
+/// | `status`, `deprecated_message`, `created` | Carried verbatim when present. `created` never resets — a re-claim is not a new claim. |
+/// | `desc` | Carried verbatim; the caller overwrites it when `observe_desc` reports the description moved. |
+/// | `upstream` | `--upstream-org` **replaces**; absent **carries**. A carried `null` is dropped rather than re-emitted, since the omit-never-null rule is this renderer's. |
+/// | `tags` | Carried verbatim. Claim never writes tags. |
+///
+/// Building a fresh map rather than mutating the parsed committed root is the
+/// whole point of the parameter: `preserve_order` keeps an inserted key where
+/// it already sat, so a newly supplied `upstream` would land *after* `tags` on
+/// a committed root that carried none (CONTRACTS §14).
 #[must_use]
-pub fn render_root(name: &str, repository: &str, owners: &[ResolvedOwner], upstream: Option<&Upstream>) -> Vec<u8> {
+pub(crate) fn build_root(
+    name: &str,
+    repository: &str,
+    owners: &[ResolvedOwner],
+    upstream: Option<&Upstream>,
+    carried: Option<&Value>,
+) -> Value {
+    let carried_field = |key: &str| carried.and_then(|root| root.get(key)).cloned();
     // `serde_json`'s `preserve_order` feature is on crate-wide, so `Map` is an
     // `IndexMap` and insertion order below *is* emission order. Fields are
     // inserted in C-047's order; nothing here may be reordered for tidiness.
@@ -100,10 +129,19 @@ pub fn render_root(name: &str, repository: &str, owners: &[ResolvedOwner], upstr
                 .collect(),
         ),
     );
-    root.insert("status".to_string(), Value::from("active"));
-    root.insert("deprecated_message".to_string(), Value::Null);
-    root.insert("created".to_string(), Value::from(ocx_index::current_date()));
-    root.insert("desc".to_string(), Value::Null);
+    root.insert(
+        "status".to_string(),
+        carried_field("status").unwrap_or_else(|| Value::from("active")),
+    );
+    root.insert(
+        "deprecated_message".to_string(),
+        carried_field("deprecated_message").unwrap_or(Value::Null),
+    );
+    root.insert(
+        "created".to_string(),
+        carried_field("created").unwrap_or_else(|| Value::from(ocx_index::current_date())),
+    );
+    root.insert("desc".to_string(), carried_field("desc").unwrap_or(Value::Null));
     if let Some(upstream) = upstream {
         // The OUTER object is omitted when absent; the INNER optionals are
         // omitted when absent too — the live root schema sets
@@ -118,9 +156,17 @@ pub fn render_root(name: &str, repository: &str, owners: &[ResolvedOwner], upstr
             object.insert("disclaimer".to_string(), Value::from(disclaimer.as_str()));
         }
         root.insert("upstream".to_string(), Value::Object(object));
+    } else if let Some(carried_upstream) = carried_field("upstream").filter(|value| !value.is_null()) {
+        // Absent flag carries the committed object — but never a committed
+        // `null`, which this renderer would not have written and which the
+        // live schema refuses.
+        root.insert("upstream".to_string(), carried_upstream);
     }
-    root.insert("tags".to_string(), Value::Object(Map::new()));
-    ocx_index::serialize_root(&Value::Object(root))
+    root.insert(
+        "tags".to_string(),
+        carried_field("tags").unwrap_or_else(|| Value::Object(Map::new())),
+    );
+    Value::Object(root)
 }
 
 #[cfg(test)]
@@ -229,6 +275,38 @@ mod tests {
 }
 "#;
 
+    /// The re-claimed root: every carried field verbatim, in C-047's order.
+    const CARRIED_ROOT: &str = r#"{
+  "name": "ocx.sh/acme/widget",
+  "repository": "oci://ghcr.io/acme/widget",
+  "owners": [
+    {
+      "login": "alice",
+      "id": 1234
+    }
+  ],
+  "status": "deprecated",
+  "deprecated_message": "Superseded by acme/widget2",
+  "created": "2020-03-04",
+  "desc": {
+    "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "title": "Widget",
+    "description": "A widget",
+    "keywords": [],
+    "readme": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "upstream": {
+    "org": "Committed Org"
+  },
+  "tags": {
+    "1.0.0": {
+      "content": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "observed": "2020-03-04T00:00:00Z"
+    }
+  }
+}
+"#;
+
     fn full_upstream() -> Upstream {
         Upstream {
             org: "Acme Org".to_string(),
@@ -237,8 +315,24 @@ mod tests {
         }
     }
 
+    /// A **fresh** claim's bytes: nothing carried.
     fn rendered(owners: &[ResolvedOwner], upstream: Option<&Upstream>) -> String {
-        String::from_utf8(render_root(NAME, REPOSITORY, owners, upstream)).expect("the root is valid UTF-8")
+        String::from_utf8(ocx_index::serialize_root(&build_root(
+            NAME, REPOSITORY, owners, upstream, None,
+        )))
+        .expect("the root is valid UTF-8")
+    }
+
+    /// A **re-claim**'s bytes, rebuilt over `carried`.
+    fn re_rendered(owners: &[ResolvedOwner], upstream: Option<&Upstream>, carried: &Value) -> String {
+        String::from_utf8(ocx_index::serialize_root(&build_root(
+            NAME,
+            REPOSITORY,
+            owners,
+            upstream,
+            Some(carried),
+        )))
+        .expect("the root is valid UTF-8")
     }
 
     /// C-047 — the whole nine-field root, **byte for byte** (renamed from
@@ -277,6 +371,87 @@ mod tests {
             rendered(&[alice()], None),
             MINIMAL_ROOT,
             "a first-party claim omits `upstream` entirely and still emits both `null` fields"
+        );
+    }
+
+    /// The committed root every re-claim row below rebuilds from: deprecated,
+    /// described, upstreamed, with one curated tag and a `created` date that is
+    /// deliberately not the pinned clock's.
+    fn carried() -> Value {
+        serde_json::json!({
+            "name": NAME,
+            "repository": REPOSITORY,
+            "owners": [{ "login": "alice", "id": 1234 }],
+            "status": "deprecated",
+            "deprecated_message": "Superseded by acme/widget2",
+            "created": "2020-03-04",
+            "desc": {
+                "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "title": "Widget",
+                "description": "A widget",
+                "keywords": [],
+                "readme": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            },
+            "upstream": { "org": "Committed Org" },
+            "tags": { "1.0.0": { "content": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "observed": "2020-03-04T00:00:00Z" } },
+        })
+    }
+
+    /// D-3 / D-4 — every carried field rides through a re-claim verbatim, and
+    /// the nine fields still emit in C-047's order.
+    ///
+    /// Asserted as BYTES against a literal, for the reason the module doc
+    /// gives: `IndexMap::eq` is order-independent, so a parsed-value compare
+    /// would pass for a renderer that appended `upstream` after `tags` — which
+    /// is exactly what mutating the parsed committed root in place produces.
+    /// The clock is pinned to a date the fixture does NOT carry, so a build
+    /// that re-renders `created` reds here rather than agreeing with itself.
+    ///
+    /// Reds on: resetting `created`, `status`, `deprecated_message`, `desc` or
+    /// `tags` to their fresh-claim values; appending a carried `upstream` out
+    /// of order.
+    #[test]
+    fn a_reclaim_carries_every_committed_field_in_order() {
+        let _seam = ClockSeam::pinned(PINNED_INSTANT);
+
+        assert_eq!(
+            re_rendered(&[alice()], None, &carried()),
+            CARRIED_ROOT,
+            "status, deprecated_message, created, desc, upstream and tags all ride through, in order"
+        );
+    }
+
+    /// D-3 — `--upstream-org` given REPLACES the carried object; and a carried
+    /// `upstream: null` is dropped rather than re-emitted.
+    ///
+    /// The null row is the one a naive carry gets wrong: this renderer's rule
+    /// is omit-never-null for `upstream`, so echoing a committed `null` back
+    /// would ship a root the live schema refuses. Paired with the replace half,
+    /// which is what makes it a check rather than a test of a renderer that
+    /// never emits `upstream` at all.
+    ///
+    /// Reds on: carrying the committed object over a supplied flag; re-emitting
+    /// a carried `null`.
+    #[test]
+    fn a_given_upstream_replaces_the_carried_one_and_a_carried_null_is_dropped() {
+        let _seam = ClockSeam::pinned(PINNED_INSTANT);
+
+        let replaced = re_rendered(&[alice()], Some(&full_upstream()), &carried());
+        assert!(
+            replaced.contains("\"org\": \"Acme Org\""),
+            "the flag wins over the committed object: {replaced}"
+        );
+        assert!(
+            !replaced.contains("Committed Org"),
+            "and the committed one is gone, not merged beside it: {replaced}"
+        );
+
+        let mut null_upstream = carried();
+        null_upstream["upstream"] = Value::Null;
+        let carried_null = re_rendered(&[alice()], None, &null_upstream);
+        assert!(
+            !carried_null.contains("upstream"),
+            "a committed `null` is dropped, never echoed back: {carried_null}"
         );
     }
 

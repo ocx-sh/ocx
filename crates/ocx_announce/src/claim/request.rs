@@ -118,7 +118,7 @@ pub struct Upstream {
 /// Whether a value may be written into [`Upstream::repository_url`].
 ///
 /// A real parse, not a prefix test, because the value reaches a **committed**
-/// index root verbatim ([`super::root::render_root`]) and a catalog renders it
+/// index root verbatim ([`super::root::build_root`]) and a catalog renders it
 /// as an `href`. Two properties have to hold at once:
 ///
 /// - **`http` or `https` scheme** (DX-64). `javascript:` or `data:` would become

@@ -595,21 +595,23 @@ mod tests {
     }
 
     #[test]
-    fn envelope_detail_populated_for_package_already_claimed() {
-        // #458: the idempotent-CI steady state ("already claimed, go announce")
-        // exited 65 with no `detail`, so an SDK could not tell it from any
-        // other DataError without matching on the message text.
-        let inner = ocx_announce::claim::ClaimError::PackageAlreadyClaimed {
-            package: "acme/widget".into(),
-            path: "p/acme/widget.json".into(),
-            base_ref: "main".into(),
+    fn envelope_detail_populated_for_a_claim_data_error() {
+        // #458: a claim refusal used to exit 65 with no `detail`, so an SDK
+        // could not tell it from any other DataError without matching on the
+        // message text. The fixture is `RepositoryMismatch` because #481
+        // deleted `PackageAlreadyClaimed` -- an already-claimed package is a
+        // re-claim now, so the 65 a claim can still reach is a committed root
+        // that disagrees with the command line.
+        let inner = ocx_announce::claim::ClaimError::RepositoryMismatch {
+            committed: "oci://ghcr.io/acme/widget".into(),
+            supplied: "oci://quay.io/acme/widget".into(),
         };
         let err = anyhow::Error::from(inner);
         let json = render_error_envelope("package claim", &err).expect("render ok");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         assert_eq!(parsed["exit_code"], 65);
         assert_eq!(parsed["error"]["kind"], "data_error");
-        assert_eq!(parsed["error"]["detail"], "package_already_claimed");
+        assert_eq!(parsed["error"]["detail"], "repository_mismatch");
     }
 
     #[test]

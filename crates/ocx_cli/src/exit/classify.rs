@@ -1239,15 +1239,17 @@ mod tests {
         use ocx_announce::claim::ClaimError;
         use ocx_announce::forge::ForgeError;
 
-        let already_claimed = ClaimError::PackageAlreadyClaimed {
-            package: "acme/widget".to_string(),
-            path: "p/acme/widget.json".to_string(),
-            base_ref: "main".to_string(),
+        // #481 deleted `PackageAlreadyClaimed`: an already-claimed package is a
+        // re-claim, so the 65 row is now the committed root that disagrees with
+        // the command line.
+        let repository_mismatch = ClaimError::RepositoryMismatch {
+            committed: "oci://ghcr.io/acme/widget".to_string(),
+            supplied: "oci://quay.io/acme/widget".to_string(),
         };
         assert_eq!(
-            classify(already_claimed),
+            classify(repository_mismatch),
             ExitCode::DataError,
-            "65 — go announce instead"
+            "65 — the committed pointer and the flag disagree"
         );
 
         let unknown_owner = ClaimError::OwnerUnknown {

@@ -170,7 +170,7 @@ impl ClassifyExitCode for ClaimError {
     /// |---|---|
     /// | `ForgeRequired`, `MissingBaseRef`, `MissingHeadRoot` | `None` — broken invariant, exit 1 |
     /// | `MalformedRepository`, `NoActingIdentity`, `InvalidOwnerLogin`, `DuplicateOwner`, `OwnerIdMismatch`, `BotIdentity` | `UsageError` (64) |
-    /// | `PackageAlreadyClaimed`, `RootNameMismatch`, `RepositoryMismatch` | `DataError` (65) |
+    /// | `RootNameMismatch`, `RepositoryMismatch` | `DataError` (65) |
     /// | `OwnerUnknown` | `NotFound` (79) |
     /// | `OutputWrite` | `IoError` (74) |
     /// | `Description(inner)`, `Forge(inner)` | `inner.classify()` — explicit, see the module doc |
@@ -184,14 +184,10 @@ impl ClassifyExitCode for ClaimError {
             | Self::DuplicateOwner { .. }
             | Self::OwnerIdMismatch { .. }
             | Self::BotIdentity { .. } => Some(ExitCode::UsageError),
-            Self::PackageAlreadyClaimed { .. } => Some(ExitCode::DataError),
             // The committed root and the command line disagree about which
             // package this is, or about where its bytes come from. Nothing is
             // malformed and nothing is absent; a human decides which side
-            // moves — announce's `RootNameMismatch` category exactly. A
-            // separate arm rather than an alternative joined onto the one
-            // above: that one is a frozen classification row, and widening its
-            // pattern re-points the row instead of adding beside it.
+            // moves — announce's `RootNameMismatch` category exactly.
             Self::RootNameMismatch { .. } | Self::RepositoryMismatch { .. } => Some(ExitCode::DataError),
             Self::OwnerUnknown { .. } => Some(ExitCode::NotFound),
             Self::OutputWrite { .. } => Some(ExitCode::IoError),
@@ -222,7 +218,6 @@ impl ClassifyErrorKind for ClaimError {
         match self {
             Self::ForgeRequired => "forge_required",
             Self::MalformedRepository { .. } => "malformed_repository",
-            Self::PackageAlreadyClaimed { .. } => "package_already_claimed",
             Self::RootNameMismatch { .. } => "root_name_mismatch",
             Self::RepositoryMismatch { .. } => "repository_mismatch",
             Self::Description(_) => "description",
@@ -574,7 +569,6 @@ mod tests {
         let expected = [
             "forge_required",
             "malformed_repository",
-            "package_already_claimed",
             "no_acting_identity",
             "invalid_owner_login",
             "duplicate_owner",
@@ -852,11 +846,6 @@ mod tests {
             ClaimError::ForgeRequired,
             ClaimError::MalformedRepository {
                 value: "ghcr.io/acme/widget".to_string(),
-            },
-            ClaimError::PackageAlreadyClaimed {
-                package: "acme/widget".to_string(),
-                path: "p/acme/widget.json".to_string(),
-                base_ref: "main".to_string(),
             },
             ClaimError::NoActingIdentity,
             ClaimError::InvalidOwnerLogin {

@@ -3,12 +3,14 @@
 
 //! `ocx package claim` orchestration (ADR `adr_index_claim_command.md`).
 //!
-//! A publisher claims a package once, before its first `ocx package announce`:
-//! claim renders the package's index root from structured flags, opens a pull
-//! request against `ocx-sh/index`, and leaves the merge to that repository's
-//! human governance gate. Announce refuses an unclaimed package at exit 79;
-//! claim refuses an already-claimed one at exit 65 (C-050). The two codes are the
-//! pair a release wrapper branches on (S-037).
+//! A publisher claims a package: claim renders the package's index root from
+//! structured flags, opens a pull request against `ocx-sh/index`, and leaves
+//! the merge to that repository's human governance gate. Announce refuses an
+//! **unclaimed** package at exit 79; claim over an **already-claimed** one is a
+//! re-claim, not a refusal ([#481], D-3) — it adds the caller's owners to the
+//! committed list and carries every other committed field through.
+//!
+//! [#481]: https://github.com/ocx-sh/ocx/issues/481
 //!
 //! Forge-neutral and transport-blind **by construction**: `commit_files` and
 //! `open_or_update_pull_request` dispatch on the transport *inside* the forge,
@@ -32,17 +34,19 @@ pub use request::{
     ClaimOutcome, ClaimRequest, ClaimStatus, ClaimTarget, OwnerIdentitySource, OwnerSpec, Upstream, request_body,
     request_title, upstream_repository_url_is_publishable,
 };
-pub use root::{parse_repository, render_root, root_name};
+pub use root::{parse_repository, root_name};
 
 use std::collections::BTreeMap;
 use std::path::Path;
+
+use serde_json::Value;
 
 use crate::forge::{
     BranchComparison, CommitBase, FileChange, Forge, ForgeError, PushAccess, RefUpdate, RepoCoordinate,
 };
 
-/// The base branch of the index repository — the ref the C-050 refusal reads and
-/// the ref every claim commit is parented on.
+/// The base branch of the index repository — the ref the re-claim path reads the
+/// committed root from, and the ref every claim commit is parented on.
 pub const INDEX_BASE_REF: &str = "main";
 
 /// The claim branch for `package` (C-054).
@@ -69,19 +73,20 @@ pub fn root_path(package: &str) -> String {
 
 /// Claim one package.
 ///
-/// `forge` is `Some` in every mode: `--out` still reads the committed root for the
-/// C-050 refusal and still resolves owners. S-011's `push-access: skipped` under
+/// `forge` is `Some` in every mode: `--out` still reads the committed root to
+/// rebuild from and still resolves owners. S-011's `push-access: skipped` under
 /// `--out` is satisfied by **not calling `ensure_push_access`** on that path — the
 /// rows then come from `PushAccess::skipped_all()` — never by a forge answering
 /// `skipped`, which on GitHub would mean an unreadable `permissions` and exit 80.
 ///
 /// # Errors
 ///
-/// Returns a [`ClaimError`] for a missing forge, a malformed `--repository`, an
-/// already-claimed package, any owner-ladder refusal, a missing base ref, a
-/// race lost twice (`NonFastForward` under `api`, `StaleLease` under `git`), an
-/// `--out` write failure, or any forge failure.
-pub async fn claim(forge: Option<&dyn Forge>, request: ClaimRequest) -> Result<ClaimOutcome, ClaimError> {
+/// Returns a [`ClaimError`] for a missing forge, a malformed `--repository`, a
+/// committed root naming another package ([`ClaimError::RootNameMismatch`]) or
+/// another physical repository ([`ClaimError::RepositoryMismatch`]), any
+/// owner-ladder refusal, a missing base ref, a race lost twice (`NonFastForward` under `api`,
+/// `StaleLease` under `git`), an `--out` write failure, or any forge failure.
+pub async fn claim(request: ClaimRequest, forge: Option<&dyn Forge>) -> Result<ClaimOutcome, ClaimError> {
     let forge = forge.ok_or(ClaimError::ForgeRequired)?;
     let package = request.package.repository().to_string();
     let root_path = root_path(&package);
@@ -89,29 +94,53 @@ pub async fn claim(forge: Option<&dyn Forge>, request: ClaimRequest) -> Result<C
     // and the ref actually written cannot diverge.
     let branch = claim_branch(&package);
     let repository = parse_repository(&request.repository)?;
+    let name = root_name(&request.package);
 
-    // C-050 — the refusal reads the index BASE ref, never the claim branch: a
-    // re-run of an unmerged claim must report `unchanged`, not 65. It runs
-    // before anything is written, `--out` included.
-    if forge
+    // D-3 — the committed root is read from the index BASE ref, never the claim
+    // branch: an unmerged claim sitting on the branch is a re-run of *this*
+    // claim, not a committed one. Read in every mode, `--out` included, because
+    // it is what a re-claim rebuilds from.
+    let committed_bytes = forge
         .get_file_contents(&request.index_repo, &root_path, INDEX_BASE_REF)
-        .await?
-        .is_some()
-    {
-        return Err(ClaimError::PackageAlreadyClaimed {
-            package,
-            path: root_path,
-            base_ref: INDEX_BASE_REF.to_string(),
-        });
+        .await?;
+    // A committed root that is not JSON is answered by the `name` refusal below
+    // rather than by a variant of its own: `get("name")` on `Value::Null` is
+    // `None`, which D-5 already rules a mismatch (`committed: ""`). A corrupt
+    // root in the published index is exactly the "two sides disagree, a human
+    // decides" case that refusal names, at the same exit 65.
+    let committed: Option<Value> = committed_bytes
+        .as_deref()
+        .map(|bytes| serde_json::from_slice(bytes).unwrap_or(Value::Null));
+
+    if let Some(committed) = &committed {
+        // D-5 (#477) — the expected value is `root_name`'s, the one spelling
+        // announce's sibling refusal also reads. An absent `name` fails closed.
+        let committed_name = committed.get("name").and_then(Value::as_str).unwrap_or_default();
+        if committed_name != name {
+            return Err(ClaimError::RootNameMismatch {
+                committed: committed_name.to_string(),
+                expected: name,
+            });
+        }
+        // D-3 — refused rather than updated: the pointer decides where a
+        // package's bytes come from, and repointing it must not be a side
+        // effect of adding an owner.
+        let committed_repository = committed.get("repository").and_then(Value::as_str).unwrap_or_default();
+        if committed_repository != repository {
+            return Err(ClaimError::RepositoryMismatch {
+                committed: committed_repository.to_string(),
+                supplied: repository,
+            });
+        }
     }
 
     let OwnerResolution {
-        owners,
+        owners: resolved,
         source,
         author,
         author_identity_source,
     } = resolve_owners(forge, &request.owners).await?;
-    let name = root_name(&request.package);
+    let owners = merge_owners(committed.as_ref(), resolved);
     // C-072 — who this claims for, on stderr, BEFORE any write. The word is
     // read from `source` here and again from `ClaimOutcome::owner_identity_source`
     // by the report and the request body, so the three cannot disagree.
@@ -123,7 +152,14 @@ pub async fn claim(forge: Option<&dyn Forge>, request: ClaimRequest) -> Result<C
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let root_bytes = render_root(&name, &repository, &owners, request.upstream.as_ref());
+    let root = root::build_root(
+        &name,
+        &repository,
+        &owners,
+        request.upstream.as_ref(),
+        committed.as_ref(),
+    );
+    let root_bytes = ocx_index::serialize_root(&root);
 
     // `--out` writes the tree and stops: no branch exists to be unchanged
     // against, so the run is ALWAYS `updated`, and `ensure_push_access` is not
@@ -143,6 +179,28 @@ pub async fn claim(forge: Option<&dyn Forge>, request: ClaimRequest) -> Result<C
             pull_request: None,
             fork: None,
             written_paths,
+            push_access: PushAccess::skipped_all(),
+        });
+    }
+
+    // D-3's no-op: the index already holds, byte for byte, what this claim
+    // would propose. No new blob and no orphan can hide behind that equality —
+    // a byte-identical root records the same `desc` digest, so its payload
+    // blobs are the ones the committed root already names, and `orphan_paths`
+    // over two equal roots is empty by construction.
+    if committed_bytes.as_deref() == Some(root_bytes.as_slice()) {
+        return Ok(ClaimOutcome {
+            package,
+            name,
+            status: ClaimStatus::Unchanged,
+            owners,
+            owner_identity_source: source,
+            author,
+            author_identity_source,
+            branch,
+            pull_request: None,
+            fork: None,
+            written_paths: Vec::new(),
             push_access: PushAccess::skipped_all(),
         });
     }
@@ -440,6 +498,47 @@ async fn write_out(directory: &Path, relative: &str, bytes: &[u8]) -> Result<Vec
             source,
         })?;
     Ok(vec![relative.to_string()])
+}
+
+/// The re-claim owner union (D-3): every committed owner first, in the order the
+/// committed root records them, then each resolved owner the committed list does
+/// not already hold.
+///
+/// **Dedupe is by `id`, never by login.** `claim::owners` already replaces a
+/// supplied spelling with the forge's canonical one, so two spellings of one
+/// account arrive here as one id — while two accounts can share no id. Matching
+/// on the login instead would append a second entry for the same account
+/// whenever the committed root spells it differently from the command line.
+///
+/// A committed entry that is not the contracted `{login, id}` object is skipped
+/// with a debug line rather than carried: [`ResolvedOwner`] is what every
+/// downstream surface reads (the rendered root, the request body, the report),
+/// so there is nowhere to put a foreign shape. `owners` is schema-typed, so the
+/// skip is unreachable against a root the index would accept.
+fn merge_owners(committed: Option<&Value>, resolved: Vec<ResolvedOwner>) -> Vec<ResolvedOwner> {
+    let Some(entries) = committed.and_then(|root| root.get("owners")).and_then(Value::as_array) else {
+        return resolved;
+    };
+    let mut owners: Vec<ResolvedOwner> = entries
+        .iter()
+        .filter_map(|entry| {
+            let owner = entry
+                .get("login")
+                .and_then(Value::as_str)
+                .zip(entry.get("id").and_then(Value::as_u64))
+                .map(|(login, id)| ResolvedOwner {
+                    login: login.to_string(),
+                    id,
+                });
+            if owner.is_none() {
+                tracing::debug!(%entry, "committed root carries an owner that is not a login/id pair; skipped");
+            }
+            owner
+        })
+        .collect();
+    let committed_ids: std::collections::HashSet<u64> = owners.iter().map(|owner| owner.id).collect();
+    owners.extend(resolved.into_iter().filter(|owner| !committed_ids.contains(&owner.id)));
+    owners
 }
 
 /// The claim orchestration's tests, plus the [`FakeForge`] double they and the
@@ -751,6 +850,9 @@ pub(crate) mod tests {
 
     pub(crate) const PACKAGE: &str = "acme/widget";
     pub(crate) const ROOT_PATH: &str = "p/acme/widget.json";
+    /// The physical pointer every fixture claims against. Never dialled — it is
+    /// recorded verbatim in the root (C-047).
+    pub(crate) const PHYSICAL: &str = "oci://ghcr.io/acme/widget";
     pub(crate) const CLAIM_BRANCH: &str = "indexbot-claim-acme-widget";
     pub(crate) const BASE_SHA: &str = "basesha";
 
@@ -765,7 +867,7 @@ pub(crate) mod tests {
     fn request(target: ClaimTarget) -> ClaimRequest {
         ClaimRequest {
             package: ocx_oci::Identifier::new_registry(PACKAGE, "ocx.sh"),
-            repository: "oci://ghcr.io/acme/widget".to_string(),
+            repository: PHYSICAL.to_string(),
             owners: vec![OwnerSpec::Resolved {
                 login: "alice".to_string(),
                 id: 1234,
@@ -881,7 +983,7 @@ pub(crate) mod tests {
         let _clock = pinned_clock();
         let forge = first_claim_forge();
 
-        let outcome = block_on(claim(Some(&forge), request(ClaimTarget::Direct))).expect("the first claim succeeds");
+        let outcome = block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect("the first claim succeeds");
 
         assert_eq!(outcome.branch, CLAIM_BRANCH);
         let committed_branches: Vec<String> = forge
@@ -899,58 +1001,379 @@ pub(crate) mod tests {
         );
     }
 
-    // ── C-050: an already-claimed package ────────────────────────────────────
+    // ── D-3 / D-5: a committed root is a re-claim ────────────────────────────
 
-    /// C-050 — a root already committed on the **index base ref** is refused at
-    /// exit 65, naming `ocx package announce`, in every mode.
+    /// The `created` date the committed fixtures carry — deliberately NOT the
+    /// pinned clock's date, so a build that resets `created` on a re-claim
+    /// produces a different document and every byte assertion below reds.
+    const COMMITTED_DATE: &str = "2020-03-04";
+
+    /// A committed root for `acme/widget`, carrying `owners` verbatim and one
+    /// curated tag.
     ///
-    /// Three things no existing test asserts: that an already-*committed* root is
-    /// what produces the 65 (rather than merely that some error yields it), that
-    /// the **base ref** and not the claim branch is what is read, and that the
-    /// refusal survives `--out`.
+    /// Serialized through `ocx_index::serialize_root`, never
+    /// `serde_json::to_vec`: the re-claim no-op compares BYTES, and a fixture
+    /// written by a second emitter would differ in indentation alone — which
+    /// would make every `Unchanged` row below pass for the wrong reason, or
+    /// fail for one.
+    fn committed_root(owners: serde_json::Value) -> Vec<u8> {
+        ocx_index::serialize_root(&serde_json::json!({
+            "name": "ocx.sh/acme/widget",
+            "repository": PHYSICAL,
+            "owners": owners,
+            "status": "active",
+            "deprecated_message": Value::Null,
+            "created": COMMITTED_DATE,
+            "desc": Value::Null,
+            "tags": {
+                "1.0.0": {
+                    "content": format!("sha256:{}", "c".repeat(64)),
+                    "observed": "2020-03-04T00:00:00Z",
+                },
+            },
+        }))
+    }
+
+    /// Put `root` on the index BASE ref, which is what makes the run a re-claim.
+    fn seed_committed(forge: &mut FakeForge, root: Vec<u8>) {
+        forge
+            .files
+            .insert((INDEX_BASE_REF.to_string(), ROOT_PATH.to_string()), root);
+    }
+
+    /// The owner entry every fixture starts from.
+    fn alice_entry() -> serde_json::Value {
+        serde_json::json!([{ "login": "alice", "id": 1234 }])
+    }
+
+    /// The root one recorded `commit_files` call wrote, parsed.
+    fn committed_root_value(forge: &FakeForge) -> Value {
+        serde_json::from_str(&committed_root_text(
+            &forge
+                .calls()
+                .into_iter()
+                .find_map(|call| match call {
+                    Call::CommitFiles { files, .. } => Some(files),
+                    _ => None,
+                })
+                .expect("a commit was made"),
+        ))
+        .expect("the committed root is JSON")
+    }
+
+    /// D-3 — a second claim ADDS the caller's owners to the committed list
+    /// instead of exiting 65, and carries every other committed field through.
     ///
-    /// Reds on: reading the branch instead of the base (an idempotent re-run of an
-    /// unmerged claim then exits 65 instead of reporting `unchanged`), gating the
-    /// check on `target != Out`, or dropping the remedy from the message.
+    /// The row that replaced `package_already_claimed_is_refused_at_data_error`:
+    /// its contract is reversed, so the old test is not weakened but wrong.
+    /// Driven over `Direct` and `--out` together, because C-050 held in every
+    /// mode and its replacement has to as well — an `--out` re-claim that still
+    /// refused would be invisible to a `Direct`-only row.
+    ///
+    /// Four assertions in one run, because each alone passes for a different
+    /// wrong build: the union ORDER (committed first) fails an implementation
+    /// that rebuilds the list from the resolved owners; `created` fails one that
+    /// re-renders the field from the clock; `tags` fails one that emits the
+    /// fresh-claim `{}`; and the nine-field ORDER fails one that mutates the
+    /// parsed committed root in place.
+    ///
+    /// Reds on: restoring the refusal (no commit at all); rebuilding `owners`
+    /// from the resolved list; `created` from `current_date()`; `tags` from
+    /// `Map::new()`.
     #[test]
-    fn package_already_claimed_is_refused_at_data_error() {
+    fn a_reclaim_appends_the_callers_owner_to_the_committed_list() {
         let output = tempfile::TempDir::new().expect("a temp dir is created");
-        for target in [ClaimTarget::Direct, ClaimTarget::Out(output.path().to_path_buf())] {
+        for (index, target) in [ClaimTarget::Direct, ClaimTarget::Out(output.path().to_path_buf())]
+            .into_iter()
+            .enumerate()
+        {
             let _clock = pinned_clock();
             let mut forge = first_claim_forge();
             forge
-                .files
-                .insert((INDEX_BASE_REF.to_string(), ROOT_PATH.to_string()), b"{}\n".to_vec());
+                .users
+                .as_mut()
+                .expect("the users API is reachable")
+                .insert("bob".to_string(), identity("bob", 77, false));
+            seed_committed(&mut forge, committed_root(alice_entry()));
 
-            let error = block_on(claim(Some(&forge), request(target))).expect_err("a committed root refuses the claim");
-            assert!(
-                matches!(&error, ClaimError::PackageAlreadyClaimed { path, base_ref, .. }
-                    if path == ROOT_PATH && base_ref == INDEX_BASE_REF),
-                "the refusal names the committed path on the base ref: {error:?}"
-            );
-            assert!(
-                error.to_string().contains("ocx package announce"),
-                "the message points the operator at the command that does work here: {error}"
-            );
+            let mut request = request(target);
+            request.owners = vec![OwnerSpec::Login("bob".to_string())];
+            let outcome = block_on(claim(request, Some(&forge)))
+                .unwrap_or_else(|error| panic!("row {index}: a re-claim is not a refusal: {error:?}"));
+
             assert_eq!(
-                std::fs::read_dir(output.path())
-                    .expect("the out dir is readable")
-                    .count(),
-                0,
-                "under --out the refusal happens before anything is written"
+                outcome.owners,
+                vec![
+                    ResolvedOwner {
+                        login: "alice".to_string(),
+                        id: 1234
+                    },
+                    ResolvedOwner {
+                        login: "bob".to_string(),
+                        id: 77
+                    },
+                ],
+                "row {index}: committed order first, the caller appended"
+            );
+            assert_eq!(outcome.status, ClaimStatus::Updated, "row {index}");
+
+            let root: Value = match index {
+                0 => committed_root_value(&forge),
+                _ => serde_json::from_slice(
+                    &std::fs::read(output.path().join(ROOT_PATH)).expect("the --out root is readable"),
+                )
+                .expect("the --out root is JSON"),
+            };
+            assert_eq!(
+                root["created"], COMMITTED_DATE,
+                "row {index}: `created` records when the package was claimed, not when it was re-claimed"
+            );
+            assert!(
+                root["tags"].get("1.0.0").is_some(),
+                "row {index}: claim never writes tags, so the committed set rides through: {root}"
+            );
+            let fields: Vec<&str> = root
+                .as_object()
+                .expect("the root is an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                fields,
+                vec![
+                    "name",
+                    "repository",
+                    "owners",
+                    "status",
+                    "deprecated_message",
+                    "created",
+                    "desc",
+                    "tags"
+                ],
+                "row {index}: CONTRACTS field order is a wire contract, and `upstream` is absent here"
             );
         }
     }
 
-    /// The mirror image: a root sitting on the **claim branch** — an unmerged,
-    /// re-run claim — is not an already-claimed package.
+    /// D-3 — an owner the committed root already records changes nothing:
+    /// `Unchanged`, exit 0, and no write of any kind.
     ///
-    /// This is the positive control for the assertion above. Without it, an
-    /// implementation that reads neither ref passes the refusal test.
+    /// The dedupe key is the resolved **id**, and this row is built so the two
+    /// candidate keys disagree: the committed entry spells the login
+    /// `alice-renamed` while the forge canonicalises the supplied one to
+    /// `alice`, both at id 1234. Under id-dedupe nothing is appended and the
+    /// re-rendered root is byte-identical to the committed one; under
+    /// login-dedupe a second entry for the same account is appended and the run
+    /// commits. No assertion on the outcome alone could tell those apart, which
+    /// is why the call counts are asserted too.
     ///
-    /// Reds on: reading the branch ref for the C-050 check.
+    /// Reds on: deduping by login; dropping the byte-identical short-circuit
+    /// (the run then commits an identical root and opens a request).
     #[test]
-    fn an_unmerged_claim_on_the_branch_is_not_already_claimed() {
+    fn a_reclaim_whose_owner_is_already_recorded_writes_nothing() {
+        let _clock = pinned_clock();
+        let mut forge = first_claim_forge();
+        seed_committed(
+            &mut forge,
+            committed_root(serde_json::json!([{ "login": "alice-renamed", "id": 1234 }])),
+        );
+
+        let outcome =
+            block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect("a re-claim that adds nothing succeeds");
+
+        assert_eq!(outcome.status, ClaimStatus::Unchanged);
+        assert_eq!(
+            outcome.owners,
+            vec![ResolvedOwner {
+                login: "alice-renamed".to_string(),
+                id: 1234
+            }],
+            "the committed spelling is kept; the id is what says the account is already there"
+        );
+        assert_eq!(forge.commit_calls(), 0, "nothing changed, so nothing is written");
+        assert_eq!(forge.pull_request_calls(), 0, "and no request is opened");
+        assert!(outcome.pull_request.is_none());
+    }
+
+    /// D-3 — `--repository` must equal the committed pointer; a disagreement is
+    /// refused at exit 65 naming both values.
+    ///
+    /// Refused rather than updated: the pointer decides where a package's bytes
+    /// come from, so repointing it must not be a side effect of adding an
+    /// owner. The refusal runs BEFORE the owner ladder, which the call log
+    /// asserts — an operator who typed the wrong pointer must not first be told
+    /// their login is unknown.
+    ///
+    /// Reds on: writing the supplied pointer into the rebuilt root; moving the
+    /// check below `resolve_owners`.
+    #[test]
+    fn a_reclaim_refuses_a_repository_that_disagrees() {
+        let _clock = pinned_clock();
+        let mut forge = first_claim_forge();
+        seed_committed(&mut forge, committed_root(alice_entry()));
+
+        let mut request = request(ClaimTarget::Direct);
+        request.repository = "oci://127.0.0.1/other".to_string();
+        let error = block_on(claim(request, Some(&forge))).expect_err("a re-claim may not repoint the repository");
+
+        assert!(
+            matches!(&error, ClaimError::RepositoryMismatch { committed, supplied }
+                if committed == PHYSICAL && supplied == "oci://127.0.0.1/other"),
+            "the refusal names both sides so an operator can see which to fix: {error:?}"
+        );
+        assert!(
+            !forge.calls().iter().any(|call| matches!(call, Call::ResolveUser(_))),
+            "the disagreement is decidable without the owner ladder, so it runs first: {:?}",
+            forge.calls()
+        );
+    }
+
+    /// D-5 (#477) — a committed root whose `name` is another package is refused
+    /// at exit 65, and an **absent** `name` counts as a mismatch.
+    ///
+    /// The absent row is the one a fail-open build passes: reading `name` with
+    /// `unwrap_or(&expected)` — or skipping the check when the key is missing —
+    /// silently re-claims whatever document sits at that path. The expected
+    /// value comes from `root_name`, the same spelling announce's sibling
+    /// refusal reads, so the two cannot drift.
+    ///
+    /// Reds on: treating an absent `name` as agreement; comparing against a
+    /// second spelling of the expected value.
+    #[test]
+    fn a_reclaim_refuses_a_root_naming_another_package() {
+        for (label, committed, expected_committed) in [
+            (
+                "another package",
+                ocx_index::serialize_root(&serde_json::json!({
+                    "name": "other.example/ns/pkg",
+                    "repository": PHYSICAL,
+                    "owners": alice_entry(),
+                    "status": "active",
+                    "deprecated_message": Value::Null,
+                    "created": COMMITTED_DATE,
+                    "desc": Value::Null,
+                    "tags": {},
+                })),
+                "other.example/ns/pkg",
+            ),
+            ("no name at all", b"{}\n".to_vec(), ""),
+            ("not even JSON", b"not a root\n".to_vec(), ""),
+        ] {
+            let _clock = pinned_clock();
+            let mut forge = first_claim_forge();
+            seed_committed(&mut forge, committed);
+
+            let error = block_on(claim(request(ClaimTarget::Direct), Some(&forge)))
+                .expect_err("a committed root that is not this package is refused");
+            assert!(
+                matches!(&error, ClaimError::RootNameMismatch { committed, expected }
+                    if committed == expected_committed
+                        && *expected == root_name(&ocx_oci::Identifier::new_registry(PACKAGE, "ocx.sh"))),
+                "{label}: {error:?}"
+            );
+        }
+    }
+
+    /// D-3 — `--upstream-org` given REPLACES the committed object; absent
+    /// CARRIES it.
+    ///
+    /// Both halves in one function because each alone passes for a wrong build:
+    /// the carry half alone passes for a renderer that ignores the flag, and the
+    /// replace half alone passes for one that ignores the committed root. The
+    /// field ORDER is asserted on the replace half, since that is the row where
+    /// mutating the parsed root in place would append `upstream` after `tags`.
+    ///
+    /// Reds on: carrying the committed object over a supplied flag; dropping it
+    /// when no flag was given; appending `upstream` after `tags`.
+    #[test]
+    fn a_reclaim_replaces_a_given_upstream_and_carries_an_absent_one() {
+        let committed = ocx_index::serialize_root(&serde_json::json!({
+            "name": "ocx.sh/acme/widget",
+            "repository": PHYSICAL,
+            "owners": alice_entry(),
+            "status": "active",
+            "deprecated_message": Value::Null,
+            "created": COMMITTED_DATE,
+            "desc": Value::Null,
+            "upstream": { "org": "Committed Org" },
+            "tags": {},
+        }));
+
+        {
+            let _clock = pinned_clock();
+            let mut forge = first_claim_forge();
+            forge
+                .users
+                .as_mut()
+                .expect("the users API is reachable")
+                .insert("bob".to_string(), identity("bob", 77, false));
+            seed_committed(&mut forge, committed.clone());
+            let mut request = request(ClaimTarget::Direct);
+            request.owners = vec![OwnerSpec::Login("bob".to_string())];
+            block_on(claim(request, Some(&forge))).expect("the carrying re-claim succeeds");
+
+            let root = committed_root_value(&forge);
+            assert_eq!(
+                root["upstream"]["org"], "Committed Org",
+                "no flag given, so the committed object rides through: {root}"
+            );
+        }
+
+        let _clock = pinned_clock();
+        let mut forge = first_claim_forge();
+        forge
+            .users
+            .as_mut()
+            .expect("the users API is reachable")
+            .insert("bob".to_string(), identity("bob", 77, false));
+        seed_committed(&mut forge, committed);
+        let mut request = request(ClaimTarget::Direct);
+        request.owners = vec![OwnerSpec::Login("bob".to_string())];
+        request.upstream = Some(Upstream {
+            org: "Supplied Org".to_string(),
+            repository_url: None,
+            disclaimer: None,
+        });
+        block_on(claim(request, Some(&forge))).expect("the replacing re-claim succeeds");
+
+        let root = committed_root_value(&forge);
+        assert_eq!(
+            root["upstream"]["org"], "Supplied Org",
+            "the flag replaces the committed object: {root}"
+        );
+        let fields: Vec<&str> = root
+            .as_object()
+            .expect("the root is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            vec![
+                "name",
+                "repository",
+                "owners",
+                "status",
+                "deprecated_message",
+                "created",
+                "desc",
+                "upstream",
+                "tags"
+            ],
+            "all nine, and `upstream` sits BEFORE `tags`: {root}"
+        );
+    }
+
+    /// The mirror image: a root sitting on the **claim branch** — an unmerged,
+    /// re-run claim — is not a committed root.
+    ///
+    /// The positive control for the re-claim rows above. Without it, an
+    /// implementation that reads neither ref passes every one of them: with no
+    /// committed root found, each would simply take the fresh-claim path.
+    ///
+    /// Reds on: reading the branch ref for the committed-root read.
+    #[test]
+    fn an_unmerged_claim_on_the_branch_is_not_a_committed_root() {
         let _clock = pinned_clock();
         let mut forge = first_claim_forge();
         forge.refs.insert(CLAIM_BRANCH.to_string(), "branchsha".to_string());
@@ -959,9 +1382,14 @@ pub(crate) mod tests {
             .files
             .insert((CLAIM_BRANCH.to_string(), ROOT_PATH.to_string()), b"{}\n".to_vec());
 
-        let outcome = block_on(claim(Some(&forge), request(ClaimTarget::Direct)))
+        let outcome = block_on(claim(request(ClaimTarget::Direct), Some(&forge)))
             .expect("an unmerged claim on the branch is a re-run, not a refusal");
         assert_eq!(outcome.package, PACKAGE);
+        assert_eq!(
+            outcome.status,
+            ClaimStatus::Updated,
+            "a `{{}}` root on the branch is not what this run renders, so it is rewritten"
+        );
     }
 
     // ── C-051 / C-053: the branch state machine ──────────────────────────────
@@ -1076,21 +1504,22 @@ pub(crate) mod tests {
             if identical {
                 // The bytes the renderer will produce this run, placed on the
                 // branch head so the comparison finds them unchanged.
-                let rendered = render_root(
+                let rendered = ocx_index::serialize_root(&root::build_root(
                     &root_name(&ocx_oci::Identifier::new_registry(PACKAGE, "ocx.sh")),
-                    "oci://ghcr.io/acme/widget",
+                    PHYSICAL,
                     &[ResolvedOwner {
                         login: "alice".to_string(),
                         id: 1234,
                     }],
                     None,
-                );
+                    None,
+                ));
                 forge
                     .files
                     .insert((CLAIM_BRANCH.to_string(), ROOT_PATH.to_string()), rendered);
             }
 
-            let outcome = block_on(claim(Some(&forge), request(ClaimTarget::Direct))).unwrap_or_else(|error| {
+            let outcome = block_on(claim(request(ClaimTarget::Direct), Some(&forge))).unwrap_or_else(|error| {
                 panic!("row {index} must succeed: {error:?}");
             });
             let calls = forge.calls();
@@ -1174,7 +1603,7 @@ pub(crate) mod tests {
                     updated: true,
                 });
 
-                block_on(claim(Some(&forge), request(ClaimTarget::Direct)))
+                block_on(claim(request(ClaimTarget::Direct), Some(&forge)))
                     .unwrap_or_else(|error| panic!("{comparison:?}/{has_request} must succeed: {error:?}"));
 
                 assert!(
@@ -1197,15 +1626,16 @@ pub(crate) mod tests {
     #[test]
     fn byte_identical_comparison_is_on_bytes_not_parsed_values() {
         let _clock = pinned_clock();
-        let rendered = render_root(
+        let rendered = ocx_index::serialize_root(&root::build_root(
             &root_name(&ocx_oci::Identifier::new_registry(PACKAGE, "ocx.sh")),
-            "oci://ghcr.io/acme/widget",
+            PHYSICAL,
             &[ResolvedOwner {
                 login: "alice".to_string(),
                 id: 1234,
             }],
             None,
-        );
+            None,
+        ));
         let text = String::from_utf8(rendered).expect("the root is UTF-8");
         // Same fields, same values, `owners` and `status` transposed.
         let (head, index) = (
@@ -1229,7 +1659,7 @@ pub(crate) mod tests {
             .files
             .insert((CLAIM_BRANCH.to_string(), ROOT_PATH.to_string()), head.into_bytes());
 
-        let outcome = block_on(claim(Some(&forge), request(ClaimTarget::Direct))).expect("the claim succeeds");
+        let outcome = block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect("the claim succeeds");
         assert_eq!(
             outcome.status,
             ClaimStatus::Updated,
@@ -1257,7 +1687,7 @@ pub(crate) mod tests {
             .lock()
             .expect("the counter is not poisoned") = 1;
 
-        block_on(claim(Some(&forge), request(ClaimTarget::Direct))).expect("one retry converges");
+        block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect("one retry converges");
         assert_eq!(forge.commit_calls(), 2, "one rejection, one retry, then success");
 
         // One `_clock` for the whole test: `ocx_util::env::overrides::lock()` is a plain
@@ -1267,7 +1697,7 @@ pub(crate) mod tests {
             .non_fast_forward_rejections
             .lock()
             .expect("the counter is not poisoned") = 2;
-        let error = block_on(claim(Some(&twice), request(ClaimTarget::Direct)))
+        let error = block_on(claim(request(ClaimTarget::Direct), Some(&twice)))
             .expect_err("a second rejection surfaces rather than looping");
         assert!(
             matches!(&error, ClaimError::Forge(ForgeError::NonFastForward { .. })),
@@ -1301,7 +1731,7 @@ pub(crate) mod tests {
             .lock()
             .expect("the counter is not poisoned") = 1;
 
-        block_on(claim(Some(&forge), request(ClaimTarget::Direct))).expect("one retry converges");
+        block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect("one retry converges");
         assert_eq!(forge.commit_calls(), 2, "the commit is redone against the re-read base");
         assert_eq!(forge.pull_request_calls(), 2, "and the request is opened on the retry");
 
@@ -1312,7 +1742,7 @@ pub(crate) mod tests {
             .stale_lease_rejections
             .lock()
             .expect("the counter is not poisoned") = 2;
-        let error = block_on(claim(Some(&twice), request(ClaimTarget::Direct)))
+        let error = block_on(claim(request(ClaimTarget::Direct), Some(&twice)))
             .expect_err("a second rejection surfaces rather than looping");
         assert!(
             matches!(&error, ClaimError::Forge(ForgeError::StaleLease { .. })),
@@ -1339,7 +1769,7 @@ pub(crate) mod tests {
             .lock()
             .expect("the counter is not poisoned") = 1;
 
-        let error = block_on(claim(Some(&forge), request(ClaimTarget::Direct)))
+        let error = block_on(claim(request(ClaimTarget::Direct), Some(&forge)))
             .expect_err("a winning head with no root cannot be regenerated against");
         assert!(
             matches!(&error, ClaimError::MissingHeadRoot { branch, .. } if branch == CLAIM_BRANCH),
@@ -1358,7 +1788,7 @@ pub(crate) mod tests {
         forge.refs.remove(INDEX_BASE_REF);
 
         let error =
-            block_on(claim(Some(&forge), request(ClaimTarget::Direct))).expect_err("no base ref, no commit parent");
+            block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect_err("no base ref, no commit parent");
         assert!(
             matches!(&error, ClaimError::MissingBaseRef { base_ref, .. } if base_ref == INDEX_BASE_REF),
             "{error:?}"
@@ -1383,7 +1813,7 @@ pub(crate) mod tests {
         let _clock = pinned_clock();
         let forge = first_claim_forge();
 
-        let outcome = block_on(claim(Some(&forge), request(ClaimTarget::Direct))).expect("the claim succeeds");
+        let outcome = block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect("the claim succeeds");
         let body = forge
             .calls()
             .into_iter()
@@ -1432,7 +1862,7 @@ pub(crate) mod tests {
         let mut req = request(ClaimTarget::Direct);
         req.owners = vec![OwnerSpec::Login("AliCe".to_string())];
 
-        let outcome = block_on(claim(Some(&forge), req)).expect("a resolvable login claims");
+        let outcome = block_on(claim(req, Some(&forge))).expect("a resolvable login claims");
         assert_eq!(
             outcome.owners,
             vec![ResolvedOwner {
@@ -1489,8 +1919,8 @@ pub(crate) mod tests {
             let forge = first_claim_forge();
 
             let outcome = block_on(claim(
-                Some(&forge),
                 request(ClaimTarget::Out(output.path().to_path_buf())),
+                Some(&forge),
             ))
             .expect("the --out run succeeds");
 
@@ -1521,7 +1951,7 @@ pub(crate) mod tests {
     #[test]
     fn a_forge_is_required_in_every_mode() {
         let output = tempfile::TempDir::new().expect("a temp dir is created");
-        let error = block_on(claim(None, request(ClaimTarget::Out(output.path().to_path_buf()))))
+        let error = block_on(claim(request(ClaimTarget::Out(output.path().to_path_buf())), None))
             .expect_err("even --out needs the forge for the C-050 read");
         assert!(matches!(error, ClaimError::ForgeRequired), "{error:?}");
     }
@@ -1561,7 +1991,7 @@ pub(crate) mod tests {
             disclaimer: Some("[x](https://evil) cc @alice".to_string()),
         });
 
-        block_on(claim(Some(&forge), req)).expect("the claim succeeds");
+        block_on(claim(req, Some(&forge))).expect("the claim succeeds");
 
         let (title, body) = forge
             .calls()
@@ -1588,12 +2018,7 @@ pub(crate) mod tests {
         );
 
         // The positive half: a denylist alone passes for an empty body.
-        for structured in [
-            "ocx.sh/acme/widget",
-            "oci://ghcr.io/acme/widget",
-            CLAIM_BRANCH,
-            "alice:1234",
-        ] {
+        for structured in ["ocx.sh/acme/widget", PHYSICAL, CLAIM_BRANCH, "alice:1234"] {
             assert!(body.contains(structured), "the body must carry {structured}: {body}");
         }
 
