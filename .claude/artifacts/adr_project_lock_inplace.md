@@ -2,7 +2,7 @@
 
 ## Metadata
 
-**Status:** Accepted
+**Status:** Superseded
 **Date:** 2026-05-03
 **Deciders:** mherwig
 **Beads Issue:** N/A
@@ -11,6 +11,7 @@
 - [x] Decision follows Golden Path in `.claude/rules/product-tech-strategy.md` — Rust 2024 + Tokio, no new external dep (reuses `fs4` already pinned in `Cargo.toml`).
 **Domain Tags:** architecture | storage | concurrency | dx
 **Supersedes:** [`adr_lock_file_locking_strategy.md`](./adr_lock_file_locking_strategy.md)
+**Superseded By:** [`adr_project_toml_rename_publish.md`](./adr_project_toml_rename_publish.md)
 **Working note:** [`research_lockfile_locking_primitives.md`](./research_lockfile_locking_primitives.md)
 
 ## Context
@@ -140,3 +141,4 @@ write_atomically(&project_toml_path, &new_content)?;
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-05-03 | worker-doc-writer (Stream C) | Initial draft — in-place flock on `ocx.toml` chosen, superseding `.ocx-lock` sentinel. |
+| 2026-09-21 | worker-doc-writer | Superseded by [`adr_project_toml_rename_publish.md`](./adr_project_toml_rename_publish.md) (ocx#494): `ocx.toml` is published by tempfile + atomic rename, not rewritten in place, so an in-place lock on the data file would strand on the inode the rename orphans. The mutex moved to a `lock_scoped` entry under `$OCX_HOME/locks`. |

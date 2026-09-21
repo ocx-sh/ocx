@@ -138,7 +138,9 @@ A **later** catalog sync that finds the *remote* root digest has moved past the 
 - **Tagged identifier** (e.g., `kitware/cmake:3.28`) — adopts that one tag. Every sibling pin, and the `repository` pointer, stay exactly as committed. A tagged update is a statement about one version.
 - **Bare identifier** (e.g., `cmake`) — adopts every tag the source currently lists, plus the package-level fields. Naming the package with no tag is the sanctioned point to take a routing migration: you asked about the package, so the package's own pointer moves.
 
-**An update never deletes.** A tag the source has stopped listing stays in the local copy, with the digest it was pinned to, on both source kinds. The copy is not a mirror of the remote's current tag list — it is the record of what this machine snapshotted, so a publisher retiring a version cannot silently break a machine still pinned to it. Merge is the only write verb: local entries outside the scope of the update are never touched, and entries the remote dropped are never removed.
+**An update never deletes a pin.** A tag the source has stopped listing stays in the local copy, with the digest it was pinned to, on both source kinds. The copy is not a mirror of the remote's current tag list — it is the record of what this machine snapshotted, so a publisher retiring a version cannot silently break a machine still pinned to it. Merge is the only write verb: local entries outside the scope of the update are never touched, and entries the remote dropped are never removed.
+
+**It does clean up after itself, always on.** After every [`ocx index update`][cmd-index-update] and [`ocx index sync`][cmd-index-sync] — published and plain-registry sources alike — the local copy removes every dispatch object under `o/` that no surviving pin of that package's root references any more: the object a moved tag's *old* digest left behind, never an object a pin still names. This is a referenced-set diff computed from the package's own on-disk root, not a directory walk, so an object orphaned before this shipped is not collected retroactively (accepted, no migration), and a sibling package refresh's just-written object is never mistaken for orphaned — it is referenced by its own root by construction. Runs silently (`debug!`-level only, no stdout/stderr line). Description blobs are not modelled in the local copy at all and are left untouched either way. [`ocx index regenerate`][cmd-index-regenerate] is unaffected — its own "removes no root document and no dispatch object" contract is unchanged.
 
 **Naming is the only mode, and there is no *implicit* whole-index sync — that is deliberate.** A
 remote index floats by definition: packages appear, platforms get added to existing versions, tags
@@ -480,6 +482,19 @@ project — and exits 86 naming whichever is missing, because only an administra
 grant it. It also refuses to run on a `git` older than 2.31.0, checked before the forge is
 constructed. [Announcing a package][authoring-announcing] walks a real pipeline through each
 posture.
+
+**Every write also removes what it stops referencing, in the same commit.** [`ocx package
+announce`][cmd-package-announce] deletes an index object the moment nothing in the rebuilt root
+references it any more — a moved tag's old dispatch object, a replaced readme, a replaced logo —
+so the request diff shows removals alongside additions rather than leaving the old bytes to
+accumulate. Always on, no flag: this mirrors the [local copy's own sweep](#update-modes) one
+layer down, and only an object the *previous* committed root named is ever a candidate. A
+concurrent announce's still-open request may reference an object a merged run just deleted;
+accepted, because it self-heals — every curated tag's bytes are rewritten on that package's next
+announce regardless. [`ocx package claim`][cmd-package-claim] runs the same sweep on every claim,
+including a re-claim that only adds an owner, but never writes tags — so the only object it ever
+orphans is the description's own payload: a claim that refreshes `desc` drops the readme or logo
+blob the previous entry named.
 
 ## Keep tags {#keep-tags}
 

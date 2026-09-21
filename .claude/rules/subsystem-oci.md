@@ -285,10 +285,25 @@ the one published-root writer, and it merges within `RootScope`:
 | `RootScope::Package` | `ocx index update pkg` (bare), and `ocx index sync <REGISTRY>` for every package the registry's catalog names | every tag the remote lists + package-level fields (routing) | any tag only the local copy holds |
 | `RootScope::Routing` | a digest-addressed `Resolve`, via `record_routing_pointer` | package-level fields only, **first sight only** — a committed root is left exactly as committed | every tag, and every field of an already-committed root |
 
-**Neither scope deletes.** A tag the remote stopped listing survives locally with its pinned
+**Neither scope deletes a pin.** A tag the remote stopped listing survives locally with its pinned
 digest, both provenance kinds — `commit_root_tags` (derived) always upserted, and
 `commit_published_root` now does too. The copy records what this machine snapshotted, so a
 publisher retiring a version cannot break a machine pinned to it.
+
+**A dispatch object with no surviving pin is a different thing — owner mandate, always on.**
+`regenerate::sweep_orphan_objects` runs at the end of every `refresh_published`/`refresh_derived`
+(so `ocx index update` and `ocx index sync`), inside the same source lock, and removes every
+`p/<ns>/<pkg>/o/<algo>/<hex>.json` no `tags[].content` of that package's on-disk root names —
+the object a moved pin abandoned, never an object a surviving tag still points at. This does not
+weaken "neither scope deletes a pin" above: the sweep is a referenced-set diff over the objects,
+not a second write path onto `tags`, and it fires strictly after the merge has decided which pins
+survive. It is also not a tree walk: an object orphaned *before* this shipped is not swept (no
+migration, accepted), and a same-repository sibling refresh's just-written object is never a
+candidate, because it is by construction referenced by its own package's root. `.md`/`.png`/`.svg`
+description blobs are not modelled in the local copy and are left alone either way. Mirrors the
+published index's own auto-clean (`referenced(prev) \ referenced(new)`, `adr_index_claim_command.md`
+amendment) — the local sweep is a subset scoped to dispatch objects, since that is the only
+extension ocx writes locally.
 
 First sight is not an exception: with no committed root the merge runs against the fetched
 document with its `tags` emptied, so a tagged first-resolve lands exactly the tag it resolved

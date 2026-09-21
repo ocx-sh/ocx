@@ -96,11 +96,15 @@ Each `[[tool]]` entry is independent, so concatenation usually produces a syntac
 
 ### Concurrent writes {#lock-concurrency}
 
-Project-state writes (`ocx lock`, `ocx update`, `ocx add`, `ocx remove`) serialize through an exclusive advisory [flock][flock] taken in-place on `ocx.toml` itself. No sentinel or sidecar file is created — the lock is invisible and leaves no artefact on disk. Concurrent readers ([`ocx pull`][cmd-pull], IDE integrations, `git`) never acquire any lock: they parse `ocx.lock` directly via an atomic read.
+`ocx.toml` is published by atomic rename: every write lands in a tempfile beside it, then replaces it with one `rename(2)`, so its inode rotates on every `ocx add`, `ocx remove`, `ocx lock`, or `ocx update`. A reader that already has the file open — `ocx status`, the per-prompt shell reconciler, an editor, `git` — keeps reading the inode it opened and always sees one whole document; `kill -9` mid-mutation leaves the file intact and parseable, never a torn or spliced write. Unix permissions carry across the rename — a `0644` `ocx.toml` stays `0644`.
+
+Because rename rotates the inode, a lock held *on* `ocx.toml` would strand on the inode the rename just orphaned. So the mutex is not on the data file at all: project-state writes (`ocx lock`, `ocx update`, `ocx add`, `ocx remove`) serialize through a content-keyed lock entry under [`$OCX_HOME/locks`][in-depth-storage-locks], scope `project-mutate`, keyed on the config file's parent directory and file name — never an `ocx.toml.lock` sidecar in the project itself. A lock held on `ocx.toml` by an editor or a bare `flock(1)` no longer blocks `ocx add`; a second `ocx` process contending for the mutation lock still exits 75 ("`ocx.toml` is locked by another process") once it waits past the contention budget. Concurrent readers ([`ocx pull`][cmd-pull], IDE integrations, `git`) never acquire any lock: they parse `ocx.lock` directly via an atomic read, and `ocx.toml` itself is a plain bounded read guarded only by a symlink refusal.
 
 ## Pin preservation {#pin-preservation}
 
 `ocx add` and `ocx remove` are **partial mutators** — they touch only the binding they name and carry every other lock entry forward unchanged. Neither command re-resolves a surviving binding's live tag. This is the guarantee that adding a new binding or dropping an old one never silently advances the versions of everything else.
+
+`ocx add` is also **idempotent** for a binding the target group already declares with the exact same identifier: the manifest is left byte-identical, `ocx.lock` is re-locked only when it has no entry yet, and an already-pinned binding is never re-resolved. Re-running `ocx add` after an interrupted download therefore just finishes the install — it never restates a version. Adding the same name with a *different* identifier still fails (exit 64): `ocx add` never moves a pin, only [`ocx update`][cmd-update] does.
 
 Every surviving entry is passed through byte-identical — no registry contact. Because `ocx.lock` is always the current V3 format (an older lock fails to load outright, per the warning above), there is nothing to transcribe: `ocx add` and `ocx remove` never touch the network for pins they are not adding or removing.
 
@@ -114,6 +118,8 @@ The two commands that intentionally advance version pins are:
 | `ocx update` | Whole file by default; `-g GROUP` / `NAME` scopes it to a named subset (those advance, the rest stay frozen) |
 
 Groups are primarily a **composition concern** — they scope which bindings `ocx exec`, `ocx env`, and `ocx pull` see. `ocx lock` ignores them and always reconciles the whole file. `ocx update` is the exception: passing `-g GROUP` or a binding `NAME` advances only that subset and carries every other pin forward verbatim, just like `ocx add` and `ocx remove` do for the bindings they touch.
+
+`ocx update` is the only command that holds both the predecessor `ocx.lock` and the candidate at once, so it is the only one that can answer "what moved" rather than "what is pinned now." It reports exactly that — a table of the bindings whose pull identifier changed, with the pins that held still summarized behind a hint line (`-v`/`--verbose` lists them too). `--check` runs the same diff without writing anything, exiting 65 when it would move something. See [`ocx update`][cmd-update] for the full report shape.
 
 ## Pulling and executing {#pull-exec}
 
@@ -277,6 +283,8 @@ A user-wide `ocx.toml` at [`$OCX_HOME`][env-ocx-home]`/ocx.toml` (default `~/.oc
 
 The global file uses the same [schema][schema-project] and lock semantics as a project file. The lock lives at `$OCX_HOME/ocx.lock`. Unlike the old home-tier fallback, the global toolchain is **never discovered implicitly** — the CWD walk does not activate it. You must pass `--global` or set `OCX_GLOBAL`.
 
+A working directory that is itself under `$OCX_HOME` is project-free, not global: the CWD walk explicitly skips an `ocx.toml` candidate sitting at `$OCX_HOME`'s own directory rather than treating it as the nearest project file, and continues walking upward — so a `$OCX_HOME` nested inside a real project does not hide that project from a deeper working directory. A project-tier command run directly inside `$OCX_HOME` exits 64 ("no `ocx.toml` found") rather than silently adopting the global manifest; reach it only through `--global`/`OCX_GLOBAL` as above. The comparison is lexical: a `$OCX_HOME` reached through a symlink is not recognised — the same limitation the CWD walk's other boundary checks share.
+
 ::: warning Global and project binaries are isolated by PATH precedence
 `ocx exec` and `ocx package exec` are always hermetic: the global toolchain is never consulted during project-tier resolution. Global binaries remain on `PATH` (there is no strip), but project-declared binaries are **prepended** by the active hook, so they shadow any same-named global binaries. See [Strict isolation][env-composition-strict-isolation] for the full model.
 :::
@@ -336,6 +344,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [cmd-lock]: ../reference/command-line.md#lock
 [cmd-pull]: ../reference/command-line.md#pull
 [cmd-remove]: ../reference/command-line.md#remove
+[cmd-update]: ../reference/command-line.md#update
 [cmd-run]: ../reference/command-line.md#exec
 [cmd-direnv-export]: ../reference/command-line.md#direnv-export
 [cmd-direnv-init]: ../reference/command-line.md#direnv-init
@@ -369,6 +378,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [in-depth-indices-bundled]: ./indices.md#bundled
 [in-depth-storage-packages]: ./storage.md#packages
 [in-depth-storage-gc]: ./storage.md#gc
+[in-depth-storage-locks]: ./storage.md#stores
 [in-depth-shell-integration]: ./shell-integration.md
 [in-depth-shell-integration-consent]: ./shell-integration.md#consent
 [in-depth-configuration]: ./configuration.md

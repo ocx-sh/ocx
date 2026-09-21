@@ -297,6 +297,10 @@ If not set, defaults to `~/.ocx`.
 export OCX_HOME="/opt/ocx"
 ```
 
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, set-always rather than merely carried over — an ambient `OCX_HOME=""` is corrected to the resolved absolute path rather than travelling onward as the empty string. It is one of the few settings still forwarded under [`--clean`][cmd-run], alongside `OCX_BINARY_PIN` — see [`--clean` is not the hermeticity boundary][env-composition-clean-not-boundary] — so a generated launcher's re-entry lands in the same store the parent resolved instead of falling back to `~/.ocx` from the passwd database.
+
+The CWD walk that discovers a project's `ocx.toml` skips a candidate sitting exactly at `$OCX_HOME`: that file is the [global toolchain][in-depth-project-global] manifest, reachable only through `--global`/[`OCX_GLOBAL`](#ocx-global), never by upward discovery — see [Project Toolchain In Depth][in-depth-project] for the CWD-walk contract this exempts.
+
 OCX also discovers a configuration file at `$OCX_HOME/config.toml` — see the [OCX home tier in the Configuration in-depth page][config-home-tier].
 
 ### `OCX_IDENTITY_TOKEN` {#ocx-identity-token}
@@ -1276,12 +1280,15 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 <!-- reference -->
 [env-composition-strict-isolation]: ./env-composition.md#strict-isolation
 [env-composition-project-env]: ./env-composition.md#project-env
+[env-composition-clean-not-boundary]: ./env-composition.md#project-env-flag-surfaces
 [reference-env-list]: ./metadata.md#env-list
 
 <!-- internal -->
 [fs-objects]: ../in-depth/storage.md#packages
 [fs-index]: ../in-depth/storage.md#index
 [fs-symlinks]: ../in-depth/storage.md#symlinks
+[in-depth-project]: ../in-depth/project.md
+[in-depth-project-global]: ../in-depth/project.md#global-toolchain
 [faq-codesign]: ../faq.md#macos-codesign
 
 <!-- authoring -->
