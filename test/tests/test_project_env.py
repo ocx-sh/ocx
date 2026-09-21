@@ -232,20 +232,84 @@ def test_env_flag_splits_on_first_equals_only(ocx: OcxRunner, tmp_path: Path) ->
 
 
 def test_env_flag_bare_key_without_equals_exits_64(ocx: OcxRunner, tmp_path: Path) -> None:
-    """A bare ``--env FOO`` (no ``=``) is a usage error, exit 64 (L2).
+    """A bare ``--env`` name in the reserved namespace is a usage error, exit 64.
 
-    Ambient pass-through is not accepted in v1 — it has meaning only under
-    ``--clean``, and admitting it later is purely additive.
+    A bare name with no ``=`` now passes the invoking process's own value
+    through, but both key gates still run on it first, and they run before the
+    ambient lookup — so a reserved name refuses whether or not it is set here.
     """
     project = tmp_path / "proj"
     project.mkdir()
     _write_ocx_toml(project, "[tools]\n")
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "exec", "--env", "FOO", "--", "echo", "hi")
+    result = _run(ocx, project, "exec", "--env", "OCX_OFFLINE", "--", "echo", "hi")
     assert result.returncode == EXIT_USAGE, (
-        f"bare --env FOO (no '=') must exit {EXIT_USAGE}; "
+        f"a bare reserved --env name must exit {EXIT_USAGE}; "
         f"got {result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+
+def test_env_flag_bare_key_without_equals_passes_the_name_through(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A bare ``--env FOO`` (no ``=``) carries the invoking process's own FOO.
+
+    Under ``--clean``, because that is the only place the claim is falsifiable.
+    A plain ``ocx exec`` hands the child the ambient environment, so a FOO set
+    in the parent arrives by plain inheritance whether or not the pass-through
+    forwards anything, and the assertion would hold against a parser that
+    forwards nothing at all.
+
+    Two calls, one per half of the contract. Set in the parent, the value
+    arrives. Unset there, the entry is skipped and the invocation still
+    succeeds: an allowlist names what *may* travel, and most of what it names
+    is typically absent, so refusing would fire on the common case.
+
+    ``${FOO-<unset>}`` substitutes only when FOO is *unset*, so the two halves
+    stay distinguishable from a FOO forwarded as the empty string -- which is
+    a value the contract does carry. ``--clean`` drops the inherited PATH and
+    this project composes no tool, so the interpreter is named absolutely, the
+    idiom ``test_exec_forwarding.py`` already uses; both make the row POSIX.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    _write_ocx_toml(project, "[tools]\n")
+    assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
+
+    probe = 'printf "FOO=[%s]" "${FOO-<unset>}"'
+    forwarded = _run(
+        ocx,
+        project,
+        "exec",
+        "--clean",
+        "--env",
+        "FOO",
+        "--",
+        "/bin/sh",
+        "-c",
+        probe,
+        extra_env={"FOO": "from-the-parent"},
+    )
+    assert forwarded.returncode == EXIT_SUCCESS, (
+        f"a bare --env FOO with FOO set must succeed; "
+        f"got {forwarded.returncode}\nstderr:\n{forwarded.stderr}"
+    )
+    assert _env_value(forwarded.stdout, "FOO") == "[from-the-parent]", (
+        f"a bare --env FOO must carry the parent's own value into the child; "
+        f"stdout:\n{forwarded.stdout}"
+    )
+
+    skipped = _run(
+        ocx, project, "exec", "--clean", "--env", "FOO", "--", "/bin/sh", "-c", probe
+    )
+    assert skipped.returncode == EXIT_SUCCESS, (
+        f"a bare --env FOO with FOO unset must succeed; "
+        f"got {skipped.returncode}\nstderr:\n{skipped.stderr}"
+    )
+    assert _env_value(skipped.stdout, "FOO") == "[<unset>]", (
+        f"an unset pass-through name must reach the child as unset, not empty; "
+        f"stdout:\n{skipped.stdout}"
     )
 
 

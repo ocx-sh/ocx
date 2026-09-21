@@ -5,7 +5,7 @@ use std::path::Path;
 
 use ocx_package::metadata::env::entry::Entry;
 
-/// The repeatable `--env KEY[:TYPE[:SEP]]=VALUE` per-invocation override.
+/// The repeatable `--env NAME|KEY[:TYPE[:SEP]]=VALUE` per-invocation override.
 ///
 /// Flatten into a command with `#[clap(flatten)]` to add the flag, then read
 /// the resolved entries through [`EnvOverride::entries`] — never the raw
@@ -18,11 +18,18 @@ use ocx_package::metadata::env::entry::Entry;
 /// after the project and group `[env]` tables.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct EnvOverride {
-    /// Set an environment variable for this invocation, as `KEY[:TYPE[:SEP]]=VALUE`.
+    /// Set an environment variable for this invocation, or pass one by name.
     ///
     /// Repeatable; a later `--env` for the same key wins. The value is split
     /// on the FIRST `=`, so `--env FOO=a=b` sets `FOO` to `a=b`. Values are
     /// literal - no interpolation.
+    ///
+    /// `--env NAME`, with no `=` and no `:TYPE`, copies the invoking
+    /// process's own `NAME` into the child - the same effect as
+    /// `--env NAME="$NAME"`, without the calling script having to spell the
+    /// value out. It is how an allowlist of variables survives `--clean`. A
+    /// `NAME` the invoking process does not set is skipped silently; a `NAME`
+    /// set to the empty string forwards the empty string.
     ///
     /// `TYPE` is `constant` (replace the existing value), `path` (prepend to
     /// it) or `list` (append to it), and defaults to `constant`. A relative
@@ -40,12 +47,13 @@ pub struct EnvOverride {
     /// for the project toolchain, the project's `[env]` and any selected
     /// group's `[env]` as well.
     ///
-    /// A bare `--env FOO` (pass the ambient value through) is not accepted;
-    /// keys matching `OCX_*` or `__OCX_*` are rejected; so is a `TYPE` outside
+    /// A qualified key with no value (`--env FOO:path`) is rejected - only
+    /// the plain bare form passes a value through. Keys matching `OCX_*` or
+    /// `__OCX_*` are rejected in both forms; so is a `TYPE` outside
     /// `constant`, `path` and `list`, a `SEP` that is empty or that qualifies
     /// any type but `list`, and a `list` value starting or ending with its own
     /// separator. All exit 64.
-    #[arg(long = "env", value_name = "KEY[:TYPE[:SEP]]=VALUE")]
+    #[arg(long = "env", value_name = "NAME|KEY[:TYPE[:SEP]]=VALUE")]
     env: Vec<String>,
 }
 
@@ -58,6 +66,16 @@ impl EnvOverride {
     /// (prepend) or `list` (append). Omitted, it is `constant`, so a plain
     /// `KEY=VALUE` means exactly what it always did. Values are literal, never
     /// interpolated. A later occurrence of a key overrides an earlier one.
+    ///
+    /// An argument carrying no `=` **and** no `:` is a bare `NAME`: the
+    /// ambient value of `NAME` in *this* process becomes a `constant` entry,
+    /// the Docker `-e NAME` convention. It is read here, at parse time, and
+    /// not in the child, which is the whole point — under `--clean` the child
+    /// env starts empty, so naming a variable is the only way one of the
+    /// caller's own reaches the far side. An unset `NAME` contributes no entry
+    /// at all: an allowlist names what *may* travel, and most of what it names
+    /// is typically absent, so a warning would fire on the common case. A
+    /// `NAME` set to the empty string is set, and forwards the empty string.
     ///
     /// `SEP` is raw text, taken from the first `:` after the type to the end
     /// of the segment — so it may itself be or contain a colon, and
@@ -87,10 +105,10 @@ impl EnvOverride {
     ///
     /// # Errors
     ///
-    /// [`crate::error::UsageError`] (exit 64) when an argument carries no `=`
-    /// (bare `--env FOO` ambient pass-through is not accepted in v1: it has
-    /// meaning only under `--clean`, and admitting it later is purely
-    /// additive), when the declared `TYPE` names no modifier, when a `SEP`
+    /// [`crate::error::UsageError`] (exit 64) when an argument carries a
+    /// qualifier but no `=` (`FOO:path` names a modifier with no value to
+    /// apply it to — a typo, not a pass-through), when the declared `TYPE`
+    /// names no modifier, when a `SEP`
     /// qualifies a type other than `list`, when a `SEP` is one the fold cannot
     /// use, when a `list` value starts or ends with its own separator, when
     /// the key is outside the POSIX environment-name grammar, or when a key
@@ -111,9 +129,29 @@ impl EnvOverride {
             // is what makes `--env FOO=a=b` set `FOO` to `a=b` rather than
             // erroring.
             let Some((qualified_key, value)) = argument.split_once('=') else {
-                return Err(crate::error::UsageError::new(format!(
-                    "--env value '{argument}' is not KEY[:TYPE[:SEP]]=VALUE; passing an ambient variable through by name is not supported"
-                )));
+                // No `=`. A plain name is the Docker `-e NAME` pass-through;
+                // anything carrying the type marker is not, because a
+                // modifier with no value to modify cannot be anything but a
+                // typo — and reading one as a pass-through would silently
+                // ignore the `:path` the caller typed.
+                if argument.contains(':') {
+                    return Err(crate::error::UsageError::new(format!(
+                        "--env value '{argument}' is not KEY[:TYPE[:SEP]]=VALUE; only a bare NAME passes the invoking process's value through"
+                    )));
+                }
+                // Both key gates first, so a refusal does not depend on
+                // whether the variable happens to be set in this shell:
+                // `--env OCX_OFFLINE` is exit 64 either way.
+                reject_unusable_key(argument)?;
+                if let Some(value) = ocx_util::env::var(argument) {
+                    entries.push(Entry {
+                        key: argument.to_owned(),
+                        value,
+                        kind: ModifierKind::Constant,
+                        separator: None,
+                    });
+                }
+                continue;
             };
             // Strip the qualifier BEFORE the key gates, so `PATH:path=/x` is
             // reported against `PATH` — running them on the raw segment would
@@ -162,16 +200,7 @@ impl EnvOverride {
                 }
                 Some(separator) => Some(separator.to_owned()),
             };
-            if !ocx_util::env::is_valid_env_key(key) {
-                return Err(crate::error::UsageError::new(format!(
-                    "--env key '{key}' is not a valid environment variable name"
-                )));
-            }
-            if ocx_util::env::is_reserved_ocx_key(key) {
-                return Err(crate::error::UsageError::new(format!(
-                    "--env key '{key}' is reserved; OCX_* and __OCX_* keys cannot be set"
-                )));
-            }
+            reject_unusable_key(key)?;
             entries.push(Entry {
                 key: key.to_owned(),
                 value: match kind {
@@ -191,6 +220,32 @@ impl EnvOverride {
         }
         Ok(entries)
     }
+}
+
+/// Refuse a key no `--env` argument may set, whichever shape it arrived in.
+///
+/// Two gates, in the order [`ocx_util::env::is_reserved_ocx_key`] documents:
+/// the POSIX environment-name grammar first, then the reserved `OCX_*` /
+/// `__OCX_*` namespace. Shared by the `KEY[:TYPE[:SEP]]=VALUE` form — which
+/// calls it once the qualifier is stripped, so `PATH:path=/x` is judged as
+/// `PATH` — and by the bare `NAME` pass-through, so neither shape can become
+/// the way in for a key that reconfigures how ocx itself resolves.
+///
+/// # Errors
+///
+/// [`crate::error::UsageError`] (exit 64) for either refusal, naming the key.
+fn reject_unusable_key(key: &str) -> Result<(), crate::error::UsageError> {
+    if !ocx_util::env::is_valid_env_key(key) {
+        return Err(crate::error::UsageError::new(format!(
+            "--env key '{key}' is not a valid environment variable name"
+        )));
+    }
+    if ocx_util::env::is_reserved_ocx_key(key) {
+        return Err(crate::error::UsageError::new(format!(
+            "--env key '{key}' is reserved; OCX_* and __OCX_* keys cannot be set"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -255,16 +310,103 @@ mod tests {
         assert_eq!(parsed[0].value, "");
     }
 
-    /// L2: a bare `--env FOO` (docker-style ambient pass-through) is a usage
-    /// error in v1 — it has meaning only under `--clean`, and admitting it
-    /// later is purely additive.
+    /// L2: a bare `--env FOO` copies the invoking process's own `FOO` into the
+    /// child, as a `constant` — the Docker `-e NAME` convention, and the form
+    /// that makes an allowlist usable under `--clean`.
     #[test]
-    fn env_override_rejects_bare_name() {
-        let error = parse_one("FOO").expect_err("a bare name must be rejected");
-        assert!(
-            error.to_string().contains("KEY[:TYPE[:SEP]]=VALUE"),
-            "the error must name the expected form; got: {error}"
+    fn env_override_bare_name_passes_the_invoking_value_through() {
+        use ocx_package::metadata::env::modifier::ModifierKind;
+
+        let guard = ocx_util::env::overrides::lock();
+        guard.set("PASSTHROUGH_FOO", "from-the-parent");
+
+        let parsed = parse_one("PASSTHROUGH_FOO").expect("a bare name must parse");
+        assert_eq!(parsed.len(), 1, "a set name must contribute exactly one entry");
+        assert_eq!(parsed[0].key, "PASSTHROUGH_FOO");
+        assert_eq!(
+            parsed[0].value, "from-the-parent",
+            "the entry must carry the invoking process's value verbatim"
         );
+        assert_eq!(
+            parsed[0].kind,
+            ModifierKind::Constant,
+            "a pass-through replaces, like `--env NAME=$NAME` would"
+        );
+        assert_eq!(parsed[0].separator, None);
+    }
+
+    /// The two states that are not "set to something": an unset name is
+    /// skipped silently (an allowlist names what *may* travel), and a name set
+    /// to the empty string is set — `FOO=` means the empty string on every
+    /// other surface, and it means it here too.
+    #[test]
+    fn env_override_bare_name_skips_unset_and_forwards_empty() {
+        let guard = ocx_util::env::overrides::lock();
+
+        guard.remove("PASSTHROUGH_FOO");
+        assert!(
+            parse_one("PASSTHROUGH_FOO")
+                .expect("an unset name must parse")
+                .is_empty(),
+            "an unset name must contribute no entry, and must not be an error"
+        );
+
+        guard.set("PASSTHROUGH_FOO", "");
+        let parsed = parse_one("PASSTHROUGH_FOO").expect("an empty-valued name must parse");
+        assert_eq!(parsed.len(), 1, "an empty string is a value, not an absence");
+        assert_eq!(parsed[0].value, "");
+    }
+
+    /// Only the *plain* bare form passes through. `FOO:path` declares a
+    /// modifier with nothing to apply it to, so reading it as a pass-through
+    /// would silently discard what the caller typed.
+    #[test]
+    fn env_override_rejects_a_qualified_name_with_no_value() {
+        for argument in ["FOO:path", "FOO:constant", "GODEBUG:list:,"] {
+            let error = parse_one(argument).expect_err("a qualified key with no value must be rejected");
+            let message = error.to_string();
+            assert!(
+                message.contains("KEY[:TYPE[:SEP]]=VALUE"),
+                "the error must name the expected form; got: {message}"
+            );
+            assert!(
+                message.contains(argument),
+                "the error must echo the offending argument; got: {message}"
+            );
+        }
+    }
+
+    /// X1 on the pass-through arm: the reserved namespace is refused by name,
+    /// before the ambient lookup — so `--env OCX_OFFLINE` is exit 64 whether or
+    /// not this shell happens to export it. The forwarded config set travels
+    /// through `apply_ocx_config`; a user allowlist is never the way in.
+    #[test]
+    fn env_override_rejects_a_reserved_bare_name() {
+        let guard = ocx_util::env::overrides::lock();
+        // Set, so a refusal cannot be an artifact of the variable's absence.
+        guard.set("OCX_OFFLINE", "1");
+        guard.set("__OCX_TESTING_X", "1");
+
+        for reserved in ["OCX_OFFLINE", "OCX_DEFAULT_REGISTRY", "__OCX_TESTING_X"] {
+            let error = parse_one(reserved).expect_err("a reserved bare name must be rejected");
+            assert!(
+                error.to_string().contains("reserved"),
+                "the error must say the key is reserved; got: {error}"
+            );
+        }
+    }
+
+    /// The grammar gate applies to the pass-through arm too: a name that is
+    /// not a POSIX environment-variable name cannot be looked up, and must not
+    /// reach the key slot of an emitted assignment line.
+    #[test]
+    fn env_override_rejects_an_invalid_bare_name() {
+        for invalid in ["A B", "1A", ""] {
+            assert!(
+                parse_one(invalid).is_err(),
+                "'{invalid}' must be rejected by the shared key validator"
+            );
+        }
     }
 
     /// X1 applies to the flag, not just the file: `--env` must not be the way
