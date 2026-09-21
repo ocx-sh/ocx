@@ -244,6 +244,94 @@ pub struct RegenerateOutcome {
     pub removed: Vec<String>,
 }
 
+/// Removes the dispatch objects a refresh's pin movement abandoned: every
+/// `o/<algo>/<hex>.json` the package's root pinned **before** the refresh and
+/// does not pin **after** it (`design_index_cluster.md` § 5 Decision B, D-7 —
+/// the local index auto-cleans).
+///
+/// `previously_pinned` is `tags[].content` of the root as committed going in
+/// (empty on a first refresh, which can therefore abandon nothing);
+/// `now_pinned` is the same of the root that just committed. The removal set is
+/// `previously_pinned \ now_pinned` and nothing else. Removed objects come back
+/// as source-relative wire paths (`p/<ns>/<pkg>/o/<algo>/<hex>.json`), sorted —
+/// a report a caller can diff must not depend on map order.
+///
+/// # A diff, never a walk
+///
+/// The obvious implementation — list `o/` and remove whatever the new root does
+/// not name — is unsafe, and the refresh fan-out is what makes it unsafe.
+/// `ocx index update pkg:1.0 pkg:2.0` refreshes its identifiers concurrently
+/// with no per-repository grouping, and **both** refresh paths write their
+/// dispatch objects before taking any lock. A walk therefore sees a sibling
+/// task's freshly written object as unreferenced and removes it; that task then
+/// commits a pin to a file that is gone. Online the next
+/// `ocx index update` repairs it (`refresh_published` gates on
+/// [`IndexStore::read_dispatch_object`] and re-fetches on a miss, D-006);
+/// offline nothing does, and offline resolution is what the local copy exists
+/// for. A diff cannot reach that object at all: no previous root ever pinned
+/// it, so it is never a candidate, whatever else is on disk. The race closes
+/// in-process and cross-process alike — which is why this function takes no
+/// lock, reads no root, and enumerates no directory.
+///
+/// # What it therefore does not collect
+///
+/// **Objects orphaned before this shipped.** A diff only ever sees the pins of
+/// the refresh it belongs to, so the backlog earlier versions accumulated stays
+/// on disk. Accepted deliberately: they are small JSON documents, and
+/// collecting them needs exactly the walk this contract rejects. An explicit
+/// verb that takes the source lock and can establish that no refresh is in
+/// flight could do it later; [`regenerate_catalog`] will not, because its
+/// "removes no root document and no `o/` object" invariant is what makes it
+/// safe to point at a served tree an operator owns.
+///
+/// **Description blobs.** `o/<algo>/<hex>.{md,png,svg}` from a full site mirror
+/// are outside the removal set by construction, not by a filter: every path
+/// removed here is built from a digest through
+/// [`IndexStore::dispatch_object_path`], which always ends `.json`.
+///
+/// # Errors
+///
+/// Only the two containment guards — CWE-22 defense in depth, because
+/// `dispatch_object_path` is a pure builder with no guard of its own and this
+/// function unlinks what it builds. A removal that fails is logged at `debug!`
+/// and skipped: one unremovable object must not hide the orphans behind it, and
+/// must not turn a refresh that has already committed into a failure. An object
+/// that is already absent is not a failure at all — a single-platform tag never
+/// had one (A3), and an earlier sweep or an operator may have taken it.
+pub(crate) async fn sweep_orphan_objects(
+    store: &IndexStore,
+    source: &str,
+    repository: &str,
+    previously_pinned: &[ocx_oci::Digest],
+    now_pinned: &[ocx_oci::Digest],
+) -> Result<Vec<String>> {
+    IndexStore::ensure_source_contained(source)?;
+    IndexStore::ensure_repository_contained(repository)?;
+
+    let retained: std::collections::HashSet<&ocx_oci::Digest> = now_pinned.iter().collect();
+    let mut removed = Vec::new();
+    for digest in previously_pinned.iter().filter(|digest| !retained.contains(*digest)) {
+        let path = store.dispatch_object_path(source, repository, digest);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => removed.push(format!(
+                "p/{repository}/o/{}/{}.json",
+                digest.algorithm().prefix(),
+                digest.hex()
+            )),
+            // Already gone. Two tags can alias one digest, so this loop can
+            // meet the same object twice; a single-platform tag never had one.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log::debug!(
+                "Could not remove the abandoned dispatch object '{}' ({e}) — no tag pins it any \
+                 more; the next pin movement past it tries again.",
+                path.display()
+            ),
+        }
+    }
+    removed.sort();
+    Ok(removed)
+}
+
 /// Specification tests for [`regenerate_catalog`], written from
 /// `design_spec_servable_index_snapshot.md`'s **C-007**, **C-008** and
 /// **C-026** rather than from the implementation — each one names the clause it
@@ -287,9 +375,15 @@ mod tests {
     /// `p/<ns>/<pkg>.json` bytes in the shape `test/src/static_index.py`'s
     /// `write_package()` emits: a `repository` pointer plus one tag.
     fn root_bytes(repository: &str) -> Vec<u8> {
+        root_bytes_pinning(repository, TAG_CONTENT)
+    }
+
+    /// [`root_bytes`] with the single tag's pin chosen by the caller — what a
+    /// *moved* pin needs, since the whole point is that the digest changes.
+    fn root_bytes_pinning(repository: &str, content: &str) -> Vec<u8> {
         serde_json::json!({
             "repository": repository,
-            "tags": { "1.0": { "content": TAG_CONTENT, "observed": "2026-08-09T09:00:00Z" } }
+            "tags": { "1.0": { "content": content, "observed": "2026-08-09T09:00:00Z" } }
         })
         .to_string()
         .into_bytes()
@@ -298,12 +392,19 @@ mod tests {
     /// A minimal OCI image index — the shape a `p/<ns>/<pkg>/o/<algo>/<hex>.json`
     /// dispatch object actually holds (A3).
     fn dispatch_object_bytes() -> Vec<u8> {
+        dispatch_object_bytes_naming(TAG_CONTENT)
+    }
+
+    /// [`dispatch_object_bytes`] over a caller-chosen leaf digest, so two calls
+    /// produce two genuinely distinct objects with two distinct digests —
+    /// without that, a "moved pin" fixture would move to itself.
+    fn dispatch_object_bytes_naming(leaf: &str) -> Vec<u8> {
         serde_json::json!({
             "schemaVersion": 2,
             "mediaType": "application/vnd.oci.image.index.v1+json",
             "manifests": [{
                 "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                "digest": TAG_CONTENT,
+                "digest": leaf,
                 "size": 42,
                 "platform": { "architecture": "amd64", "os": "linux" }
             }]
@@ -995,6 +1096,285 @@ mod tests {
                 ))
             ),
             "C-007: an unparseable root under p/ is MalformedRootDocument, got {outcome:?}"
+        );
+    }
+
+    // ── C-004 / D-7: the local index drops the objects a moved pin abandoned ──
+
+    /// The one repository every sweep test below works on. A constant because
+    /// the wire paths [`sweep_orphan_objects`] returns are asserted literally.
+    const SWEPT: &str = "kitware/cmake";
+
+    /// A third leaf digest, distinct from [`TAG_CONTENT`] and [`FOREIGN_ENTRY`],
+    /// for the object a test needs to be neither side of the moved pin.
+    const OTHER_CONTENT: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+    /// Writes one dispatch object into [`SWEPT`]'s CAS and returns the digest
+    /// that names it.
+    ///
+    /// No root document is seeded anywhere in this group, and that is the
+    /// contract, not a shortcut: the sweep is a diff over pin sets its caller
+    /// hands it, so it reads no root and enumerates no directory. A fixture
+    /// that seeded one would imply a read that does not happen.
+    async fn seed_object(store: &IndexStore, leaf: &str) -> ocx_oci::Digest {
+        let object = dispatch_object_bytes_naming(leaf);
+        let digest = Algorithm::Sha256.hash(&object);
+        store
+            .write_dispatch_object(SOURCE, SWEPT, &digest, &object)
+            .await
+            .unwrap();
+        digest
+    }
+
+    /// The source-relative wire path [`sweep_orphan_objects`] reports for one
+    /// removed object.
+    fn swept_path(digest: &ocx_oci::Digest) -> String {
+        format!("p/{SWEPT}/o/sha256/{}.json", digest.hex())
+    }
+
+    /// **C-004.** The headline: the pin moved, so the object the old pin
+    /// resolved through goes and the object the new pin resolves through stays.
+    ///
+    /// `write_dispatch_object` is addressed by content, so the new pin's object
+    /// lands at a new path and never overwrites the old one — until this
+    /// contract, nothing on the local write path removed it, and a copy
+    /// tracking a frequently-retagged package grew by one dead image index per
+    /// retag.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_removes_the_dispatch_object_a_moved_pin_abandoned() {
+        let home = tempfile::tempdir().unwrap();
+        let locks = tempfile::tempdir().unwrap();
+        let store = store_at(home.path(), locks.path());
+        let old = seed_object(&store, TAG_CONTENT).await;
+        let new = seed_object(&store, FOREIGN_ENTRY).await;
+        assert_ne!(old, new, "fixture: two distinct objects, or no pin moved");
+
+        let removed = sweep_orphan_objects(
+            &store,
+            SOURCE,
+            SWEPT,
+            std::slice::from_ref(&old),
+            std::slice::from_ref(&new),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            removed,
+            vec![swept_path(&old)],
+            "C-004: exactly the abandoned object, as a source-relative wire path"
+        );
+        assert!(
+            !store.dispatch_object_path(SOURCE, SWEPT, &old).exists(),
+            "C-004: the abandoned object is gone from disk, not merely from the report"
+        );
+        assert!(
+            store.dispatch_object_path(SOURCE, SWEPT, &new).is_file(),
+            "C-004: the object the surviving pin resolves through must stay — removing it would \
+             break the offline resolve the snapshot exists for"
+        );
+    }
+
+    /// **C-004.** Two tags, one moved pin: the tag that did not move keeps its
+    /// object.
+    ///
+    /// The single-tag case above cannot see this. With one pin, "remove what the
+    /// previous root pinned and the new one does not" and "remove everything
+    /// that is not the new pin" give the same answer; a second, steady tag is
+    /// what separates them, and it is the everyday shape — a package has many
+    /// versions and a refresh moves one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_keeps_the_object_of_a_tag_whose_pin_did_not_move() {
+        let home = tempfile::tempdir().unwrap();
+        let locks = tempfile::tempdir().unwrap();
+        let store = store_at(home.path(), locks.path());
+        let moved_from = seed_object(&store, TAG_CONTENT).await;
+        let moved_to = seed_object(&store, FOREIGN_ENTRY).await;
+        let steady = seed_object(&store, OTHER_CONTENT).await;
+
+        let removed = sweep_orphan_objects(
+            &store,
+            SOURCE,
+            SWEPT,
+            &[moved_from.clone(), steady.clone()],
+            &[moved_to.clone(), steady.clone()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            removed,
+            vec![swept_path(&moved_from)],
+            "C-004: only the pin that actually moved abandons an object"
+        );
+        assert!(
+            store.dispatch_object_path(SOURCE, SWEPT, &steady).is_file(),
+            "C-004: a tag whose pin did not move keeps the object that pin resolves through"
+        );
+        assert!(
+            store.dispatch_object_path(SOURCE, SWEPT, &moved_to).is_file(),
+            "C-004: and so does the tag that moved, at its new digest"
+        );
+        assert!(!store.dispatch_object_path(SOURCE, SWEPT, &moved_from).exists());
+    }
+
+    /// **C-004, the race the diff exists to close.** An object on disk that
+    /// NEITHER pin set names survives untouched.
+    ///
+    /// This is the shape a concurrent refresh of a sibling identifier leaves:
+    /// `refresh_packages` fans out with no per-repository grouping and both
+    /// refresh paths write their dispatch objects *before* taking any lock, so
+    /// a sibling's object is on disk and pinned by nothing for a window. A walk
+    /// over `o/` would call it unreferenced and remove it, and that sibling
+    /// would then commit a pin to a deleted file — repaired only by the next
+    /// ONLINE update, never by the offline resolve the copy exists for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_leaves_an_object_neither_pin_set_names_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let locks = tempfile::tempdir().unwrap();
+        let store = store_at(home.path(), locks.path());
+        let old = seed_object(&store, TAG_CONTENT).await;
+        let new = seed_object(&store, FOREIGN_ENTRY).await;
+        // A sibling refresh's fresh write: present, and about to be pinned by a
+        // commit this sweep knows nothing about.
+        let sibling = seed_object(&store, OTHER_CONTENT).await;
+
+        let removed = sweep_orphan_objects(
+            &store,
+            SOURCE,
+            SWEPT,
+            std::slice::from_ref(&old),
+            std::slice::from_ref(&new),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            store.dispatch_object_path(SOURCE, SWEPT, &sibling).is_file(),
+            "C-004: an object no PREVIOUS root pinned is never a candidate — a walk would remove \
+             this one and strand the sibling refresh's pin"
+        );
+        assert_eq!(
+            removed,
+            vec![swept_path(&old)],
+            "non-vacuity: the run removed a real orphan from the same directory, so the survival \
+             assertion above is not satisfied by a sweep that did nothing"
+        );
+    }
+
+    /// **C-004.** A first refresh pinned nothing before it, so it can abandon
+    /// nothing.
+    ///
+    /// The state an interrupted write leaves is the same shape — object on
+    /// disk, no committed root behind it — and F1 wants the next refresh to
+    /// REUSE that orphan rather than re-fetch it
+    /// (`test_orphan_dispatch_object_without_root_self_heals_on_next_online_update`).
+    /// An empty `previously_pinned` is what makes that hold.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_over_a_first_refresh_removes_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let locks = tempfile::tempdir().unwrap();
+        let store = store_at(home.path(), locks.path());
+        let first = seed_object(&store, TAG_CONTENT).await;
+
+        let removed = sweep_orphan_objects(&store, SOURCE, SWEPT, &[], std::slice::from_ref(&first))
+            .await
+            .unwrap();
+
+        assert!(
+            removed.is_empty(),
+            "C-004: nothing was pinned before, so nothing was abandoned; got {removed:?}"
+        );
+        assert!(
+            store.dispatch_object_path(SOURCE, SWEPT, &first).is_file(),
+            "F1: the next refresh reuses an orphan left by an aborted write, so it must survive"
+        );
+    }
+
+    /// **C-004.** No pin moved → nothing removed, and the subtree is byte- and
+    /// mtime-identical.
+    ///
+    /// The empty return value cannot witness the second half: a sweep that
+    /// removed and rewrote an object it then kept would report the same `[]`.
+    /// Snapshotting the filesystem is what sees it, the same reason
+    /// `regenerate_removes_no_root_document_and_no_dispatch_object` snapshots.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_removes_nothing_and_rewrites_nothing_when_no_pin_moved() {
+        let home = tempfile::tempdir().unwrap();
+        let locks = tempfile::tempdir().unwrap();
+        let store = store_at(home.path(), locks.path());
+        let pinned = seed_object(&store, TAG_CONTENT).await;
+        let source_dir = store.source_config_path(SOURCE).parent().unwrap().to_path_buf();
+        let before = file_snapshot(&source_dir);
+        assert!(
+            before.contains_key(&store.dispatch_object_path(SOURCE, SWEPT, &pinned)),
+            "fixture: the pinned object must be inside the snapshotted subtree"
+        );
+
+        let removed = sweep_orphan_objects(
+            &store,
+            SOURCE,
+            SWEPT,
+            std::slice::from_ref(&pinned),
+            std::slice::from_ref(&pinned),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            removed.is_empty(),
+            "C-004: the pin set is unchanged, so nothing was abandoned; got {removed:?}"
+        );
+        let after = file_snapshot(&source_dir);
+        assert_eq!(
+            bytes_only(&after),
+            bytes_only(&before),
+            "C-004: the sweep only ever unlinks — it writes no file and creates none"
+        );
+        assert_eq!(
+            mtimes_only(&after),
+            mtimes_only(&before),
+            "C-004: not even a rewrite of identical content — the tree people commit and rsync \
+             must not churn on a no-op sweep"
+        );
+    }
+
+    /// **C-004.** The description-blob control: a `.md` sharing the CAS
+    /// directory with an abandoned object survives.
+    ///
+    /// Safe by construction now — every removed path is built from a digest
+    /// through `dispatch_object_path`, which always ends `.json` — and kept
+    /// exactly because that is a property of the construction. A future edit
+    /// that reached for a directory listing would lose it, and no other test
+    /// here would notice.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_leaves_a_description_blob_beside_an_orphan_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let locks = tempfile::tempdir().unwrap();
+        let store = store_at(home.path(), locks.path());
+        let old = seed_object(&store, TAG_CONTENT).await;
+        let new = seed_object(&store, FOREIGN_ENTRY).await;
+        let readme = store.dispatch_object_path(SOURCE, SWEPT, &old).with_extension("md");
+        std::fs::write(&readme, b"# cmake\n").unwrap();
+
+        let removed = sweep_orphan_objects(
+            &store,
+            SOURCE,
+            SWEPT,
+            std::slice::from_ref(&old),
+            std::slice::from_ref(&new),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            readme.is_file(),
+            "C-004: a description blob is outside the dispatch-object namespace and is left alone"
+        );
+        assert_eq!(
+            removed,
+            vec![swept_path(&old)],
+            "non-vacuity: the run removed a real orphan from the very directory the blob sits in"
         );
     }
 }

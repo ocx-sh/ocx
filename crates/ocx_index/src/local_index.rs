@@ -63,6 +63,26 @@ struct DerivedTag {
     observed: String,
 }
 
+/// The pins one root commit moved past: what the local copy pinned going in,
+/// and what it pins coming out (D-7).
+///
+/// `previous` is empty on a first commit, and the two are equal when the merge
+/// changed nothing in scope. `previous \ current` is exactly the set of
+/// dispatch objects the sweep may remove — and the reason the sweep is a DIFF
+/// rather than a walk over `o/`. Both refresh paths write their dispatch
+/// objects before taking any lock, so an object a CONCURRENT refresh of a
+/// sibling tag has just written is on disk and named by nothing yet; a walk
+/// would collect it and leave that refresh pinning a deleted file, while a
+/// diff can never see it, because no previous root ever pinned it.
+///
+/// Carried out of the commit rather than re-read afterwards: this is the only
+/// place that holds both sides, and it holds them under the source lock.
+#[derive(Debug, Default, Clone)]
+pub(super) struct RootPins {
+    previous: Vec<ocx_oci::Digest>,
+    current: Vec<ocx_oci::Digest>,
+}
+
 /// File-backed collection of registry metadata, rooted at the index home.
 ///
 /// **Wire grammar only** — this is a `IndexStore`-backed collection of
@@ -354,7 +374,12 @@ impl LocalIndex {
                 Some(tag) => RootScope::Tags(std::slice::from_ref(tag)),
                 None => RootScope::Package,
             };
-            return self.commit_published_root(identifier, bytes, scope).await;
+            let pins = self.commit_published_root(identifier, bytes, scope).await?;
+            // Every pin this commit moved past named an object nothing resolves
+            // through any more (D-7). The set comes out of the commit; nothing
+            // is re-read, and nothing on disk is enumerated.
+            self.sweep_dispatch_orphans(identifier, &pins).await;
+            return Ok(());
         };
 
         // Partial success (D-008b/c). Commit ONLY the tags whose dispatch object
@@ -495,7 +520,60 @@ impl LocalIndex {
         // root read-modify-write (`adr_index_indirection.md` A2/F1). Committing
         // each tag separately would re-lock and rewrite the whole root per tag —
         // O(N²) bytes for N tags; the batch merge preserves every other tag.
-        self.commit_root_tags(identifier, &fetched).await
+        let pins = self.commit_root_tags(identifier, &fetched).await?;
+        self.sweep_dispatch_orphans(identifier, &pins).await;
+        Ok(())
+    }
+
+    /// Remove the dispatch objects this refresh's pin movement abandoned —
+    /// `pins.previous \ pins.current` and nothing else (`design_index_cluster.md`
+    /// § 5 Decision B, D-7). One call per package.
+    ///
+    /// Three properties are load-bearing and each is a deliberate choice.
+    ///
+    /// **It runs after a fully successful refresh, and only then.** The
+    /// partial-success branches of both paths *do* commit, and they still skip
+    /// this: some tag's object was never written, so what those branches left
+    /// behind is F1's harmless orphan — the state the next run reuses rather
+    /// than re-fetches
+    /// (`test_orphan_dispatch_object_without_root_self_heals_on_next_online_update`)
+    /// — and their narrowed commit is not a clean statement of what the copy
+    /// now pins.
+    ///
+    /// **It cannot fail the refresh.** The user's index is already correct; a
+    /// housekeeping pass that could not unlink a file has produced a leftover
+    /// object, not a wrong answer, and the next pin movement past it sweeps it.
+    /// Same reasoning as `commit_published_root`'s absorbed `config.json` lock
+    /// timeout, one step further: nothing here is even worth an operator's
+    /// attention.
+    ///
+    /// **It is `debug!` and only `debug!`.** A collected object is routine
+    /// bookkeeping over a fan-out that can span a whole catalog — at `info!` or
+    /// above it would be per-package noise on every `ocx index sync`
+    /// (C-026, the silence rule this module's log budget enforces).
+    async fn sweep_dispatch_orphans(&self, identifier: &ocx_oci::Identifier, pins: &RootPins) {
+        let source = identifier.registry();
+        let repository = identifier.repository();
+        match super::regenerate::sweep_orphan_objects(
+            &self.index_store,
+            source,
+            repository,
+            &pins.previous,
+            &pins.current,
+        )
+        .await
+        {
+            Ok(removed) if removed.is_empty() => {}
+            Ok(removed) => log::debug!(
+                "Removed {} dispatch object(s) '{source}/{repository}' no longer pins: {}.",
+                removed.len(),
+                removed.join(", ")
+            ),
+            Err(error) => log::debug!(
+                "Could not sweep the dispatch objects '{source}/{repository}' moved off ({}) — the                  refresh itself committed; the next pin movement past them sweeps them.",
+                ocx_util::error::render_chain(&error)
+            ),
+        }
     }
 
     // ── Dispatch-only reads/writes (A3) ───────────────────────────────────────
@@ -611,6 +689,7 @@ impl LocalIndex {
             .expect("commit_root_tag invariant: identifier must carry a tag");
         self.commit_root_tags(identifier, &[(tag.to_owned(), content.clone())])
             .await
+            .map(|_| ())
     }
 
     /// Batch counterpart to [`Self::commit_root_tag`]: upsert MANY `tag →
@@ -631,9 +710,9 @@ impl LocalIndex {
         &self,
         identifier: &ocx_oci::Identifier,
         entries: &[(String, ocx_oci::Digest)],
-    ) -> Result<()> {
+    ) -> Result<RootPins> {
         if entries.is_empty() {
-            return Ok(());
+            return Ok(RootPins::default());
         }
         let source = identifier.registry();
         let repository = identifier.repository();
@@ -691,6 +770,12 @@ impl LocalIndex {
             },
         };
 
+        // The pins going in — read off the document this commit is about to
+        // modify, which is the one place that holds them under the root lock.
+        // A root that did not parse took the kill-9 recovery above and arrives
+        // here empty, so a copy OCX could not read never authorises a removal.
+        let previous: Vec<ocx_oci::Digest> = doc.tags.values().map(|tag| tag.content.clone()).collect();
+
         // Upsert every requested tag, preserving each other tag's pointer and
         // stamp. One `observed` for the whole batch — confirmed together.
         let observed = chrono::Utc::now().to_rfc3339();
@@ -704,9 +789,10 @@ impl LocalIndex {
             );
         }
 
+        let current: Vec<ocx_oci::Digest> = doc.tags.values().map(|tag| tag.content.clone()).collect();
         let bytes = serde_json::to_vec_pretty(&doc)?;
         self.index_store.write_root_document(source, repository, &bytes).await?;
-        Ok(())
+        Ok(RootPins { previous, current })
     }
 
     /// Resolve `identifier` against the dispatch-only object store to a typed
@@ -992,7 +1078,7 @@ impl LocalIndex {
         identifier: &ocx_oci::Identifier,
         fetched_bytes: &[u8],
         scope: RootScope<'_>,
-    ) -> Result<()> {
+    ) -> Result<RootPins> {
         let source = identifier.registry();
         let repository = identifier.repository();
         let repository_check =
@@ -1004,13 +1090,26 @@ impl LocalIndex {
         let mut transaction = self.index_store.begin_catalog_transaction(source).await?;
 
         let committed = self.index_store.read_root_document_bytes(source, repository).await?;
+        // The pins going in, taken inside the lock because this is the only
+        // place that holds both sides of the merge (D-7). A root that does not
+        // parse yields none, so a copy OCX cannot read never authorises a
+        // removal — and a first commit yields none either, which is the same
+        // answer for the same reason.
+        let previous = published_pins(committed.as_deref());
+        let mut current = previous.clone();
         // `None` = nothing in scope changed — the fetched root does not carry
         // the named tag, or the copy already holds exactly these entries. A
         // no-op write would churn the mtime of a tree people commit and rsync (A2).
+        // The two pin sets then stay equal, and the sweep has nothing to do.
         if let Some(bytes) = merge_root(committed.as_deref(), fetched_bytes, scope) {
             transaction.write_root(repository, &bytes, repository_check).await?;
+            // Read off the bytes that actually committed, after the write
+            // accepted them — never off the fetched document, which the merge
+            // is free to have taken only part of.
+            current = published_pins(Some(&bytes));
         }
         transaction.commit().await?;
+        let pins = RootPins { previous, current };
 
         // The tree ocx just published declares itself an index at the version
         // this binary speaks (C-023). Two things fix this statement's position.
@@ -1038,9 +1137,10 @@ impl LocalIndex {
                      stayed held for {SOURCE_LOCK_TIMEOUT:?} ({}). The next index update writes it.",
                     ocx_util::error::render_chain(&error)
                 );
-                Ok(())
+                Ok(pins)
             }
-            result => result,
+            Err(error) => Err(error),
+            Ok(()) => Ok(pins),
         }
     }
 
@@ -1254,6 +1354,22 @@ fn withheld_by_commit_failure(
 /// Committed bytes no reader accepts get the same treatment: recovering from a
 /// crashed write is not overwriting committed state, because bytes that do not
 /// parse hold no pin.
+/// The content digests a PUBLISHED root's tags pin, or none when there is no
+/// root yet or its bytes do not parse.
+///
+/// Unparseable degrades to "pins nothing" rather than propagating, and the
+/// direction matters: this feeds [`RootPins::previous`], where an empty set
+/// means "authorise no removal". A copy OCX cannot read must never be the
+/// authority for deleting the objects it names. On the `current` side the
+/// question does not arise — those bytes have already been accepted by
+/// `CatalogTransaction::write_root`, which parses them with this same type.
+fn published_pins(bytes: Option<&[u8]>) -> Vec<ocx_oci::Digest> {
+    bytes
+        .and_then(|bytes| serde_json::from_slice::<super::wire::IndexRoot>(bytes).ok())
+        .map(|root| root.tags.into_values().map(|tag| tag.content).collect())
+        .unwrap_or_default()
+}
+
 fn merge_root(committed: Option<&[u8]>, fetched: &[u8], scope: RootScope<'_>) -> Option<Vec<u8>> {
     let fetched_root: serde_json::Value = serde_json::from_slice(fetched).ok()?;
     let adopted: Vec<(String, serde_json::Value)> = match scope {

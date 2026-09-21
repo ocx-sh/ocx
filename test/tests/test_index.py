@@ -641,3 +641,46 @@ def test_index_list_excludes_internal_tags(
     result = ocx.plain("index", "list", fq)
     assert "__ocx" not in result.stdout
     assert "1.0.0" in result.stdout
+
+
+def test_moved_pin_sweeps_the_abandoned_dispatch_object_on_a_registry_source(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """A re-pushed tag moves the pin, and the next `ocx index update` against a
+    plain OCI registry (a DERIVED source) leaves only the object the new pin
+    resolves through.
+
+    The published-source half of the same contract lives in
+    `test_index_selfcontained.py`; this is the derived half, and it is the path
+    every `--index`-redirected registry package takes. `write_dispatch_object`
+    is addressed by content, so nothing ever overwrote the old object — before
+    the sweep the CAS grew by one dead image index per retag, forever.
+    """
+    from src.helpers import make_package
+
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    ocx.plain("--index", str(index_dir), "index", "update", pkg.short)
+
+    objects_dir = index_dir / registry_dir(ocx.registry) / "p" / pkg.repo / "o" / "sha256"
+    before = {path.name for path in objects_dir.iterdir()}
+    assert len(before) == 1, f"precondition: one update stores exactly one dispatch object, got {before}"
+
+    # Re-push the SAME tag: `make_package` bakes a fresh marker per call, so the
+    # image index `1.0.0` resolves to has a different digest.
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "republish", index=False)
+    ocx.plain("--index", str(index_dir), "index", "update", pkg.short)
+
+    after = {path.name for path in objects_dir.iterdir()}
+    assert len(after) == 1, (
+        f"the object the moved pin abandoned must be swept, leaving only the adopted one: {after}"
+    )
+    assert after != before, (
+        "precondition: the re-push must have moved the pin — if it did not, the assertion above "
+        "passes without the sweep having done anything"
+    )
+    root = json.loads((index_dir / registry_dir(ocx.registry) / "p" / f"{pkg.repo}.json").read_text())
+    assert next(iter(after)) == f"{root['tags']['1.0.0']['content'].split(':', 1)[1]}.json", (
+        "the surviving object is exactly the one the committed pin names"
+    )
