@@ -649,7 +649,7 @@ In bash, zsh, fish, PowerShell, and elvish, this rides the same per-prompt hook 
 nushell and the strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch have no append-safe per-prompt hook point, so a project scope on those shells needs one of two explicit entry points instead: [`ocx direnv export`][cmd-direnv-export] — stateless, exports only, never installs missing packages or contacts the registry, so run [`ocx pull`][cmd-pull] first; [`ocx direnv init`][cmd-direnv-init] drops a ready `.envrc` that re-evaluates on each directory entry — or [`ocx exec`][cmd-run] for CI and scripts, which needs no hook at all.
 
 ::: tip Learn more
-[Project Toolchain In Depth][in-depth-project] — schema details, declaration-hash canonicalization (RFC 8785 JCS), in-place flock concurrency, per-group binding semantics, multi-project GC retention, SLSA roadmap.
+[Project Toolchain In Depth][in-depth-project] — schema details, declaration-hash canonicalization (RFC 8785 JCS), the rename-publish + scoped-lock concurrency model, per-group binding semantics, multi-project GC retention, SLSA roadmap.
 [Shell Integration][in-depth-shell-integration] — the full per-shell coverage table, the consent grants, `ocx shell state`'s diagnostic role, and how OCX yields to a live direnv or mise session.
 :::
 
@@ -1378,7 +1378,7 @@ For [direnv][direnv]-driven repos, use [`ocx direnv init`][cmd-direnv-init] to w
 
 ### Project mutators are atomic {#migration-atomic-mutators}
 
-`ocx add`, `ocx remove`, and `ocx lock` now acquire an in-place exclusive flock on `ocx.toml` before reading or writing either file. Concurrent invocations from different terminals or parallel CI jobs are serialised. The old `.ocx-lock` sentinel file is gone — remove it from `.gitignore` and run `git rm .ocx-lock` if previously committed.
+`ocx add`, `ocx remove`, `ocx lock`, and `ocx update` serialise through a content-keyed lock entry under `$OCX_HOME/locks` before reading or writing `ocx.toml` — never a lock on `ocx.toml` itself, and never an `.ocx-lock`/`ocx.toml.lock` sidecar in the project. Concurrent invocations from different terminals or parallel CI jobs are serialised the same way either mechanism achieved; `ocx.toml` is published by atomic rename, so a reader with the file open always sees one whole document.
 
 ### `--project` accepts custom filenames {#migration-project-flag}
 

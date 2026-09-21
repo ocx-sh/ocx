@@ -511,7 +511,9 @@ The command locates the project `ocx.toml` by walking the directory tree from th
 
 After mutating `ocx.toml`, `ocx add` resolves only the new bindings and carries every existing lock entry forward unchanged, then installs the newly added packages.
 
-Multiple identifiers may be given in one invocation. They are staged together and committed atomically — if any identifier is invalid or its binding name already exists, nothing is written. `--group` applies to every identifier in the batch.
+Multiple identifiers may be given in one invocation. They are staged together and committed atomically — if any identifier is invalid, or its binding name is already bound to a *different* identifier, nothing is written. `--group` applies to every identifier in the batch.
+
+Adding a binding the target group already declares with the exact same identifier is a **no-op**, not a failure: `ocx.toml` is left byte-identical (a repeated identifier within one batch collapses the same way), and the binding is re-locked only when `ocx.lock` has no entry for it yet — an existing pin is never re-resolved, so `ocx add` never moves a version. Each already-declared binding prints `` Unchanged: <name> is already added; use `ocx update <name>` to move it `` on stderr. Because packages are pulled on every path regardless, re-running `ocx add` after an interrupted download still finishes the install. Naming an already-bound key with a *different* identifier still fails at exit 64, naming both identifiers and pointing at `ocx remove`+`ocx add` or `ocx update` to move the pin instead.
 
 The same binding name may coexist in the default `[tools]` table and in any named `[group.*]` table — binding identity is `(group, name)`. This lets a project carry different versions of the same package in different contexts:
 
@@ -551,7 +553,7 @@ See [`--global`][global-flag] for the full root-flag reference.
 |------|---------|
 | 0 | Binding added, lock updated, package installed. |
 | 1 | The in-place `ocx.toml` edit could not be expressed safely (rare); the command aborts rather than falling back to a lossy rewrite. |
-| 64 | No `ocx.toml` found, binding already exists, invalid `--group` name, invalid binding `NAME`, `--global` combined with `--project`, or more than one `--platform` value (single-valued flag). |
+| 64 | No `ocx.toml` found, the binding name is already bound to a *different* identifier, invalid `--group` name, invalid binding `NAME`, `--global` combined with `--project`, or more than one `--platform` value (single-valued flag). |
 | 65 | `ocx.toml` drifted from `ocx.lock` before this add — run `ocx lock` to reconcile. |
 | 69 | Registry unreachable while resolving the new tag. |
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
@@ -1855,11 +1857,13 @@ Pass `--global` **before** the subcommand: `ocx --global lock`. See [`--global`]
 | `digest` | string | Host-platform leaf digest in `sha256:<hex>` form. |
 | `platforms` | object | Full available-only map: platform key string to leaf digest. Keys follow the lossless platform encoding (e.g. `"linux/amd64"`, `"darwin/arm64"`, `"any"`). |
 
-Concurrent invocations of `ocx lock` and `ocx update` are serialised via an in-place exclusive flock on `ocx.toml`. Readers (`ocx pull`, `git`, IDE tooling) never acquire any lock and are never blocked by a running `ocx lock`.
+Concurrent invocations of `ocx lock` and `ocx update` serialise through a content-keyed lock entry under `$OCX_HOME/locks` — never a lock on `ocx.toml` itself, since `ocx.toml` is published by atomic rename and its inode rotates on every write. Readers (`ocx pull`, `git`, IDE tooling) never acquire any lock and are never blocked by a running `ocx lock`.
 
 ### `update` {#update}
 
 Re-resolves advisory tags in `ocx.toml` against the live registry and rewrites `ocx.lock`. Unlike [`ocx lock`](#lock) or [`ocx add`](#add), which resolve through the local index by default, `ocx update` talks to the registry every time — the same default [`ocx self update`](#self-update) uses, since the whole point is to see where a moving tag (`:latest`, `:3`) points *today*. With no arguments this is the **whole-file forced-bump verb**: every declared tag is re-resolved, even when the lock is already current. An unchanged result rewrites the lock byte-identically. The operation is fully transactional — on any resolution failure nothing is written. Resolution only ever writes `ocx.lock`; it never rewrites the local index at `--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index/`.
+
+Because it is the only command that holds both the predecessor `ocx.lock` and the candidate at the same moment, `ocx update` reports **what moved**, not just what is now pinned: a table of the bindings whose pull identifier changed, the ones that held still summarized behind a hint line unless `--verbose` lists them too. See [Report](#update-report) below for the full shape.
 
 Pass binding names, `-g/--group`, or both to advance only part of the toolchain instead: every other pin in `ocx.lock` stays frozen. A scoped update advances each named binding's declared tag to today's resolution and carries every other entry forward unchanged. This only moves the resolution the declared tag already points to — it never changes the declaration itself. To pin a new explicit version, edit `ocx.toml` directly; that is a declaration change, not an update.
 
@@ -1885,7 +1889,8 @@ ocx update [OPTIONS] [NAME...]
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx exec`. | — |
 | `--group <NAME>` | `-g` | Advance every binding in one or more named groups; freeze the rest. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table; `all` expands to `default` plus every declared `[group.*]`. Combine with `NAME` arguments to advance only those bindings within the named groups. | *(whole file)* |
 | `NAME...` | — | Binding names to advance; every other pin is frozen. Each name is advanced in every group it appears in (narrow with `-g`). | *(whole file)* |
-| `--check` | — | Re-resolves the selected scope (every declared tag, or only the bindings named by `-g`/positional names), compares the candidate to the predecessor, and exits 0 (matches) or 65 (`DataError`, a pin would change). No writes, no commit. When the predecessor lock is absent, exits 78. | off |
+| `--check` | — | Re-resolves the selected scope (every declared tag, or only the bindings named by `-g`/positional names), prints the report, and exits 0 (nothing would move) or 65 (`DataError`, a pin would change). No writes, no commit. When the predecessor lock is absent, exits 78. | off |
+| `--verbose` | `-v` | List the bindings that did not move as well as the ones that did. Affects the plain rendering only — `ocx --format json update` carries every field either way. | off |
 | `--platform <PLATFORM>` | `-p` | Materialise the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Selects which already-locked leaf to fetch (the lock stays host-agnostic); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
 | `--remote` | | Redundant — resolution already talks to the registry by default. Still accepted. | false |
 | `-h`, `--help` | | Print help information. | |
@@ -1894,11 +1899,17 @@ ocx update [OPTIONS] [NAME...]
 Pass `--global` **before** the subcommand: `ocx --global update`. See [`--global`][global-flag].
 :::
 
+#### Report {#update-report}
+
+Plain format renders one five-column table — `Binding | Group | Platform | From | To` — holding only the bindings whose pull identifier moved. `Binding` is `name:tag` as declared, or the bare `name` when digest-pinned; `From`/`To` are `sha256:` plus the first 12 hex digits (the same short-digest form [`package inspect`](#package-inspect) uses), `-` when the pin did not exist on that side. When any pin held still and `--verbose` was not given, a trailing hint names the count: `2 unchanged pins not shown; re-run with --verbose to list them` (singular: `1 unchanged pin not shown; re-run with --verbose to list it`). `--verbose` appends those rows to the same table instead of printing the hint. A scoped run (`-g`/positional names) lists only the bindings it examined as unchanged — a pin outside the scope was never re-resolved, so it is never reported either way.
+
+`ocx --format json update` emits `{ "changes": [...], "unchanged": [...], "metadata_changed": bool }`, identical at both verbosities. Each `changes[]` entry is `{ name, group, platform, tag, from, to }`; each `unchanged[]` entry is `{ name, group, platform, tag, digest }`, where `digest` is the full pull identifier (`registry/repository@sha256:<hex>`) — the same form `from`/`to` carry, so all three are directly comparable and feed straight back into `ocx pull`. `tag` is `null` for a digest-pinned binding; `from`/`to` are `null` when the pin is newly introduced or dropped. `metadata_changed` reports whether load-bearing lock metadata (`declaration_hash`, `declaration_hash_version`, `lock_version`) moved — advisory fields like `generated_at` are ignored, since those move on every write. `--format json update --check` on drift prints this same report and exits 65 with **no** `error.detail` envelope — the report itself is the verdict, not a wrapped error.
+
 **Exit codes**
 
 | Code | Meaning |
 |------|---------|
-| 0 | `ocx.lock` written, or `--check` confirmed the candidate matches. |
+| 0 | `ocx.lock` written, or `--check` confirmed nothing would move. |
 | 64 | Missing `ocx.toml`, `--global` combined with `--project`, more than one `--platform` value (single-valued flag), or an unknown `-g` group or unknown binding `NAME` in a scoped update. |
 | 65 | `--check` reported the candidate would change pinned content (an advisory tag moved upstream), or a scoped update whose `ocx.toml` has drifted from `ocx.lock` (hand-edited since the last `ocx lock`) — run `ocx lock` to reconcile. |
 | 69 | Registry unreachable while resolving advisory tags. |
@@ -1921,7 +1932,7 @@ ocx update ripgrep
 ocx update -g ci
 ```
 
-Concurrent invocations of `ocx update` and `ocx lock` are serialised via an in-place exclusive flock on `ocx.toml`.
+Concurrent invocations of `ocx update` and `ocx lock` serialise through a content-keyed lock entry under `$OCX_HOME/locks` — see [Concurrent writes][in-depth-project-lock-concurrency] for why the mutex is not on `ocx.toml` itself.
 
 ### `pull` {#pull}
 
@@ -2941,7 +2952,7 @@ Every run also observes the package description published by [`ocx package descr
 
 Publishing tags for a package that has no entry in the index yet is out of scope for `announce` — a package with no committed entry exits 79, and the first-time claim that creates one is [`ocx package claim`](#package-claim).
 
-A tag that is not a version — the OCX-internal `__ocx` namespace, which carries the keep tag from [`--keep-tag`][cmd-package-push], or the frozen legacy `sha256.<hex>` keep tag — is dropped from the curated set rather than failing the run, and reported in the JSON report's `reserved_tags_dropped`. The one exception: `--tags-from-registry` filters a reserved tag out of its listing silently, before it reaches that report, since keep tags are pushed by default and reporting one per published version would drown a real drop. A reserved tag already committed in the index root is still reported, from any mode. A curated set that resolves to nothing but reserved tags exits 64.
+A tag that is not a version — the OCX-internal `__ocx` namespace, which carries the keep tag from [`--keep-tag`][cmd-package-push], or the frozen legacy `sha256.<hex>` keep tag — is dropped from the curated set rather than failing the run, and reported in the JSON report's `reserved_tags_dropped`. The one exception: `--tags-from-registry` filters a reserved tag out of its listing silently, before it reaches that report, since keep tags are pushed by default and reporting one per published version would drown a real drop. A reserved tag already committed in the index root is still reported, from any mode. A curated set named by `--tags` or `--tags-file` that resolves to nothing but reserved tags exits 64. With `--refresh` or `--tags-from-registry`, an empty or wholly reserved set is not a refusal: the run proceeds as a description-only pass and reports the drop in `reserved_tags_dropped`.
 
 **Usage**
 
@@ -2981,10 +2992,11 @@ The package used to be named by a `--package` flag. That spelling is deprecated:
 | A curated tag does not resolve on the physical registry — check for a typo | 79 |
 | The package is unclaimed — no committed root exists for it yet. Claiming one is a human-lane action, never something announce performs | 79 |
 | The forge rate-limited the run (429), or a concurrent announce kept winning the branch — retry | 75 |
-| The curated set resolved to nothing but reserved tags — nothing left to announce | 64 |
+| A curated set named by `--tags` or `--tags-file` resolved to nothing but reserved tags — nothing left to announce. With `--refresh` or `--tags-from-registry`, an empty or wholly reserved set is not a refusal: the run proceeds as a description-only pass and reports the drop in `reserved_tags_dropped` | 64 |
 | `--index-repo` names a self-hosted host and no `--forge` was given, or `--fork` names the namespace that already owns the index (fork it into itself — omit `--fork` instead) | 64 |
 | `--fork` names a different host than `--index-repo`, or either coordinate's host is malformed. A fork lives on the same instance as its upstream, and a host that is not a hostname is refused rather than interpreted | 64 |
 | `--index-repo` or `--fork` names a nested namespace on GitHub, which has no nested organizations. Checked before any request | 64 |
+| The committed root's `name` disagrees with the identifier this run announces — the message names both values: `committed root at <path> names <committed>, not the <expected> this run announces` (an absent `name` reads `committed root at <path> carries no name; this run announces <expected>`). Fix the mismatch, or type the full identifier when your default registry differs from the index domain | 65 |
 | The description recorded in the index no longer exists on the registry — republish it, or ask for it to be cleared in the index | 65 |
 | An unchanged run's open pull request can no longer merge against the index base — close the pull request or delete the branch; the next announce rebuilds it | 65 |
 | `--transport git` was selected and the forge answered, but the instance or the target project lacks a capability that transport needs — job-token pushes disabled on the index project, or neither of its allowlists (the publishing project by name, or one of its groups) admits it. A [split credential pair][authoring-announcing-split] checks this before anything is written and names the missing one; a bare job token cannot read either setting, so it pushes and GitLab's own rejection decides instead — same exit code, a generic message. An administrator of the index project has to act either way | 86 |
@@ -3061,7 +3073,11 @@ ocx package announce --tags 1.0.0 --transport git \
 
 Claims a package in the index so its tags can be announced. Renders the package's index entry — its logical name, the physical OCI repository its bytes live in, and the accounts that own it — and opens a pull request (GitHub) or merge request (GitLab) against the index repository, or writes the entry to a local directory with `--out`.
 
-The claimed unit is the package, not the namespace prefix: the entry is `p/<namespace>/<package>.json` and the already-claimed refusal reads that exact path, so a second package under an already-claimed namespace still needs its own `claim` run. This is the first-time counterpart to [`announce`](#package-announce), and the two never overlap: `claim` creates the entry, `announce` publishes tags into one that already exists. A package whose entry is already committed is refused at exit 65 with a message naming `ocx package announce`; that refusal holds in every mode, `--out` included, because it reads the index's base branch rather than the claim branch — so re-running an unmerged claim reports `unchanged` rather than failing.
+The claimed unit is the package, not the namespace prefix: the entry is `p/<namespace>/<package>.json`, so a second package under an already-claimed namespace still needs its own `claim` run. `claim` never overlaps with [`announce`](#package-announce): `claim` writes `owners`, `repository`, `name`, `upstream` and `desc`, `announce` publishes `tags` into an entry that already exists, and neither writes the other's fields.
+
+**Claiming an already-claimed package is a re-claim, not a refusal.** It adds your resolved owners to the committed list — union, not replace, with the committed owners kept first — and carries every other committed field through unless the entry disagrees with what you typed: `status`, `deprecated_message`, `created` (never reset — a re-claim is not a new claim) and `tags` (claim never writes tags) survive verbatim, `desc` is re-observed from the registry on every claim (see below), and `--upstream-org` **replaces** the committed `upstream` object when given and **carries** it when omitted. A committed `name` that disagrees with the identifier you typed, or a committed `repository` other than the one you passed with `--repository`, is refused rather than silently repointed — see the exit table. Nothing new to add or change reports `status: unchanged` and opens no request, in every mode including `--out`, because the comparison reads the index's base branch, not an unmerged claim's own branch. This reads the committed root on every run — `claim` is now a registry client too, and a curated host [`trusted_hosts`][config-registries-trusted-hosts] refusal applies exactly as it does under `announce`.
+
+**Every claim writes the package description.** The entry carries whatever the registry currently serves at `__ocx.desc` — title, summary, keywords, README and logo — in the same commit as the root, refreshed on every claim including a re-claim. A re-claim that moves the description drops the readme and logo blobs the previous entry named, the same [orphan sweep announce runs][in-depth-indices-writing] — claim never writes tags, so a description blob is the only object it can ever orphan. Publish one first with [`ocx package description push`][cmd-package-describe]; a package with none simply claims without a `desc` field. `--out` writes the description's blobs alongside the entry too, matching `announce --out`'s shape.
 
 Everything about forge selection, coordinates, nested GitLab groups and self-hosted instances reads exactly as it does for [`announce`](#package-announce) — `--index-repo`, `--forge`, `--fork` and `--out` are one shared grammar across both commands, so a pipeline that already announces needs no new vocabulary to claim.
 
@@ -3103,7 +3119,9 @@ ocx package claim --repository oci://<HOST>/<PATH> [OPTIONS] <NAMESPACE>/<PACKAG
 | `--out` with `--fork`; `--transport git` with `--fork`, with `--out`, or against a resolved GitHub forge; `--fork` on a different host than `--index-repo`; a self-hosted `--index-repo` host with no `--forge`; a nested namespace on GitHub; an `--upstream-*` flag without `--upstream-org` | 64 |
 | `--repository` is not `oci://host/path`; `--owner` is neither a `LOGIN` nor a `LOGIN:ID` pair; `--upstream-repository-url` is not an `http`/`https` URL, or carries embedded credentials (the message names the flag and the rule, never the value — it would be a live token) | 64 |
 | No acting identity at all — the credential has no account and the CI environment named none; an owner named twice; a supplied id that disagrees with the forge's; an owner login the forge reports as a bot, or whose shape is a documented bot form; a bare `LOGIN` while the users API is out of reach | 64 |
-| The package is already claimed — an entry is committed on the index's base branch. Holds in every mode, `--out` included; announce it with [`ocx package announce`](#package-announce) instead | 65 |
+| The committed entry names another package — the message names both values, the same wording [`announce`'s does][cmd-package-announce] | 65 |
+| `--repository` disagrees with the committed pointer; the message names both values | 65 |
+| A curated tag's physical host resolves to a private, loopback, link-local, or metadata address while observing the description — add it to that namespace's [`trusted_hosts`][config-registries-trusted-hosts] to allow | 78 |
 | The forge is unreachable or returned a 5xx; or `--transport git` was selected and no `git` was found, or the one found is older than the floor the transport needs. Checked before the forge is constructed | 69 |
 | Writing under `--out` failed — permission denied, disk full, or a parent that is not a directory | 74 |
 | The forge rate-limited the run (429), or a concurrent claim kept winning the branch — retry | 75 |
@@ -3116,7 +3134,9 @@ ocx package claim --repository oci://<HOST>/<PATH> [OPTIONS] <NAMESPACE>/<PACKAG
 
 | `detail` value | Exit | Meaning |
 |----------------|------|---------|
-| `package_already_claimed` | 65 | An entry is already committed on the index's base branch — the idempotent steady state; run [`ocx package announce`](#package-announce) |
+| `root_name_mismatch` | 65 | The committed entry names another package than the one this run claims |
+| `repository_mismatch` | 65 | `--repository` disagrees with the committed pointer |
+| `description` | inherited | Observing `__ocx.desc` failed; the exit code is the inner announce error's own (65, 69, 78 above) — reported under this one `detail` slug regardless of which announce failure it was |
 | `malformed_repository` | 64 | `--repository` is not `oci://host/path` |
 | `no_acting_identity` | 64 | The credential has no account and the CI environment named none |
 | `invalid_owner_login` | 64 | `--owner` is neither a `LOGIN` nor a `LOGIN:ID` pair |
@@ -3157,7 +3177,7 @@ ocx package claim --repository oci://<HOST>/<PATH> [OPTIONS] <NAMESPACE>/<PACKAG
 }
 ```
 
-`status` is `unchanged` or `updated`, compared against the **open claim branch** — so an `--out` run always reports `updated`, unlike announce's, which compares against the committed entry. `credential_kind` is `job-token`, `token` or `none`; it says `job-token` only when the credential is this environment's own `CI_JOB_TOKEN`, because ocx cannot tell a personal from a project, group or OAuth token and reports no kind it cannot observe. `push_credential_kind` is `job-token`, `token`, `git-helper` or `null`, and is always `null` under `api`, which pushes nothing; `git-helper` means ocx injected nothing and git's own credential helpers authenticated the push. `owner_identity_source` is `resolved`, `ci-environment` or `asserted` (GitLab-only, see above). `author_identity_source` is `resolved`, `ci-environment` or `null`, and never `asserted`. `branch` is present on every run, `--out` included — it is derived from the package, not read from the forge. `fork` is `null` on the direct path and under `--transport git`. `capability_checks` carries one row per capability in a fixed order, `skipped` rows included, and is **non-empty on every run** — so a pipeline asserts the preflight ran rather than trusting a bare exit 0. There is no `failed` status: a check that fails raises the error instead — `unknown` is a bare job token's normal answer for a capability it cannot read, and the push it still allows decides the outcome instead.
+`status` is `unchanged` when this run's owners, description and every other field would change nothing — either nothing already committed on the index's base branch, or nothing an already-open, unmerged request already proposes — and `updated` otherwise. `--out` always reports `updated`: there is no branch to compare an on-disk write against. `credential_kind` is `job-token`, `token` or `none`; it says `job-token` only when the credential is this environment's own `CI_JOB_TOKEN`, because ocx cannot tell a personal from a project, group or OAuth token and reports no kind it cannot observe. `push_credential_kind` is `job-token`, `token`, `git-helper` or `null`, and is always `null` under `api`, which pushes nothing; `git-helper` means ocx injected nothing and git's own credential helpers authenticated the push. `owner_identity_source` is `resolved`, `ci-environment` or `asserted` (GitLab-only, see above). `author_identity_source` is `resolved`, `ci-environment` or `null`, and never `asserted`. `branch` is present on every run, `--out` included — it is derived from the package, not read from the forge. `fork` is `null` on the direct path and under `--transport git`. `capability_checks` carries one row per capability in a fixed order, `skipped` rows included, and is **non-empty on every run** — so a pipeline asserts the preflight ran rather than trusting a bare exit 0. There is no `failed` status: a check that fails raises the error instead — `unknown` is a bare job token's normal answer for a capability it cannot read, and the push it still allows decides the outcome instead.
 
 `author` records who authored the request, which is deliberately not who owns the package. **It is not an attestation.** Only its first rung — the forge's own answer about the credential — is the forge speaking; the second rung is an ordinary read of `GITLAB_USER_LOGIN`/`GITHUB_ACTOR`, which an earlier pipeline step can set to anything. `author_identity_source` says which rung answered: `resolved` for the forge's answer about the credential, `ci-environment` for the environment read, `null` when there is no author at all. Branch on that key rather than on `author` alone — the two rungs produce the same `{login, id}` shape and are not equally trustworthy.
 
@@ -5415,6 +5435,7 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 | `-p`, `--platform` | | Target platform to consider. |
 | `--clean` | | Start with a clean environment; only package-declared variables and `OCX_*` config vars reach the child. |
 | `--self` | | Use the self view (expose `private` + `public` entries). Default: consumer view (`public` + `interface` only). |
+| `--rm` | | Remove the packages from the store once the command finishes. A package this invocation downloaded leaves nothing behind; only what nothing else holds is removed — a package that is also installed, one a project's or the global `ocx.lock` pins, or a site-patch companion all stay, each named on stderr as kept. The exit code is always the command's; a removal that fails warns on stderr and leaves the exit code alone. Without this flag ocx replaces itself with the command on Unix; with it, ocx stays running as the command's parent and the command's process id is no longer ocx's — see the "Process replacement on Unix" box below. A kill of ocx itself skips the removal, the same hole [`docker run --rm`][docker-run-rm] has. | off |
 | [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim instead of downloading content up front; the requested command's own invocation is what triggers materialization if it names one of the deferred package's entries. Typing `always` together with `--self` is a usage error (exit 64) — a shim is a consumer-facing launcher and `--self` selects the private view that bypasses launchers, so the two ask for contradictory things. An `always` merely *inherited* from `OCX_LAZY_MODE` is not: `--self` outranks it and composes eagerly. | *(inherit from `OCX_LAZY_MODE`; there is no `ocx.toml` to consult on this OCI-tier command)* |
 | `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends); `SEP` qualifies `list` only (`--env GODEBUG:list:,=gctrace=1`) and, if omitted, inherits whatever separator another contributor to the key already declared, or a single space if none did. A relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx exec`](#exec). | — |
 | `--records-dir <DIR>` | — | Sink directory for the [exec-time resolution record][execution-records-ref] — one JSON file written immediately before the child starts, naming every package digest that composed the environment plus the resolved executable. Overrides the [`[records]` `dir`][config-records-dir] config key and [`OCX_RECORDS_DIR`][env-ocx-records-dir]. Unset at every tier means no record is written. Recording failure aborts the invocation when [`[records] required`][config-records] is `true` — exit 74 for an unwritable sink, exit 78 when the sink resolves through a symlink. | *(unset — recording off)* |
@@ -5427,6 +5448,12 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 
 ::: info Process replacement on Unix
 On Unix, `ocx package exec` hands the current process image off to the target via `execvp(2)`, so the child inherits ocx's PID. Signals reach the target without an ocx forwarder, `pgrep <name>` shows the wrapped binary, and the process tree drops the ocx layer entirely — matching the same semantics shells use when chaining `exec "$@"` in entry-point scripts. On Windows, `ocx package exec` spawns the target and waits for it, since `CreateProcess` has no exec equivalent; the propagated exit code is forwarded as ocx's own exit code.
+
+**`--rm` is the exception on Unix.** Cleanup has to run after the child, and a replaced process image has nowhere to run it, so `--rm` spawns and waits instead of exec-replacing — ocx stays resident for the child's whole lifetime, `pgrep <name>` no longer shows the ocx layer's own PID, and the [exec-time resolution record][execution-records-ref]'s pre-exec guarantee weakens to the spawn-and-wait ordering Windows already has (the record is written after the child is spawned, since only then does ocx know its pid). Windows already spawns and waits, so `--rm` changes nothing there.
+:::
+
+::: tip `--rm`'s cleanup pass
+`--rm` runs the same lock-free store garbage collection [`ocx package uninstall --purge`][cmd-package-uninstall] uses, over the packages this run composed — not a project-lock-aware collector, so two `ocx` invocations sharing one `$OCX_HOME` can race the same way two concurrent `docker run --rm` containers can (accepted, [docker-like][docker-run-rm] semantics). Each `--rm` pays a whole-store reachability walk, so it is a flag for ephemeral one-off runs, not something to put in a hot loop. A package composed under [`--lazy-mode always`](#arg-lazy-mode) and left deferred is neither removed nor retained by `--rm` — its shim tree is [`ocx clean`](#clean)'s to collect.
 :::
 
 `<COMMAND>` is resolved once, before the child starts, by searching only the composed packages' own `PATH` contributions — never the ambient `PATH` and never a working-directory fallback — and a match that is itself an ocx-generated launcher trampoline is refused rather than handed to the child.
@@ -5439,7 +5466,7 @@ On Unix, `ocx package exec` hands the current process image off to the target vi
 | 65 | `<COMMAND>` does not resolve within the composed environment (no ambient-`PATH` or working-directory fallback); or `<COMMAND>` resolves to an ocx-generated launcher trampoline, refused to prevent an unbounded self-invocation loop. |
 | 74 | The [exec-time resolution record][execution-records-ref] could not be written and [`[records] required`][config-records] is `true` — the command never runs. |
 | 78 | The `--records-name`/`OCX_RECORDS_NAME`/[`[records] name`][config-records-name] template names an unrecognized placeholder, carries no varying component (`{time}`, `{pid}`, or `{rand}`), or renders to something other than a single plain filename; or the `--records-dir`/`OCX_RECORDS_DIR`/[`[records] dir`][config-records-dir] sink resolves through a symlink to a different directory. |
-| _N_ | Wrapped command exited with code _N_ — `exec` forwards the child status verbatim. |
+| _N_ | Wrapped command exited with code _N_ — `exec` forwards the child status verbatim. `--rm` mints no exit code of its own: this row still applies even when its post-run removal fails, which only ever warns on stderr (`could not remove the packages this run composed: <error>`). |
 
 ::: info `ocx launcher exec` takes no `--records-*` flags
 An entrypoint launcher's re-entry (`ocx launcher exec`) inherits the active sink only through the forwarded [`OCX_RECORDS_DIR`][env-ocx-records-dir]/[`OCX_RECORDS_NAME`][env-ocx-records-name] environment variables — the same mechanism that forwards every other resolution-affecting setting into a launcher re-entry. See [Two records per launcher invocation][execution-records-frames].
@@ -6094,6 +6121,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 | 80 | Authentication failed against the registry (full-update path only). |
 
 <!-- external -->
+[docker-run-rm]: https://docs.docker.com/reference/cli/docker/container/run/#rm
 [git-no-verify]: https://git-scm.com/docs/git-commit
 [wm-settingchange]: https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-settingchange
 [rustup-261]: https://github.com/rust-lang/rustup/issues/261
@@ -6136,10 +6164,12 @@ or a registry error) — the report then degrades to a local-state-only summary
 [exec-modes]: ../in-depth/environments.md#visibility-views
 [env-composition-forwarding]: ../in-depth/environments.md#ocx-forwarding
 [in-depth-project-running]: ../in-depth/project.md#running
+[in-depth-project-lock-concurrency]: ../in-depth/project.md#lock-concurrency
 [env-composition-strict-isolation]: ./env-composition.md#strict-isolation
 [in-depth-ci]: ../in-depth/ci.md
 [in-depth-indices-layout]: ../in-depth/indices.md#local-layout
 [in-depth-indices-update]: ../in-depth/indices.md#update-modes
+[in-depth-indices-writing]: ../in-depth/indices.md#writing
 [in-depth-signing]: ../in-depth/signing.md
 [cmd-lock-file]: ../in-depth/project.md#lock-format
 [ug-promoting]: ../user-guide/promoting-packages.md

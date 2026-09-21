@@ -219,6 +219,7 @@ Whenever ocx spawns a subprocess (most commonly the child process under [`ocx pa
 | Variable | Source | Purpose |
 |---|---|---|
 | [`OCX_BINARY_PIN`][env-ocx-binary-pin] | Resolved path of the running ocx executable | Pins the inner ocx to the same binary that installed the package |
+| [`OCX_HOME`][env-ocx-home] | `crate::home::default_ocx_root()` — the outer ocx's own resolved data root | Set-always, even under `--clean`: a child that strips ambient state still resolves the same object store, not `~/.ocx` from the passwd database |
 | [`OCX_OFFLINE`][env-ocx-offline] | `--offline` flag on the outer invocation | Child ocx stays offline if outer was offline |
 | [`OCX_FROZEN`][env-ocx-frozen] | `--frozen` flag on the outer invocation | Child ocx stays frozen if outer was frozen |
 | [`OCX_REMOTE`][env-ocx-remote] | `--remote` flag on the outer invocation | Child ocx uses the remote index if outer did |
@@ -280,6 +281,7 @@ Example: a package that sets `JAVA_HOME` with default (`private`) visibility wil
 
 <!-- environment -->
 [env-ocx-binary-pin]: ../reference/environment.md#ocx-binary-pin
+[env-ocx-home]: ../reference/environment.md#ocx-home
 [env-ocx-offline]: ../reference/environment.md#ocx-offline
 [env-ocx-frozen]: ../reference/environment.md#ocx-frozen
 [env-ocx-remote]: ../reference/environment.md#ocx-remote

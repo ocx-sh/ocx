@@ -71,8 +71,9 @@ ocx package claim --repository oci://ghcr.io/acme/widget acme/widget
 ```
 
 That is the whole minimum: a logical name and the registry repository behind it. `--owner`
-names the accounts recorded as owners and **replaces** the detected list rather than adding
-to it; `--upstream-org`, with its optional `--upstream-repository-url` and
+names the accounts recorded as owners; on a fresh claim it **replaces** the detected list, and
+on a re-claim of an already-claimed package it adds them to the committed list rather than
+replacing it. `--upstream-org`, with its optional `--upstream-repository-url` and
 `--upstream-disclaimer`, marks a package that repackages someone else's software. Flags
 come before the positional; the full grammar and every flag is in the
 [`claim` reference][cmd-package-claim].
@@ -83,10 +84,11 @@ credential is resolved and before anything is dialled, so a bad invocation costs
 trip through a token you did not need.
 
 The claimed unit is the **package**, not the namespace prefix: the entry lives at
-`p/<namespace>/<package>.json`, and the refusal that guards a second claim reads exactly that
-path. So `acme/gadget` needs its own claim run even after `acme/widget` merged — a shared
-namespace prefix grants nothing on the ocx side. What you do once per package is this; after
-its request merges, `announce` works and nobody looks at that package's releases again.
+`p/<namespace>/<package>.json`, so `acme/gadget` needs its own claim run even after
+`acme/widget` merged — a shared namespace prefix grants nothing on the ocx side. Claiming
+`acme/widget` a second time, once its own entry has merged, is not an error: it is how a new
+maintainer adds themself to `owners[]`, and it costs the release pipeline nothing to run
+unconditionally — see [Who reviews it, and what happens after](#announcing-review).
 
 ## Announcing tags {#announcing-tags}
 
@@ -121,6 +123,13 @@ A run that changes nothing makes no commit and reports `unchanged`; a second ann
 same package updates the open request in place rather than opening a second one. Announcing
 also picks up whatever [`ocx package description push`][cmd-package-describe] last published —
 title, summary, keywords, README and logo — so a description refresh needs no separate step.
+
+Every announce also cleans up after itself, in the same commit: a moved tag's old dispatch
+object, a replaced README, a replaced logo are all deleted the moment the rebuilt entry stops
+referencing them, no flag required. Nothing about the request grammar changes — the removals
+show up only in the diff itself, the way the additions always did. Only an object the
+*previously committed* entry named is ever a candidate; an object orphaned by an announce that
+ran before this behaviour shipped is not swept retroactively.
 
 Yanking runs through the same command. `--yank <tag>` with a `--yank-reason` marks a tag as
 one that should no longer be installed, and `--unyank <tag>` clears the marker. It is a
@@ -392,10 +401,12 @@ route to which lane. Getting the owner list right at claim time is what makes yo
 pipeline unattended later. A self-hosted index sets its own rules — check with whoever runs
 it.
 
-Re-running a claim before its request merges is safe: the refusal that guards an
-already-claimed package reads the index's **base** branch, not the claim branch, so a
-second run reports `unchanged` rather than failing. Once the request merges, a further claim
-exits 65 and points you at `announce`.
+Re-running a claim is always safe, before or after its request merges. Nothing new to say
+reports `status: unchanged` and opens no request; a genuine change — a new `--owner`, a moved
+description — adds itself to the committed entry and reports `updated`. Neither path ever
+fails just because the package is already claimed: a name-mismatched or repository-mismatched
+re-claim is the two refusals that still exist, and both name what disagreed rather than
+pointing at `announce`.
 
 ## What your consumers need {#announcing-consumers}
 
@@ -444,8 +455,10 @@ Codes marked *claim* or *announce* are reachable from that command only; the res
 | 64 | *claim* — `--owner` is neither a `LOGIN` nor a `LOGIN:ID` pair | The id is a non-negative whole number, split on the first colon. `alice:7`, not `alice:7:8` and not `:7` |
 | 64 | *claim* — `--upstream-repository-url` must be an http or https URL without embedded credentials | The refusal never echoes the value, because the most likely one is a forwarded `CI_REPOSITORY_URL` whose userinfo is a live job token. Pass the public URL |
 | 64 | *claim* — `no acting identity`, `unknown owner … expected LOGIN:ID`, or `owner … is a bot account` | Pass `--owner LOGIN:ID` naming a human. On a job token the users API is closed, so the pair is required — as the [job-token recipe](#announcing-gitlab-job-token) shows |
-| 64 | *announce* — the curated set resolved to nothing but reserved tags | Every tag named was an OCX-internal `__ocx` or legacy keep tag. Name a real version |
-| 65 | *claim* — `package already claimed` | It merged. Publish tags with [`ocx package announce`][cmd-package-announce] instead |
+| 64 | *announce* — a `--tags`/`--tags-file` curated set resolved to nothing but reserved tags | Every tag named was an OCX-internal `__ocx` or legacy keep tag. Name a real version. With `--refresh` or `--tags-from-registry`, an empty or wholly reserved set is not a refusal: the run proceeds as a description-only pass and reports the drop in `reserved_tags_dropped` |
+| 65 | *claim* — the committed entry names another package | Check the identifier: `<namespace>/<package>` decides the expected name, and a wrong registry or a renamed package both surface here |
+| 65 | *claim* — `--repository` disagrees with the committed pointer | The pointer decides where a package's bytes come from and is never repointed as a side effect of adding an owner. Pass the current value — the error names it — or reach an existing owner to move the pointer deliberately if the repository genuinely changed |
+| 65 | *announce* — the committed root's `name` disagrees with the identifier this run announces | Fix the mismatch: either the registry you typed differs from the one the root already committed, or the identifier itself changed. A publisher whose configured default registry differs from the index domain must type the full identifier — no `[registries."<domain>"]` entry is required to announce |
 | 65 | *announce* — the recorded description no longer exists on the registry, or an unchanged run's open request can no longer merge | Republish the description with [`ocx package description push`][cmd-package-describe]; for the second, close the request or delete the branch and announce again |
 | 69 | the forge is unreachable or returned a 5xx; the registry could not be resolved; or no `git` was found, or it is older than 2.31.0 | Retry the first two; install a newer git for the third — the floor is checked before the forge is even constructed |
 | 74 | writing under `--out` failed, or `--tags-file` could not be read | Check the path's permissions. Parent directories are created for you; a parent that is a regular file is not |

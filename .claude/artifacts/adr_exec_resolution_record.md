@@ -1088,6 +1088,10 @@ Two new envelope fields and a third package role, settled the same day as the re
 
 ---
 
+## Amendment (2026-09-21) — `ocx package exec --rm` is the Unix exception to "pre-exec record"
+
+One-line amendment, no new field. Every launching frame documented above writes its record before the child starts (Unix `execvp(2)` diverges on success, so the record has to exist first or never). `ocx package exec --rm` breaks that ordering by construction: cleanup has to run *after* the child exits, and a replaced process image has nowhere to run it, so `--rm` selects `spawn_and_wait` instead of `launch::exec` on every platform, not just Windows. The record is therefore written **after** the child is spawned under `--rm` on Unix — the same ordering Windows already has for every invocation, since `CreateProcess` never had an exec equivalent to diverge from in the first place. Nothing about the record's *shape* changes; only Unix's pre-exec guarantee narrows to "pre-exec, unless `--rm`." See `ocx package exec`'s own reference entry for the full `--rm` contract.
+
 ## Links
 
 - Issue [#214](https://github.com/ocx-sh/ocx/issues/214) — originating request

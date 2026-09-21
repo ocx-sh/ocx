@@ -53,7 +53,7 @@ Content-addressed storage, a local index, persistent state, stable symlinks, and
       <Description>download staging — cleaned on successful install</Description>
     </Node>
     <Node name="locks/" icon="🔒">
-      <Description>cross-process lock files — content-keyed, safe to delete when no ocx process is running</Description>
+      <Description>cross-process lock files — content-keyed, safe to delete when no ocx process is running; also holds the project mutation mutex for every ocx.toml this machine has written to, scoped under project-mutate/</Description>
     </Node>
   </Node>
 </Tree>

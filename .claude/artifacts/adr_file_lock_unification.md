@@ -554,6 +554,14 @@ The `acceptance-tests` job's `needs: [build, cross-compile]` is unchanged — cr
 
 ---
 
+## Amendment (2026-09-21) — Decision 3 retracted for `ocx.toml` (ocx#494)
+
+**Decision 3, "`ocx.toml` mutation uses in-place lock + `replace_bytes`," is retracted for `ocx.toml` specifically.** The crash-safety trade-off this ADR accepted — kill-9 between `set_len(0)` and `sync_data` leaves `ocx.toml` truncated — proved worse in practice than the sidecar-file cost it was traded for: a concurrent reader with the file already open (`ocx status`, the per-prompt shell reconciler, an editor, `git`) could observe a spliced document mid-rewrite, the same defect class ocx#441 found in `config.json`. `ocx.toml` now publishes by tempfile + atomic rename (`ocx_project::mutate::publish_by_rename`, mode-preserving), the shape this ADR's own §2 (`BlobGuard` deletion) already used for blobs. Because rename rotates the inode, the mutex could no longer live on the data file — see [`adr_project_toml_rename_publish.md`](./adr_project_toml_rename_publish.md) for the full replacement decision, D-8 in `plan_issue_batch_477_494.md`, and the `lock_scoped`-under-`$OCX_HOME/locks` mechanism the 2026-09-15 `config.toml` amendment below already established as precedent.
+
+**Decisions 1 and 2, and the rest of Decision 3, are unaffected.** `LockedFile`/`LockedJsonFile`/`LockedTomlFile` remain the canonical in-place primitive for every stable-inode target — `TagGuard`, `install_status`, `temp_store` sentinels, `acquire_select_lock` — none of which publish by rename. `BlobGuard`'s deletion and the tempfile-rename-singleflight blob write path are untouched. `LockedTomlFile` itself has no production caller left after this change (its one caller, `ocx.toml`, moved to `publish_by_rename`); left in place as a follow-up deletion, not removed here.
+
+---
+
 ## Links
 
 - Discovery: [`./discovery_file_lock_unification.md`](./discovery_file_lock_unification.md) — call-site enumeration (10 sites), content-addressed audit, CI surface, conventions, open hazards.
@@ -571,3 +579,4 @@ The `acceptance-tests` job's `needs: [build, cross-compile]` is unchanged — cr
 |---|---|---|
 | 2026-05-28 | architect (opus) | Initial draft — `LockedFile` chosen for in-place mutables; `BlobGuard` deleted; `ocx.toml` in-place rewrite; Windows CI leg added; 11-commit migration plan. |
 | 2026-09-15 | builder (opus) | `config.toml` added to the covered files: every surgical read-modify-write goes through `config::edit::edit` under a `lock_scoped` entry in `$OCX_HOME/locks` (ocx#468). |
+| 2026-09-21 | worker-doc-writer | Decision 3 retracted for `ocx.toml` — rename-publish + `lock_scoped` mutex replaces in-place `replace_bytes`, per the Amendment above (ocx#494). |

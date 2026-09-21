@@ -2190,3 +2190,83 @@ Resolved by the orchestrator under the owner's autonomous-implementation mandate
 | Forge coordinate from non-argv sources | Argv is the only source today (ocx-mirror drives ocx through the CLI). The forge path stays deliberately unguarded; if execution finds a non-argv source, the existing proxy-aware SSRF guard is applied to it — no new guard. | execution note |
 | indexbot dual-emit stop date | Recommend indexbot 0.7 with its own owners-drop ADR; opened as an issue on the index repo referencing this ADR. | index issue |
 | GitHub invoker identity (`actor_id`) | Out of 0.6.1 scope; index-governance question, filed on `ocx-sh/index` with the `actor_id` note above. | index issue |
+
+---
+
+## Amendment (2026-09-21) — the published index deletes what it stops referencing, always on
+
+Owner mandate: "make sure the index auto-cleans itself always." `ocx package announce` (and the underlying commit builder every write path shares) now removes, in the **same commit** that stops referencing them, every index object the previous root named and the new root does not: a moved tag's old `p/<ns>/<pkg>/o/<algo>/<hex>.json`, a replaced readme's old `.md`, a replaced logo's old `.png`/`.svg`. No flag, no opt-out, no new report field — the removals are visible only in the PR/MR diff itself, the same way the additions always were. `--out DIR` performs the equivalent removals under `DIR` for parity with the commit path (probing the forge for a moved logo exactly as the commit path does), though `written_paths` in the JSON report continues to list writes only, not deletions — an accepted asymmetry, not an oversight.
+
+**Mechanism.** `Forge::commit_files` now takes `BTreeMap<String, FileChange>` (`enum FileChange { Put(Vec<u8>), Delete }`) instead of a flat byte-map; every driver (GitHub tree `sha: null`, GitLab `delete` action, git-workspace `git rm`) applies `Delete` for a path that exists and treats `Delete` of an absent path as a no-op, never an error. The candidate set is `referenced(previous_root) \ referenced(new_root)` over `tags[].content ∪ desc.readme ∪ desc.logo` — a **referenced-set diff**, not a directory listing: computing it needs no `Forge` listing capability, and a path both put and deleted in the same run is unrepresentable by construction (the map is keyed by path; a referenced object is never orphaned by the same commit that references it). A `previous_root == None` (fresh claim or first announce) short-circuits to no candidates and no probe. The logo's extension is not recorded anywhere, so a probe checks `<hex>.png` then `<hex>.svg` at the parent ref via `Forge::get_file_contents`; neither answering means the logo was never fetchable at that ref and nothing is removed. **A probe transport failure propagates as the announce's own forge error** — an orphan a transport failure left behind is still an orphan, and the run says so rather than silently leaving it.
+
+**Scope, and the accepted risk.** Only objects the *previous committed root* named are candidates. An object orphaned by an announce that shipped before this amendment is not swept retroactively — a one-time backlog for the index bot to reclaim by directory listing, out of scope here (§ Out of Scope, "A `Forge` directory-listing read to reclaim objects orphaned before this ships"). A concurrent announce's still-open PR may reference an object this run's PR deletes; this is accepted, not guarded against, because it self-heals structurally: every curated tag's bytes are re-written on every announce run (`pipeline.rs`), so that package's next announce — merged or not — re-creates whatever object its own tags still need. No cross-branch check exists or is planned.
+
+**Local counterpart.** The local index collection (`ocx index update`/`ocx index sync`, `LocalIndex::refresh_published`/`refresh_derived`) runs the equivalent sweep, `regenerate::sweep_orphan_objects`, scoped to dispatch objects only (the one extension type ocx writes locally) and likewise a referenced-set diff rather than a tree walk, for the same pre-existing-orphan and cross-process-race reasons — see `.claude/rules/subsystem-oci.md` § "Merge is the only write verb" for the full local contract and `website/src/docs/in-depth/indices.md` for the reader-facing statement of both halves.
+
+Component contracts: C-001 (`FileChange`/`commit_files`), C-006 (`orphan_paths`), C-004 (the local sweep). Plan: `.claude/artifacts/plan_issue_batch_477_494.md`, WP-1/WP-3/WP-4, decisions D-6/D-7, deviation DX-1.
+
+---
+
+## Amendment (2026-09-21) — claiming an already-claimed package is a re-claim, not a refusal
+
+Owner mandate: reverse #481. `ClaimError::PackageAlreadyClaimed` — this ADR's own "Why 65 for an
+already-claimed namespace" decision, above — is **deleted**. A committed root at
+`INDEX_BASE_REF` is no longer a conflict `claim` refuses; it is read as the base a re-claim
+carries forward. Running `claim` again to add an owner, after the first claim's request merged,
+was already the obvious second call an operator reaches for — refusing it and pointing at
+`announce` instead was the wrong halves of the two commands, since `announce` cannot write
+`owners`.
+
+**Field rules (D-3).** `owners` union by resolved forge **id**, never login — the same account
+under two spellings collapses to one entry — with the committed owners kept first and new ones
+appended. `status`, `deprecated_message`, `created` and `tags` carry verbatim from the committed
+root; `created` never resets, because a re-claim is not a new claim, and `tags` never appears
+here at all — claim has never written it. `--upstream-org` **replaces** the committed `upstream`
+object when given and **carries** it when omitted; a carried `null` is dropped rather than
+re-emitted. `desc` is re-observed from the registry on every claim, fresh or re-claim alike (see
+below). Byte-identical output — nothing an owner, a field or a description move would change —
+reports `ClaimStatus::Unchanged`, exit 0, no request opened, in every mode including `--out`,
+because the comparison reads the index's base branch rather than an unmerged claim's own branch.
+
+**The two refusals that remain.** A committed `name` that disagrees with the identifier typed, or
+a committed `repository` other than the one passed with `--repository`, still refuse rather than
+silently repoint — `ClaimError::RootNameMismatch` and `ClaimError::RepositoryMismatch`, both exit
+65, both naming the two disagreeing values. Repository decides where a package's bytes come from
+and must never move as a side effect of adding an owner. Both variants reuse this ADR's own exit
+65 reading rather than minting a new number: "the root is there and disagrees with the operation
+you asked for" — the same family as `DescDisappeared` and `PullRequestUnmergeable`, not the `79`
+"the root is not there" `announce` raises for an unclaimed package.
+
+**Every claim writes the description, fresh or re-claim.** `claim::claim` now calls the same
+`observe_desc`/`build_files` pipeline `announce` uses (D-2): the entry carries whatever the
+registry currently serves at `__ocx.desc` — title, summary, keywords, readme, logo — in the same
+commit as the root. A fresh claim has no committed root to diff against, so `desc` starts `None`
+and takes whatever `observe_desc` reports; a re-claim overwrites it exactly when the served
+digest moved. Publishing one first with `ocx package description push` is unaffected; a package
+with none simply claims without a `desc` field.
+
+**Orphan sweep extends to claim, narrowed by what claim can ever write.** Every claim — including
+one that only adds an owner — runs the C-006 orphan sweep from the amendment above against the
+previous committed root. Because claim never writes `tags`, the only objects a
+claim's own root ever stops referencing are the description's own readme and logo blobs; a
+dispatch object is never a candidate here, only under `announce`. A fresh claim's `previous_root`
+is `None`, which C-006 already short-circuits to no candidates and no probe — a first claim
+orphans nothing. The same accepted risk this ADR already carries for announce applies unchanged:
+a concurrent claim's still-open request may reference an object a merged claim's request just
+deleted, and it self-heals the same way — the next claim against that package re-observes and
+re-writes the description in full regardless of what any other in-flight request assumed.
+
+**Mechanism.** `render_root` becomes `build_root(name, repository, owners, upstream, carried:
+Option<&Value>)` (D-4): rather than mutating the parsed committed root in place, it builds a
+fresh map and inserts all nine fields in one fixed order — `name`, `repository`, `owners`,
+`status`, `deprecated_message`, `created`, `desc`, `upstream` (only when present), `tags` — so a
+newly supplied `upstream` on a root that carried none lands in its contracted position rather
+than appended after `tags`. `ClaimRequest` gains `trusted_hosts`/`insecure_hosts`, sourced
+exactly as `package_announce.rs` sources them, because claim is now a registry client too: a
+curated host `trusted_hosts` refusal (exit 78) applies to the `desc` observation the same way it
+applies to announce's tag resolution. `claim/error.rs`'s message-style arity assertion drops from
+16 (after WP-2's three new variants) to 15 with `PackageAlreadyClaimed` gone.
+
+Component contracts: C-007 (`claim::claim`, D-3/D-4 field rules), reusing C-003
+(`RootNameMismatch`/`RepositoryMismatch` exit classification) and C-006 (the orphan sweep). Plan:
+`.claude/artifacts/plan_issue_batch_477_494.md`, WP-5, decisions D-2/D-3/D-4, scenarios S-002/S-003.
