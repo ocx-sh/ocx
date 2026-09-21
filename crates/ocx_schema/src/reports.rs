@@ -127,6 +127,8 @@ pub fn reports_schema() -> String {
         ocx::api::data::sweep::SweepReport<ocx::api::data::attestation::AttestationReport>
             as "SweepReport<AttestationReport>",
         ocx::api::data::tag::Tags,
+        ocx::api::data::update::UpdateReport,
+        ocx::api::data::update::VerboseUpdateReport,
         ocx::api::data::verification::VerificationReport,
         ocx::api::data::version::VerboseVersionData,
         ocx::api::data::version::VersionData,

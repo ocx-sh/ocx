@@ -150,6 +150,12 @@
     "Tags": {
       "$ref": "#/$defs/Tags"
     },
+    "UpdateReport": {
+      "$ref": "#/$defs/UpdateReport"
+    },
+    "VerboseUpdateReport": {
+      "$ref": "#/$defs/VerboseUpdateReport"
+    },
     "VerificationReport": {
       "$ref": "#/$defs/VerificationReport"
     },
@@ -5863,6 +5869,155 @@
         }
       ],
       "description": "Tag listing for one or more packages, optionally including platform or variant details.\n\nPlain format: two-column table (Package | Tag) by default, or\n(Package | Platform) with `--platforms`, or (Package | Variant) with `--variants`.\n\nJSON format: object keyed by package name; values are arrays of tags, platforms, or variants."
+    },
+    "UpdateReport": {
+      "type": "object",
+      "properties": {
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BindingChange"
+          },
+          "description": "Pins whose pull identifier differs between the two locks, ordered by\n`(group, name, platform)`."
+        },
+        "unchanged": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BindingState"
+          },
+          "description": "Bindings this run examined and found unchanged, in the same order.\n\nA scoped run (`-g` / positional names) examines only its own\nselection; every other pin is carried forward verbatim and was never\nre-resolved, so listing it as \"unchanged\" would claim a check that did\nnot happen. A whole-lock run examines everything, so nothing is\nfiltered out."
+        },
+        "metadata_changed": {
+          "type": "boolean",
+          "description": "Whether the load-bearing lock metadata moved — `declaration_hash`,\n`declaration_hash_version` or `lock_version`. Advisory metadata\n(`generated_at`, `generated_by`) is deliberately ignored: it moves on\nevery write and would make every `--check` fail."
+        }
+      },
+      "required": [
+        "changes",
+        "unchanged",
+        "metadata_changed"
+      ],
+      "description": "Report emitted by `ocx update` (and by `ocx update --check` before it\nexits 65).\n\nPlain format: one five-column table (Binding | Group | Platform | From |\nTo) holding the `changes` rows, where `Binding` is `name` or `name:tag`\nand the digest columns carry the CLI-wide short-digest abbreviation\n[`ocx_oci::Digest::to_short_string`] (`-` when the pin did not exist on\nthat side). When `unchanged` is non-empty a trailing hint names the count\nand `--verbose`.\n\nJSON format: `{ \"changes\": [...], \"unchanged\": [...], \"metadata_changed\":\nbool }`. Every `BindingChange` carries `{ name, group, platform, tag,\nfrom, to }` and every `BindingState` `{ name, group, platform, tag,\ndigest }`, with `tag`/`from`/`to` present and `null` rather than absent.\n**The payload is identical with and without `--verbose`** — see\n[`VerboseUpdateReport`]."
+    },
+    "BindingChange": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Local binding name (the `ocx.toml` key)."
+        },
+        "group": {
+          "type": "string",
+          "description": "Owning group — `default` for the top-level `[tools]` table."
+        },
+        "platform": {
+          "type": "string",
+          "description": "Canonical platform key the pin belongs to."
+        },
+        "tag": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The tag the declaration spells, `null` when it is digest-pinned."
+        },
+        "from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Pull identifier before the update; `null` when newly pinned. Held\ntyped so `Serialize` emits the full pinned form while the plain table\nrenders the shared short-digest abbreviation."
+        },
+        "to": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identifier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Pull identifier after the update; `null` when dropped."
+        }
+      },
+      "required": [
+        "name",
+        "group",
+        "platform",
+        "tag",
+        "from",
+        "to"
+      ],
+      "description": "One `(group, binding, platform)` pin that moved between the predecessor\nlock and the candidate.\n\n`from` is `None` when the pin is newly introduced (a binding or a platform\nthe predecessor did not carry); `to` is `None` when it was dropped. Both\nare the full pull identifier — `registry/repository@sha256:<hex>` — so a\nconsumer can feed either straight back to `ocx pull` without rebuilding it\nfrom parts."
+    },
+    "BindingState": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Local binding name (the `ocx.toml` key)."
+        },
+        "group": {
+          "type": "string",
+          "description": "Owning group — `default` for the top-level `[tools]` table."
+        },
+        "platform": {
+          "type": "string",
+          "description": "Canonical platform key the pin belongs to."
+        },
+        "tag": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The tag the declaration spells, `null` when it is digest-pinned."
+        },
+        "digest": {
+          "$ref": "#/$defs/Identifier",
+          "description": "The unchanged pull identifier — the same\n`registry/repository@sha256:<hex>` form `BindingChange::from` / `to`\ncarry, so the two arrays are directly comparable."
+        }
+      },
+      "required": [
+        "name",
+        "group",
+        "platform",
+        "tag",
+        "digest"
+      ],
+      "description": "One `(group, binding, platform)` pin the update left where it was."
+    },
+    "VerboseUpdateReport": {
+      "type": "object",
+      "properties": {
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BindingChange"
+          },
+          "description": "Pins whose pull identifier differs between the two locks, ordered by\n`(group, name, platform)`."
+        },
+        "unchanged": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BindingState"
+          },
+          "description": "Bindings this run examined and found unchanged, in the same order.\n\nA scoped run (`-g` / positional names) examines only its own\nselection; every other pin is carried forward verbatim and was never\nre-resolved, so listing it as \"unchanged\" would claim a check that did\nnot happen. A whole-lock run examines everything, so nothing is\nfiltered out."
+        },
+        "metadata_changed": {
+          "type": "boolean",
+          "description": "Whether the load-bearing lock metadata moved — `declaration_hash`,\n`declaration_hash_version` or `lock_version`. Advisory metadata\n(`generated_at`, `generated_by`) is deliberately ignored: it moves on\nevery write and would make every `--check` fail."
+        }
+      },
+      "required": [
+        "changes",
+        "unchanged",
+        "metadata_changed"
+      ],
+      "description": "Report emitted by `ocx update` (and by `ocx update --check` before it\nexits 65).\n\nPlain format: one five-column table (Binding | Group | Platform | From |\nTo) holding the `changes` rows, where `Binding` is `name` or `name:tag`\nand the digest columns carry the CLI-wide short-digest abbreviation\n[`ocx_oci::Digest::to_short_string`] (`-` when the pin did not exist on\nthat side). When `unchanged` is non-empty a trailing hint names the count\nand `--verbose`.\n\nJSON format: `{ \"changes\": [...], \"unchanged\": [...], \"metadata_changed\":\nbool }`. Every `BindingChange` carries `{ name, group, platform, tag,\nfrom, to }` and every `BindingState` `{ name, group, platform, tag,\ndigest }`, with `tag`/`from`/`to` present and `null` rather than absent.\n**The payload is identical with and without `--verbose`** — see\n[`VerboseUpdateReport`]."
     },
     "VerificationReport": {
       "type": "object",
