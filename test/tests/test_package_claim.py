@@ -48,11 +48,14 @@ from announce_helpers import (
     INDEX_REPO,
     TOKEN,
     announce,
+    configure_trusted_hosts,
     forge_args,
+    registry_host,
 )
 from fake_forge import FakeForge
 from git_shim import GitShimVariant, install_git_shim
 
+from src.helpers import make_package
 from src.runner import OcxRunner
 
 #: The namespace/package every scenario claims. `acme/widget` is the ADR's own
@@ -69,10 +72,17 @@ ROOT_PATH = f"p/{PACKAGE}.json"
 #: instead of with the rule.
 CLAIM_BRANCH = "indexbot-claim-acme-widget"
 
-#: The physical OCI repository the namespace's packages live in. Never read by
-#: claim — it is recorded verbatim in the root (C-047) — so it names a registry
-#: no test contacts.
-PHYSICAL = "oci://ghcr.io/acme/widget"
+#: Sentinel default for `claim`'s `--repository`, substituted with the harness's
+#: own compose registry.
+#:
+#: It used to be the literal `oci://ghcr.io/acme/widget`, on the reasoning that
+#: claim never read the pointer. #482 reversed that: claim now OBSERVES the
+#: `__ocx.desc` artifact at this repository, so the pointer is dialled. A public
+#: host here would put all forty rows in this module on the public internet, so
+#: the pointer is built per run from `ocx.registry` — which only the fixture
+#: knows, hence a sentinel rather than a literal. `None` already means "omit the
+#: flag entirely", so it cannot serve as the default.
+PHYSICAL = object()
 
 #: C-047's documented default registry. Pinned explicitly on every run because
 #: the harness's own `OCX_DEFAULT_REGISTRY` is the compose registry, so a row
@@ -124,7 +134,7 @@ def claim(
     fake_forge: FakeForge,
     *args: str,
     package: str = PACKAGE,
-    repository: str | None = PHYSICAL,
+    repository: str | None | object = PHYSICAL,
     token: str | None = TOKEN,
     check: bool = False,
     extra_env: dict[str, str] | None = None,
@@ -162,11 +172,20 @@ def claim(
         env["OCX_ANNOUNCE_TOKEN"] = token
     if path is not None:
         env["PATH"] = path
+    # #482: claim dials the `--repository` pointer to observe `__ocx.desc`, and
+    # the harness registry is loopback — SSRF-forbidden by default (design
+    # register X2). The escape hatch is keyed on the LOGICAL registry, and a row
+    # runs under one of two (the pinned `ocx.sh` or, for the key-set row, the
+    # harness's own), so both are written. Writing it unconditionally keeps the
+    # refusal rows honest: none of them is reached by way of an SSRF error.
+    configure_trusted_hosts(ocx, [CANONICAL_REGISTRY, ocx.registry], [registry_host(ocx.registry)])
     if extra_env:
         env.update(extra_env)
     argv = ["package", "claim", *forge_args(forge)]
+    if repository is PHYSICAL:
+        repository = f"oci://{ocx.registry}/{PACKAGE}"
     if repository is not None:
-        argv += ["--repository", repository]
+        argv += ["--repository", str(repository)]
     argv += [*args, package]
     return ocx.run(*argv, format=fmt, check=check, log_level=log_level, env_overrides=env)
 
@@ -300,7 +319,7 @@ def test_claim_writes_login_id_only(
     Asserted as EQUALITY of the whole list, never key membership: an entry that
     also carries `bot` satisfies `entry["login"] == "alice"`.
 
-    Mutation: emit the four-key owner form in `claim/root.rs::render_root`.
+    Mutation: emit the four-key owner form in `claim/root.rs::build_root`.
     """
     seed_index_base(fake_forge)
     fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
@@ -336,7 +355,7 @@ def test_claim_field_order_byte_exact(
 
     assert claimed_root_bytes(fake_forge) == expected_root_bytes(
         owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}],
-        physical=PHYSICAL,
+        physical=f"oci://{ocx.registry}/{PACKAGE}",
     )
 
 
@@ -609,7 +628,7 @@ def test_a_second_claim_adds_the_callers_owner(
     Mutation: restore the `PackageAlreadyClaimed` refusal in `claim.rs` — every
     assertion below reds.
     """
-    physical = PHYSICAL
+    physical = f"oci://{ocx.registry}/{PACKAGE}"
     seed_claimed_root(
         fake_forge,
         physical,
@@ -674,7 +693,7 @@ def test_a_third_claim_naming_the_same_owner_is_unchanged(
     fixture spells the committed login differently from the forge's canonical
     one, so a second entry is appended and the run commits.
     """
-    physical = PHYSICAL
+    physical = f"oci://{ocx.registry}/{PACKAGE}"
     seed_claimed_root(
         fake_forge, physical, owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}]
     )
@@ -706,8 +725,9 @@ def test_a_reclaim_with_another_repository_exits_65(
     Mutation: write the supplied pointer into the rebuilt root — the run then
     succeeds and every assertion reds.
     """
+    committed = f"oci://{ocx.registry}/{PACKAGE}"
     seed_claimed_root(
-        fake_forge, PHYSICAL, owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}]
+        fake_forge, committed, owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}]
     )
     fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
 
@@ -716,11 +736,11 @@ def test_a_reclaim_with_another_repository_exits_65(
         fake_forge,
         "--owner",
         f"{OWNER_LOGIN}:{OWNER_ID}",
-        repository="oci://quay.io/acme/widget",
+        repository=f"oci://{ocx.registry}/other",
     )
 
     assert result.returncode == 65, result.stderr
-    assert PHYSICAL in result.stderr and "quay.io" in result.stderr, (
+    assert committed in result.stderr and "/other" in result.stderr, (
         f"the refusal must name both pointers: {result.stderr!r}"
     )
     envelope = json.loads(result.stdout)
@@ -740,7 +760,7 @@ def test_a_reclaim_of_a_root_naming_another_package_exits_65(
     Mutation: drop the `name` comparison — the run re-claims whatever document
     sits at that path and this reds.
     """
-    physical = PHYSICAL
+    physical = f"oci://{ocx.registry}/{PACKAGE}"
     seed_claimed_root(
         fake_forge,
         physical,
@@ -757,6 +777,139 @@ def test_a_reclaim_of_a_root_naming_another_package_exits_65(
     )
     envelope = json.loads(result.stdout)
     assert envelope["error"]["detail"] == "root_name_mismatch", envelope
+
+
+def test_claim_carries_the_description_the_registry_serves(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """S-002/C-007 (#482): a first claim on a package whose registry serves
+    `__ocx.desc` opens a request carrying `desc` AND the readme blob.
+
+    End to end against the harness registry, because that is the only place the
+    artifact-type rules, the CAS naming and the pull request payload meet: the
+    unit tests drive `observe_desc` over a stub transport and cannot see what
+    the claim commits.
+
+    Its own `unique_repo`, never the shared `acme/widget`: a description pushed
+    to the pointer every other row in this module claims against would give them
+    all a non-null `desc` and red their byte-exact root assertions.
+
+    Mutation: render `desc: null` unconditionally in `claim/root.rs` — the desc
+    assertion reds; drop `observed.blobs` from the file set — the CAS assertion
+    reds while `desc` still points at a readme the index does not hold.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    readme = tmp_path / "README.md"
+    readme.write_text("# widget\n\nDoes widget things.\n")
+    ocx.plain(
+        "package", "description", "push", "--readme", str(readme),
+        f"{ocx.registry}/{unique_repo}",
+    )
+    package = f"acme/{unique_repo}"
+    root_path = f"p/{package}.json"
+    branch = f"indexbot-claim-{package.replace('/', '-')}"
+    seed_index_base(fake_forge)
+    fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
+
+    claim_json(
+        ocx,
+        fake_forge,
+        "--owner",
+        f"{OWNER_LOGIN}:{OWNER_ID}",
+        package=package,
+        repository=f"oci://{ocx.registry}/{unique_repo}",
+    )
+
+    raw = fake_forge.read_file(INDEX_OWNER, INDEX_REPO, root_path, branch=branch)
+    assert raw is not None, f"no root committed on {branch}"
+    root = json.loads(raw)
+    assert root["desc"] is not None, f"the claim must carry the description: {root}"
+    assert root["desc"]["title"], (
+        f"the index schema types desc.title minLength 1: {root['desc']}"
+    )
+    readme_relative = f"p/{package}/o/sha256/{root['desc']['readme'].split(':', 1)[1]}.md"
+    blob = fake_forge.read_file(INDEX_OWNER, INDEX_REPO, readme_relative, branch=branch)
+    assert blob == b"# widget\n\nDoes widget things.\n", (
+        f"the readme blob ships in the same commit, verbatim: {blob!r}"
+    )
+
+
+def test_a_reclaim_removes_the_readme_the_previous_root_named(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """Owner mandate: a re-claim whose description changed DELETES the readme
+    the committed root named, in the same commit that writes the new one.
+
+    The published index must not accumulate a readme per description edit. The
+    deletion is asserted through the fake forge's own tree — a path the claim
+    branch no longer holds — which is the only place a `FileChange::Delete`
+    becomes observable.
+
+    Both directions in one run: the new blob present AND the old one gone. A
+    build that folded no orphans still writes the new blob, so presence alone is
+    not the check.
+
+    Mutation: pass `None` as `orphan_paths`' previous root in `claim.rs` — the
+    stale readme survives and this reds.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    package = f"acme/{unique_repo}"
+    root_path = f"p/{package}.json"
+    branch = f"indexbot-claim-{package.replace('/', '-')}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    readme = tmp_path / "README.md"
+
+    readme.write_text("# first\n")
+    ocx.plain(
+        "package", "description", "push", "--readme", str(readme),
+        f"{ocx.registry}/{unique_repo}",
+    )
+    seed_index_base(fake_forge)
+    fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
+    claim_json(
+        ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}",
+        package=package, repository=physical,
+    )
+    first = json.loads(fake_forge.read_file(INDEX_OWNER, INDEX_REPO, root_path, branch=branch))
+    stale_relative = f"p/{package}/o/sha256/{first['desc']['readme'].split(':', 1)[1]}.md"
+
+    # The merge: the claim's own bytes become the committed root, which is what
+    # makes the second run a re-claim rather than a repeat of the first.
+    fake_forge.seed_files(
+        INDEX_OWNER,
+        INDEX_REPO,
+        {
+            root_path: fake_forge.read_file(
+                INDEX_OWNER, INDEX_REPO, root_path, branch=branch
+            ),
+            stale_relative: fake_forge.read_file(
+                INDEX_OWNER, INDEX_REPO, stale_relative, branch=branch
+            ),
+        },
+    )
+
+    readme.write_text("# second, rewritten\n")
+    ocx.plain(
+        "package", "description", "push", "--readme", str(readme),
+        f"{ocx.registry}/{unique_repo}",
+    )
+    claim_json(
+        ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}",
+        package=package, repository=physical,
+    )
+
+    second = json.loads(fake_forge.read_file(INDEX_OWNER, INDEX_REPO, root_path, branch=branch))
+    fresh_relative = f"p/{package}/o/sha256/{second['desc']['readme'].split(':', 1)[1]}.md"
+    assert fresh_relative != stale_relative, (
+        "the description did not actually move, so nothing could be orphaned"
+    )
+    assert (
+        fake_forge.read_file(INDEX_OWNER, INDEX_REPO, fresh_relative, branch=branch)
+        == b"# second, rewritten\n"
+    ), "the new readme is written"
+    assert (
+        fake_forge.read_file(INDEX_OWNER, INDEX_REPO, stale_relative, branch=branch) is None
+    ), "and the one the previous root named leaves the index in the same commit"
 
 
 def test_disclaimer_reaches_root_not_request_body(
@@ -776,7 +929,7 @@ def test_disclaimer_reaches_root_not_request_body(
     claim is the failure C-067 exists to prevent.
 
     Mutations: interpolate the disclaimer into `claim/request.rs::request_body`
-    — the absence reds; drop it from `render_root` — the presence reds; prefix
+    — the absence reds; drop it from `build_root` — the presence reds; prefix
     the owner pairs with `@` — the mention assertion reds.
     """
     disclaimer = "Repackaged by [the Acme team](https://acme.invalid/team) — ping @acme-team"
@@ -856,7 +1009,7 @@ def test_out_renders_and_opens_nothing(
     assert report["written_paths"] == [ROOT_PATH]
     assert (out_dir / ROOT_PATH).read_bytes() == expected_root_bytes(
         owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}],
-        physical=PHYSICAL,
+        physical=f"oci://{ocx.registry}/{PACKAGE}",
     )
     assert report["pull_request_url"] is None
     assert report["pull_request_number"] is None
@@ -927,7 +1080,7 @@ def test_out_writes_nothing_when_the_committed_root_disagrees(
     out_dir = tmp_path / "out"
     seed_claimed_root(
         fake_forge,
-        PHYSICAL,
+        f"oci://{ocx.registry}/{PACKAGE}",
         owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}],
     )
     fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
@@ -939,7 +1092,7 @@ def test_out_writes_nothing_when_the_committed_root_disagrees(
         f"{OWNER_LOGIN}:{OWNER_ID}",
         "--out",
         str(out_dir),
-        repository="oci://quay.io/acme/widget",
+        repository=f"oci://{ocx.registry}/other",
     )
 
     assert result.returncode == 65, result.stderr
@@ -1924,7 +2077,7 @@ def _claim_over_git(
     """
     shim = install_git_shim(tmp_path, variant=variant)
     seed_claimed_root(
-        fake_forge, PHYSICAL, name="other.example/ns/pkg"
+        fake_forge, f"oci://{ocx.registry}/{PACKAGE}", name="other.example/ns/pkg"
     )
     return claim(
         ocx,

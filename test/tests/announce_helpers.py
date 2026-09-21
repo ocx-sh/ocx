@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -32,12 +33,20 @@ def registry_host(registry: str) -> str:
     return registry.split(":", 1)[0]
 
 
-def configure_trusted_hosts(ocx: OcxRunner, registry: str, hosts: list[str]) -> None:
+def configure_trusted_hosts(ocx: OcxRunner, registry: str | Sequence[str], hosts: list[str]) -> None:
     """Writes `[registries."<registry>"] trusted_hosts = [...]` to `config.toml`
-    (design register X2 — the sole SSRF escape hatch, config-only)."""
+    (design register X2 — the sole SSRF escape hatch, config-only).
+
+    `registry` may name several keys. The escape hatch is keyed on the LOGICAL
+    registry, so a suite whose rows run under more than one namespace (a claim
+    pinned to `ocx.sh` alongside a row under the harness's own) needs a table
+    per namespace in the one file."""
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     hosts_toml = ", ".join(f'"{host}"' for host in hosts)
-    config_path.write_text(f'[registries."{registry}"]\ntrusted_hosts = [{hosts_toml}]\n')
+    keys = [registry] if isinstance(registry, str) else list(registry)
+    config_path.write_text(
+        "".join(f'[registries."{key}"]\ntrusted_hosts = [{hosts_toml}]\n' for key in keys)
+    )
 
 
 def root_name(package: str, physical_repository: str, registry: str | None = None) -> str:
