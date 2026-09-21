@@ -345,6 +345,10 @@ Stages 4-6 are appended to the same entry vector in that order. Constants replac
 
 **L2.** Bare `--env FOO` (docker-style ambient pass-through) is rejected in v1 with `ExitCode::UsageError` (64). It has meaning only under `--clean`, and admitting it later is additive.
 
+> **Amended 2026-09-21 — the bare form IS the ambient pass-through.** L2's own escape hatch ("admitting it later is additive") was taken. A bare `NAME` with no `=` and no `:TYPE` now copies the invoking process's value of `NAME` into the child as a stage-6 `constant` entry — the Docker `-e NAME` convention — which is what makes `--clean` usable with an allowlist instead of an all-or-nothing wipe. Unset in the parent, the entry is **skipped silently, exit 0**: an allowlist names what *may* travel and most of what it names is typically absent, so refusing would fire on the common case. An empty string counts as set and forwards as the empty string.
+>
+> Three refusals are unchanged, and all three still exit **64**. `NAME:TYPE` with no `=` is not a pass-through — a modifier with no value to modify can only be a typo, and reading it as one would silently ignore the `:path` the caller typed. `OCX_*` / `__OCX_*` (X1) and an invalid variable name (X2) are both gated **before** the ambient lookup, so `--env OCX_OFFLINE` exits 64 whether or not it is set in the invoking shell — a refusal that depended on the caller's shell would be untestable and unexplainable.
+
 > **No in-repo precedent exists for a repeatable `KEY=VALUE` flag.** Discovery grepped the whole `ocx_cli` tree: zero matches. The nearest shape is `project::compose::parse_positional` (`project/compose.rs:93-124`, `[name=]identifier` split on first `=`), but it has **zero callers in `ocx_cli`** — it is unit-tested dead code from the CLI's perspective. This flag will therefore be the first of its kind and needs its own clap `value_parser`. The dead `parse_positional` should be raised as a separate cleanup issue, not folded in here.
 
 **L3.** ~~Scope: `--env` lands on `ocx run` in v1. `ocx env` and `ocx exec` do not get it — `ocx env` emits rather than executes (a caller can post-process), and `ocx exec` is OCI-tier where the ambient shell is the caller's own concern. Additive later if asked.~~
@@ -544,7 +548,7 @@ Every surface below is touched by this change and must be updated in the same PR
 | `crates/ocx_lib/src/project/mutate.rs` | `init_project`'s literal template (`mutate.rs:469-475`) must emit the nested shape (Q1) |
 | Any `ocx.toml` in this repo and in `ocx-mirror` | Dogfood: convert before merge; this repo's own file has an empty `[group]` and is unaffected, but verify |
 | `website/src/docs/reference/env-composition.md` | C2's six-stage ordering table; the `--clean`-is-not-hermeticity corollary; `--self` has no effect on project env (S6) |
-| `website/src/docs/reference/command-line.md` | `ocx run --env` flag; exit codes 64 (bare `--env FOO`) and 78 (`OCX_*` key) |
+| `website/src/docs/reference/command-line.md` | `ocx run --env` flag; exit code 64 for a bare `--env FOO:path` and for an `OCX_*` key (L2 as amended — a bare `--env FOO` is the pass-through) |
 | `website/src/docs/reference/environment.md` | Cross-reference that `OCX_*` keys cannot be set from `ocx.toml` |
 | `website/src/docs/user-guide.md` | Use-case-first section: project constants, group-scoped env, project-local PATH entry |
 | `website/src/docs/in-depth/project.md` | Composition-order worked example extended with project/group env stages |
@@ -572,7 +576,7 @@ Every surface below is touched by this change and must be updated in the same PR
 - [ ] A tool named `env` parses in both flat and nested form
 - [ ] `declaration_hash_unchanged_by_env` — mirrors `declaration_hash_unchanged_by_no_patches` (H1)
 - [ ] `OCX_*` and `__OCX_*` keys rejected in `[env]`, `[group.X.env]`, and `--env` (X1)
-- [ ] `--env FOO=a=b` yields `FOO` → `a=b`; bare `--env FOO` exits 64 (L1/L2)
+- [ ] `--env FOO=a=b` yields `FOO` → `a=b`; bare `--env FOO` passes the invoking value through and is skipped when unset, while bare `--env FOO:path` and bare `--env OCX_OFFLINE` both exit 64 (L1/L2 as amended)
 - [ ] `--env KEY:path=…` prepends while `--env KEY=…` replaces; unknown/empty `TYPE` exits 64; `--env OCX_*:path=…` still rejected (L1 amendment)
 - [ ] Relative `--env KEY:path=…` resolves against CWD, not the project root — assert from a subdirectory (the inverse of the file-form check below)
 - [ ] Relative `type = "path"` resolves against project root, not CWD — assert from a subdirectory

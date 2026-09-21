@@ -325,3 +325,114 @@ def test_launcher_chain_offline_propagates(
     assert pkg.marker in result.stdout, (
         f"launcher must invoke wrapped target; stdout={result.stdout!r}"
     )
+
+
+def test_bare_env_name_passes_the_invoking_value_through_under_clean(
+    ocx: OcxRunner, published_package
+) -> None:
+    """`--env NAME`, with no `=`, copies the invoking process's own `NAME`
+    into the child — the Docker `-e NAME` convention.
+
+    Asserted under `--clean`, where the child environment starts empty, so a
+    pass-through is the only way one of the caller's variables reaches the far
+    side. `/bin/sh` is named absolutely for the same reason the other `--clean`
+    rows in this module do: `--clean` drops the inherited `PATH`.
+    """
+    ocx.plain("package", "install", published_package.short)
+    result = ocx.plain(
+        "package",
+        "exec",
+        "--clean",
+        "--env",
+        "PASSTHROUGH_FOO",
+        published_package.short,
+        "--",
+        "/bin/sh",
+        "-c",
+        'printf "%s" "${PASSTHROUGH_FOO-unset}"',
+        env_overrides={"PASSTHROUGH_FOO": "carried-from-the-parent"},
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "carried-from-the-parent", (
+        "a bare `--env NAME` must carry the invoking process's value into a "
+        f"--clean child; got {result.stdout!r}"
+    )
+
+
+def test_bare_env_name_unset_in_the_parent_is_not_an_error(
+    ocx: OcxRunner, published_package
+) -> None:
+    """A name the invoking process does not set contributes nothing, and the
+    invocation still succeeds.
+
+    An allowlist names what *may* travel, so most of what it names is typically
+    absent; refusing — or warning — would fire on the common case.
+    """
+    ocx.plain("package", "install", published_package.short)
+    result = ocx.plain(
+        "package",
+        "exec",
+        "--clean",
+        "--env",
+        "PASSTHROUGH_ABSENT",
+        published_package.short,
+        "--",
+        "/bin/sh",
+        "-c",
+        'printf "%s" "${PASSTHROUGH_ABSENT-unset}"',
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"an unset pass-through name must not fail the invocation; stderr={result.stderr!r}"
+    )
+    assert result.stdout == "unset", (
+        f"an unset name must reach the child unset, not as an empty string; got {result.stdout!r}"
+    )
+
+
+def test_bare_env_name_in_the_reserved_namespace_is_a_usage_error(
+    ocx: OcxRunner, published_package
+) -> None:
+    """`OCX_*` stays refused in the bare form too (sysexits.h `EX_USAGE = 64`).
+
+    The forwarded configuration set travels through `apply_ocx_config`; a user
+    allowlist is never the way in, whichever spelling it uses.
+    """
+    ocx.plain("package", "install", published_package.short)
+    result = ocx.plain(
+        "package",
+        "exec",
+        "--env",
+        "OCX_OFFLINE",
+        published_package.short,
+        "--",
+        "true",
+        check=False,
+    )
+    assert result.returncode == 64, (
+        "a reserved bare `--env` name must be a usage error, not a silent skip; "
+        f"got rc={result.returncode}, stderr={result.stderr!r}"
+    )
+
+
+def test_qualified_env_name_without_a_value_is_a_usage_error(
+    ocx: OcxRunner, published_package
+) -> None:
+    """Only the *plain* bare form passes through: `--env FOO:path` declares a
+    modifier with nothing to apply it to, and stays exit 64."""
+    ocx.plain("package", "install", published_package.short)
+    result = ocx.plain(
+        "package",
+        "exec",
+        "--env",
+        "PASSTHROUGH_FOO:path",
+        published_package.short,
+        "--",
+        "true",
+        check=False,
+    )
+    assert result.returncode == 64, (
+        "a `:TYPE` with no value must stay a usage error; "
+        f"got rc={result.returncode}, stderr={result.stderr!r}"
+    )
