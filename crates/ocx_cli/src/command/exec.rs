@@ -5,9 +5,11 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_config::env;
+use ocx_package_manager::RootSet;
 use ocx_package_manager::composer::{ComposeRequest, Materialization};
 use ocx_package_manager::launch::{self, Launch};
 use ocx_package_manager::record::{RecordInputs, Scope};
+use ocx_util::child_process;
 
 use crate::{conventions::*, options};
 use ocx_package::metadata::env::apply::{ChildEnv, EnvEntriesExt, reconcile_list_separators};
@@ -37,6 +39,22 @@ pub struct Exec {
     /// `always` coming from `OCX_LAZY_MODE`, which composes eagerly.
     #[clap(long = "self", default_value_t = false)]
     self_view: bool,
+
+    /// Remove the packages from the store once the command finishes.
+    ///
+    /// A package this invocation downloaded leaves nothing behind. Only what
+    /// nothing else holds is removed: a package that is also installed, one a
+    /// project's `ocx.lock` pins, and a site-patch companion all stay, and each
+    /// is named on stderr as kept.
+    ///
+    /// The exit code is the command's, always. A removal that fails warns on
+    /// stderr and leaves the exit code alone.
+    ///
+    /// Without this flag ocx replaces itself with the command on Unix. With it,
+    /// ocx stays running as the command's parent, and the command's process id
+    /// is no longer ocx's. A kill of ocx itself skips the removal.
+    #[clap(long = "rm", default_value_t = false)]
+    rm: bool,
 
     #[clap(flatten)]
     env: options::EnvOverride,
@@ -86,9 +104,12 @@ impl Exec {
     /// `launch::exec` diverges on success on every platform — Unix
     /// `execvp(2)`s, Windows spawns + waits + `process::exit`s — so this
     /// function only returns when start-up itself fails, or when a record the
-    /// policy marked `required` could not be written. The
-    /// `anyhow::Result<ExitCode>` shape is kept for symmetry with sibling
-    /// commands; the `Ok` arm is unreachable.
+    /// policy marked `required` could not be written.
+    ///
+    /// `--rm` is the one exception, and the only reason the `Ok` arm exists:
+    /// cleanup has to run after the child, and a replaced process image has
+    /// nowhere to run it, so that arm spawns and waits instead and returns the
+    /// child's status as this command's.
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let manager = context.manager();
         let platform = platform_or_default(self.platform.platform.clone());
@@ -229,11 +250,70 @@ impl Exec {
             &records,
         )?;
 
-        // Replace this process with the child on Unix (PID inherited via
-        // `execvp(2)`); on Windows spawn+wait then `process::exit`, since
-        // `CreateProcess` has no exec equivalent. Either way the seam diverges
-        // on success — only start-up failures fall through to the
-        // error-wrapping path below.
-        Err(anyhow::Error::from(launch::exec(launch).await))
+        if !self.rm {
+            // Replace this process with the child on Unix (PID inherited via
+            // `execvp(2)`); on Windows spawn+wait then `process::exit`, since
+            // `CreateProcess` has no exec equivalent. Either way the seam
+            // diverges on success — only start-up failures fall through to the
+            // error-wrapping path below. Byte-identical to the behaviour every
+            // invocation that does not type `--rm` has always had.
+            return Err(anyhow::Error::from(launch::exec(launch).await));
+        }
+
+        // `--rm` has work to do *after* the child, and `execvp` leaves no
+        // process to do it in — the shape `package test` already uses for its
+        // tempdir guard. Three flag-scoped consequences, none of them papered
+        // over: ocx stays resident for the tool's lifetime so the tool's pid is
+        // not ocx's; the Unix pre-exec record guarantee weakens to the
+        // spawn-and-wait ordering Windows already has; and a SIGKILL of ocx
+        // itself skips the cleanup, the same hole `docker run --rm` has.
+        // Signal forwarding and `kill_on_drop` are `spawn_and_wait`'s own.
+        let status = launch::spawn_and_wait(launch).await.map_err(anyhow::Error::from)?;
+        let exit_code = child_process::propagate_exit_code(status);
+
+        // The identities to offer up, taken from the composed roots rather than
+        // the requested list: a request is a tag, and what landed on disk is a
+        // digest. Read after `spawn_and_wait` consumed the launch that borrowed
+        // them.
+        let pinned: Vec<_> = install_infos.iter().map(|info| info.identifier().clone()).collect();
+
+        // Housekeeping, not the command's result. Whatever happens below, the
+        // exit code stays the child's: a script reading `$?` after
+        // `ocx package exec` is reading the tool's status, and a removal that
+        // failed is not the tool's status.
+        match manager.purge_unrooted(&pinned).await {
+            Ok(purged) => {
+                for path in &purged.removed {
+                    context.ui().status("Removed", path.display());
+                }
+                match purged.root_set {
+                    // Retaining because something holds the package is the
+                    // flag's designed outcome, not a problem: it is what keeps
+                    // `--rm` from deleting an install out from under its own
+                    // symlink. A status line, like the removals above.
+                    RootSet::Determinate => {
+                        for identifier in &purged.retained {
+                            context
+                                .ui()
+                                .status("Kept", format!("{identifier} (still held by something else)"));
+                        }
+                    }
+                    // A different sentence, because it is a different fact: the
+                    // root set could not be read, so nothing was tested and
+                    // nothing was removed. Naming each identifier here would
+                    // claim each is held, which is exactly what this run failed
+                    // to establish. `collect_project_roots` has already logged
+                    // which lock it was.
+                    RootSet::Indeterminate => context.ui().warn(
+                        "retained every package: a project lock could not be read this run, so nothing was removed",
+                    ),
+                }
+            }
+            Err(error) => context
+                .ui()
+                .warn(format!("could not remove the packages this run composed: {error}")),
+        }
+
+        Ok(exit_code)
     }
 }

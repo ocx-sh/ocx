@@ -324,6 +324,7 @@ pub use tasks::managed_config::{ManagedConfigRefreshOutcome, ManagedConfigUpdate
 pub use tasks::patch_discovery::PatchDiscoveryMode;
 pub use tasks::patch_publish::PatchPublishReport;
 pub use tasks::patch_sync::PatchSyncReport;
+pub use tasks::purge::{PurgeUnrooted, RootSet};
 // The request/report vocabulary `ocx_cli` needs to spell a `render_toolchain`
 // call. Every other task's types are re-exported here; these five were the
 // omission (RUL-48) that made `PackageManager::render_toolchain` unreachable

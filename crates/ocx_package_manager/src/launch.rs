@@ -761,12 +761,17 @@ mod tests {
             .expect("nothing to probe when recording is off");
     }
 
-    // ── the recording wait path, which has no caller yet ─────────────────────
+    // ── the recording wait path ──────────────────────────────────────────────
     //
-    // `spawn_and_wait`'s recording arm is reachable only from these two tests:
-    // both production callers launch exempt. It carries the pre-spawn probe the
-    // non-Unix fail-closed posture depends on, so without them it would rot
-    // silently and the seam would re-grow wrong when a caller does appear.
+    // `ocx package exec --rm` is the production caller of `spawn_and_wait`'s
+    // recording arm: it must outlive the child to collect the package, and a
+    // replaced process image cannot. The other spawn-and-wait caller
+    // (`package test`) launches exempt.
+    //
+    // These two tests stay because that caller does not exercise the arm's
+    // fail-closed half: the pre-spawn probe is the only gate on a non-Unix
+    // recording launch, and no acceptance fixture drives an unwritable sink to
+    // a refusal. Without them the probe would rot silently.
 
     /// A real program with an observable side effect, so "did the tool run?" is
     /// a filesystem question rather than an inference from an exit status.
