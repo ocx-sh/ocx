@@ -864,3 +864,247 @@ def test_add_explicit_name_resolves_basename_collision(
     tools_after = tomllib.loads((project_dir / "ocx.toml").read_text())["tools"]
     assert "glab" not in tools_after, f"alias must be gone after remove; got {tools_after!r}"
     assert "cli" in tools_after, f"the other binding must survive; got {tools_after!r}"
+
+
+# ---------------------------------------------------------------------------
+# Idempotent re-add (#490): `ocx add X` twice is a no-op for `ocx.toml`
+# ---------------------------------------------------------------------------
+
+
+def test_add_twice_is_idempotent_and_leaves_manifest_byte_identical(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx add X`` followed by ``ocx add X`` exits 0 both times, leaves
+    ``ocx.toml`` byte-identical after the second run, keeps the existing pin,
+    and says so once on stderr.
+
+    Before #490 the second invocation exited 64 (``BindingAlreadyExists``).
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_idem"
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, "[tools]\n")
+
+    first = _run_cmd(ocx, project_dir, "add", "--no-pull", pkg.fq)
+    assert first.returncode == EXIT_SUCCESS, (
+        f"first add failed: rc={first.returncode}, stderr={first.stderr!r}"
+    )
+    toml_before = (project_dir / "ocx.toml").read_bytes()
+    pin_before = _leaves_for_add((project_dir / "ocx.lock").read_text(), repo)
+    assert pin_before, "the first add must record leaf digests"
+
+    second = _run_cmd(ocx, project_dir, "add", "--no-pull", pkg.fq)
+    assert second.returncode == EXIT_SUCCESS, (
+        f"re-adding an identical binding must exit {EXIT_SUCCESS}; "
+        f"rc={second.returncode}, stderr={second.stderr!r}"
+    )
+    assert (project_dir / "ocx.toml").read_bytes() == toml_before, (
+        "ocx.toml must be byte-identical after an idempotent re-add"
+    )
+    assert _leaves_for_add((project_dir / "ocx.lock").read_text(), repo) == pin_before, (
+        "an already-pinned binding must never be re-resolved by ocx add"
+    )
+    assert f"{repo} is already added" in second.stderr, (
+        f"the re-add must report the binding as already added; stderr:\n{second.stderr}"
+    )
+    assert f"ocx update {repo}" in second.stderr, (
+        f"the re-add must point at `ocx update <name>`; stderr:\n{second.stderr}"
+    )
+
+
+def test_add_relocks_a_binding_whose_lock_entry_was_removed(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Re-adding a declared binding whose ``[[tool]]`` entry is gone from
+    ``ocx.lock`` re-locks it, without editing ``ocx.toml``."""
+    short = uuid4().hex[:8]
+    repo_a = f"t_{short}_relock_a"
+    repo_b = f"t_{short}_relock_b"
+    pkg_a = make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    pkg_b = make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, "[tools]\n")
+
+    seeded = _run_cmd(ocx, project_dir, "add", "--no-pull", pkg_a.fq, pkg_b.fq)
+    assert seeded.returncode == EXIT_SUCCESS, (
+        f"seeding add failed: rc={seeded.returncode}, stderr={seeded.stderr!r}"
+    )
+    toml_before = (project_dir / "ocx.toml").read_bytes()
+
+    # Drop A's entry from the lock, keeping the file and B's entry intact.
+    lock_path = project_dir / "ocx.lock"
+    head, _, tools = lock_path.read_text().partition("[[tool]]")
+    kept = [
+        block for block in tools.split("[[tool]]") if f'name = "{repo_a}"' not in block
+    ]
+    lock_path.write_text(head + "".join(f"[[tool]]{block}" for block in kept))
+    assert not _leaves_for_add(lock_path.read_text(), repo_a), (
+        "the surgery must actually remove A's lock entry"
+    )
+    assert _leaves_for_add(lock_path.read_text(), repo_b), (
+        "the surgery must leave B's lock entry intact"
+    )
+
+    result = _run_cmd(ocx, project_dir, "add", "--no-pull", pkg_a.fq)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"re-adding an unlocked declared binding must exit {EXIT_SUCCESS}; "
+        f"rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert (project_dir / "ocx.toml").read_bytes() == toml_before, (
+        "re-locking must not edit ocx.toml"
+    )
+    assert _leaves_for_add(lock_path.read_text(), repo_a), (
+        f"A must be locked again; lock:\n{lock_path.read_text()}"
+    )
+    assert _leaves_for_add(lock_path.read_text(), repo_b), (
+        "B must still be locked"
+    )
+
+
+def test_add_pulls_a_declared_binding_the_store_never_materialized(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """A re-add still pulls: the binding is declared and pinned but the object
+    store is cold, so the second ``ocx add`` completes the install instead of
+    refusing the duplicate.
+
+    ``--no-pull`` stands in for a first add whose download failed — it produces
+    the same observable precondition (declared, pinned, store cold), which is
+    the only state the command can see.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_repull"
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, "[tools]\n")
+
+    cold = _run_cmd(ocx, project_dir, "add", "--no-pull", pkg.fq)
+    assert cold.returncode == EXIT_SUCCESS, (
+        f"cold add failed: rc={cold.returncode}, stderr={cold.stderr!r}"
+    )
+    assert _packages_present_count(ocx) == 0, (
+        "--no-pull must leave the object store cold"
+    )
+
+    warm = _run_cmd(ocx, project_dir, "add", pkg.fq)
+    assert warm.returncode == EXIT_SUCCESS, (
+        f"re-add must exit {EXIT_SUCCESS} and pull; "
+        f"rc={warm.returncode}, stderr={warm.stderr!r}"
+    )
+    assert _packages_present_count(ocx) == 1, (
+        "the re-add must materialize the package the first add deferred"
+    )
+
+
+def test_add_batch_repeating_the_same_identifier_collapses(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx add A A`` (the same identifier twice in one batch) is idempotent:
+    exit 0, one binding, one lock entry — the second occurrence collapses onto
+    the first rather than aborting the batch."""
+    import tomllib
+
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_batch_same"
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, "[tools]\n")
+
+    result = _run_cmd(ocx, project_dir, "add", "--no-pull", pkg.fq, pkg.fq)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"a batch repeating one identifier must exit {EXIT_SUCCESS}; "
+        f"rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    tools = tomllib.loads((project_dir / "ocx.toml").read_text())["tools"]
+    assert list(tools) == [repo], f"exactly one binding must be written; got {tools!r}"
+    lock_names = [
+        entry["name"]
+        for entry in tomllib.loads((project_dir / "ocx.lock").read_text())["tool"]
+    ]
+    assert lock_names == [repo], f"exactly one lock entry must be written; got {lock_names!r}"
+
+
+def test_add_does_not_move_a_pin_when_the_upstream_tag_advanced(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """Re-adding a binding on a moving ``:latest`` tag must NOT advance its
+    pin, even after the upstream tag moved and the local index saw it.
+
+    Moving a pin is ``ocx update``'s job and nobody else's — an ``ocx add``
+    that silently re-resolved an already-locked binding would bump it behind
+    the user's back.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_nomove"
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=True)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    _write_ocx_toml(project_dir, "[tools]\n")
+
+    bare_id = f"{ocx.registry}/{repo}"
+    first = _run_cmd(ocx, project_dir, "add", "--no-pull", bare_id)
+    assert first.returncode == EXIT_SUCCESS, (
+        f"first add failed: rc={first.returncode}, stderr={first.stderr!r}"
+    )
+    toml_before = (project_dir / "ocx.toml").read_bytes()
+    pin_before = _leaves_for_add((project_dir / "ocx.lock").read_text(), repo)
+    assert pin_before, "the first add must record leaf digests"
+
+    # Move the upstream ``:latest`` to a new digest and let the local index see it.
+    make_package(ocx, repo, "2.0.0", tmp_path, cascade=True)
+    refresh = _run_cmd(ocx, project_dir, "index", "update", bare_id)
+    assert refresh.returncode == EXIT_SUCCESS, refresh.stderr
+
+    second = _run_cmd(ocx, project_dir, "add", "--no-pull", bare_id)
+    assert second.returncode == EXIT_SUCCESS, (
+        f"re-add must exit {EXIT_SUCCESS}; rc={second.returncode}, stderr={second.stderr!r}"
+    )
+    assert (project_dir / "ocx.toml").read_bytes() == toml_before, (
+        "ocx.toml must be byte-identical after the re-add"
+    )
+    after = _leaves_for_add((project_dir / "ocx.lock").read_text(), repo)
+    assert after == pin_before, (
+        "ocx add must never advance an existing pin; "
+        f"before={pin_before}, after={after}"
+    )
+
+
+def test_add_conflicting_identifier_names_both_identifiers(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """The exit-64 refusal for a key already bound to a DIFFERENT identifier
+    names the identifier on record, the one that was asked for, and both
+    remedies — so the fix is readable from the failure alone.
+
+    Complements ``test_add_rejects_existing_binding``, which pins the exit code
+    and the untouched manifest; this pins what the message has to say.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_conflict"
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
+    newer = make_package(ocx, repo, "2.0.0", tmp_path, cascade=False)
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    existing = f"{ocx.registry}/{repo}:1.0.0"
+    _write_ocx_toml(project_dir, f'[tools]\n{repo} = "{existing}"\n')
+
+    result = _run_cmd(ocx, project_dir, "add", "--no-pull", newer.fq)
+    assert result.returncode == EXIT_USAGE_ERROR, (
+        f"a conflicting identifier must still exit {EXIT_USAGE_ERROR}; "
+        f"rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    for needle in (existing, newer.fq, f"ocx remove {repo}", f"ocx update {repo}"):
+        assert needle in result.stderr, (
+            f"the refusal must name {needle!r}; stderr:\n{result.stderr}"
+        )

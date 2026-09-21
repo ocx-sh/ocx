@@ -347,7 +347,10 @@ pub async fn read_manifest_snapshot(config_path: &Path) -> Result<ManifestSnapsh
 ///   this mutation would write, is not a name the reader accepts. The key is
 ///   checked whether it was typed or derived (R-W21).
 /// - [`ProjectErrorKind::BindingAlreadyExists`] — the key already exists in
-///   the target group.
+///   the target group. Raised whatever the occupying identifier is: the
+///   library refuses every duplicate key, and the *command* decides which
+///   duplicates are worth asking about (`ocx add` treats an identical re-add
+///   as a no-op and never calls this for it).
 pub fn add_binding_in_memory(
     config: &mut crate::config::ProjectConfig,
     path: &Path,
@@ -366,31 +369,33 @@ pub fn add_binding_in_memory(
     let key = name.map_or_else(|| binding_key(identifier), str::to_owned);
     validate_tool_key(&key, group, path)?;
 
-    // Duplicate check: scoped to the target group only.
+    // Duplicate check: scoped to the target group only. The occupant is read
+    // out rather than probed for, because the refusal names it — a message
+    // saying only that the key is taken leaves the user to go and look.
     match group {
         None => {
-            if config.tools.contains_key(&key) {
+            if let Some(existing) = config.tools.get(&key) {
                 return Err(Error::Project(ProjectError::new(
                     path.to_path_buf(),
                     ProjectErrorKind::BindingAlreadyExists {
-                        name: key,
                         group: "default".to_owned(),
+                        name: key,
+                        existing: Box::new(existing.clone()),
+                        requested: Box::new(identifier.clone()),
                     },
                 )));
             }
             config.tools.insert(key.clone(), identifier.clone());
         }
         Some(group_name) => {
-            if config
-                .groups
-                .get(group_name)
-                .is_some_and(|g| g.tools.contains_key(&key))
-            {
+            if let Some(existing) = config.groups.get(group_name).and_then(|g| g.tools.get(&key)) {
                 return Err(Error::Project(ProjectError::new(
                     path.to_path_buf(),
                     ProjectErrorKind::BindingAlreadyExists {
-                        name: key,
                         group: group_name.to_owned(),
+                        name: key,
+                        existing: Box::new(existing.clone()),
+                        requested: Box::new(identifier.clone()),
                     },
                 )));
             }
@@ -964,9 +969,22 @@ mod tests {
             .expect_err("second add under the same explicit name must fail");
 
         assert!(
-            matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::BindingAlreadyExists { name, group } if name == "glab" && group == "default")),
-            "expected BindingAlreadyExists for the explicit name; got: {err}"
+            matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::BindingAlreadyExists { name, group, existing, requested } if name == "glab" && group == "default" && **existing == first && **requested == second)),
+            "expected BindingAlreadyExists for the explicit name, naming both identifiers; got: {err}"
         );
+        let message = err.to_string();
+        let (first_text, second_text) = (first.to_string(), second.to_string());
+        for needle in [
+            first_text.as_str(),
+            second_text.as_str(),
+            "ocx remove glab",
+            "ocx update glab",
+        ] {
+            assert!(
+                message.contains(needle),
+                "the refusal must name {needle:?} so the remedy is readable from the failure alone; got: {message}"
+            );
+        }
     }
 
     /// An explicit name the reader's charset refuses is rejected before

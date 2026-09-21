@@ -106,6 +106,24 @@ pub enum Command {
     /// project toolchain into `<project>/.ocx/toolchain/` - or under the
     /// `toolchain_dir` root, when one is configured. That directory carries
     /// its own `.gitignore`, so `git status` stays clean.
+    ///
+    /// Each binding is named after the repository basename, so two packages
+    /// with the same basename collide. Prefix an identifier with `NAME=` to
+    /// choose the name yourself: `ocx add glab=ocx.sh/gitlab/cli`.
+    ///
+    /// Adding a binding the target group already declares with the same
+    /// identifier leaves `ocx.toml` byte-identical, including when one batch
+    /// repeats the identifier. Such a binding is re-locked only when
+    /// `ocx.lock` has no entry for it; an existing pin is never re-resolved,
+    /// so run `ocx update <name>` to move one. The packages are downloaded
+    /// either way, so re-running after a failed download finishes the install.
+    ///
+    /// Fails with exit 64 when the binding name is already bound to a
+    /// different identifier. Run `ocx remove <name>` and add it again, or
+    /// `ocx update <name>` to move the pin. The same name in a different
+    /// group is legal. Fails with exit 65 when `ocx.toml` drifted from
+    /// `ocx.lock` before this add (run `ocx lock` to reconcile), or exit 78
+    /// when a carried entry can no longer be migrated (run `ocx update`).
     Add(add::Add),
     /// Remove unreferenced objects from the local object store.
     Clean(clean::Clean),
