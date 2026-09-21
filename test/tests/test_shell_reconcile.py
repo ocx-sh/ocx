@@ -1915,10 +1915,16 @@ def test_shell_allow_refuses_the_ocx_home(arena: Arena) -> None:
         f"stamping the ocx home is a usage error, not a silent success; "
         f"got {refused.returncode}\nstdout:\n{refused.stdout}\nstderr:\n{refused.stderr}"
     )
+    # Since #485 the walk never adopts `$OCX_HOME/ocx.toml` as a project, so
+    # `shell state` there carries no project key at all — and with no key
+    # there is nothing a stamp could be filed under.
     home_key = matrix.shell_state(arena.ocx, arena.ocx_home, arena.env())["project_key"]
-    assert not matrix.stamp_dir(arena.ocx_home, home_key).exists(), (
-        "A-44: `state/projects/<key-for-$OCX_HOME>/` must never exist"
+    assert home_key is None, (
+        f"A-44/#485: $OCX_HOME must not resolve to a project key; got {home_key!r}"
     )
+    assert not (arena.ocx_home / "state" / "projects").exists() or not any(
+        (arena.ocx_home / "state" / "projects").iterdir()
+    ), "A-44: `state/projects/<key-for-$OCX_HOME>/` must never exist"
 
     # Discrimination: an ordinary project under the same home still consents.
     source = _locked_project(arena, "alpha", _ENV_BLOCK_A)
