@@ -20,6 +20,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_announce::claim::{self, ClaimRequest, ClaimTarget, Upstream};
+use ocx_package::publisher::Publisher;
 
 use crate::api::data::claim::ClaimReport;
 use crate::options;
@@ -31,6 +32,10 @@ use crate::options;
 /// `--out`. Claiming an already-claimed package adds your owners to the entry
 /// and leaves everything else as committed; run it again with nothing new to
 /// say and it reports `unchanged` and opens no request.
+///
+/// The entry carries the package description the registry serves at
+/// `__ocx.desc`, refreshed on every claim. Publish one with
+/// `ocx package description push`.
 ///
 /// Owners default to the CI environment's user variables, else to the identity
 /// behind the credential. Name them explicitly with `--owner`, which replaces
@@ -270,6 +275,19 @@ impl PackageClaim {
         // see `options::ForgeWriteOptions::warn_push_identity`.
         self.forge.warn_push_identity(context.ui(), &credentials);
 
+        // The SSRF escape hatch is sourced exclusively from the selected
+        // `[registries."<ns>"]` entry for the package's namespace — the same
+        // config source announce reads, spelled the same way, because the
+        // description observation is the same pipeline step (design register
+        // X2). There is no CLI flag to widen it.
+        let trusted_hosts = context
+            .config()
+            .registries
+            .as_ref()
+            .and_then(|registries| registries.get(package.registry()))
+            .and_then(|entry| entry.trusted_hosts.clone())
+            .unwrap_or_default();
+
         let request = ClaimRequest {
             package,
             repository: self.repository.clone(),
@@ -277,6 +295,12 @@ impl PackageClaim {
             upstream: self.upstream(),
             target: self.target(),
             index_repo: self.forge.index_repo.clone(),
+            trusted_hosts: trusted_hosts.clone(),
+            // The same allowance `Context::client_builder` passes as
+            // `plain_http_registries`, so the pre-flight decides the dial
+            // scheme — and hence which proxy variable applies (ocx#407) —
+            // from what the client will actually dial.
+            insecure_hosts: context.insecure_hosts().to_vec(),
         };
 
         // The merged extra-CA view (C-007): a forge dial trusts what every
@@ -288,7 +312,15 @@ impl PackageClaim {
             git,
             context.extra_roots_merged(),
         )?;
-        let outcome = claim::claim(request, Some(forge.as_ref())).await?;
+
+        // The OCI client the `__ocx.desc` observation runs on, built exactly as
+        // `ocx package announce` builds its own: the invocation's shared recipe
+        // pinned through the `ocx_oci::ssrf::GuardedResolver` seam, because the
+        // physical repository a claim reads a description from is
+        // operator-typed on a first claim and root-supplied on a re-claim.
+        let publisher = Publisher::new(context.client_builder().ssrf_guard(trusted_hosts).build());
+
+        let outcome = claim::claim(request, Some(forge.as_ref()), &publisher).await?;
 
         context.api().report(&ClaimReport::from_outcome(
             outcome,

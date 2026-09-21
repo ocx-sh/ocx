@@ -134,8 +134,13 @@ DEFAULT_PUSH_USERNAME = "gitlab-ci-token"
 #: call: the claim prefix is `indexbot-claim-`, a different one from announce's,
 #: and a helper shared with announce would agree with a rename of either.
 CLAIM_PACKAGE = "acme/widget"
-CLAIM_PHYSICAL = "oci://ghcr.io/acme/widget"
 CLAIM_BRANCH = "indexbot-claim-acme-widget"
+
+#: The claim rows' physical repository is built per run from `ocx.registry`
+#: rather than named here. It used to be `oci://ghcr.io/acme/widget`, on the
+#: reasoning that claim never read the pointer; #482 reversed that -- claim now
+#: OBSERVES `__ocx.desc` at this repository -- so a public host here would put
+#: these rows on the public internet, where ghcr.io answers DENIED.
 
 #: The owner the claim rows name, as a `LOGIN:ID` pair the forge can confirm.
 CLAIM_OWNER_LOGIN = "alice"
@@ -342,9 +347,15 @@ def claim_over_git(
     env.update(git_transport_env(shim, home))
     if extra_env:
         env.update(extra_env)
+    # #482: the claim observes `__ocx.desc` at the physical repository, and the
+    # harness registry is loopback -- SSRF-forbidden by default (design register
+    # X2). The escape hatch is keyed on the LOGICAL registry, which these rows
+    # pin to `ocx.sh` just above.
+    configure_trusted_hosts(ocx, "ocx.sh", [registry_host(ocx.registry)])
     return ocx.run(
         "package", "claim", "--forge", "gitlab", "--transport", "git",
-        "--repository", CLAIM_PHYSICAL, "--owner", f"{CLAIM_OWNER_LOGIN}:{CLAIM_OWNER_ID}",
+        "--repository", f"oci://{ocx.registry}/{CLAIM_PACKAGE}",
+        "--owner", f"{CLAIM_OWNER_LOGIN}:{CLAIM_OWNER_ID}",
         *args, CLAIM_PACKAGE,
         format="json", check=False, env_overrides=env,
     )
@@ -1441,10 +1452,15 @@ def test_persistent_non_fast_forward_exits_75(
     makes the cell reachable.
     """
     package = "acme/widget"
-    physical = "oci://ghcr.io/acme/widget"
+    # The harness's own registry, never a public host: #482 makes claim dial
+    # this pointer to observe `__ocx.desc`.
+    physical = f"oci://{ocx.registry}/{package}"
     branch = f"indexbot-claim-{package.replace('/', '-')}"
     fake_forge.seed_files(INDEX_OWNER, INDEX_REPO, {"README.md": b"the index\n"})
     fake_forge.seed_user("alice", 7)
+    # The harness registry is loopback, which the SSRF pre-flight forbids by
+    # default; the allowance is keyed on the LOGICAL registry this row pins.
+    configure_trusted_hosts(ocx, "ocx.sh", [registry_host(ocx.registry)])
 
     def run_claim(*owners: str) -> subprocess.CompletedProcess[str]:
         owner_args = [flag for owner in owners for flag in ("--owner", owner)]

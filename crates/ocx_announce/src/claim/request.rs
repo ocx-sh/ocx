@@ -118,7 +118,7 @@ pub struct Upstream {
 /// Whether a value may be written into [`Upstream::repository_url`].
 ///
 /// A real parse, not a prefix test, because the value reaches a **committed**
-/// index root verbatim ([`super::root::build_root`]) and a catalog renders it
+/// index root verbatim (`build_root`) and a catalog renders it
 /// as an `href`. Two properties have to hold at once:
 ///
 /// - **`http` or `https` scheme** (DX-64). `javascript:` or `data:` would become
@@ -172,6 +172,16 @@ pub struct ClaimRequest {
     pub target: ClaimTarget,
     /// The index repository coordinate (default `ocx-sh/index`).
     pub index_repo: RepoCoordinate,
+    /// `[registries."<ns>"].trusted_hosts` for the package's **logical**
+    /// registry — the sole SSRF escape hatch (design register X2), and the same
+    /// value `AnnounceRequest` carries for the same reason: claim observes the
+    /// `__ocx.desc` artifact at the physical repository, which is operator-typed
+    /// here and root-supplied on a re-claim.
+    pub trusted_hosts: Vec<String>,
+    /// The plain-HTTP allowance the client is built with, so the pre-flight
+    /// decides the dial **scheme** — and hence which proxy variable applies
+    /// (ocx#407) — from what the client will actually dial.
+    pub insecure_hosts: Vec<String>,
 }
 
 /// The result of a claim run.

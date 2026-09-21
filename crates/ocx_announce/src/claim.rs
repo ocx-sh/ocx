@@ -10,7 +10,15 @@
 //! re-claim, not a refusal ([#481], D-3) — it adds the caller's owners to the
 //! committed list and carries every other committed field through.
 //!
+//! Claim also observes the package's `__ocx.desc` artifact ([#482], D-2) and
+//! writes the description into the root it proposes, through
+//! `announce::pipeline::observe_desc` — the same function announce runs, so
+//! `desc` means one thing in the index whichever command wrote it. That makes
+//! claim a registry client: the SSRF pre-flight runs before the first registry
+//! request, exactly as it does on the announce path.
+//!
 //! [#481]: https://github.com/ocx-sh/ocx/issues/481
+//! [#482]: https://github.com/ocx-sh/ocx/issues/482
 //!
 //! Forge-neutral and transport-blind **by construction**: `commit_files` and
 //! `open_or_update_pull_request` dispatch on the transport *inside* the forge,
@@ -41,9 +49,11 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use crate::announce::{AnnounceError, pipeline};
 use crate::forge::{
     BranchComparison, CommitBase, FileChange, Forge, ForgeError, PushAccess, RefUpdate, RepoCoordinate,
 };
+use ocx_package::publisher::Publisher;
 
 /// The base branch of the index repository — the ref the re-claim path reads the
 /// committed root from, and the ref every claim commit is parented on.
@@ -79,14 +89,24 @@ pub fn root_path(package: &str) -> String {
 /// rows then come from `PushAccess::skipped_all()` — never by a forge answering
 /// `skipped`, which on GitHub would mean an unreadable `permissions` and exit 80.
 ///
+/// `publisher` is the registry client the `__ocx.desc` observation runs on
+/// (D-2). It is reached only after every zero-I/O refusal, and only behind
+/// `pipeline::guarded_physical`'s SSRF pre-flight.
+///
 /// # Errors
 ///
 /// Returns a [`ClaimError`] for a missing forge, a malformed `--repository`, a
 /// committed root naming another package ([`ClaimError::RootNameMismatch`]) or
 /// another physical repository ([`ClaimError::RepositoryMismatch`]), any
-/// owner-ladder refusal, a missing base ref, a race lost twice (`NonFastForward` under `api`,
+/// owner-ladder refusal, any description-observation failure
+/// ([`ClaimError::Description`], which carries the announce taxonomy verbatim),
+/// a missing base ref, a race lost twice (`NonFastForward` under `api`,
 /// `StaleLease` under `git`), an `--out` write failure, or any forge failure.
-pub async fn claim(request: ClaimRequest, forge: Option<&dyn Forge>) -> Result<ClaimOutcome, ClaimError> {
+pub async fn claim(
+    request: ClaimRequest,
+    forge: Option<&dyn Forge>,
+    publisher: &Publisher,
+) -> Result<ClaimOutcome, ClaimError> {
     let forge = forge.ok_or(ClaimError::ForgeRequired)?;
     let package = request.package.repository().to_string();
     let root_path = root_path(&package);
@@ -152,21 +172,64 @@ pub async fn claim(request: ClaimRequest, forge: Option<&dyn Forge>) -> Result<C
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let root = root::build_root(
+    let mut root = root::build_root(
         &name,
         &repository,
         &owners,
         request.upstream.as_ref(),
         committed.as_ref(),
     );
+
+    // D-2 — the description. X3's pre-flight is resolved here and nowhere else,
+    // so it precedes the first registry request of the run by construction:
+    // `observe_desc` is the only registry caller on this path, and it takes the
+    // `Physical` this produced rather than resolving one of its own.
+    let physical = pipeline::guarded_physical(
+        &request.repository,
+        request.package.registry(),
+        &request.trusted_hosts,
+        &request.insecure_hosts,
+        &ocx_oci::ssrf::proxy_rules(),
+    )
+    .await?;
+    // The root just built carries the committed `desc` verbatim, so the
+    // floating-tag comparison inside is against what the index currently
+    // records — absent on a fresh claim, which makes any served description a
+    // move and ships it on the very first pull request.
+    let observed = pipeline::observe_desc(publisher, &physical, &root).await?;
+    if let Some(updated) = &observed.desc
+        && let Some(object) = root.as_object_mut()
+    {
+        // Replacing an existing key keeps its position under `preserve_order`,
+        // and `build_root` always emits `desc`, so this never appends.
+        object.insert("desc".to_string(), updated.clone());
+    }
     let root_bytes = ocx_index::serialize_root(&root);
+    // Owner mandate (§5 decisions C–E) — the objects the new root stops
+    // referencing leave the index in the commit that stops referencing them,
+    // diffed against the committed root at the ref the commit is parented on. A
+    // fresh claim references nothing and orphans nothing, answered without a
+    // single probe.
+    let orphans = pipeline::orphan_paths(
+        committed.as_ref(),
+        &root,
+        &package,
+        forge,
+        &request.index_repo,
+        INDEX_BASE_REF,
+    )
+    .await?;
+    // `observed: &[]` — claim never writes tags, so the only CAS objects it
+    // carries are the description's payload blobs, in the same atomic commit as
+    // the root (C15).
+    let files = pipeline::build_files(&root_path, &root_bytes, &package, &[], &observed.blobs, &orphans);
 
     // `--out` writes the tree and stops: no branch exists to be unchanged
     // against, so the run is ALWAYS `updated`, and `ensure_push_access` is not
     // called at all — S-011's `push-access: skipped` comes from
     // `PushAccess::skipped_all()`, never from a forge answering `skipped`.
     if let ClaimTarget::Out(directory) = &request.target {
-        let written_paths = write_out(directory, &root_path, &root_bytes).await?;
+        let written_paths = write_out(directory, &files).await?;
         return Ok(ClaimOutcome {
             package,
             name,
@@ -322,7 +385,6 @@ pub async fn claim(request: ClaimRequest, forge: Option<&dyn Forge>) -> Result<C
         }
     };
 
-    let files = BTreeMap::from([(root_path.clone(), FileChange::Put(root_bytes))]);
     let message = request_title(&name);
     let body = request_body(&name, &repository, &branch, &owners, source);
     // Every claim commit is BASED on the index base — the sha read here is the
@@ -474,30 +536,36 @@ async fn read_base_sha(forge: &dyn Forge, index_repo: &RepoCoordinate) -> Result
         })
 }
 
-/// Write the rendered root under the `--out` directory.
+/// Write the claim's whole file set — the root and the description's payload
+/// blobs — under the `--out` directory.
+///
+/// The writer is announce's ([`pipeline::write_out`]): a `--out` claim and a
+/// `--out` announce must materialise the same entry shape, or the
+/// `claim --out dir && publish dir` pipeline ships a root naming a readme it
+/// never wrote.
+///
+/// The one thing not shared is the failure: announce's
+/// [`AnnounceError::OutputWrite`] is re-pointed onto [`ClaimError::OutputWrite`]
+/// so the envelope keeps its `output_write` slug rather than reporting a write
+/// failure as `description`. Both classify to exit 74 either way, which is why
+/// the slug is the whole of what this mapping buys.
 ///
 /// # Errors
 ///
 /// [`ClaimError::OutputWrite`] — its own variant rather than a bare
 /// `io::Error`, because `cli::classify` special-cases only `PermissionDenied`
 /// and everything else would land on exit 1.
-async fn write_out(directory: &Path, relative: &str, bytes: &[u8]) -> Result<Vec<String>, ClaimError> {
-    let path = directory.join(relative);
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|source| ClaimError::OutputWrite {
-                path: parent.display().to_string(),
-                source,
-            })?;
-    }
-    tokio::fs::write(&path, bytes)
+async fn write_out(directory: &Path, files: &BTreeMap<String, FileChange>) -> Result<Vec<String>, ClaimError> {
+    pipeline::write_out(directory, files)
         .await
-        .map_err(|source| ClaimError::OutputWrite {
-            path: path.display().to_string(),
-            source,
-        })?;
-    Ok(vec![relative.to_string()])
+        .map_err(|error| match error {
+            AnnounceError::OutputWrite { path, source } => ClaimError::OutputWrite { path, source },
+            // Unreachable: `pipeline::write_out` documents `OutputWrite` as its
+            // only failure. Carried rather than collapsed, so a variant added
+            // there keeps its own exit code instead of being relabelled an I/O
+            // error.
+            other => ClaimError::Description(other),
+        })
 }
 
 /// The re-claim owner union (D-3): every committed owner first, in the order the
@@ -558,6 +626,7 @@ pub(crate) mod tests {
         BranchComparison, CommitBase, FileChange, ForgeError, ForgeIdentity, ForkIdentity, Mergeability, PullRequest,
         PushAccess, RefUpdate, RepoCoordinate,
     };
+    use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
 
     /// The root one recorded `commit_files` call wrote, as text.
     ///
@@ -850,9 +919,15 @@ pub(crate) mod tests {
 
     pub(crate) const PACKAGE: &str = "acme/widget";
     pub(crate) const ROOT_PATH: &str = "p/acme/widget.json";
-    /// The physical pointer every fixture claims against. Never dialled — it is
-    /// recorded verbatim in the root (C-047).
-    pub(crate) const PHYSICAL: &str = "oci://ghcr.io/acme/widget";
+    /// The physical pointer every fixture claims against.
+    ///
+    /// Loopback, not `ghcr.io`: claim observes `__ocx.desc` now, so a public
+    /// hostname here would make `guarded_physical` resolve it through real DNS
+    /// and the observation dial the public internet from a unit test. The
+    /// address is the one [`stub_publisher`] answers for, and `request` trusts
+    /// it explicitly — loopback is forbidden by default, so a fixture that
+    /// forgot the allowance reds with `Ssrf` rather than passing quietly.
+    pub(crate) const PHYSICAL: &str = "oci://127.0.0.1/x";
     pub(crate) const CLAIM_BRANCH: &str = "indexbot-claim-acme-widget";
     pub(crate) const BASE_SHA: &str = "basesha";
 
@@ -875,7 +950,30 @@ pub(crate) mod tests {
             upstream: None,
             target,
             index_repo: index_repo(),
+            // The loopback host is forbidden by default; trusting it is what
+            // lets the description observation reach the stub transport.
+            trusted_hosts: vec!["127.0.0.1".to_string()],
+            // No plain-HTTP allowance: the fixture dials https, so the guard's
+            // route decision does not depend on the ambient environment.
+            insecure_hosts: Vec::new(),
         }
+    }
+
+    /// A [`Publisher`] over an empty stub registry: every manifest probe
+    /// answers "not found", so `observe_desc` is a no-op and `desc` stays
+    /// `null` unless a fixture seeds one.
+    ///
+    /// Built per call rather than shared: `StubTransportData` records the calls
+    /// made against it, and a shared instance would let one test read another's
+    /// log.
+    pub(crate) fn stub_publisher(data: StubTransportData) -> Publisher {
+        Publisher::new(ocx_oci::Client::with_transport(Box::new(StubTransport::new(data))))
+    }
+
+    /// The empty-registry publisher every fixture that is not about the
+    /// description uses.
+    fn publisher() -> Publisher {
+        stub_publisher(StubTransportData::new())
     }
 
     /// A forge whose users API is reachable, whose index base exists, and whose
@@ -983,7 +1081,8 @@ pub(crate) mod tests {
         let _clock = pinned_clock();
         let forge = first_claim_forge();
 
-        let outcome = block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect("the first claim succeeds");
+        let outcome = block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher()))
+            .expect("the first claim succeeds");
 
         assert_eq!(outcome.branch, CLAIM_BRANCH);
         let committed_branches: Vec<String> = forge
@@ -1098,7 +1197,7 @@ pub(crate) mod tests {
 
             let mut request = request(target);
             request.owners = vec![OwnerSpec::Login("bob".to_string())];
-            let outcome = block_on(claim(request, Some(&forge)))
+            let outcome = block_on(claim(request, Some(&forge), &publisher()))
                 .unwrap_or_else(|error| panic!("row {index}: a re-claim is not a refusal: {error:?}"));
 
             assert_eq!(
@@ -1178,8 +1277,8 @@ pub(crate) mod tests {
             committed_root(serde_json::json!([{ "login": "alice-renamed", "id": 1234 }])),
         );
 
-        let outcome =
-            block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect("a re-claim that adds nothing succeeds");
+        let outcome = block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher()))
+            .expect("a re-claim that adds nothing succeeds");
 
         assert_eq!(outcome.status, ClaimStatus::Unchanged);
         assert_eq!(
@@ -1214,7 +1313,8 @@ pub(crate) mod tests {
 
         let mut request = request(ClaimTarget::Direct);
         request.repository = "oci://127.0.0.1/other".to_string();
-        let error = block_on(claim(request, Some(&forge))).expect_err("a re-claim may not repoint the repository");
+        let error = block_on(claim(request, Some(&forge), &publisher()))
+            .expect_err("a re-claim may not repoint the repository");
 
         assert!(
             matches!(&error, ClaimError::RepositoryMismatch { committed, supplied }
@@ -1263,7 +1363,7 @@ pub(crate) mod tests {
             let mut forge = first_claim_forge();
             seed_committed(&mut forge, committed);
 
-            let error = block_on(claim(request(ClaimTarget::Direct), Some(&forge)))
+            let error = block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher()))
                 .expect_err("a committed root that is not this package is refused");
             assert!(
                 matches!(&error, ClaimError::RootNameMismatch { committed, expected }
@@ -1310,7 +1410,7 @@ pub(crate) mod tests {
             seed_committed(&mut forge, committed.clone());
             let mut request = request(ClaimTarget::Direct);
             request.owners = vec![OwnerSpec::Login("bob".to_string())];
-            block_on(claim(request, Some(&forge))).expect("the carrying re-claim succeeds");
+            block_on(claim(request, Some(&forge), &publisher())).expect("the carrying re-claim succeeds");
 
             let root = committed_root_value(&forge);
             assert_eq!(
@@ -1334,7 +1434,7 @@ pub(crate) mod tests {
             repository_url: None,
             disclaimer: None,
         });
-        block_on(claim(request, Some(&forge))).expect("the replacing re-claim succeeds");
+        block_on(claim(request, Some(&forge), &publisher())).expect("the replacing re-claim succeeds");
 
         let root = committed_root_value(&forge);
         assert_eq!(
@@ -1382,13 +1482,225 @@ pub(crate) mod tests {
             .files
             .insert((CLAIM_BRANCH.to_string(), ROOT_PATH.to_string()), b"{}\n".to_vec());
 
-        let outcome = block_on(claim(request(ClaimTarget::Direct), Some(&forge)))
+        let outcome = block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher()))
             .expect("an unmerged claim on the branch is a re-run, not a refusal");
         assert_eq!(outcome.package, PACKAGE);
         assert_eq!(
             outcome.status,
             ClaimStatus::Updated,
             "a `{{}}` root on the branch is not what this run renders, so it is rewritten"
+        );
+    }
+
+    // ── D-2: the description ────────────────────────────────────────────────
+
+    /// Seed an `__ocx.desc` artifact carrying `readme` at `127.0.0.1/x`, and
+    /// return the readme bytes' own SHA-256 hex — the CAS name the claim must
+    /// write it under.
+    fn seed_description(data: &StubTransportData, readme: &[u8]) -> String {
+        let readme_digest = ocx_oci::Algorithm::Sha256.hash(readme);
+        data.write().blobs.insert(readme_digest.to_string(), readme.to_vec());
+        let manifest = ocx_oci::Manifest::Image(ocx_oci::ImageManifest {
+            artifact_type: Some(ocx_oci::media_type::MEDIA_TYPE_DESCRIPTION_V1.to_string()),
+            layers: vec![ocx_oci::Descriptor {
+                media_type: ocx_oci::media_type::MEDIA_TYPE_MARKDOWN.to_string(),
+                digest: readme_digest.to_string(),
+                size: i64::try_from(readme.len()).expect("a test blob fits i64"),
+                urls: None,
+                artifact_type: None,
+                annotations: None,
+            }],
+            annotations: Some([(ocx_oci::annotations::TITLE.to_string(), "Widget".to_string())].into()),
+            ..Default::default()
+        });
+        let bytes = serde_json::to_vec_pretty(&manifest).expect("the manifest serializes");
+        let digest = ocx_oci::Algorithm::Sha256.hash(&bytes);
+        data.write()
+            .manifests
+            .insert("127.0.0.1/x:__ocx.desc".to_string(), (bytes, digest.to_string()));
+        readme_digest.hex().to_string()
+    }
+
+    /// D-2 (#482) — a FIRST claim ships the description the registry serves:
+    /// `desc` is populated in the root and the readme blob rides in the same
+    /// commit.
+    ///
+    /// The fresh-claim path has no committed `desc` to compare against, so any
+    /// served description counts as moved — which is what makes a brand-new
+    /// package's first pull request carry its readme rather than a `null`.
+    ///
+    /// Reds on: rendering `desc: null` unconditionally (the populated
+    /// assertion); calling `observe_desc` but dropping its blobs (the CAS
+    /// assertion).
+    #[test]
+    fn a_fresh_claim_carries_the_description_the_registry_serves() {
+        let _clock = pinned_clock();
+        let forge = first_claim_forge();
+        let data = StubTransportData::new();
+        let readme_hex = seed_description(&data, b"# widget\n");
+
+        block_on(claim(request(ClaimTarget::Direct), Some(&forge), &stub_publisher(data))).expect("the claim succeeds");
+
+        let files = forge
+            .calls()
+            .into_iter()
+            .find_map(|call| match call {
+                Call::CommitFiles { files, .. } => Some(files),
+                _ => None,
+            })
+            .expect("a commit was made");
+        let root: Value = serde_json::from_str(&committed_root_text(&files)).expect("the root is JSON");
+        assert_eq!(
+            root["desc"]["readme"],
+            format!("sha256:{readme_hex}"),
+            "the root points at the readme the registry served: {root}"
+        );
+        assert_eq!(root["desc"]["title"], "Widget", "{root}");
+        assert!(
+            files.contains_key(&format!("p/acme/widget/o/sha256/{readme_hex}.md")),
+            "the readme blob ships in the same commit as the root: {:?}",
+            files.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// D-2 — an `--out` claim writes the description blobs too, so
+    /// `claim --out dir && publish dir` never ships a root naming a readme the
+    /// directory does not hold.
+    ///
+    /// Announce parity: the `--out` contract is "the whole entry, every run".
+    ///
+    /// Reds on: writing only the root under `--out`.
+    #[test]
+    fn an_out_claim_writes_the_description_blobs() {
+        let _clock = pinned_clock();
+        let forge = first_claim_forge();
+        let output = tempfile::TempDir::new().expect("a temp dir is created");
+        let data = StubTransportData::new();
+        let readme_hex = seed_description(&data, b"# widget\n");
+
+        let outcome = block_on(claim(
+            request(ClaimTarget::Out(output.path().to_path_buf())),
+            Some(&forge),
+            &stub_publisher(data),
+        ))
+        .expect("the --out claim succeeds");
+
+        let readme_relative = format!("p/acme/widget/o/sha256/{readme_hex}.md");
+        assert!(
+            outcome.written_paths.contains(&readme_relative),
+            "the report names every written path: {:?}",
+            outcome.written_paths
+        );
+        assert_eq!(
+            std::fs::read(output.path().join(&readme_relative)).expect("the readme was written"),
+            b"# widget\n",
+            "and the bytes are the registry's own"
+        );
+    }
+
+    /// D-2 / X3 — a forbidden physical host is refused BEFORE the first
+    /// registry request of any kind.
+    ///
+    /// The claim mirror of announce's
+    /// `from_registry_refuses_a_forbidden_host_before_listing_any_tag`. The
+    /// exit code alone proves nothing about ordering: a pre-flight that ran
+    /// after the probe would raise the same `Ssrf`. Only the empty call log on
+    /// the transport does, which is why the stub is shared with the assertion
+    /// rather than discarded.
+    ///
+    /// Reds on: moving the pre-flight below `observe_desc`, or dropping it.
+    #[test]
+    fn claim_refuses_a_forbidden_host_before_any_registry_request() {
+        let _clock = pinned_clock();
+        let forge = first_claim_forge();
+        let data = StubTransportData::new();
+        seed_description(&data, b"# widget\n");
+
+        let mut request = request(ClaimTarget::Direct);
+        // The default fixture trusts loopback; this one does not, so the
+        // `oci://127.0.0.1/x` pointer is forbidden.
+        request.trusted_hosts = Vec::new();
+        let error = block_on(claim(request, Some(&forge), &stub_publisher(data.clone())))
+            .expect_err("a forbidden physical host must be refused");
+
+        assert!(
+            matches!(
+                &error,
+                ClaimError::Description(crate::announce::AnnounceError::Ssrf { .. })
+            ),
+            "the announce taxonomy is reused verbatim, so the exit code is announce's: {error:?}"
+        );
+        let inner = data.read();
+        assert!(
+            inner.calls.is_empty(),
+            "no registry call may precede the SSRF refusal: {:?}",
+            inner.calls
+        );
+        assert!(inner.auth_calls.is_empty(), "no auth call may precede it either");
+        assert_eq!(forge.commit_calls(), 0, "and nothing is written");
+    }
+
+    /// Owner mandate — a re-claim whose description MOVED deletes the readme
+    /// the previous root named, in the commit that stops naming it.
+    ///
+    /// The orphan set is diffed against the committed root at the ref the
+    /// commit parents on, so the deletion and the write are one atomic file
+    /// set. Both directions asserted: the new blob is a `Put`, the old path a
+    /// `Delete` — a build that folded no orphans still writes the new one, so
+    /// the `Put` alone is not the check.
+    ///
+    /// Reds on: skipping the orphan fold (no `Delete` entry).
+    #[test]
+    fn a_reclaim_removes_the_readme_the_previous_root_named() {
+        let _clock = pinned_clock();
+        let stale_hex = "a".repeat(64);
+        let mut forge = first_claim_forge();
+        seed_committed(
+            &mut forge,
+            ocx_index::serialize_root(&serde_json::json!({
+                "name": "ocx.sh/acme/widget",
+                "repository": PHYSICAL,
+                "owners": alice_entry(),
+                "status": "active",
+                "deprecated_message": Value::Null,
+                "created": COMMITTED_DATE,
+                "desc": {
+                    "digest": format!("sha256:{}", "d".repeat(64)),
+                    "title": "Widget",
+                    "description": "",
+                    "keywords": [],
+                    "readme": format!("sha256:{stale_hex}"),
+                },
+                "tags": {},
+            })),
+        );
+        let data = StubTransportData::new();
+        let fresh_hex = seed_description(&data, b"# widget, rewritten\n");
+
+        block_on(claim(request(ClaimTarget::Direct), Some(&forge), &stub_publisher(data)))
+            .expect("the re-claim succeeds");
+
+        let files = forge
+            .calls()
+            .into_iter()
+            .find_map(|call| match call {
+                Call::CommitFiles { files, .. } => Some(files),
+                _ => None,
+            })
+            .expect("a commit was made");
+        assert!(
+            matches!(
+                files.get(&format!("p/acme/widget/o/sha256/{fresh_hex}.md")),
+                Some(FileChange::Put(_))
+            ),
+            "the new readme is written: {:?}",
+            files.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            files.get(&format!("p/acme/widget/o/sha256/{stale_hex}.md")),
+            Some(&FileChange::Delete),
+            "and the one the previous root named leaves in the same commit: {:?}",
+            files.keys().collect::<Vec<_>>()
         );
     }
 
@@ -1519,9 +1831,10 @@ pub(crate) mod tests {
                     .insert((CLAIM_BRANCH.to_string(), ROOT_PATH.to_string()), rendered);
             }
 
-            let outcome = block_on(claim(request(ClaimTarget::Direct), Some(&forge))).unwrap_or_else(|error| {
-                panic!("row {index} must succeed: {error:?}");
-            });
+            let outcome =
+                block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher())).unwrap_or_else(|error| {
+                    panic!("row {index} must succeed: {error:?}");
+                });
             let calls = forge.calls();
 
             assert_eq!(
@@ -1603,7 +1916,7 @@ pub(crate) mod tests {
                     updated: true,
                 });
 
-                block_on(claim(request(ClaimTarget::Direct), Some(&forge)))
+                block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher()))
                     .unwrap_or_else(|error| panic!("{comparison:?}/{has_request} must succeed: {error:?}"));
 
                 assert!(
@@ -1659,7 +1972,8 @@ pub(crate) mod tests {
             .files
             .insert((CLAIM_BRANCH.to_string(), ROOT_PATH.to_string()), head.into_bytes());
 
-        let outcome = block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect("the claim succeeds");
+        let outcome =
+            block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher())).expect("the claim succeeds");
         assert_eq!(
             outcome.status,
             ClaimStatus::Updated,
@@ -1687,7 +2001,7 @@ pub(crate) mod tests {
             .lock()
             .expect("the counter is not poisoned") = 1;
 
-        block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect("one retry converges");
+        block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher())).expect("one retry converges");
         assert_eq!(forge.commit_calls(), 2, "one rejection, one retry, then success");
 
         // One `_clock` for the whole test: `ocx_util::env::overrides::lock()` is a plain
@@ -1697,7 +2011,7 @@ pub(crate) mod tests {
             .non_fast_forward_rejections
             .lock()
             .expect("the counter is not poisoned") = 2;
-        let error = block_on(claim(request(ClaimTarget::Direct), Some(&twice)))
+        let error = block_on(claim(request(ClaimTarget::Direct), Some(&twice), &publisher()))
             .expect_err("a second rejection surfaces rather than looping");
         assert!(
             matches!(&error, ClaimError::Forge(ForgeError::NonFastForward { .. })),
@@ -1731,7 +2045,7 @@ pub(crate) mod tests {
             .lock()
             .expect("the counter is not poisoned") = 1;
 
-        block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect("one retry converges");
+        block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher())).expect("one retry converges");
         assert_eq!(forge.commit_calls(), 2, "the commit is redone against the re-read base");
         assert_eq!(forge.pull_request_calls(), 2, "and the request is opened on the retry");
 
@@ -1742,7 +2056,7 @@ pub(crate) mod tests {
             .stale_lease_rejections
             .lock()
             .expect("the counter is not poisoned") = 2;
-        let error = block_on(claim(request(ClaimTarget::Direct), Some(&twice)))
+        let error = block_on(claim(request(ClaimTarget::Direct), Some(&twice), &publisher()))
             .expect_err("a second rejection surfaces rather than looping");
         assert!(
             matches!(&error, ClaimError::Forge(ForgeError::StaleLease { .. })),
@@ -1769,7 +2083,7 @@ pub(crate) mod tests {
             .lock()
             .expect("the counter is not poisoned") = 1;
 
-        let error = block_on(claim(request(ClaimTarget::Direct), Some(&forge)))
+        let error = block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher()))
             .expect_err("a winning head with no root cannot be regenerated against");
         assert!(
             matches!(&error, ClaimError::MissingHeadRoot { branch, .. } if branch == CLAIM_BRANCH),
@@ -1787,8 +2101,8 @@ pub(crate) mod tests {
         let mut forge = first_claim_forge();
         forge.refs.remove(INDEX_BASE_REF);
 
-        let error =
-            block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect_err("no base ref, no commit parent");
+        let error = block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher()))
+            .expect_err("no base ref, no commit parent");
         assert!(
             matches!(&error, ClaimError::MissingBaseRef { base_ref, .. } if base_ref == INDEX_BASE_REF),
             "{error:?}"
@@ -1813,7 +2127,8 @@ pub(crate) mod tests {
         let _clock = pinned_clock();
         let forge = first_claim_forge();
 
-        let outcome = block_on(claim(request(ClaimTarget::Direct), Some(&forge))).expect("the claim succeeds");
+        let outcome =
+            block_on(claim(request(ClaimTarget::Direct), Some(&forge), &publisher())).expect("the claim succeeds");
         let body = forge
             .calls()
             .into_iter()
@@ -1862,7 +2177,7 @@ pub(crate) mod tests {
         let mut req = request(ClaimTarget::Direct);
         req.owners = vec![OwnerSpec::Login("AliCe".to_string())];
 
-        let outcome = block_on(claim(req, Some(&forge))).expect("a resolvable login claims");
+        let outcome = block_on(claim(req, Some(&forge), &publisher())).expect("a resolvable login claims");
         assert_eq!(
             outcome.owners,
             vec![ResolvedOwner {
@@ -1921,6 +2236,7 @@ pub(crate) mod tests {
             let outcome = block_on(claim(
                 request(ClaimTarget::Out(output.path().to_path_buf())),
                 Some(&forge),
+                &publisher(),
             ))
             .expect("the --out run succeeds");
 
@@ -1951,8 +2267,12 @@ pub(crate) mod tests {
     #[test]
     fn a_forge_is_required_in_every_mode() {
         let output = tempfile::TempDir::new().expect("a temp dir is created");
-        let error = block_on(claim(request(ClaimTarget::Out(output.path().to_path_buf())), None))
-            .expect_err("even --out needs the forge for the C-050 read");
+        let error = block_on(claim(
+            request(ClaimTarget::Out(output.path().to_path_buf())),
+            None,
+            &publisher(),
+        ))
+        .expect_err("even --out needs the forge for the C-050 read");
         assert!(matches!(error, ClaimError::ForgeRequired), "{error:?}");
     }
 
@@ -1991,7 +2311,7 @@ pub(crate) mod tests {
             disclaimer: Some("[x](https://evil) cc @alice".to_string()),
         });
 
-        block_on(claim(req, Some(&forge))).expect("the claim succeeds");
+        block_on(claim(req, Some(&forge), &publisher())).expect("the claim succeeds");
 
         let (title, body) = forge
             .calls()

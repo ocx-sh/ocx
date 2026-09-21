@@ -11,6 +11,7 @@ here on observable stderr text. The subscriber prints no target
 from __future__ import annotations
 
 import re
+import subprocess
 
 import pytest
 
@@ -56,7 +57,7 @@ CONSOLE_LINE = "nothing to revoke"
 # registry and a published package. ``get_docker_auth`` (``auth.rs``) resolves
 # credentials *before* the request goes out, so it renders whether or not
 # anything answers: ``package install`` against a closed loopback port reaches
-# it, then fails the connect (exit 75 — see `EXPECT_NONZERO`). No registry
+# it, then fails the connect (exit 75 — see `EXPECT_EXIT`). No registry
 # fixture, no server, no network beyond a refused TCP connect to 127.0.0.1:1.
 #
 # Assumes the host has no native Docker credential entry for ``127.0.0.1:1`` —
@@ -78,7 +79,7 @@ TRUST_LINE = "rejected by sigstore"
 # loader's escape hatch, which it logs before it reads anything at all, so the
 # line renders with no registry, no package, no network and no file. The verb
 # stays ``CATALOG`` and the run exits 0 — this row is deliberately **not** in
-# `EXPECT_NONZERO`.
+# `EXPECT_EXIT`.
 CONFIG_LINE = "OCX_PROJECT is set to empty string"
 # ``ocx_index`` left ``ocx_lib`` in WP-28 with the whole resolution-index tier.
 # Unlike ``ocx_store``'s rows it needs no on-disk state and no network: the
@@ -117,7 +118,7 @@ PACKAGE_LINE = "Cascade gather for '"
 # is rejected by sigstore, and the reason is logged rather than flattened into
 # the ``MalformedKey`` message; so the line renders with no registry, no
 # package, no network and no file. Exits 65 (``DataError``) — the row is in
-# `EXPECT_NONZERO`. The PEM rides ``extra_env`` the way ``ocx_trust``'s bad key
+# `EXPECT_EXIT`. The PEM rides ``extra_env`` the way ``ocx_trust``'s bad key
 # does, and the two lines overlap by the words "rejected by sigstore": that is
 # harmless because each row asserts its own line under its own directive, and
 # the longer one is the one pinned here.
@@ -194,11 +195,30 @@ LIBRARY_LINE = "OCX_MANAGED_CONFIG is still exported"
 # ``ocx_announce`` left ``ocx_lib`` at WP-35 with ``announce/**``, ``claim/**``
 # and ``forge/**``. Two ``log::`` call sites, both in the claim tier, and this
 # is the one that does not depend on which rung answered: ``claim`` logs what it
-# is about to write once the owner set is settled. ``--out`` keeps the run off
-# the write path, so it exits 0 against the fake forge with no pull request
-# opened. Observed rendering, not derived from reading the source.
+# is about to write once the owner set is settled. Observed rendering, not
+# derived from reading the source.
+#
+# The run exits 78 (see ``EXPECT_EXIT``) because #482 made ``claim`` observe
+# ``__ocx.desc`` at the ``--repository`` pointer, which this row aims at a
+# loopback address with no trusted-hosts allowance: the SSRF pre-flight refuses
+# it before any socket opens. Deliberate — the line this row asserts is emitted
+# before that step, and the alternative is a row that dials a registry to prove
+# a log directive works.
 ANNOUNCE_LINE = "claiming ocx.sh/acme/widget for"
-EXPECT_NONZERO = {"ocx_oci", "ocx_trust", "ocx_sign"}
+#: Rows whose run is expected to fail, so ``check=False``. The value is the
+#: exact status when this row's refusal has one path to reach it, and ``None``
+#: where the row tolerates any failure. ``ocx_announce`` names 78: the SSRF
+#: pre-flight raises ``AnnounceError::Ssrf``, whose ``classify`` delegates to
+#: ``SsrfError::ForbiddenTarget`` → ``ExitCode::ConfigError``
+#: (``crates/ocx_cli/src/exit/ocx_oci.rs``). A row that only asked for
+#: "non-zero" would stay green if the refusal moved to a different failure
+#: entirely — including one that opened the socket first.
+EXPECT_EXIT: dict[str, int | None] = {
+    "ocx_oci": None,
+    "ocx_trust": None,
+    "ocx_sign": None,
+    "ocx_announce": 78,
+}
 # Rows whose crate hosts no ``debug!`` at all. ``OCX_LOG=<crate>=debug`` selects
 # that level *and above*, so a crate whose cheapest line is a ``warn`` needs no
 # entry here — only one whose only state-free line is a ``trace`` does. Named as
@@ -207,7 +227,7 @@ EXPECT_NONZERO = {"ocx_oci", "ocx_trust", "ocx_sign"}
 # anything in particular.
 TRACE_TARGETS = {"ocx_shell"}
 #: Rows whose line needs an account to exist on the fake forge. Named as a set
-#: rather than given a per-row setup hook, for the reason `EXPECT_NONZERO` and
+#: rather than given a per-row setup hook, for the reason `EXPECT_EXIT` and
 #: `TRACE_TARGETS` are sets: the table stays four literal columns, and the one
 #: row that departs from "argv and environment are all there is" says so by
 #: name where a reader of the table will see it.
@@ -265,7 +285,13 @@ LIBRARY_TARGETS = [
             "package",
             "claim",
             "--repository",
-            "oci://ghcr.io/acme/widget",
+            # A LOOPBACK pointer with no trusted-hosts allowance: #482 makes
+            # claim dial `--repository` to observe `__ocx.desc`, and this row
+            # only needs the `ocx_announce` target to emit before that. The SSRF
+            # pre-flight refuses the dial outright, so the run reaches no
+            # registry at all -- which is what a public host here would have
+            # done instead.
+            "oci://127.0.0.1/acme/widget",
             "--owner",
             "ocx-sh-nonexistent-claim-fixture:4242424242",
             "--out",
@@ -284,8 +310,8 @@ LIBRARY_TARGETS = [
 CLI_TARGET = "ocx::app"
 
 
-def _stderr(ocx, argv: tuple[str, ...], check: bool = True, **env: str) -> str:
-    return ocx.plain(*argv, env_overrides=env, check=check).stderr
+def _run(ocx, argv: tuple[str, ...], check: bool = True, **env: str) -> subprocess.CompletedProcess[str]:
+    return ocx.plain(*argv, env_overrides=env, check=check)
 
 
 # The crate whose targets are the CLI's own. Excluded from the derived set
@@ -345,7 +371,7 @@ def test_debug_level_reaches_library_events(ocx):
 )
 def test_env_filter_selects_library_target(request, ocx, tmp_path, target, line, extra_env, argv):
     """``OCX_LOG=<crate>=debug`` alone selects that crate's events, and a CLI-only directive leaves them out."""
-    check = target not in EXPECT_NONZERO
+    check = target not in EXPECT_EXIT
     # Requested per row rather than taken by every row: building and pushing a
     # package costs a registry round-trip, and standing a fake forge up costs a
     # thread and a port, so only the rows that name the sentinel pay.
@@ -371,7 +397,14 @@ def test_env_filter_selects_library_target(request, ocx, tmp_path, target, line,
     docker_config.mkdir()
     extra_env = {**extra_env, "DOCKER_CONFIG": str(docker_config)}
     level = "trace" if target in TRACE_TARGETS else "debug"
-    selected = _stderr(ocx, argv, check=check, OCX_LOG=f"{target}={level}", **extra_env)
+    completed = _run(ocx, argv, check=check, OCX_LOG=f"{target}={level}", **extra_env)
+    expected_status = EXPECT_EXIT.get(target)
+    if expected_status is not None:
+        assert completed.returncode == expected_status, (
+            f"{target} row exited {completed.returncode}, not the {expected_status} its refusal "
+            f"classifies to; stderr={completed.stderr!r}"
+        )
+    selected = completed.stderr
     assert line in selected, (
         f"OCX_LOG={target}={level} rendered no library line — is {target!r} still a crate target?; "
         f"stderr={selected!r}"
@@ -391,10 +424,10 @@ def test_env_filter_selects_library_target(request, ocx, tmp_path, target, line,
     # filter is the only thing that can keep the line out.
     control_home = tmp_path / "control-home"
     control_home.mkdir()
-    cli_only = _stderr(
+    cli_only = _run(
         ocx, argv, check=check,
         OCX_LOG=f"{CLI_TARGET}=debug", OCX_HOME=str(control_home), **extra_env,
-    )
+    ).stderr
     assert CLI_LINE in cli_only, (
         f"OCX_LOG={CLI_TARGET}=debug rendered no CLI line — the control is dead; stderr={cli_only!r}"
     )
