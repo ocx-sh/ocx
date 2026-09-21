@@ -26,7 +26,7 @@ use std::path::PathBuf;
 /// Read through [`ocx_util::env::var`], the project-wide shim, so a test injects
 /// `OCX_HOME` the same way it does for every other variable.
 pub fn default_ocx_root() -> Option<PathBuf> {
-    if let Some(home) = ocx_util::env::var("OCX_HOME").filter(|value| !value.is_empty()) {
+    if let Some(home) = ocx_util::env::var(crate::env::keys::OCX_HOME).filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(home));
     }
     ocx_util::env::home_dir().map(|home| home.join(".ocx"))
