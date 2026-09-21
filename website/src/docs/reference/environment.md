@@ -31,7 +31,7 @@ for disabling an option.
 ## Internal
 
 ::: info Presentation flags do not propagate
-The presentation flags `--log-level`, `--format`, and `--color` are CLI-only by design — they have no `OCX_*` counterpart and never propagate from a parent ocx into a subprocess (such as a generated [entrypoint launcher][entrypoints-ref]). Carrying them through env would leak ocx's own logging, JSON output, or ANSI color choices into the launcher's child stream. Only resolution-affecting policy (binary path, offline, remote, config file, index) propagates.
+The presentation flags `--log-level`, `--format`, and `--color` are CLI-only by design — they have no `OCX_*` counterpart and never propagate from a parent ocx into a subprocess (such as a generated [entrypoint launcher][entrypoints-ref]). Carrying them through env would leak ocx's own logging, JSON output, or ANSI color choices into the launcher's child stream. Only resolution-affecting policy propagates — binary path, offline, remote, config file, index, and the four ambient-only settings [`OCX_DEFAULT_REGISTRY`](#ocx-default-registry), [`OCX_INSECURE_REGISTRIES`](#ocx-insecure-registries), [`OCX_NO_PROJECT`](#ocx-no-project) and [`OCX_NO_CONFIG_REFRESH`](#ocx-no-config-refresh) among them.
 :::
 
 ### Shell Activation Files {#shell-activation-files}
@@ -265,6 +265,8 @@ The default registry to use when no registry is specified in a package reference
 Overrides the `[registry] default` key in the [configuration file][config-ref].
 If neither is set, OCX uses `ocx.sh`.
 
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx exec` calls — resolve a bare reference under the same registry. It is read from the environment alone — there is no CLI flag and no `OcxConfigView` field — so the forwarded value is the one this invocation itself read. An empty value is treated as unset, and clears any inherited setting rather than travelling onward.
+
 ### `OCX_GLOBAL` {#ocx-global}
 
 Selects the global toolchain tier — equivalent to the [`--global`][arg-global] CLI flag, but injectable via environment for CI and container setups where the command line is not controlled.
@@ -443,7 +445,7 @@ Accepts `never` (the default when nothing sets any tier) or `always`, parsed cas
 Four more-specific tiers can override this variable: the [`--lazy-mode`][arg-lazy-mode] flag, `[package."<id>"]`, `[group.<name>]`, and the toolchain-level `lazy-mode` key, all in `ocx.toml`. See [Deferred Packages][in-depth-lazy-loading] for the full ladder and [Project Configuration][config-project-package] for the `ocx.toml` keys.
 
 ::: warning Not forwarded to child processes
-Unlike the resolution-affecting variables listed in the box at the top of this section (binary path, offline, remote, config file, index), `OCX_LAZY_MODE` does **not** propagate from a parent `ocx` into a subprocess — it changes *when* content materializes, never *which* digest resolves, so it sits outside the forwarded set entirely. A child `ocx` invocation reads its own environment.
+Unlike the resolution-affecting variables listed in the box at the top of this section, `OCX_LAZY_MODE` does **not** propagate from a parent `ocx` into a subprocess — it changes *when* content materializes, never *which* digest resolves, so it sits outside the forwarded set entirely. A child `ocx` invocation reads its own environment.
 :::
 
 ### `OCX_LAZY_REPORT` {#ocx-lazy-report}
@@ -469,6 +471,8 @@ export OCX_INSECURE_REGISTRIES="localhost:5000,registry.local:8080"
 The variable is one half of a **union** with the [`[registries.<name>] insecure`][config-registries-insecure] config key: a host named in either source is plaintext-eligible. Only one thing narrows that set: an `insecure = false` entry declared at the [system config scope](./configuration.md#keys-registries-system-lock) subtracts its host from this variable's contribution too. Every other `insecure` value — including an explicit `false` below the system scope — only ever adds to the union, never removes from it. Prefer the config key for a host your machine always talks to over plain HTTP; the variable is the ambient, per-invocation half, and it is what a subprocess inherits.
 
 Names are matched exactly, `host[:port]` together — the same comparison the transport makes. `registry.corp` does not cover `registry.corp:5001`.
+
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx exec` calls — may dial the same authorities over plain HTTP. Without that, a launcher re-entry under [`--clean`][cmd-run] would refuse the very registry the parent just pulled from. The config-key half of the union is re-read by the child from the same config chain, so only the ambient half needs carrying; an empty value clears rather than travels.
 
 The same set gates a second case: a plain-`http://` [`[mirrors]`][config-mirrors] target. A
 mirror value — for either the `registry` role or the `index` role — that starts with `http://` is
@@ -638,6 +642,8 @@ This mirrors the [`OCX_NO_UPDATE_CHECK`](#ocx-no-update-check) auto-check gate e
 
 Distinct from [`OCX_NO_UPDATE_CHECK`](#ocx-no-update-check): that variable silences the ocx-binary self-update notice, an unrelated concern independently silenceable from the managed-config tick.
 
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx exec` calls — keep the tick suppressed. The refresh can replace the `[managed]` tier mid-chain, so a child that re-enabled it would resolve against configuration the parent never saw — and a [`--clean`][cmd-run] child re-enables it by starting from an empty environment.
+
 ### `OCX_LOG` {#ocx-log}
 
 The log level for OCX.
@@ -718,6 +724,10 @@ OCX_NO_PROJECT=1 ocx --project /ci/ocx.toml exec -- cmake --version
 ```
 
 `OCX_NO_PROJECT` is available only as an environment variable. A `--no-project` CLI flag would duplicate surface without solving a new problem — the hermetic-CI use case is best expressed via env vars, matching the [`OCX_NO_CONFIG`](#ocx-no-config) pattern.
+
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx exec` calls — skip project discovery too, instead of walking up from their own working directory and adopting a project the parent deliberately had none of.
+
+One exception, visible in the example above: when the invocation also carries an explicit [`--project`][arg-project] path, the path is forwarded and this variable is **not**. A child reads the prune before it reads [`OCX_PROJECT`](#ocx-project), so carrying both would make it discard the path — and an explicit path outranks the prune, in the child exactly as it does here.
 
 ### `OCX_NO_CONSENT` {#ocx-no-consent}
 

@@ -436,3 +436,114 @@ def test_qualified_env_name_without_a_value_is_a_usage_error(
         "a `:TYPE` with no value must stay a usage error; "
         f"got rc={result.returncode}, stderr={result.stderr!r}"
     )
+
+
+def test_ambient_project_prune_reaches_a_clean_child(
+    ocx: OcxRunner, published_package
+) -> None:
+    """`OCX_NO_PROJECT` and `OCX_NO_CONFIG_REFRESH` are ambient-only knobs with
+    no CLI flag, and both are resolution-affecting.
+
+    Without forwarding, a `--clean` child re-adopts the project the parent
+    pruned and re-fetches the managed tier the parent suppressed — the two
+    frames of one launch resolve against different configuration.
+    """
+    ocx.plain("package", "install", published_package.short)
+    result = ocx.plain(
+        "package",
+        "exec",
+        "--clean",
+        published_package.short,
+        "--",
+        "/bin/sh",
+        "-c",
+        'printf "project=%s refresh=%s" "${OCX_NO_PROJECT-unset}" "${OCX_NO_CONFIG_REFRESH-unset}"',
+        env_overrides={"OCX_NO_PROJECT": "1", "OCX_NO_CONFIG_REFRESH": "1"},
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "project=1 refresh=1", (
+        "both ambient kill switches must reach a --clean child; "
+        f"got {result.stdout!r}"
+    )
+
+
+def test_ambient_default_registry_reaches_a_clean_child(
+    ocx: OcxRunner, published_package
+) -> None:
+    """`OCX_DEFAULT_REGISTRY` decides what repository a bare identifier names,
+    so a child resolving it differently resolves a different package."""
+    ocx.plain("package", "install", published_package.short)
+    result = ocx.plain(
+        "package",
+        "exec",
+        "--clean",
+        published_package.short,
+        "--",
+        "/bin/sh",
+        "-c",
+        'printf "%s" "${OCX_DEFAULT_REGISTRY-unset}"',
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ocx.registry, (
+        "the default registry the parent resolved under must reach a --clean "
+        f"child; expected {ocx.registry!r}, got {result.stdout!r}"
+    )
+
+
+def test_ambient_insecure_registries_reach_a_clean_child(
+    ocx: OcxRunner, published_package
+) -> None:
+    """`OCX_INSECURE_REGISTRIES` decides which authorities may be dialled over
+    plain HTTP. A child with a narrower set refuses the very registry the
+    parent just pulled from.
+
+    The extra authority is a host nothing in this test contacts; it is there so
+    the assertion pins the forwarded value rather than a string the child could
+    have derived some other way.
+    """
+    ocx.plain("package", "install", published_package.short)
+    authorities = f"{ocx.registry},never-dialled.example:5000"
+    result = ocx.plain(
+        "package",
+        "exec",
+        "--clean",
+        published_package.short,
+        "--",
+        "/bin/sh",
+        "-c",
+        'printf "%s" "${OCX_INSECURE_REGISTRIES-unset}"',
+        env_overrides={"OCX_INSECURE_REGISTRIES": authorities},
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == authorities, (
+        "the insecure-authority list must reach a --clean child verbatim; "
+        f"expected {authorities!r}, got {result.stdout!r}"
+    )
+
+
+def test_ambient_kill_switches_absent_from_a_clean_child_when_unset(
+    ocx: OcxRunner, published_package
+) -> None:
+    """The other half of the set-or-remove contract: a knob the parent did not
+    resolve must not appear on the child, so the forward can never be read as
+    an unconditional write."""
+    ocx.plain("package", "install", published_package.short)
+    result = ocx.plain(
+        "package",
+        "exec",
+        "--clean",
+        published_package.short,
+        "--",
+        "/bin/sh",
+        "-c",
+        'printf "project=%s refresh=%s" "${OCX_NO_PROJECT-unset}" "${OCX_NO_CONFIG_REFRESH-unset}"',
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "project=unset refresh=unset", (
+        "a knob the parent never set must stay absent on the child; "
+        f"got {result.stdout!r}"
+    )

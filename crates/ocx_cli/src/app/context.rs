@@ -431,7 +431,7 @@ impl Context {
         );
 
         let default_registry = ocx_util::env::string(
-            "OCX_DEFAULT_REGISTRY",
+            env::keys::OCX_DEFAULT_REGISTRY,
             config
                 .resolved_default_registry()
                 .map(str::to_owned)
