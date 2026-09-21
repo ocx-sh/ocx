@@ -248,7 +248,7 @@ impl MutationGuard {
     /// [`crate::lock::ProjectLock::save`] (which respects
     /// the `previous` byte-for-byte preservation contract), then
     /// `ocx.toml` is published the same way, by
-    /// `tempfile + rename + parent fsync` (`super::mutate`'s `atomic_write`).
+    /// `tempfile + rename + parent fsync` (`super::mutate`'s `publish_by_rename`).
     ///
     /// Both files are therefore all-or-nothing under a SIGKILL: the kill
     /// leaves whichever document was last published whole, never a truncated
@@ -347,7 +347,7 @@ impl MutationGuard {
             if staged.manifest_changed {
                 let serialized =
                     super::document::render_preserving(&self.manifest.text, &staged.candidate, &self.config_path)?;
-                super::mutate::atomic_write_async(&self.config_path, serialized).await?;
+                super::mutate::publish_by_rename_async(&self.config_path, serialized.into_bytes()).await?;
             }
             Ok(())
         }
