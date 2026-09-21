@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Mutating writes to the project config file. Every write publishes the
+//! Mutating writes to the project's on-disk files. Every write publishes the
 //! whole file by atomic rename, under the scoped mutation lock
 //! ([`crate::acquire_project_lock_for_file`]).
 //!
-//! Public mutation helpers ([`add_binding`], [`remove_binding`],
-//! [`init_project`], [`set_activate`]) take the **resolved config file path** — typically
-//! `<project_root>/ocx.toml` but may be `<project_root>/<custom>.toml`
-//! when the caller passed `--project=<custom>.toml`. The lock is keyed by that
-//! path, never hard-coded to `ocx.toml`, and lives under `$OCX_HOME/locks`.
+//! `publish_by_rename` is that one publish, and it writes **both** project
+//! files: `ocx.toml` from the mutators here, `ocx.lock` from
+//! [`crate::lock::ProjectLock::save`].
+//!
+//! Public mutation helpers ([`init_project`], [`set_activate`]) take the
+//! **resolved config file path** — typically `<project_root>/ocx.toml` but may
+//! be `<project_root>/<custom>.toml` when the caller passed
+//! `--project=<custom>.toml`. The lock is keyed by that path, never hard-coded
+//! to `ocx.toml`, and lives under `$OCX_HOME/locks`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -20,52 +24,63 @@ use crate::mutation::ManifestSnapshot;
 use crate::project_lock::acquire_project_lock_for_file;
 use ocx_oci::Identifier;
 
-/// Publish `content` as the entire contents of `path` by atomic rename: a
+/// Publish `bytes` as the entire contents of `path` by atomic rename: a
 /// tempfile in the same directory, the existing file's Unix mode carried onto
 /// it, [`ocx_util::fs::persist_temp_file`], then a parent-directory fsync so
 /// the rename entry is durable.
 ///
-/// This is the *only* writer of `ocx.toml`. Rename-publish is what lets the
-/// unlocked readers — `ocx status`, the per-prompt reconciler, direnv, git, an
-/// editor — never observe a short or spliced document: a reader that has the
-/// file open keeps reading the inode it opened, where an in-place
-/// truncate-and-write would splice the tail of the new document onto the head
-/// of the old one it had already buffered (ocx#494, and ocx#441 for the same
-/// bug in `config.json`).
+/// **The one writer of both project files.** `ocx.toml` and `ocx.lock` sit in
+/// one directory, are rewritten by one command (`ocx add` publishes both inside
+/// a single [`crate::MutationGuard`] commit) and are read by the same unlocked
+/// readers — so they get one publish policy instead of two that drift. Until
+/// this was one function they had drifted three ways: the lock file persisted
+/// through a bare `NamedTempFile::persist` with no Windows transient-lock
+/// retry, took the mode through `metadata` (which follows a symlink) and capped
+/// it at `0o644`, while the manifest beside it swallowed a failed parent fsync.
+///
+/// Rename-publish is what lets the unlocked readers — `ocx status`, the
+/// per-prompt reconciler, direnv, git, an editor — never observe a short or
+/// spliced document: a reader that has the file open keeps reading the inode it
+/// opened, where an in-place truncate-and-write would splice the tail of the
+/// new document onto the head of the old one it had already buffered (ocx#494,
+/// and ocx#441 for the same bug in `config.json`).
 ///
 /// **Not `ocx_util::fs::write_bytes_atomic`**: that one publishes `0o600`,
 /// which is right for a credential file and wrong for a VCS-committed project
-/// manifest. The existing file's mode is carried over instead, so a `0644`
-/// `ocx.toml` stays `0644` — applied with `fchmod` on the open temp file
-/// rather than at create time, which `umask` would clip. An absent file gets
-/// the `tempfile` default (`0600`): unchanged for `ocx init`, which always
-/// staged through a temp file; for `set_activate` on a fresh `$OCX_HOME` the
-/// create case moves from umask-derived to `0600`, the same mode the global
-/// manifest's sibling state files carry.
+/// file, and it neither creates the parent nor syncs anything. The existing
+/// file's mode is carried over instead, so a `0644` `ocx.toml` stays `0644` —
+/// applied with `fchmod` on the open temp file rather than at create time,
+/// which `umask` would clip. An absent file gets the `tempfile` default
+/// (`0600`): unchanged for `ocx init`, which always staged through a temp file;
+/// for `set_activate` on a fresh `$OCX_HOME` the create case moves from
+/// umask-derived to `0600`, the same mode the global manifest's sibling state
+/// files carry.
 ///
-/// Blocking: call [`atomic_write_async`] from an async context.
+/// **The mode is carried whole, never capped.** `ocx.lock` used to mask the
+/// mode it found with `0o644`. That cap closed nothing — it fired only when the
+/// lock happened to be rewritten, and never on the `ocx.toml` beside it, which
+/// anyone able to rewrite one file could rewrite anyway — while it did break
+/// the umask-002 shared-group checkout, where the group-write bit is what lets
+/// the *next* developer run `ocx lock` at all.
 ///
-/// # Panics
+/// **A failed parent fsync is an error, not a shrug.** The manifest writer used
+/// to discard it; a publish reported as landed but not durable is the one
+/// outcome a crash-safety contract cannot tolerate.
 ///
-/// Panics if `path` has no parent component. All callers pass an
-/// already-resolved config-file path (typically `<project_root>/ocx.toml`,
-/// or a custom `<project_root>/<custom>.toml` when `--project=<custom>.toml`
-/// is in effect); both forms have a parent component.
-pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), Error> {
-    // SAFETY: all callers resolve a config-file path with a parent component
-    // (project root is always absolute when produced by the CLI shim, and
-    // the in-tree tests construct their fixture under a tempdir).
-    let parent = path
-        .parent()
-        .expect("config file path must have a parent (resolved by CLI shim or tempdir fixture)");
-    if !parent.as_os_str().is_empty() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
-    }
+/// Blocking: call [`publish_by_rename_async`] from an async context.
+pub(crate) fn publish_by_rename(path: &Path, bytes: &[u8]) -> Result<(), Error> {
+    // `Path::parent` is `Some("")` for a bare relative filename and `None` only
+    // for a root; both name the current directory, and neither reaches here
+    // from a caller — every one resolves a config-file path first.
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(parent).map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
 
     let mut tmp = tempfile::NamedTempFile::new_in(parent)
         .map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
-    tmp.write_all(content.as_bytes())
+    tmp.write_all(bytes)
         .map_err(|e| ProjectError::new(tmp.path().to_path_buf(), ProjectErrorKind::Io(e)))?;
     carry_existing_mode(path, &tmp)?;
     tmp.as_file()
@@ -74,26 +89,40 @@ pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<(), Error> {
     ocx_util::fs::persist_temp_file(tmp, path)
         .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::Io(e)))?;
 
-    // Fsync the parent directory so the rename entry is durable.
-    // parent is always non-empty (see SAFETY comment above).
-    if let Ok(dir) = std::fs::File::open(parent) {
-        let _ = dir.sync_all();
-    }
+    fsync_parent(parent)
+}
 
+/// Fsync `parent` so the rename entry itself is durable across a crash.
+///
+/// Unix only: opening a directory as a [`std::fs::File`] is unsupported on
+/// Windows, so there is no handle to sync through and the call is a no-op
+/// there.
+#[cfg(unix)]
+fn fsync_parent(parent: &Path) -> Result<(), Error> {
+    let dir =
+        std::fs::File::open(parent).map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
+    dir.sync_all()
+        .map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
+    Ok(())
+}
+
+/// No-op off Unix — see the Unix arm.
+#[cfg(not(unix))]
+fn fsync_parent(_parent: &Path) -> Result<(), Error> {
     Ok(())
 }
 
 /// Carry the mode of the file currently at `path` onto `tmp`, so publishing
-/// the replacement does not silently change the manifest's permissions.
+/// the replacement does not silently change the file's permissions.
 ///
-/// `symlink_metadata` deliberately does not follow: a symlink at `path` is
-/// refused by the lock acquire, and its own `0o777` mode is not what a
-/// published `ocx.toml` should wear even if one slipped through. An absent
+/// `symlink_metadata` deliberately does not follow: a symlink at the config
+/// path is refused by the lock acquire, and its own `0o777` mode is not what a
+/// published project file should wear even if one slipped through. An absent
 /// file leaves the `tempfile` default in place.
 ///
 /// `set_permissions` on the *open* temp file is `fchmod(2)`, which is not
 /// clipped by `umask` — passing the mode to `tempfile::Builder` would be, and
-/// a `0664` group-writable manifest would come back `0644`.
+/// a `0664` group-writable file would come back `0644`.
 #[cfg(unix)]
 fn carry_existing_mode(path: &Path, tmp: &tempfile::NamedTempFile) -> Result<(), Error> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -104,7 +133,9 @@ fn carry_existing_mode(path: &Path, tmp: &tempfile::NamedTempFile) -> Result<(),
     if !metadata.is_file() {
         return Ok(());
     }
-    let mode = metadata.permissions().mode() & 0o7777;
+    // Permission bits only: setuid/setgid/sticky confer nothing on a manifest
+    // or lock file, so they are not carried.
+    let mode = metadata.permissions().mode() & 0o0777;
     tmp.as_file()
         .set_permissions(std::fs::Permissions::from_mode(mode))
         .map_err(|e| ProjectError::new(tmp.path().to_path_buf(), ProjectErrorKind::Io(e)))?;
@@ -118,16 +149,18 @@ fn carry_existing_mode(_path: &Path, _tmp: &tempfile::NamedTempFile) -> Result<(
     Ok(())
 }
 
-/// [`atomic_write`] from an async caller: the blocking publish goes to the
+/// [`publish_by_rename`] from an async caller: the blocking publish goes to the
 /// pool rather than stalling the runtime.
-pub(crate) async fn atomic_write_async(path: &Path, content: String) -> Result<(), Error> {
+pub(crate) async fn publish_by_rename_async(path: &Path, bytes: Vec<u8>) -> Result<(), Error> {
     let target = path.to_path_buf();
     let error_path = path.to_path_buf();
-    match tokio::task::spawn_blocking(move || atomic_write(&target, &content)).await {
+    match tokio::task::spawn_blocking(move || publish_by_rename(&target, &bytes)).await {
         Ok(result) => result,
         Err(join) => Err(Error::Project(ProjectError::new(
             error_path,
-            ProjectErrorKind::Io(std::io::Error::other(format!("manifest publish task panicked: {join}"))),
+            ProjectErrorKind::Io(std::io::Error::other(format!(
+                "project file publish task panicked: {join}"
+            ))),
         ))),
     }
 }
@@ -423,7 +456,7 @@ pub fn add_binding_in_memory(
 ///
 /// Holds the scoped mutation lock under `locks_root` (`$OCX_HOME/locks`)
 /// for the duration of the read-modify-write cycle, then publishes the whole
-/// file by rename via `atomic_write`.
+/// file by rename via [`publish_by_rename`].
 ///
 /// # Errors
 ///
@@ -468,7 +501,7 @@ pub async fn add_binding(
     add_binding_in_memory(&mut config, config_path, identifier, name, group)?;
 
     let serialized = super::document::render_preserving(&original, &config, config_path)?;
-    atomic_write_async(config_path, serialized).await?;
+    publish_by_rename_async(config_path, serialized.into_bytes()).await?;
 
     Ok(())
     // The mutation lock is released here, after the rename has landed.
@@ -488,7 +521,7 @@ pub async fn add_binding(
 ///
 /// Holds the scoped mutation lock under `locks_root` (`$OCX_HOME/locks`)
 /// for the duration of the read-modify-write cycle, then publishes the whole
-/// file by rename via `atomic_write`.
+/// file by rename via [`publish_by_rename`].
 ///
 /// # Errors
 ///
@@ -523,7 +556,7 @@ pub async fn remove_binding(
     remove_binding_in_memory(&mut config, config_path, name, group)?;
 
     let serialized = super::document::render_preserving(&original, &config, config_path)?;
-    atomic_write_async(config_path, serialized).await?;
+    publish_by_rename_async(config_path, serialized.into_bytes()).await?;
     Ok(())
 }
 
@@ -681,7 +714,7 @@ pub fn init_project(config_path: &Path) -> Result<PathBuf, Error> {
 [tools]
 ";
 
-    atomic_write(config_path, content)?;
+    publish_by_rename(config_path, content.as_bytes())?;
     Ok(config_path.to_path_buf())
 }
 
@@ -756,7 +789,7 @@ pub async fn set_activate(
     config.activate = Some(mode);
 
     let serialized = super::document::render_preserving(&original, &config, config_path)?;
-    atomic_write_async(config_path, serialized).await?;
+    publish_by_rename_async(config_path, serialized.into_bytes()).await?;
 
     Ok(())
 }
@@ -1598,7 +1631,7 @@ mod tests {
     async fn a_published_manifest_keeps_its_unix_mode() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        for mode in [0o644u32, 0o600u32] {
+        for mode in [0o644u32, 0o664u32, 0o600u32] {
             let dir = tempdir().unwrap();
             write_minimal_toml(dir.path(), "[tools]\n");
             let config_path = toml(dir.path());
@@ -1619,6 +1652,34 @@ mod tests {
                 "a {mode:o} ocx.toml must still be {mode:o} after a mutation; got {published:o}"
             );
         }
+    }
+
+    /// `carry_existing_mode` carries permission bits only: setuid/setgid/sticky
+    /// confer nothing on a manifest and are dropped on publish.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_published_manifest_drops_setuid_setgid_and_sticky_bits() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let config_path = toml(dir.path());
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o2664)).expect("chmod the fixture");
+
+        let id = test_id("example.com", "cmake", "3.28");
+        add_binding(&config_path, &locks(dir.path()), &id, None, None)
+            .await
+            .expect("the mutation must land");
+
+        let published = fs::metadata(&config_path)
+            .expect("ocx.toml must exist")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            published, 0o664,
+            "a 2664 ocx.toml must publish as 664 — setgid dropped, group-write kept; got {published:o}"
+        );
     }
 
     /// Regression (ocx#494, the ocx#441 shape): an unlocked reader that opened
@@ -1711,7 +1772,7 @@ mod tests {
             .expect("the mutation lock must be acquirable");
 
         for i in 0u32..10 {
-            atomic_write(&config_path, &format!("[tools]\n# iteration {i}\n"))
+            publish_by_rename(&config_path, format!("[tools]\n# iteration {i}\n").as_bytes())
                 .expect("a publish under the held mutation lock must not hit os error 33");
         }
 

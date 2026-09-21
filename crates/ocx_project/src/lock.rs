@@ -11,7 +11,6 @@
 //! sees one whole document.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -438,8 +437,10 @@ impl ProjectLock {
 
         let serialized = to_write.to_toml_string()?;
 
-        // Atomic write via tempfile + rename in the same directory.
-        write_lock_bytes_atomic(path, serialized.into_bytes()).await?;
+        // One publish policy for both project files: tempfile + rename in the
+        // same directory, mode carried, parent fsynced. See
+        // [`crate::mutate::publish_by_rename`].
+        crate::mutate::publish_by_rename_async(path, serialized.into_bytes()).await?;
 
         // Register this project's directory in the per-user GC ledger so
         // `ocx clean` can retain packages held by this project's lock file.
@@ -458,81 +459,14 @@ impl ProjectLock {
 /// partial mutation fails after the new lock has been renamed into place.
 ///
 /// Uses the same atomic tempfile + rename + parent-fsync primitive as
-/// [`ProjectLock::save`], so the restore is crash-durable.
+/// [`ProjectLock::save`] — `publish_by_rename`, the one
+/// writer of both project files — so the restore is crash-durable.
 ///
 /// # Errors
 ///
 /// Returns the underlying I/O error from the atomic write.
 pub async fn restore_lock_bytes_verbatim(path: &Path, bytes: Vec<u8>) -> Result<(), super::Error> {
-    write_lock_bytes_atomic(path, bytes).await
-}
-
-/// Atomically write `bytes` to `path` via tempfile + rename in the same
-/// directory, preserving prior permissions and fsyncing the parent dir.
-///
-/// Done on a blocking thread so the sync filesystem calls do not block the
-/// async runtime. Shared by [`ProjectLock::save`] (serialized bytes) and
-/// [`restore_lock_bytes_verbatim`] (captured predecessor bytes).
-async fn write_lock_bytes_atomic(path: &Path, bytes: Vec<u8>) -> Result<(), super::Error> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || -> Result<(), super::Error> {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
-        }
-
-        // Snapshot the existing file's permissions (if any) so the rename
-        // doesn't demote, say, 0o644 down to the tempfile's default 0o600. On
-        // first-ever save this lookup fails with NotFound, which we tolerate —
-        // tempfile's default stands.
-        //
-        // On Unix, cap the mode at 0o644 (user rw, group/other r) so an
-        // accidentally world-writable file is not perpetuated through the
-        // atomic rename cycle (Warn #8).
-        let prior_perms = std::fs::metadata(&path).ok().map(|m| {
-            #[cfg_attr(not(unix), allow(unused_mut))]
-            let mut perms = m.permissions();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = perms.mode() & 0o644;
-                perms.set_mode(mode);
-            }
-            perms
-        });
-
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)
-            .map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
-        tmp.write_all(&bytes)
-            .map_err(|e| ProjectError::new(tmp.path().to_path_buf(), ProjectErrorKind::Io(e)))?;
-        tmp.as_file()
-            .sync_data()
-            .map_err(|e| ProjectError::new(tmp.path().to_path_buf(), ProjectErrorKind::Io(e)))?;
-        if let Some(perms) = prior_perms {
-            tmp.as_file()
-                .set_permissions(perms)
-                .map_err(|e| ProjectError::new(tmp.path().to_path_buf(), ProjectErrorKind::Io(e)))?;
-        }
-        tmp.persist(&path)
-            .map_err(|e| ProjectError::new(path.clone(), ProjectErrorKind::Io(e.error)))?;
-
-        // fsync the containing directory so the rename is durable across a
-        // crash. On Unix, opening a directory and calling sync_all() commits
-        // the directory entry; on Windows opening a directory as a File is not
-        // supported, so we skip.
-        #[cfg(unix)]
-        if !parent.as_os_str().is_empty() {
-            let dir = std::fs::File::open(parent)
-                .map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
-            dir.sync_all()
-                .map_err(|e| ProjectError::new(parent.to_path_buf(), ProjectErrorKind::Io(e)))?;
-        }
-
-        Ok(())
-    })
-    .await
-    .expect("spawn_blocking panicked in write_lock_bytes_atomic")
+    crate::mutate::publish_by_rename_async(path, bytes).await
 }
 
 /// Borrowed-view serialization wrapper used by [`ProjectLock::to_toml_string`].
@@ -2005,44 +1939,60 @@ repository = "ocx.sh/cmake"
         );
     }
 
-    // ── Warn #8 regression — save() caps permissions at 0o644 ─────────────
+    // ── the lock is published under the manifest's mode policy ────────────
 
-    /// If the existing lock file has mode 0o666 (accidentally world-writable),
-    /// the atomic-save must cap the preserved mode at 0o644.
+    /// A save carries the mode it finds **whole** — group-writable and
+    /// world-writable modes included.
+    ///
+    /// This inverts the former Warn #8 contract, which masked the carried mode
+    /// with `0o644`. The cap was applied by `ocx.lock`'s own writer and by
+    /// nothing else: the `ocx.toml` published beside it, in the same directory,
+    /// by the same `MutationGuard` commit, was never capped — so the cap could
+    /// not close anything an attacker able to rewrite one file would not get
+    /// from the other, and it fired only on the saves that happened to occur.
+    /// What it did reliably do is strip the group-write bit in an
+    /// `umask 002` shared-group checkout, which is the bit that lets the next
+    /// developer run `ocx lock` at all.
+    ///
+    /// `0o664` is the discriminating case: it is the mode the old mask would
+    /// silently demote, and reinstating `& 0o644` in
+    /// [`crate::mutate::publish_by_rename`] turns both arms red.
     #[cfg(unix)]
     #[tokio::test]
-    async fn save_caps_world_writable_permissions_at_0o644() {
+    async fn save_carries_the_mode_it_finds_including_group_and_world_writable() {
         use std::os::unix::fs::PermissionsExt;
 
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("ocx.lock");
+        for mode in [0o664u32, 0o666u32] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp.path().join("ocx.lock");
 
-        // Seed with initial save.
-        let seed = ProjectLock {
-            metadata: sample_metadata(),
-            tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
-        };
-        let cfg = stage_sibling_ocx_toml(&path);
-        seed.save(&path, None, tmp.path(), &cfg).await.expect("seed save ok");
+            // Seed with initial save.
+            let seed = ProjectLock {
+                metadata: sample_metadata(),
+                tools: vec![locked_tool("cmake", "default", "ocx.sh", "cmake", 'a')],
+            };
+            let cfg = stage_sibling_ocx_toml(&path);
+            seed.save(&path, None, tmp.path(), &cfg).await.expect("seed save ok");
 
-        // Force the file to 0o666 (world-writable).
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).expect("chmod 0o666");
+            // `set_permissions` is not umask-clipped, so the fixture wears
+            // exactly `mode` — and neither is the `fchmod` the publish uses.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("chmod the fixture");
 
-        // Save again — the mode must be capped to 0o644.
-        let next = ProjectLock {
-            metadata: sample_metadata(),
-            tools: vec![locked_tool("ninja", "default", "ocx.sh", "ninja", 'b')],
-        };
-        let cfg2 = stage_sibling_ocx_toml(&path);
-        next.save(&path, None, tmp.path(), &cfg2).await.expect("save ok");
+            let next = ProjectLock {
+                metadata: sample_metadata(),
+                tools: vec![locked_tool("ninja", "default", "ocx.sh", "ninja", 'b')],
+            };
+            let cfg2 = stage_sibling_ocx_toml(&path);
+            next.save(&path, None, tmp.path(), &cfg2).await.expect("save ok");
 
-        let after = std::fs::metadata(&path).expect("meta after").permissions().mode();
-        assert_eq!(
-            after & 0o777,
-            0o644,
-            "world-writable mode must be capped to 0o644; got 0o{:o}",
-            after & 0o777
-        );
+            let after = std::fs::metadata(&path).expect("meta after").permissions().mode();
+            assert_eq!(
+                after & 0o7777,
+                mode,
+                "a 0o{mode:o} ocx.lock must still be 0o{mode:o} after a save; got 0o{:o}",
+                after & 0o7777
+            );
+        }
     }
 
     // ── Warn #14 regression — contention surfaces as Locked, real errors as Io ──

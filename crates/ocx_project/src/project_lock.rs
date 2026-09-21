@@ -5,7 +5,7 @@
 //! *on* it.
 //!
 //! `ocx.toml` is published by atomic rename ([`super::mutate`]'s
-//! `atomic_write`), so its inode rotates on every mutation and a lock taken on
+//! `publish_by_rename`), so its inode rotates on every mutation and a lock taken on
 //! the data file would strand on the inode the rename orphaned. Per the
 //! arch-principles Locking Policy the mutex is therefore an
 //! [`ocx_util::fs::lock_scoped`] entry under `$OCX_HOME/locks`, keyed by the
