@@ -117,7 +117,7 @@ impl IndexStore {
     /// This is the only boundary: nothing turns a remote catalog key into a
     /// local path any more, so no repository-keyed read or write ever touches a
     /// path outside its source subtree, whatever the caller.
-    fn ensure_repository_contained(repository: &str) -> Result<()> {
+    pub(crate) fn ensure_repository_contained(repository: &str) -> Result<()> {
         ocx_util::fs::path::join_under_root(Path::new("/ocx-index-home"), Path::new(repository))
             .map(|_| ())
             .map_err(|source| {

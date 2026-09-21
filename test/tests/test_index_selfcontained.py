@@ -974,3 +974,96 @@ def test_root_updated_catalog_stale_self_heals_on_next_local_read(
         "a stale-but-present catalog entry must self-heal to match the on-disk root, "
         f"got {healed!r}, expected {expected_entry!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #15 — the local index auto-cleans: an object no pin references is removed
+#       on every update
+# ---------------------------------------------------------------------------
+
+
+def test_moved_pin_sweeps_the_dispatch_object_it_abandoned(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
+):
+    """A remote pin moves, so the next `ocx index update` adopts a new dispatch
+    object and the one the old pin resolved through is named by nothing. That
+    object is gone from `$OCX_HOME/index/.../o/sha256/` when the update
+    returns.
+
+    `IndexStore::write_dispatch_object` is addressed by content, so a moved pin
+    writes a *new* path and can never overwrite the old one. Before this the
+    local copy only ever grew: a package retagged weekly accumulated one dead
+    image index per retag, forever, with no verb to collect them.
+
+    Two controls keep the assertion from passing for the wrong reason. The new
+    object must be present — a sweep that emptied the whole CAS would satisfy
+    "the old one is gone" and break every offline resolve. And a description
+    blob written into the same directory must survive: `IndexRoot` models no
+    field naming a readme or a logo, so their reachability is undecidable
+    locally and `.json` is the whole scope of the sweep.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    os_name, arch_name = pkg.platform.split("/")
+
+    configure_index_source(ocx, index_server)
+    static_index.write_config(index_server.root)
+    repository = f"{unique_repo}/pkg"
+    first = static_index.write_package(
+        index_server.root,
+        repository=repository,
+        tag="1.0.0",
+        physical_repository=f"oci://{ocx.registry}/{pkg.repo}",
+        platform_digest=leaf_digest,
+        os=os_name,
+        architecture=arch_name,
+    )
+    static_index.write_catalog(index_server.root, {repository: first.root_digest})
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    ocx.plain("--index", str(index_dir), "index", "update", f"ocx.sh/{repository}")
+
+    objects_dir = index_dir / "ocx.sh" / "p" / repository / "o" / "sha256"
+    old_object = objects_dir / f"{first.index_digest.split(':', 1)[1]}.json"
+    assert old_object.is_file(), "precondition: the first update must have stored the pinned object"
+
+    # A description blob of the shape a full site mirror carries, in the very
+    # directory the sweep walks.
+    readme = objects_dir / f"{'d' * 64}.md"
+    readme.write_text("# hello\n")
+
+    # The publisher re-points `1.0.0` at a different image index. The leaf is a
+    # literal: it is never dereferenced (an `index update` fetches the image
+    # index, never the platform manifest under it), it only has to be a
+    # well-formed digest that differs from the first one.
+    moved_leaf = "sha256:" + ("7" * 64)
+    second = static_index.write_package(
+        index_server.root,
+        repository=repository,
+        tag="1.0.0",
+        physical_repository=f"oci://{ocx.registry}/{pkg.repo}",
+        platform_digest=moved_leaf,
+        os=os_name,
+        architecture=arch_name,
+    )
+    static_index.write_catalog(index_server.root, {repository: second.root_digest})
+    assert second.index_digest != first.index_digest, "precondition: the pin must actually move"
+
+    ocx.plain("--index", str(index_dir), "index", "update", f"ocx.sh/{repository}")
+
+    new_object = objects_dir / f"{second.index_digest.split(':', 1)[1]}.json"
+    assert new_object.is_file(), (
+        "the object the adopted pin resolves through must be on disk — without it the package "
+        "no longer resolves offline"
+    )
+    assert not old_object.exists(), (
+        "the object the moved pin abandoned must be swept: nothing in the root names it, and "
+        f"still-present dispatch objects are {sorted(p.name for p in objects_dir.iterdir())}"
+    )
+    assert readme.is_file(), (
+        "a non-.json blob is outside the dispatch-object namespace and must be left alone"
+    )
+    assert sorted(p.name for p in objects_dir.iterdir()) == sorted([new_object.name, readme.name]), (
+        "exactly the adopted object and the untouched blob remain"
+    )
