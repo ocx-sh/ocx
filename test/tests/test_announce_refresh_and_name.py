@@ -260,3 +260,32 @@ def test_a_matching_name_needs_no_registries_entry_to_get_past_the_check(
         "a matching name must reach the SSRF pre-flight, which is the next refusal on this "
         f"path; got {result.returncode}: {result.stderr}"
     )
+
+
+def test_an_empty_tags_value_names_one_tag_that_does_not_resolve(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """`--tags ''` is not the empty selection the row above covers.
+
+    That row's docstring draws the distinction and nothing held it. clap's
+    comma delimiter splits the value into a list of one *empty tag name*, so
+    the selection is non-empty, reaches the observe loop, and is refused there
+    for a tag that does not resolve — a different exit from the usage error an
+    empty `--tags-file` gets, off two inputs that look alike on a command line.
+    """
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_canonical_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    result = announce(
+        ocx, fake_forge, "--tags", "", "--out", str(tmp_path / "out"), package, check=False
+    )
+
+    assert result.returncode == 79, (
+        "an empty --tags value names one unresolvable tag, which is a not-found — not the "
+        f"usage error an empty --tags-file gets; got {result.returncode}: {result.stderr}"
+    )
+    assert "tag  does not resolve" in result.stderr, (
+        f"the 79 must be the empty tag's not-found, not another one; stderr: {result.stderr}"
+    )
