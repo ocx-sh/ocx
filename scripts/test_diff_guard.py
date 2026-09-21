@@ -12,6 +12,11 @@ unmodified at every commit. So under `test/` a merge may only
 
   - add `@pytest.mark.smoke` lines (and the `import pytest` that makes one
     resolve in a module that lacked it),
+  - add `@pytest.mark.xdist_group("<name>")` lines — a scheduling constraint,
+    the one mark that cannot change what a test asserts: it moves the test to
+    a worker, and the tests it must not run beside are the reason. A group
+    argument must be a literal, so the line names the slot it serialises on
+    and a reader can grep for the other members,
   - change docstring / comment lines (path spellings follow the moved code),
   - add wholly new test functions (or test classes) to an existing module,
     or new `test/tests/**/*.py` modules — never a `conftest.py` or
@@ -308,6 +313,12 @@ FORBIDDEN_KEYWORDS = (
 SIGNATURE = re.compile(r"^\s*(async\s+)?def\s")
 MARKER_LINE = "@pytest.mark.smoke"
 IMPORT_LINE = "import pytest"
+#: `@pytest.mark.xdist_group("slot")` — scheduling only. Pinning a test to a
+#: worker cannot change what it asserts, and a shared registry-wide resource
+#: (the reserved `global` patch-descriptor repository) is serialised no other
+#: way. The group must be a string LITERAL: a name built at runtime hides which
+#: slot is being joined, and the point of the line is that it is greppable.
+XDIST_GROUP_LINE = re.compile(r'^@pytest\.mark\.xdist_group\("[A-Za-z0-9_]+"\)$')
 
 
 def _keyword_hit(text: str) -> str | None:
@@ -1144,13 +1155,16 @@ def check_python_edit(
             if lineno in exempt:
                 continue
             stripped = text.strip()
-            if not inert_only and stripped in (MARKER_LINE, IMPORT_LINE):
+            if not inert_only and (
+                stripped in (MARKER_LINE, IMPORT_LINE) or XDIST_GROUP_LINE.match(stripped)
+            ):
                 continue
             if word := _keyword_hit(text):
                 problems.append(f"{path}:+{lineno}: changed line carries {word}: {stripped!r}")
             elif lineno not in head_inert:
                 problems.append(
-                    f"{path}:+{lineno}: added line is not `{MARKER_LINE}`, `{IMPORT_LINE}`, "
+                    f"{path}:+{lineno}: added line is not `{MARKER_LINE}`, "
+                    f'`@pytest.mark.xdist_group("…")`, `{IMPORT_LINE}`, '
                     f"a docstring/comment or a new test: {stripped!r}"
                 )
     return problems
@@ -1631,6 +1645,13 @@ SELF_TEST_CASES: list[Case] = [
         # module — above it, the docstring would stop being one.
         "test/tests/test_b.py": _edit(_BASE_TEST, "def test_about", "@pytest.mark.smoke\ndef test_about"),
     }),
+    Case("xdist_group_mark_added", False, {
+        # Scheduling, not assertion: the test is pinned to the worker that
+        # already owns the registry-wide slot it writes.
+        "test/tests/test_a.py": _edit(
+            _BASE_TEST, "def test_about", '@pytest.mark.xdist_group("patch_global_slot")\ndef test_about'
+        ),
+    }),
     Case("docstring_path_respelled", False, {
         "test/tests/test_a.py": _edit(_BASE_TEST, "crates/ocx_lib/src/thing.rs", "crates/ocx_store/src/thing.rs"),
     }),
@@ -1754,6 +1775,20 @@ SELF_TEST_CASES: list[Case] = [
     }),
     Case("marker_variant_is_not_exact", True, {
         "test/tests/test_a.py": _edit(_BASE_TEST, "def test_about", "@pytest.mark.smoke(1)\ndef test_about"),
+    }),
+    Case("xdist_group_from_a_name_is_not_greppable", True, {
+        # A group built at runtime hides which slot is joined, which is the
+        # one thing the literal spelling buys.
+        "test/tests/test_a.py": _edit(
+            _BASE_TEST, "def test_about", "@pytest.mark.xdist_group(SLOT)\ndef test_about"
+        ),
+    }),
+    Case("xdist_group_skip_wearing_the_mark_shape", True, {
+        # The allowance is the mark, not the decorator column: a skip added
+        # beside it is still a silenced test.
+        "test/tests/test_a.py": _edit(
+            _BASE_TEST, "def test_about", '@pytest.mark.skip("later")\ndef test_about'
+        ),
     }),
     Case("other_import_added", True, {
         "test/tests/test_a.py": _edit(_BASE_TEST, "import pytest\n", "import os\nimport pytest\n"),
