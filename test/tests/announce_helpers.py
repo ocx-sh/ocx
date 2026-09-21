@@ -40,20 +40,42 @@ def configure_trusted_hosts(ocx: OcxRunner, registry: str, hosts: list[str]) -> 
     config_path.write_text(f'[registries."{registry}"]\ntrusted_hosts = [{hosts_toml}]\n')
 
 
-def seed_empty_root(fake_forge: FakeForge, package: str, physical_repository: str) -> None:
+def root_name(package: str, physical_repository: str, registry: str | None = None) -> str:
+    """The committed root's `name`: `<logical registry>/<namespace>/<package>`.
+
+    The *logical* registry is the one `OCX_DEFAULT_REGISTRY` hands to the
+    identifier on the command line, and announce refuses a root whose `name`
+    disagrees with it (ocx#477). `OcxRunner` sets that variable to the compose
+    registry, which is also the host every scenario's `repository` pointer
+    names — so the pointer's host is the default, and only a row that points the
+    root somewhere else (the SSRF rows) has to say which registry it means.
+    """
+    if registry is None:
+        registry = physical_repository.removeprefix("oci://").split("/", 1)[0]
+    return f"{registry}/{package}"
+
+
+def seed_empty_root(
+    fake_forge: FakeForge, package: str, physical_repository: str, *, registry: str | None = None
+) -> None:
     """Seeds an empty-tags committed root at `p/<package>.json` on the index
     repo's `main` — the "package already claimed, nothing curated yet"
     starting state every scenario announces against.
 
     `name` is carried because the index root schema requires it of every root:
     announce reads it (it is the fallback for a description with no title
-    annotation), so a fixture omitting it exercises a root the index cannot
-    hold."""
+    annotation, and ocx#477 checks it against the identifier), so a fixture
+    omitting it exercises a root the index cannot hold. `registry` overrides the
+    logical registry — see `root_name`."""
     fake_forge.seed_root(
         INDEX_OWNER,
         INDEX_REPO,
         f"p/{package}.json",
-        {"name": f"ocx.sh/{package}", "repository": physical_repository, "tags": {}},
+        {
+            "name": root_name(package, physical_repository, registry),
+            "repository": physical_repository,
+            "tags": {},
+        },
     )
 
 
@@ -121,7 +143,11 @@ def index_root_bytes(package: str, physical_repository: str, tags: dict[str, Any
     renderings of "the same" root would make a byte-exact comparison across the
     two transports meaningless.
     """
-    root = {"name": f"ocx.sh/{package}", "repository": physical_repository, "tags": tags or {}}
+    root = {
+        "name": root_name(package, physical_repository),
+        "repository": physical_repository,
+        "tags": tags or {},
+    }
     return (json.dumps(root, indent=2) + "\n").encode()
 
 

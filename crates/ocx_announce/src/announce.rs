@@ -136,6 +136,23 @@ pub async fn announce(
     if !committed_root.is_object() {
         return Err(AnnounceError::RootNotObject { path: root_path });
     }
+    // #477: the root's `name` and the identifier on the command line are two
+    // statements of the same fact, and nobody compared them — so announcing
+    // `ghcr.io/acme/widget` against a root that says `ocx.sh/acme/widget`
+    // rewrote somebody else's entry. Checked here, immediately after the shape
+    // check and before the branch-tag carry, so a disagreement costs zero
+    // registry requests and the run cannot half-rebuild the wrong package.
+    // Fails closed on an absent `name`: the index schema requires it of every
+    // root, so a file without one is not the root it is standing in for.
+    let expected_name = crate::claim::root_name(&request.package);
+    let committed_name = committed_root.get("name").and_then(Value::as_str).unwrap_or_default();
+    if committed_name != expected_name {
+        return Err(AnnounceError::RootNameMismatch {
+            path: root_path,
+            committed: committed_name.to_string(),
+            expected: expected_name,
+        });
+    }
     // D1: a stale branch supplies its tags but never its shape — that shape is
     // what froze in #399. `committed_bytes` deliberately stays the BASE's raw
     // bytes while the regeneration input becomes the merged root: comparing C6
@@ -2142,6 +2159,78 @@ mod tests {
         assert!(
             matches!(result, Err(AnnounceError::UnclaimedPackage { .. })),
             "a package with no committed root goes through the human lane"
+        );
+    }
+
+    // ── #477: the committed root's `name` is checked ─────────────────────────
+
+    /// The three shapes a root's `name` can have against the identifier the run
+    /// announces: matching (the run proceeds), differing, and absent.
+    ///
+    /// The differing and absent halves are refused at `DataError`, and the
+    /// refusal costs **zero** registry requests — the check sits immediately
+    /// after the root-shape check, before the SSRF pre-flight and before the
+    /// first observe, so announcing into somebody else's entry cannot
+    /// half-happen. The matching half is not decoration: without it a check
+    /// that refused every root would pass both refusal assertions.
+    ///
+    /// Reds on deleting the check (differing and absent both become `Ok`) and
+    /// on reading `name` with a `.unwrap_or(expected)`-shaped default (the
+    /// absent half becomes `Ok`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_committed_root_naming_another_package_is_refused_before_any_registry_call() {
+        // Matching: the fixture root names `ocx.sh/acme/widget` and the request
+        // announces exactly that, so the run reaches the registry and succeeds.
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &unchanged_root("1.0.0", &digest));
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+            .await
+            .expect("a root whose name agrees announces");
+        assert_eq!(outcome.status, AnnounceStatus::Unchanged);
+
+        // Differing: the same root under another registry's name.
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let mut other = unchanged_root("1.0.0", &digest);
+        other["name"] = Value::from("other.example/acme/widget");
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &other);
+        let result = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry.clone()).await;
+        let Err(AnnounceError::RootNameMismatch {
+            committed, expected, ..
+        }) = result
+        else {
+            panic!("a root naming another package must be refused, got {result:?}");
+        };
+        assert_eq!(committed, "other.example/acme/widget");
+        assert_eq!(expected, "ocx.sh/acme/widget", "the one spelling is claim::root_name");
+        assert!(
+            registry.read().calls.is_empty(),
+            "the refusal precedes every registry request: {:?}",
+            registry.read().calls
+        );
+
+        // Absent: fail closed, with an empty `committed` the message renders
+        // as its own sentence rather than as `names , not …`.
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let mut nameless = unchanged_root("1.0.0", &digest);
+        nameless
+            .as_object_mut()
+            .expect("the fixture root is an object")
+            .remove("name");
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &nameless);
+        let result = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry).await;
+        let Err(error @ AnnounceError::RootNameMismatch { .. }) = result else {
+            panic!("a root with no name at all must be refused, got {result:?}");
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("carries no name") && message.contains("ocx.sh/acme/widget"),
+            "the message must say what is missing and what was expected: {message}"
         );
     }
 

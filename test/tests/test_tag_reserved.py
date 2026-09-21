@@ -43,6 +43,7 @@ from announce_helpers import (
     announce_json,
     configure_trusted_hosts,
     registry_host,
+    root_name,
     seed_empty_root,
 )
 from fake_forge import FakeForge
@@ -82,9 +83,17 @@ RESERVED_FORMS = [
 
 def _seed_root_with_tags(fake_forge: FakeForge, package: str, physical: str, tags: dict[str, dict]) -> None:
     """Seeds a committed root carrying `tags` verbatim — the state `--refresh`
-    and a tags-file union both start from."""
+    and a tags-file union both start from.
+
+    `name` is carried rather than omitted: announce refuses a root whose `name`
+    disagrees with the identifier the run announces, and an absent one counts as
+    a disagreement (ocx#477), so a root without it is refused at 65 before any
+    reserved tag is looked at."""
     fake_forge.seed_root(
-        INDEX_OWNER, INDEX_REPO, f"p/{package}.json", {"repository": physical, "tags": tags}
+        INDEX_OWNER,
+        INDEX_REPO,
+        f"p/{package}.json",
+        {"name": root_name(package, physical), "repository": physical, "tags": tags},
     )
 
 

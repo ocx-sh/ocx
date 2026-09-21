@@ -1600,7 +1600,11 @@ def test_announce_ssrf_forbidden_repository_refused_before_any_registry_call(
     through) as part of its normal setup.
     """
     package = f"acme/{unique_repo}"
-    seed_empty_root(fake_forge, package, "oci://127.0.0.1:1/x")
+    # `registry=` because the root deliberately points somewhere other than the
+    # harness registry: the root's `name` still has to agree with the identifier
+    # the run announces (ocx#477), or the run is refused at 65 before the SSRF
+    # pre-flight this row is about ever runs.
+    seed_empty_root(fake_forge, package, "oci://127.0.0.1:1/x", registry=ocx.registry)
     # No trusted_hosts entry at all for this namespace.
 
     result = announce(
@@ -1639,7 +1643,9 @@ def test_announce_ssrf_guard_active_permits_cidr_trusted_ip_literal_registry(
     package = f"acme/{unique_repo}"
     port = ocx.registry.split(":", 1)[1] if ":" in ocx.registry else "443"
     physical = f"oci://127.0.0.1:{port}/{unique_repo}"
-    seed_empty_root(fake_forge, package, physical)
+    # `registry=`: the pointer names the loopback literal rather than the
+    # harness registry, so the root's `name` has to be spelled out (ocx#477).
+    seed_empty_root(fake_forge, package, physical, registry=ocx.registry)
     configure_trusted_hosts(ocx, ocx.registry, ["127.0.0.0/8"])
 
     report = announce_json(

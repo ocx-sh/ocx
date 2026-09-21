@@ -77,6 +77,28 @@ pub enum AnnounceError {
     #[error("committed root at {path} is not a JSON object")]
     RootNotObject { path: String },
 
+    /// The committed root's `name` disagrees with the identifier the run
+    /// announces ([#477]).
+    ///
+    /// The identifier on the command line and the root's `name` are two
+    /// statements of the same fact, and until now nothing compared them: a
+    /// package whose root said `ocx.sh/acme/widget` accepted an announce of
+    /// `ghcr.io/acme/widget` and rewrote it. An absent `name` is a mismatch
+    /// carrying an empty `committed` — fail closed, because the index schema
+    /// requires the field of every real root, so its absence means the file is
+    /// not the root it claims to be.
+    ///
+    /// `expected` is [`crate::claim::root_name`]'s output; there is no second
+    /// spelling of the expected value anywhere.
+    ///
+    /// [#477]: https://github.com/ocx-sh/ocx/issues/477
+    #[error("{}", root_name_mismatch_message(path, committed, expected))]
+    RootNameMismatch {
+        path: String,
+        committed: String,
+        expected: String,
+    },
+
     /// The committed root is missing a field announce needs to proceed.
     #[error("committed root is missing the {field} field")]
     RootMissingField { field: &'static str },
@@ -243,6 +265,17 @@ pub enum AnnounceError {
         #[source]
         source: std::io::Error,
     },
+}
+
+/// `Display` body for [`AnnounceError::RootNameMismatch`] — thiserror's format
+/// string cannot branch, and a root with no `name` at all would otherwise
+/// render as `names , not …`, which reads like a bug in the tool rather than a
+/// defect in the file.
+fn root_name_mismatch_message(path: &str, committed: &str, expected: &str) -> String {
+    if committed.is_empty() {
+        return format!("committed root at {path} carries no name; this run announces {expected}");
+    }
+    format!("committed root at {path} names {committed}, not the {expected} this run announces")
 }
 
 /// `Display` body for [`AnnounceError::NoCuratedTags`] — thiserror's format
