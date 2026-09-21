@@ -19,7 +19,6 @@ use crate::error::UsageError;
 use clap::Parser;
 use ocx_announce::announce::{self, AnnounceRequest, AnnounceTarget, TagSelection};
 use ocx_announce::forge::ForgeCredentials;
-use ocx_package::publisher::Publisher;
 
 use crate::{api::data::announce::AnnounceReport, command::deprecated, options};
 
@@ -212,13 +211,7 @@ impl PackageAnnounce {
         // `[registries."<ns>"]` entry for the package's namespace — the same
         // config source the index read path resolves through. There is no
         // CLI flag to widen it (design register X2).
-        let trusted_hosts = context
-            .config()
-            .registries
-            .as_ref()
-            .and_then(|registries| registries.get(package.registry()))
-            .and_then(|entry| entry.trusted_hosts.clone())
-            .unwrap_or_default();
+        let trusted_hosts = context.trusted_hosts_for(package.registry());
 
         let request = AnnounceRequest {
             package: package.clone(),
@@ -228,7 +221,7 @@ impl PackageAnnounce {
             yank: self.yank.clone(),
             unyank: self.unyank.clone(),
             yank_reason: self.yank_reason.clone().unwrap_or_default(),
-            trusted_hosts: trusted_hosts.clone(),
+            trusted_hosts,
             // The same allowance `Context::client_builder` passes as
             // `plain_http_registries`, so the pre-flight decides the dial
             // scheme — and hence which proxy variable applies (ocx#407) —
@@ -287,13 +280,12 @@ impl PackageAnnounce {
         // shared recipe (mirror map, plain-HTTP set, merged extra-CA view —
         // the physical registry a curated tag is read from sits behind the
         // same corporate proxy as everything else this invocation dials),
-        // pinned through the same `ocx_oci::ssrf::GuardedResolver` seam the
-        // index read path uses (`ClientBuilder::ssrf_guard`) — the
-        // physical registry a curated tag resolves against is
-        // remote-controlled data (a root `repository` pointer), so the
-        // connect-time pin must be wired here too, not only the pre-flight
+        // pinned through the `ocx_oci::ssrf::GuardedResolver` seam the index
+        // read path uses, because the physical registry a curated tag resolves
+        // against is remote-controlled data (a root `repository` pointer): the
+        // connect-time pin belongs here too, not only in the pre-flight
         // `resolve_and_validate` the announce pipeline already runs.
-        let publisher = Publisher::new(context.client_builder().ssrf_guard(trusted_hosts).build());
+        let publisher = context.guarded_publisher(package.registry());
 
         let outcome = announce::announce(&publisher, Some(forge.as_ref()), request).await?;
 

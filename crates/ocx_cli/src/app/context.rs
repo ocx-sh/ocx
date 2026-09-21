@@ -10,6 +10,7 @@ use ocx_config::tls::TlsError;
 use ocx_config::tls::resolve_extra_roots;
 use ocx_config::tls::sigstore_extra_roots;
 use ocx_console::{ColorModeConfig, Printer, UserInterface};
+use ocx_package::publisher::Publisher;
 use ocx_store::file_structure::{self, StateStore};
 use ocx_util::tls::ExtraRoots;
 
@@ -1063,10 +1064,7 @@ impl Context {
             // rebind to a forbidden range between validate and connect. The trust
             // set is per-namespace (never a union) so one namespace's exemption
             // can never widen another's.
-            let trusted_hosts = registries
-                .get(namespace)
-                .and_then(|entry| entry.trusted_hosts.clone())
-                .unwrap_or_default();
+            let trusted_hosts = trusted_hosts_for(config, namespace);
             let client = client_builder(registry_mirrors, progress, insecure_hosts, extra_roots)
                 .ssrf_guard(trusted_hosts.clone())
                 .build();
@@ -1142,6 +1140,35 @@ impl Context {
             &self.progress,
             &self.insecure_hosts,
             &self.extra_roots_merged,
+        )
+    }
+
+    /// The SSRF escape hatch `registry` declares, or none (ocx#218, design
+    /// register X2). The merged config is the single source of truth and there
+    /// is no CLI flag to widen it, so every caller that needs the set — the
+    /// announce/claim request field and [`Self::guarded_publisher`] below —
+    /// reads it through here rather than re-spelling the lookup.
+    #[must_use]
+    pub fn trusted_hosts_for(&self, registry: &str) -> Vec<String> {
+        trusted_hosts_for(&self.config, registry)
+    }
+
+    /// A [`Publisher`] on the invocation's shared client recipe, pinned through
+    /// the `ocx_oci::ssrf::GuardedResolver` seam with exactly `registry`'s
+    /// exemption.
+    ///
+    /// The one constructor for both publisher sites (`ocx package announce`,
+    /// `ocx package claim`): each observes a physical repository taken from
+    /// remote-controlled data — a root `repository` pointer, or an
+    /// operator-typed one on a first claim — so the connect-time pin belongs on
+    /// every one of them, and a second spelling of the recipe is a place for
+    /// one of them to lose it.
+    #[must_use]
+    pub fn guarded_publisher(&self, registry: &str) -> Publisher {
+        Publisher::new(
+            self.client_builder()
+                .ssrf_guard(self.trusted_hosts_for(registry))
+                .build(),
         )
     }
 
@@ -1242,6 +1269,23 @@ impl Context {
     pub fn verify_client(&self) -> &ocx_oci::Client {
         self.registry_client_cell.get_or_init(|| self.client_builder().build())
     }
+}
+
+/// One namespace's `[registries."<ns>"].trusted_hosts` SSRF exemption, or none
+/// when it declares no entry or no hosts (ocx#218).
+///
+/// Free rather than a method because [`Context::build_index_sources`] runs
+/// before a `Context` exists and must read the field the same way; the
+/// inherent [`Context::trusted_hosts_for`] delegates here so the three sites
+/// that need one namespace's set — the index sources, announce, claim — cannot
+/// drift apart on which config the set comes from.
+fn trusted_hosts_for(config: &ocx_config::Config, registry: &str) -> Vec<String> {
+    config
+        .registries
+        .as_ref()
+        .and_then(|registries| registries.get(registry))
+        .and_then(|entry| entry.trusted_hosts.clone())
+        .unwrap_or_default()
 }
 
 /// Every namespace's `[registries."<ns>"].trusted_hosts` SSRF exemption
