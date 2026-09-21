@@ -2144,4 +2144,70 @@ mod tests {
             "a package with no committed root goes through the human lane"
         );
     }
+
+    // ── #487: a description-only refresh ─────────────────────────────────────
+
+    /// A claimed but unreleased package carries `"tags": {}`, and `--refresh`
+    /// over it used to collapse into `NoCuratedTags` (exit 64) before the
+    /// description was ever observed.
+    ///
+    /// The run now completes with an empty curated set and reports `unchanged`
+    /// — `AnnounceStatus` stays two-valued, and `desc_status` is the field that
+    /// discriminates a description-only pass.
+    ///
+    /// Reds on restoring the unconditional empty-set refusal in
+    /// `pipeline::resolve_curated_tags`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refresh_over_a_claimed_but_unreleased_root_is_a_description_pass() {
+        let (registry, _) = seed_tags(&[]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &committed_root(serde_json::json!({})));
+
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+            .await
+            .expect("an empty committed tag set is nothing to curate, not a usage error");
+
+        assert_eq!(
+            outcome.status,
+            AnnounceStatus::Unchanged,
+            "no tag and no description moved"
+        );
+        assert_eq!(outcome.desc_status, AnnounceStatus::Unchanged);
+        assert!(forge.commits().is_empty(), "an unchanged run commits nothing");
+    }
+
+    /// The same run once the package publishes a description: the empty tag set
+    /// still carries no version, the `__ocx.desc` observation moves, and the two
+    /// existing status words say so — `updated` overall, `updated` on the
+    /// description. No third outcome word was needed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_description_only_refresh_reports_updated_through_desc_status() {
+        let directory = tempfile::TempDir::new().expect("a scratch directory");
+        let data = StubTransportData::new();
+        let readme_hex = seed_description(&data);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &committed_root(serde_json::json!({})));
+
+        let outcome = run_announce(
+            &forge,
+            TagSelection::Refresh,
+            AnnounceTarget::Out(directory.path().to_path_buf()),
+            data,
+        )
+        .await
+        .expect("a description-only refresh succeeds");
+
+        assert_eq!(outcome.status, AnnounceStatus::Updated);
+        assert_eq!(outcome.desc_status, AnnounceStatus::Updated);
+        assert!(
+            outcome
+                .written_paths
+                .iter()
+                .any(|path| path.ends_with(&format!("{readme_hex}.md"))),
+            "the readme blob rides out with the root: {:?}",
+            outcome.written_paths
+        );
+    }
 }
