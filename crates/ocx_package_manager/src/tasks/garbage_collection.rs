@@ -114,6 +114,20 @@ impl GarbageCollector {
         &self.graph.roots_attribution
     }
 
+    /// Returns every entry reachable from this collector's roots.
+    ///
+    /// Canonical paths, the same keys `orphaned_by_seeds` compares against.
+    /// The complement of [`unreachable_objects`] over the walked entry set --
+    /// exposed separately because `purge_unrooted` needs the membership test
+    /// on seeds it supplies, not the collectable set.
+    ///
+    /// `pub(crate)`, unlike its siblings: the only consumer is `tasks::purge`,
+    /// and a bare `pub` on a type no other crate can name is what
+    /// `unreachable_pub` is ratcheted against.
+    pub(crate) fn reachable(&self) -> HashSet<PathBuf> {
+        self.graph.reachable()
+    }
+
     /// Returns all entries not reachable from any root.
     ///
     /// Blobs are first-class GC participants: any blob reachable from an
