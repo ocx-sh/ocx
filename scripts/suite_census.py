@@ -93,11 +93,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SUITE = REPO_ROOT / "test"
 
-#: The census of this script's parent commit, `0fadc002`, with `skipped`
-#: moved to 108 by ocx#494: four platform gates added (`flock(1)` twice,
-#: Unix file modes, SIGKILL) and one retired with the in-place lock test
-#: it guarded.
-PINNED = {"tests": 2859, "skipped": 108, "xfailed": 4, "parametrized": 150}
+#: The census as of the ocx#477–#494 batch: `tests` 2859 -> 2904 with the
+#: batch's 45 rows, `skipped` 108 -> 110 with two more POSIX-only gates
+#: (`flock(2)` advisory contract, SIGKILL mid-add).
+PINNED = {"tests": 2904, "skipped": 110, "xfailed": 4, "parametrized": 150}
 
 #: Which way each number may move on its own. DEC-38 pinned all four to
 #: equality for the duration of the crate split, so that a refactor could not

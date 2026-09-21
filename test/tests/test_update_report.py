@@ -226,3 +226,42 @@ still = "{ocx.registry}/{repo}:1.0.0"
     assert payload["changes"] == [], payload
     assert payload["metadata_changed"] is False, payload
     assert [entry["name"] for entry in payload["unchanged"]] == ["still"], payload
+
+
+def test_update_check_with_nothing_moved_exits_zero_and_writes_nothing(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``--check`` refuses only when a pin *would* move.
+
+    Every other ``--check`` row starts from a lock one bump behind and asserts
+    the 65, which leaves the other half of the gate untested: a ``--check``
+    that exited 65 unconditionally passes all of them, and fails every CI job
+    wired to it as a drift gate. This row is that half — a current lock, exit
+    0, an empty change set, and the lock still byte-identical.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_rep_check"
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
+
+    project = _write_project(
+        tmp_path,
+        f"""\
+[tools]
+current = "{ocx.registry}/{repo}:1.0.0"
+""",
+    )
+    locked = _run_lock(ocx, project)
+    assert locked.returncode == EXIT_SUCCESS, locked.stderr
+    before = (project / "ocx.lock").read_bytes()
+
+    result = _run_update_json(ocx, project, "--check")
+
+    assert result.returncode == EXIT_SUCCESS, (
+        f"nothing would move, so --check must not refuse; stderr:\n{result.stderr}"
+    )
+    payload = json.loads(result.stdout)
+    assert payload["changes"] == [], payload
+    assert [entry["name"] for entry in payload["unchanged"]] == ["current"], payload
+    assert (project / "ocx.lock").read_bytes() == before, (
+        "ocx update --check must not rewrite ocx.lock, moved pins or not"
+    )
