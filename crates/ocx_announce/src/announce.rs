@@ -35,7 +35,10 @@
 //! the CLI a thin wrapper).
 
 pub mod error;
-mod pipeline;
+// `pub(crate)` because claim is the second caller of the description observer
+// and the file-set builder (design decision D-2): one observer, two commands,
+// no parallel implementation. Nothing here leaves the crate.
+pub(crate) mod pipeline;
 pub mod request;
 
 pub use error::AnnounceError;
@@ -173,7 +176,20 @@ pub async fn announce(
         observed,
         mut reserved_dropped,
         desc_updated,
-    } = observe_and_rebuild(publisher, &committed_root, &request, &now, &root_path, &package).await?;
+    } = observe_and_rebuild(
+        publisher,
+        forge,
+        RootBase {
+            root: &committed_root,
+            repo: &root_read.repo,
+            sha: &root_read.base_sha,
+        },
+        &request,
+        &now,
+        &root_path,
+        &package,
+    )
+    .await?;
     let mut desc_status = AnnounceStatus::from_changed(desc_updated);
 
     // C6: byte-identical root AND no new CAS object ⇒ nothing moved.
@@ -457,8 +473,20 @@ pub async fn announce(
                     if let Some(carried) = &root_read.carried_tags {
                         pipeline::carry_branch_tags(&mut head_root, carried);
                     }
-                    let merged =
-                        observe_and_rebuild(publisher, &head_root, &request, &now, &root_path, &package).await?;
+                    let merged = observe_and_rebuild(
+                        publisher,
+                        forge,
+                        RootBase {
+                            root: &head_root,
+                            repo: retry_repo,
+                            sha: &head_sha,
+                        },
+                        &request,
+                        &now,
+                        &root_path,
+                        &package,
+                    )
+                    .await?;
                     // The retry re-resolved the curated set against the winning
                     // head, so its drop list supersedes — never unions with —
                     // the pre-race one: for `--tags-file`/`--refresh` the base
@@ -564,6 +592,26 @@ pub async fn announce(
     }
 }
 
+/// The base a regeneration pass runs against: the root document, and where that
+/// document was read.
+///
+/// The three travel together because the orphan diff needs all three at once —
+/// the document supplies the previous referenced set, and the repository and
+/// commit are the tree a logo probe reads (design decision E). Splitting them
+/// into parameters is what would let a pass diff one root and probe another.
+#[derive(Clone, Copy)]
+struct RootBase<'a> {
+    /// The committed root the pass regenerates from, after the D1 branch-tag
+    /// carry.
+    root: &'a Value,
+    /// The repository `sha` lives in: the branch's own repository while the
+    /// announce branch is live, the index repository otherwise.
+    repo: &'a RepoCoordinate,
+    /// The commit `root` was read at — [`RootRead::base_sha`], or the winning
+    /// head on the race retry.
+    sha: &'a str,
+}
+
 /// One regenerated announce payload.
 struct Rebuilt {
     /// The canonical root bytes (CONTRACTS §14) — what the C6 byte comparison
@@ -604,20 +652,31 @@ struct Rebuilt {
 /// (C7) failures of the steps it composes.
 async fn observe_and_rebuild(
     publisher: &Publisher,
-    base_root: &Value,
+    forge: &dyn Forge,
+    base: RootBase<'_>,
     request: &AnnounceRequest,
     now: &str,
     root_path: &str,
     package: &str,
 ) -> Result<Rebuilt, AnnounceError> {
+    let base_root = base.root;
     let base_tags = pipeline::committed_tag_names(base_root);
     // X3: the physical target is remote-controlled data (a root `repository`
     // pointer), so it is resolved and validated once, ahead of the first
     // registry request of any kind. Under `--tags-from-registry` that first
     // request is the tag listing rather than an observe — a pre-flight inside
     // the observe loop would guard the wrong thing.
+    //
+    // The field lift is here rather than inside the guard because claim resolves
+    // the same pointer off its own command line and has no root to read it out
+    // of; the refusal an absent `repository` earns is announce's, so announce
+    // raises it.
+    let repository = base_root
+        .get("repository")
+        .and_then(Value::as_str)
+        .ok_or(AnnounceError::RootMissingField { field: "repository" })?;
     let physical = pipeline::guarded_physical(
-        base_root,
+        repository,
         request.package.registry(),
         &request.trusted_hosts,
         &request.insecure_hosts,
@@ -675,8 +734,14 @@ async fn observe_and_rebuild(
         object.insert("desc".to_string(), updated.clone());
     }
     pipeline::apply_yank_markers(&mut root, &request.yank, &request.unyank, &request.yank_reason, now)?;
+    // Owner mandate: the objects this root stops referencing leave the index in
+    // the same commit that stops referencing them. Diffed against the base —
+    // which is the tree the commit parents on, never a second independently
+    // resolved read — so a concurrent writer's objects are outside the diff
+    // rather than swept by it.
+    let orphans = pipeline::orphan_paths(Some(base_root), &root, package, forge, base.repo, base.sha).await?;
     let root_bytes = serialize_root(&root);
-    let files = pipeline::build_files(root_path, &root_bytes, package, &observed, &desc.blobs);
+    let files = pipeline::build_files(root_path, &root_bytes, package, &observed, &desc.blobs, &orphans);
     Ok(Rebuilt {
         root_bytes,
         files,
@@ -739,6 +804,12 @@ struct RootRead {
     /// check, because the check is against the newer commit. Resolving first and
     /// reading at the resolved SHA closes it.
     base_sha: String,
+    /// The repository `base_sha` is a commit of — the branch's own repository
+    /// when accumulating, the index repository otherwise. Paired with
+    /// `base_sha` because a sha alone names no tree to read: the orphan diff's
+    /// logo probe reads at that commit and has to ask the repository that has
+    /// it, the same reason [`CommitBase`] carries its own `repo`.
+    repo: RepoCoordinate,
     base_ref: String,
     /// The stale announce branch head's own `tags` object, merged onto the
     /// base's root before regeneration (D1) so no tag already announced into
@@ -887,6 +958,7 @@ async fn read_committed_root(
             bytes,
             branch_sha: Some(branch_sha.clone()),
             base_sha: branch_sha,
+            repo: repo.clone(),
             base_ref: branch.to_string(),
             carried_tags: None,
         });
@@ -909,6 +981,7 @@ async fn read_committed_root(
         bytes,
         branch_sha: None,
         base_sha,
+        repo: index_repo.clone(),
         base_ref: INDEX_BASE_REF.to_string(),
         carried_tags,
     })
@@ -969,16 +1042,21 @@ mod tests {
         })
     }
 
+    /// The index repository every fixture announces into.
+    fn index_repo() -> RepoCoordinate {
+        RepoCoordinate {
+            host: None,
+            namespace: "ocx-sh".to_string(),
+            project: "index".to_string(),
+        }
+    }
+
     fn request(curated: TagSelection) -> AnnounceRequest {
         AnnounceRequest {
             package: ocx_oci::Identifier::new_registry("acme/widget", "ocx.sh"),
             curated,
             target: AnnounceTarget::Out(std::path::PathBuf::from("unused")),
-            index_repo: crate::forge::RepoCoordinate {
-                host: None,
-                namespace: "ocx-sh".to_string(),
-                project: "index".to_string(),
-            },
+            index_repo: index_repo(),
             yank: Vec::new(),
             unyank: Vec::new(),
             yank_reason: String::new(),
@@ -1060,6 +1138,68 @@ mod tests {
         readme_digest.hex().to_string()
     }
 
+    /// The commit the fixtures' base root is read at. Only the orphan diff's
+    /// logo probe reads anything there, and [`FakeForge`] answers by ref, so a
+    /// fixture that seeds no root at this sha probes "absent" — which is what
+    /// every pass below wants, none of them having a logo.
+    const BASE_SHA: &str = "base-sha";
+
+    /// One regeneration pass over `root`, read at [`BASE_SHA`] in the index
+    /// repository — the shape every pass fixture wants, with the timestamp and
+    /// the package pinned so a row states only what it varies.
+    async fn rebuild(
+        publisher: &Publisher,
+        forge: &FakeForge,
+        root: &Value,
+        request: &AnnounceRequest,
+    ) -> Result<Rebuilt, AnnounceError> {
+        observe_and_rebuild(
+            publisher,
+            forge,
+            RootBase {
+                root,
+                repo: &request.index_repo,
+                sha: BASE_SHA,
+            },
+            request,
+            "2026-07-25T00:00:00Z",
+            ROOT_PATH,
+            "acme/widget",
+        )
+        .await
+    }
+
+    /// The `repository` lift moved out of `extract_physical` and into the pass,
+    /// and a field lift is exactly the kind of refactor that drops the refusal
+    /// it used to carry: a root with no pointer names no registry, so it must
+    /// still fail rather than resolve one from somewhere else.
+    ///
+    /// No registry is seeded and none is reached — the refusal is ahead of the
+    /// SSRF pre-flight, which is ahead of every request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_root_without_a_repository_pointer_is_still_refused() {
+        let publisher = Publisher::new(ocx_oci::Client::with_transport(Box::new(StubTransport::new(
+            StubTransportData::new(),
+        ))));
+        let root = serde_json::json!({ "name": "ocx.sh/acme/widget", "tags": {} });
+
+        let Err(error) = rebuild(
+            &publisher,
+            &FakeForge::new(),
+            &root,
+            &request(TagSelection::Replace(vec!["1.0.0".to_string()])),
+        )
+        .await
+        else {
+            panic!("a root carrying no repository pointer must be refused, not regenerated");
+        };
+
+        assert!(
+            matches!(error, AnnounceError::RootMissingField { field: "repository" }),
+            "the refusal names the absent field, got {error:?}"
+        );
+    }
+
     /// A moved description is written back into the root's EXISTING `desc` slot,
     /// not appended: the index CI re-serializes the committed root and rejects
     /// any byte that differs, so a `desc` landing after `tags` fails the PR.
@@ -1072,13 +1212,11 @@ mod tests {
         let publisher = Publisher::new(ocx_oci::Client::with_transport(Box::new(StubTransport::new(data))));
         let root = committed_root(serde_json::json!({}));
 
-        let rebuilt = observe_and_rebuild(
+        let rebuilt = rebuild(
             &publisher,
+            &FakeForge::new(),
             &root,
             &request(TagSelection::Replace(vec!["1.0.0".to_string()])),
-            "2026-07-25T00:00:00Z",
-            "p/acme/widget.json",
-            "acme/widget",
         )
         .await
         .expect("the description observes alongside the tag");
@@ -1122,16 +1260,9 @@ mod tests {
             keep.clone(),
         ]));
 
-        let rebuilt = observe_and_rebuild(
-            &publisher,
-            &root,
-            &request,
-            "2026-07-25T00:00:00Z",
-            "p/acme/widget.json",
-            "acme/widget",
-        )
-        .await
-        .expect("the one real version announces");
+        let rebuilt = rebuild(&publisher, &FakeForge::new(), &root, &request)
+            .await
+            .expect("the one real version announces");
 
         assert_eq!(
             rebuilt.reserved_dropped,
@@ -1157,16 +1288,9 @@ mod tests {
             "__ocx.desc".to_string(),
         ]));
 
-        observe_and_rebuild(
-            &publisher,
-            &root,
-            &request,
-            "2026-07-25T00:00:00Z",
-            "p/acme/widget.json",
-            "acme/widget",
-        )
-        .await
-        .expect("the one real version announces");
+        rebuild(&publisher, &FakeForge::new(), &root, &request)
+            .await
+            .expect("the one real version announces");
 
         let manifest_pulls = data.read().calls.iter().filter(|c| *c == "pull_manifest_raw").count();
         assert_eq!(
@@ -1192,13 +1316,11 @@ mod tests {
             "1.0.0": { "content": format!("sha256:{}", "b".repeat(64)), "observed": "2026-07-01T00:00:00Z" }
         }));
 
-        let rebuilt = observe_and_rebuild(
+        let rebuilt = rebuild(
             &publisher,
+            &FakeForge::new(),
             &root,
             &request(TagSelection::FromRegistry),
-            "2026-07-25T00:00:00Z",
-            "p/acme/widget.json",
-            "acme/widget",
         )
         .await
         .expect("both registry tags announce");
@@ -1232,15 +1354,7 @@ mod tests {
         let mut request = request(TagSelection::FromRegistry);
         request.trusted_hosts = Vec::new();
 
-        let result = observe_and_rebuild(
-            &publisher,
-            &root,
-            &request,
-            "2026-07-25T00:00:00Z",
-            "p/acme/widget.json",
-            "acme/widget",
-        )
-        .await;
+        let result = rebuild(&publisher, &FakeForge::new(), &root, &request).await;
 
         assert!(
             matches!(result, Err(AnnounceError::Ssrf { .. })),
@@ -1262,6 +1376,11 @@ mod tests {
     const BRANCH: &str = "indexbot-announce-acme-widget";
     const BRANCH_REF: &str = "heads/indexbot-announce-acme-widget";
     const MAIN_REF: &str = "heads/main";
+
+    /// The one root path every fixture announces — the path [`FakeForge`]
+    /// answers out of its `roots` map, so a read of anything else is a read of
+    /// a CAS object and is answered from `files`.
+    const ROOT_PATH: &str = "p/acme/widget.json";
 
     /// A scripted [`Forge`] that records every call.
     ///
@@ -1286,6 +1405,15 @@ mod tests {
         /// it. An absent sha is an absent file, which is what an unclaimed
         /// namespace looks like from here.
         roots: HashMap<String, Vec<u8>>,
+        /// `(commit sha, path)` → the bytes served there, for every path that
+        /// is not the root. Keyed by path as well as ref because the orphan
+        /// diff's logo probe asks for one exact object and takes the answer as
+        /// "this extension is the one on disk": a fixture that served the root
+        /// at every path would report both `.png` and `.svg` present.
+        files: HashMap<(String, String), Vec<u8>>,
+        /// Every read of a non-root path fails — the transport fault the orphan
+        /// probe must propagate rather than read as "no such object".
+        failing_reads: bool,
         comparison: BranchComparison,
         open_request: Option<PullRequest>,
         mergeability: Mergeability,
@@ -1317,6 +1445,8 @@ mod tests {
             Self {
                 refs: HashMap::new(),
                 roots: HashMap::new(),
+                files: HashMap::new(),
+                failing_reads: false,
                 comparison: BranchComparison::Ahead,
                 open_request: None,
                 mergeability: Mergeability::Mergeable,
@@ -1339,6 +1469,19 @@ mod tests {
         /// reads it directly.
         fn with_root(mut self, sha: &str, root: &Value) -> Self {
             self.roots.insert(sha.to_string(), serialize_root(root));
+            self
+        }
+
+        /// `path` exists at commit `sha` — the fixture for an object the orphan
+        /// probe can find.
+        fn with_file(mut self, sha: &str, path: &str, bytes: &[u8]) -> Self {
+            self.files.insert((sha.to_string(), path.to_string()), bytes.to_vec());
+            self
+        }
+
+        /// Every object read fails with a server error.
+        fn failing_reads(mut self) -> Self {
+            self.failing_reads = true;
             self
         }
 
@@ -1428,10 +1571,20 @@ mod tests {
         async fn get_file_contents(
             &self,
             _repo: &RepoCoordinate,
-            _path: &str,
+            path: &str,
             r#ref: &str,
         ) -> Result<Option<Vec<u8>>, ForgeError> {
-            Ok(self.roots.get(r#ref).cloned())
+            if path == ROOT_PATH {
+                return Ok(self.roots.get(r#ref).cloned());
+            }
+            if self.failing_reads {
+                return Err(ForgeError::Status {
+                    url: path.to_string(),
+                    status: 500,
+                    detail: "the fixture refuses every object read".to_string(),
+                });
+            }
+            Ok(self.files.get(&(r#ref.to_string(), path.to_string())).cloned())
         }
 
         async fn get_ref_sha(&self, _repo: &RepoCoordinate, r#ref: &str) -> Result<Option<String>, ForgeError> {
@@ -1548,6 +1701,165 @@ mod tests {
                 updated: false,
             })
         }
+    }
+
+    // ── orphan_paths: the index drops what the new root stopped naming ───────
+
+    /// A 64-hex digest string, told apart by its fill character.
+    fn digest(fill: char) -> String {
+        format!("sha256:{}", fill.to_string().repeat(64))
+    }
+
+    /// The CAS path `digest` lands at under this package.
+    fn object(digest: &str, extension: &str) -> String {
+        let hex = digest.trim_start_matches("sha256:");
+        format!("p/acme/widget/o/sha256/{hex}.{extension}")
+    }
+
+    /// A root referencing `tags` by content digest, plus an optional
+    /// description — the two halves of a root's referenced set.
+    fn referencing(tags: &[String], description: Value) -> Value {
+        let tags: serde_json::Map<String, Value> = tags
+            .iter()
+            .enumerate()
+            .map(|(index, content)| (format!("{index}.0.0"), serde_json::json!({ "content": content })))
+            .collect();
+        serde_json::json!({ "tags": tags, "desc": description })
+    }
+
+    /// The orphan set between two roots, read at [`BASE_SHA`] in the index.
+    async fn orphans(
+        forge: &FakeForge,
+        previous: Option<&Value>,
+        new_root: &Value,
+    ) -> Result<Vec<String>, AnnounceError> {
+        pipeline::orphan_paths(previous, new_root, "acme/widget", forge, &index_repo(), BASE_SHA).await
+    }
+
+    /// The mandate's core case: a digest moved, so the object nobody reaches
+    /// any more leaves the index in the same commit that stops reaching it —
+    /// and the tag that did not move keeps its object, which is what says the
+    /// diff is a diff and not a sweep of everything the previous root held.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_moved_tag_orphans_its_old_object_and_spares_the_unmoved_one() {
+        let previous = referencing(&[digest('a'), digest('b')], Value::Null);
+        let new_root = referencing(&[digest('c'), digest('b')], Value::Null);
+
+        let paths = orphans(&FakeForge::new(), Some(&previous), &new_root)
+            .await
+            .expect("a tag's extension is known, so nothing is probed");
+
+        assert_eq!(
+            paths,
+            vec![object(&digest('a'), "json")],
+            "only the abandoned digest's object is dropped"
+        );
+    }
+
+    /// A description edit moves the readme's own digest, and the markdown blob
+    /// the old one named is as unreachable as an abandoned dispatch object.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_changed_readme_orphans_the_markdown_blob() {
+        let previous = referencing(&[], serde_json::json!({ "readme": digest('a') }));
+        let new_root = referencing(&[], serde_json::json!({ "readme": digest('b') }));
+
+        let paths = orphans(&FakeForge::new(), Some(&previous), &new_root)
+            .await
+            .expect("a readme's extension is known too");
+
+        assert_eq!(paths, vec![object(&digest('a'), "md")]);
+    }
+
+    /// The logo is the one reference whose extension the root does not record,
+    /// so the old object is found by probing `.png` then `.svg`. A publisher
+    /// who replaces a PNG logo with an SVG leaves the PNG behind, and this is
+    /// the read that finds it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_logo_that_changed_format_is_found_by_probing_the_parent_commit() {
+        let previous = referencing(&[], serde_json::json!({ "readme": digest('a'), "logo": digest('c') }));
+        let new_root = referencing(&[], serde_json::json!({ "readme": digest('a'), "logo": digest('d') }));
+        let forge = FakeForge::new().with_file(BASE_SHA, &object(&digest('c'), "png"), b"\x89PNG");
+
+        let paths = orphans(&forge, Some(&previous), &new_root)
+            .await
+            .expect("the probe answers from the parent commit");
+
+        assert_eq!(
+            paths,
+            vec![object(&digest('c'), "png")],
+            "the extension comes from the tree, not from a guess"
+        );
+    }
+
+    /// Neither extension answering means the object was never committed —
+    /// nothing to delete, and a `Delete` naming it would be noise in every
+    /// commit. The readme beside it still goes, so this row is not passing
+    /// because the whole diff was empty.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_logo_no_commit_ever_wrote_is_skipped() {
+        let previous = referencing(&[], serde_json::json!({ "readme": digest('a'), "logo": digest('c') }));
+        let new_root = referencing(&[], Value::Null);
+
+        let paths = orphans(&FakeForge::new(), Some(&previous), &new_root)
+            .await
+            .expect("an absent object is not an error");
+
+        assert_eq!(paths, vec![object(&digest('a'), "md")], "only the readme is nameable");
+    }
+
+    /// A failed probe is not an absent object. Reading the failure as "no logo
+    /// here" would leave the orphan behind and report a clean sweep, so the run
+    /// stops and says the read failed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_logo_probe_propagates_rather_than_skipping() {
+        let previous = referencing(&[], serde_json::json!({ "readme": digest('a'), "logo": digest('c') }));
+        let new_root = referencing(&[], Value::Null);
+
+        let result = orphans(&FakeForge::new().failing_reads(), Some(&previous), &new_root).await;
+
+        assert!(
+            matches!(result, Err(AnnounceError::Forge(_))),
+            "the transport failure reaches the caller, got {result:?}"
+        );
+    }
+
+    /// A fresh claim has no previous root, so there is nothing to diff against
+    /// and no reason to spend a round trip. The forge refuses every read here:
+    /// the `Ok` is only reachable if no probe was made.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_previous_root_orphans_nothing_without_probing() {
+        let new_root = referencing(&[], serde_json::json!({ "readme": digest('a'), "logo": digest('c') }));
+
+        let paths = orphans(&FakeForge::new().failing_reads(), None, &new_root)
+            .await
+            .expect("no probe is made, so the refusing forge is never asked");
+
+        assert!(
+            paths.is_empty(),
+            "nothing was referenced before, so nothing is orphaned"
+        );
+    }
+
+    /// A root document is remote data, and its digest strings become path
+    /// components. Anything that is not a well-formed `<algorithm>:<hex>` is
+    /// dropped before it can be joined into one — a traversal in a `content`
+    /// field names no file this run may delete.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_malformed_digest_never_becomes_a_path() {
+        let previous = serde_json::json!({
+            "tags": {
+                "1.0.0": { "content": "../../../p/other/widget.json" },
+                "2.0.0": { "content": "sha256:../x" },
+            },
+            "desc": { "readme": "not-a-digest-at-all", "logo": "sha256:zz" },
+        });
+        let new_root = referencing(&[], Value::Null);
+
+        let paths = orphans(&FakeForge::new().failing_reads(), Some(&previous), &new_root)
+            .await
+            .expect("a malformed logo reference is dropped before it can be probed");
+
+        assert!(paths.is_empty(), "no unparseable reference produced a path: {paths:?}");
     }
 
     /// The default [`request`] with a different write target.

@@ -19,7 +19,7 @@ use serde_json::{Map, Value, json};
 
 use super::error::AnnounceError;
 use super::request::TagSelection;
-use crate::forge::FileChange;
+use crate::forge::{FileChange, Forge, RepoCoordinate};
 use ocx_oci::annotations;
 use ocx_oci::client::ReadAddressing;
 use ocx_oci::tag::InternalTag;
@@ -286,23 +286,24 @@ fn dedup_in_order(tags: &[String]) -> Vec<String> {
     tags.iter().filter(|tag| seen.insert((*tag).clone())).cloned().collect()
 }
 
-/// Dereference a root's `repository` pointer into its physical registry target,
-/// applying the strict `oci://host/path` parse (design register C3).
-pub fn extract_physical(root: &Value) -> Result<Physical, AnnounceError> {
-    let repository = root
-        .get("repository")
-        .and_then(Value::as_str)
-        .ok_or(AnnounceError::RootMissingField { field: "repository" })?;
+/// Dereference an `oci://host/path` pointer into its physical registry target,
+/// applying the strict parse (design register C3).
+///
+/// Takes the pointer rather than the document that carried it: claim holds a
+/// `--repository` value straight off the command line and has no root to read
+/// it out of, so lifting the field is the caller's one line (announce raises
+/// [`AnnounceError::RootMissingField`] there).
+pub fn extract_physical(pointer: &str) -> Result<Physical, AnnounceError> {
     let (registry, path) =
-        ocx_index::parse_physical_repository(repository).map_err(|_| AnnounceError::MalformedPhysicalRepository {
-            value: repository.to_string(),
+        ocx_index::parse_physical_repository(pointer).map_err(|_| AnnounceError::MalformedPhysicalRepository {
+            value: pointer.to_string(),
         })?;
     let (host, port) = ocx_oci::ssrf::split_host_port(&registry);
     Ok(Physical {
         host: host.to_string(),
         port,
         identifier: ocx_oci::Identifier::new_registry(path, registry.clone()),
-        display: repository.to_string(),
+        display: pointer.to_string(),
     })
 }
 
@@ -325,18 +326,18 @@ pub fn extract_physical(root: &Value) -> Result<Physical, AnnounceError> {
 /// on either route; the floor's verdict is the whole point of the call.
 /// # Errors
 ///
-/// [`AnnounceError::RootMissingField`] / [`AnnounceError::MalformedPhysicalRepository`]
-/// if the root's `repository` pointer is absent or unparseable;
-/// [`AnnounceError::Ssrf`] if the host is forbidden or unresolvable — naming
-/// `namespace`, the `[registries."<ns>"]` key the `trusted_hosts` fix goes into.
+/// [`AnnounceError::MalformedPhysicalRepository`] if `pointer` is not an
+/// `oci://host/path` reference; [`AnnounceError::Ssrf`] if the host is
+/// forbidden or unresolvable — naming `namespace`, the `[registries."<ns>"]`
+/// key the `trusted_hosts` fix goes into.
 pub async fn guarded_physical(
-    root: &Value,
+    pointer: &str,
     namespace: &str,
     trusted_hosts: &[String],
     insecure_hosts: &[String],
     rules: &ocx_oci::ssrf::ProxyRules,
 ) -> Result<Physical, AnnounceError> {
-    let physical = extract_physical(root)?;
+    let physical = extract_physical(pointer)?;
     ocx_oci::ssrf::guard_destination(
         ocx_oci::ssrf::DialScheme::for_registry(insecure_hosts, physical.identifier.registry()),
         &physical.host,
@@ -807,36 +808,136 @@ pub fn new_cas_count(committed: &Value, observed: &[Observed]) -> usize {
         .count()
 }
 
-/// Assemble the atomic file set for an announce: the root, one CAS object per
-/// observed tag, and the description's payload blobs when it moved this run
-/// (design register C15 — one commit).
-///
-/// Every CAS object is keyed by wire path; only the extension distinguishes
-/// them, and it is descriptive only — the index derives a CAS file's claimed
+/// A CAS object's wire path under its package (design register A2/A3). The
+/// extension is descriptive only — the index derives a CAS file's claimed
 /// digest from the filename's hex half alone.
+///
+/// The digest is a parsed [`ocx_oci::Digest`] rather than a string, which is
+/// what makes the path safe to build from a root document: both halves come
+/// from the algorithm enum and a validated hex run, so no component of remote
+/// data reaches the path verbatim.
+fn object_path(package_repo: &str, digest: &ocx_oci::Digest, extension: &str) -> String {
+    let (algorithm, hex) = digest.parts();
+    format!("p/{package_repo}/o/{algorithm}/{hex}.{extension}")
+}
+
+/// Every CAS object a root references, paired with the extension its path
+/// carries: `tags[].content` (`json`), `desc.readme` (`md`), and `desc.logo`,
+/// whose extension the root does not record (`None` — the caller probes).
+///
+/// A reference that is not a well-formed `<algorithm>:<hex>` digest is dropped
+/// with a debug line rather than carried: a root document is remote data, and
+/// the only thing this function's output is used for is building paths.
+fn referenced_objects(root: &Value) -> Vec<(ocx_oci::Digest, Option<&'static str>)> {
+    let mut objects = Vec::new();
+    let mut push = |raw: Option<&Value>, extension: Option<&'static str>| {
+        let Some(raw) = raw.and_then(Value::as_str) else {
+            return;
+        };
+        match ocx_oci::Digest::try_from(raw) {
+            Ok(digest) => objects.push((digest, extension)),
+            Err(_) => tracing::debug!(reference = %raw, "index root references a malformed digest; skipped"),
+        }
+    };
+    if let Some(tags) = root.get("tags").and_then(Value::as_object) {
+        for entry in tags.values() {
+            push(entry.get("content"), Some("json"));
+        }
+    }
+    let description = root.get("desc");
+    push(description.and_then(|desc| desc.get("readme")), Some("md"));
+    push(description.and_then(|desc| desc.get("logo")), None);
+    objects
+}
+
+/// The objects `previous_root` referenced that `new_root` does not — the
+/// deletions an announce carries so the published index does not accumulate a
+/// dispatch object per digest move and a readme per description edit (owner
+/// mandate, design decision C/D).
+///
+/// Diffing two referenced sets replaces a directory listing: every object in the
+/// repository was written as some root's referenced set, and the index refuses a
+/// root naming an absent object, so the set difference *is* the unreachable set.
+/// The logo is the one reference whose extension the root does not record, so it
+/// is probed — `<hex>.png`, then `<hex>.svg` — at `base_ref`, the commit this
+/// run's payload is parented on (design decision E). Neither answering is a
+/// silent skip; a transport failure is not.
+///
+/// `previous_root` is `None` for a fresh claim, which references nothing and
+/// therefore orphans nothing — answered without a single probe.
+///
+/// # Errors
+///
+/// [`AnnounceError::Forge`] when a logo probe fails. An orphan left behind
+/// because a read failed is still an orphan, so the run says so rather than
+/// committing a half-swept tree.
+pub(crate) async fn orphan_paths(
+    previous_root: Option<&Value>,
+    new_root: &Value,
+    package_repo: &str,
+    forge: &dyn Forge,
+    repo: &RepoCoordinate,
+    base_ref: &str,
+) -> Result<Vec<String>, AnnounceError> {
+    let Some(previous_root) = previous_root else {
+        return Ok(Vec::new());
+    };
+    let live: HashSet<ocx_oci::Digest> = referenced_objects(new_root)
+        .into_iter()
+        .map(|(digest, _)| digest)
+        .collect();
+    let mut paths = Vec::new();
+    for (digest, extension) in referenced_objects(previous_root) {
+        if live.contains(&digest) {
+            continue;
+        }
+        let Some(extension) = extension else {
+            for candidate in ["png", "svg"] {
+                let path = object_path(package_repo, &digest, candidate);
+                if forge.get_file_contents(repo, &path, base_ref).await?.is_some() {
+                    paths.push(path);
+                    break;
+                }
+            }
+            continue;
+        };
+        paths.push(object_path(package_repo, &digest, extension));
+    }
+    Ok(paths)
+}
+
+/// Assemble the atomic file set for an announce: the root, one CAS object per
+/// observed tag, the description's payload blobs, and a removal for every object
+/// the new root stopped referencing (design register C15 — one commit).
+///
+/// A path both written and orphaned is unrepresentable: the map is keyed by
+/// path and the writes go in first, so `Put` wins. It cannot arise anyway — an
+/// object the new root references is in `referenced(new)` and therefore not in
+/// the orphan set by construction.
 pub fn build_files(
     root_path: &str,
     root_bytes: &[u8],
     package_repo: &str,
     observed: &[Observed],
     desc_blobs: &[DescBlob],
+    orphans: &[String],
 ) -> BTreeMap<String, FileChange> {
     let mut files = BTreeMap::new();
     files.insert(root_path.to_string(), FileChange::Put(root_bytes.to_vec()));
     for entry in observed {
-        let (algorithm, hex) = entry.content.parts();
         files.insert(
-            format!("p/{package_repo}/o/{algorithm}/{hex}.json"),
+            object_path(package_repo, &entry.content, "json"),
             FileChange::Put(entry.bytes.clone()),
         );
     }
     for blob in desc_blobs {
-        let (algorithm, hex) = blob.digest.parts();
-        let extension = blob.extension;
         files.insert(
-            format!("p/{package_repo}/o/{algorithm}/{hex}.{extension}"),
+            object_path(package_repo, &blob.digest, blob.extension),
             FileChange::Put(blob.bytes.clone()),
         );
+    }
+    for orphan in orphans {
+        files.entry(orphan.clone()).or_insert(FileChange::Delete);
     }
     files
 }
@@ -921,6 +1022,10 @@ mod tests {
     fn keep_tag() -> String {
         format!("__ocx.keep.sha256-{}", "a".repeat(64))
     }
+
+    /// The physical pointer every loopback fixture below announces against —
+    /// the stub transport's own address.
+    const LOOPBACK_POINTER: &str = "oci://127.0.0.1/x";
 
     /// A committed root Value with one already-observed tag, in canonical form.
     fn committed_root(repository: &str) -> Value {
@@ -1154,8 +1259,7 @@ mod tests {
 
     #[test]
     fn extract_physical_parses_host_and_repository() {
-        let root = committed_root("oci://ghcr.io/ocx-contrib/widget");
-        let physical = extract_physical(&root).unwrap();
+        let physical = extract_physical("oci://ghcr.io/ocx-contrib/widget").unwrap();
         assert_eq!(physical.host, "ghcr.io");
         assert_eq!(physical.port, 443);
         assert_eq!(physical.identifier.registry(), "ghcr.io");
@@ -1164,27 +1268,16 @@ mod tests {
 
     #[test]
     fn extract_physical_honours_an_explicit_port() {
-        let root = committed_root("oci://registry.corp:5000/team/tool");
-        let physical = extract_physical(&root).unwrap();
+        let physical = extract_physical("oci://registry.corp:5000/team/tool").unwrap();
         assert_eq!(physical.host, "registry.corp");
         assert_eq!(physical.port, 5000);
     }
 
     #[test]
     fn extract_physical_rejects_a_missing_scheme() {
-        let root = committed_root("ghcr.io/ocx-contrib/widget");
         assert!(matches!(
-            extract_physical(&root),
+            extract_physical("ghcr.io/ocx-contrib/widget"),
             Err(AnnounceError::MalformedPhysicalRepository { .. })
-        ));
-    }
-
-    #[test]
-    fn extract_physical_errors_when_repository_is_absent() {
-        let root = serde_json::json!({ "tags": {} });
-        assert!(matches!(
-            extract_physical(&root),
-            Err(AnnounceError::RootMissingField { field: "repository" })
         ));
     }
 
@@ -1244,13 +1337,13 @@ mod tests {
         let manifest = image_index(vec![index_entry("amd64", 'a'), index_entry("arm64", 'b')]);
         let (served_bytes, served_digest) = seed_manifest(&data, "1.0.0", &manifest);
         let publisher = stub_publisher(&data);
-        let physical = extract_physical(&committed_root("oci://127.0.0.1/x")).unwrap();
+        let physical = extract_physical(LOOPBACK_POINTER).unwrap();
 
         let observed = observe_one_tag(&publisher, &physical, "1.0.0").await.unwrap();
 
         assert_eq!(observed.bytes, served_bytes, "the CAS payload must be the served bytes");
         assert_eq!(observed.content, served_digest, "the pointer must be the served digest");
-        let files = build_files("p/x.json", b"root", "x", std::slice::from_ref(&observed), &[]);
+        let files = build_files("p/x.json", b"root", "x", std::slice::from_ref(&observed), &[], &[]);
         let (algorithm, hex) = served_digest.parts();
         assert_eq!(
             written(&files, &format!("p/x/o/{algorithm}/{hex}.json")),
@@ -1271,7 +1364,7 @@ mod tests {
             &ocx_oci::Manifest::Image(ocx_oci::ImageManifest::default()),
         );
         let publisher = stub_publisher(&data);
-        let physical = extract_physical(&committed_root("oci://127.0.0.1/x")).unwrap();
+        let physical = extract_physical(LOOPBACK_POINTER).unwrap();
 
         let result = observe_one_tag(&publisher, &physical, "1.0.0").await;
 
@@ -1293,7 +1386,7 @@ mod tests {
         let manifest = image_index(vec![index_entry("arm64", 'b'), attestation]);
         let (served_bytes, _) = seed_manifest(&data, "1.0.0", &manifest);
         let publisher = stub_publisher(&data);
-        let physical = extract_physical(&committed_root("oci://127.0.0.1/x")).unwrap();
+        let physical = extract_physical(LOOPBACK_POINTER).unwrap();
 
         let observed = observe_one_tag(&publisher, &physical, "1.0.0").await.unwrap();
 
@@ -1349,7 +1442,7 @@ mod tests {
     }
 
     fn loopback_physical() -> Physical {
-        extract_physical(&committed_root("oci://127.0.0.1/x")).expect("root parses")
+        extract_physical(LOOPBACK_POINTER).expect("root parses")
     }
 
     /// A committed root whose `desc` records tag digest `digest` and points at
@@ -1412,7 +1505,7 @@ mod tests {
             "field order and values must match the index bot's Desc wire shape"
         );
 
-        let files = build_files("p/acme/widget.json", b"root", "acme/widget", &[], &observed.blobs);
+        let files = build_files("p/acme/widget.json", b"root", "acme/widget", &[], &observed.blobs, &[]);
         assert_eq!(
             written(&files, &format!("p/acme/widget/o/sha256/{}.md", readme_digest.hex())),
             Some(readme),
@@ -1451,7 +1544,7 @@ mod tests {
             observed.desc.is_none(),
             "an unmoved description is not rewritten into the root"
         );
-        let files = build_files("p/acme/widget.json", b"root", "acme/widget", &[], &observed.blobs);
+        let files = build_files("p/acme/widget.json", b"root", "acme/widget", &[], &observed.blobs, &[]);
         let readme_path = format!("p/acme/widget/o/sha256/{}.md", readme_digest.hex());
         assert_eq!(
             written(&files, &readme_path),
@@ -1946,9 +2039,63 @@ mod tests {
             "acme/widget",
             std::slice::from_ref(&entry),
             &[],
+            &[],
         );
         assert_eq!(written(&files, "p/acme/widget.json"), Some(b"root-bytes".as_slice()));
         assert!(files.contains_key(&format!("p/acme/widget/o/sha256/{hex}.json")));
+    }
+
+    // ── write_out ────────────────────────────────────────────────────────────
+
+    /// `--out` renders the file set a commit would produce, and since the
+    /// orphan sweep that set carries removals. All three cases ride one map,
+    /// because they only mean anything together: the removal lands, the removal
+    /// that hits nothing is the same no-op the forge drivers owe rather than an
+    /// error, and neither disturbs the write beside them. A caller pointing
+    /// `--out` at the directory a previous run filled is where this is visible
+    /// at all — a fresh directory makes every `Delete` the second case.
+    ///
+    /// The return value is the *written* paths: a deletion is not a written
+    /// file, so reporting one would tell `publish` to look for a file that is
+    /// deliberately absent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_out_applies_a_delete_and_tolerates_one_that_hits_nothing() {
+        const ROOT: &str = "p/acme/widget.json";
+        const STALE: &str = "p/acme/widget/o/sha256/aaaa.json";
+        const NEVER_WRITTEN: &str = "p/acme/widget/o/sha256/bbbb.md";
+
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let stale = directory.path().join(STALE);
+        tokio::fs::create_dir_all(stale.parent().expect("the object has a parent"))
+            .await
+            .expect("the previous run's directory");
+        tokio::fs::write(&stale, b"a previous run's object")
+            .await
+            .expect("the previous run's object");
+
+        let files = BTreeMap::from([
+            (ROOT.to_string(), FileChange::Put(b"root-bytes".to_vec())),
+            (STALE.to_string(), FileChange::Delete),
+            (NEVER_WRITTEN.to_string(), FileChange::Delete),
+        ]);
+
+        let written = write_out(directory.path(), &files)
+            .await
+            .expect("a delete naming an absent path is a no-op, not a failure");
+
+        assert_eq!(written, vec![ROOT.to_string()], "only the written path is reported");
+        assert!(
+            !tokio::fs::try_exists(&stale)
+                .await
+                .expect("the probe reads the directory")
+        );
+        assert_eq!(
+            tokio::fs::read(directory.path().join(ROOT))
+                .await
+                .expect("the root was written"),
+            b"root-bytes",
+            "the write beside the removals still lands"
+        );
     }
 
     // ── unclaimed package + SSRF ordering ────────────────────────────────────
@@ -1965,10 +2112,16 @@ mod tests {
         // before any registry request is even constructible: `guarded_physical` is
         // the only thing that yields the `Physical` both the tag listing and the
         // observe loop need.
-        let root = committed_root("oci://127.0.0.1/x");
         assert!(
             matches!(
-                guarded_physical(&root, "ocx.sh", &[], &[], &ocx_oci::ssrf::ProxyRules::direct()).await,
+                guarded_physical(
+                    LOOPBACK_POINTER,
+                    "ocx.sh",
+                    &[],
+                    &[],
+                    &ocx_oci::ssrf::ProxyRules::direct()
+                )
+                .await,
                 Err(AnnounceError::Ssrf { .. })
             ),
             "forbidden host must be refused"
@@ -1982,9 +2135,8 @@ mod tests {
         // the observe loop ran only *after* the pre-flight passed.
         let data = StubTransportData::new();
         let publisher = stub_publisher(&data);
-        let root = committed_root("oci://127.0.0.1/x");
         let physical = guarded_physical(
-            &root,
+            LOOPBACK_POINTER,
             "ocx.sh",
             &["127.0.0.1".to_string()],
             &[],
@@ -2016,10 +2168,10 @@ mod tests {
         // at the announce guard: under a proxy the destination name is literal
         // text in the CONNECT line, so a local lookup neither can succeed on a
         // proxy-only-DNS network nor decides anything (ocx#407).
-        let root = committed_root(&format!("oci://{UNRESOLVABLE_REGISTRY}/acme/widget"));
+        let pointer = format!("oci://{UNRESOLVABLE_REGISTRY}/acme/widget");
 
         let physical = guarded_physical(
-            &root,
+            &pointer,
             "ocx.sh",
             &[],
             &[],
@@ -2038,10 +2190,8 @@ mod tests {
         // Guard test: green before and after the fix. A proxy must never become
         // a laundering hop for a loopback target, so a forbidden literal is
         // refused on the text alone, with no lookup and no trusted_hosts entry.
-        let root = committed_root("oci://127.0.0.1:5000/acme/widget");
-
         let result = guarded_physical(
-            &root,
+            "oci://127.0.0.1:5000/acme/widget",
             "ocx.sh",
             &[],
             &[],
@@ -2069,19 +2219,19 @@ mod tests {
         // configured, the same authority is proxied when it is dialed over
         // plain HTTP and direct when it is dialed over HTTPS — and a direct
         // dial to an unresolvable name still fails closed.
-        let root = committed_root(&format!("oci://{UNRESOLVABLE_REGISTRY}/acme/widget"));
+        let pointer = format!("oci://{UNRESOLVABLE_REGISTRY}/acme/widget");
         let rules = ocx_oci::ssrf::ProxyRules::new(
             hyper_util::client::proxy::matcher::Matcher::builder()
                 .http("http://proxy.corp:3128")
                 .build(),
         );
 
-        let physical = guarded_physical(&root, "ocx.sh", &[], &[UNRESOLVABLE_REGISTRY.to_string()], &rules)
+        let physical = guarded_physical(&pointer, "ocx.sh", &[], &[UNRESOLVABLE_REGISTRY.to_string()], &rules)
             .await
             .expect("an insecure registry dials http, which this proxy intercepts");
         assert_eq!(physical.identifier.registry(), UNRESOLVABLE_REGISTRY);
 
-        let refused = guarded_physical(&root, "ocx.sh", &[], &[], &rules).await;
+        let refused = guarded_physical(&pointer, "ocx.sh", &[], &[], &rules).await;
         assert!(
             matches!(
                 refused,
@@ -2121,7 +2271,7 @@ mod tests {
             );
         }
         let publisher = stub_publisher(&data);
-        let physical = extract_physical(&committed_root("oci://127.0.0.1/x")).expect("root parses");
+        let physical = extract_physical(LOOPBACK_POINTER).expect("root parses");
 
         let observed = observe_curated(&publisher, &physical, &curated)
             .await
@@ -2147,7 +2297,7 @@ mod tests {
             .manifest_delays
             .insert("127.0.0.1/x:missing-first".to_string(), Duration::from_millis(60));
         let publisher = stub_publisher(&data);
-        let physical = extract_physical(&committed_root("oci://127.0.0.1/x")).expect("root parses");
+        let physical = extract_physical(LOOPBACK_POINTER).expect("root parses");
 
         // `Observed` carries raw bytes and has no `Debug`, so `expect_err` is out.
         let Err(error) = observe_curated(&publisher, &physical, &curated).await else {
@@ -2176,7 +2326,7 @@ mod tests {
             "latest".to_string(),
         ]];
         let publisher = stub_publisher(&data);
-        let physical = extract_physical(&committed_root("oci://127.0.0.1/x")).expect("root parses");
+        let physical = extract_physical(LOOPBACK_POINTER).expect("root parses");
 
         let tags = list_registry_tags(&publisher, &physical)
             .await
