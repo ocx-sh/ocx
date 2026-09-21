@@ -917,7 +917,41 @@ impl ConfigLoader {
     /// `symlink_metadata` as well so a `.git` symlink does not silently
     /// weaken the boundary check. A `.git` file (git worktree linkfile) also
     /// counts as a boundary — we match git's own "any `.git` entry" rule.
+    ///
+    /// A candidate sitting at `$OCX_HOME` is skipped the same way: that file is
+    /// the **global toolchain manifest**, reachable only through the explicit
+    /// `--global`/`OCX_GLOBAL` selector, never by discovery
+    /// (`adr_global_toolchain_tier.md` §Decision 1). Skip-and-continue rather
+    /// than a boundary — `$OCX_HOME` nested inside a real project must still
+    /// let that project be found from a deeper working directory.
+    ///
+    /// A relative `$OCX_HOME` is resolved against `start`, the same way a
+    /// relative ceiling is: `current` is absolute at every level, so a relative
+    /// root could otherwise never match one.
+    ///
+    /// Known limitation, shared with `OCX_CEILING_PATH`: the comparison is
+    /// **lexical**, so a `$OCX_HOME` spelled through a symlink (`/tmp` →
+    /// `/private/tmp` on macOS) will not match a `current` that is spelled
+    /// canonically. `current` is never canonicalized — canonicalizing one side
+    /// alone would break the other comparison, and canonicalizing both would
+    /// put a `stat` per level on the walk.
     async fn walk_for_project_file(start: &Path, ceiling: Option<&Path>) -> Option<PathBuf> {
+        // Resolved once, outside the loop: `$OCX_HOME` cannot change mid-walk,
+        // and `default_ocx_root` is the one definition of it (`crate::home`).
+        //
+        // Absolutized against `start` and normalized, exactly as the ceiling is
+        // above, and for the same reason. `default_ocx_root` hands back the
+        // environment value verbatim, so a relative `OCX_HOME` would be unequal
+        // to every level the walk produces — `current` is absolute throughout —
+        // and the guard would be silently inert rather than wrong. The join
+        // alone is not enough either: a relative spelling that reaches an
+        // ancestor is `..`-prefixed, and `..` is a component `Path` equality
+        // keeps rather than folds. `Path::join` with an absolute value
+        // replaces, and normalizing a path carrying no `.`/`..` is the
+        // identity, so an absolute `OCX_HOME` — every real one — behaves
+        // exactly as it would without either step.
+        let ocx_home =
+            crate::home::default_ocx_root().map(|root| ocx_util::fs::path::lexical_normalize(&start.join(root)));
         let mut current = start;
         loop {
             // Probe `.git/` and `ocx.toml` concurrently; `tokio::join!` just
@@ -932,6 +966,16 @@ impl ConfigLoader {
                 tokio::join!(Self::has_git_dir(current), tokio::fs::symlink_metadata(&candidate),);
 
             match &candidate_meta {
+                // `$OCX_HOME/ocx.toml` is the global toolchain manifest, not a
+                // project — debug, not warn, because a working directory under
+                // `$OCX_HOME` is an ordinary state for a tool whose own store
+                // lives there (#485).
+                Ok(meta) if meta.file_type().is_file() && ocx_home.as_deref() == Some(current) => {
+                    log::debug!(
+                        "skipping global toolchain manifest {} during the CWD walk (reachable only via --global/OCX_GLOBAL)",
+                        candidate.display()
+                    );
+                }
                 Ok(meta) if meta.file_type().is_file() => {
                     return Some(candidate);
                 }
@@ -3568,6 +3612,163 @@ mod tests {
             resolved,
             Some(project),
             "the candidate probe runs before the ceiling gate, so an ocx.toml AT the ceiling resolves"
+        );
+    }
+
+    /// C-010 (#485) half one of two: a working directory under `$OCX_HOME`
+    /// does not adopt the global toolchain manifest as its project.
+    ///
+    /// `$OCX_HOME/ocx.toml` is the `--global` tier
+    /// (`adr_global_toolchain_tier.md` §Decision 1) and the CWD walk used to
+    /// hand it back as an ordinary discovery hit, so every command run from
+    /// inside the store — `$OCX_HOME/packages/<x>` — silently acquired the
+    /// global toolchain as a project.
+    ///
+    /// The paired half is
+    /// [`project_path_explicit_flag_still_reaches_the_global_manifest`]: a
+    /// guard that suppressed the manifest outright, rather than only during
+    /// the walk, would pass this assertion alone.
+    #[tokio::test]
+    async fn walk_does_not_adopt_the_global_toolchain_manifest() {
+        let env = ocx_util::env::overrides::lock();
+        let home = env.isolate_project_home();
+        write_file(&home.path().join(PROJECT_FILE_NAME), "");
+        let cwd = home.path().join("sub");
+        std::fs::create_dir(&cwd).unwrap();
+
+        let resolved = ConfigLoader::walk_for_project_file(&cwd, None).await;
+
+        assert_eq!(
+            resolved, None,
+            "the walk must skip $OCX_HOME's own ocx.toml and keep ascending, not return it"
+        );
+    }
+
+    /// C-010 (#485) half two of two: the skip is scoped to the walk, so the
+    /// global manifest stays reachable through an explicit selection.
+    ///
+    /// The `--global` selector itself is `ProjectConfig::resolve`'s own branch
+    /// in `ocx_project`, which joins `<ocx_home>/ocx.toml` without consulting
+    /// this loader at all and therefore cannot be exercised from here. The
+    /// explicit-path branch is this crate's equivalent evidence: it proves the
+    /// guard refuses the *discovery* of that file, not the file.
+    #[tokio::test]
+    async fn project_path_explicit_flag_still_reaches_the_global_manifest() {
+        let env = ocx_util::env::overrides::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let home = env.isolate_project_home();
+        let manifest = home.path().join(PROJECT_FILE_NAME);
+        write_file(&manifest, "");
+        let cwd = home.path().join("sub");
+        std::fs::create_dir(&cwd).unwrap();
+
+        let resolved = ConfigLoader::project_path(Some(&cwd), Some(&manifest))
+            .await
+            .expect("an explicit path naming the global manifest must resolve, not error");
+
+        assert_eq!(
+            resolved,
+            Some(manifest),
+            "the $OCX_HOME guard bounds discovery only — an explicit selection still selects"
+        );
+    }
+
+    /// C-010 (#485): the guard is a skip, not a boundary — a real project
+    /// **above** `$OCX_HOME` is still found from a working directory below it.
+    ///
+    /// The mutation this catches is "skip and stop": returning `None` at
+    /// `$OCX_HOME` instead of continuing the ascent. That reads as the same
+    /// fix and passes [`walk_does_not_adopt_the_global_toolchain_manifest`],
+    /// but it makes a project undiscoverable whenever someone points
+    /// `OCX_HOME` at a directory inside their checkout.
+    #[tokio::test]
+    async fn walk_finds_a_project_above_a_nested_ocx_home() {
+        let env = ocx_util::env::overrides::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+        let project_root = dir.path().join("proj");
+        let home = project_root.join("home");
+        let cwd = home.join("x");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let project = project_root.join(PROJECT_FILE_NAME);
+        write_file(&project, "");
+        write_file(&home.join(PROJECT_FILE_NAME), "");
+        env.set("OCX_HOME", home.to_str().unwrap());
+
+        let resolved = ConfigLoader::project_path(Some(&cwd), None)
+            .await
+            .expect("a walk past a nested $OCX_HOME should resolve, not error");
+
+        assert_eq!(
+            resolved,
+            Some(project),
+            "$OCX_HOME skips its own candidate and keeps walking, so the project above it wins"
+        );
+    }
+
+    /// C-010 (#485): `OCX_NO_PROJECT=1` stays a hard `None` — the guard adds a
+    /// skip to the walk, it does not give the walk a new way to run.
+    ///
+    /// Asserted over the tree of
+    /// [`walk_finds_a_project_above_a_nested_ocx_home`], which resolves to a
+    /// real project without the flag, so the `None` here is the flag's doing
+    /// and not an empty fixture.
+    #[tokio::test]
+    async fn no_project_stays_a_hard_none_above_a_nested_ocx_home() {
+        let env = ocx_util::env::overrides::lock();
+        env.set("OCX_NO_PROJECT", "1");
+        env.remove("OCX_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+        let project_root = dir.path().join("proj");
+        let home = project_root.join("home");
+        let cwd = home.join("x");
+        std::fs::create_dir_all(&cwd).unwrap();
+        write_file(&project_root.join(PROJECT_FILE_NAME), "");
+        write_file(&home.join(PROJECT_FILE_NAME), "");
+        env.set("OCX_HOME", home.to_str().unwrap());
+
+        let resolved = ConfigLoader::project_path(Some(&cwd), None)
+            .await
+            .expect("OCX_NO_PROJECT=1 with no explicit flag must return Ok(None)");
+
+        assert_eq!(resolved, None, "OCX_NO_PROJECT=1 prunes the walk entirely");
+    }
+
+    /// C-010 (#485): a **relative** `$OCX_HOME` still fires the guard.
+    ///
+    /// `home::default_ocx_root` returns the environment value verbatim, and
+    /// `current` is absolute at every level of the walk, so an unjoined
+    /// relative root can never equal one — the guard would report as present
+    /// and do nothing. Resolved against `start`, which is the same treatment
+    /// `OCX_CEILING_PATH` gets and for the same reason (#380).
+    ///
+    /// Mutation that reds it: drop the `start.join(..)` and normalize the raw
+    /// root. Every other `$OCX_HOME` test stays green, because they all spell
+    /// the root absolutely.
+    #[tokio::test]
+    async fn walk_skips_a_relative_ocx_home() {
+        let env = ocx_util::env::overrides::lock();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        let cwd = home.join("sub");
+        std::fs::create_dir_all(&cwd).unwrap();
+        write_file(&home.join(PROJECT_FILE_NAME), "");
+        // `..` from the walk's start is this tree's relative spelling of $OCX_HOME.
+        env.set("OCX_HOME", "..");
+
+        let resolved = ConfigLoader::walk_for_project_file(&cwd, None).await;
+
+        assert_eq!(
+            resolved, None,
+            "a relative $OCX_HOME resolves against the walk start, so the guard still skips its manifest"
         );
     }
 
