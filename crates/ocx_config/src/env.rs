@@ -21,6 +21,26 @@ pub mod keys {
     /// Named `_PIN` to make the pin semantics explicit — the value is
     /// the specific binary that was running when the package was installed.
     pub const OCX_BINARY_PIN: &str = "OCX_BINARY_PIN";
+    /// The OCX data root every store is rooted at — `$OCX_HOME`, else
+    /// `~/.ocx`. Resolved through [`crate::home::default_ocx_root`], the one
+    /// definition of that fallback.
+    ///
+    /// Forwarded by [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config) **set-always**,
+    /// never removed — the second key here with that shape, beside
+    /// [`OCX_BINARY_PIN`]. Unlike [`OCX_CONFIG`] and its siblings there is no
+    /// "parent resolved none" state a stale inherited value could beat: a
+    /// resolvable root *is* what the parent resolved, so the value written
+    /// here is the home the parent's own stores used, and an ambient
+    /// `OCX_HOME=""` is corrected to the absolute fallback rather than
+    /// travelling onward as the empty string.
+    ///
+    /// Without that forwarding `ocx exec --clean` sent a child into a
+    /// *different* home: `--clean` strips `HOME` too, so a generated
+    /// entrypoint launcher's `ocx launcher exec` re-entry resolved `~/.ocx`
+    /// from the passwd database, read another config chain and looked for the
+    /// package the parent had just materialized in a store that did not have
+    /// it (ocx-sh/ocx#488).
+    pub const OCX_HOME: &str = "OCX_HOME";
     /// Boolean — disables network access when truthy. Mirrors `--offline`.
     pub const OCX_OFFLINE: &str = "OCX_OFFLINE";
     /// Boolean — freezes tag resolution to the local index when truthy:
@@ -734,7 +754,10 @@ impl Env {
     /// channel that survives a deliberately emptied child env
     /// ([`Env::clean`](crate::env::Env::clean)) — the reason at its own block below.
     ///
-    /// Always sets [`keys::OCX_BINARY_PIN`]. Sets [`keys::OCX_OFFLINE`] /
+    /// Always sets [`keys::OCX_BINARY_PIN`] and — when a root resolves —
+    /// [`keys::OCX_HOME`], so a child lands in the same store the parent did
+    /// even on the `--clean` arm, which strips `HOME` along with everything
+    /// else. Sets [`keys::OCX_OFFLINE`] /
     /// [`keys::OCX_REMOTE`] / [`keys::OCX_FROZEN`] / [`keys::OCX_GLOBAL`] /
     /// [`keys::OCX_NO_VERIFY`] / [`keys::OCX_NO_CONFIG`] only
     /// when the corresponding flag is true so the child env stays minimal. Sets
@@ -755,6 +778,34 @@ impl Env {
             self.remove(credential);
         }
         self.set(keys::OCX_BINARY_PIN, cfg.self_exe.as_os_str());
+        // Set-always, never removed, and the one value here that is *resolved*
+        // rather than parsed from the view: `default_ocx_root()` is the single
+        // definition of the root this process' own stores were opened at, so
+        // reading it here is the same source the parent used, not a second one
+        // (the shape `OCX_ALLOW_YANKED` established below). `None` means
+        // neither `$OCX_HOME` nor a home directory resolved — the state that
+        // produced it, and one no inherited value could improve on — so that
+        // arm writes nothing and clears nothing.
+        //
+        // Absolutized against *this* process' working directory, which is the
+        // only frame where a relative ambient `OCX_HOME` still means what its
+        // author meant: a child is free to run somewhere else —
+        // `package test --script` spawns from the scratch tree — and a
+        // relative value travelling verbatim would name a different directory
+        // there, silently. `std::path::absolute` is lexical (no filesystem
+        // access, no symlink resolution), so an absolute value is returned
+        // unchanged and nothing is canonicalized behind the operator's back.
+        if let Some(root) = crate::home::default_ocx_root() {
+            let absolute = std::path::absolute(&root).unwrap_or_else(|error| {
+                // The documented failure is an empty path or a CWD this
+                // process cannot read; the raw value is still better than no
+                // value, and the child re-resolves it the same way this
+                // process just did.
+                log::debug!("could not absolutize OCX_HOME '{}': {error}", root.display());
+                root.clone()
+            });
+            self.set(keys::OCX_HOME, absolute.as_os_str());
+        }
         if cfg.offline {
             self.set(keys::OCX_OFFLINE, "1");
         } else {
@@ -2166,6 +2217,56 @@ mod tests {
         assert!(env.get(keys::OCX_REMOTE).is_none());
         assert!(env.get(keys::OCX_CONFIG).is_none());
         assert!(env.get(keys::OCX_INDEX).is_none());
+    }
+
+    /// C-013 (#488): a child env carries the home the parent resolved.
+    ///
+    /// `--clean` strips `HOME` as well, so a child that inherits no `OCX_HOME`
+    /// resolves `~/.ocx` from the passwd database — a different store than the
+    /// one the parent just materialized the package into. The value is written
+    /// unconditionally, and an ambient empty string is corrected rather than
+    /// forwarded: an empty `OCX_HOME` is not a home, and passing it on would
+    /// hand the child a root the parent never used either.
+    #[test]
+    fn apply_ocx_config_sets_ocx_home_from_the_resolved_root() {
+        let guard = ocx_util::env::overrides::lock();
+        let home = guard.isolate_project_home();
+
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert_eq!(
+            env.get(keys::OCX_HOME).map(std::path::Path::new),
+            Some(home.path()),
+            "a clean child env must carry the OCX_HOME the parent resolved"
+        );
+
+        // Ambient `OCX_HOME=""` is "unset" to `default_ocx_root`, so the child
+        // gets the absolute fallback the parent's own stores used.
+        guard.set(keys::OCX_HOME, "");
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        let fallback = ocx_util::env::home_dir().expect("a home directory").join(".ocx");
+        assert_eq!(
+            env.get(keys::OCX_HOME).map(std::path::Path::new),
+            Some(fallback.as_path()),
+            "an empty ambient OCX_HOME must become the absolute fallback, never the empty string"
+        );
+
+        // A relative ambient value means "relative to *this* process' working
+        // directory". The child may run somewhere else entirely, so what
+        // crosses the spawn is the absolutized form.
+        guard.set(keys::OCX_HOME, "rel/dir");
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        let forwarded = std::path::Path::new(env.get(keys::OCX_HOME).expect("OCX_HOME is set"));
+        assert!(
+            forwarded.is_absolute(),
+            "a relative ambient OCX_HOME must be absolutized before it crosses a spawn, got {forwarded:?}"
+        );
+        assert!(
+            forwarded.ends_with("rel/dir"),
+            "absolutizing must keep the operator's own path, got {forwarded:?}"
+        );
     }
 
     #[test]

@@ -70,7 +70,7 @@ const DEFAULT_READ_MAX_BYTES: i32 = 1_048_576;
 /// defence-in-depth) re-entrant ocx.
 const RESERVED_ENV_KEYS: &[&str] = &[
     "PATH",
-    "OCX_HOME",
+    ocx_config::env::keys::OCX_HOME,
     ocx_config::env::keys::OCX_BINARY_PIN,
     ocx_config::env::keys::OCX_CONFIG,
     ocx_config::env::keys::OCX_PROJECT,
