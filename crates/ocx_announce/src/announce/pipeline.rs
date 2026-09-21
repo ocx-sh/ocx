@@ -154,10 +154,27 @@ pub fn committed_tag_names(root: &Value) -> Vec<String> {
 /// reserved tag, but either would re-announce one forever once it landed. A
 /// reserved tag is not a version, so it is dropped and reported, never refused:
 /// refusing would make announce police how a publisher tags their own
-/// repository. A selection that is *entirely* reserved collapses into the
-/// existing [`AnnounceError::NoCuratedTags`] — the empty-set case, no separate
-/// variant — carrying the dropped names, because that path returns no outcome
-/// for the CLI's drop notice to read and the names would otherwise vanish.
+/// repository. A *caller-named* selection that is entirely reserved collapses
+/// into the existing [`AnnounceError::NoCuratedTags`] — the empty-set case, no
+/// separate variant — carrying the dropped names, because that path returns no
+/// outcome for the CLI's drop notice to read and the names would otherwise
+/// vanish.
+///
+/// **The empty set is a refusal only for the selections that name tags**
+/// ([#487]). [`TagSelection::Replace`] and [`TagSelection::UnionFile`] are the
+/// publisher saying which versions the index should carry, so resolving to
+/// nothing means the invocation asked for nothing and the refusal guards
+/// against a retraction nobody typed. [`TagSelection::Refresh`] and
+/// [`TagSelection::FromRegistry`] derive their universe from state instead, and
+/// empty state is legitimate: a freshly claimed root carries `"tags": {}`
+/// (`claim/root.rs`), so `--refresh` over it collapsed to the empty set and
+/// exited 64 before the description was ever observed. Both now return an empty
+/// [`ResolvedTags`] and let the pipeline run on to `observe_desc`, which is what
+/// makes a description-only refresh possible. Reserved drops then ride out on
+/// [`AnnounceOutcome::reserved_tags_dropped`](super::AnnounceOutcome::reserved_tags_dropped)
+/// rather than on an error message.
+///
+/// [#487]: https://github.com/ocx-sh/ocx/issues/487
 ///
 /// `discovered` is the one source filtered *before* the collapse, by
 /// [`list_registry_tags`], and it is filtered silently. `reserved_dropped`
@@ -169,7 +186,8 @@ pub fn committed_tag_names(root: &Value) -> Vec<String> {
 ///
 /// # Errors
 ///
-/// [`AnnounceError::NoCuratedTags`] when nothing survives resolution.
+/// [`AnnounceError::NoCuratedTags`] when nothing survives resolution under
+/// [`TagSelection::Replace`] or [`TagSelection::UnionFile`].
 pub fn resolve_curated_tags(
     selection: &TagSelection,
     committed: &[String],
@@ -183,7 +201,12 @@ pub fn resolve_curated_tags(
     };
     let (reserved_dropped, tags): (Vec<String>, Vec<String>) =
         resolved.into_iter().partition(|tag| Tag::is_reserved_str(tag));
-    if tags.is_empty() {
+    // Spelled as the two positives rather than `!Refresh && !FromRegistry`: a
+    // negation opts a total match out of the exhaustiveness the compiler would
+    // otherwise give it, so a fifth selection would silently join the refusing
+    // set. Same reasoning as the `dropped_committed_tags` guard's spelling in
+    // `super::observe_and_rebuild`.
+    if tags.is_empty() && matches!(selection, TagSelection::Replace(_) | TagSelection::UnionFile(_)) {
         return Err(AnnounceError::NoCuratedTags { reserved_dropped });
     }
     Ok(ResolvedTags { tags, reserved_dropped })
@@ -243,9 +266,10 @@ fn union_onto_committed(committed: &[String], additions: &[String]) -> Vec<Strin
 /// # Errors
 ///
 /// [`AnnounceError::ListTags`] when the registry listing fails. An empty
-/// repository is not an error here: it collapses into
-/// [`AnnounceError::NoCuratedTags`] alongside an empty committed set, the same
-/// as any other selection that resolves to nothing.
+/// repository is not an error here, and — since `--tags-from-registry` derives
+/// its universe from state rather than naming it — an empty repository beside
+/// an empty committed set is not an error at the collapse either: the run
+/// proceeds to the description observation with no curated tag at all.
 pub async fn list_registry_tags(publisher: &Publisher, physical: &Physical) -> Result<Vec<String>, AnnounceError> {
     let tags = publisher
         .list_tags(physical.identifier.clone())
@@ -970,6 +994,9 @@ mod tests {
         assert_eq!(curated.tags, committed);
     }
 
+    /// The empty set is a refusal for the two selections that **name** tags:
+    /// the invocation asked for nothing, and accepting it would retract the
+    /// whole curated set on the strength of a typo.
     #[test]
     fn empty_curated_set_is_an_error() {
         assert!(matches!(
@@ -977,9 +1004,32 @@ mod tests {
             Err(AnnounceError::NoCuratedTags { ref reserved_dropped }) if reserved_dropped.is_empty()
         ));
         assert!(matches!(
-            resolve_no_discovery(&TagSelection::Refresh, &[]),
+            resolve_no_discovery(&TagSelection::UnionFile(vec![]), &[]),
             Err(AnnounceError::NoCuratedTags { ref reserved_dropped }) if reserved_dropped.is_empty()
         ));
+    }
+
+    /// #487, the other half: `--refresh` and `--tags-from-registry` derive their
+    /// universe from state, and a freshly claimed root's state is `"tags": {}`.
+    /// An empty result there is the legitimate "nothing curated yet", so the
+    /// collapse returns it and the pipeline runs on to the description
+    /// observation — which is the only thing such a run has to do.
+    ///
+    /// Reds on restoring the old unconditional `tags.is_empty()` refusal.
+    #[test]
+    fn an_empty_state_derived_selection_resolves_to_no_tags_rather_than_an_error() {
+        let refreshed = resolve_no_discovery(&TagSelection::Refresh, &[])
+            .expect("--refresh over an empty committed set is not a refusal");
+        assert!(
+            refreshed.tags.is_empty(),
+            "nothing was committed, so nothing is curated"
+        );
+        assert!(refreshed.reserved_dropped.is_empty(), "nothing was dropped either");
+
+        let discovered = resolve_curated_tags(&TagSelection::FromRegistry, &[], &[])
+            .expect("--tags-from-registry over an empty repository is not a refusal");
+        assert!(discovered.tags.is_empty());
+        assert!(discovered.reserved_dropped.is_empty());
     }
 
     // ── the D7 reserved-tag filter, one site, all three selections ───────────
@@ -1042,10 +1092,10 @@ mod tests {
         );
     }
 
-    /// An entirely reserved selection is the empty-set case — it collapses into
-    /// the existing `NoCuratedTags`, so no new error variant exists to add.
-    /// The dropped names ride out on the variant: this is the one D7 path with
-    /// no outcome for the CLI's drop notice to read.
+    /// An entirely reserved **caller-named** selection is the empty-set case —
+    /// it collapses into the existing `NoCuratedTags`, so no new error variant
+    /// exists to add. The dropped names ride out on the variant: this is the one
+    /// D7 path with no outcome for the CLI's drop notice to read.
     #[test]
     fn resolve_curated_tags_all_reserved_is_no_curated_tags() {
         let Err(AnnounceError::NoCuratedTags { reserved_dropped }) =
@@ -1054,13 +1104,36 @@ mod tests {
             panic!("an entirely reserved selection resolves to nothing");
         };
         assert_eq!(reserved_dropped, vec!["__ocx.desc".to_string(), keep_tag()]);
+    }
 
-        let Err(AnnounceError::NoCuratedTags { reserved_dropped }) =
-            resolve_no_discovery(&TagSelection::Refresh, &["__ocx.patch".to_string()])
-        else {
-            panic!("an entirely reserved committed set resolves to nothing");
-        };
-        assert_eq!(reserved_dropped, vec!["__ocx.patch".to_string()]);
+    /// The `--refresh` half of the same shape (#487): a committed set that is
+    /// wholly reserved carries no version to announce, but the publisher named
+    /// none either — the root simply holds tags that are not versions. So the
+    /// drops ride out on `ResolvedTags` for the outcome's
+    /// `reserved_tags_dropped` to report, and the run proceeds.
+    ///
+    /// Reds on restoring the old unconditional `tags.is_empty()` refusal.
+    #[test]
+    fn an_all_reserved_committed_set_under_refresh_drops_without_refusing() {
+        let curated = resolve_no_discovery(&TagSelection::Refresh, &["__ocx.patch".to_string()])
+            .expect("a carrier selection never refuses the empty set");
+        assert!(curated.tags.is_empty(), "no version survived the D7 filter");
+        assert_eq!(
+            curated.reserved_dropped,
+            vec!["__ocx.patch".to_string()],
+            "the drop is reported on the outcome instead of on an error message"
+        );
+
+        // The #436 tripwire is the reason the empty set could not simply be
+        // waved through: a regenerated root that carries fewer committed tags
+        // than it started with is a deletion. It cannot fire here, and this is
+        // the assertion rather than the argument — a reserved name is excluded
+        // by construction, so the only committed tag is not a loss.
+        let regenerated = serde_json::json!({ "tags": {} });
+        assert!(
+            dropped_committed_tags(&["__ocx.patch".to_string()], &regenerated, &curated.reserved_dropped).is_empty(),
+            "a D7 drop is not a lost tag, so the empty refresh does not trip the #436 guard"
+        );
     }
 
     // ── require_root (unclaimed package, C10) ────────────────────────────────
