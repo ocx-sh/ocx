@@ -46,8 +46,7 @@ pub use hash::{DECLARATION_HASH_VERSION, declaration_hash};
 pub use hook::{MissingState, ProjectState, load_project_state};
 pub use lock::{LockCurrency, LockMetadata, LockVersion, LockedTool, ProjectLock, locked_tool_content_equal};
 pub use mutate::{
-    add_binding, add_binding_in_memory, binding_key, init_project, init_project_at_default, remove_binding,
-    remove_binding_in_memory, set_activate,
+    add_binding_in_memory, binding_key, init_project, init_project_at_default, remove_binding_in_memory, set_activate,
 };
 pub use mutation::{ManifestSnapshot, MutationCommit, MutationGuard, StagedMutation};
 pub use project_lock::{acquire_project_lock, acquire_project_lock_for_file};

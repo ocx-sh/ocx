@@ -170,7 +170,7 @@ def test_remove_from_named_group(
     """``ocx remove <name>`` finds a binding in a named group (``[group.ci]``)
     and removes it — no explicit ``--group`` flag required.
 
-    Spec: Unit 7 §3 bullet 3. ``mutate::remove_binding`` searches both
+    Spec: Unit 7 §3 bullet 3. ``mutate::remove_binding_in_memory`` searches both
     default and named groups.
     """
     short = uuid4().hex[:8]
