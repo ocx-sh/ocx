@@ -1569,6 +1569,36 @@ mod tests {
                         continue;
                     }
                 }
+                DissolvedClaim::Retired { was } => {
+                    // Canonicalised through the same parse as the baseline's
+                    // own value, so the row is written the way a Rust author
+                    // would write it rather than in `syn`'s spacing.
+                    let Ok((_, retired)) = canonical_row(written, was, "DissolvedRootError") else {
+                        panic!("`{was}` in a DISSOLVED `Retired` row is not a parseable value");
+                    };
+                    if want != retired {
+                        drifted.push(format!(
+                            "{}: `{pattern}` is recorded as retired from `{retired}`, but the baseline says \
+                             `{want}` — a row naming the wrong value records the wrong retirement",
+                            row.baseline_source
+                        ));
+                        continue;
+                    }
+                    // The tree-side half, and the only one that can red on a
+                    // later edit: the row claims nothing produces this value
+                    // any more, which is true exactly while the baseline row
+                    // has no successor arm. A variant re-minted under its old
+                    // name would otherwise leave the row asserting a deletion
+                    // that had been undone.
+                    if !missing.iter().any(|(source, _)| source == row.baseline_source) {
+                        drifted.push(format!(
+                            "{}: `{pattern}` is recorded as retired, but the tree still carries that arm — \
+                             a retirement row outliving the deletion it records says the opposite of the truth",
+                            row.baseline_source
+                        ));
+                        continue;
+                    }
+                }
             }
             covered.insert(row.baseline_source.to_owned());
         }
@@ -1845,12 +1875,35 @@ mod tests {
         /// red. The equivalence is proven concretely instead, by
         /// `shell_error_falls_through_to_the_same_failure`.
         FallsThrough,
+        /// The **variant itself** was deleted, so nothing produces the
+        /// baseline row's value any more — and that is the decision, not an
+        /// accident.
+        ///
+        /// The two rows above answer "who produces this now"; this one answers
+        /// "nobody, deliberately". It is the shape an interface break takes
+        /// here: an exit code a release wrapper branched on stops being
+        /// reachable, which the changelog announces and this table records.
+        ///
+        /// Both halves are checked, because either alone is a rubber stamp.
+        /// `was` must equal the baseline's value verbatim, so a row cannot
+        /// retire a code it names wrongly; and the baseline row must actually
+        /// have no successor arm, so a row cannot outlive the deletion it
+        /// records — a variant re-minted under its old name reds here rather
+        /// than being silently excused.
+        Retired {
+            /// The value the deleted arm carried, as the baseline writes it.
+            was: &'static str,
+        },
     }
 
     /// WP-37's rows: `ocx_lib::Error` is deleted, so its 32 baseline arms have
     /// no declaring impl left. 26 are answered by `STANDS_IN_FOR` rows against
     /// the arms `ocx_package_manager::Error` and its siblings already carry;
-    /// these six are the remainder.
+    /// six of the rows below are the remainder.
+    ///
+    /// The last two are a different kind of row and carry
+    /// [`DissolvedClaim::Retired`]: a variant deleted outright, whose value
+    /// nothing produces any more by decision.
     const DISSOLVED: &[Dissolved] = &[
         // `Self::Auth(e)`, inner `ocx_oci::auth::error::AuthError`.
         Dissolved {
@@ -1906,6 +1959,24 @@ mod tests {
         Dissolved {
             baseline_source: "crates/ocx_lib/src/error.rs:393",
             claim: DissolvedClaim::FallsThrough,
+        },
+        // #481 — `ClaimError::PackageAlreadyClaimed` is deleted: a claim over an
+        // already-claimed package adds the caller's owners instead of refusing,
+        // so exit 65 is no longer reachable that way and the `detail` slug no
+        // longer ships. An interface break, announced in the changelog; these
+        // two rows are where the tool records that the values were retired
+        // rather than moved.
+        Dissolved {
+            baseline_source: "crates/ocx_lib/src/claim/error.rs:168",
+            claim: DissolvedClaim::Retired {
+                was: "Some(ExitCode::DataError)",
+            },
+        },
+        Dissolved {
+            baseline_source: "crates/ocx_lib/src/claim/error.rs:195",
+            claim: DissolvedClaim::Retired {
+                was: "\"package_already_claimed\"",
+            },
         },
     ];
 

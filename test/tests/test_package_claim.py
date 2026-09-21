@@ -194,13 +194,40 @@ def seed_index_base(
     fake_forge.seed_files(owner, repo, {"README.md": b"the index\n"})
 
 
-def seed_claimed_root(fake_forge: FakeForge) -> None:
-    """The already-claimed state: a committed root on the index's `main`."""
-    fake_forge.seed_root(
-        INDEX_OWNER,
-        INDEX_REPO,
-        ROOT_PATH,
-        {"name": f"{CANONICAL_REGISTRY}/{PACKAGE}", "repository": PHYSICAL, "tags": {}},
+def seed_claimed_root(
+    fake_forge: FakeForge,
+    physical: str,
+    *,
+    name: str | None = None,
+    owners: list[dict[str, Any]] | None = None,
+    created: str = "2020-03-04",
+    tags: dict[str, Any] | None = None,
+) -> None:
+    """The already-claimed state: a committed root on the index's `main` — the
+    state a re-claim rebuilds from (#481).
+
+    Written through `json.dumps(..., indent=2)` rather than `seed_root`'s
+    compact form, because it is CANONICAL bytes: the re-claim no-op compares
+    the rebuilt root against these bytes, so a compact fixture would make every
+    re-claim look changed and the `unchanged` row unreachable.
+
+    `created` is deliberately a date the shared test clock does NOT produce. A
+    fixture stamped with `FIXED_CLOCK` would be satisfied by a build that resets
+    the field, since the reset value and the carried one would be the same
+    string.
+    """
+    root: dict[str, Any] = {
+        "name": name if name is not None else f"{CANONICAL_REGISTRY}/{PACKAGE}",
+        "repository": physical,
+        "owners": owners if owners is not None else [],
+        "status": "active",
+        "deprecated_message": None,
+        "created": created,
+        "desc": None,
+        "tags": tags if tags is not None else {},
+    }
+    fake_forge.seed_files(
+        INDEX_OWNER, INDEX_REPO, {ROOT_PATH: (json.dumps(root, indent=2) + "\n").encode()}
     )
 
 
@@ -214,6 +241,7 @@ def claimed_root_bytes(fake_forge: FakeForge) -> bytes:
 def expected_root_bytes(
     *,
     owners: list[dict[str, Any]],
+    physical: str,
     registry: str = CANONICAL_REGISTRY,
     upstream: dict[str, Any] | None = None,
 ) -> bytes:
@@ -230,7 +258,7 @@ def expected_root_bytes(
     """
     root: dict[str, Any] = {
         "name": f"{registry}/{PACKAGE}",
-        "repository": PHYSICAL,
+        "repository": physical,
         "owners": owners,
         "status": "active",
         "deprecated_message": None,
@@ -307,7 +335,8 @@ def test_claim_field_order_byte_exact(
     claim_json(ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}")
 
     assert claimed_root_bytes(fake_forge) == expected_root_bytes(
-        owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}]
+        owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}],
+        physical=PHYSICAL,
     )
 
 
@@ -559,25 +588,34 @@ def test_forge_5xx_on_the_request_open_exits_69(
 
 
 @pytest.mark.parametrize("mode", ["direct", "out", "fork"])
-def test_existing_root_refused_65(
+def test_a_second_claim_adds_the_callers_owner(
     ocx: OcxRunner, fake_forge: FakeForge, tmp_path: Path, mode: str
 ) -> None:
-    """S-004/C-050: a root already committed at `p/<ns>/<pkg>.json` is refused
-    at **65**, with a message pointing at `ocx package announce`.
+    """S-003/C-007 (#481): claiming an already-claimed package ADDS the caller's
+    owner to the committed list instead of exiting 65.
 
-    C-050 holds in EVERY mode, and the plan names only the bare and the `--out`
-    variants — so this row is parametrised over all three targets, the `--fork`
-    arm reaching the refusal through a different early return.
+    This row replaced `test_existing_root_refused_65`, whose contract #481
+    reverses: an already-committed root used to be the refusal a release wrapper
+    branched on (65-from-claim / 79-from-announce), and is now the ordinary
+    steady state. Parametrised over all three targets for the reason that row
+    was: the old refusal held in every mode, so its replacement has to as well,
+    and the `--fork` arm reaches the path through a different early return.
 
-    S-037 depends on the code being exactly 65 and on the message naming the
-    other command: a release wrapper branches on the pair 65-from-claim /
-    79-from-announce, so an exit-code-only assertion leaves the half that tells
-    an operator what to do next untested.
+    Four properties in one run, each reding for a different wrong build: the
+    owner UNION and its order; `created` carried (the fixture's date is not the
+    test clock's, so a reset is visible); `tags` carried (claim never writes
+    them); and the exit code, which a restored refusal reds first.
 
-    Mutation: guard the C-050 read on the target — guarding it against `Out`
-    reds one arm, against `Direct` reds two.
+    Mutation: restore the `PackageAlreadyClaimed` refusal in `claim.rs` — every
+    assertion below reds.
     """
-    seed_claimed_root(fake_forge)
+    physical = PHYSICAL
+    seed_claimed_root(
+        fake_forge,
+        physical,
+        owners=[{"login": "alice", "id": 4242}],
+        tags={"1.0.0": {"content": "sha256:" + "c" * 64, "observed": "2020-03-04T00:00:00Z"}},
+    )
     fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
     target = {
         "direct": [],
@@ -585,16 +623,140 @@ def test_existing_root_refused_65(
         "fork": ["--fork", f"forkuser/{INDEX_REPO}"],
     }[mode]
 
-    result = claim(ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}", *target)
+    report = claim_json(ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}", *target)
+
+    assert report["owners"] == [
+        {"login": "alice", "id": 4242},
+        {"login": OWNER_LOGIN, "id": OWNER_ID},
+    ], "the committed list comes first and the caller is appended"
+
+    if mode == "out":
+        root = json.loads((tmp_path / "out" / ROOT_PATH).read_bytes())
+    else:
+        # The fork arm commits onto the FORK's copy of the branch, not the index
+        # repository's -- which is the whole point of `--fork`.
+        owner = "forkuser" if mode == "fork" else INDEX_OWNER
+        raw = fake_forge.read_file(owner, INDEX_REPO, ROOT_PATH, branch=CLAIM_BRANCH)
+        assert raw is not None, f"no root committed on {owner}/{INDEX_REPO}:{CLAIM_BRANCH}"
+        root = json.loads(raw)
+    assert root["created"] == "2020-03-04", (
+        "`created` records when the package was claimed, not when it was re-claimed"
+    )
+    assert "1.0.0" in root["tags"], "claim never writes tags, so the committed set rides through"
+    assert list(root) == [
+        "name",
+        "repository",
+        "owners",
+        "status",
+        "deprecated_message",
+        "created",
+        "desc",
+        "tags",
+    ], "the nine-field order survives the rebuild (`upstream` absent here)"
+
+
+def test_a_third_claim_naming_the_same_owner_is_unchanged(
+    ocx: OcxRunner, fake_forge: FakeForge
+) -> None:
+    """S-003: re-claiming with an owner the root already records reports
+    `unchanged`, exits 0 and opens NO request.
+
+    The idempotent steady state a CI pipeline lands in. Asserted on the forge's
+    own request log as well as on `status`, because a build that committed an
+    identical root and opened a request would still report `updated` only if the
+    status came from the write — and a build that reported `unchanged` while
+    writing anyway is exactly what the log catches.
+
+    The fixture's committed root is CANONICAL bytes (see `seed_claimed_root`),
+    which is what makes the byte-identical short-circuit reachable at all.
+
+    Mutation: dedupe the owner union by login instead of by resolved id — the
+    fixture spells the committed login differently from the forge's canonical
+    one, so a second entry is appended and the run commits.
+    """
+    physical = PHYSICAL
+    seed_claimed_root(
+        fake_forge, physical, owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}]
+    )
+    fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
+
+    report = claim_json(ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}")
+
+    assert report["status"] == "unchanged"
+    assert report["pull_request_url"] is None, (
+        f"nothing moved, so no request is opened: {report}"
+    )
+    assert write_routes(fake_forge) == [], (
+        f"an unchanged re-claim writes nothing at all: {fake_forge.requests}"
+    )
+
+
+def test_a_reclaim_with_another_repository_exits_65(
+    ocx: OcxRunner, fake_forge: FakeForge
+) -> None:
+    """S-003/D-3: `--repository` disagreeing with the committed pointer is
+    refused at **65**, naming both values.
+
+    Refused rather than updated: the pointer decides where a package's bytes
+    come from, and repointing it must not be a side effect of adding an owner.
+    Both values are asserted because only naming both tells an operator which
+    side to change, and the envelope `detail` is asserted so an SDK branches on
+    the slug rather than on the message.
+
+    Mutation: write the supplied pointer into the rebuilt root — the run then
+    succeeds and every assertion reds.
+    """
+    seed_claimed_root(
+        fake_forge, PHYSICAL, owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}]
+    )
+    fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
+
+    result = claim(
+        ocx,
+        fake_forge,
+        "--owner",
+        f"{OWNER_LOGIN}:{OWNER_ID}",
+        repository="oci://quay.io/acme/widget",
+    )
 
     assert result.returncode == 65, result.stderr
-    assert "ocx package announce" in result.stderr, (
-        f"the refusal must point at the other command: {result.stderr!r}"
+    assert PHYSICAL in result.stderr and "quay.io" in result.stderr, (
+        f"the refusal must name both pointers: {result.stderr!r}"
     )
-    # #458: the envelope names the refusal, so an SDK branches on `detail`
-    # rather than on the message text.
     envelope = json.loads(result.stdout)
-    assert envelope["error"]["detail"] == "package_already_claimed", envelope
+    assert envelope["error"]["detail"] == "repository_mismatch", envelope
+
+
+def test_a_reclaim_of_a_root_naming_another_package_exits_65(
+    ocx: OcxRunner, fake_forge: FakeForge
+) -> None:
+    """S-003/D-5 (#477): a committed root whose `name` is another package is
+    refused at **65**.
+
+    The identifier parses and the root exists; the two sides simply name
+    different packages, which is `DescDisappeared`'s category and deliberately
+    not 64 — nothing about the command line is malformed.
+
+    Mutation: drop the `name` comparison — the run re-claims whatever document
+    sits at that path and this reds.
+    """
+    physical = PHYSICAL
+    seed_claimed_root(
+        fake_forge,
+        physical,
+        name="other.example/ns/pkg",
+        owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}],
+    )
+    fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
+
+    result = claim(ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}")
+
+    assert result.returncode == 65, result.stderr
+    assert "other.example/ns/pkg" in result.stderr, (
+        f"the refusal names the committed value: {result.stderr!r}"
+    )
+    envelope = json.loads(result.stdout)
+    assert envelope["error"]["detail"] == "root_name_mismatch", envelope
 
 
 def test_disclaimer_reaches_root_not_request_body(
@@ -693,7 +855,8 @@ def test_out_renders_and_opens_nothing(
 
     assert report["written_paths"] == [ROOT_PATH]
     assert (out_dir / ROOT_PATH).read_bytes() == expected_root_bytes(
-        owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}]
+        owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}],
+        physical=PHYSICAL,
     )
     assert report["pull_request_url"] is None
     assert report["pull_request_number"] is None
@@ -747,29 +910,39 @@ def test_out_without_credential_reports_push_access_skipped(
     assert [check["status"] for check in report["capability_checks"]] == ["skipped"] * 4
 
 
-def test_out_still_refuses_existing_root(
+def test_out_writes_nothing_when_the_committed_root_disagrees(
     ocx: OcxRunner, fake_forge: FakeForge, tmp_path: Path
 ) -> None:
-    """C-050 under `--out`: exit **65**, message naming `ocx package announce`,
-    and NOTHING written under the output directory.
+    """A refused `--out` claim leaves NOTHING under the output directory.
 
-    The plan names the refusal; nothing names the tree. A build that writes
-    first and refuses second exits 65 too, and leaves a half-materialised
-    directory the operator then commits.
+    The property is the tree, not the code: a build that writes first and
+    refuses second exits 65 too, and leaves a half-materialised directory the
+    operator then commits. #481 deleted the refusal this row used to drive
+    (an already-committed root is a re-claim now), so it drives the surviving
+    one — a `--repository` that disagrees with the committed pointer.
 
-    Mutation: move the C-050 read below the write — the exit code is unchanged
-    and only the directory assertion reds.
+    Mutation: move the repository comparison below the `--out` write — the exit
+    code is unchanged and only the directory assertion reds.
     """
     out_dir = tmp_path / "out"
-    seed_claimed_root(fake_forge)
+    seed_claimed_root(
+        fake_forge,
+        PHYSICAL,
+        owners=[{"login": OWNER_LOGIN, "id": OWNER_ID}],
+    )
     fake_forge.seed_user(OWNER_LOGIN, OWNER_ID)
 
     result = claim(
-        ocx, fake_forge, "--owner", f"{OWNER_LOGIN}:{OWNER_ID}", "--out", str(out_dir)
+        ocx,
+        fake_forge,
+        "--owner",
+        f"{OWNER_LOGIN}:{OWNER_ID}",
+        "--out",
+        str(out_dir),
+        repository="oci://quay.io/acme/widget",
     )
 
     assert result.returncode == 65, result.stderr
-    assert "ocx package announce" in result.stderr
     written = sorted(str(p.relative_to(out_dir)) for p in out_dir.rglob("*")) if out_dir.exists() else []
     assert written == [], f"the refused run left a half-materialised tree: {written}"
 
@@ -1738,17 +1911,21 @@ def _claim_over_git(
     reported version the shim spoofs.
 
     The fixture state is shared by both version rows and is what makes them one
-    measurement in two directions: the root is **already committed**, so a run
-    that gets past the probe refuses at 65 on the C-050 read. That is a positive
-    observation of "the probe was passed" which stops short of the push —
-    everything past the read is `test_transport_git.py`'s (WP-17), and a row
-    that needed the push to succeed would red on WP-17's surface.
+    measurement in two directions: the committed root names ANOTHER package, so
+    a run that gets past the probe refuses at 65 on the committed-root read
+    (#477). That is a positive observation of "the probe was passed" which stops
+    short of the push — everything past the read is `test_transport_git.py`'s
+    (WP-17), and a row that needed the push to succeed would red on WP-17's
+    surface. The disagreeing `name` replaced a plain already-committed root,
+    which #481 turned into the ordinary success path.
 
     GitLab, because `--transport git` on GitHub is refused at validation before
     the probe ever runs.
     """
     shim = install_git_shim(tmp_path, variant=variant)
-    seed_claimed_root(fake_forge)
+    seed_claimed_root(
+        fake_forge, PHYSICAL, name="other.example/ns/pkg"
+    )
     return claim(
         ocx,
         fake_forge,
@@ -1788,9 +1965,9 @@ def test_git_at_the_floor_is_accepted(
     The accept side needs a positive, because a gate that refuses everything
     passes every refusal test — and "the exit code is not 69" is satisfied by
     any later failure, including a crash. The discriminator is that the run got
-    PAST the probe: the C-050 root read happened, and because the fixture has
-    the root committed the run then refuses at **65** — an exit code that only
-    the read can produce.
+    PAST the probe: the committed-root read happened, and because the fixture's
+    root names another package the run then refuses at **65** — an exit code
+    that only the read can produce.
 
     Mutation: compare versions with the semver type instead of the tuple —
     2.31.0 is then refused and this row reds.
@@ -1802,7 +1979,7 @@ def test_git_at_the_floor_is_accepted(
         f"accepted; the run then refuses on the committed root: {result.stderr!r}"
     )
     assert any("/repository/files/" in path for _, path in fake_forge.requests), (
-        f"the C-050 root read never happened, so the probe was not passed: {fake_forge.requests}"
+        f"the committed-root read never happened, so the probe was not passed: {fake_forge.requests}"
     )
 
 
@@ -1843,9 +2020,9 @@ def test_git_transport_warns_that_the_operator_token_authors_the_request(
     stylistic one.
 
     Rides `VERSION_2_31_0`, so the run gets past the version probe and refuses at
-    **65** on the C-050 read of the already-committed root. That exit is asserted:
-    it proves the notice was emitted on the path a real write takes, not by a run
-    that died before reaching the emit site.
+    **65** on the committed-root read (the fixture's root names another package).
+    That exit is asserted: it proves the notice was emitted on the path a real
+    write takes, not by a run that died before reaching the emit site.
 
     DX-86: it names the credential, never a person. The one identity-shaped
     string ocx holds here is the HTTP Basic username, which in this exact state

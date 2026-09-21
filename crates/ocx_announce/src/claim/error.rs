@@ -48,18 +48,6 @@ pub enum ClaimError {
     #[error("malformed --repository {value}: expected oci://host/path")]
     MalformedRepository { value: String },
 
-    /// A root is already committed at `path` on `base_ref` (C-050).
-    ///
-    /// The **base ref** is what is read, never the claim branch: an idempotent
-    /// re-run of an unmerged claim must report `unchanged`, not 65. Holds in
-    /// every mode, `--out` included, and before anything is written there.
-    #[error("package already claimed: {path} exists on {base_ref} for {package} — use `ocx package announce`")]
-    PackageAlreadyClaimed {
-        package: String,
-        path: String,
-        base_ref: String,
-    },
-
     /// The owner ladder reached its terminal rung with nothing to write (C-048).
     #[error("no acting identity: the credential has no account and the CI environment named none — pass --owner")]
     NoActingIdentity,
@@ -187,11 +175,6 @@ mod tests {
             ClaimError::MalformedRepository {
                 value: "ghcr.io/acme/widget".to_string(),
             },
-            ClaimError::PackageAlreadyClaimed {
-                package: "acme/widget".to_string(),
-                path: "p/acme/widget.json".to_string(),
-                base_ref: "main".to_string(),
-            },
             ClaimError::NoActingIdentity,
             ClaimError::InvalidOwnerLogin {
                 login: "@alice".to_string(),
@@ -257,7 +240,7 @@ mod tests {
         let variants = every_variant();
         assert_eq!(
             variants.len(),
-            16,
+            15,
             "every ClaimError variant owes a style-checked message; extend this list when one is added"
         );
 

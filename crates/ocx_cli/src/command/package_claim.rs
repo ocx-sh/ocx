@@ -28,8 +28,9 @@ use crate::options;
 ///
 /// Renders the package's index entry and opens a pull or merge request
 /// against the index repository, or writes the entry to a local directory with
-/// `--out`. A package that is already claimed is refused: announce it with
-/// `ocx package announce` instead.
+/// `--out`. Claiming an already-claimed package adds your owners to the entry
+/// and leaves everything else as committed; run it again with nothing new to
+/// say and it reports `unchanged` and opens no request.
 ///
 /// Owners default to the CI environment's user variables, else to the identity
 /// behind the credential. Name them explicitly with `--owner`, which replaces
@@ -287,7 +288,7 @@ impl PackageClaim {
             git,
             context.extra_roots_merged(),
         )?;
-        let outcome = claim::claim(Some(forge.as_ref()), request).await?;
+        let outcome = claim::claim(request, Some(forge.as_ref())).await?;
 
         context.api().report(&ClaimReport::from_outcome(
             outcome,
