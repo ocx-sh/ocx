@@ -369,7 +369,15 @@ def test_a_nested_group_index_is_addressed_as_one_segment(
         "acme/platform/tooling",
         INDEX_REPO,
         f"p/{package}.json",
-        {"name": f"ocx.sh/{package}", "repository": f"oci://{ocx.registry}/{unique_repo}", "tags": {}},
+        {
+            # The logical registry is the harness's own, not `ocx.sh`: announce
+            # checks the root's `name` against the identifier the run announces
+            # (ocx#477), and `OcxRunner` supplies the compose registry as the
+            # default domain.
+            "name": f"{ocx.registry}/{package}",
+            "repository": f"oci://{ocx.registry}/{unique_repo}",
+            "tags": {},
+        },
     )
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
 

@@ -1591,6 +1591,56 @@ mod tests {
         // the duplicate never got to speak, which is a check whose red state is
         // unreachable.
 
+        // DEC-55 route 4: an arm for a variant the tree grew **after** the
+        // freeze.
+        //
+        // `STANDS_IN_FOR` answers "this code did not move", and a variant
+        // minted afterwards has nothing to have moved from — so the claim it
+        // can make is narrower, and stated rather than derived: *this arm
+        // carries this value*. That still buys DEC-55's property. The sweep
+        // below refuses an arm nothing speaks for, and the value a new arm
+        // carries is written somewhere re-checked on every run, so a later
+        // edit to it reds here instead of shipping.
+        //
+        // Deliberately **not** a `STANDS_IN_FOR` row with a nearby citation.
+        // A citation marks its baseline row `covered`, which suppresses the
+        // missing-arm report for that row — so a new arm citing a neighbour
+        // would be able to answer for that neighbour's later disappearance,
+        // which is the one thing route 3 exists to make impossible.
+        for row in NEW_ARMS {
+            let Ok((pattern, value)) = canonical_row(row.pattern, row.value, row.target) else {
+                panic!(
+                    "`{} => {}` in NEW_ARMS is not a parseable match arm",
+                    row.pattern, row.value
+                );
+            };
+            let key = (
+                row.target.to_owned(),
+                row.trait_name.to_owned(),
+                row.func.to_owned(),
+                row.match_id,
+                pattern.clone(),
+            );
+            match index.get(&key) {
+                None => drifted.push(format!(
+                    "{}/{}::{} match #{}: `{pattern}` is named in NEW_ARMS but the tree has no such \
+                     arm — a row outliving its arm asserts nothing",
+                    row.target, row.trait_name, row.func, row.match_id
+                )),
+                Some(values) => {
+                    let found: Vec<String> = values.iter().cloned().collect();
+                    if found != vec![value.clone()] {
+                        drifted.push(format!(
+                            "{}/{}::{} match #{}: `{pattern}` is {found:?}, and NEW_ARMS records \
+                             `{value}`",
+                            row.target, row.trait_name, row.func, row.match_id
+                        ));
+                    }
+                }
+            }
+            baseline_keys.insert(key);
+        }
+
         let unaccounted: Vec<String> = index
             .keys()
             .filter(|key| !baseline_keys.contains(*key))
@@ -1663,6 +1713,88 @@ mod tests {
         /// the tree's behaviour.
         Resolves(Option<ExitCode>),
     }
+
+    /// An arm for a variant that **did not exist** at `7adaea62` and stands in
+    /// for nothing — a refusal the tree grew afterwards.
+    ///
+    /// The freeze pins the codes the tool shipped with; it has nothing to say
+    /// about a variant minted since, and `STANDS_IN_FOR` is the wrong shape for
+    /// one (its claim is "the cited code did not move", and there is no cited
+    /// code). What a row here buys is the rest of DEC-55: the arm is accounted
+    /// for, and the value it carries is recorded where every later run
+    /// re-checks it — so changing an exit code a release wrapper branches on
+    /// reds here rather than shipping quietly.
+    ///
+    /// A row is owed by each arm, including the `kind_detail` slug arms: those
+    /// strings ship in JSON envelopes, and the per-variant table in
+    /// `exit/<crate>.rs` is the other pin on them.
+    struct NewArm {
+        target: &'static str,
+        trait_name: &'static str,
+        func: &'static str,
+        match_id: usize,
+        pattern: &'static str,
+        /// The value the arm must carry, as written in the tree.
+        value: &'static str,
+    }
+
+    /// Every classification arm minted since the freeze (DEC-55 route 4).
+    const NEW_ARMS: &[NewArm] = &[
+        // #477 — announce refuses a root whose `name` disagrees with the
+        // identifier the run announces. 65, the `DescDisappeared` family: two
+        // sides disagree and only a human decides.
+        NewArm {
+            target: "AnnounceError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::RootNameMismatch { .. }",
+            value: "Some(ExitCode::DataError)",
+        },
+        // #477 / #481 — the re-claim path's two disagreement refusals.
+        NewArm {
+            target: "ClaimError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::RootNameMismatch { .. } | Self::RepositoryMismatch { .. }",
+            value: "Some(ExitCode::DataError)",
+        },
+        // #482 — a claim's description failure classifies through the announce
+        // taxonomy it reuses, so the arm delegates exactly as `Forge` does.
+        NewArm {
+            target: "ClaimError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::Description(inner)",
+            value: "inner.classify()",
+        },
+        NewArm {
+            target: "ClaimError",
+            trait_name: "ClassifyErrorKind",
+            func: "kind_detail",
+            match_id: 0,
+            pattern: "Self::RootNameMismatch { .. }",
+            value: "\"root_name_mismatch\"",
+        },
+        NewArm {
+            target: "ClaimError",
+            trait_name: "ClassifyErrorKind",
+            func: "kind_detail",
+            match_id: 0,
+            pattern: "Self::RepositoryMismatch { .. }",
+            value: "\"repository_mismatch\"",
+        },
+        NewArm {
+            target: "ClaimError",
+            trait_name: "ClassifyErrorKind",
+            func: "kind_detail",
+            match_id: 0,
+            pattern: "Self::Description(_)",
+            value: "\"description\"",
+        },
+    ];
 
     /// A baseline arm whose **declaring type was deleted**, named with what
     /// still produces its value (DEC-106).

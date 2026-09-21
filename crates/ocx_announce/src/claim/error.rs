@@ -136,6 +136,38 @@ pub enum ClaimError {
         source: std::io::Error,
     },
 
+    /// A committed root whose `name` disagrees with the identifier the re-claim
+    /// names ([#477]).
+    ///
+    /// Reachable on the **re-claim** path alone: a fresh claim renders `name`
+    /// from the identifier and cannot disagree with itself. Announce's sibling
+    /// is [`AnnounceError::RootNameMismatch`](crate::announce::AnnounceError::RootNameMismatch),
+    /// and both read the expected value from [`root_name`](super::root_name) —
+    /// one spelling, two callers.
+    ///
+    /// [#477]: https://github.com/ocx-sh/ocx/issues/477
+    #[error("committed root names {committed}, not the {expected} this claim names")]
+    RootNameMismatch { committed: String, expected: String },
+
+    /// A re-claim supplied a `--repository` other than the committed one.
+    ///
+    /// Refused rather than updated: the pointer decides where a package's bytes
+    /// come from, and repointing it must not be a side effect of adding an
+    /// owner. The flag is required on every claim, so an operator adding an
+    /// owner types the current value anyway.
+    #[error("committed root points at {committed}, not the supplied {supplied}")]
+    RepositoryMismatch { committed: String, supplied: String },
+
+    /// A description observation failed while rendering the claim's root.
+    ///
+    /// Transparent over the announce taxonomy rather than a parallel one: claim
+    /// runs `announce::pipeline::observe_desc` verbatim, so `Ssrf`,
+    /// `ObserveDesc` and `DescDisappeared` mean exactly what they mean under
+    /// announce — and classify to exactly the same codes, because
+    /// `ClaimError::classify` delegates to the inner error.
+    #[error(transparent)]
+    Description(#[from] crate::announce::AnnounceError),
+
     /// Any forge failure, classified by [`ForgeError`] itself.
     #[error(transparent)]
     Forge(#[from] ForgeError),
@@ -190,6 +222,18 @@ mod tests {
                 path: "/out/p/acme/widget.json".to_string(),
                 source: std::io::Error::other("no space left on device"),
             },
+            ClaimError::RootNameMismatch {
+                committed: "ocx.sh/acme/widget".to_string(),
+                expected: "ghcr.io/acme/widget".to_string(),
+            },
+            ClaimError::RepositoryMismatch {
+                committed: "oci://ghcr.io/acme/widget".to_string(),
+                supplied: "oci://quay.io/acme/widget".to_string(),
+            },
+            ClaimError::Description(crate::announce::AnnounceError::DescDisappeared {
+                repository: "oci://ghcr.io/acme/widget".to_string(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+            }),
             ClaimError::Forge(ForgeError::UsersApiUnavailable),
         ]
     }
@@ -213,7 +257,7 @@ mod tests {
         let variants = every_variant();
         assert_eq!(
             variants.len(),
-            13,
+            16,
             "every ClaimError variant owes a style-checked message; extend this list when one is added"
         );
 

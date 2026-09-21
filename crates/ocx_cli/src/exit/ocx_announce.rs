@@ -29,6 +29,13 @@ impl ClassifyExitCode for AnnounceError {
             // category, same as `TagIsNotAnImageIndex`, and discriminable from
             // an unclassified crash.
             Self::DescDisappeared { .. } => Some(ExitCode::DataError),
+            // The identifier parses, the root exists and is well-formed: the
+            // two sides simply name different packages, and only a human can
+            // say which one is right. `DescDisappeared`'s category exactly, and
+            // deliberately not `UsageError` (64) — nothing about the command
+            // line is malformed, and 64 has to keep meaning "your flags are
+            // wrong" for the comments above it to stay true.
+            Self::RootNameMismatch { .. } => Some(ExitCode::DataError),
             // The two sides disagree and only a human can say which is right —
             // the same category and the same precedent as `DescDisappeared`.
             // Never `TempFail`: a rerun reproduces it exactly, so inviting a
@@ -163,10 +170,10 @@ impl ClassifyExitCode for ClaimError {
     /// |---|---|
     /// | `ForgeRequired`, `MissingBaseRef`, `MissingHeadRoot` | `None` — broken invariant, exit 1 |
     /// | `MalformedRepository`, `NoActingIdentity`, `InvalidOwnerLogin`, `DuplicateOwner`, `OwnerIdMismatch`, `BotIdentity` | `UsageError` (64) |
-    /// | `PackageAlreadyClaimed` | `DataError` (65) — S-037's "already claimed, go announce" |
+    /// | `PackageAlreadyClaimed`, `RootNameMismatch`, `RepositoryMismatch` | `DataError` (65) |
     /// | `OwnerUnknown` | `NotFound` (79) |
     /// | `OutputWrite` | `IoError` (74) |
-    /// | `Forge(inner)` | `inner.classify()` — explicit, see the module doc |
+    /// | `Description(inner)`, `Forge(inner)` | `inner.classify()` — explicit, see the module doc |
     fn classify(&self) -> Option<ExitCode> {
         match self {
             // A broken invariant, not an operator error — exit 1, by decision.
@@ -178,11 +185,22 @@ impl ClassifyExitCode for ClaimError {
             | Self::OwnerIdMismatch { .. }
             | Self::BotIdentity { .. } => Some(ExitCode::UsageError),
             Self::PackageAlreadyClaimed { .. } => Some(ExitCode::DataError),
+            // The committed root and the command line disagree about which
+            // package this is, or about where its bytes come from. Nothing is
+            // malformed and nothing is absent; a human decides which side
+            // moves — announce's `RootNameMismatch` category exactly. A
+            // separate arm rather than an alternative joined onto the one
+            // above: that one is a frozen classification row, and widening its
+            // pattern re-points the row instead of adding beside it.
+            Self::RootNameMismatch { .. } | Self::RepositoryMismatch { .. } => Some(ExitCode::DataError),
             Self::OwnerUnknown { .. } => Some(ExitCode::NotFound),
             Self::OutputWrite { .. } => Some(ExitCode::IoError),
-            // Explicit, never inherited: `#[error(transparent)]` forwards
-            // `source()` past `ForgeError`, so the generic chain walker never
-            // sees this node.
+            // Explicit, never inherited, for both: `#[error(transparent)]`
+            // forwards `source()` past the wrapped error, so the generic chain
+            // walker never sees either node. Delegating rather than minting a
+            // code keeps a claim's description failure exiting exactly as the
+            // same failure does under announce.
+            Self::Description(inner) => inner.classify(),
             Self::Forge(inner) => inner.classify(),
         }
     }
@@ -205,6 +223,9 @@ impl ClassifyErrorKind for ClaimError {
             Self::ForgeRequired => "forge_required",
             Self::MalformedRepository { .. } => "malformed_repository",
             Self::PackageAlreadyClaimed { .. } => "package_already_claimed",
+            Self::RootNameMismatch { .. } => "root_name_mismatch",
+            Self::RepositoryMismatch { .. } => "repository_mismatch",
+            Self::Description(_) => "description",
             Self::NoActingIdentity => "no_acting_identity",
             Self::InvalidOwnerLogin { .. } => "invalid_owner_login",
             Self::DuplicateOwner { .. } => "duplicate_owner",
@@ -440,6 +461,50 @@ mod tests {
         }
     }
 
+    /// #477 — a root that names another package is a disagreement between two
+    /// statements of the same fact, not a malformed command line.
+    ///
+    /// `DataError` (65) rather than `UsageError` (64) is the load-bearing half:
+    /// a release wrapper branches on 64 to mean "the flags I generated are
+    /// wrong", and retrying with different flags cannot fix a root that names
+    /// somebody else's package. Unclassified it would exit 1, which is the
+    /// crash code.
+    ///
+    /// Reds on: classifying the variant as `UsageError`, or dropping the arm so
+    /// the wildcard answers `None`.
+    #[test]
+    fn root_name_mismatch_classifies_as_data_error() {
+        let error = AnnounceError::RootNameMismatch {
+            path: "p/acme/widget.json".to_string(),
+            committed: "other.example/acme/widget".to_string(),
+            expected: "ocx.sh/acme/widget".to_string(),
+        };
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+        let message = error.to_string();
+        for value in ["p/acme/widget.json", "other.example/acme/widget", "ocx.sh/acme/widget"] {
+            assert!(
+                message.contains(value),
+                "the operator cannot act without both names and the path; {value} is missing from: {message}"
+            );
+        }
+    }
+
+    /// The absent-`name` half of the same variant: an empty `committed` renders
+    /// as its own sentence, because `names , not …` reads as a defect in the
+    /// tool rather than in the file.
+    #[test]
+    fn an_absent_root_name_still_names_what_was_expected() {
+        let error = AnnounceError::RootNameMismatch {
+            path: "p/acme/widget.json".to_string(),
+            committed: String::new(),
+            expected: "ocx.sh/acme/widget".to_string(),
+        };
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+        let message = error.to_string();
+        assert!(message.contains("carries no name"), "got: {message}");
+        assert!(message.contains("ocx.sh/acme/widget"), "got: {message}");
+    }
+
     /// D2's refusal is the one announce failure a rerun cannot clear, so a
     /// release wrapper must be able to tell it from a crash (exit 1) and from a
     /// transient (75). The message has to name the branch, because deleting it
@@ -519,6 +584,9 @@ mod tests {
             "missing_base_ref",
             "missing_head_root",
             "output_write",
+            "root_name_mismatch",
+            "repository_mismatch",
+            "description",
             "forge",
         ];
         let variants = every_variant();
@@ -535,6 +603,66 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    /// #477 / #481 — a re-claim's two disagreement refusals exit 65, the same
+    /// category and the same reading as announce's `RootNameMismatch`.
+    ///
+    /// Reds on: classifying either as `UsageError`, and on an arm that answers
+    /// `None` (the match is wildcard-free, so the *absence* of an arm is a build
+    /// failure instead — this pins the value the arm carries).
+    #[test]
+    fn a_re_claim_disagreement_classifies_as_data_error() {
+        for error in [
+            ClaimError::RootNameMismatch {
+                committed: "ocx.sh/acme/widget".to_string(),
+                expected: "ghcr.io/acme/widget".to_string(),
+            },
+            ClaimError::RepositoryMismatch {
+                committed: "oci://ghcr.io/acme/widget".to_string(),
+                supplied: "oci://quay.io/acme/widget".to_string(),
+            },
+        ] {
+            assert_eq!(
+                error.classify(),
+                Some(ExitCode::DataError),
+                "two sides of a re-claim disagreeing is 65, not a malformed command line: {error}"
+            );
+        }
+    }
+
+    /// C-003 — a claim's description failure exits exactly as the same failure
+    /// does under announce, because the arm delegates rather than minting a
+    /// code.
+    ///
+    /// The expectation is read from the inner error rather than written as a
+    /// literal, so the row cannot drift away from the announce taxonomy it is
+    /// asserting parity with; the guard above it is what stops the whole
+    /// assertion from being `None == None`.
+    ///
+    /// Reds on: replacing the delegation with any fixed code.
+    #[test]
+    fn a_claims_description_failure_classifies_through_the_announce_taxonomy() {
+        let inner = AnnounceError::Ssrf {
+            namespace: "ocx.sh".to_string(),
+            source: ocx_oci::ssrf::SsrfError::ForbiddenTarget {
+                host: "127.0.0.1".to_string(),
+                ip: "127.0.0.1".parse().expect("valid ip literal"),
+            },
+        };
+        let expected = inner.classify();
+        assert!(
+            expected.is_some(),
+            "the fixture's own inner error classifies to nothing, so the delegation below \
+             would agree even if it delegated nowhere"
+        );
+        let error = ClaimError::Description(inner);
+        assert_eq!(error.classify(), expected);
+        assert_eq!(
+            error.kind_detail(),
+            "description",
+            "the envelope slug is the claim-side variant's, never the wrapped error's"
+        );
     }
 
     /// C-052 — the three deliberately **unclassified** variants answer `None`,
@@ -760,6 +888,18 @@ mod tests {
                 path: "/out/p/acme/widget.json".to_string(),
                 source: std::io::Error::other("no space left on device"),
             },
+            ClaimError::RootNameMismatch {
+                committed: "ocx.sh/acme/widget".to_string(),
+                expected: "ghcr.io/acme/widget".to_string(),
+            },
+            ClaimError::RepositoryMismatch {
+                committed: "oci://ghcr.io/acme/widget".to_string(),
+                supplied: "oci://quay.io/acme/widget".to_string(),
+            },
+            ClaimError::Description(AnnounceError::DescDisappeared {
+                repository: "oci://ghcr.io/acme/widget".to_string(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+            }),
             ClaimError::Forge(ForgeError::UsersApiUnavailable),
         ]
     }
