@@ -526,18 +526,38 @@ pub enum ProjectErrorKind {
     #[error("binding '{name}' not declared in ocx.toml")]
     ToolNotInConfig { name: String },
 
-    /// The binding already exists in the target group in `ocx.toml`.
-    /// Surfaced by `ocx add` when the user attempts to add a tool that is
-    /// already declared in the same group — most often because two packages
-    /// share a repository basename (`gitlab/cli` and `github/cli` both derive
-    /// the key `cli`). The message names the `NAME=IDENTIFIER` form so the
-    /// remedy is discoverable from the failure alone, following the
-    /// `BindingAmbiguous` precedent of naming the CLI syntax that resolves it.
+    /// The binding key is already taken in the target group by a **different**
+    /// identifier. Surfaced by `ocx add`, which refuses to silently repoint an
+    /// existing declaration — most often because two packages share a
+    /// repository basename (`gitlab/cli` and `github/cli` both derive the key
+    /// `cli`), or because the user asked for a different tag of a tool they
+    /// already bound.
+    ///
+    /// Re-adding the **same** identifier never reaches here: `ocx add`
+    /// partitions its bindings first and treats that as a no-op, so this
+    /// message can name the conflict rather than hedging about duplicates.
+    ///
+    /// The message names both identifiers and both remedies, following the
+    /// `BindingAmbiguous` precedent of naming the CLI syntax that resolves it:
+    /// `ocx remove` + `ocx add` replaces the binding, `ocx update` moves the
+    /// pin. The `NAME=IDENTIFIER` alias form is not named here — it answers a
+    /// different question (coexisting under two keys), and the help of the
+    /// `[NAME=]IDENTIFIER` positional it belongs to already states it.
     ///
     /// `group` is `"default"` for the implicit top-level `[tools]` table,
-    /// or the named group string for `[group.<name>]` tables.
-    #[error("binding '{name}' already exists in group '{group}' — pass NAME=IDENTIFIER to bind under a different name")]
-    BindingAlreadyExists { name: String, group: String },
+    /// or the named group string for `[group.<name>]` tables. Both identifiers
+    /// are boxed to keep `ProjectErrorKind` small — same reason as
+    /// [`Self::TagNotFound`].
+    #[error(
+        "binding '{name}' in group '{group}' is already bound to '{existing}'; \
+         run `ocx remove {name}` then add '{requested}', or `ocx update {name}` to move the pin"
+    )]
+    BindingAlreadyExists {
+        group: String,
+        name: String,
+        existing: Box<Identifier>,
+        requested: Box<Identifier>,
+    },
 
     /// An explicit binding name from the `NAME=IDENTIFIER` form of `ocx add`
     /// is empty or contains characters that are invalid for a TOML table key

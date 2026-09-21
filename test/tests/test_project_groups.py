@@ -144,14 +144,13 @@ def test_add_same_name_default_and_named_group_succeeds(
 # ---------------------------------------------------------------------------
 
 
-def test_add_same_name_same_group_rejected(
+def test_add_same_name_same_group_is_a_noop(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """Second ``ocx add cmake:1.0.0`` targeting the *same* default group
-    must exit 64 (UsageError) and mention the group label ``default`` in
-    stderr.
-
-    Error variant: ``BindingAlreadyExists`` → ``UsageError`` (64).
+    is a no-op: exit 0, ``ocx.toml`` byte-identical, and the report names
+    the binding as already added (#490). The 64 ``BindingAlreadyExists``
+    refusal is reserved for a *different* identifier under an existing name.
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_grp_dup"
@@ -169,23 +168,19 @@ def test_add_same_name_same_group_rejected(
 
     original_toml = _read_toml(project_dir)
 
-    # Second add to the same (default) group must fail.
+    # Second add to the same (default) group is a no-op that reports itself.
     r2 = _add_tool(ocx, project_dir, pkg.fq)
-    assert r2.returncode == EXIT_USAGE, (
-        f"duplicate add to default group should exit {EXIT_USAGE}; "
+    assert r2.returncode == EXIT_SUCCESS, (
+        f"duplicate add to default group should be a no-op exit {EXIT_SUCCESS}; "
         f"rc={r2.returncode}, stderr={r2.stderr!r}"
     )
-    # Error message must mention "already exists" and the group label.
     combined = (r2.stderr + r2.stdout).lower()
-    assert "already" in combined, (
-        f"stderr must mention 'already' for BindingAlreadyExists; stderr:\n{r2.stderr}"
-    )
-    assert "default" in combined, (
-        f"stderr must name the 'default' group; stderr:\n{r2.stderr}"
+    assert "already added" in combined, (
+        f"the report must say the binding is already added; stderr:\n{r2.stderr}"
     )
     # ocx.toml must be unchanged.
     assert _read_toml(project_dir) == original_toml, (
-        "ocx.toml must be unchanged after a rejected duplicate add"
+        "ocx.toml must be byte-identical after a no-op duplicate add"
     )
 
 
