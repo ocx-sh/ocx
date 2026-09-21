@@ -64,6 +64,18 @@ pub mod keys {
     pub const OCX_PROJECT: &str = "OCX_PROJECT";
     /// Boolean — when truthy, skip the CWD walk and the [`OCX_PROJECT`]
     /// env var. Explicit `--project` paths still load.
+    ///
+    /// Resolution-affecting → forwarded to child ocx processes via
+    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config), so a
+    /// launcher re-entry or a nested `ocx exec` keeps the prune instead of
+    /// walking up from its own working directory and adopting a project the
+    /// frame that spawned it deliberately had none of.
+    ///
+    /// **Forwarded only when this invocation resolved no project.** The two
+    /// keys collide in the child: `ConfigLoader::explicit_project` reads the
+    /// prune *before* [`OCX_PROJECT`], so forwarding both would make the child
+    /// discard the very path being forwarded beside it. An explicit
+    /// `--project` outranks the prune here, and has to outrank it there too.
     pub const OCX_NO_PROJECT: &str = "OCX_NO_PROJECT";
     /// Boolean — when truthy, the seven project-scoped commands that stamp
     /// shell-activation consent as a side effect (`add`, `remove`, `lock`,
@@ -98,6 +110,28 @@ pub mod keys {
     pub const OCX_GLOBAL: &str = "OCX_GLOBAL";
     /// Path to the local index directory. Mirrors `--index`.
     pub const OCX_INDEX: &str = "OCX_INDEX";
+    /// The registry a bare identifier resolves under — `cmake:3.28` becomes
+    /// `<value>/cmake:3.28`. Outranks `[registry] default`; absent from both,
+    /// the built-in `ocx.sh` applies.
+    ///
+    /// A pure env opt-in with no `OcxConfigView` field and no CLI flag: its
+    /// authoritative value *is* the ambient environment, read at
+    /// `Context::try_init`. Resolution-affecting → forwarded to child ocx
+    /// processes via [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config),
+    /// so a bare identifier means the same repository in every frame of one
+    /// launch chain. Empty is treated as unset, matching the read side's
+    /// [`ocx_util::env::string`] default.
+    pub const OCX_DEFAULT_REGISTRY: &str = "OCX_DEFAULT_REGISTRY";
+    /// Comma-separated `host[:port]` authorities that may be dialled over
+    /// plain HTTP — the env tier of `[registries."<name>"] insecure`, unioned
+    /// with it and then narrowed by anything the system scope locked shut.
+    ///
+    /// Same shape as [`OCX_DEFAULT_REGISTRY`]: ambient-only, no view field, no
+    /// flag. Resolution-affecting → forwarded to child ocx processes via
+    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config), because a
+    /// child that resolved a narrower set fails to reach a registry the parent
+    /// just pulled from. Parsed back by [`crate::env::insecure_registries`].
+    pub const OCX_INSECURE_REGISTRIES: &str = "OCX_INSECURE_REGISTRIES";
     /// Boolean — when truthy, a tag resolving to a yanked entry on a static-file
     /// index (`index.ocx.sh`) is allowed instead of refused. A yank is a
     /// publisher signal, not a delete, so the override is explicit and opt-in.
@@ -170,6 +204,12 @@ pub mod keys {
     /// (both `notify` and `apply` postures). Distinct from
     /// `OCX_NO_UPDATE_CHECK` — an independently silenceable concern. Explicit
     /// `ocx config update` still works when this is set.
+    ///
+    /// Resolution-affecting → forwarded to child ocx processes via
+    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config). The
+    /// refresh can *replace* the managed tier mid-chain, so a child that
+    /// re-enabled it would resolve against configuration the parent never saw
+    /// — and a `--clean` child re-enables it by starting from an empty map.
     pub const OCX_NO_CONFIG_REFRESH: &str = "OCX_NO_CONFIG_REFRESH";
     /// Directory execution records are written to — the env tier of `[records]
     /// dir` / `--records-dir`. Absent ⇒ recording is off.
@@ -768,6 +808,15 @@ impl Env {
     /// otherwise removes any inherited setting so a stale parent-shell export
     /// cannot beat the outer ocx's parsed state.
     ///
+    /// Five keys have no [`OcxConfigView`] field and no CLI flag at all, so
+    /// their authoritative value is the ambient environment and they are read
+    /// here rather than carried: [`keys::OCX_ALLOW_YANKED`],
+    /// [`keys::OCX_NO_PROJECT`], [`keys::OCX_NO_CONFIG_REFRESH`],
+    /// [`keys::OCX_DEFAULT_REGISTRY`] and [`keys::OCX_INSECURE_REGISTRIES`].
+    /// Each is set-or-remove on the same terms as the parsed keys above; the
+    /// prune is additionally suppressed whenever this invocation carries an
+    /// explicit project, since the child resolves the two against each other.
+    ///
     /// Does **not** propagate presentation flags (`--log-level`, `--format`,
     /// `--color`) — those are user-facing surface and must not leak into a
     /// launcher's child stream. Idempotent.
@@ -912,6 +961,47 @@ impl Env {
             self.set(keys::OCX_ALLOW_YANKED, "1");
         } else {
             self.remove(keys::OCX_ALLOW_YANKED);
+        }
+        // Four more of the same shape as `OCX_ALLOW_YANKED` above: pure env
+        // opt-ins with no `OcxConfigView` field and no CLI flag, so the
+        // ambient value IS what the outer ocx resolved from, and the ambient
+        // read here is the same read the outer ocx already made. Without them
+        // a `--clean` child — a generated entrypoint launcher's
+        // `ocx launcher exec` re-entry, or a nested `ocx exec` — starts from
+        // an empty map and resolves against the *defaults* of four settings
+        // the parent had overridden.
+        //
+        // The `else { remove }` arm does real work on the inherit path too:
+        // it is what stops a stale parent-shell export from beating the
+        // state this process actually resolved with, the same reason
+        // `OCX_TOOLCHAIN_DIR` clears above.
+        //
+        // Gated on the view, unlike its three neighbours: forwarding a prune
+        // and an explicit project together hands the child two answers, and
+        // `ConfigLoader::explicit_project` reads the prune first — so the
+        // child would discard the `OCX_PROJECT` written a few lines above.
+        // The flag outranks the prune here (Amendment G3) and must outrank it
+        // there.
+        if cfg.project.is_none() && flag(keys::OCX_NO_PROJECT, false) {
+            self.set(keys::OCX_NO_PROJECT, "1");
+        } else {
+            self.remove(keys::OCX_NO_PROJECT);
+        }
+        if flag(keys::OCX_NO_CONFIG_REFRESH, false) {
+            self.set(keys::OCX_NO_CONFIG_REFRESH, "1");
+        } else {
+            self.remove(keys::OCX_NO_CONFIG_REFRESH);
+        }
+        // Empty is unset on the read side (`ocx_util::env::string` falls back
+        // to its default for it), so an empty ambient value must not travel as
+        // a value the child would then honour as "no default registry at all".
+        match var(keys::OCX_DEFAULT_REGISTRY).filter(|value| !value.is_empty()) {
+            Some(registry) => self.set(keys::OCX_DEFAULT_REGISTRY, registry),
+            None => self.remove(keys::OCX_DEFAULT_REGISTRY),
+        }
+        match var(keys::OCX_INSECURE_REGISTRIES).filter(|value| !value.is_empty()) {
+            Some(authorities) => self.set(keys::OCX_INSECURE_REGISTRIES, authorities),
+            None => self.remove(keys::OCX_INSECURE_REGISTRIES),
         }
         // Two independent refusals, one key: `cfg.no_consent` is what this
         // invocation's own `--no-consent` said, the ambient read is what the
@@ -1833,9 +1923,9 @@ fn trampoline_signal(path: &std::path::Path) -> bool {
     std::fs::metadata(path.with_extension("exec")).is_ok_and(|sidecar| sidecar.is_file())
 }
 
-/// Parses `OCX_INSECURE_REGISTRIES` into a list of registry hostnames.
+/// Parses [`keys::OCX_INSECURE_REGISTRIES`] into a list of registry hostnames.
 pub fn insecure_registries() -> Vec<String> {
-    string("OCX_INSECURE_REGISTRIES", String::new())
+    string(keys::OCX_INSECURE_REGISTRIES, String::new())
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -2593,6 +2683,131 @@ mod tests {
         assert!(
             env.get(keys::OCX_ALLOW_YANKED).is_none(),
             "an absent OCX_ALLOW_YANKED must not be set on the child env"
+        );
+    }
+
+    /// The two ambient booleans with no view field and no flag. Without the
+    /// forward a `--clean` child re-adopts a project the parent pruned, and
+    /// re-fetches the managed config the parent suppressed — resolving against
+    /// configuration the frame that spawned it never saw.
+    ///
+    /// Red state: delete either arm of the `OCX_NO_PROJECT` or
+    /// `OCX_NO_CONFIG_REFRESH` block in `apply_ocx_config`.
+    #[test]
+    fn apply_ocx_config_forwards_the_ambient_resolution_kill_switches() {
+        let guard = ocx_util::env::overrides::lock();
+
+        guard.set(keys::OCX_NO_PROJECT, "1");
+        guard.set(keys::OCX_NO_CONFIG_REFRESH, "1");
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert_eq!(
+            env.get(keys::OCX_NO_PROJECT).and_then(std::ffi::OsStr::to_str),
+            Some("1"),
+            "a truthy OCX_NO_PROJECT must forward, or the child walks up and adopts a project"
+        );
+        assert_eq!(
+            env.get(keys::OCX_NO_CONFIG_REFRESH).and_then(std::ffi::OsStr::to_str),
+            Some("1"),
+            "a truthy OCX_NO_CONFIG_REFRESH must forward, or the child re-fetches the managed tier"
+        );
+
+        // Absent (or falsy) → cleared, so a stale parent-shell export cannot
+        // beat what this process resolved with. The inherited value is seeded
+        // onto the child map first, the way
+        // `apply_ocx_config_overwrites_inherited_stale_values` does: `remove`
+        // on a key `Env::clean()` never held is a no-op, so asserting absence
+        // from an empty map would hold with the remove arms deleted — a green
+        // indistinguishable from the check never running.
+        guard.remove(keys::OCX_NO_PROJECT);
+        guard.set(keys::OCX_NO_CONFIG_REFRESH, "0");
+        let mut env = Env::clean();
+        env.set(keys::OCX_NO_PROJECT, "1");
+        env.set(keys::OCX_NO_CONFIG_REFRESH, "1");
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert!(
+            env.get(keys::OCX_NO_PROJECT).is_none(),
+            "an absent OCX_NO_PROJECT must clear an inherited value, not leave it standing"
+        );
+        assert!(
+            env.get(keys::OCX_NO_CONFIG_REFRESH).is_none(),
+            "a falsy OCX_NO_CONFIG_REFRESH must clear an inherited value, not leave it standing"
+        );
+    }
+
+    /// The prune and an explicit project are two answers to one question, and
+    /// the child reads the prune first (`ConfigLoader::explicit_project`). So
+    /// an invocation carrying `--project` must forward the path and NOT the
+    /// prune, or the child discards the path written beside it.
+    ///
+    /// Red state: drop the `cfg.project.is_none() &&` guard.
+    #[test]
+    fn apply_ocx_config_suppresses_the_project_prune_when_a_project_is_explicit() {
+        let guard = ocx_util::env::overrides::lock();
+        guard.set(keys::OCX_NO_PROJECT, "1");
+
+        let mut cfg = view("/abs/ocx");
+        cfg.project = Some(std::path::PathBuf::from("/abs/repo/ocx.toml"));
+        let mut env = Env::clean();
+        env.apply_ocx_config(&cfg);
+
+        assert_eq!(
+            env.get(keys::OCX_PROJECT).map(std::path::Path::new),
+            Some(std::path::Path::new("/abs/repo/ocx.toml")),
+            "the explicit project must reach the child"
+        );
+        assert!(
+            env.get(keys::OCX_NO_PROJECT).is_none(),
+            "the prune must not travel beside a project path the child would then discard"
+        );
+    }
+
+    /// The two ambient strings. `OCX_DEFAULT_REGISTRY` decides what repository
+    /// a bare identifier names and `OCX_INSECURE_REGISTRIES` decides what a
+    /// dial may downgrade to, so a child resolving either differently reaches
+    /// a different registry than the frame that spawned it.
+    ///
+    /// Empty is unset on the read side, so it must clear rather than travel.
+    ///
+    /// Red state: delete either arm of either `match` in `apply_ocx_config`.
+    #[test]
+    fn apply_ocx_config_forwards_the_ambient_registry_settings() {
+        let guard = ocx_util::env::overrides::lock();
+
+        guard.set(keys::OCX_DEFAULT_REGISTRY, "registry.example:5000");
+        guard.set(keys::OCX_INSECURE_REGISTRIES, "registry.example:5000,other.example");
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert_eq!(
+            env.get(keys::OCX_DEFAULT_REGISTRY).and_then(std::ffi::OsStr::to_str),
+            Some("registry.example:5000"),
+            "the default registry must forward, or a bare identifier names another repository"
+        );
+        assert_eq!(
+            env.get(keys::OCX_INSECURE_REGISTRIES).and_then(std::ffi::OsStr::to_str),
+            Some("registry.example:5000,other.example"),
+            "the insecure authorities must forward verbatim, comma-joined as the parser reads them"
+        );
+
+        // Empty and absent are the same state to `ocx_util::env::string`, so
+        // both clear — an empty value travelling onward would read as a
+        // deliberate "no default registry" the parent never resolved. Seeded
+        // onto the child map first for the reason the sibling above states:
+        // `remove` on a key `Env::clean()` never held cannot fail, so the
+        // assertion would hold with the remove arms deleted.
+        guard.set(keys::OCX_DEFAULT_REGISTRY, "");
+        guard.remove(keys::OCX_INSECURE_REGISTRIES);
+        let mut env = Env::clean();
+        env.set(keys::OCX_DEFAULT_REGISTRY, "stale.example");
+        env.set(keys::OCX_INSECURE_REGISTRIES, "stale.example:5000");
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert!(
+            env.get(keys::OCX_DEFAULT_REGISTRY).is_none(),
+            "an empty OCX_DEFAULT_REGISTRY must clear the inherited value, not forward either one"
+        );
+        assert!(
+            env.get(keys::OCX_INSECURE_REGISTRIES).is_none(),
+            "an absent OCX_INSECURE_REGISTRIES must clear an inherited value, not leave it standing"
         );
     }
 
