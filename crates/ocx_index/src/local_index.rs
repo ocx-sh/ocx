@@ -402,12 +402,19 @@ impl LocalIndex {
         // own failure and drops `error` — the withheld tag failure this whole
         // branch exists to report — on the floor (see
         // [`withheld_by_commit_failure`]).
-        if !adopted.is_empty()
-            && let Err(commit) = self
+        if !adopted.is_empty() {
+            match self
                 .commit_published_root(identifier, bytes, RootScope::Tags(&adopted))
                 .await
-        {
-            return Err(withheld_by_commit_failure(identifier, &error, commit));
+            {
+                // Same call the full-success path makes, for the same reason
+                // (D-7): this commit moved pins too, so the objects it moved
+                // off are named by nothing any more. The failed tag cannot be
+                // harmed by it — its object was never written, so it is in
+                // neither side of the diff.
+                Ok(pins) => self.sweep_dispatch_orphans(identifier, &pins).await,
+                Err(commit) => return Err(withheld_by_commit_failure(identifier, &error, commit)),
+            }
         }
         Err(error)
     }
@@ -499,10 +506,14 @@ impl LocalIndex {
             //
             // Matched, never `?`-ed, for the same reason as the published half:
             // a `?` returns the commit failure and silently discards `error`.
-            if !fetched.is_empty()
-                && let Err(commit) = self.commit_root_tags(identifier, &fetched).await
-            {
-                return Err(withheld_by_commit_failure(identifier, &error, commit));
+            if !fetched.is_empty() {
+                match self.commit_root_tags(identifier, &fetched).await {
+                    // The published half's reasoning, unchanged: a partial
+                    // commit still moves pins, and the objects it moved off
+                    // are unreachable from any surviving tag (D-7).
+                    Ok(pins) => self.sweep_dispatch_orphans(identifier, &pins).await,
+                    Err(commit) => return Err(withheld_by_commit_failure(identifier, &error, commit)),
+                }
             }
             return Err(error);
         }
@@ -531,14 +542,17 @@ impl LocalIndex {
     ///
     /// Three properties are load-bearing and each is a deliberate choice.
     ///
-    /// **It runs after a fully successful refresh, and only then.** The
-    /// partial-success branches of both paths *do* commit, and they still skip
-    /// this: some tag's object was never written, so what those branches left
-    /// behind is F1's harmless orphan — the state the next run reuses rather
-    /// than re-fetches
-    /// (`test_orphan_dispatch_object_without_root_self_heals_on_next_online_update`)
-    /// — and their narrowed commit is not a clean statement of what the copy
-    /// now pins.
+    /// **It runs after every commit that can move a pin, the partial-success
+    /// ones included.** What it removes is `previous \ current` of *that* commit, so a tag whose
+    /// dispatch object was never written is in neither side and cannot be
+    /// touched by it: the failed tag's own object is F1's harmless orphan the
+    /// next run reuses rather than re-fetches
+    /// (`test_orphan_dispatch_object_without_root_self_heals_on_next_online_update`).
+    /// What a partial commit *does* abandon belongs to a **sibling** tag whose
+    /// pin it moved — and `previous` is re-read from the committed root by
+    /// every later run, so the object that pin moved off is named by nothing
+    /// afterwards. Skipping the sweep here would strand it forever rather than
+    /// until the next update.
     ///
     /// **It cannot fail the refresh.** The user's index is already correct; a
     /// housekeeping pass that could not unlink a file has produced a leftover
@@ -570,7 +584,8 @@ impl LocalIndex {
                 removed.join(", ")
             ),
             Err(error) => log::debug!(
-                "Could not sweep the dispatch objects '{source}/{repository}' moved off ({}) — the                  refresh itself committed; the next pin movement past them sweeps them.",
+                "Could not sweep the dispatch objects '{source}/{repository}' moved off ({}) — the \
+                 refresh itself committed; the next pin movement past them sweeps them.",
                 ocx_util::error::render_chain(&error)
             ),
         }
@@ -2941,6 +2956,108 @@ mod tests {
             Some(content_for('3').to_string().as_str())
         );
         assert!(root["tags"].get("b").is_none(), "the failing tag is not authored");
+    }
+
+    /// Seed a committed root pinning `tag` at `leaf`'s dispatch digest, and put
+    /// that dispatch object on disk — the "this machine already snapshotted
+    /// this version" starting state the sweep fixtures below move a pin away
+    /// from. Returns the digest it pinned, so the test can assert on the file.
+    async fn seed_pinned_tag(index: &LocalIndex, tag: &str, leaf: char) -> ocx_oci::Digest {
+        let (bytes, digest) = object_for(leaf);
+        index
+            .seed_root_document(
+                &repo_id(),
+                format!(r#"{{"repository":"oci://{REGISTRY}/{REPO}","tags":{{"{tag}":{{"content":"{digest}"}}}}}}"#)
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        index.stage_dispatch_bytes(&repo_id(), &digest, &bytes).await.unwrap();
+        digest
+    }
+
+    /// D-7 under partial success, published — the object a SIBLING's moved pin
+    /// abandoned is still swept.
+    ///
+    /// The failing tag is a red herring by construction: its own dispatch
+    /// object was never written, so it is in neither side of the
+    /// `previous \ current` diff. What the partial commit abandons belongs to
+    /// `x`, whose pin it moved D1 → D2 — and `RootPins.previous` is re-read
+    /// from the committed root by every later run, which now says D2. Skipping
+    /// the sweep on this branch therefore strands D1 forever, not until the
+    /// next update.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_partial_published_commit_sweeps_the_object_a_siblings_moved_pin_abandoned() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let abandoned = seed_pinned_tag(&index, "x", '1').await;
+        assert!(
+            store(&dir).dispatch_object_path(REGISTRY, REPO, &abandoned).exists(),
+            "prerequisite: the pin this refresh moves off really does have an object on disk"
+        );
+
+        // `x` moves to leaf '2'; `y` never persists, so the commit is partial.
+        let source = ScriptedSource::new(&[("x", '2'), ("y", '3')]).failing(&["y"]);
+        let error = index
+            .refresh_tags(&repo_id(), &source.index())
+            .await
+            .expect_err("the failing tag must still be reported");
+        assert!(
+            ocx_util::error::render_chain(&error).contains("scripted.example/y"),
+            "the sweep must not swallow the withheld tag failure; got: {}",
+            ocx_util::error::render_chain(&error)
+        );
+
+        let adopted = content_for('2');
+        assert_eq!(
+            read_root_value(&dir)["tags"]["x"]["content"].as_str(),
+            Some(adopted.to_string().as_str()),
+            "prerequisite: the partial commit really did move x's pin"
+        );
+        assert!(
+            store(&dir).dispatch_object_path(REGISTRY, REPO, &adopted).exists(),
+            "the object the surviving pin names is kept — the sweep is a diff, not a walk"
+        );
+        assert!(
+            !store(&dir).dispatch_object_path(REGISTRY, REPO, &abandoned).exists(),
+            "no tag of this package pins the old object any more, so it must be gone"
+        );
+    }
+
+    /// D-7 under partial success, derived — the same contract on the other
+    /// commit site. Separate fixture, not a parametrisation: reverting one
+    /// branch's sweep leaves the other green, so one test cannot pin both.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_partial_derived_commit_sweeps_the_object_a_siblings_moved_pin_abandoned() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let abandoned = seed_pinned_tag(&index, "x", '1').await;
+
+        let source = ScriptedSource::new(&[("x", '2'), ("y", '3')]).derived().failing(&["y"]);
+        let error = index
+            .refresh_tags(&repo_id(), &source.index())
+            .await
+            .expect_err("the failing tag must still be reported");
+        assert!(
+            ocx_util::error::render_chain(&error).contains("scripted.example/y"),
+            "the sweep must not swallow the withheld tag failure; got: {}",
+            ocx_util::error::render_chain(&error)
+        );
+
+        let adopted = content_for('2');
+        assert_eq!(
+            read_root_value(&dir)["tags"]["x"]["content"].as_str(),
+            Some(adopted.to_string().as_str()),
+            "prerequisite: the partial commit really did move x's pin"
+        );
+        assert!(
+            store(&dir).dispatch_object_path(REGISTRY, REPO, &adopted).exists(),
+            "the object the surviving pin names is kept"
+        );
+        assert!(
+            !store(&dir).dispatch_object_path(REGISTRY, REPO, &abandoned).exists(),
+            "no tag of this package pins the old object any more, so it must be gone"
+        );
     }
 
     /// The derived half of C-012, and the one that is about the EXIT CODE.
