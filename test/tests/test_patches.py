@@ -47,8 +47,11 @@ from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
 # and any base install with a `[patches]` tier probes it — so two patch tests
 # running concurrently on the shared registry:2 can overwrite each other's
 # global descriptor or observe a sibling's. Pin the whole module to a single
-# xdist worker so these tests run sequentially (deterministic order); other
-# test modules still parallelize, and none of them touch the `[patches]` tier.
+# xdist worker so these tests run sequentially (deterministic order). Other
+# test modules still parallelize, and several configure a `[patches]` tier of
+# their own — harmless, because READING the slot cannot corrupt it. Writing it
+# is the hazard, and this group is the only thing that serialises the writers:
+# `tests/test_patch_global_slot.py` is what keeps its membership complete.
 pytestmark = pytest.mark.xdist_group("patch_global_slot")
 
 

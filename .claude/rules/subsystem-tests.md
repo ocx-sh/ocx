@@ -132,7 +132,11 @@ the suite an unmodified proof while `ocx_lib` is taken apart. Four mechanisms:
   ceiling after it, both as `cmds:` (`--force` skips `preconditions:`).
 - **Diff guard.** `scripts/test_diff_guard.py <base>..<head>` (run at every merge over both the
   per-WP range and `merge-base(origin/main)..HEAD`) refuses any diff under `test/` except:
-  an added `@pytest.mark.smoke` line (and the `import pytest` a module lacked); a
+  an added `@pytest.mark.smoke` line (and the `import pytest` a module lacked); an added
+  `@pytest.mark.xdist_group("<name>")` line — scheduling, the one mark that cannot change
+  what a test asserts, and the only way to serialise writers of a registry-wide singleton
+  such as the reserved `global` patch-descriptor repository; the group must be a string
+  literal, so the slot being joined is greppable; a
   docstring/comment line that carries none of `assert`, `pytest.mark.skip`, `xfail`,
   `parametrize`, `pytest.fixture` or a `def` signature — the keyword check runs before the
   inertness check on purpose, so commenting an assertion out is refused exactly like deleting

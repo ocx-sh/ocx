@@ -95,8 +95,10 @@ SUITE = REPO_ROOT / "test"
 
 #: The census as of the ocx#477–#494 batch: `tests` 2859 -> 2904 with the
 #: batch's 45 rows, `skipped` 108 -> 110 with two more POSIX-only gates
-#: (`flock(2)` advisory contract, SIGKILL mid-add).
-PINNED = {"tests": 2904, "skipped": 110, "xfailed": 4, "parametrized": 150}
+#: (`flock(2)` advisory contract, SIGKILL mid-add). 2904 -> 2906 with the two
+#: rows of `tests/test_patch_global_slot.py`, which keep the writers of the
+#: registry-wide `global` patch slot inside one xdist group.
+PINNED = {"tests": 2906, "skipped": 110, "xfailed": 4, "parametrized": 150}
 
 #: Which way each number may move on its own. DEC-38 pinned all four to
 #: equality for the duration of the crate split, so that a refactor could not
