@@ -6,11 +6,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_project::{
-    ALL_GROUP, DEFAULT_GROUP, LockedTool, ProjectConfig, ProjectLock, ResolveLockOptions, expand_all_keyword,
-    locked_tool_content_equal, resolve_lock, resolve_lock_touched,
+    ALL_GROUP, DEFAULT_GROUP, ProjectConfig, ResolveLockOptions, expand_all_keyword, resolve_lock, resolve_lock_touched,
 };
 
-use crate::api::data::lock::{LockEntry, LockReport};
+use crate::api::data::update::{UpdateReport, VerboseUpdateReport};
 use crate::app::CommandError;
 use crate::app::project_context::{load_project_for_mutate, materialize_lock, record_activation_consent};
 use crate::conventions;
@@ -28,12 +27,19 @@ pub struct Update {
     /// Verify the candidate lock would match the predecessor and exit.
     ///
     /// Re-resolves the selected scope (every declared tag, or only the
-    /// bindings named by `-g`/positional names), compares the candidate to the
-    /// predecessor, and exits 0 (matches) or 65 (`DataError`, a pin would
-    /// change). No writes, no commit. When the predecessor lock is absent,
-    /// exits 78 (`ConfigError`).
+    /// bindings named by `-g`/positional names), prints the bindings that
+    /// would move, and exits 0 (nothing would move) or 65 (`DataError`, a pin
+    /// would change). No writes, no commit. When the predecessor lock is
+    /// absent, exits 78 (`ConfigError`).
     #[arg(long = "check", default_value_t = false)]
     pub check: bool,
+
+    /// List the bindings that did not move as well as the ones that did.
+    ///
+    /// Affects the plain rendering only. The structured report
+    /// (`ocx --format json update`) carries every field either way.
+    #[arg(short, long)]
+    pub verbose: bool,
 
     #[clap(flatten)]
     pub pull: options::Pull,
@@ -72,6 +78,13 @@ impl Update {
         // byte-identical to the snapshot.
         let staged = guard.stage(|_cfg| Ok(()))?.lock_only();
 
+        // The predecessor the report diffs the candidate against. Cloned up
+        // front because `commit_and_render` consumes the guard below, and the
+        // whole point of this command's report is that both locks are in hand
+        // at the same moment. `None` only for a bare `ocx update` in a project
+        // that has no `ocx.lock` yet — every other path gates on it.
+        let previous = guard.previous_lock().cloned();
+
         // Update-family routing: resolve tags live against the registry by
         // default, capped by `--offline`/`--frozen`, and never commit tag
         // pointers into the shared local index — `ocx.lock` is the canonical
@@ -84,12 +97,16 @@ impl Update {
         // re-resolve, everything else is carried forward verbatim.
         let scoped = !self.groups.is_empty() || !self.names.is_empty();
 
-        let new_lock = if scoped {
+        // `examined` is the `(group, binding)` selection this run actually
+        // re-resolved — `None` for a whole-lock bump, which examines every
+        // binding. The report narrows its `unchanged` list to it, so a pin
+        // carried forward verbatim is never reported as checked.
+        let (new_lock, examined) = if scoped {
             // Scoped mode carries untouched pins forward, so it needs a
             // predecessor `ocx.lock` — there is nothing to freeze without one.
             // Checked before any resolve so a missing lock is deterministic
             // (exit 78) and never masked by a registry failure.
-            let Some(previous) = guard.previous_lock().cloned() else {
+            let Some(previous) = previous.as_ref() else {
                 return Err(missing_lock(guard.lock_path()).into());
             };
 
@@ -105,15 +122,16 @@ impl Update {
             // pre-mutation snapshot are the same value (`staged.config()` ==
             // `guard.config()`). The freshness gate inside `resolve_lock_touched`
             // refuses a drifted `ocx.toml` (exit 65) before any resolve.
-            resolve_lock_touched(
+            let lock = resolve_lock_touched(
                 staged.config(),
                 guard.config(),
-                &previous,
+                previous,
                 resolve_index,
                 &touched,
                 ResolveLockOptions::default(),
             )
-            .await?
+            .await?;
+            (lock, Some(touched))
         } else {
             // ── --check missing-predecessor gate (spec §4.5) ───────────────
             //
@@ -123,29 +141,39 @@ impl Update {
             // the intended exit 78 (and waste a network round-trip). Checking
             // first makes "no lock to verify against" return ConfigError (78)
             // deterministically, with no network attempted.
-            if self.check && guard.previous_lock().is_none() {
+            if self.check && previous.is_none() {
                 return Err(missing_lock(guard.lock_path()).into());
             }
 
             // Whole-file bump (spec §4.5): bare `resolve_lock(&[])` re-resolves
             // every declared tag. There is no subset, no carry-forward, nothing
             // untouched — laundering and drift are impossible by construction.
-            resolve_lock(staged.config(), resolve_index, &[], ResolveLockOptions::default()).await?
+            let lock = resolve_lock(staged.config(), resolve_index, &[], ResolveLockOptions::default()).await?;
+            (lock, None)
         };
+
+        // The answer both paths report: which pins moved between the
+        // predecessor and the candidate, keyed by `(group, name, platform)`
+        // and compared as pull identifiers. Built here, while the guard still
+        // holds the declaration the tag column reads from — the commit below
+        // consumes it.
+        let report = UpdateReport::diff(previous.as_ref(), &new_lock, guard.config(), examined.as_deref());
 
         // ── --check verify-only path (both modes) ──────────────────────
         //
         // `--check` performs the re-resolve above and exits without writing:
-        // 0 when the candidate matches the predecessor, 65 when any pinned
-        // content would change (an advisory tag moved upstream). The
+        // 0 when nothing would move, 65 when any pinned content or the
+        // load-bearing metadata would change (an advisory tag moved
+        // upstream). The report goes to stdout FIRST — data on stdout, the
+        // diagnostic on stderr, so a refusal names what moved instead of
+        // making the user re-run without `--check` to find out. The
         // missing-predecessor case (78) is already handled above — the scoped
         // branch requires a predecessor unconditionally, the whole-file branch
         // gates `--check` on it — so a predecessor is guaranteed here.
         if self.check {
-            let prev = guard
-                .previous_lock()
-                .expect("missing-predecessor gate guarantees a predecessor lock for --check");
-            if !lock_content_matches(&new_lock, prev) {
+            let moved = report.moved();
+            self.emit(&context, report)?;
+            if moved {
                 return Err(CommandError::new(
                     "ocx.lock candidate would change pinned content; \
                      re-run `ocx update` (without --check) to refresh the lock",
@@ -197,18 +225,22 @@ impl Update {
         // the object-store population is deferred. Matches `add` semantics.
         // The `--check` early-return above ensures this line is never reached
         // on the verify-only path. `--no-pull` opts out.
-        materialize_lock(&context, &new_lock, eager, platform.clone()).await?;
+        materialize_lock(&context, &new_lock, eager, platform).await?;
 
-        let report_platform = platform;
-        let entries: Vec<LockEntry> = new_lock
-            .tools
-            .iter()
-            .map(|t| LockEntry::from_tool(t, &report_platform))
-            .collect();
-        let report = LockReport::new(entries);
-        context.api().report(&report)?;
+        self.emit(&context, report)?;
 
         Ok(ExitCode::SUCCESS)
+    }
+
+    /// One report, two renderings: `--verbose` appends the pins that held
+    /// still. `VerboseUpdateReport` serializes as its inner report, so
+    /// `--format json` is byte-identical with and without the flag.
+    fn emit(&self, context: &crate::app::Context, report: UpdateReport) -> anyhow::Result<()> {
+        if self.verbose {
+            context.api().report(&VerboseUpdateReport(report))
+        } else {
+            context.api().report(&report)
+        }
     }
 }
 
@@ -312,33 +344,6 @@ fn select_touched(
     }
 
     Ok(touched)
-}
-
-/// Resolved-content equality: two locks match when they share the same
-/// `(group, name, pinned content)` tuples and the same load-bearing
-/// metadata (declaration_hash, lock_version, declaration_hash_version).
-/// Advisory metadata (`generated_at`, `generated_by`) is ignored.
-///
-/// Used by the `update --check` verify-only path: a candidate that
-/// resolves to a different digest for any entry must surface as
-/// `DataError` (exit 65) without writing.
-fn lock_content_matches(candidate: &ProjectLock, prev: &ProjectLock) -> bool {
-    if candidate.metadata.declaration_hash != prev.metadata.declaration_hash
-        || candidate.metadata.declaration_hash_version != prev.metadata.declaration_hash_version
-        || candidate.metadata.lock_version != prev.metadata.lock_version
-    {
-        return false;
-    }
-    if candidate.tools.len() != prev.tools.len() {
-        return false;
-    }
-    let mut a: Vec<&LockedTool> = candidate.tools.iter().collect();
-    let mut b: Vec<&LockedTool> = prev.tools.iter().collect();
-    a.sort_by(|x, y| (x.group.as_str(), x.name.as_str()).cmp(&(y.group.as_str(), y.name.as_str())));
-    b.sort_by(|x, y| (x.group.as_str(), x.name.as_str()).cmp(&(y.group.as_str(), y.name.as_str())));
-    a.iter()
-        .zip(b.iter())
-        .all(|(x, y)| x.name == y.name && x.group == y.group && locked_tool_content_equal(x, y))
 }
 
 #[cfg(test)]

@@ -45,6 +45,7 @@ pub mod signature;
 pub mod status;
 pub mod sweep;
 pub mod tag;
+pub mod update;
 pub mod verification;
 pub mod version;
 pub mod warmed_paths;
