@@ -96,6 +96,13 @@ _SEGMENT = re.compile(r"""["']([A-Za-z0-9_.*+-]+)["']""")
 EXEMPT_EXACT = {"crates/ocx_cli/src/exit/classify_baseline_7adaea62.json"}
 EXEMPT_PATTERNS = (
     re.compile(r"crates/ocx_cli/src/exit(\.rs|/ocx_[a-z_]+\.rs)$"),  # DEC-24 bridge
+    # `bazel_build_drift.py` was here too and is not any more. Its synthetic
+    # tree named its filler packages `ocx_pNN`, which this reader truncates to
+    # the dead literal `crates/ocx_p` — and a file-wide exemption bought that
+    # one dead name at the price of blinding the sweep to the five *live*
+    # `crates/ocx_{cli,shim,util}` literals in the same 1000-line gate script,
+    # in a tree mid-crate-split. The fixture prefix is `pkgNN` now; the dead
+    # literal is gone rather than tolerated.
     re.compile(r"scripts/(lint_ratchet|test_diff_guard|dead_path_sweep)\.py$"),
     re.compile(r"crates/ocx_test_support/tests/workspace_structure\.rs$"),
     re.compile(r"\.claude/tests/test_hooks\.py$"),

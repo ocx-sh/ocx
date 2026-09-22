@@ -6,6 +6,7 @@ vars:
   REPORTS_ROOT: '{{.ROOT_DIR}}/target/reports'
 
 includes:
+  bazel: ./taskfiles/bazel.taskfile.yml
   git: ./taskfiles/git.taskfile.yml
   infra: ./taskfiles/infra.taskfile.yml
   rust: ./taskfiles/rust.taskfile.yml
@@ -96,16 +97,27 @@ tasks:
       Phase 1 (parallel, .verify:lint): rust:format:check, rust:clippy:check,
         shell:verify (shellcheck + shfmt), ci:verify (actionlint), claude:verify
         (structural tests + link check), scripts:verify (the gate-tool self-tests),
-        test:lint (ruff over the acceptance suite), website:lint:links
+        test:lint (ruff over the acceptance suite), website:lint:links,
+        bazel:pin:check (the Bazel pin authority; it reads text and one
+        `bazel --version`, loads no graph, and so belongs in the parallel leg)
       Phase 2 (sequential, .verify:build-test): rust:license:check,
         rust:license:deps, rust:license:notice:check,
         scripts:suite-census, scripts:dead-path-sweep, rust:lint:ratchet,
         rust:doc:ratchet, rust:build,
-        then rust:test:unit bracketed by
-        rust:test:floor / rust:test:ceiling, that ceiling parser's own
-        red/green fixtures (rust:test:ceiling:self-test), the one-second
-        per-test budget over the same run (rust:test:duration) and its own
-        red/red/green fixtures (rust:test:duration:self-test), rust:test:doc
+        bazel:build:nobuild, then bazel:build:drift and bazel:tag:guard,
+        which read the graph that step proves loadable, then bazel:lint
+        (buildifier over every BUILD/.bzl file) and bazel:mod:check
+        (the module lockfile is fresh) — A7's other two lint lines, both
+        sub-second, neither of which had any caller before WP-39,
+        then bazel:test:unit (`bazel test //crates/...` with its floor and
+        skip ceiling read per target off that run's own build event stream —
+        it replaces the three-step cargo nextest bracket, whose listing step
+        alone measured 536.5 s on CI against 173.5 s for the run it fenced),
+        that nextest ceiling parser's own red/green fixtures
+        (rust:test:ceiling:self-test), the per-test duration budget's own
+        red/red/green fixtures (rust:test:duration:self-test — both live
+        parsers left this phase with the nextest run log they read),
+        rust:test:doc
         (nextest runs no doctest, and the scoped gate's per-crate doctest step
         is iterated over an empty CRATES on every escalate), then test:parallel
       Ends with a *full* verify mark (.verify:mark SCOPE=full) — the only
@@ -219,10 +231,18 @@ tasks:
         cmd: cargo check --workspace --all-targets --locked
       - for: { var: CRATES }
         cmd: cargo clippy -p {{.ITEM}} --all-targets --locked -- -D warnings
-      # `--no-tests=warn`: an empty shell (phase 1) has nothing to run and
-      # says so; nextest's default would fail the gate on it.
+      # The scoped arm's unit run follows `.verify:build-test`'s: the engine
+      # is Bazel, so a crate that passes here and a crate that passes in the
+      # full gate passed under the same runner. `:all` rather than a named
+      # target because a crate's test rules are not enumerable from the crate
+      # name, and `--nocache_test_results` is deliberately NOT set - the point
+      # of the scoped arm is that an untouched crate is free.
+      #
+      # `cargo nextest run -p <crate>` stays reachable as `rust:test:nextest`
+      # (local convenience, per the goal's "nextest stays local-only"); it is
+      # no longer what a gate reads.
       - for: { var: CRATES }
-        cmd: cargo nextest run -p {{.ITEM}} --locked --no-tests=warn
+        cmd: ocx exec bazel -- bazel test //crates/{{.ITEM}}:all
       - for: { var: CRATES }
         cmd: cargo test --doc -p {{.ITEM}} --locked
       # Both arms, deliberately: the escalate arm reaches this through
@@ -286,6 +306,11 @@ tasks:
       - task: scripts:verify
       - task: test:lint
       - task: website:lint:links
+      # The one Bazel gate that loads no graph: `bazel --version` against
+      # `.bazelversion`, plus the `rust-toolchain.toml` ↔ `MODULE.bazel` twin.
+      # The other five are sequential and live in phase 2, behind the step
+      # that proves the graph loads.
+      - task: bazel:pin:check
 
   .verify:build-test:
     internal: true
@@ -316,23 +341,66 @@ tasks:
       # on the scoped arm alone and no escalated work package ever saw it.
       - task: rust:doc:ratchet
       - task: rust:build
-      - task: rust:test:floor
-      - task: rust:test:unit
-      - task: rust:test:ceiling
-      # The ceiling is a shell parser and this is its red/green proof, run in
-      # the leg that just depended on it. It hung off `rust:verify` — which no
-      # gate calls — until R16, so the check that proves the ceiling was itself
-      # a check nobody ran.
+      # The Bazel gates (plan_bazel_build_adoption.md C-010, C-011, C-014), in
+      # this order because the other two read a graph and this step is what
+      # proves there is one: a loading or analysis error surfaces here by its
+      # own name instead of downstream as a missing edge or a missing tag.
+      # DX-40 is the measured case — one BUILD file made `test/` a package and
+      # 63 `//:` labels broke at once.
+      - task: bazel:build:nobuild
+      - task: bazel:build:drift
+      - task: bazel:tag:guard
+      # A7's other two lint lines (C-025). Both are sub-second warm — 0.66 s
+      # and 0.31 s measured on the pinned binary — and both had no caller at
+      # all until WP-39: `//:buildifier.check` has been green since WP-10 with
+      # nothing running it, and `--lockfile_mode=error` appears in no rc file
+      # on purpose. A7's fourth line, `bazel test //...`, is deliberately NOT
+      # here: it compiles the workspace a second time and runs the acceptance
+      # suite, so it belongs to `task bazel:test`, the release-gate entry
+      # point, which WP-30's NO-GO leaves without a lane to call it.
+      - task: bazel:lint
+      - task: bazel:mod:check
+      # A7's fourth line over the Rust half, and the three cargo steps it
+      # replaces — `rust:test:floor`, `rust:test:unit`, `rust:test:ceiling`.
+      # Measured on `verify-basic.yml`'s `smoke` job (measurement_bazel_r2.md
+      # § 6): the floor step alone was **536.5 s**, because `cargo nextest
+      # list --workspace --release --locked` builds every test binary in
+      # release before it can name a case, against 173.5 s for the run itself.
+      # Swapping only the execution step — which is what C-016 said and WP-23
+      # did — removed 173.5 s and left the 536.5 s compile in place. So the
+      # floor's subject moves to the run Bazel already did: one invocation, a
+      # per-target case count read out of its build event stream against
+      # `crates/TEST_TARGET_MAP.toml`, and the skip ceiling off the same read.
+      #
+      # It is per target rather than a sum, because `crates/NEXTEST_FLOOR`
+      # carries 10 cases of headroom and `bazel test` exits 0 over a graph
+      # that shrank — both measured, and both shown in the reader's own
+      # `--self-test`, which is this task's first item.
+      #
+      # `rust:test:floor` / `:unit` / `:ceiling` survive as the local nextest
+      # convenience and as `verify-deep.yml`'s macOS and Windows legs; they
+      # are simply not what the gate reads any more.
+      - task: bazel:test:unit
+      # The nextest ceiling is a shell parser and this is its red/green proof.
+      # It stays on the gate although `rust:test:ceiling` no longer runs here:
+      # the task is still the answer on a machine `bazel:test:unit` does not
+      # cover (it is `platforms: [linux]`, as the floor and ceiling were), and
+      # a parser whose fixtures run nowhere is how it stopped matching before.
       - task: rust:test:ceiling:self-test
-      # Same bracket, same log, one question further on: the ceiling asks how
-      # many tests were skipped, this asks whether any of the ones that ran
-      # took a second. `rust:test:floor` deleted the log before the run, so
-      # both read durations that can only be this run's.
-      - task: rust:test:duration
-      # And its own red/red/green fixtures, in the leg that just depended on
-      # it — the budget's red, the reader floor's red (a gate that read a
-      # subset run prints the same green as one over the whole workspace), and
-      # a green asserted on the numbers it reports.
+      # `rust:test:duration` is NOT here, for the reason `rust:test:ceiling`
+      # is not: its subject is `target/nextest/run.log`, which the bracket the
+      # swap removed was what wrote — `rust:test:floor` deleted it, `Test`
+      # tee'd into it. With neither on the lane the live gate reads whatever
+      # an earlier run left behind, or nothing: measured both ways on this
+      # change, it printed 12 findings off a 963 KB stale log locally and
+      # died `FileNotFoundError` on a clean CI runner. libtest prints no
+      # per-test timing, so the budget is not re-derivable from the Bazel
+      # logs the floor already reads; a per-TARGET budget off `TestResult`
+      # is a different property and its own work package.
+      #
+      # Its red/red/green fixtures stay, exactly as the ceiling's do: the task
+      # is still the answer on a machine `bazel:test:unit` does not cover, and
+      # a parser whose fixtures run nowhere is how it stopped matching before.
       - task: rust:test:duration:self-test
       # nextest cannot run doctests, so nothing above this line executes one.
       # The per-crate `cargo test --doc` in `verify:scoped` runs under

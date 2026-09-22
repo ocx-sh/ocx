@@ -6,6 +6,15 @@ vars:
   # The tee'd log of the last `test:unit` run; `test:ceiling` reads its
   # Summary line (C-070).
   NEXTEST_RUN_LOG: '{{.ROOT_DIR}}/target/nextest/run.log'
+  # The tee'd log of the last `test:unit` run on the Bazel arm. Read by that
+  # arm and by nothing else, for one number: the `out of N` of Bazel's
+  # `Executed M out of N tests` line. Never for a verdict about the test set
+  # (C-013) — `M` collapses to 0 the moment the action cache is warm, while
+  # `N` is what the run selected and does not move. A reader that took `M`
+  # here, or that counted `(cached)` markers, would report a fully cached run
+  # as 33 skipped tests and clear a ceiling of 9 by 24 without a single test
+  # having been skipped.
+  BAZEL_RUN_LOG: '{{.ROOT_DIR}}/target/bazel/test.log'
 
 includes:
   # `--all-targets` on the check variants only. Without it `cargo check`
@@ -85,8 +94,10 @@ tasks:
         7. cargo-about third-party notice freshness
         8. cargo build --release
         9. the unit-test floor (Linux; test:floor)
-       10. cargo nextest run
-       11. the ignored/skipped ceiling over that run (Linux; test:ceiling)
+       10. the unit tests (test:unit — `cargo nextest run`, or
+           `bazel test //crates/...` under OCX_TEST_ENGINE=bazel)
+       11. the ignored/skipped ceiling for whichever of the two ran
+           (Linux; test:ceiling)
        12. that ceiling parser's own red/green fixtures (Linux; test:ceiling:self-test)
        13. the one-second per-test budget over that run (Linux; test:duration)
        14. that budget reader's own red/red/green fixtures (Linux;
@@ -229,14 +240,75 @@ tasks:
         vars: { TOOL: cargo-nextest, CRATE: cargo-nextest }
 
   test:unit:
-    desc: Run unit tests
-    # No `sources:`. The bracket around this run — `test:floor` deletes the
-    # log, `test:ceiling` reads it — needs the run to happen every time: a
-    # fingerprint-cached skip would leave the ceiling no log and red an
-    # unchanged tree, and a subset run (`-- <filter>`) would otherwise stamp
-    # the full run up to date. Cargo's own fingerprints make the recompile a
-    # no-op; the run itself is the price of a Summary line that is always
-    # this run's.
+    desc: Run unit tests — `OCX_TEST_ENGINE=bazel` runs them through `bazel test //crates/...` instead of nextest
+    summary: |
+      Two arms, one engine each, selected by `OCX_TEST_ENGINE` (`cargo`, the
+      default, or `bazel`). An unknown value names no task and reds — the
+      dispatch below is the validation, so there is no third state where the
+      gate runs nothing and reports success.
+
+      `cargo` stays the default while `crates/*/BUILD.bazel` does not exist
+      (WP-12). That is also the rollback: the Bazel lane is reverted by not
+      setting the variable, which is what the plan's partial-failure state
+      rests on.
+
+      **The `bazel` arm is PARKED, and nothing sets the variable.** Not because
+      the swap was abandoned - it landed (DX-46 overrode WP-30's NO-GO, and
+      `bazel:test:unit` now runs in `task verify` phase 2 and in
+      `verify-basic.yml`'s `smoke`). It landed as its own task rather than as
+      an engine switch inside this one, so this variable never acquired a
+      setter. No lane, local or CI, runs `OCX_TEST_ENGINE=bazel` today — said here out loud
+      because a green `task verify` says nothing about this arm and a reader
+      would otherwise assume it does.
+
+      It is parked rather than retired: it is landed, red/green-proven work
+      (Schedule log row 13), its floor is the measured part that would have to
+      be redone, and the plan carries an explicit **reopen condition** — a later
+      R2 re-measurement with the shared cache realm deployed (C-029 is what
+      makes that owner-gated today). The rot this exposes it to is the dispatch
+      losing its target: `test:unit` selects `test:unit:{{.ENGINE}}` by string,
+      so renaming the arm turns `OCX_TEST_ENGINE=bazel` into "task not found"
+      and nothing in this repository would notice. That is what
+      `TestSelfTestsRunOnAGate::test_the_parked_bazel_test_engine_arm_keeps_its_entry_point`
+      in `.claude/tests/test_ai_config.py` asserts, and all it asserts —
+      demanding reachability from `verify` would demand the lane WP-30 refused.
+
+      `{{.CLI_ARGS}}` goes to the engine's own command — `-- --profile ci` to
+      nextest, `-- --test_output=all` to Bazel. `test:ceiling` is invoked
+      separately and takes its own, so a caller that names a nextest profile
+      for the run must name it for the ceiling too (see that task).
+    # No `sources:` here or on either arm. The bracket around this run —
+    # `test:floor` deletes the log, `test:ceiling` reads it — needs the run to
+    # happen every time: a fingerprint-cached skip would leave the ceiling no
+    # log and red an unchanged tree, and a subset run (`-- <filter>`) would
+    # otherwise stamp the full run up to date. Cargo's own fingerprints make
+    # the recompile a no-op; the run itself is the price of a Summary line
+    # that is always this run's. The Bazel arm needs the same absence in its
+    # own currency: Bazel's action cache already decides what re-executes, and
+    # a task-level fingerprint stacked on top of it would skip the run whose
+    # `Executed … out of N tests` line carries the target floor — leaving that
+    # floor unevaluated on exactly the trees where the graph could have shrunk.
+    vars:
+      ENGINE: '{{.OCX_TEST_ENGINE | default "cargo"}}'
+    cmds:
+      - task: 'test:unit:{{.ENGINE}}'
+
+  test:nextest:
+    desc: Run the unit tests through cargo-nextest (local convenience; no gate reads this)
+    summary: |
+      The cargo-nextest runner, kept reachable now that no gate uses it.
+      `.verify:build-test` and `verify:scoped` both run the Bazel engine, so a
+      green here is not a green `task verify` - it is the faster local loop and
+      the second opinion when a Bazel result looks wrong.
+
+      Not a fallback the gates can select: `OCX_TEST_ENGINE` still dispatches
+      `test:unit`, and nothing sets it. If this and `bazel:test:unit` ever
+      disagree, that disagreement is the finding.
+    cmds:
+      - task: test:unit:cargo
+
+  test:unit:cargo:
+    internal: true
     deps:
       - install:nextest
     # `set -o pipefail` so nextest's own exit status survives the `tee`; the
@@ -258,6 +330,51 @@ tasks:
         vars:
           JUNIT: '{{.ROOT_DIR}}/target/nextest/default/junit.xml'
           SUITE: unit
+
+  test:unit:bazel:
+    internal: true
+    summary: |
+      `bazel test //crates/...`, floored on the number of test targets the run
+      selected. The floor is the point: until WP-12 commits
+      `crates/*/BUILD.bazel` the pattern matches no package at all, and a step
+      that greens because its graph is empty is the exact failure this bracket
+      exists to prevent. Measured on bazel 9.2.0, both zero-selection shapes
+      already exit non-zero — 1 for "no targets found beneath 'crates'", 4 for
+      "No test targets were found, yet testing was requested" — but neither
+      exit code says how many targets there *were*, so a graph that shrank from
+      33 to 2 is green on the exit code alone. The floor reads the count.
+
+      It reads `N` from `Executed M out of N tests`, never `M`, and never the
+      `(cached)` markers. Measured over a 33-target graph, cold then warm:
+      `Executed 33 out of 33` and 0 `(cached)` lines, then `Executed 0 out of
+      33` and 33 of them. `N` is the selection, `M` is what the action cache
+      let through — reading `M` would make a warm cache indistinguishable from
+      31 deleted targets, and reading the markers as skips would clear
+      `crates/NEXTEST_SKIP_CEILING` by 24 on a tree where nothing was skipped
+      (C-013).
+
+      The floor value comes from `scripts/bazel_gate_proofs.py`'s
+      `CRATES_TEST_TARGETS`, never from a literal here: WP-12's `crates/
+      TEST_TARGET_MAP.toml` and WP-18's parity check reconcile against that
+      same constant, and a second copy in a taskfile is the one that goes
+      stale. `bazel` resolves off the project toolchain (`ocx.toml`), and
+      `--jobs=12` is already a `build` line in `.bazelrc`, which `test`
+      inherits — restating it here would be a second source of truth for a
+      host RAM cap.
+    cmds:
+      - mkdir -p {{.ROOT_DIR}}/target/bazel
+      - >-
+        set -o pipefail;
+        floor=$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import bazel_gate_proofs; print(bazel_gate_proofs.CRATES_TEST_TARGETS)' '{{.ROOT_DIR}}/scripts');
+        [ -n "$floor" ] || { echo "bazel unit: could not read CRATES_TEST_TARGETS from scripts/bazel_gate_proofs.py — the floor has no value, and a comparison against an empty one is not a floor" >&2; exit 1; };
+        status=0;
+        bazel test //crates/... {{.CLI_ARGS}} 2>&1 | tee {{.BAZEL_RUN_LOG}} || status=$?;
+        selected=$(sed -E 's/\x1b\[[0-9;]*m//g' {{.BAZEL_RUN_LOG}} | sed -nE 's/^Executed [0-9]+ out of ([0-9]+) tests?:.*/\1/p' | tail -n 1);
+        selected=${selected:-0};
+        [ "$selected" -ge "$floor" ] || {
+          echo "bazel unit: the run selected $selected test target(s) under //crates/..., floor is $floor (CRATES_TEST_TARGETS in scripts/bazel_gate_proofs.py) — an empty or partial Rust test graph is not a pass; bazel exited $status" >&2; exit 1; };
+        [ "$status" -eq 0 ] || exit "$status";
+        echo "bazel unit: $selected test target(s) selected under //crates/... (floor $floor), all green"
 
   test:doc:
     desc: Run the workspace doctests
@@ -619,14 +736,41 @@ tasks:
         echo "nextest floor: $count tests listed (floor $floor)"
 
   test:ceiling:
-    desc: Fail when the last unit run skipped more tests than crates/NEXTEST_SKIP_CEILING (Linux)
+    desc: Fail when more tests than crates/NEXTEST_SKIP_CEILING were skipped (Linux)
     summary: |
-      Parses the Summary line of the run `test:unit` tee'd to target/nextest/run.log:
-      an `#[ignore]` added to dodge a red shows up here as a skipped count
-      above the ceiling. Run `task rust:test:floor` then `task rust:test:unit`
-      first: the floor deletes the previous log, so a line here is that run's.
+      Same two arms as `test:unit`, selected by the same `OCX_TEST_ENGINE`, and
+      for a reason: the two engines leave different evidence behind.
+
+      `cargo` — the default — parses the Summary line of the run `test:unit`
+      tee'd to target/nextest/run.log. That reading carries a second property
+      the listing cannot: the log came from *this* bracket, so a green here
+      says a run happened. Run `task rust:test:floor` then `task
+      rust:test:unit` first — the floor deletes the previous log.
+
+      `bazel` — there is no nextest Summary line to read, because nextest did
+      not run. The count comes from `cargo nextest list` instead, through
+      `scripts/bazel_floor_proofs.py --check`, which WP-18 measured against the
+      run it replaces: 8223 listed testcases, 8 of them `#[ignore]`, against a
+      run reporting `8215 tests run … 8 skipped`. 8223 − 8215 = 8, exact. That
+      makes the ceiling a declaration check like `test:floor`, and buys the
+      property C-013 asks for by construction rather than by promise: its only
+      input is a listing, so no amount of Bazel cache hits can reach it.
+      What it gives up is the bracket — under this arm the assertion that a
+      run happened is `test:unit:bazel`'s own exit code and target floor.
+
+      Shaped differently from `test:unit`'s two arms, deliberately. `test:unit`
+      dispatches to `test:unit:{{.ENGINE}}` and lets an unknown engine red as a
+      missing task; the cargo arm here stays *inline*, because
+      `scripts/bazel_floor_proofs.py`'s C-012 proof reads this task's own
+      `cmds:` as its live specimen of a recipe that reads a run artifact — the
+      red half that stops the floor predicate from being a check that passes
+      everything. Move the Summary parser into a sub-task and that proof goes
+      green with nothing left to separate it from the floor. The engine is
+      therefore validated in the shell here, in the first `case`, and never by
+      the dispatch.
     platforms: [linux]
     vars:
+      ENGINE: '{{.OCX_TEST_ENGINE | default "cargo"}}'
       # nextest's whole Summary grammar, read from 0.9.144's
       # `displayer/progress.rs::write_summary_str` (nextest-runner): every
       # token but `passed` is conditional, so the skipped count is read only
@@ -643,6 +787,8 @@ tasks:
         [0-9]+ timed out)?(, [0-9]+ skipped)?$
     cmds:
       - >-
+        case '{{.ENGINE}}' in cargo) ;; bazel) exit 0;; *)
+        echo "nextest ceiling: OCX_TEST_ENGINE is '{{.ENGINE}}' — expected cargo or bazel" >&2; exit 1;; esac;
         summary=$(sed -E 's/\x1b\[[0-9;]*m//g' {{.NEXTEST_RUN_LOG}} | grep -E 'Summary \[' | tail -n 1);
         [ -n "$summary" ] || { echo "nextest ceiling: no Summary line in {{.NEXTEST_RUN_LOG}} — rust:test:unit did not run in this bracket; run task rust:test:floor then task rust:test:unit first" >&2; exit 1; };
         printf '%s\n' "$summary" | grep -Eq '{{.SUMMARY_GRAMMAR}}' || { echo "nextest ceiling: Summary line is not nextest's grammar (a nextest bump?): $summary" >&2; exit 1; };
@@ -652,6 +798,45 @@ tasks:
         [ "$skipped" -le "$ceiling" ] || {
           echo "nextest ceiling: $skipped skipped exceeds crates/NEXTEST_SKIP_CEILING ($ceiling): $summary" >&2; exit 1; };
         echo "nextest ceiling: $skipped skipped (ceiling $ceiling)"
+      - task: test:ceiling:bazel
+        vars: { ENGINE: '{{.ENGINE}}' }
+
+  test:ceiling:bazel:
+    internal: true
+    summary: |
+      The Bazel arm of `test:ceiling`, a no-op under any other engine — the
+      guard is the first thing in the recipe and `test:ceiling`'s own `case`
+      has already refused anything that is neither `cargo` nor `bazel`, so
+      there is no third value under which both arms fall through and the task
+      greens having judged nothing.
+
+      `--check` evaluates C-012 and C-013 off one listing, and reports the two
+      readings of "skipped" separately: `ignored` is the `#[ignore]` attribute,
+      `filter-match` is the decision a run would take. They agree on this tree
+      — 8 and 8, under `profile.default` and under `profile.ci` alike — and
+      part company the moment a filter narrows the universe, which is why
+      `{{.CLI_ARGS}}` is forwarded verbatim: the listing must be taken under
+      the same `--profile` the caller named for the run, or the ceiling judges
+      a universe the caller never asked for. Their disagreement is a finding
+      (`ceiling-split`), never a silent choice between them. Reproduced live at
+      a narrowing `-E`: 8 carrying `#[ignore]` against 39 filtered out, exit 1.
+
+      A subset listing reds rather than quietly shrinking the count: the script
+      floors on 36 rust-suites first, so `-- <filter>` is no more a verdict
+      here than a subset run is on the nextest arm.
+
+      No `deps: install:nextest`. Every route that reaches a ceiling runs
+      `test:floor` first — `.verify:build-test`, `rust:verify` and
+      verify-basic.yml all order floor → unit → ceiling — and that task carries
+      the dep. Repeating it here costs a `cargo install` round trip on every
+      `task verify`, on the arm that is a no-op.
+    cmds:
+      - >-
+        [ '{{.ENGINE}}' = bazel ] || exit 0;
+        set -o pipefail;
+        listing=$(mktemp); trap 'rm -f "$listing"' EXIT;
+        cargo nextest list --workspace --release --locked --message-format json {{.CLI_ARGS}} > "$listing";
+        python3 {{.ROOT_DIR}}/scripts/bazel_floor_proofs.py --check --listing "$listing"
 
   test:ceiling:self-test:
     desc: Show the skipped-ceiling parser red on an over-ceiling Summary line and green on a clean one (Linux)
@@ -682,7 +867,12 @@ tasks:
 
       The nested call names the root taskfile explicitly: entered through the
       root `rust:` include, a bare `task` would resolve against whichever
-      taskfile it finds above the current directory.
+      taskfile it finds above the current directory. It pins
+      `OCX_TEST_ENGINE=cargo` for the same class of reason — these fixtures are
+      nextest Summary lines, and inheriting a `bazel` engine from the
+      environment would send them to an arm that never opens the file, so the
+      red half would red for the wrong reason and the green half would report
+      on a `cargo nextest list` of the live tree instead of on the fixture.
     platforms: [linux]
     vars:
       RED_SKIPPED: '999999'
@@ -691,7 +881,7 @@ tasks:
       # `-s`: without it go-task echoes the task body to STDERR, and the body
       # contains the very phrase the red half looks for — the assertion would
       # then match the script quoting itself and pass for any failure at all.
-      CEILING: task -s -t {{.ROOT_DIR}}/taskfile.yml rust:test:ceiling
+      CEILING: task -s -t {{.ROOT_DIR}}/taskfile.yml rust:test:ceiling OCX_TEST_ENGINE=cargo
       # Carries the runtime count for the same reason: `$skipped skipped
       # exceeds …` is in the body, `999999 skipped exceeds …` can only be output.
       RED_REASON: '{{.RED_SKIPPED}} skipped exceeds crates/NEXTEST_SKIP_CEILING'
