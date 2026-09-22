@@ -1,5 +1,7 @@
 [tools]
 actionlint = "ocx.sh/actionlint/actionlint:latest"
+agg = "ocx.sh/asciinema/agg:1.9.0"
+bazel = "ocx.sh/bazelbuild/bazel:9.2.0"
 bun = "ocx.sh/oven-sh/bun:1"
 cosign = "ocx.sh/sigstore/cosign:3.1.1"
 git-cliff = "ocx.sh/git-cliff/git-cliff:2"
