@@ -34,6 +34,8 @@ $ CARGO_BAZEL_REPIN=1 ocx exec bazel -- bazel fetch --repo=@crates
 
 Measured in this checkout: 12 seconds. The repin's own exit code is not proof it ran — `bazel fetch --repo=@crates` exits 0 in about two seconds as a no-op once `@crates` is already in the repo contents cache, splicing nothing and writing no lockfile. `task bazel:bootstrap` checks that the file actually exists afterward rather than trusting the exit code.
 
+**A build also writes three files you should not commit.** `crate_universe` splices each `[patch.crates-io]` path submodule and leaves a generated `BUILD.bazel` behind in `external/rust-oci-client`, `external/docker_credential` and `external/sigstore-rs`. They belong to the generator, not to this repository — CI regenerates them on every run — so `task bazel:bootstrap` adds `BUILD.bazel` to each submodule's `$GIT_DIR/modules/<path>/info/exclude` instead. That is the one ignore file a superproject may write without editing a fork's tree, and it is per worktree, which is why the task writes it rather than a setup step you run once. After a build, `git status --short --ignore-submodules=none` is clean; if it is not, run `task bazel:bootstrap`.
+
 Two failure modes are worth knowing before they surprise you:
 
 - **A `~/.cargo/config.toml` above the splice temp directory.** If one sits in a parent of wherever `crate_universe` splices its workspace, the repin refuses with exit code 8 and `A Cargo config file was found in a parent directory`. Point the splice temp outside `$HOME`: `CARGO_BAZEL_REPIN=1 bazel fetch --repo=@crates --repo_env=TMPDIR=/var/tmp/ocx-splice`.

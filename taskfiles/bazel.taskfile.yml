@@ -67,8 +67,12 @@ tasks:
       chmod 700 '{{.DIR}}' && python3 -c "import os,sys; m = os.stat(sys.argv[1]).st_mode & 0o777; sys.exit(0 if m == 0o700 else f'bazel: the BEP scratch directory {sys.argv[1]} is mode {m:04o}, not 0700 — the Build Event Protocol stream carries every --client_env entry and every --remote_header value, so a directory other accounts can traverse is a credential leak. Point TMPDIR at a filesystem that honours modes.')" '{{.DIR}}'
 
   bootstrap:
-    desc: Repin crate_universe once when its lockfile is absent, so a fresh checkout can query at all
+    desc: Make this checkout queryable — hide crate_universe's generated submodule BUILD files, and repin once when its lockfile is absent
     summary: |
+      Two things `crate_universe` needs doing per checkout, both of them about
+      files it *generates* and git would otherwise argue about. The first item
+      below carries its own reasoning; the rest of this summary is the repin.
+
       `Cargo.bazel.lock.json` is gitignored (DX-23): with `[patch.crates-io]`
       pointing at `path =` submodules, crate_universe records the *generating
       machine's* output base, so a committed copy fails `can't readdir(), not a
@@ -99,6 +103,38 @@ tasks:
       queries the live graph by design.
     dir: '{{.ROOT_DIR}}'
     cmds:
+      # Before the repin, because the repin is what creates the files this
+      # hides and a `--force` run reaches this item on every gate.
+      #
+      # `crate_universe` writes a `BUILD.bazel` into each `[patch.crates-io]`
+      # path submodule (DX-24) — its generated output, not ours — so after the
+      # first splice `git status --ignore-submodules=none` reports three
+      # untracked files in `external/*` forever. They are not committed: CI
+      # regenerates them, and a committed copy of generated output is a second
+      # source of truth.
+      #
+      # The ignore goes in `$GIT_DIR/modules/<path>/info/exclude`, which is the
+      # one ignore file a superproject may write without editing a fork's tree
+      # — `.gitignore` inside the submodule is the fork's file, and a root
+      # `.gitignore` entry cannot reach into a submodule's own status at all.
+      # It is also **per worktree**: `git rev-parse --git-path` answers
+      # `.git/worktrees/<name>/modules/…` here, so a one-time setup step would
+      # cover this checkout and none of the agent worktrees beside it. Hence a
+      # task everything calls rather than a step anyone remembers.
+      #
+      # The submodule list comes from `.gitmodules`, never from three names
+      # spelled here — a second table of one fact is the one that goes stale.
+      # `grep -qxF` makes it idempotent; an uninitialised submodule has no
+      # module directory and is skipped rather than conjured.
+      - cmd: >-
+          git config --file .gitmodules --get-regexp '^submodule\..*\.path$' |
+          while read -r _ path; do
+          moddir=$(git rev-parse --git-path "modules/$path");
+          [ -d "$moddir" ] || continue;
+          mkdir -p "$moddir/info";
+          grep -qxF 'BUILD.bazel' "$moddir/info/exclude" 2>/dev/null ||
+          echo 'BUILD.bazel' >> "$moddir/info/exclude";
+          done
       - cmd: >-
           test -s Cargo.bazel.lock.json || {
           echo 'bazel: Cargo.bazel.lock.json is absent - it is gitignored, because crate_universe records the generating machine output base (DX-23). Repinning once.' >&2;
