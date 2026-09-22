@@ -1,0 +1,44 @@
+# Workspace-relative DIRECTORY PATHS, not globs. `.bazelignore` does not
+# depth-match the way `.gitignore` does: a bare `target` line ignores the
+# top-level `target/` only, which is why every `external/<crate>/target` and
+# `website/node_modules` is spelled out. Bazel never reads `.gitignore`
+# (BZL-ARCH-26), so the two files agree by maintenance, not by mechanism.
+
+# Agent and swarm working copies — parallel checkouts of this same repo.
+.agents
+.claude/state
+.claude/worktrees
+.swarm
+
+# Rendered project toolchain and task/bazel scratch.
+.ocx
+.task
+.tmp
+
+# Cargo output, in the workspace and in each patched submodule.
+#
+# Measured on 9.2.0: the three `external/...` lines are belt-and-braces.
+# `external` is Bazel's reserved workspace-root directory name and `//...`
+# never expands into it at all — a package planted at `external/probe/` with
+# nothing ignoring it stays invisible to `bazel query 'buildfiles(//...)'`,
+# while the same package one directory over is found. They are kept so the
+# entries survive a layout that stops being special-cased.
+target
+external/docker_credential/target
+external/rust-oci-client/target
+external/sigstore-rs/target
+
+# Acceptance-suite scratch. `test/manual/.ocx-home` is a real ocx home a manual
+# run leaves behind (gitignored). It contains the store's `refs/symlinks`
+# back-edges, which Bazel's directory walk reads as infinite symlink expansion
+# and reports as forty ERROR lines on every `//...` command — non-fatal, and
+# indistinguishable from a broken build to whoever reads the log.
+test/manual/.ocx-home
+
+# Node and Python environments.
+node_modules
+website/node_modules
+test/.venv
+
+# Windows cross-compile SDK cache.
+.cache/xwin

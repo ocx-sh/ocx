@@ -1,0 +1,138 @@
+# ocx `.bazelrc` — the committed, shipped rc.
+#
+# Every flag below was proven present on the pinned binary's two help surfaces
+# (`bazel help build --long`, `bazel help startup_options`) at bazel 9.2.0
+# before it was written here (BZL-FLAG-11). A flag absent from both surfaces
+# and from the `--flag //... | grep 'Unrecognized option'` probe does not exist
+# on this binary and hard-fails every command in the repository.
+#
+# The prefix on each line is load-bearing. A startup option on a `build` line
+# is an `unrecognized option` error, not a warning.
+
+# ---------------------------------------------------------------------------
+# Startup — parsed by the client, before the server exists.
+# ---------------------------------------------------------------------------
+
+# The Bazel server is a scheduler, not a compiler. Left to itself the JVM sizes
+# its heap off total RAM; on the 32 GB development host that reserves multiples
+# of what a workspace this size needs and starves rustc.
+startup --host_jvm_args=-Xmx2g
+
+# ---------------------------------------------------------------------------
+# Local resource envelope. `test` inherits every `build` option.
+# ---------------------------------------------------------------------------
+
+# A RAM cap, not a speed choice — the same number `cargo build` already uses on
+# this host, because it is the same constraint. CI runners are the opposite
+# shape (few cores, no LSP, ephemeral) and get Bazel's own default back below.
+build --jobs=12
+
+# Never `/tmp`: on the development host that is a tmpfs, so a disk cache there
+# is RAM and an hourly reaper deletes it mid-build.
+#
+# Nor anywhere inside the workspace, and the reason is mechanical rather than
+# stylistic. Measured on 9.2.0: `%workspace%` is substituted in `import` and
+# `try-import` statements ONLY — written into a flag value it is taken
+# literally and Bazel creates a directory actually named `%workspace%`. And a
+# relative `--disk_cache` resolves against the CLIENT WORKING DIRECTORY, not
+# the workspace root, so `bazel` run from `crates/` silently forks a second,
+# empty cache. A `~`-rooted absolute path is the only spelling in a committed
+# rc that means one place from every directory — and one cache shared by the
+# four fixed worktrees plus every agent worktree is the behaviour this repo
+# wants anyway.
+build --disk_cache=~/.cache/ocx/bazel-disk
+
+# Disk-cache GC is deliberately OFF on this pin. Both
+# `--experimental_disk_cache_gc_max_size` and
+# `--experimental_disk_cache_gc_max_age` default to "0" (unbounded) even where
+# supported, so this is unbounded growth and it is a known, accepted cost:
+# collection runs only once the server has been idle for
+# `--experimental_disk_cache_gc_idle_delay` (5m), which never happens on an
+# ephemeral CI runner, so the flag would buy nothing on the lane that needs it
+# and would expose the development host to the disk-cache TOCTOU in
+# https://github.com/bazelbuild/bazel/issues/30836 — milestoned 9.3.0. Reopen
+# when this workspace's pin crosses 9.3.0.
+
+# ---------------------------------------------------------------------------
+# Remote cache — read-only everywhere this file reaches.
+# ---------------------------------------------------------------------------
+
+# The scheme is explicit: both remote flags default to `grpcs` on a scheme-less
+# URI, which silently talks the wrong protocol to an HTTP cache.
+#
+# `/v1` is the cache GENERATION, and it is a URI path prefix on purpose.
+# `--remote_instance_name` is inert over an HTTP remote cache — Bazel's HTTP
+# client never puts the instance name in the URL — so rotating a generation
+# through that flag changes nothing at all. Do not re-add it here. The server
+# side of the same exit is `--enable_ac_key_instance_mangling` on the
+# bazel-remote unit; that is a server flag and no Bazel binary carries it.
+build --remote_cache=https://bazel-cache.ocx.sh/v1
+
+# Writes are granted per-lane, never by this file. A contributor, a fork PR and
+# a non-main CI lane all read and none of them write.
+build --remote_upload_local_results=false
+
+# The default is 60s PER OPERATION. A single slow box with no failover, serving
+# thousands of lookups per build, makes a build slower than no cache at all —
+# green, with nothing noticing. A per-operation wait longer than the action it
+# is trying to avoid is never a win.
+build --remote_timeout=30s
+
+# Stated rather than inherited so the worst case per operation is readable.
+# This is not `--experimental_remote_cache_eviction_retries`, which stays at
+# its default of 5 and is deliberately absent from this file.
+build --remote_retries=2
+
+# Download mode is per role (BZL-CACHE-11). Interactive machines keep the
+# `toplevel` default and therefore set nothing here; a CI runner consumes no
+# build output locally and gets `minimal` under `--config=ci`, below.
+#
+# The paired position BZL-CACHE-12 asks for, because `minimal` maximises
+# exposure to the evicted-intermediate class: never key CI retry or alerting
+# logic on exit code 39 — it was never observed reaching the caller. Match the
+# log text instead: `lost inputs with digests:`, `Found transient remote cache
+# error, retrying the build...`, `Lost inputs no longer available remotely:`,
+# `lost input too many times (#21)`. And `--experimental_remote_cache_ttl`
+# stays unset (3h default) until the server's real eviction window is known and
+# shorter.
+build:ci --remote_download_minimal
+
+# Hand `--jobs` back to Bazel on the lane this file's local cap does not fit.
+build:ci --jobs=auto
+
+# Do NOT enable `--experimental_remote_cache_chunking`. It is present on 9.2.0
+# and defaults false; turning it on re-keys CAS uploads and splits this
+# workspace's cache population across two incompatible encodings for no
+# measured win.
+
+# ---------------------------------------------------------------------------
+# What deliberately is NOT in this file
+# ---------------------------------------------------------------------------
+#
+# No credential of any kind, and no flag whose value is EXECUTED. Bazel
+# resolves and spawns such a helper with the full client environment, before
+# the sandbox — a read-only `bazel query //...` on a fresh clone is enough to
+# run it, and upstream closed that as intended behaviour. The cache write
+# credential is written by CI into an rc file under `$RUNNER_TEMP`, outside the
+# workspace, and passed with `--bazelrc=`; CI's read credential arrives the same
+# way. A developer's read credential is a `--remote_header` line in `~/.bazelrc`,
+# never `.bazelrc.user` - host state must not need a per-checkout file, because
+# this machine carries many worktrees and disposable ones. `task bazel:doctor`
+# reds the `.bazelrc.user` spelling as `userrc-host-state`.
+#
+# No `--lockfile_mode=error` either. Unscoped in a committed base rc it turns
+# every legitimate dependency edit into a failure a developer cannot
+# self-serve; the freshness gate belongs on its own CI leg, as
+# `bazel mod deps --lockfile_mode=error`, decided on the exit code.
+#
+# `--repo_contents_cache` is left at its default,
+# `{--repository_cache}/contents` = `{--output_user_root}/cache/repos/v1/contents`
+# — outside the workspace, shared across checkouts, and the one repository-
+# shaped cache on this pin that does have real GC (age-only, 14d).
+
+# ---------------------------------------------------------------------------
+# Personal overrides. MUST stay the last non-comment line: import position is
+# the precedence contract, and an override imported anywhere else is silently
+# defeated (BZL-FLAG-19).
+# ---------------------------------------------------------------------------
+try-import %workspace%/.bazelrc.user

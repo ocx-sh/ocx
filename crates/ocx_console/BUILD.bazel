@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//crates:__subpackages__"])
+
+rust_library(
+    name = "ocx_console",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = glob(
+        ["src/**"],
+        allow_empty = True,
+        exclude = ["src/**/*.rs"],
+    ),
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_console"},
+    version = "0.6.2",
+    deps = all_crate_deps(normal = True) + [
+        "//crates/ocx_util",
+    ],
+)
+
+rust_test(
+    name = "ocx_console_test",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    # `--test-threads=1`. 25 testcases across 8 crates mutate the *process*
+    # environment (`std::env::set_var`) inside the test body. nextest runs one
+    # process per testcase, so that is safe there; libtest runs them as threads
+    # in one process, and Bazel drives libtest — measured flaky, not merely
+    # slower. Serialising the binary is what makes `bazel test` deterministic.
+    args = [
+        "--test-threads=1",
+    ],
+    crate = ":ocx_console",
+    data = glob(
+        ["src/**"],
+        allow_empty = True,
+    ),
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_console"},
+    deps = all_crate_deps(normal_dev = True),
+)

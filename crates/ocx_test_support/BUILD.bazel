@@ -1,0 +1,186 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//crates:__subpackages__"])
+
+filegroup(
+    name = "data",
+    srcs = glob(["data/**"]),
+)
+
+rust_library(
+    name = "ocx_test_support",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = glob(
+        ["src/**"],
+        allow_empty = True,
+        exclude = ["src/**/*.rs"],
+    ),
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_test_support"},
+    version = "0.6.2",
+    deps = all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "ocx_test_support_test",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    # `--test-threads=1`. 25 testcases across 8 crates mutate the *process*
+    # environment (`std::env::set_var`) inside the test body. nextest runs one
+    # process per testcase, so that is safe there; libtest runs them as threads
+    # in one process, and Bazel drives libtest — measured flaky, not merely
+    # slower. Serialising the binary is what makes `bazel test` deterministic.
+    args = [
+        "--test-threads=1",
+    ],
+    crate = ":ocx_test_support",
+    data = glob(
+        ["src/**"],
+        allow_empty = True,
+    ),
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_test_support"},
+    deps = all_crate_deps(normal_dev = True),
+)
+
+rust_test(
+    name = "boundary",
+    srcs = [
+        "tests/boundary.rs",
+    ],
+    aliases = aliases(
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    # `--test-threads=1`. 25 testcases across 8 crates mutate the *process*
+    # environment (`std::env::set_var`) inside the test body. nextest runs one
+    # process per testcase, so that is safe there; libtest runs them as threads
+    # in one process, and Bazel drives libtest — measured flaky, not merely
+    # slower. Serialising the binary is what makes `bazel test` deterministic.
+    args = [
+        "--test-threads=1",
+    ],
+    compile_data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/*.rs"],
+    ),
+    data = glob(
+        [
+            "src/**",
+            "tests/**",
+        ],
+        allow_empty = True,
+        exclude = ["tests/*.rs"],
+    ),
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_test_support"},
+    version = "0.6.2",
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [
+        ":ocx_test_support",
+    ],
+)
+
+rust_test(
+    name = "workspace_structure",
+    srcs = [
+        "tests/workspace_structure.rs",
+    ],
+    aliases = aliases(
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    # `--test-threads=1`. 25 testcases across 8 crates mutate the *process*
+    # environment (`std::env::set_var`) inside the test body. nextest runs one
+    # process per testcase, so that is safe there; libtest runs them as threads
+    # in one process, and Bazel drives libtest — measured flaky, not merely
+    # slower. Serialising the binary is what makes `bazel test` deterministic.
+    # The testcase-level half of C-008's exclusion set. Every name here fails
+    # under `bazel test` for a reason that is a property of the *test*, not of
+    # this graph, and each is still executed by `cargo nextest` — which is what
+    # `rust:test:floor` counts, so nothing here shrinks the declared suite.
+    # Two causes, both measured:
+    #   (a) the testcase walks `crates/*/src` of crates this target does not
+    #       depend on. Declaring that as data would make the target a reverse
+    #       dependency of every crate without being one in `rdeps`, which is
+    #       exactly the shape A1's `a1-graph-too-wide` refuses.
+    #   (b) the testcase needs a process of its own (a `set_global_default`
+    #       tracing subscriber, a per-test `HOME`, or cargo's crate-directory
+    #       CWD). nextest runs one process per testcase; libtest runs threads
+    #       in one, and Bazel drives libtest.
+    # `--exact` is load-bearing: libtest matches `--skip` as a substring by
+    # default, and without it 22 names silently filtered 29 testcases here.
+    # The executed count is recorded in `crates/TEST_TARGET_MAP.toml` and rises
+    # only, so a skip that widens past its name reds there.
+    args = [
+        "--test-threads=1",
+        "--exact",
+        "--skip=anyhow_only_in_cli_runtime",
+        "--skip=crate_map_toml_matches_rust_table",
+        "--skip=deps_direction",
+        "--skip=every_boundary_needle_names_something_live",
+        "--skip=every_public_item_of_ocx_util_has_a_consumer",
+        "--skip=every_repo_path_literal_in_a_test_names_something_live",
+        "--skip=every_source_file_is_reachable",
+        "--skip=every_utility_error_reaching_the_cli_is_armed",
+        "--skip=internal_crates_block_is_complete_and_sorted",
+        "--skip=manifests_inherit_lints_and_never_publish",
+        "--skip=needle_liveness_and_the_absence_exemption_discriminate",
+        "--skip=no_classification_in_libraries",
+        "--skip=no_log_shim",
+        "--skip=no_module_path_in_output",
+        "--skip=readme_may_depend_on_rows_match_the_crate_map",
+        "--skip=release_feature_set_excludes_testing_seams",
+        "--skip=resolver_resolves_aliases_that_name_unlike_error_types",
+        "--skip=resolver_resolves_each_error_declaration_apart",
+        "--skip=ssrf_guard_ratchet",
+        "--skip=test_scaffolding_is_declared_where_it_is_gated_and_forwarded_nowhere",
+        "--skip=testing_feature_forward_list_matches_grep",
+        "--skip=tests_hold_no_inert_loop",
+    ],
+    compile_data = glob(
+        ["tests/**"],
+        allow_empty = True,
+        exclude = ["tests/*.rs"],
+    ),
+    data = glob(
+        [
+            "src/**",
+            "tests/**",
+        ],
+        allow_empty = True,
+        exclude = ["tests/*.rs"],
+    ),
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_test_support"},
+    version = "0.6.2",
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [
+        ":ocx_test_support",
+    ],
+)

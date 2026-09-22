@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//crates:__subpackages__"])
+
+rust_library(
+    name = "ocx_sign",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = glob(
+        ["src/**"],
+        allow_empty = True,
+        exclude = ["src/**/*.rs"],
+    ),
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sign"},
+    version = "0.6.2",
+    deps = all_crate_deps(normal = True) + [
+        "//crates/ocx_exit",
+        "//crates/ocx_oci",
+        "//crates/ocx_trust",
+        "//crates/ocx_util",
+    ],
+)
+
+rust_test(
+    name = "ocx_sign_test",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    # `--test-threads=1`. 25 testcases across 8 crates mutate the *process*
+    # environment (`std::env::set_var`) inside the test body. nextest runs one
+    # process per testcase, so that is safe there; libtest runs them as threads
+    # in one process, and Bazel drives libtest — measured flaky, not merely
+    # slower. Serialising the binary is what makes `bazel test` deterministic.
+    args = [
+        "--test-threads=1",
+    ],
+    compile_data = [
+        "//test:sigstore/keys/rekor.key.pem",
+        "//test:sigstore/keys/rekor.pub.pem",
+        "//test:sigstore/trusted_root.json",
+        "//test:tests/fixtures/golden/attestation_sidecar_key_envelope.json",
+        "//test:tests/fixtures/golden/attestation_sidecar_key_manifest.json",
+        "//test:tests/fixtures/golden/key_bundle.json",
+        "//test:tests/fixtures/golden/key_referrer_manifest.json",
+        "//test:tests/fixtures/golden/keyless_bundle.json",
+        "//test:tests/fixtures/golden/keyless_referrer_manifest.json",
+        "//test:tests/fixtures/golden/keys/cosign.key",
+        "//test:tests/fixtures/golden/keys/cosign.pub",
+        "//test:tests/fixtures/golden/sbom_sidecar_document.json",
+        "//test:tests/fixtures/golden/sbom_sidecar_manifest.json",
+        "//test:tests/fixtures/golden/simplesigning_key_manifest.json",
+        "//test:tests/fixtures/golden/simplesigning_key_payload.json",
+        "//test:tests/fixtures/golden/simplesigning_keyless_manifest.json",
+        "//test:tests/fixtures/golden/simplesigning_keyless_payload.json",
+        "//test:tests/fixtures/simplesigning/foreign_claim_type_payload.json",
+        "//test:tests/fixtures/simplesigning/foreign_subject_payload.json",
+        "//test:tests/fixtures/simplesigning/publisher_formatted_manifest.json",
+        "//test:tests/fixtures/simplesigning/publisher_formatted_payload.json",
+        "//test:tests/fixtures/simplesigning/tampered_signature_manifest.json",
+        "//test:tests/fixtures/simplesigning/untrusted_ca_manifest.json",
+    ],
+    crate = ":ocx_sign",
+    data = glob(
+        ["src/**"],
+        allow_empty = True,
+    ),
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_sign"},
+    deps = all_crate_deps(normal_dev = True),
+)

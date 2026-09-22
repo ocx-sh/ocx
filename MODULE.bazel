@@ -1,0 +1,119 @@
+"""ocx — the Bazel module.
+
+Bazel is a test-execution cache under `task`; nobody types `bazel`. The binary
+itself is pinned by `ocx.lock` (a per-platform digest), not by `.bazelversion`
+(a semver string a registry can re-tag) — `.bazelversion` is retained for
+BZL-FLAG-01 and for any tool that does reach for bazelisk, and a drift check
+keeps the pair honest.
+
+`compatibility_level` is deliberately absent: it is non-functional from Bazel
+9.1.0 on, so declaring one would encode a guarantee nothing enforces.
+"""
+
+module(
+    name = "ocx",
+    version = "0.6.2",
+)
+
+# Every dependency carries an explicit version. A `bazel_dep` without one
+# resolves to whatever the registry serves that day.
+bazel_dep(name = "rules_rust", version = "0.74.0")
+bazel_dep(name = "rules_shell", version = "0.8.0")
+bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.4")
+
+# The one exception, and it carries its own paragraph below: `rules_ocx` is
+# resolved by `git_override`, not by the registry, so the version here is the
+# module's self-declared one and no registry is consulted for it.
+bazel_dep(name = "rules_ocx", version = "0.4.0")
+
+# ---------------------------------------------------------------------------
+# Rust toolchain
+# ---------------------------------------------------------------------------
+
+# Pinned, and equal to `rust-toolchain.toml`'s channel by policy: this project
+# ships binaries, so the floor is the pinned compiler and the two spellings
+# must agree. Omitting this call is not an error — rules_rust's own non-dev
+# registration backs it up and the build succeeds with nothing here naming a
+# version, while `DEFAULT_RUST_VERSION` moves under every ruleset bump.
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+    versions = ["1.95.0"],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+# ---------------------------------------------------------------------------
+# Third-party crates
+# ---------------------------------------------------------------------------
+
+# `lockfile =` is explicit and mandatory (BZL-RUST-01). Without it
+# `determine_repin()` returns True unconditionally: every build re-splices the
+# whole graph, forever, and no freshness check is possible at all. Note
+# `cargo_lockfile` is Cargo's own `Cargo.lock` and does not satisfy that.
+#
+# Repin with `CARGO_BAZEL_REPIN=1 bazel fetch --repo=@crates`. Never
+# `bazel sync` — deleted at Bazel 9.0.0, whatever the ruleset's docs print.
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    lockfile = "//:Cargo.bazel.lock.json",
+    manifests = ["//:Cargo.toml"],
+)
+use_repo(crate, "crates")
+
+# ---------------------------------------------------------------------------
+# The project toolchain — `@tools//:<bin>`
+# ---------------------------------------------------------------------------
+
+# Deliberate and temporary. `rules_ocx` has no BCR release carrying its Bazel 9
+# support yet, so the module is taken from the branch that does; the pin is a
+# commit, never a branch name, because a branch re-points. Dropped — this whole
+# stanza, not just the `commit` line — in the commit that bumps the `bazel_dep`
+# above to the first BCR release, which is also when the version there starts
+# meaning something.
+git_override(
+    module_name = "rules_ocx",
+    commit = "9ced5ffb79a77d37d6f479498bf32517a49b3dc7",
+    remote = "https://github.com/ocx-sh/rules_ocx",
+)
+
+# One runnable target per binary the toolchain declares, resolved from the same
+# `ocx.toml`/`ocx.lock` pair the per-prompt shell hook reads. `name` is
+# mandatory: without it the call does not load, and `@tools//:bun` is `@tools`
+# because of it.
+#
+# `ocx` itself is never taken from `PATH` — rules_ocx fetches a sha256-pinned
+# CLI into `@ocx_tool//:ocx` — so a fresh clone builds with nothing installed
+# and without assuming the shell hook ever ran.
+#
+# Two structural properties of this path, recorded here so that no later reader
+# re-derives them:
+#
+#   - Tool *content* is not a Bazel action input: a launcher execs an absolute
+#     `$OCX_HOME/packages/…/<digest>/content/<bin>` path, where `<digest>` is a
+#     128-bit prefix of the content digest. The launcher is the action's tool,
+#     so an action does re-key on a tool change — **but only once the repository
+#     refetches**, and on this pin the eager form watches neither `ocx.toml` nor
+#     `ocx.lock`: the repo marker records no entry for either, so a lock bump
+#     alone leaves every action cached until `bazel fetch --force --repo=@tools`.
+#     Measured here, both directions, against a throwaway probe project. That is
+#     a rules_ocx defect — its lazy `bins =` form watches both and re-keys on a
+#     plain build — so a hermeticity check must not assume the eager edge.
+#   - There is no remote execution on this path, ever. An absolute store path
+#     cannot resolve on a remote executor, so `--remote_cache` is the ceiling
+#     here as a structural fact rather than a scope decision.
+#
+# Only executables are exposed; there is no `@tools//` route to package *data*,
+# even in principle. That is why the Nerd Font WP-34 needs stays an
+# `http_archive` with `integrity` — a structural carve-out, and the only one.
+# Nothing ocx can package may be fetched with `http_file`/`http_archive`.
+ocx = use_extension("@rules_ocx//ocx:extensions.bzl", "ocx")
+ocx.project(
+    name = "tools",
+    ocx_lock = "//:ocx.lock",
+    ocx_toml = "//:ocx.toml",
+)
+use_repo(ocx, "tools")
