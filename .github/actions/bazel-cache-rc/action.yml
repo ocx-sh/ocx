@@ -1,0 +1,97 @@
+name: Bazel Cache Credential
+description: >-
+  Write the CI-only rc file carrying the shared Bazel cache's credentials, and —
+  for the write half only — the credential helper it names. Both land under
+  `$RUNNER_TEMP` and never in the workspace: Bazel spawns a
+  `--credential_helper` with the full client environment, before the sandbox, so
+  a helper reachable from a shipped rc file runs on a read-only
+  `bazel query //...` from any clone (bazel#30439, closed by the vendor as
+  intended; BZL-CACHE-04, MUST). With `write-auth` empty no
+  `--credential_helper` line is written at all — that is the state of every lane
+  but the `main` push, and it is how the write credential is *absent* there
+  rather than merely unused (BZL-CACHE-01, MUST). Exactly one of the two inputs
+  is ever non-empty, and the refusal when both are is `write_rc.py`'s (DX-81).
+  With **both** inputs empty
+  nothing is written, which is the fork-PR lane: GitHub withholds secrets from a
+  fork-triggered run, so that lane reads the cache anonymously over
+  `--disk_cache`. The caller passes the file with
+  `--bazelrc="$RUNNER_TEMP/bazel-cache.rc"`, and only when it exists —
+  `--bazelrc` naming a missing file is a hard error (measured on 9.2.0: exit 2,
+  `Unable to read .bazelrc file`), so a fork lane must not name it.
+
+inputs:
+  read-auth:
+    description: >-
+      The cache **read** credential, as one `--remote_header` value:
+      `authorization=Basic <base64 of user:password>`. It becomes a
+      `build --remote_header=…` line in the rc file and nothing else: a header
+      is a value Bazel sends, so BZL-CACHE-04's executed-helper hazard does not
+      reach it, and no helper program is written when only this input is set.
+
+      **Never together with `write-auth`** (DX-81). Bazel `add`s an
+      `Authorization` header per configured source and sends all of them, so two
+      inputs would make the origin's parsing decide which credential
+      authenticates a request. `write_rc.py` refuses rather than write both,
+      which is why the caller gates the two on one trusted event with one of them
+      negated: the lane that writes presents the write credential alone, whose
+      user is in both realms, and every other lane presents this one alone.
+    required: false
+    default: ""
+  write-auth:
+    description: >-
+      The cache **write** credential, as one `--remote_header` value:
+      `authorization=Basic <base64 of user:password>`. The caller binds it to a
+      trusted-event expression that yields the empty string on every lane but
+      the `main` push — the exact expression is ADR ruling 5's, and it is not
+      repeated here because a third copy of it is a third thing to keep in step.
+      That gate belongs in the calling workflow and never in this action: under
+      `workflow_call` the `github` context is the *caller's*, so a trigger test
+      evaluated inside a composite action answers about the wrong workflow (ADR
+      ruling 5a).
+    required: false
+    default: ""
+  cleanup:
+    description: >-
+      `true` deletes both files instead of writing them. A composite action has
+      no `post:` hook — the runner's action schema gives `post`/`post-if` to
+      `node-runs` and `container-runs` only — so the caller runs this action a
+      second time under `if: always()`, and a cancelled or failed job leaves no
+      credential on the runner.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Write the Bazel cache credential
+      if: inputs.cleanup != 'true'
+      shell: bash
+      env:
+        # Through `env:`, never as `${{ inputs.write-auth }}` inside the `run:`
+        # body below. GitHub materialises every step script to a file under
+        # `/home/runner/work/_temp/` before running it, so the interpolated
+        # spelling writes the credential to a second place on disk and through
+        # the expression-expansion path (ADR ruling 4b line 1).
+        READ_AUTH: ${{ inputs.read-auth }}
+        WRITE_AUTH: ${{ inputs.write-auth }}
+      run: |
+        set -euo pipefail
+        # Before either file exists, so neither is group- or world-readable for
+        # even an instant (ADR ruling 4b line 2). `write_rc.py` then chmods
+        # explicitly, since `open(2)` is umask-clipped and `chmod(2)` is not.
+        umask 077
+        # The credential reaches the interpreter through the environment and
+        # appears on no command line, so a `set -x` on this step traces exactly
+        # these three lines and nothing else.
+        python3 "$GITHUB_ACTION_PATH/write_rc.py"
+
+    - name: Remove the Bazel cache credential
+      if: inputs.cleanup == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The two names `write_rc.py` may write. `rm -f` so the step is green on
+        # a job that failed before the credential was ever written — the job an
+        # `if: always()` cleanup exists for — and on a read-only lane, where the
+        # rc file exists and the helper never did.
+        rm -f "$RUNNER_TEMP/bazel-cache.rc" "$RUNNER_TEMP/bazel-cache-helper"

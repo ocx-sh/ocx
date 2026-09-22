@@ -58,7 +58,7 @@ jobs:
       - name: Setup OCX
         uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
-          version: '0.5.8'
+          version: '0.6.2'
           # Default-off: the action would otherwise restore
           # $OCX_HOME/{blobs,layers,packages,tags} across runs via
           # @actions/cache, and a restored object store is runner-executable
@@ -88,6 +88,20 @@ jobs:
   smoke:
     name: Smoke (Linux)
     runs-on: ubuntu-latest
+    # Stated rather than inherited (plan_bazel_build_adoption.md C-016). This is
+    # the job the Bazel gates below run in, and the one earmarked to hold the
+    # cache write credential, so its grant must not widen silently with the
+    # workflow-level block above it.
+    #
+    # It is the workflow default written out, NOT a reduction to `contents:
+    # read`: `EnricoMi/publish-unit-test-result-action` creates a check run and
+    # comments on the pull request, which its README names as `checks: write`
+    # plus `pull-requests: write`. Dropping either 403s `Publish Unit Test
+    # Results` below, on a step that runs under `!cancelled()` and blocks.
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
     env:
       # Shared compile cache, same wiring as verify-deep.yml `build`: a fork PR
       # has no secrets, gets an empty RUSTC_WRAPPER and a skipped sccache step.
@@ -100,10 +114,17 @@ jobs:
       SCCACHE_S3_USE_SSL: "true"
       AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
-      # Test telemetry (subsystem-ci.md § Test telemetry), lifted into the job
-      # env for the same reason the sccache credentials are: `secrets` is not a
-      # context a composite action's `if:` can read. Empty on a fork PR, and
-      # the push step's guard skips it rather than failing.
+      # Test telemetry (subsystem-ci.md § Test telemetry), for `Push unit test
+      # timings` alone: the composite action reads it from the environment, and
+      # its `if:` guard needs a value `if:` can see — `secrets` is not such a
+      # context. Empty on a fork PR, and the guard skips rather than fails.
+      #
+      # **Job-wide, and saying otherwise would be worse than saying nothing.**
+      # Every `cargo`, `bazel` and `task` process in `smoke` inherits it, and
+      # `bazel` writes its whole client environment into the build event
+      # stream. Which is why the Bazel half does not use this variable — its
+      # credential is a step `env:` entry on `Bazel graph loads` — and why the
+      # stream recording it never touches the checkout.
       OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
     steps:
       - name: Checkout
@@ -128,10 +149,11 @@ jobs:
         uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
-      - name: Install nextest
-        uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
-        with:
-          tool: cargo-nextest
+      # `Install nextest` stood here and is gone with the lane swap below: the
+      # unit run and its floor are both `bazel test //crates/...` now, and
+      # `task rust:test:doc` is `cargo test --doc`. Nothing left in this job
+      # invokes nextest, and an install for a tool nothing runs is a minute of
+      # every run.
       - name: Check formatting
         id: fmt
         run: task rust:format:check
@@ -142,9 +164,10 @@ jobs:
         continue-on-error: true
       # The crate-split structural gates `task verify` runs
       # (plan_crate_split_workspace.md C-011, C-070), in its order: the two
-      # ratchets before the build, the unit-test floor
-      # before the unit run and the skip ceiling right after it — the ceiling
-      # reads the Summary line `rust:test:unit` tees to target/nextest/run.log.
+      # ratchets before the build, then the unit run. The floor and the skip
+      # ceiling used to bracket that run as two cargo steps; both now come off
+      # the Bazel run's own build event stream in one step (see `Unit tests
+      # (Bazel)` below), which is why nothing brackets it here any more.
       # The two lints follow section 3 of subsystem-ci.md: they never block
       # the test results, the final gate step reports them.
       # The acceptance suite's shape, beside the two ratchets: it reads no
@@ -166,16 +189,23 @@ jobs:
         id: docratchet
         run: task rust:doc:ratchet
         continue-on-error: true
+      # The release compile stays in this job, and the rule is instruction-level
+      # rather than habit: a cargo `Build` step stays exactly where a later job
+      # needs the release binary. `smoke-acceptance` below `needs: smoke` and
+      # downloads `ocx-binary`, so dropping it here would leave that job with
+      # nothing to run. Measured at 197.5 s (WP-30 § 6); it is not what the
+      # lane swap removes, and saying otherwise would be a saving on paper.
       - name: Build
         run: task rust:build
-      # Upload the acceptance binary *before* the Test step. `task rust:build`
-      # compiles target/release/ocx with `--features ocx/__testing`, enabling the
-      # `__OCX_SELF_IMAGE` seam that the self-setup / self-update acceptance tests
-      # rely on to redirect the canonical `ocx.sh/ocx/cli` identifier to the local
-      # fixture registry. The Test step below runs `cargo nextest --workspace
-      # --release` WITHOUT that feature, which recompiles and overwrites
-      # target/release/ocx seam-free — so a download after Test would ship a
-      # binary that ignores the redirect and every self-* acceptance test fails.
+      # `task rust:build` compiles target/release/ocx with `--features
+      # ocx/__testing`, enabling the `__OCX_SELF_IMAGE` seam the self-setup /
+      # self-update acceptance tests use to redirect `ocx.sh/ocx/cli` at the
+      # fixture registry. The upload sat before the test step because
+      # `cargo nextest --workspace --release` recompiled the same path without
+      # that feature and overwrote it. The Bazel lane writes to `bazel-out/`
+      # and touches `target/` not at all, so that hazard is gone — the order is
+      # kept because an artifact uploaded early is one a later failure cannot
+      # take away, not because anything downstream still overwrites it.
       - name: Upload Binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -191,7 +221,7 @@ jobs:
       - name: Setup OCX
         uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
-          version: '0.5.8'
+          version: '0.6.2'
           # `project: ''` is the action's documented opt-out from project
           # auto-load. This leg wants the binary and nothing else — the step
           # below pulls three shells with `ocx --remote`, which needs no
@@ -201,7 +231,11 @@ jobs:
       - name: Put the elvish, nushell and fish parity arms on PATH
         run: |
           set -euo pipefail
-          eval "$(ocx --remote package env nushell elvish fish-shell/fish --shell=bash)"
+          # Namespaced, not the flat `nushell`/`elvish`: index.ocx.sh is
+          # authoritative for every name in the `ocx.sh` registry, and only
+          # `nushell/nushell`, `elvish/elvish` and `fish-shell/fish` are announced
+          # there -- the flat spellings resolve to nothing and the pull exits 1.
+          eval "$(ocx --remote package env nushell/nushell elvish/elvish fish-shell/fish --shell=bash)"
           for interpreter in nu elvish fish; do
             # Assigned first, so `set -e` sees the lookup's exit status: a
             # failed `command -v` inside an argument would otherwise append
@@ -209,43 +243,209 @@ jobs:
             resolved="$(command -v "$interpreter")"
             dirname "$resolved" >> "$GITHUB_PATH"
           done
-      - name: Unit-test floor
-        run: task rust:test:floor
-      - name: Test
-        # Names exactly the three interpreters the step above installs: with them
-        # on PATH a skip is a defect, so no arm can drop out of the matrix
-        # while this leg stays green. The other six skip where absent, which
-        # `assert_every_present_interpreter_ran` reports with an observed cause.
+      # The Bazel gates of `.verify:build-test`, in that phase's order: the pin
+      # authority, then the loading check, then the two gates that read the
+      # graph it proves loadable, then A7's two lint lines (C-025).
+      #
+      # They sit here rather than beside `Build` above, where the phase runs
+      # them, for a mechanical reason: every task in
+      # `taskfiles/bazel.taskfile.yml` shells out through `ocx exec bazel --`,
+      # and `ocx` first reaches this job's PATH at the `Setup OCX` step above.
+      # Directly after `Build` all four would exit 127 on `ocx: command not
+      # found` on every run. `ocx exec` resolves the binding from `ocx.toml`
+      # itself (measured: outside a project it exits non-zero with `no ocx.toml
+      # found`), so the `project: ''` opt-out on that step does not reach it —
+      # bazel still comes from the `9.2.0` pin `bazel:pin:check` asserts.
+      #
+      # `bazel:pin:check` is a `.verify:lint` member rather than a
+      # `.verify:build-test` one, and it is here anyway: it is the only other
+      # gate needing `ocx exec bazel`, so this is where it costs nothing extra,
+      # and a pin nothing checks makes the gates below read the wrong binary's
+      # graph. No test asserts its presence.
+      #
+      # `bazel:build:nobuild`, `bazel:build:drift`, `bazel:tag:guard` and
+      # `bazel:mod:check` each depend on `bazel:bootstrap` in the taskfile:
+      # `Cargo.bazel.lock.json` is gitignored (DX-23, it records the generating
+      # machine's output base), so a runner arrives without it and every
+      # `bazel query` would die with `Unable to read lockfile`. The bootstrap
+      # repins once (measured 18 s) and then asserts the lockfile exists,
+      # because the repin command itself exits 0 as a no-op once `@crates` is
+      # in the repo contents cache. `Bazel graph loads` is the first of the
+      # four to reach `@crates` — every `crates/*/BUILD.bazel` does
+      # `load("@crates//:defs.bzl", …)` at loading phase — so it is the step a
+      # missing bootstrap reds first, measured at exit 201.
+      # `bazel:lint` does not depend on it, and that is measured rather than
+      # assumed: with the lockfile moved aside `bazel run //:buildifier.check`
+      # still exits 0, while `bazel mod deps` exits 2 on a failed extension.
+      #
+      # `bazel:lint` is the only one of these that executes a build action, and
+      # the action it executes is the buildifier launcher — no compile, no Rust
+      # toolchain, no `@crates`. Their `--remote_cache` and
+      # `--remote_upload_local_results=false` come from the committed
+      # `.bazelrc`, unconditionally — and none of them overrides the latter.
+      # Only `Unit tests (Bazel)` does, on the `main` push alone.
+      #
+      # **One credential source per lane, and the two bindings below are one
+      # gate read twice.** Bazel `add`s an `Authorization` header per configured
+      # source and sends every one of them on the same request — measured
+      # against a local sink with both routes live, a cache `PUT` carried
+      # *three*. Which of them an origin honours is that origin's business, and
+      # a design that needs to know is the defect (DX-81). So the lanes are
+      # disjoint by construction rather than by the server's parsing:
+      #
+      # * the **`main` push presents the write credential alone**. The `ci` user
+      #   is in both realms, so the one helper reads and writes, and `read-auth`
+      #   is the empty string on exactly that lane;
+      # * **every other trigger presents the read credential alone** — a
+      #   same-repo pull request is the lane the cache exists for, and the merge
+      #   queue is not a push to `main`, so it reads too.
+      #
+      # `!(…)` rather than a second, independently-worded condition: it is
+      # ruling 5's expression negated, so the two bindings cannot drift into
+      # overlapping or into leaving a trigger with nothing. The truthy branch
+      # carries the secret in both, because GitHub's `a && b || c` yields `c`
+      # whenever `b` is falsy and `''` is falsy — a binding written
+      # `<trusted> && '' || secrets.READ` would hand the read secret to the
+      # `main` push, which is the state this gate exists to forbid.
+      #
+      # A **fork** PR is given no secrets, both bindings are then the empty
+      # string, the action writes nothing, and the lane reads anonymously over
+      # `--disk_cache` — silently, because a step that fails loudly on a fork is
+      # the defect. Until this step existed every request to the shared cache
+      # was an anonymous 401 and `Unit tests (Bazel)` compiled cold on every run.
+      #
+      # **Write is ADR ruling 5's expression and nothing looser**, so it is the
+      # empty string on every lane but the `main` push — BZL-CACHE-01's "absent
+      # from that lane's environment, not merely unused". With it empty
+      # `write_rc.py` emits no `--credential_helper` line at all, which is a
+      # stronger statement than an rc file holding an unused one. The gate lives
+      # here and never inside the composite action: under `workflow_call` the
+      # `github` context is the *caller's*, so a trigger test evaluated in a
+      # composite action answers about the wrong workflow (ruling 5a).
+      #
+      # The count is asserted per trigger in `.claude/tests/test_workflows.py`
+      # (`test_every_bazel_lane_carries_exactly_one_credential_source`), and
+      # `write_rc.py` refuses at runtime if a second source reaches the same
+      # invocation from an rc file this file cannot see.
+      #
+      # This job is now **the one write lane in the corpus**, which narrows what
+      # `_lanes_not_disabling_upload` covers here — it exempts a job holding the
+      # write credential — and `.claude/tests/test_workflows.py` carries the
+      # replacement: `--remote_upload_local_results=true` may be cited by no job
+      # that lacks the credential, must be gated on the same trusted event where
+      # it is cited, no second job may hold the credential, and a job holding it
+      # while citing no upload flag is itself a finding — that pairing is a live
+      # write credential on a runner uploading nothing, green at full cost.
+      - name: Bazel cache credential
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          read-auth: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.BAZEL_CACHE_READ_AUTH || '' }}
+          write-auth: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}
+      - name: Bazel pin authority
+        run: task bazel:pin:check
+      # Per-target analysis timings to otel.ocx.sh (C-019, S-013) are pushed
+      # from inside this step, by the `telemetry:bazel` item at the tail of
+      # `bazel:build:nobuild` — the same item a local run takes. There is no
+      # separate push step, and there is no file for one to read: Bazel
+      # serialises the whole client environment and every rc-file flag value
+      # into the build event stream (measured: 276 `--client_env` entries,
+      # `AWS_SECRET_ACCESS_KEY` among them, plus every `--remote_header`), so
+      # the stream is written to a `mktemp -d` outside the workspace and a
+      # `defer:` removes it on every exit. It used to be `target/bep.json`,
+      # mode 0644, inside the directory `Swatinem/rust-cache` saves above.
+      #
+      # The endpoint is empty on a fork PR, which is the whole guard:
+      # `telemetry:bazel` exits 0 silently with no endpoint, so nothing here
+      # needs an `if:` — and this step is a gate, which must run regardless.
+      # The credential is a step `env:` entry, never interpolated into `run:`.
+      # The cost of exporting from inside the build step rather than after it:
+      # `bazel` sees the header in its own client env. That is the trade the
+      # scratch path and the `defer:` are there to pay for.
+      - name: Bazel graph loads
+        env:
+          OTEL_EXPORTER_OTLP_ENDPOINT: ${{ secrets.OTEL_OTLP_AUTH != '' && 'https://otel.ocx.sh' || '' }}
+          OTEL_EXPORTER_OTLP_HEADERS: Authorization=${{ secrets.OTEL_OTLP_AUTH }}
+        run: task bazel:build:nobuild
+      - name: BUILD drift
+        run: task bazel:build:drift
+      - name: Bazel tag guard
+        run: task bazel:tag:guard
+      - name: Bazel lint
+        run: task bazel:lint
+      - name: Bazel lockfile freshness
+        run: task bazel:mod:check
+      # The lane swap (C-016), and the re-spec that makes it worth taking.
+      # WP-30 measured this job step by step: `Test` (`cargo nextest run
+      # --workspace --release`) 173.5 s, and `Unit-test floor` (`cargo nextest
+      # list --workspace --release --locked`) **536.5 s** — the listing has to
+      # build every test binary in release before it can name a case. Swapping
+      # only the execution step removed 173.5 s and left the 536.5 s compile
+      # standing, which is the arithmetic that returned NO-GO. Both steps are
+      # gone: the run and its floor come off one `bazel test //crates/...`,
+      # whose build event stream carries a per-target case count judged against
+      # `crates/TEST_TARGET_MAP.toml`. `Skip ceiling` is gone with them, off
+      # the same read — `task rust:test:ceiling`'s cargo arm needs a nextest
+      # Summary line that no longer exists in this job, and its bazel arm runs
+      # `cargo nextest list`, which is the 536.5 s this swap exists to delete.
+      #
+      # `Ceiling self-test` below stays: it is a `.verify:build-test` member
+      # and a pair of fixture logs, and the parser it proves is still the
+      # answer on a machine `bazel:test:unit` does not cover.
+      #
+      # `--test_env` twice, and neither is decoration. Bazel does not inherit
+      # the client environment into a test action, so without the first the
+      # nine-shell parity matrix cannot see the three interpreters the step
+      # above put on PATH, and without the second its `REQUIRE` guard is unset
+      # and every arm skips silently. With both, a shell that cannot be reached
+      # under Bazel's sandbox reds `assert_every_present_interpreter_ran` by
+      # name instead of dropping out of the matrix (#349).
+      #
+      # **The upload grant, and the only step in the repository that carries
+      # it.** The tracked `.bazelrc` sets `--remote_upload_local_results=false`
+      # unconditionally, and that file stays as it is: a command-line build
+      # option outranks every rc file, so the override belongs here. Measured on
+      # the pinned 9.2.0 rather than taken from the manual — with the flag
+      # passed here the build event stream's *canonical* command line carries
+      # `--remote_upload_local_results=true` and no `=false`; without it,
+      # `=false`. The same run, done with `--disk_cache` pointed at a path no rc
+      # file names, created that path.
+      #
+      # It rides `{{.CLI_ARGS}}`, which `bazel:test:unit` appends after the
+      # command word, because `--remote_upload_local_results` is a *build*
+      # option. `--bazelrc` could not: that one is a **startup** option and must
+      # precede the command word, which is why the lane derives it from the
+      # credential file existing rather than taking it here.
+      #
+      # The expression is ruling 5's, the same one that releases the credential
+      # two steps up, so a pull request appends no argument at all — the
+      # credential and the grant are absent together or present together, and
+      # neither can arrive without the other.
+      - name: Unit tests (Bazel)
         env:
           __OCX_TESTING_REQUIRE_LIVE_SHELLS: nu,elvish,fish
-        run: task rust:test:unit -- --profile ci
-      - name: Skip ceiling
-        run: task rust:test:ceiling
-      # Beside the ceiling, never instead of it: the step above is a shell
-      # parser, and this is the pair of fixture logs that shows it red on an
-      # over-ceiling Summary and green reading a real count. Same position as
-      # in `.verify:build-test` — a parser proved nowhere is a gate whose green
-      # cannot be told from one that stopped matching.
+        run: >-
+          task bazel:test:unit --
+          --test_env=PATH --test_env=__OCX_TESTING_REQUIRE_LIVE_SHELLS
+          ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && '--remote_upload_local_results=true' || '' }}
       - name: Ceiling self-test
         run: task rust:test:ceiling:self-test
-      # Inside the floor -> unit -> ceiling bracket on purpose, and after both
-      # halves of it: `Unit-test floor` deletes target/nextest/run.log before
-      # the run, `Test` tee's this run into it, so every duration read here can
-      # only be this run's. Outside the bracket the same step would happily
-      # report on a stale or a subset log and print the same green. The gate's
-      # own reader floor is the second half of that guarantee — it refuses a
-      # log holding fewer result lines than crates/NEXTEST_FLOOR.
-      # This is the gate. The step runs with `CI` set, which is the only
-      # environment the script treats as hard: off CI it prints the same
-      # findings and exits 0, because wall clock on a shared machine measures a
-      # test's neighbours rather than the test (6x-170x inflation measured
-      # under load). Every pull request reaches this job, drafts included, so
-      # the advisory local mode defers to a verdict that always gets reached.
-      - name: Unit duration budget
-        run: task rust:test:duration
-      # Beside the budget, never instead of it: the step above is a parser, and
-      # this is the three fixture logs that show it red over budget, red on a
-      # short log, and green on an allowlisted one. Same position as in
+      # `task rust:test:duration` is NOT a step here. Its own comment named
+      # the condition it needs — "inside the floor -> unit -> ceiling bracket,
+      # after both halves of it: `Unit-test floor` deletes
+      # target/nextest/run.log before the run, `Test` tee's this run into it"
+      # — and the lane swap removed both halves. The gate then had no subject:
+      # on this runner it died `FileNotFoundError` on the missing log, and on a
+      # workstation that still had one it reported 12 findings off a stale
+      # 963 KB file in advisory mode. Its own comment called that outcome
+      # ("outside the bracket the same step would happily report on a stale or
+      # a subset log"); it just did not survive the step being deleted.
+      # libtest prints no per-test timing, so nothing in the Bazel run
+      # re-derives a per-test budget — a per-TARGET one off `TestResult` is a
+      # different property and its own work package.
+      #
+      # The fixtures stay, as `Ceiling self-test` does with no live ceiling:
+      # three logs that show the parser red over budget, red on a short log,
+      # and green on an allowlisted one. Same position as in
       # `.verify:build-test`.
       - name: Duration self-test
         run: task rust:test:duration:self-test
@@ -262,24 +462,30 @@ jobs:
       # tier, and `verify-deep.yml`'s acceptance job ships its own).
       - name: Generate Schema
         run: task schema:generate
-      - name: Publish Unit Test Results
-        if: ${{ !cancelled() }}
-        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
-        with:
-          files: target/nextest/ci/junit.xml
-          check_name: "Unit Test Results"
-      # Per-test timings to otel.ocx.sh. `!cancelled()` rather than
-      # `success()`: a failing suite still writes the report, and a red run's
-      # timings are the ones worth having. The action turns each of its own
-      # failures into a warning; `continue-on-error` covers the rest.
-      - name: Push unit test timings
-        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
-        continue-on-error: true
-        timeout-minutes: 5
-        uses: ./.github/actions/test-telemetry
-        with:
-          junit: target/nextest/ci/junit.xml
-          suite: unit
+      # `Publish Unit Test Results` and `Push unit test timings` stood here and
+      # are gone with the lane swap, because after it this job produces no
+      # per-case JUnit report and there is no honest substitute. rules_rust
+      # drives plain libtest, which emits none, so Bazel writes its
+      # **synthesised** `test.xml` — measured on this tree:
+      #
+      #     <testsuite name="crates/<crate>/<crate>_test" tests="1" …>
+      #
+      # (that `name` is the target label with its colon rendered as a slash,
+      # not a path - spelled literally it reads as a file claim to the
+      # dead-path sweep)
+      #
+      # one `testcase` per *target*. Publishing that would replace an
+      # 8213-case check run and 8213 OTLP spans with 34 of each, under the same
+      # names — a strictly worse signal presented as the same one, which is
+      # `quality-core.md` § "A green is only as wide as what ran" from the
+      # reporting side. Per-case unit timings survive on `verify-deep.yml`'s
+      # macOS and Windows legs, which stay on nextest.
+      #
+      # What restores them here is `$XML_OUTPUT_FILE` wiring on every
+      # `rust_test` (the ADR's ruling 5 design, unbuilt): with a real
+      # per-case `test.xml` both steps come back pointed at
+      # `bazel-testlogs/**/test.xml`, and `scripts/bazel_test_floor.py` reads
+      # the XML instead of the log.
       - name: Check lint results
         if: ${{ !cancelled() }}
         run: |
@@ -287,6 +493,17 @@ jobs:
             echo "::error::Lint checks failed (fmt=${{ steps.fmt.outcome }}, clippy=${{ steps.clippy.outcome }}, ratchet=${{ steps.ratchet.outcome }}, docratchet=${{ steps.docratchet.outcome }})"
             exit 1
           fi
+      # C-015's caller half, which a composite action cannot carry itself: the
+      # runner's schema gives `post:` to `node-runs` and `container-runs` only,
+      # so a `using: composite` action has no post hook and the deletion is an
+      # obligation on this file. `if: always()` and not `success()` — a
+      # cancelled or failed job is exactly the one that would otherwise leave
+      # the credential on the runner.
+      - name: Remove the Bazel cache credential
+        if: always()
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          cleanup: 'true'
 
   smoke-acceptance:
     name: Smoke Acceptance
@@ -349,7 +566,7 @@ jobs:
       - name: Setup OCX
         uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
-          version: '0.5.8'
+          version: '0.6.2'
           # Default-off for the reason the workflow-lint job states: a restored
           # object store is runner-executable content.
           cache: false

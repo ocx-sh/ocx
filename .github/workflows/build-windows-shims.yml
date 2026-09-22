@@ -273,7 +273,13 @@ jobs:
           # the shim again -- which is exactly the state that ships a two-line
           # sidecar against a one-line parser. Compare the last commit to touch
           # each tree instead: the blobs must be at or after the sources.
-          last_src="$(git log -1 --format=%H HEAD -- crates/ocx_shim/)"
+          # `:(exclude)` on the Bazel description: `crates/ocx_shim/BUILD.bazel`
+          # describes a parallel build of the same sources and cannot change a
+          # byte of the cargo-built blob, so a commit that only adds or edits it
+          # is not a source change. Everything else under the tree still is --
+          # the exclusion names one file, not a glob, so a new `.rs` or a
+          # `Cargo.toml` bump still reds here.
+          last_src="$(git log -1 --format=%H HEAD -- crates/ocx_shim/ ':(exclude)crates/ocx_shim/BUILD.bazel')"
           last_blob="$(git log -1 --format=%H HEAD -- crates/ocx_store/src/shims/)"
           if [ -z "$last_src" ]; then
             echo "no shim source history; nothing to compare"; exit 0
