@@ -1,0 +1,142 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+#
+# The acceptance suite, as 172 `sh_test` targets (C-024). The tag set, the
+# serialisation decision and the reason nothing here declares the compose stack
+# are all in `bazel.bzl`'s module docstring; this file is the enumeration.
+
+load("//test:bazel.bzl", "acceptance_suite")
+
+# ---------------------------------------------------------------------------
+# Root-package sources that `crates/*` targets reach across the package
+# boundary.
+#
+# These 26 labels used to live in the ROOT `BUILD.bazel` as `//:test/...`.
+# Declaring any BUILD file under `test/` makes `test/` a package, and a label
+# may not reach into a subpackage: `//:test/sigstore/keys/fulcio-ca.crt.pem` is
+# then invalid ("'test' is a subpackage"), by analysis error, on every target
+# that names it. Measured on 9.2.0 against an otherwise empty `test/BUILD.bazel`
+# — `bazel build --nobuild //...` went 0 -> 1 with 26 such errors from the root
+# package and 37 more from seven `crates/*` packages.
+#
+# The half of that move this package owns is below. The other half — dropping
+# the same 26 from the root `exports_files` and re-spelling `//:test/X` as
+# `//test:X` in the seven crate BUILD files — is a one-line-per-label rename
+# those packages' owner applies; until it lands, `//...` does not analyse.
+#
+# `exports_files` rather than a `filegroup`, for the reason the root package
+# already recorded: each crate then depends on the individual files it reads,
+# so editing an unrelated fixture does not invalidate its test action.
+# ---------------------------------------------------------------------------
+exports_files(
+    [
+        "sigstore/keys/fulcio-ca.crt.pem",
+        "sigstore/keys/fulcio-ca.key.pem",
+        "sigstore/keys/rekor.key.pem",
+        "sigstore/keys/rekor.pub.pem",
+        "sigstore/trusted_root.json",
+        "tests/fixtures/golden/attestation_sidecar_key_envelope.json",
+        "tests/fixtures/golden/attestation_sidecar_key_manifest.json",
+        "tests/fixtures/golden/key_bundle.json",
+        "tests/fixtures/golden/key_referrer_manifest.json",
+        "tests/fixtures/golden/keyless_bundle.json",
+        "tests/fixtures/golden/keyless_referrer_manifest.json",
+        "tests/fixtures/golden/keys/cosign.key",
+        "tests/fixtures/golden/keys/cosign.pub",
+        "tests/fixtures/golden/sbom_sidecar_document.json",
+        "tests/fixtures/golden/sbom_sidecar_manifest.json",
+        "tests/fixtures/golden/simplesigning_key_manifest.json",
+        "tests/fixtures/golden/simplesigning_key_payload.json",
+        "tests/fixtures/golden/simplesigning_keyless_manifest.json",
+        "tests/fixtures/golden/simplesigning_keyless_payload.json",
+        "tests/fixtures/simplesigning/foreign_claim_type_payload.json",
+        "tests/fixtures/simplesigning/foreign_subject_payload.json",
+        "tests/fixtures/simplesigning/publisher_formatted_manifest.json",
+        "tests/fixtures/simplesigning/publisher_formatted_payload.json",
+        "tests/fixtures/simplesigning/tampered_signature_manifest.json",
+        "tests/fixtures/simplesigning/untrusted_ca_manifest.json",
+        "tests/test_index.py",
+    ],
+    visibility = ["//crates:__subpackages__"],
+)
+
+# The one runfile every acceptance target carries, and the three binaries the
+# suite drives: `ocx`, `ocx-mirror`, and `ocx-shim` — the last only on the
+# windows-latest leg, where `OCX_SHIM_BINARY` points `test_windows_shim.py` at
+# it (`test/taskfile.yml:13`); its ELF is never executed on Linux. Measured:
+# `bazel query 'labels(srcs, //test:suite_anchor)'` answers all three plus
+# `conftest.py`, so the wildcard below is doing what this comment says.
+#
+# `conftest.py` is the anchor: the runner resolves its symlink to find the
+# source tree, so it is load-bearing rather than decorative. `bin/ocx*` is
+# globbed with `allow_empty = True` because `cargo` writes those binaries and a
+# fresh clone has none — an absent `bin/ocx` is refused by the runner, out
+# loud, rather than by an analysis error nobody can act on. A glob whose
+# emptiness is silent is exactly the unfalsifiable shape, which is why the
+# runtime check is the one that governs and this is only the declaration.
+filegroup(
+    name = "suite_anchor",
+    srcs = ["conftest.py"] + glob(
+        ["bin/ocx*"],
+        allow_empty = True,
+    ),
+)
+
+# One target per module, named `//test:<module stem>`.
+#
+# `glob` rather than a list: the unit C-024 makes a target of is "a file in
+# `test/tests/` named `test_*.py`", so the enumeration is the filesystem's and
+# a module added without a target is not a state this package can be in.
+# `allow_empty = False` is the floor — a glob that matched nothing would
+# otherwise declare an empty package that `bazel build //test:all` reports
+# success over.
+acceptance_suite(
+    name = "acceptance_runner",
+    extra_pytest_args = ["-v"],
+    modules = glob(
+        ["tests/test_*.py"],
+        allow_empty = False,
+    ),
+)
+
+# C-022's declared-input set for the cast recording targets. They live in
+# //test/doc_scripts, which cannot glob across the package boundary, so the
+# inputs are exported from the package that owns them. WP-33 measured that
+# every route around this is worse: an ambient digest probe never re-observes
+# (a constant that freezes 39 action keys while reading like a live edge), a
+# source symlink to ../bin/ocx dangles on a fresh clone, and
+# --workspace_status_command belongs to another WP's file.
+filegroup(
+    name = "recording_inputs",
+    srcs = [
+        "conftest.py",
+        "pyproject.toml",
+        "scripts/doc_scripts_list.py",
+        "uv.lock",
+    ] + glob(
+        [
+            "recordings/**/*.py",
+            "src/**/*.py",
+        ],
+        allow_empty = False,
+    ) + glob(
+        # C-022 names one binary: `ocx`. `bin/` also holds `ocx-mirror` (a
+        # different product, `ocx-sh/ocx-mirror`, vendored here) and `ocx-shim`
+        # (the Windows launcher, exercised only by the windows-latest leg) — no
+        # recording executes either, so a `bin/ocx*` wildcard would re-key all
+        # 39 casts on a rebuild of a binary none of them runs. Measured:
+        # `bazel query 'labels(srcs, //test:recording_inputs)'` answered all
+        # three under the wildcard.
+        #
+        # A constant pattern inside `glob` rather than a plain `srcs` entry
+        # because `bin/ocx` is a gitignored `cargo` output, absent on a fresh
+        # clone, and `allow_empty = True` is what keeps analysis working there;
+        # the runner refuses an absent binary out loud at recording time. That
+        # costs the buildifier warning below, which is the narrower of the two
+        # evils and is disabled by name rather than by widening the match.
+        # buildifier: disable=constant-glob
+        ["bin/ocx"],
+        allow_empty = True,
+    ),
+    visibility = ["//test/doc_scripts:__pkg__"],
+)

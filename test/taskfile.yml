@@ -86,6 +86,28 @@ vars:
   # reds the tier instead of quietly stretching it. A literal, deliberately:
   # a budget read from the environment could be raised by the run it gates.
   SMOKE_BUDGET_SECONDS: 90
+  # The one acceptance-suite lock on this host, and the reason it is a file
+  # rather than a convention: the four fixed worktrees and every agent worktree
+  # drive the SAME docker-compose stack on the same ports, so two suites at
+  # once push into one registry and read each other's state. It was a sentence
+  # in a session prompt until now, which is to say it was enforced by whoever
+  # remembered it.
+  #
+  # `bazel test`'s `exclusive` tag is not this: it serialises the targets of
+  # one invocation and knows nothing about a `task test:parallel` in a sibling
+  # checkout. `test/bazel.bzl`'s runner computes this same path, so the two
+  # entry points contend on one lock rather than on two.
+  #
+  # NOT under the repository, deliberately. `{{.TASKFILE_DIR}}/../.agents/…`
+  # resolves to a different file in each checkout and in every agent worktree,
+  # which is to say it would serialise nothing between exactly the trees that
+  # share the registry. The key is `REGISTRY_PORT` because the port identifies
+  # the contended stack: a checkout that moved its registry off 5000 is not a
+  # competitor and must not queue behind one that did not.
+  ACCEPTANCE_LOCK:
+    sh: >-
+      dir="$HOME/.cache/ocx"; mkdir -p "$dir";
+      printf '%s/acceptance-suite-%s.lock' "$dir" "${OCX_TEST_REGISTRY_PORT:-5000}"
 
 # Applies to every task in this file, so no pytest leg can miss it.
 env:
@@ -163,9 +185,30 @@ tasks:
       # `set -o pipefail` so pytest's own exit status survives the `tee`; the
       # tee is what lets `.suite-ceilings` read the summary line of the run
       # that just happened rather than of some earlier one.
+      #
+      # `flock <file> <command>` and never the fd form. Measured: go-task runs
+      # a `cmds:` entry under mvdan/sh, whose `exec 9>file` opens the fd inside
+      # the interpreter and does NOT pass it to a child process — so `flock 9`
+      # exits 1 without ever waiting, and the step fails before pytest starts.
+      # The `tee` stays outside the lock on purpose: it is not contended, and
+      # `set -o pipefail` in this shell is what keeps pytest's status from
+      # being replaced by the tee's.
+      #
+      # `flock -n … true` first, only to say out loud that this run is queued
+      # behind another one. A suite that sits silent for twenty minutes is
+      # indistinguishable from a hung one, and that is exactly the diagnosis
+      # subsystem-tests.md's "Observing a Running Suite" exists to make.
       - >-
+        if command -v flock >/dev/null 2>&1; then
+          flock -n '{{.ACCEPTANCE_LOCK}}' true ||
+            echo "acceptance: another suite holds {{.ACCEPTANCE_LOCK}} — waiting for it" >&2;
+          LOCKED="flock {{.ACCEPTANCE_LOCK}}";
+        else
+          echo "acceptance: no flock(1) on this host — running unserialised, {{.ACCEPTANCE_LOCK}} untaken" >&2;
+          LOCKED="";
+        fi;
         set -o pipefail;
-        uv run pytest --basetemp={{.TEST_BASETEMP}} --junit-xml={{.JUNIT_XML}}
+        $LOCKED uv run pytest --basetemp={{.TEST_BASETEMP}} --junit-xml={{.JUNIT_XML}}
         {{.CLI_ARGS | default "-v"}}
         2>&1 | tee {{.TEST_RUN_LOG}}
       - task: .suite-ceilings
@@ -463,6 +506,72 @@ tasks:
       # Collection only for the per-glob check; the registry never starts
       # (the same reason `.suite-floor` sets it).
       OCX_TESTS_NO_REGISTRY: "1"
+
+  bazel:tags:
+    desc: >-
+      Emit `{label: [tag, ...]}` for every acceptance `sh_test` — the tag table
+      `scripts/bazel_accept_proofs.py --check-s015 --tags` judges.
+    summary: |
+      S-015 rests on a claim about tags: every `//test:*` target carries
+      `external` (measured on bazel 9.2.0 as the only tag that stops a test
+      result being reused), `exclusive` (C-024's serialisation, on the target
+      and never as a global `--local_test_jobs`) and `local`.
+
+      The claim is only checkable against the graph Bazel actually loaded, so
+      this task reads it back out of `bazel query` rather than restating the
+      list from `test/bazel.bzl`. Two readers of one fact; the comparator in
+      `bazel_accept_proofs.py` is what makes them agree.
+
+      The floor is a COUNT, and it is read off `test/tests/`. A `bazel query`
+      that matches nothing exits 0 — so an exit code here would certify an
+      empty table, and every tag assertion taken from that table would be
+      vacuously true.
+    dir: '{{.TASKFILE_DIR}}'
+    vars:
+      BAZEL_TAGS_JSON: '{{.BAZEL_TAGS_JSON | default (printf "%s/results/bazel-acceptance-tags.json" .TASKFILE_DIR)}}'
+    cmds:
+      - mkdir -p "$(dirname '{{.BAZEL_TAGS_JSON}}')"
+      - |
+        set -eu
+        raw='{{.BAZEL_TAGS_JSON}}.jsonproto'
+        bazel query --output=streamed_jsonproto 'kind(sh_test, //test:all)' > "$raw"
+        python3 - "$raw" '{{.BAZEL_TAGS_JSON}}' <<'PY'
+        import json
+        import pathlib
+        import sys
+
+        raw, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+        table: dict[str, list[str]] = {}
+        for line in raw.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            rule = json.loads(line)["rule"]
+            table[rule["name"]] = next(
+                (
+                    attr.get("stringListValue", [])
+                    for attr in rule.get("attribute", [])
+                    if attr.get("name") == "tags"
+                ),
+                [],
+            )
+        # `dir:` above is `test/`, so this is `test/tests/` however a caller
+        # relocated the output file.
+        modules = len(list(pathlib.Path("tests").glob("test_*.py")))
+        if modules < 1:
+            raise SystemExit(
+                "bazel:tags: read 0 modules from test/tests/ — the reader, not the graph, "
+                "is what answered, and a floor of zero is no floor"
+            )
+        if len(table) < modules:
+            raise SystemExit(
+                f"bazel:tags: the query named {len(table)} sh_test target(s) for {modules} "
+                "test/tests/test_*.py module(s) — a short table makes every tag assertion "
+                "taken from it a statement about a subset"
+            )
+        out.write_text(json.dumps(table, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"bazel:tags: {len(table)} acceptance target(s) over {modules} module(s) -> {out}")
+        PY
+        rm -f "$raw"
 
   lint:
     desc: Lint the acceptance suite with ruff (rule set + Python floor in pyproject.toml)
