@@ -223,20 +223,20 @@ jobs:
           path: target/${{ matrix.job.target }}/release/ocx_schema
           compression-level: 0
           retention-days: 1
-      # Both steps are nextest-only, and the `if:` says so rather than letting
-      # them find an absent file: after the swap the Linux leg writes no
-      # per-case JUnit, because rules_rust drives plain libtest and Bazel's
-      # synthesised `test.xml` carries one `testcase` per *target* (34, against
-      # 8213 cases). Uploading that under `deep-unit-Linux` would hand
-      # `test-results` a report whose scope is 240x narrower than its name.
-      # macOS and Windows keep both, and they are the legs whose timings the
-      # per-OS dashboards are actually about.
+      # Every leg publishes now, and the path is the one its own engine wrote.
+      # Bazel's synthesised `test.xml` still carries one `testcase` per *target*
+      # (34, against 8213 cases), which is why the Linux leg skipped both steps
+      # after the swap — but `task bazel:test:unit` writes a per-case report at
+      # `target/bazel/junit.xml` off the same `test.log` files its floor reads,
+      # and that one is the peer of nextest's. `junit.xml` on both sides so the
+      # `test-results` job's `artifacts/**/junit.xml` glob needs no second
+      # spelling. macOS and Windows are unchanged.
       - name: Upload Test Results
-        if: ${{ !cancelled() && matrix.job.name != 'Linux' }}
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: deep-unit-${{ matrix.job.name }}
-          path: target/nextest/ci/junit.xml
+          path: ${{ matrix.job.name == 'Linux' && 'target/bazel/junit.xml' || 'target/nextest/ci/junit.xml' }}
       # Per-test timings to otel.ocx.sh, so the dashboards can name which unit
       # tests accumulate the wall clock on which OS. `!cancelled()` rather than
       # `success()`: a failing suite still writes the report, and its timings
@@ -244,12 +244,12 @@ jobs:
       # every one of its own failures into a warning, and this guards the case
       # where the runner kills it.
       - name: Push unit test timings
-        if: ${{ !cancelled() && matrix.job.name != 'Linux' && env.OTEL_OTLP_AUTH != '' }}
+        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
         continue-on-error: true
         timeout-minutes: 5
         uses: ./.github/actions/test-telemetry
         with:
-          junit: target/nextest/ci/junit.xml
+          junit: ${{ matrix.job.name == 'Linux' && 'target/bazel/junit.xml' || 'target/nextest/ci/junit.xml' }}
           suite: unit
 
   cross-compile:

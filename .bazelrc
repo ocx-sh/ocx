@@ -97,6 +97,37 @@ build --remote_retries=2
 # shorter.
 build:ci --remote_download_minimal
 
+# **The whole `build:ci` block below and above is LATENT.** No lane in this
+# repository passes `--config=ci` today — neither `verify-basic.yml` nor
+# `verify-deep.yml` nor any `task` recipe — so every `build:ci` line here is
+# parsed and never applied, and the presence of the download-regex exception
+# is indistinguishable from its absence. Wiring `--config=ci` into a lane is a
+# separate decision with real behaviour change (`minimal` stops downloading
+# build outputs the lane may still read), so it is not made here. Whoever makes
+# it inherits these lines, and the regex below is what keeps a test report on
+# disk once they do.
+
+# The one exception `minimal` must carve out, and it is measured rather than
+# assumed. With `--config=ci` in effect a cached test target leaves `test.log`
+# and `test.cache_status` on disk and **no `test.xml` at all** — measured on
+# 9.2.0 against a fresh output base, for a `--disk_cache` hit and for a local
+# action-cache hit alike. Every consumer of a test result downstream of the run
+# reads one of those two files, so without this line the pull-request check and
+# the otel.ocx.sh push report on a tree that has no report in it — a green whose
+# emptiness is indistinguishable from a suite that never ran.
+#
+# `--remote_download_regex` is the flag that exists on this pin, and
+# `--experimental_remote_download_regex` does not. BZL-FLAG-11 asks for both
+# help surfaces and both were read on 9.2.0: `bazel help build --long` carries
+# it ("Force remote build outputs whose path matches this pattern to be
+# downloaded, irrespective of --remote_download_outputs"), and
+# `bazel help startup_options` does **not** — expected, and not a failed check:
+# that surface lists only options the client parses before the server exists,
+# and this is a build option. `bazel help test --long` carries it too, because
+# `test` inherits every `build` option. The value is a Java regular expression
+# matched against the output path.
+build:ci --remote_download_regex=.*/test\.(xml|log)$
+
 # Hand `--jobs` back to Bazel on the lane this file's local cap does not fit.
 build:ci --jobs=auto
 

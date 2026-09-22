@@ -427,6 +427,37 @@ jobs:
           task bazel:test:unit --
           --test_env=PATH --test_env=__OCX_TESTING_REQUIRE_LIVE_SHELLS
           ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && '--remote_upload_local_results=true' || '' }}
+      # The two consumers the lane swap took away, restored onto the report the
+      # step above now writes. Until this, `smoke` published unit results to
+      # neither the pull request nor otel.ocx.sh — the swap deleted both steps
+      # with the `target/nextest/ci/junit.xml` that fed them, and nothing took
+      # its place.
+      #
+      # `target/bazel/junit.xml` rather than `bazel-testlogs/**/test.xml`, and
+      # the difference is the whole point: Bazel's synthesised file carries one
+      # `testcase` per TARGET, so a glob of it names 34 targets and cannot name
+      # a single Rust test — measured on a deliberately failed case, the failing
+      # `#[test]` fn appears only inside the testsuite-level `system-out`, which
+      # neither consumer reads. `bazel:test:unit` writes the per-case report off
+      # the same `test.log` files its floor already reads.
+      #
+      # `!cancelled()` rather than `success()`: a failing suite still writes the
+      # report, and naming the tests that went red is what the check is for. The
+      # job's verdict comes from the step above, never from these two.
+      - name: Publish Unit Test Results
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
+        with:
+          files: target/bazel/junit.xml
+          check_name: "Unit Test Results"
+      - name: Push unit test timings
+        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: ./.github/actions/test-telemetry
+        with:
+          junit: target/bazel/junit.xml
+          suite: unit
       - name: Ceiling self-test
         run: task rust:test:ceiling:self-test
       # `task rust:test:duration` is NOT a step here. Its own comment named

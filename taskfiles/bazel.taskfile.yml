@@ -409,6 +409,21 @@ tasks:
       Both files are `testActionOutput` entries of the same `TestResult`, and
       a cache hit replays both, so the log is the reachable per-case count.
 
+      **The same read writes the report the lanes publish.** `--junit` turns
+      those logs into a per-case JUnit at `target/bazel/junit.xml` — one
+      `testcase` per `#[test]`, named after the libtest path rather than the
+      target. That is what `verify-basic.yml`'s `smoke` job hands
+      `publish-unit-test-result-action` and `test-telemetry`, and what
+      `verify-deep.yml`'s Linux leg uploads for its `test-results` job.
+      Publishing `bazel-testlogs/**/test.xml` instead would name 34 targets and
+      not one test: Bazel's synthesised file carries one `testcase` per target
+      and puts the failing test's name only in the testsuite-level
+      `system-out`, which no consumer here reads. Not a second parse of the same
+      bytes — the floor and the report are two readings of one pass, and the
+      report's case count is floored against the summary line the floor reads,
+      so a libtest format change reds instead of shipping an empty report.
+
+
       **The stream never touches the checkout**, for the reason
       `build:nobuild` states at length: bazel serialises the whole client
       environment and every rc-file flag value into it. Same `mktemp -d`, the
@@ -438,6 +453,48 @@ tasks:
       BEP_DIR:
         sh: mktemp -d -t ocx-test-bep.XXXXXXXX
       BEP: '{{.BEP_DIR}}/test-bep.json'
+      # Inside the checkout, where the BEP deliberately is not: this one is the
+      # report two CI steps read AFTER this task returns, and the stream it is
+      # derived from dies with the task. It is `junit.xml` rather than a name of
+      # its own because `verify-deep.yml`'s `test-results` job publishes
+      # `artifacts/**/junit.xml`, and a second spelling there is a second thing
+      # to keep in step. It carries no secret — `bazel_test_floor.py` writes
+      # test names, outcomes and panic text, never the client environment.
+      JUNIT: '{{.ROOT_DIR}}/target/bazel/junit.xml'
+      # `--bazelrc=$RUNNER_TEMP/bazel-cache.rc`, or the empty string. That file
+      # is the cache credential `.github/actions/bazel-cache-rc` writes; without
+      # it every request to the shared cache is an anonymous 401 and this lane
+      # compiles cold, which is what it did until now.
+      #
+      # **Derived from the file existing, never from a lane naming it.** Three
+      # states must all be green and only one has the file: `--bazelrc` on a
+      # missing path is a HARD error (measured on the pinned 9.2.0: exit 2,
+      # `Unable to read .bazelrc file`, before anything runs), a fork PR is
+      # given no secrets so the action writes nothing, and a developer shell has
+      # no `$RUNNER_TEMP` at all. Both of those then read the cache anonymously
+      # over `--disk_cache`, which is the documented fallback — a lane that
+      # fails loudly on a fork is the defect, not the fallback.
+      #
+      # It is a *startup* option, so it goes before the command word. It does
+      # not replace the tracked `.bazelrc`: measured with `--announce_rc`, Bazel
+      # reads the home rc, then the workspace rc, then this one, so
+      # `--remote_upload_local_results=false` still holds on every lane.
+      #
+      # `printf '%s' "<value>"`, and the spelling is measured rather than
+      # stylistic. go-task runs `sh:` through its own shell (mvdan/sh), not
+      # bash, and that `printf` builtin does **not** honour `--` as
+      # end-of-options: `printf -- '--bazelrc=%s' "$X"` takes `--` as the
+      # *format* and emits exactly two dashes, so the lane ran
+      # `bazel -- test //crates/...` with the credential silently dropped. It
+      # is green — the flag is simply gone — which is why it was caught by
+      # reading `task --dry`'s rendered command line and not by a bash probe of
+      # the same expression, where `--` works.
+      #
+      # ponytail: no quoting around the expansion at the call site —
+      # `$RUNNER_TEMP` is `/home/runner/work/_temp` on every GitHub runner. A
+      # path with a space would need the flag built inside the `cmd:` body.
+      CACHE_RC:
+        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
       # `--bazelrc=$RUNNER_TEMP/bazel-cache.rc`, or the empty string. That file
       # is the cache credential `.github/actions/bazel-cache-rc` writes; without
       # it every request to the shared cache is an anonymous 401 and this lane
@@ -488,7 +545,8 @@ tasks:
             exit 1
           fi
           chmod 600 '{{.BEP}}'
-          python3 {{.ROOT_DIR}}/scripts/bazel_test_floor.py --bep '{{.BEP}}' || exit $?
+          mkdir -p "$(dirname '{{.JUNIT}}')"
+          python3 {{.ROOT_DIR}}/scripts/bazel_test_floor.py --bep '{{.BEP}}' --junit '{{.JUNIT}}' || exit $?
           exit "$status"
 
   test:
