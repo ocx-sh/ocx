@@ -1,0 +1,119 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+#
+# C-010's name-mapping table: every Bazel dep label under `//crates/...` that
+# `bazel:build:drift` may see, mapped to the Cargo package name it is.
+# GENERATED — regenerate with `python3 scripts/bazel_build_drift.py --update`.
+#
+# A label with no row here is its own exit 1 (`drift-unmapped`), and a row for
+# a label nothing depends on is its own exit 1 too (`drift-map-stale`). Both
+# directions are gated because only the pair keeps this table honest: a map
+# that only grows ends up mapping everything, and then the unmapped check
+# catches nothing.
+#
+# Two derivations, both mechanical:
+#
+#   `@crates//<name>-<version>:<name>-<version>` -> the workspace-resolved
+#       package whose `<name>-<version>` is exactly that stem. Never a
+#       `rsplit("-", 1)`: `toml` resolves to `toml-1.1.4+spec-1.1.0`, whose
+#       version contains a `-`, so the split answers `toml-1.1.4+spec`. The
+#       table exists precisely because the two halves are not separable by
+#       inspection — which is also why a `cargo update` that moves a pin
+#       retires the row and reds this gate until it is re-derived.
+#
+#   `//crates/<dir>:<dir>` -> the member's Cargo package name, listed ONLY
+#       where the two differ. `bazel_gate_proofs.resolve_label` falls through
+#       to `//crates/<x>:<x>` -> `<x>` for the other 19, so listing them would
+#       be 19 rows saying nothing. One member differs: `crates/ocx_cli` is the
+#       package `ocx`.
+#
+# The Cargo-rename trap the plan recorded does NOT appear here. This workspace
+# renames `rustls-pki-types` to `pki-types` and `sha2` to `sha2_oid`, and
+# neither spelling occurs in any label: crate_universe keys on the package
+# name. `sha2` is in this table twice, at 0.10.9 and 0.11.0, which is the case
+# a single `@crates//:sha2` alias could not have expressed.
+
+[label]
+"//crates/ocx_cli:ocx_cli" = "ocx"
+"@crates//allocative-0.3.4:allocative-0.3.4" = "allocative"
+"@crates//anyhow-1.0.104:anyhow-1.0.104" = "anyhow"
+"@crates//async-compression-0.4.43:async-compression-0.4.43" = "async-compression"
+"@crates//async-trait-0.1.91:async-trait-0.1.91" = "async-trait"
+"@crates//base64-0.22.1:base64-0.22.1" = "base64"
+"@crates//bytes-1.12.1:bytes-1.12.1" = "bytes"
+"@crates//bzip2-0.6.1:bzip2-0.6.1" = "bzip2"
+"@crates//chrono-0.4.45:chrono-0.4.45" = "chrono"
+"@crates//clap-4.6.4:clap-4.6.4" = "clap"
+"@crates//clap_builder-4.6.2:clap_builder-4.6.2" = "clap_builder"
+"@crates//clap_complete-4.6.8:clap_complete-4.6.8" = "clap_complete"
+"@crates//colored_json-5.0.0:colored_json-5.0.0" = "colored_json"
+"@crates//console-0.16.4:console-0.16.4" = "console"
+"@crates//dirs-6.0.0:dirs-6.0.0" = "dirs"
+"@crates//docker_credential-1.3.3:docker_credential-1.3.3" = "docker_credential"
+"@crates//dunce-1.0.5:dunce-1.0.5" = "dunce"
+"@crates//elf-0.8.0:elf-0.8.0" = "elf"
+"@crates//flate2-1.1.9:flate2-1.1.9" = "flate2"
+"@crates//fs4-1.1.0:fs4-1.1.0" = "fs4"
+"@crates//futures-0.3.33:futures-0.3.33" = "futures"
+"@crates//h2-0.4.15:h2-0.4.15" = "h2"
+"@crates//hex-0.4.3:hex-0.4.3" = "hex"
+"@crates//http-1.5.0:http-1.5.0" = "http"
+"@crates//hyper-util-0.1.20:hyper-util-0.1.20" = "hyper-util"
+"@crates//indexmap-2.14.0:indexmap-2.14.0" = "indexmap"
+"@crates//indicatif-0.18.6:indicatif-0.18.6" = "indicatif"
+"@crates//junction-2.0.0:junction-2.0.0" = "junction"
+"@crates//libc-0.2.189:libc-0.2.189" = "libc"
+"@crates//liblzma-0.4.7:liblzma-0.4.7" = "liblzma"
+"@crates//log-0.4.33:log-0.4.33" = "log"
+"@crates//lzma-rust2-0.16.5:lzma-rust2-0.16.5" = "lzma-rust2"
+"@crates//oci-client-0.17.0:oci-client-0.17.0" = "oci-client"
+"@crates//p256-0.13.2:p256-0.13.2" = "p256"
+"@crates//packageurl-0.7.0:packageurl-0.7.0" = "packageurl"
+"@crates//pem-3.0.6:pem-3.0.6" = "pem"
+"@crates//percent-encoding-2.3.2:percent-encoding-2.3.2" = "percent-encoding"
+"@crates//proc-macro2-1.0.107:proc-macro2-1.0.107" = "proc-macro2"
+"@crates//quick-junit-0.7.0:quick-junit-0.7.0" = "quick-junit"
+"@crates//quote-1.0.47:quote-1.0.47" = "quote"
+"@crates//regex-1.13.1:regex-1.13.1" = "regex"
+"@crates//reqwest-0.13.4:reqwest-0.13.4" = "reqwest"
+"@crates//rpassword-7.5.4:rpassword-7.5.4" = "rpassword"
+"@crates//rustls-pki-types-1.15.1:rustls-pki-types-1.15.1" = "rustls-pki-types"
+"@crates//same-file-1.0.6:same-file-1.0.6" = "same-file"
+"@crates//schemars-1.2.2:schemars-1.2.2" = "schemars"
+"@crates//secrecy-0.10.3:secrecy-0.10.3" = "secrecy"
+"@crates//serde-1.0.229:serde-1.0.229" = "serde"
+"@crates//serde_ignored-0.1.14:serde_ignored-0.1.14" = "serde_ignored"
+"@crates//serde_json-1.0.151:serde_json-1.0.151" = "serde_json"
+"@crates//serde_json_canonicalizer-0.3.2:serde_json_canonicalizer-0.3.2" = "serde_json_canonicalizer"
+"@crates//serde_repr-0.1.21:serde_repr-0.1.21" = "serde_repr"
+"@crates//serde_yaml_ng-0.10.0:serde_yaml_ng-0.10.0" = "serde_yaml_ng"
+"@crates//sha2-0.10.9:sha2-0.10.9" = "sha2"
+"@crates//sha2-0.11.0:sha2-0.11.0" = "sha2"
+"@crates//sigstore-0.14.0:sigstore-0.14.0" = "sigstore"
+"@crates//sigstore_protobuf_specs-0.5.1:sigstore_protobuf_specs-0.5.1" = "sigstore_protobuf_specs"
+"@crates//starlark-0.13.0:starlark-0.13.0" = "starlark"
+"@crates//starlark_derive-0.13.0:starlark_derive-0.13.0" = "starlark_derive"
+"@crates//starlark_map-0.13.0:starlark_map-0.13.0" = "starlark_map"
+"@crates//starlark_syntax-0.13.0:starlark_syntax-0.13.0" = "starlark_syntax"
+"@crates//strsim-0.11.1:strsim-0.11.1" = "strsim"
+"@crates//symlink-0.1.0:symlink-0.1.0" = "symlink"
+"@crates//syn-2.0.119:syn-2.0.119" = "syn"
+"@crates//sysinfo-0.39.6:sysinfo-0.39.6" = "sysinfo"
+"@crates//tar-0.4.46:tar-0.4.46" = "tar"
+"@crates//tempfile-3.27.0:tempfile-3.27.0" = "tempfile"
+"@crates//thiserror-2.0.19:thiserror-2.0.19" = "thiserror"
+"@crates//tokio-1.53.1:tokio-1.53.1" = "tokio"
+"@crates//tokio-rustls-0.26.4:tokio-rustls-0.26.4" = "tokio-rustls"
+"@crates//tokio-util-0.7.19:tokio-util-0.7.19" = "tokio-util"
+"@crates//toml-1.1.4+spec-1.1.0:toml-1.1.4+spec-1.1.0" = "toml"
+"@crates//toml_edit-0.25.13+spec-1.1.0:toml_edit-0.25.13+spec-1.1.0" = "toml_edit"
+"@crates//tracing-0.1.44:tracing-0.1.44" = "tracing"
+"@crates//tracing-subscriber-0.3.23:tracing-subscriber-0.3.23" = "tracing-subscriber"
+"@crates//url-2.5.8:url-2.5.8" = "url"
+"@crates//webpki-root-certs-1.0.9:webpki-root-certs-1.0.9" = "webpki-root-certs"
+"@crates//which-8.0.5:which-8.0.5" = "which"
+"@crates//windows-sys-0.61.2:windows-sys-0.61.2" = "windows-sys"
+"@crates//x509-cert-0.2.5:x509-cert-0.2.5" = "x509-cert"
+"@crates//zeroize-1.9.0:zeroize-1.9.0" = "zeroize"
+"@crates//zip-8.6.0:zip-8.6.0" = "zip"
+"@crates//zstd-0.13.3:zstd-0.13.3" = "zstd"

@@ -1,0 +1,597 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# The Bazel gates (plan_bazel_build_adoption.md C-014): the pin authority, the
+# BUILD/Cargo dep-set comparison, the tag guard, and the loading-phase check
+# the latter two need in order to have a graph to read at all. Plus A7's other
+# two lint lines (C-025) — `lint` and `mod:check` — and the two entry points
+# `test` and `test:scoped`.
+#
+# Each gate is a `cmds:` entry, never a `preconditions:` one — `task --force`
+# skips preconditions on go-task 3.52, and `--force` is what this repository's
+# conventions tell everyone to pass. A guard that evaporates under the flag
+# everyone passes is the same class of defect as one whose red state is
+# unreachable.
+#
+# No `sources:` on anything here, for the reason `scripts:self-test` and
+# `ci:actionlint` have none: a fingerprint-cached verdict is the *last* tree's,
+# and a cached green cannot be told from a gate that never ran.
+#
+# Two conventions this file departs from, both deliberately:
+#
+#   * No `verify` aggregator, which subsystem-taskfiles.md § OCX Conventions
+#     asks every subsystem for. The plan splits the gates across both phases
+#     on purpose: `pin:check` is a parallel `.verify:lint` dep, the other five
+#     are sequential and ordered behind a loading-clean graph. An aggregator
+#     neither phase calls would be one more gate nobody runs — and C-025's
+#     "chained into one named target" is already satisfied by `test`, whose
+#     recipe IS A7's four lines in A7's order. An extra name wrapping the gates
+#     that `task verify` already calls would add a gate, not a guarantee.
+#   * Every tool call is wrapped in `ocx exec bazel --`, where the rest of this
+#     repository calls toolchain binaries bare and leaves the PATH to the
+#     per-prompt hook. `bazel` is the one tool for which that is not enough:
+#     DX-42 measured `build:drift` and `tag:guard` exiting 1 on their reader
+#     floors from a plain shell (`read 0 of an expected >= 53`). The floors
+#     working is the good half of that; a full `task verify` that cannot pass
+#     outside a hooked shell is the bad half, and the wrapper is the fix. It
+#     names the one binding it needs rather than taking the whole toolchain, so
+#     an unrelated tool with no leaf for this host does not block the run.
+#     Measured: 0.05 s per call.
+#
+# The wrapper widens where a green is *reachable*; it turns no red into a
+# green. With `bazel` unreachable by any route the gates still exit 1 on their
+# own reader floors, which is what the floors are for.
+
+version: '3'
+
+tasks:
+  bep:mode:
+    internal: true
+    desc: Pin a BEP scratch directory to 0700 and prove it, before anything writes a secret into it
+    summary: |
+      Called by both BEP producers with `DIR` set to their `mktemp -d`, rather
+      than spelled twice: the two call sites are 200 lines apart, and a guard
+      edited in one of them is a guard that silently stopped agreeing with
+      itself in the other.
+
+      `mktemp -d` is already 0700 on GNU coreutils 9.7 (measured here), so the
+      `chmod` is a no-op on this host — the read-back is the part that can go
+      red. A mktemp that is not coreutils', or a `TMPDIR` on a filesystem that
+      does not honour modes (a WSL DrvFs mount), both produce a wider directory
+      and neither announces itself. Proven both ways against a directory forced
+      to 0755: the chmod repairs it to 0700 and exits 0, and with the repair
+      removed the read-back exits 1.
+
+      Python rather than `stat -c %a`, which is GNU-only; python3 is already a
+      hard dependency of both recipes.
+    cmd: >-
+      chmod 700 '{{.DIR}}' && python3 -c "import os,sys; m = os.stat(sys.argv[1]).st_mode & 0o777; sys.exit(0 if m == 0o700 else f'bazel: the BEP scratch directory {sys.argv[1]} is mode {m:04o}, not 0700 — the Build Event Protocol stream carries every --client_env entry and every --remote_header value, so a directory other accounts can traverse is a credential leak. Point TMPDIR at a filesystem that honours modes.')" '{{.DIR}}'
+
+  bootstrap:
+    desc: Repin crate_universe once when its lockfile is absent, so a fresh checkout can query at all
+    summary: |
+      `Cargo.bazel.lock.json` is gitignored (DX-23): with `[patch.crates-io]`
+      pointing at `path =` submodules, crate_universe records the *generating
+      machine's* output base, so a committed copy fails `can't readdir(), not a
+      directory` on every other tree — including the generating one after a
+      `bazel clean --expunge`. MODULE.bazel's `lockfile =` is mandatory
+      (BZL-RUST-01) and names it, so on a fresh clone every `bazel query` dies
+      with `Unable to read lockfile` until it is regenerated once.
+
+      A shell guard, not `status:`, and not `run: once`. `--force` skips
+      `status:`, and this is a repin rather than an idempotent tool install;
+      `run: once` is unreliable across namespaced includes (go-task #852). The
+      `test -s` costs a millisecond and decides at run time, which no flag can
+      skip.
+
+      The second step is the reason this is two commands. **A green exit from
+      the repin is not evidence that it repinned**: measured on this tree,
+      `bazel fetch --repo=@crates` exits 0 in two seconds as a no-op once
+      `@crates` is in the repo contents cache, splicing nothing and writing no
+      lockfile — so the bootstrap would hand a still-absent lockfile to the
+      gate below it and report success. The post-condition is a floor on the
+      thing the task exists to produce, not on the exit code of the command
+      that produces it.
+
+      Public rather than `internal:`, for the reason `git:hooks` is: it is
+      called by every gate that needs it *and* it is the one thing a fresh
+      clone may want to run on purpose, so `task --list` should name it.
+      `scripts:self-test` calls it too — `bazel_tag_guard.py --self-test`
+      queries the live graph by design.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - cmd: >-
+          test -s Cargo.bazel.lock.json || {
+          echo 'bazel: Cargo.bazel.lock.json is absent - it is gitignored, because crate_universe records the generating machine output base (DX-23). Repinning once.' >&2;
+          CARGO_BAZEL_REPIN=1 ocx exec bazel -- bazel fetch --repo=@crates; }
+      - cmd: >-
+          test -s Cargo.bazel.lock.json || {
+          echo 'bazel: the repin left Cargo.bazel.lock.json absent, so nothing below this can query. Its exit code settles nothing - measured, bazel fetch --repo=@crates exits 0 as a no-op once @crates is in the repo contents cache. If a splice did run and fail, its cause is printed above; the measured one on this host is cargo-bazel refusing while a Cargo config file sits in a parent directory of the splice workspace (~/.cargo/config.toml, splice temp under $HOME). Remove that file, or put the splice temp outside $HOME and repin by hand: CARGO_BAZEL_REPIN=1 bazel fetch --repo=@crates --repo_env=TMPDIR=/var/tmp/ocx-splice (measured 18 s, 892 KB written).' >&2;
+          exit 1; }
+
+  doctor:
+    desc: Check this HOST for the preconditions a first Bazel build needs — toolchain pin, ~/.bazelrc host block, libstdc++, the cache reader credential, caches, fonts
+    summary: |
+      Not a gate, and deliberately not in `verify`. Every other task in this
+      file reads the *repository*, which is committed and therefore the same
+      everywhere; this one reads the *machine*, which is not committed, is
+      different on every host, and is what a first build actually gets wrong —
+      the output root, the RAM envelope, the C++ link prerequisite, the remote
+      cache reader credential. None of that is visible to any gate here.
+
+      It makes one authenticated HTTPS request per run (a 401-or-not probe of
+      the reader realm), which is why it is a command a developer chooses
+      rather than a step in `task verify`.
+
+      `/init-bazel-config` is this same script plus the questions: the skill
+      runs `--check`, reads the codes, and prompts for the answers only a human
+      has (the `dev-read` password, the maintainer opt-in). Two implementations
+      of "is this host ready" would drift inside one release, so the skill owns
+      no check of its own.
+
+      Bare `python3`, not `ocx exec bazel --`: the script resolves `bazel`
+      itself through `ocx exec` when it needs a `--version`, and wrapping the
+      whole run would make an unreachable toolchain look like a doctor that
+      cannot start rather than a doctor reporting an unreachable toolchain.
+    dir: '{{.ROOT_DIR}}'
+    cmd: python3 scripts/bazel_doctor.py --check
+
+  pin:check:
+    desc: Bazel pin authority — `.bazelversion` against the resolved binary, and the `rust-toolchain.toml` ↔ `MODULE.bazel` twin
+    summary: |
+      C-003 and C-026, in `.verify:lint`'s parallel leg because it is a
+      text-and-`--version` check: `bazel --version` starts no server, loads no
+      package and needs no `@crates`, which is why this one gate does not call
+      `bootstrap`.
+    dir: '{{.ROOT_DIR}}'
+    cmd: ocx exec bazel -- python3 scripts/bazel_pin_check.py --check
+
+  build:nobuild:
+    desc: Load and analyse every target without building — the loading-clean graph the drift and tag gates read
+    summary: |
+      Loading and analysis errors fail here, one step before the two gates that
+      would otherwise report them as a missing edge or a missing tag. A BUILD
+      file under a directory that was not a package is the measured example
+      (DX-40): 31 ERROR lines and `//...` refusing to load the root package.
+
+      `bootstrap` first, for the reason `build:drift`, `tag:guard` and
+      `mod:check` have it. Every `crates/*/BUILD.bazel` does
+      `load("@crates//:defs.bzl", …)` at *loading* phase, and
+      `Cargo.bazel.lock.json` is gitignored, so a runner that has only run
+      `actions/checkout` has no lockfile — measured, this step exits 201 with
+      `Unable to read lockfile` and it is the first `@crates`-reaching step of
+      the `smoke` job. Locally the same absence is masked: phase 1's
+      `scripts:verify` reaches `bootstrap` through `scripts:self-test` before
+      phase 2 runs, so the omission is invisible on every developer machine and
+      red on every clean CI run.
+
+      No target-count floor, deliberately, and this is the one place in the
+      gate set without one: there is no `//...` constant in
+      `scripts/bazel_gate_proofs.py` to floor against — every constant there is
+      scoped to `//crates/...` — and minting a fifteenth floor value in a
+      taskfile is exactly the one shared table the plan forbids. The vacuous
+      case is already covered downstream: a `//...` that loaded nothing leaves
+      `build:drift` and `tag:guard` reading 0 targets, and both red on their
+      own floors in the two steps that follow this one.
+
+      It is also the repository's only producer of a Build Event Protocol
+      stream, which is why `--build_event_json_file` is here and the telemetry
+      call is at the tail (C-019, S-013). Measured on 9.2.0: `--nobuild` stops
+      after analysis and still emits one `targetCompleted` per target — 280 of
+      them for this `//...`, 272 KB — so the analysis-only lane is a real
+      subject for `scripts/bep_to_otlp.py` rather than an empty one.
+
+      **That stream is a credential dump, and it never touches the checkout.**
+      Bazel serialises the whole client environment and every rc-file flag
+      value into the BEP. Measured on this tree: 276 `--client_env` entries,
+      among them `AWS_SECRET_ACCESS_KEY` with its 64-character value, plus nine
+      `--remote_header=authorization=Basic …`. Under `target/` that was a
+      mode-0644 secret file inside the directory `Swatinem/rust-cache` saves on
+      a push to `main`. So the path is a `mktemp -d` outside the workspace and
+      the `defer:` below removes it — first item, so it is armed before
+      anything can fail, and go-task runs deferred items on every exit.
+
+      Outside the workspace is not the same as unreadable, so the directory is
+      pinned to 0700 before the build and the stream to 0600 after it. Measured
+      on this host: `mktemp -d` (GNU coreutils 9.7) already creates 0700, but
+      the file Bazel writes inside it lands at the process umask — **0644** —
+      so the directory bit was the only thing keeping the secret in, and a
+      single mode change anywhere above it would have published the file.
+
+      A grep for `--client_env=` finds **zero** of them: the BEP is proto3
+      JSON and the `=` is escaped, so the byte sequence on disk is
+      `--client_env=`. `bep_persistence_findings` in
+      `scripts/bep_to_otlp.py` is the reader that holds this path outside the
+      checkout, and its scanner leg shows the naive spelling reporting clean
+      over bytes that carry the secret.
+
+      The `test -s` is the `bootstrap` post-condition again, for the same
+      reason: the flag going missing would leave the export reading nothing,
+      and an export of nothing is the one thing this pipeline must not report
+      as a success. It blocks, where the export itself never does — a dropped
+      flag is a defect in this tree, a collector outage is not.
+    dir: '{{.ROOT_DIR}}'
+    vars:
+      # Outside the checkout, one directory per invocation. `sh:` runs once,
+      # before the first item, so every item below and the `defer:` see the
+      # same value.
+      BEP_DIR:
+        sh: mktemp -d -t ocx-bep.XXXXXXXX
+      # Not `bazel-bep.json`: `.claude/tests/test_workflows.py` classifies any
+      # CI step whose `run:` matches `\bbazel\b` as a bazel lane and then
+      # demands the cache flags of one, and `bazel-bep.json` matches.
+      BEP: '{{.BEP_DIR}}/bep.json'
+    cmds:
+      # First, so the removal is armed before the build, the floor, the ignore
+      # check or the export can fail. An unlink placed after them is a cleanup
+      # a failed step skips, which is not a cleanup.
+      - defer: rm -rf '{{.BEP_DIR}}'
+      # Then the mode, before anything writes a secret into it.
+      - task: bep:mode
+        vars: {DIR: '{{.BEP_DIR}}'}
+      - task: bootstrap
+      - ocx exec bazel -- bazel build --nobuild --build_event_json_file={{.BEP}} //...
+      # The `chmod 600` rides the emptiness post-condition because it is the
+      # same post-condition: the stream exists and it is ours alone. Bazel
+      # creates it at the umask (0644 here, measured), which the 0700 directory
+      # hides but does not fix — and the file outlives that directory the
+      # moment anything copies it out with its mode.
+      - cmd: >-
+          test -s {{.BEP}} || {
+          echo 'bazel: --build_event_json_file wrote nothing to {{.BEP}}, so scripts/bep_to_otlp.py has no subject and WP-27 dashboard would empty silently. Restore the flag on the build above.' >&2;
+          exit 1; };
+          chmod 600 {{.BEP}}
+      # C-006's declared red state, which this step is measurably NOT: dropping
+      # `test/manual/.ocx-home` from `.bazelignore` produces forty ERROR lines
+      # on every `//...` command and they are non-fatal, so the line above stays
+      # green while the ignore set degrades. Here rather than beside the drift
+      # and tag gates because `.bazelignore` is what decides the `//...` this
+      # step just analysed, and it needs a graph that loaded to query at all.
+      - ocx exec bazel -- python3 scripts/bazel_ignore_check.py
+      # Per-target analysis timings to otel.ocx.sh; a silent no-op unless this
+      # machine is configured for it (taskfiles/telemetry.taskfile.yml). CI
+      # runs the same item rather than a step of its own — the BEP dies with
+      # this task, so there is no file for a later step to read. The cost of
+      # that is named rather than hidden: the credential reaches this step's
+      # env, and therefore this build's `--client_env` list, which is why the
+      # stream is written to scratch and deleted on the way out.
+      - task: :telemetry:bazel
+        vars:
+          BEP: '{{.BEP}}'
+
+  build:drift:
+    desc: Every Cargo dep edge has a `BUILD.bazel` twin and back, third-party edges through the declared name-mapping table
+    summary: |
+      C-010. Reads `bazel query --output=build` over `//crates/...` and `cargo
+      metadata --locked`, compares the full dep set in both directions, and
+      reds on an unmapped external label rather than ignoring it. Its own
+      reader floors (56 targets / 20 packages) are what make a green mean
+      something, so nothing here passes `--bazel` or a captured query: a second
+      spelling of either is a thing to forget.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - ocx exec bazel -- python3 scripts/bazel_build_drift.py
+
+  tag:guard:
+    desc: Every `no-sandbox` target carries the cache-excluding tag its kind was measured to need; every `rust_binary` carries `no-remote-cache` or `stamp = 0`
+    summary: |
+      C-011, the compensating control for BZL-CORE-01: the initial tag set is
+      defensible as build configuration, and every later tag change is a
+      green-chasing edit by default unless this gate still passes.
+
+      No `--stage`: the floor is stage-scoped and advances with the adoption
+      (`//crates/...`, then `+//test/doc_scripts/...`, then `//...` last), and
+      the script's own default is the single place that advances. A stage named
+      here too would be a second spelling, and the one that goes stale. The
+      default is **stage 3** as of WP-33: all 40 `no-sandbox` targets in the
+      graph live in `//test/doc_scripts/...`, so while the default was stage 1
+      the gate's only live clause was its own reader floor.
+
+      "The tag its kind needs" is two measured answers, not one: `external` for
+      a test action (WP-35), `no-remote-cache` for a build action (WP-33 —
+      no tag makes a build action re-execute, so what a tag buys there is the
+      machine boundary). The script's docstring carries both measurements and
+      `--self-test` reds each kind against the other's tag.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - ocx exec bazel -- python3 scripts/bazel_tag_guard.py
+
+  lint:
+    desc: Buildifier over every `BUILD.bazel` and `.bzl` — format diff plus lint findings, decided on the exit code
+    summary: |
+      A7's second line (C-025). `buildifier_prebuilt` ships the rule and never
+      a target, so `//:buildifier.check` exists only because the root
+      `BUILD.bazel` declares it; `mode = "diff"` exits nonzero on an
+      unformatted file and `lint_mode = "warn"` on a lint finding, and this
+      gate reads that exit code — never a number, never a line of stdout
+      (bazel-quality.md rule 3, BZL-LARK-01).
+
+      **The target had no caller until WP-39.** It has been green since WP-10
+      and nothing ran it, which is DX-5/C-008's shape exactly: a gate outside
+      the full gate is a gate nobody runs. Measured warm on the pinned binary:
+      0.66 s, which is why it belongs in `task verify` rather than only in the
+      release-gate chain below.
+
+      No `bootstrap`, and that is measured rather than assumed: with
+      `Cargo.bazel.lock.json` moved aside this command still exits 0, because
+      `//:buildifier.check` reaches no `@crates` repository and the extension
+      is never evaluated. `mod:check` walks the whole module graph and does
+      need it — the two differ, so they are spelled differently.
+    dir: '{{.ROOT_DIR}}'
+    cmd: ocx exec bazel -- bazel run //:buildifier.check
+
+  mod:check:
+    desc: The module lockfile is fresh — `bazel mod deps` refusing to update `MODULE.bazel.lock`
+    summary: |
+      A7's third line (C-025), and the only place `--lockfile_mode=error`
+      appears in this repository. `.bazelrc` deliberately does not carry it and
+      says so: unscoped in a committed base rc it turns every legitimate
+      dependency edit into a failure a developer cannot self-serve, so the
+      freshness check belongs on its own gate leg, decided on the exit code.
+      Exit 37 with no text on stdout is still the finding.
+
+      `bootstrap` first, for the reason `build:drift` and `tag:guard` have it
+      and `lint` does not — measured: with `Cargo.bazel.lock.json` moved aside
+      this command exits **2** with `Results may be incomplete as 1 extension
+      failed`. That is a red for the wrong reason on every fresh clone, and a
+      gate whose red state is "you have not repinned yet" is a gate nobody
+      reads. Measured warm, lockfile present: 0.31 s.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - ocx exec bazel -- bazel mod deps --lockfile_mode=error
+
+  test:unit:
+    desc: The workspace unit-test lane — `bazel test //crates/...`, floored per target off the build event stream
+    summary: |
+      C-016's execution swap, plus the re-spec that makes it pay. WP-30
+      measured `verify-basic.yml`'s `smoke` job step by step: `Test`
+      (`cargo nextest run`) **173.5 s**, `Unit-test floor`
+      (`cargo nextest list --workspace --release --locked`) **536.5 s** — the
+      listing must build every test binary in release before it can name a
+      case. Swapping only the execution step therefore removed 173.5 s and
+      left the 536.5 s compile standing, which is the arithmetic the NO-GO
+      rested on. This task is both halves: the run *and* its floor come off
+      one Bazel invocation, and `cargo nextest list` leaves the gating lane.
+
+      **The floor is per target, not a target count.** `bazel test` exits 0
+      over a graph that shrank — measured on this tree: three `#[test]` fns
+      deleted from `crates/ocx_exit/src/exit_code.rs`, `Executed 1 out of 34
+      tests: 34 tests pass`, exit 0, while `scripts/bazel_test_floor.py` exits
+      1 with `//crates/ocx_exit:ocx_exit_test executed 18 case(s), …records
+      21`. That is the whole reason the reader exists, and why the previous
+      draft's "target count plus a committed table" was not a floor:
+      `crates/NEXTEST_FLOOR` carries 10 cases of headroom, so three deletions
+      are invisible to any sum.
+
+      **The reader takes `test.log`, and that is measured rather than
+      preferred.** The ADR's design was a `rust_test` wired to
+      `$XML_OUTPUT_FILE`; no `crates/*/BUILD.bazel` carries that wiring, so
+      Bazel writes its *synthesised* `test.xml` — `tests="1"`, one `testcase`
+      per target. Summing those elements reports 34 against a floor of 8174.
+      Both files are `testActionOutput` entries of the same `TestResult`, and
+      a cache hit replays both, so the log is the reachable per-case count.
+
+      **The stream never touches the checkout**, for the reason
+      `build:nobuild` states at length: bazel serialises the whole client
+      environment and every rc-file flag value into it. Same `mktemp -d`, the
+      same `defer:` armed before anything can fail, and the same 0700 directory
+      and 0600 stream as that task — for its measurements too. The
+      filename differs (`test-bep.json`) so that
+      `scripts/bep_to_otlp.py --self-test`'s in-workspace mutation still lands
+      on exactly one path and its finding count stays readable.
+
+      `--self-test` runs first rather than beside this task, and never as a
+      `preconditions:` entry: `--force` skips preconditions, and a floor
+      proved nowhere is a green that cannot be told from a reader that stopped
+      matching. It costs 0.4 s and needs no graph.
+
+      `platforms: [linux]`, matching `rust:test:floor` and `rust:test:ceiling`
+      exactly and for their reason: `cfg`-gated tests make the per-target
+      counts platform-dependent, and `crates/TEST_TARGET_MAP.toml` records the
+      Linux ones. `verify-deep.yml`'s macOS and Windows legs stay on
+      `cargo nextest run` for the same reason.
+
+      The exit code is bazel's unless the floor has its own finding — both are
+      reported, because a red suite and a shrunken one are different facts and
+      a run can be both.
+    dir: '{{.ROOT_DIR}}'
+    platforms: [linux]
+    vars:
+      BEP_DIR:
+        sh: mktemp -d -t ocx-test-bep.XXXXXXXX
+      BEP: '{{.BEP_DIR}}/test-bep.json'
+      # `--bazelrc=$RUNNER_TEMP/bazel-cache.rc`, or the empty string. That file
+      # is the cache credential `.github/actions/bazel-cache-rc` writes; without
+      # it every request to the shared cache is an anonymous 401 and this lane
+      # compiles cold, which is what it did until now.
+      #
+      # **Derived from the file existing, never from a lane naming it.** Three
+      # states must all be green and only one has the file: `--bazelrc` on a
+      # missing path is a HARD error (measured on the pinned 9.2.0: exit 2,
+      # `Unable to read .bazelrc file`, before anything runs), a fork PR is
+      # given no secrets so the action writes nothing, and a developer shell has
+      # no `$RUNNER_TEMP` at all. Both of those then read the cache anonymously
+      # over `--disk_cache`, which is the documented fallback — a lane that
+      # fails loudly on a fork is the defect, not the fallback.
+      #
+      # It is a *startup* option, so it goes before the command word. It does
+      # not replace the tracked `.bazelrc`: measured with `--announce_rc`, Bazel
+      # reads the home rc, then the workspace rc, then this one, so
+      # `--remote_upload_local_results=false` still holds on every lane.
+      #
+      # `printf '%s' "<value>"`, and the spelling is measured rather than
+      # stylistic. go-task runs `sh:` through its own shell (mvdan/sh), not
+      # bash, and that `printf` builtin does **not** honour `--` as
+      # end-of-options: `printf -- '--bazelrc=%s' "$X"` takes `--` as the
+      # *format* and emits exactly two dashes, so the lane ran
+      # `bazel -- test //crates/...` with the credential silently dropped. It
+      # is green — the flag is simply gone — which is why it was caught by
+      # reading `task --dry`'s rendered command line and not by a bash probe of
+      # the same expression, where `--` works.
+      #
+      # ponytail: no quoting around the expansion at the call site —
+      # `$RUNNER_TEMP` is `/home/runner/work/_temp` on every GitHub runner. A
+      # path with a space would need the flag built inside the `cmd:` body.
+      CACHE_RC:
+        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
+    cmds:
+      - defer: rm -rf '{{.BEP_DIR}}'
+      - task: bep:mode
+        vars: {DIR: '{{.BEP_DIR}}'}
+      - python3 {{.ROOT_DIR}}/scripts/bazel_test_floor.py --self-test
+      - task: bootstrap
+      - cmd: |
+          set -o pipefail
+          status=0
+          ocx exec bazel -- bazel {{.CACHE_RC}} test //crates/... \
+            --build_event_json_file='{{.BEP}}' {{.CLI_ARGS}} || status=$?
+          if [ ! -s '{{.BEP}}' ]; then
+            echo 'bazel unit: --build_event_json_file wrote nothing to {{.BEP}}, so the floor has no subject and would report a shrunken test set as a clean tree. Restore the flag on the run above.' >&2
+            exit 1
+          fi
+          chmod 600 '{{.BEP}}'
+          python3 {{.ROOT_DIR}}/scripts/bazel_test_floor.py --bep '{{.BEP}}' || exit $?
+          exit "$status"
+
+  test:
+    desc: The full-suite entry point — A7's four gate lines chained, ending in `bazel test` over the whole scope
+    summary: |
+      C-025's release-gate entry, and the one named target A7 asks for: its
+      recipe **is** A7's four lines in A7's order, each exit code propagated by
+      go-task's own sequencing. No `|| true`, no stdout scrape, no step that
+      reports a range of exit codes as success.
+
+          bazel build --nobuild //...            -> task bazel:build:nobuild
+          bazel run //:buildifier.check          -> task bazel:lint
+          bazel mod deps --lockfile_mode=error   -> task bazel:mod:check
+          bazel test <the whole scope>           -> the last line here
+
+      **Nothing calls this task today, and that is stated rather than left to
+      be discovered.** Not because `bazel test` has no lane - `bazel:test:unit`
+      runs `bazel test //crates/...` in `task verify` phase 2 and in
+      `verify-basic.yml`'s `smoke` job. This task is the *full suite*: it
+      compiles the workspace a second time and runs the acceptance suite and
+      the site build, and no release lane exists to hang that on. The first three lines are
+      sub-second and run in `task verify` on their own; the fourth compiles the
+      workspace a second time and runs the acceptance suite and the site build,
+      which is a release gate's cost and not a fast gate's. When a release lane
+      exists, this is its one step.
+
+      `test:scoped` below is the other half of C-025. The two are judged by
+      opposite legs of one predicate in
+      `scripts/bazel_accept_proofs.py::entry_findings`, so no single recipe can
+      satisfy both — which is why the contract asks for two entry points rather
+      than one flag.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: build:nobuild
+      - task: lint
+      - task: mod:check
+      - ocx exec bazel -- bazel test //... {{.CLI_ARGS}}
+
+  test:scoped:
+    desc: The change-selected entry point — only the Bazel targets the changed paths reach
+    summary: |
+      C-025's PR-lane entry and S-004's subject. **No item of this recipe names
+      the whole scope at all**, guarded or otherwise — the target list is
+      computed from the change set and `bazel test` is given that list.
+
+      Two readers, no third — and the recipe below keeps that literally. The
+      change set comes from `scripts/scoped_gate.py`, the same plan
+      `task verify:scoped` reads. The crate -> acceptance-target query is
+      `SCOPED_ROWS` in `test/taskfile.yml` (C-024), reached through
+      `scripts/bazel_accept_proofs.py::select_targets`, which is already that
+      table's reader and the function `--check-s004` judges a selection with.
+      Re-spelling the table in YAML would make this the third reader of it, and
+      the third reader is the one that goes stale.
+
+      **The `crates/<dir>` -> `//crates/<dir>:all` mapping is in
+      `select_targets` too**, and the first cut of this task spelled it in the
+      heredoc — which made the heredoc that third reader after all, in the one
+      form review does not see as a table. It also dropped the `crate_of_dir`
+      membership check the acceptance half applies, so any `crates/<dir>/<file>`
+      produced a label whether or not that directory was a crate.
+
+      Three inputs, three answers, all of them `select_targets`':
+
+        a crate path   `//crates/<dir>:all`, plus every acceptance target that
+                       crate's `SCOPED_ROWS` row names — or `//test:all` where
+                       the row itself reads `escalate` (C-024's mapping)
+        a test module  that module's own `//test:` target
+        a docs path    nothing at all; the task says so and exits 0
+
+      **`scoped_gate`'s `decision` is deliberately not read, and the first cut
+      of this task read it.** Measured: on a docs-only working tree the plan
+      returns `escalate` — `website/**` has no route, and for the *cargo* gate
+      escalating is the conservative answer — so an `escalate` arm dispatching
+      `bazel:test` ran `bazel test //...` for a change that had selected zero
+      targets. That is S-004's failure verbatim, reached through the entry point
+      whose job is to prevent it. The selector was right and the arm above it
+      was wrong, so the arm is gone. Graph-wide breakage from a `MODULE.bazel`
+      or `.bazelrc` edit is `bazel:build:nobuild`'s subject — it analyses
+      `//...` on every `task verify` — and re-running every test on such an
+      edit is `bazel:test`'s job, not this one's.
+
+      The Rust half is derived from the changed paths rather than from the
+      plan's `crates` list on purpose: that list holds **package** names
+      (`crates/ocx_cli` is package `ocx`) and Bazel labels are directories, so
+      inverting it would need a name map — one more table to keep in step for
+      an answer the path already carries.
+
+      Nothing calls this task either, for the same reason `test` has no caller:
+      it is the full-suite shape, and no release lane exists. (The narrower
+      `bazel:test:unit` does run, in both lanes.) What it buys today is that
+      S-004 is answerable — a docs-only change and a crate-touching change
+      produce different, inspectable target lists in `{{.TARGETS}}`.
+    dir: '{{.ROOT_DIR}}'
+    vars:
+      TARGETS: '{{.ROOT_DIR}}/target/bazel/scoped-targets.txt'
+    cmds:
+      # The selection reaches `@crates` the moment it is non-empty, so this
+      # needs the lockfile for the same reason `build:nobuild` does.
+      - task: bootstrap
+      - mkdir -p {{.ROOT_DIR}}/target/bazel
+      # The selector. It writes the list rather than piping it, so the answer
+      # survives the run and S-004 has a subject to read; the echo is for the
+      # operator, never for a gate to parse.
+      - cmd: |
+          python3 - {{.TARGETS}} <<'PY'
+          import sys
+
+          sys.path.insert(0, "scripts")
+          from bazel_accept_proofs import (
+              REPO_ROOT,
+              acceptance_modules,
+              read_scoped_rows,
+              select_targets,
+          )
+          from scoped_gate import cargo_metadata, make_plan, mark_file, parse_workspace
+
+          changed = make_plan(REPO_ROOT, mark_file()).changed
+          targets, notes = select_targets(
+              changed,
+              rows=read_scoped_rows((REPO_ROOT / "test" / "taskfile.yml").read_text(encoding="utf-8")),
+              modules=acceptance_modules(REPO_ROOT / "test"),
+              crate_of_dir=parse_workspace(cargo_metadata(REPO_ROOT)).crate_of_dir,
+          )
+          for note in notes:
+              print("bazel test:scoped: " + note.message, file=sys.stderr)
+          selected = " ".join(sorted(targets))
+          with open(sys.argv[1], "w", encoding="utf-8") as handle:
+              handle.write(selected + "\n")
+          print(
+              "bazel test:scoped: {} change(d) path(s) select {} target(s): {}".format(
+                  len(changed), len(targets), selected or "(none)"
+              )
+          )
+          PY
+      # The empty answer is a real answer and exits 0. It is also the one S-004
+      # is about, so it says which file to read rather than going quiet.
+      - cmd: >-
+          selected=$(cat {{.TARGETS}});
+          [ -n "$selected" ] || {
+          echo 'bazel test:scoped: the change reaches no Bazel target - nothing to run (selection in {{.TARGETS}})' >&2;
+          exit 0; };
+          ocx exec bazel -- bazel test $selected {{.CLI_ARGS}}
