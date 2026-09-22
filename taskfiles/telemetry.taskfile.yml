@@ -1,19 +1,28 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
 #
-# Test telemetry: per-test timings from a JUnit report, pushed to
-# https://otel.ocx.sh as OTLP traces so Grafana can name the tests that
-# accumulate the most wall clock. The CI half of the same contract is
-# `.github/actions/test-telemetry`; both are described in
-# `.claude/rules/subsystem-ci.md` § Test telemetry.
+# Build and test telemetry, pushed to https://otel.ocx.sh as OTLP traces:
 #
-# OFF BY DEFAULT, and silently: with no endpoint configured and no
-# `junit2otlp` on PATH this task prints nothing and changes nothing, so
-# `task verify` on a fresh checkout is unaffected.
+#   * `push` — per-test timings from a JUnit report, so Grafana can name the
+#     tests that accumulate the most wall clock. Its CI half is
+#     `.github/actions/test-telemetry`.
+#   * `bazel` — per-target timings from a Bazel Build Event Protocol stream,
+#     so S-013 can be asked of a real build. It has no CI half: the same item
+#     runs in both lanes, at the tail of `bazel:build:nobuild`. A step of its
+#     own would need the BEP to outlive the build, and the BEP carries the
+#     whole client environment (see that task's summary).
+#
+# Both are described in `.claude/rules/subsystem-ci.md` § Test telemetry.
+#
+# OFF BY DEFAULT, and silently: with no endpoint configured these tasks print
+# nothing and change nothing, so `task verify` on a fresh checkout is
+# unaffected. `push` needs `junit2otlp` on PATH as well and is a no-op without
+# it; `bazel` needs only python3, which is a project-toolchain floor anyway.
 #
 # To turn it on for this machine:
 #
-#   1. Install junit2otlp 0.1.2 onto PATH, from the release tarball for your
-#      platform (`junit2otlp_{linux,darwin,windows}_{x86_64,arm64}.tar.gz`):
+#   1. For `push` only: install junit2otlp 0.1.2 onto PATH, from the release
+#      tarball for your platform
+#      (`junit2otlp_{linux,darwin,windows}_{x86_64,arm64}.tar.gz`):
 #
 #        https://github.com/mdelapenya/junit2otlp/releases/tag/v0.1.2
 #
@@ -26,6 +35,13 @@
 #      only, and the Go SDK reads the endpoint as a URL: `https` selects TLS,
 #      `http` selects plaintext, and a bare `host:port` fails outright with
 #      `dns resolver: missing address`.
+#
+#      One value serves both transports. `bep_to_otlp.py` appends
+#      `/v1/traces` to the same base and POSTs it over HTTP/JSON — nginx on
+#      otel.ocx.sh proxies `location /v1/` to `tempo:4318` and its own comment
+#      calls that the primary path, the gRPC location existing only because
+#      junit2otlp has no other transport. `:443` is explicit and harmless in a
+#      URL, so nothing here needs a second endpoint variable.
 #
 # The file is sourced by this task, so it works whether or not the shell you
 # run `task` from has it loaded. Nothing here echoes its contents.
@@ -79,3 +95,54 @@ tasks:
       echo "telemetry: pushed {{.SUITE}} timings from {{.JUNIT}}"
     requires:
       vars: [JUNIT, SUITE]
+
+  bazel:
+    desc: >-
+      Push one Bazel BEP to otel.ocx.sh as OTLP traces (BEP=<path>). A no-op,
+      silently, unless the machine is configured for it — see the header of
+      this file.
+    summary: |
+      C-019 / S-013. The reader is `scripts/bep_to_otlp.py`, whose
+      `--self-test` (run by `scripts:verify`) is where its red states are
+      proved; this task is the wiring and nothing else. No check count is
+      quoted: it moves with every proof added, and nothing here re-measures it.
+
+      `{{.BEP}}` is a scratch path the caller owns and deletes — this task
+      neither creates nor removes it. `bazel:build:nobuild` is the only
+      caller and its `defer:` is what guarantees the removal.
+
+      **The floor is the script's own default** — `CRATES_RULE_TARGETS`, 53,
+      imported from `scripts/bazel_gate_proofs.py` — and no `--min-targets` is
+      passed here. The one lane that writes a BEP analyses `//...`, which is
+      280 targets today, so 53 is a floor it clears by a wide margin. That is
+      the point of it: the floor exists to tell "the reader read nothing" from
+      "the build was clean", and 53 is the only number for this that has a
+      home. Spelling 280 here would mint the `//...` constant
+      `bazel_gate_proofs.prove_counts` refuses to declare ("stage-4 stays
+      undeclared … a number here would be a guess"), in a taskfile, where
+      nothing re-measures it. The tighter reads of the same graph are two
+      steps away and do block: `build:drift` floors at 56 and `tag:guard` at
+      101.
+
+      Failure is loud and non-fatal, the contract `push` above already has:
+      the script prints one line per finding on stderr and exits 1, and this
+      wrapper names the swallow and exits 0. `task verify` must not red
+      because otel.ocx.sh is down. What *does* red is the producer —
+      `bazel:build:nobuild` floors on the BEP it writes — so a dropped
+      `--build_event_json_file` blocks while a collector outage warns.
+    silent: true
+    cmd: >-
+      set -u;
+      if [ -f "$HOME/.config/ocx-telemetry/env" ]; then
+        set -a; . "$HOME/.config/ocx-telemetry/env"; set +a;
+      fi;
+      [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] || exit 0;
+      [ -s "{{.BEP}}" ] || {
+        echo "telemetry: no build event stream at {{.BEP}}, nothing pushed" >&2; exit 0;
+      };
+      python3 {{.ROOT_DIR}}/scripts/bep_to_otlp.py --bep "{{.BEP}}"
+      || {
+        echo "telemetry: bep_to_otlp.py failed (above); the build is unaffected" >&2; exit 0;
+      }
+    requires:
+      vars: [BEP]
