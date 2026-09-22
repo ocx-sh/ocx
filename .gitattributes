@@ -22,3 +22,26 @@ LICENSE-THIRD-PARTY.md -text
 
 # OCX lock files
 ocx.lock merge=union
+
+# Bazel's module lockfile. A line-based merge driver (`union`, `ours`)
+# interleaves or duplicates a digest key WITHOUT writing a conflict marker,
+# which also defeats Bazel's own conflict detector — it looks for `<<<<<<<` in
+# the text. A silent bad merge is strictly worse than a visible one, so this
+# file gets Bazel's JSON-aware driver and nothing else does: pointed at a
+# foreign lockfile it parses a schema it was not written for.
+#
+# The driver name still needs a one-time registration per clone and per CI
+# runner (`git config merge.bazel-lockfile-merge.driver ...`); until then git
+# falls back to a plain text merge, which conflicts loudly rather than
+# corrupting quietly.
+#
+# No task registers it, and that is not an oversight: **the driver program is
+# not in this tree and the pinned binary does not carry one.** Measured on
+# 9.2.0 — `bazel help mod` lists no `merge-lockfile` subcommand, and the
+# install base ships no `*lockfile*` script. Upstream's driver is
+# `scripts/bazel-lockfile-merge.py` in the bazelbuild/bazel *repository*, so
+# registering it means vendoring a JSON merge driver for someone else's schema
+# (`quality-core.md` § Don't Own Non-Domain Code) or depending on a checkout
+# nobody here has. The loud text-merge conflict is the accepted state until a
+# release ships the driver with the binary.
+MODULE.bazel.lock merge=bazel-lockfile-merge

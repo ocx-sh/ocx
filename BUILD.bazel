@@ -1,0 +1,81 @@
+load("@buildifier_prebuilt//:rules.bzl", "buildifier")
+
+# Directories buildifier must not walk. This deliberately restates part of
+# `.bazelignore` instead of reading it: the rule shells out to `find` over the
+# source tree and never consults Bazel's package machinery, so an entry in
+# `.bazelignore` buys nothing here. Measured — without `./.tmp/*` the check
+# lints Bazel's own embedded tools out of the output base and exits 1.
+# buildifier: disable=external-path — these are `find` path patterns, not
+# labels; the lint is about depending on an external repository.
+_NOT_OURS = [
+    "./.agents/*",
+    "./.git/*",
+    "./.ocx/*",
+    "./bazel-*/*",
+    # crate_universe output, written into each patched submodule by every
+    # repin and tracked by nobody. Not ours to format and not ours to lint:
+    # it is unformatted AND trips `load: Loaded symbol "selects" is unused`,
+    # so without this line the gate is red on a clean tree.
+    "./external/*/BUILD.bazel",
+    "./external/*/target/*",
+    "./node_modules/*",
+    "./target/*",
+    "./website/node_modules/*",
+    # LAST on purpose, and the position is load-bearing. `buildifier_prebuilt`
+    # joins these into one `find` expression as
+    # `-path P1 -o -path P2 -o ... -o -path Pn -prune -o -type f ... -exec`,
+    # and `-a` binds tighter than `-o`, so `-prune` pairs with the LAST pattern
+    # only. Every earlier entry merely short-circuits the `-exec` — correct for
+    # suppressing findings, but `find` still descends. `.tmp/` is the one that
+    # must not be descended: it collects scratch from every agent run, some of
+    # it root-owned and unreadable, and one such directory makes `find` exit 1
+    # under the script's `set -euo pipefail` with no lint finding at all.
+    "./.tmp/*",
+]
+
+# The lint gate `bazel-quality.md` names. `buildifier_prebuilt` ships the rule
+# and never the target, so `//:buildifier.check` exists only because this
+# package declares it. `mode = "diff"` exits nonzero on an unformatted file and
+# `lint_mode = "warn"` on a lint finding — the gate reads the exit code, never
+# a number and never a line of stdout.
+buildifier(
+    name = "buildifier.check",
+    exclude_patterns = _NOT_OURS,
+    lint_mode = "warn",
+    mode = "diff",
+)
+
+# The same pass, applying its fixes. Never run by a gate.
+buildifier(
+    name = "buildifier",
+    exclude_patterns = _NOT_OURS,
+    lint_mode = "fix",
+    mode = "fix",
+)
+
+# ---------------------------------------------------------------------------
+# Root-package sources that `crates/*` targets reach across the package
+# boundary. Bazel 9 exports no source file implicitly, so a `rust_test` whose
+# `compile_data` or `data` names `//:test/...` cannot see the file until it is
+# listed here — `bazel build //...` fails at analysis, naming the target.
+#
+# The list is exact, not a `glob()`, and both halves of it are derivable:
+# the 25 fixtures are every `include_str!`/`include_bytes!` in `crates/**`
+# whose path escapes its crate, and `Cargo.lock` and `test/tests/test_index.py`
+# are the two runtime reads built from `env!("CARGO_MANIFEST_DIR")`
+# (`ocx_util::compression`, `ocx_cli::command::index_catalog`). A glob over the
+# three fixture directories would export 42 files for the 25 that are read, and
+# would make a stale entry invisible; an exact list reds the build the moment a
+# crate names a file that is not here, and reds this package the moment a file
+# here is deleted.
+#
+# `exports_files` rather than a `filegroup` on purpose: each crate then depends
+# on the individual files it reads, so editing an unrelated fixture does not
+# invalidate its test action.
+# ---------------------------------------------------------------------------
+exports_files(
+    [
+        "Cargo.lock",
+    ],
+    visibility = ["//crates:__subpackages__"],
+)

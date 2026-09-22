@@ -1,0 +1,231 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+#
+# C-009 — one row per Bazel `rust_test` target under `//crates/...`, with the
+# testcase count `bazel test` last executed for it.
+#
+# Generated, never hand-edited: regenerate with the task's `-- --update`, which
+# re-reads `bazel-testlogs/**/test.log`. **Counts rise only.** A row whose count
+# falls is either a deleted test or a `--skip` filter that widened past the name
+# it was written for, and both are findings — say which in the commit body or
+# the ratchet is doing nothing.
+#
+# `cases` is *executed* testcases (passed + failed), so it excludes the
+# `--skip`ped ones; `skipped` records how many a target's `args` filter out and
+# is the testcase-level half of C-008's exclusion set. The suite-level half is
+# the `[[excluded_suite]]` rows at the bottom: suites `cargo nextest list`
+# reports that stage 1 builds no target for at all.
+#
+# Reconciliation against the other universe, measured on this tree
+# (`cargo nextest list --workspace --release --locked --message-format json`,
+# then `scripts/bazel_floor_proofs.py --derive --listing`):
+#
+#   nextest : 36 rust-suites (3 bin + 19 lib + 14 test), 8223 testcases,
+#             8 of them `#[ignore]`d.
+#   bazel   : 34 `rust_test` targets, 8174 executed + 40 skipped + 8 ignored.
+#   8223 = 8174 + 40 + 8 + 1, the 1 being `ocx::linux_self_contained` below.
+#
+# `derive_exclusions` in that script no longer derives the set from
+# `kind != lib|test`. That rule was stale in both directions: `ocx::bin/ocx`
+# (1 case) and `ocx_shim::bin/ocx-shim` (109) do have `rust_test` targets, and
+# `ocx::linux_self_contained` is `kind = "test"` and has none, which the rule
+# could not see — it reported 3 suites / 110 testcases against a true 2 / 1.
+# The set below is the measured one and the script now names the same two.
+
+[[target]]
+label = "//crates/ocx_announce:ocx_announce_test"
+crate = "ocx_announce"
+cases = 395
+
+[[target]]
+label = "//crates/ocx_cli:help_surface"
+crate = "ocx_cli"
+cases = 3
+
+[[target]]
+label = "//crates/ocx_cli:macos_self_contained"
+crate = "ocx_cli"
+cases = 0
+
+[[target]]
+label = "//crates/ocx_cli:ocx_cli_bin_test"
+crate = "ocx_cli"
+cases = 1
+
+[[target]]
+label = "//crates/ocx_cli:ocx_cli_test"
+crate = "ocx_cli"
+cases = 1360
+skipped = 8
+
+[[target]]
+label = "//crates/ocx_config:ocx_config_test"
+crate = "ocx_config"
+cases = 615
+
+[[target]]
+label = "//crates/ocx_console:ocx_console_test"
+crate = "ocx_console"
+cases = 41
+
+[[target]]
+label = "//crates/ocx_exit:ocx_exit_test"
+crate = "ocx_exit"
+cases = 21
+
+[[target]]
+label = "//crates/ocx_index:dispatch_conformance"
+crate = "ocx_index"
+cases = 4
+
+[[target]]
+label = "//crates/ocx_index:index_wire_conformance"
+crate = "ocx_index"
+cases = 8
+
+[[target]]
+label = "//crates/ocx_index:live_index_wire"
+crate = "ocx_index"
+cases = 3
+
+[[target]]
+label = "//crates/ocx_index:ocx_index_test"
+crate = "ocx_index"
+cases = 432
+skipped = 1
+
+[[target]]
+label = "//crates/ocx_oci:ocx_oci_test"
+crate = "ocx_oci"
+cases = 759
+skipped = 2
+ignored = 5
+
+[[target]]
+label = "//crates/ocx_package:index_variant_derivation"
+crate = "ocx_package"
+cases = 1
+
+[[target]]
+label = "//crates/ocx_package:ocx_package_test"
+crate = "ocx_package"
+cases = 914
+
+[[target]]
+label = "//crates/ocx_package:tag_verdicts"
+crate = "ocx_package"
+cases = 5
+
+[[target]]
+label = "//crates/ocx_package_manager:ocx_package_manager_test"
+crate = "ocx_package_manager"
+cases = 1097
+skipped = 5
+ignored = 1
+
+[[target]]
+label = "//crates/ocx_project:ocx_project_test"
+crate = "ocx_project"
+cases = 455
+skipped = 1
+ignored = 2
+
+[[target]]
+label = "//crates/ocx_schema:borrowed_vocabulary_matches_spec"
+crate = "ocx_schema"
+cases = 3
+
+[[target]]
+label = "//crates/ocx_schema:golden_schemas"
+crate = "ocx_schema"
+cases = 7
+
+[[target]]
+label = "//crates/ocx_schema:json_keys_are_snake_case"
+crate = "ocx_schema"
+cases = 1
+
+[[target]]
+label = "//crates/ocx_schema:ocx_schema_test"
+crate = "ocx_schema"
+cases = 13
+
+[[target]]
+label = "//crates/ocx_schema:schema_outputs"
+crate = "ocx_schema"
+cases = 13
+
+[[target]]
+label = "//crates/ocx_script:ocx_script_test"
+crate = "ocx_script"
+cases = 62
+skipped = 1
+
+[[target]]
+label = "//crates/ocx_setup:ocx_setup_test"
+crate = "ocx_setup"
+cases = 242
+
+[[target]]
+label = "//crates/ocx_shell:ocx_shell_test"
+crate = "ocx_shell"
+cases = 362
+
+[[target]]
+label = "//crates/ocx_shim:ocx_shim_bin_test"
+crate = "ocx_shim"
+cases = 109
+
+[[target]]
+label = "//crates/ocx_sign:ocx_sign_test"
+crate = "ocx_sign"
+cases = 473
+
+[[target]]
+label = "//crates/ocx_store:ocx_store_test"
+crate = "ocx_store"
+cases = 350
+
+[[target]]
+label = "//crates/ocx_test_support:boundary"
+crate = "ocx_test_support"
+cases = 56
+
+[[target]]
+label = "//crates/ocx_test_support:ocx_test_support_test"
+crate = "ocx_test_support"
+cases = 2
+
+[[target]]
+label = "//crates/ocx_test_support:workspace_structure"
+crate = "ocx_test_support"
+cases = 13
+skipped = 22
+
+[[target]]
+label = "//crates/ocx_trust:ocx_trust_test"
+crate = "ocx_trust"
+cases = 95
+
+[[target]]
+label = "//crates/ocx_util:ocx_util_test"
+crate = "ocx_util"
+cases = 259
+
+# ---------------------------------------------------------------------------
+# C-008's suite-level exclusion set: what `cargo nextest list` reports and no
+# stage-1/2 Bazel target executes. `rust:test:floor` still counts these, which
+# is why they are enumerated rather than left to a count comparison.
+# ---------------------------------------------------------------------------
+
+[[excluded_suite]]
+suite = "ocx_schema::bin/ocx_schema"
+crate = "ocx_schema"
+cases = 0
+reason = "a `[[bin]]` suite with no `#[cfg(test)]`; stages 1-2 build no `rust_binary` (ADR ruling 3) and there is nothing to run."
+
+[[excluded_suite]]
+suite = "ocx::linux_self_contained"
+crate = "ocx_cli"
+cases = 1
+reason = "`env!(\"CARGO_BIN_EXE_ocx\")` — the suite's subject is the *shipped* binary's dynamic-link set, and stages 1-2 build no `rust_binary`. Giving it a fabricated path would green it against a file that is not ocx, which is worse than not running it."
