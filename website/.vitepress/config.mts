@@ -129,6 +129,13 @@ export default defineConfig({
           ],
         },
         {
+          text: "Contributing",
+          collapsed: true,
+          items: [
+            { text: "Building with Bazel", link: "/docs/contributing/bazel" },
+          ],
+        },
+        {
           text: "FAQ",
           link: "/docs/faq",
         },
