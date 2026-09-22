@@ -1233,6 +1233,11 @@ class TestAiConfigOverhaulPhase2:
         "commit": False,
         "meta-maintain-config": True,
         "ocx-sync-roadmap": True,
+        # Writes `~/.bazelrc` on this machine and can set an `ocx-sh` org
+        # secret. Both are side effects outside the repository, and one of them
+        # takes a password the user types — so the skill is reachable by name
+        # and never by inference from a prompt that merely mentions Bazel.
+        "init-bazel-config": True,
         # Pure analysis / advisory — auto-invocation safe
         "builder": False,
         "code-check": False,
@@ -2455,6 +2460,179 @@ class TestSelfTestsRunOnAGate:
         assert "rust:verify" not in self._reachable_from("verify"), (
             "`task verify` now reaches `rust:verify` — re-read its `desc`, which states "
             "that no gate calls it and that its members are wired individually"
+        )
+
+    def test_the_parked_bazel_test_engine_arm_keeps_its_entry_point(self) -> None:
+        """`OCX_TEST_ENGINE=bazel` is PARKED, and a parked arm is the kind that rots.
+
+        WP-30 returned NO-GO, so the CI execution swap does not land and
+        `rust:test:unit:bazel` runs in no lane. The plan keeps it — the reopen
+        condition is a later R2 re-measurement with the cache realm deployed, and
+        the arm's floor (`selected >= CRATES_TEST_TARGETS`) is the measured work
+        that would otherwise have to be redone.
+
+        What this asserts is the one thing that can break while nothing runs it:
+        the dispatch still resolves. `test:unit` selects `test:unit:{ENGINE}` by
+        string, so renaming the arm turns `OCX_TEST_ENGINE=bazel` into "task not
+        found" and no gate in this repository would notice. It deliberately does
+        **not** assert reachability from `verify` — being unreachable is what
+        parked means, and asserting otherwise would demand the lane WP-30
+        refused.
+        """
+        _, defined = self._graph()
+        arm = "rust:test:unit:bazel"
+        assert arm in defined, (
+            f"`{arm}` is gone, but `taskfiles/rust.taskfile.yml`'s `test:unit` still "
+            f"dispatches `test:unit:{{{{.ENGINE}}}}` — `OCX_TEST_ENGINE=bazel` now resolves to "
+            f"no task. Retire the dispatch in the same change, or restore the arm"
+        )
+        body = yaml.safe_load(
+            (ROOT / "taskfiles" / "rust.taskfile.yml").read_text(encoding="utf-8")
+        )["tasks"]
+        dispatch = [
+            entry["task"]
+            for entry in (body["test:unit"].get("cmds") or [])
+            if isinstance(entry, dict) and "task" in entry
+        ]
+        assert dispatch == ["test:unit:{{.ENGINE}}"], (
+            f"`rust:test:unit` dispatches {dispatch} — the engine selection is what makes "
+            f"`{arm}` reachable at all, and the arm is parked, so nothing else would red"
+        )
+
+
+# ---------------------------------------------------------------------------
+# The Bazel gate set has a reader: prose against the taskfile (R-2)
+# ---------------------------------------------------------------------------
+
+
+class TestBazelGateProse:
+    """Every Bazel gate `task verify` runs is named where a reader looks.
+
+    Nothing bound this prose to the taskfile. `TestVerifySummary` above holds
+    only `taskfile.yml`'s *own* summary against its phase bodies, which is
+    exactly why the taskfile stayed right while `CLAUDE.md`,
+    `subsystem-taskfiles.md` and the contributing page all still said "four
+    gates" after the fifth and sixth landed. Fourth-plus recurrence of the
+    "prose paraphrases an authority with no reader" class; this is the reader.
+    """
+
+    _BAZEL_TASKFILE = ROOT / "taskfiles" / "bazel.taskfile.yml"
+    _PHASES = (".verify:lint", ".verify:build-test")
+    _PROSE = (
+        "CLAUDE.md",
+        ".claude/rules/subsystem-taskfiles.md",
+        "website/src/docs/contributing/bazel.md",
+    )
+    #: The files that state the gate *count* in words. A count is the one part
+    #: of this prose a containment check cannot catch: adding a seventh gate to
+    #: a sentence that still says "six" leaves every name present.
+    _COUNTING = (*_PROSE, ".claude/rules/subsystem-ci.md")
+    _NUMBER_WORDS = {3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight"}
+    _COUNT_PHRASE = re.compile(r"\b(three|four|five|six|seven|eight)\s+(?:\w+\s+)?gates\b", re.I)
+
+    #: Measured with `Cargo.bazel.lock.json` moved aside, not assumed:
+    #: `bazel:pin:check` (`bazel --version`) and `bazel:lint`
+    #: (`bazel run //:buildifier.check`) both still exit 0, while
+    #: `bazel:build:nobuild` exits 201 and `bazel mod deps` exits 2 —
+    #: every `crates/*/BUILD.bazel` does `load("@crates//:defs.bzl", …)` at
+    #: loading phase, so anything reaching the graph needs the lockfile.
+    _NO_BOOTSTRAP = frozenset({"bazel:pin:check", "bazel:lint"})
+
+    @classmethod
+    def _gates(cls) -> list[str]:
+        """The `bazel:*` tasks the two `verify` phases dispatch directly."""
+        tasks = yaml.safe_load((ROOT / "taskfile.yml").read_text(encoding="utf-8"))["tasks"]
+        return [
+            entry["task"]
+            for phase in cls._PHASES
+            for entry in [*(tasks[phase].get("deps") or []), *(tasks[phase].get("cmds") or [])]
+            if isinstance(entry, dict) and str(entry.get("task", "")).startswith("bazel:")
+        ]
+
+    def test_the_reader_finds_the_gates(self) -> None:
+        """This class's own control: a walk that returned nothing would pass every
+        containment assertion below over any prose at all."""
+        gates = self._gates()
+        assert len(gates) >= 4, (
+            f"`.verify:lint` and `.verify:build-test` dispatch {gates} — fewer than four "
+            f"`bazel:` tasks means the reader stopped, not that the gate set shrank"
+        )
+        assert len(set(gates)) == len(gates), f"a gate is dispatched twice: {gates}"
+
+    @pytest.mark.parametrize("relative", _PROSE)
+    def test_every_gate_is_named_in_the_prose(self, relative: str) -> None:
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        # The full `bazel:` spelling, never a bare suffix: `lint` and `test`
+        # occur in any of these files as ordinary prose, so a suffix-tolerant
+        # containment check is green over a page that names no gate at all.
+        missing = [gate for gate in self._gates() if gate not in text]
+        assert not missing, (
+            f"{relative} does not name {missing}, which `task verify` runs off "
+            f"`taskfiles/bazel.taskfile.yml` — a gate the prose omits is a gate a reader of "
+            f"that file does not know exists"
+        )
+
+    @pytest.mark.parametrize("relative", _COUNTING)
+    def test_the_stated_gate_count_is_the_gate_count(self, relative: str) -> None:
+        expected = self._NUMBER_WORDS[len(self._gates())]
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        # Only a count on a line that is about Bazel. `subsystem-taskfiles.md`
+        # also says "Three gates" of the *verify tiers*, which is a different
+        # subject and a correct sentence.
+        stated = {
+            word.lower()
+            for line in text.splitlines()
+            if "bazel" in line.lower()
+            for word in self._COUNT_PHRASE.findall(line)
+        }
+        assert stated, (
+            f"{relative} states no `<word> gates` count — every file in this list carried one, "
+            f"and dropping it removes the thing this test reads rather than fixing the drift"
+        )
+        assert stated == {expected}, (
+            f"{relative} says {sorted(stated)} gates; `task verify` runs {len(self._gates())} "
+            f"({expected}): {self._gates()}"
+        )
+
+    def test_every_graph_reaching_bazel_task_bootstraps(self) -> None:
+        """`Cargo.bazel.lock.json` is gitignored, so CI arrives without it.
+
+        `bazel:build:nobuild` and `bazel:test:scoped` each lost their
+        `- task: bootstrap` to one commit that never mentioned the removal.
+        Locally that is invisible — phase 1's `scripts:verify` reaches
+        `bazel:bootstrap` before phase 2 runs — and red on every clean CI run.
+        """
+        bodies = yaml.safe_load(self._BAZEL_TASKFILE.read_text(encoding="utf-8"))["tasks"]
+        invokes = re.compile(r"\bbazel\s+(?!--version\b)\w")
+        orphans: list[str] = []
+        for name, body in bodies.items():
+            full = f"bazel:{name}"
+            if full == "bazel:bootstrap" or full in self._NO_BOOTSTRAP:
+                continue
+            items = [*(body.get("cmds") or []), *([body["cmd"]] if "cmd" in body else [])]
+            shell = " ".join(item for item in items if isinstance(item, str)) + " ".join(
+                str(item.get("cmd", "")) for item in items if isinstance(item, dict)
+            )
+            if invokes.search(shell) and "bazel:bootstrap" not in (
+                TestSelfTestsRunOnAGate._reachable_from(full)
+            ):
+                orphans.append(full)
+        assert not orphans, (
+            f"{orphans} invoke `bazel` against the graph and never reach `bazel:bootstrap`. "
+            f"`Cargo.bazel.lock.json` is gitignored (DX-23), so `actions/checkout` never "
+            f"delivers it and every `crates/*/BUILD.bazel` loads `@crates//:defs.bzl` at "
+            f"loading phase — measured, the task exits 201 on `Unable to read lockfile`. "
+            f"Add `- task: bootstrap`, or add the task to `_NO_BOOTSTRAP` with the "
+            f"lockfile-absent exit code you measured"
+        )
+
+    def test_the_no_bootstrap_exemptions_still_exist(self) -> None:
+        """A stale exemption silently widens the test above into a no-op."""
+        bodies = yaml.safe_load(self._BAZEL_TASKFILE.read_text(encoding="utf-8"))["tasks"]
+        missing = sorted(name for name in self._NO_BOOTSTRAP if name.split(":", 1)[1] not in bodies)
+        assert not missing, (
+            f"{missing} are exempted from the bootstrap requirement and are not tasks of "
+            f"{self._BAZEL_TASKFILE.name} — the exemption list is stale"
         )
 
 

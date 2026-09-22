@@ -60,7 +60,7 @@ Before plan/research/architectural decision, scan "By concern" in catalog. Auto-
 
 Task runner [`task`](https://taskfile.dev) (Taskfile v3). **Run `task --list` before invent ad-hoc commands.** Common: `task` (fast check), `task verify:scoped` (per work package; escalates to full when it must), `task verify` (full gate), `task rust:verify`, `task test`, `task checkpoint`. Cargo OK for finer control. Always `cargo fmt` before commit, `task verify` (or a green `task verify:scoped`) after implementation. Conventions → [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md).
 
-**Project toolchain.** `ocx.toml` lists `actionlint`, `bun`, `cosign`, `git-cliff`, `go-task`, `lychee`, `prek`, `shellcheck`, `shfmt`, `uv`. `ocx self setup` wires a per-prompt hook that puts them on `PATH` when you `cd` in and takes them off when you leave (bash, zsh, fish, PowerShell, elvish; `ocx.toml` and `ocx.lock` are reconciled each prompt, so an edit takes effect at the next one). CI bootstraps the same set via the `setup-ocx` action. Taskfiles call the tools directly — no `ocx package exec` wrapping. For one-off overrides — e.g. testing a freshly built ocx, or invoking from a shell with no hook — prefix with `ocx exec -- <cmd>`. Details → [getting-started.md](./website/src/docs/getting-started.md) § Project Toolchain.
+**Project toolchain.** `ocx.toml` lists `actionlint`, `bazel`, `bun`, `cosign`, `git-cliff`, `go-task`, `lychee`, `prek`, `shellcheck`, `shfmt`, `uv`. `ocx self setup` wires a per-prompt hook that puts them on `PATH` when you `cd` in and takes them off when you leave (bash, zsh, fish, PowerShell, elvish; `ocx.toml` and `ocx.lock` are reconciled each prompt, so an edit takes effect at the next one). CI bootstraps the same set via the `setup-ocx` action. Taskfiles call the tools directly — no `ocx package exec` wrapping. For one-off overrides — e.g. testing a freshly built ocx, or invoking from a shell with no hook — prefix with `ocx exec -- <cmd>`. Details → [getting-started.md](./website/src/docs/getting-started.md) § Project Toolchain.
 
 Single acceptance test:
 ```sh
@@ -68,6 +68,8 @@ cd test && uv run pytest tests/test_install.py::test_install_creates_candidate_s
 ```
 
 Lint tooling setup (one-off): the first `ocx pull` (or `task` invocation) materializes the symlinks under `~/.ocx/`. The toolchain resolves from `ocx.lock` alone — this repository keeps no committed index copy, and tool bumps go through `ocx add` / `ocx lock`.
+
+**Bazel.** Cargo builds and tests the tree; Bazel 9.2.0 is adopted alongside it as a graph over the same crates, and `task verify` runs seven gates off it — `bazel:pin:check` in phase 1, then `bazel:build:nobuild` → `bazel:build:drift` → `bazel:tag:guard` → `bazel:lint` → `bazel:mod:check` → `bazel:test:unit` in phase 2. The last two are A7's other lint lines: `bazel:lint` is buildifier over every `BUILD.bazel` and `.bzl` file, decided on `//:buildifier.check`'s exit code, and `bazel:mod:check` is `bazel mod deps --lockfile_mode=error`, the one place that flag appears — `MODULE.bazel.lock` must already be fresh. `bazel` is the one tool a plain shell cannot reach: every call goes through `ocx exec bazel -- <cmd>`, including a bare `bazel query` you run by hand, or the gates exit 1 on their reader floors (DX-42). `.bazelversion` and `MODULE.bazel` are pinned and `bazel:pin:check` is the authority over both. None of those gates reads the *host*, which is where a first build actually fails: `task bazel:doctor` does that (toolchain pin, the `~/.bazelrc` host block, the libstdc++ link prerequisite, the cache reader credential, the caches), and `/init-bazel-config` is the same script plus the prompts it cannot answer itself. Host state belongs in `~/.bazelrc`, never `.bazelrc.user` — this machine carries a worktree per agent task and a per-checkout file has to be re-created in each one. The decision is [`adr_bazel_build_adoption.md`](./.claude/artifacts/adr_bazel_build_adoption.md); the ruleset is [bazel-quality.md](./.claude/rules/bazel-quality.md).
 
 ## Architecture
 
@@ -173,7 +175,7 @@ Planning flow: ADR → Design Spec → Plan → Implementation. Artifacts → `.
 
 ## Skills & Personas
 
-Persona skills (`/builder`, `/qa-engineer`, `/security-auditor`, `/code-check`) + the vendored hex multi-agent bundle (`/hex-discuss`, `/hex-architect`, `/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-finalize`) + task skills in `.claude/skills/`. Map → "Skills by task topic" in [.claude/rules.md](./.claude/rules.md). Check before ad-hoc gen.
+Persona skills (`/builder`, `/qa-engineer`, `/security-auditor`, `/code-check`) + `/init-bazel-config` (host setup for a first Bazel build) + the vendored hex multi-agent bundle (`/hex-discuss`, `/hex-architect`, `/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-finalize`) + task skills in `.claude/skills/`. Map → "Skills by task topic" in [.claude/rules.md](./.claude/rules.md). Check before ad-hoc gen.
 
 ## Starting Work
 

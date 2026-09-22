@@ -30,6 +30,17 @@ not copies. Team-shared — commit it.
   trusted, which `[shell.consent]` grants stand) and `crates/ocx_store/**`
   (the on-disk layout every install writes through).
 - Worktrees: default `.agents/worktrees/` (gitignored, `.gitignore:50`).
+- Federation: this repo is the **lead**. Satellite keys, for plans carrying a
+  `Repo` column:
+  - `mirror-asciinema` → `/home/mherwig/dev/mirror-asciinema` (trunk `main`; no
+    remote yet — the repository is owner-gated, see `.agents/owner-actions.md`)
+  - `server-hetzner1` → `/home/mherwig/dev/server-hetzner1` (trunk `main`)
+  - **Satellite worktree deviation.** Neither satellite creates a
+    `.agents/worktrees/<wp>` tree: each is a single-writer checkout already on
+    the branch its work belongs to, and the owner reviews those branches
+    directly. Satellite WPs commit in place on that branch. Consequently the
+    C-303 pre-flight's clause (vi) (`.agents/worktrees/` must be ignored) does
+    not gate here — no such path is ever written.
 - Constitution: `.claude/rules/arch-principles.md` (optional gate; plans
   checked against it when present).
 - Discussions: `.agents/discussions/<slug>.md` (hex-discuss artifacts;
@@ -91,6 +102,127 @@ research-axes:
 
 ## Memory
 
+- **Active plan (sion): `.claude/artifacts/plan_bazel_build_adoption.md`** — the Bazel
+  adoption ([ADR](../../.claude/artifacts/adr_bazel_build_adoption.md) Accepted 2026-09-21).
+  `/hex-plan high`, 2026-09-21. **31 WPs, 12 waves, 4 repos** (ocx, rules_ocx,
+  mirror-asciinema, server-hetzner1). Discover wave of 5 + 1 research axis; review panel
+  (spec/architect/SOTA, all opus) + `codex:rescue` **ran** — 30 findings, 6 Block, one fix
+  round, re-validation converged.
+  **Three sibling pre-works landed mid-plan and were folded in (R2):** rules_ocx on Bazel
+  9.2.0 done and pushed (branch `bazel-9` @ `9ced5ffb`, `ocx-sh/rules_ocx` PR #15, 80/80) →
+  WP-00b **withdrawn**; the `agg` mirror spec built and validated (`~/dev/mirror-asciinema`
+  @ `02e5fd1`, 6 platforms) → WP-29 resized to publication-only and **WP-33b split out** so
+  the owner gate blocks one S-sized WP instead of the cast stage; the server reader realm
+  implemented and tested (`bazel-cache-reader-realm`, `b469ae1`/`8667a34`) → WP-25 resized.
+  Their common consequence is **C-029 — no red/green proof may depend on the owner-gated
+  remote realm**; the whole corpus runs on `--disk_cache`, so every gate is demonstrable
+  before the owner applies anything. Measured tool-path contract worth keeping: the tool
+  digest lives in the **launcher text**, so actions re-key on a tool change (ADR ruling
+  2(c) is green by construction) but the absolute-path launcher makes **RBE structurally
+  impossible**, and only executables are exposed — no filegroups for package data.
+  Research: `.claude/artifacts/research_bazel_mechanism_verification.md`.
+  `Next: /hex-execute .claude/artifacts/plan_bazel_build_adoption.md`.
+  **Lessons.**
+  (1) **The ADR's stage-2 design rested on a premise one `sed` of the live taskfile
+  refutes.** `rust:test:floor` (`taskfiles/rust.taskfile.yml:591-614`) runs
+  `cargo nextest list --message-format json` — a **declaration** check that never reads a
+  run, so moving *execution* to Bazel does not touch it. The ADR and this plan's first draft
+  both specified a BEP + libtest-output reader, an L-sized WP, and a Block-tier "Don't Own
+  Non-Domain Code" deviation, to rebuild a gate that did not need rebuilding. The architect
+  seat found it. **Read what a gate actually executes before designing its replacement** —
+  the discover report had quoted the exact command and nobody drew the conclusion.
+  (2) **A measurement can fill a signal row and still not answer it.** `verify-deep`'s
+  largest job is `Build & Unit Test (Windows)` (1250/1456/1487 s), not acceptance — which
+  reads like go/no-go clause 4 firing. But the lane is Linux-only and a 3-OS matrix stage
+  costs `max(legs)`, so **stage 2's contribution to `verify-deep` is structurally zero**.
+  The ADR asked "which job is largest **and how much of it is compile**"; only the first
+  half was measured. A verdict written off half a signal leaves the row empty.
+  (3) **The plan dropped the ADR's own WP-1c and thereby deleted A2's abort.** Two seats
+  caught it independently. An abort with no work package that can fire it is a decorative
+  gate — the failure the ADR wrote a subsection against. Re-added as WP-30, gating the swap.
+  (4) `--remote_instance_name` is **inert over an HTTP remote cache** (Bazel's HTTP client
+  never puts it in the URL), so the ADR's "abandoning a poisoned generation costs one string
+  bump" exit did not exist. Needs a URI path prefix + `--enable_ac_key_instance_mangling`
+  server-side. A cheap-sounding mitigation nobody priced against the actual deployment.
+  (5) `--local_test_jobs=1` is **global, never per-target-pattern** — the ADR scoped it "for
+  the `//test/...` package", which would have serialised the Rust tests too and deleted the
+  win. The per-target mechanism is the `exclusive` tag.
+  (6) **`external/` are mode-160000 submodules**, so `external/*/BUILD.bazel` cannot simply
+  be committed in the parent repo. Only the cross-model seat raised it.
+  (7) The cross-model gate earned its keep an **eighth** time: 3 of its Blocks were net-new,
+  including (6) and a semantic dependency cycle (WP-32 gated WP-34 while needing WP-34's
+  rule as its subject) that four opus seats missed.
+  (8) Preference hint for the next `/hex-init`: the seat that paid here was **SOTA /
+  known-pitfall**, which produced a flag-existence table for a binary the repo does not yet
+  have. BZL-FLAG-11's "prove it on the pinned binary's two help surfaces" is unrunnable
+  before adoption, so a documentation-sourced table is the only pre-flight available — and
+  it found six wrong flag positions.
+- **Design record (hex-architect high, 2026-09-21, dossier fast path): `.claude/artifacts/adr_bazel_build_adoption.md`
+  (Status Proposed), on `sion`.** From `.agents/discussions/bazel-full-adoption.md`. Bazel 9.2.0 /
+  rules_rust 0.74.0 under Taskfile, four staged surfaces, `ocx.lock` as pin authority. Amended
+  `adr_crate_split_workspace.md:19` in place (**not** superseded — the crate split stands in full;
+  only its Bazel clause reopens). ADR index row added to `arch-principles.md`. Discover:
+  `discover_bazel_full_adoption.md` (claim diff: 1 WRONG, 3 contradictions). Research axes
+  security&compliance / technology-verification: `research_bazel_cache_trust_boundary.md`,
+  `research_bazel_toolchain_verification.md`; operability&cost and design-precedent skipped on
+  unexpired dossier citations. Panel (spec, quality, security — all opus) + Codex `nox-review`:
+  **10 Block / 16 High**, one fix round, re-validation 30/30 closed.
+  **Lessons.**
+  (1) **A dossier's own `## Decisions` can rest on a premise a landed sibling record already
+  refuted — and the root cause was a stale README.** The steelman duty found it and I verified it:
+  `bazel-adoption-timing.md:50` ("Anonymous 403; bazel-cache reads now 401", 2026-09-20, server work
+  *landed*) contradicts the next day's dossier asserting anonymous reads — and this file's own
+  Memory row agreed with the 401 all along. Settled by measurement on hetzner1:
+  `nginx/.../ocx-sh-10-bazel-cache.conf:29-33` puts `auth_basic` on `location /` with **no
+  `limit_except`**, so GET is 401; `/srv/sh.ocx/bazel-cache/README.md:7-8` still says "reads are
+  anonymous" and **that stale line is what the discussion rested on**. `bazel-cache.ocx.sh` **is
+  not anonymously readable** — fix the README before it misleads a third decision.
+  **Two-party agreement between an owner and one discussion agent is unexamined.** Read the
+  *preceding* decision in the same series, and the live config, not the dossier's own citations.
+  (2) **`nox-review` on a path under `.claude/` reviews NOTHING and still returns `status: ok`.**
+  Its neutralizer strips agent-config paths by pattern: `counts: neutralized=1 of 1`, empty
+  checkout, `verdict: needs-attention` about the missing document. Copy the artifact to a path
+  outside `.claude/` first, then delete the copy. A `status: ok` whose `counts:` line says the
+  subject was neutralized is the textbook unchecked green.
+  (3) The re-run gate earned its keep a **seventh** time — 3 of its 4 Highs were net-new, including
+  a hermeticity check that was *inverted* (it demanded a cache miss after touching an **undeclared**
+  file, which a correctly isolated action legitimately survives as a hit, so it could never
+  discriminate). No opus seat caught it.
+  (4) **The fix round introduced a new wrong number beside a correct fix** — `54` (all
+  `//crates/...` targets) substituted for `34` (test targets) at four sites, making its *own* floor
+  contract unsatisfiable. Budget a re-validation for every correction pass; this is the second
+  dataset for that rule.
+  (5) A count nobody questioned was off by an order of magnitude: the ADR and all three reviewers
+  carried "~15 acceptance modules"; `ls test/tests/test_*.py` is **172**, which moves the stage-4
+  target count to ~274 and all but reaches BZL-CI-01's tripwire on day one. Re-derive counts,
+  never inherit them.
+  (6) **Measured 2026-09-21, supersedes what this file and the dossier carried.** CI medians over
+  the last 50 successful runs: **verify-basic 1731 s, verify-deep 3407 s** — the `3347 s` in the
+  2026-09-20 row below is stale, and the narrower fix has shown **no demonstrated movement** (the
+  controlled before/after is still owed). `ocx.sh/bazelbuild/bazel` publishes 9.0.0…9.2.0 over five
+  platforms (no linux/arm64 musl). `agg` has **no mirror sibling at all** — the prerequisite is a
+  new `mirror-asciinema` repo on the `../mirror-bazelbuild/bazel/mirror.yml` pattern, not a tag
+  bump. **`rules_ocx` is v0.4.0, not the 0.1.0 the dossier claimed** — clean on `main` @ `825f20b`,
+  `ocx.project()` already live in `//ocx:extensions.bzl` and dogfooding its own lock; "outdated"
+  is the 8.7.0 pin and being unverified on 9.x, nothing missing. Host envelope: 32 GB / 32 cores,
+  `/tmp` tmpfs 76 % full.
+  `Next: /hex-plan high "Bazel build adoption, per .claude/artifacts/adr_bazel_build_adoption.md"`
+  — WP-0 is `bazel-adopt`'s 11 steps. Two orchestrator rulings were taken in autonomous mode and
+  are recorded in the ADR **pending owner ratification**: the read-credential branch for the 401
+  cache, and the ≥ 4 min / < 150 ms p50 performance threshold with WP-1a/WP-1c budgets.
+  Preference hint for the next `/hex-init`: the axes that carried this ADR were
+  **security & compliance** (shared-cache trust boundary) and **technology verification**
+  (converting a prior lane's `UNVERIFIED` markers into primary-source facts) — the second is a
+  *reusable shape*, not a topic: when a dossier cites research that flagged its own gaps, that axis
+  is not covered.
+- **Discussion handed off (hex-discuss, 2026-09-21): `.agents/discussions/bazel-full-adoption.md`
+  → architect (tier high), on `sion`.** Bazel 9 at all four stages (Rust unit tests per crate,
+  casts, website, acceptance), existing bazel-cache.ocx.sh + otel.ocx.sh, no RBE, rules_ocx as
+  the sole tool path via worktree/branch/`git_override`. Supersedes the 2026-09-20
+  `bazel-adoption-timing` deferral: the narrower fix landed and per-crate test caching is the
+  pain cargo cannot address. Research: `.agents/research/bazel_*.md` (six lanes).
+  `Next: /hex-architect .agents/discussions/bazel-full-adoption.md` — reopens
+  `adr_crate_split_workspace.md` "Bazel parked".
 - **Discussion handed off (hex-discuss, 2026-09-20): `.agents/discussions/bazel-adoption-timing.md`
   → plan, applied inline on `evelynn`.** Verdict: Bazel deferred until the narrower fix is
   measured; server half landed (sccache.ocx.sh → Garage, bazel-cache reads closed,

@@ -16,7 +16,7 @@
 
 **Tech Strategy Alignment:**
 - [x] Rust 2024, Cargo workspace, resolver v3 — Golden Path in `.claude/rules/product-tech-strategy.md`, unchanged
-- [x] No new build system (Bazel parked by the dossier), no new dependency introduced by this ADR
+- [x] No new build system at the time of this ADR (Bazel parked by the dossier), no new dependency introduced by this ADR. **Amended 2026-09-21 by `adr_bazel_build_adoption.md`**: the park is reopened — the crate split this ADR delivered is what makes per-crate test caching possible, and test wall-clock is now the dominant pain
 
 ---
 
