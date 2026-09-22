@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
 #
-# The acceptance suite, as 172 `sh_test` targets (C-024). The tag set, the
-# serialisation decision and the reason nothing here declares the compose stack
-# are all in `bazel.bzl`'s module docstring; this file is the enumeration.
+# The acceptance suite, as one `sh_test` per `tests/test_*.py` (C-024) — 181
+# today, and the number is the filesystem's rather than this comment's: the
+# `glob` below is the enumeration and `scripts/bazel_accept_proofs.py`'s
+# `prove_counts` reds when its own constant drifts from `test/tests/`. The tag
+# set, the serialisation decision, the measured table behind result caching and
+# the under-declaration that survives it are all in `bazel.bzl`'s module
+# docstring; this file is the enumeration and the input groups.
 
 load("//test:bazel.bzl", "acceptance_suite")
 
@@ -21,8 +25,9 @@ load("//test:bazel.bzl", "acceptance_suite")
 #
 # The half of that move this package owns is below. The other half — dropping
 # the same 26 from the root `exports_files` and re-spelling `//:test/X` as
-# `//test:X` in the seven crate BUILD files — is a one-line-per-label rename
-# those packages' owner applies; until it lands, `//...` does not analyse.
+# `//test:X` in the seven crate BUILD files — has landed, so `//...` analyses
+# today; the reasoning above is why the labels live here and not in the root
+# package, and it is what a reader needs before moving one back.
 #
 # `exports_files` rather than a `filegroup`, for the reason the root package
 # already recorded: each crate then depends on the individual files it reads,
@@ -82,6 +87,139 @@ filegroup(
     ),
 )
 
+# Everything an acceptance module reads that is NOT the module, in one group.
+#
+# The cache unit C-024 asks for is "one file, one target", and with result
+# caching on (`bazel.bzl` § "Result caching is ON") the inputs have to carry
+# that: a module changes, one target re-runs; a shared file changes, all 181 do.
+# Per-module attribution was measured and refused — 160 of the 181 modules
+# import the one shared `src` package, so a per-module set would be this set
+# plus a rounding error for almost every target.
+#
+# **The exclusions are the load-bearing half, and they were measured rather than
+# guessed.** `glob` walks the filesystem and knows nothing about `.gitignore`, so
+# a generated file inside a globbed directory would re-key all 181 targets on
+# every run and "second run fully cached" would be unreachable.
+#
+# How the set was derived: every path under `test/` snapshotted by mtime and
+# size, `task test:parallel --force` run, then re-snapshotted. 243 paths moved,
+# and they fall into exactly four groups —
+#
+#     236  __pycache__/  (188 under tests/, 16 under src/, 8 under
+#                         tests/fixtures/, 7 under src/scenarios/, 6 under
+#                         bench/, 5 under recordings/, 2 under src/announce_e2e/,
+#                         2 at the top level)
+#       4  .pytest_cache/
+#       2  bin/ocx, bin/ocx-shim
+#       1  results/junit.xml
+#
+# — so `**/__pycache__/**` and `**/*.pyc` are the only exclusions a globbed
+# directory needs. `.pytest_cache/`, `results/` and `.venv/` sit at `test/`'s top
+# level and no glob below names them; `bin/` is reached only through
+# `:suite_anchor`'s `bin/ocx*`, which is the input this whole design exists to
+# declare. `manual/` is not globbed at all — it carries a generated
+# `.ocx-home/`, `build/`, `out/` and `metadata.json` beside its committed
+# `ocx.toml`/`metadata.in.json` fixtures, and no acceptance module reads it.
+#
+# `docker-compose.yml` is here for its own sake: it carries every service image
+# reference and every host port, so a bumped registry or Rekor image, or a moved
+# port, re-keys the suite. It is also one
+# of the two labels `scripts/bazel_tag_guard.py` requires in an acceptance
+# target's input closure before it will credit the `no-sandbox` exemption — the
+# compensating control that makes that exemption defensible.
+# **What this group contains is itself floored**, by
+# `scripts/bazel_tag_guard.py`'s `SUITE_INPUTS_*` clause: every directory
+# globbed below and every top-level file listed below is named there, and so is
+# a member count. Narrowing a glob *inside* this group leaves both labels the
+# per-target clause requires in place, so it would otherwise stay green — which
+# is exactly how `bench/**` and `taskfile.yml` stayed undeclared for a whole
+# wave. Adding a directory here means adding it there.
+#
+# `taskfile.yml` is an input because `tests/test_doc_scripts_publish.py` reads
+# it: the module asserts on what the publish task's own recipe does, so an edit
+# to the task changes what that test should say.
+#
+# `bench/**` is an input because `tests/test_bench_smoke.py` imports
+# `bench.scenarios`, `bench.compare`, `bench.report` and `bench.baseline` and
+# asserts on that package's `SCENARIOS` matrix, `SCALING_GROUP_ANCHORS` and
+# `SUITE_BUDGET_SECONDS`. `bench/results/` is the one generated path under it
+# (`test/.gitignore` names it, and nothing else under `bench/` is ignored);
+# `bench/dashboard/**` is committed input, not output.
+filegroup(
+    name = "suite_inputs",
+    srcs = [
+        # `:suite_anchor` carries `conftest.py` and `bin/ocx*`; nested rather
+        # than re-globbed so the runner's anchor and the cache key name one
+        # group. It is the second label the tag guard requires.
+        ":suite_anchor",
+        "SKIP_CEILING",
+        "SUITE_FLOOR",
+        "XFAIL_CEILING",
+        "docker-compose.yml",
+        "ocx.lock",
+        "ocx.toml",
+        "pyproject.toml",
+        "taskfile.yml",
+        "uv.lock",
+        "zot-config.json",
+    ] + glob(
+        [
+            "bench/**",
+            "docker/**",
+            "recordings/**/*.py",
+            "scenarios/**",
+            "scripts/**",
+            "sigstore/**",
+            "specs/**",
+            "src/**/*.py",
+            "tests/**",
+        ],
+        allow_empty = False,
+        exclude = [
+            # Each module is its own target's input. Including them here would
+            # make every module's edit re-run all 181, which is the selection
+            # C-024 exists to buy. The five modules that genuinely READ the set
+            # get it back through `extra_data`, below.
+            "tests/test_*.py",
+            # `task test:bench` writes here and `test/.gitignore` ignores it. A
+            # generated file inside a globbed directory re-keys every target on
+            # every run, which is the one thing this exclusion list is for.
+            "bench/results/**",
+            "**/__pycache__/**",
+            "**/*.pyc",
+        ],
+    ),
+)
+
+# ---------------------------------------------------------------------------
+# The sweep groups: the acceptance modules, as data for the acceptance modules
+# that READ them.
+#
+# Excluding `tests/test_*.py` from `:suite_inputs` is what buys the selection
+# C-024 asks for — one module edited, one target re-run. Five modules break
+# that assumption by reading their siblings' source, and with only their own
+# module declared they were served a cached PASS over a tree they had never
+# seen: deleting a `@pytest.mark.smoke` marker re-ran `//test:test_install` and
+# left `//test:test_smoke_coverage` CACHED, so the gate could not observe the
+# thing it gates.
+#
+# **Which modules those are is DERIVED, not asserted here.**
+# `scripts/bazel_tag_guard.py` parses every `tests/test_*.py` for a
+# `glob`/`rglob` pattern that can only be matching sibling modules, and reds an
+# acceptance target whose input closure does not carry the siblings its own
+# source reads. A sixth sweeping module therefore reds that gate rather than
+# quietly joining the set of targets served a stale green.
+# ---------------------------------------------------------------------------
+_SWEEP_ALL = glob(
+    ["tests/test_*.py"],
+    allow_empty = False,
+)
+
+_SWEEP_SHELL = glob(
+    ["tests/test_shell*.py"],
+    allow_empty = False,
+)
+
 # One target per module, named `//test:<module stem>`.
 #
 # `glob` rather than a list: the unit C-024 makes a target of is "a file in
@@ -92,6 +230,23 @@ filegroup(
 # success over.
 acceptance_suite(
     name = "acceptance_runner",
+    # Keyed by target name, and `acceptance_suite` fails on a key that names no
+    # module: a typo here would otherwise declare nothing and read exactly like
+    # a module that does not sweep. The comment on each row is the call the tag
+    # guard's parser finds in that module.
+    extra_data = {
+        # `test_dir.rglob("*.py")` over the whole of `test/`.
+        "test_doc_scripts_publish": _SWEEP_ALL,
+        # `TESTS_DIR.glob("*.py")`.
+        "test_no_crate_path_assertions": _SWEEP_ALL,
+        # `SUITE.rglob("*.py")` over the whole of `test/`.
+        "test_patch_global_slot": _SWEEP_ALL,
+        # `(root / "test" / "tests").glob("test_shell*.py")` — the shell subset
+        # only, so an unrelated module's edit does not re-run this target.
+        "test_shell_reconcile_edge_cases": _SWEEP_SHELL,
+        # `TESTS_DIR.glob("test_*.py")`.
+        "test_smoke_coverage": _SWEEP_ALL,
+    },
     extra_pytest_args = ["-v"],
     modules = glob(
         ["tests/test_*.py"],

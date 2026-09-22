@@ -3,7 +3,7 @@ outline: deep
 ---
 # Building with Bazel {#contributing-bazel}
 
-OCX's Rust workspace builds twice: once through `cargo`, and once through a second, parallel graph that [Bazel][bazel] walks to check the first one honestly. Seven gates run on every change. Four read the graph itself — a pin check, a loading-phase sanity build, a dependency-drift comparison against `Cargo.toml`, and a sandbox-tag audit. Two lint what declares it: `bazel:lint` runs buildifier over every `BUILD.bazel` and `.bzl` file, and `bazel:mod:check` refuses a stale `MODULE.bazel.lock`. The seventh, `bazel:test:unit`, runs the workspace's own unit tests through `bazel test`, floored per target off the build event stream rather than a bare pass/fail. Together they catch the class of defect a green `cargo build` cannot see on its own: a `BUILD.bazel` target that quietly stopped matching the crate it describes.
+OCX's Rust workspace builds twice: once through `cargo`, and once through a second, parallel graph that [Bazel][bazel] walks to check the first one honestly. Eight gates run in two lanes. Seven of them run on every change; the eighth, the acceptance suite, runs on the deep lane only. Four read the graph itself — a pin check, a loading-phase sanity build, a dependency-drift comparison against `Cargo.toml`, and a sandbox-tag audit. Two lint what declares it: `bazel:lint` runs buildifier over every `BUILD.bazel` and `.bzl` file, and `bazel:mod:check` refuses a stale `MODULE.bazel.lock`. The last two run tests: `bazel:test:unit` runs the workspace's own unit tests, floored per target off the build event stream rather than a bare pass/fail, and `bazel:test:accept` runs the acceptance suite as one target per test module. `bazel:test:accept` is the one that is not on every change: `verify-basic.yml` — the only workflow a pull request fires — runs the other seven, and the acceptance gate lives in `verify-deep.yml`, which has no `pull_request` trigger. Locally `task verify` runs all eight. Together they catch the class of defect a green `cargo build` cannot see on its own: a `BUILD.bazel` target that quietly stopped matching the crate it describes.
 
 Cloning a repository with an unfamiliar second build system is exactly the moment a contributor installs the wrong version, hunts for a `WORKSPACE` file that does not exist, or wonders whether [bazelisk][bazelisk] belongs on `PATH`. None of that applies here. Nobody types `bazel` directly — [`task`][task-runner] is the one command anyone runs, and `bazel` itself is a pinned entry in `ocx.lock`, resolved the same way `git-cliff` or `shellcheck` are.
 
@@ -11,10 +11,10 @@ Cloning a repository with an unfamiliar second build system is exactly the momen
 
 Before your first Bazel build, run `/init-bazel-config` — or `task bazel:doctor` for the checks alone. `.bazelrc` and `MODULE.bazel` are committed and already correct. What a first build gets wrong is host state no gate here can see: the output root, the RAM envelope, the `libstdc++` link prerequisite and the remote-cache reader credential. That state belongs in `~/.bazelrc`, never `.bazelrc.user`.
 
-The seven gates live in `taskfiles/bazel.taskfile.yml` as `task` targets: `bazel:pin:check`, `bazel:build:nobuild`, `bazel:build:drift`, `bazel:tag:guard`, `bazel:lint`, `bazel:mod:check`, and `bazel:test:unit`. `task verify` runs all of them; none needs a `bazel` invocation typed by hand.
+All eight live in `taskfiles/bazel.taskfile.yml` as `task` targets: `bazel:pin:check`, `bazel:build:nobuild`, `bazel:build:drift`, `bazel:tag:guard`, `bazel:lint`, `bazel:mod:check`, `bazel:test:unit`, and `bazel:test:accept`. `task verify` runs all of them; on CI the first seven are `verify-basic.yml`'s and `bazel:test:accept` is `verify-deep.yml`'s. None needs a `bazel` invocation typed by hand.
 
 ::: tip Bazel is a pinned tool, not a system dependency
-`ocx exec bazel -- bazel --version` resolves the exact binary the seven gates use, straight from `ocx.lock` — the same mechanism that resolves `uv`, `shellcheck`, and every other tool in the [project toolchain][project-toolchain]. There is nothing to install with a system package manager and no [bazelisk][bazelisk] version file to maintain.
+`ocx exec bazel -- bazel --version` resolves the exact binary every one of those gates uses, straight from `ocx.lock` — the same mechanism that resolves `uv`, `shellcheck`, and every other tool in the [project toolchain][project-toolchain]. There is nothing to install with a system package manager and no [bazelisk][bazelisk] version file to maintain.
 :::
 
 The scoped `ocx exec bazel --` form is what every gate uses, and it is deliberate: it names the one binding it needs, so an unrelated tool with no leaf for this host cannot block the run.
@@ -60,15 +60,17 @@ $ ocx exec bazel -- bazel build --nobuild //...
 ```
 
 ```text
-Analyzing: 280 targets (28 packages loaded, 6 targets configured)
-INFO: Analyzed 280 targets (731 packages loaded, 27129 targets configured).
-INFO: Found 280 targets...
+Analyzing: 290 targets (28 packages loaded, 6 targets configured)
+INFO: Analyzed 290 targets (620 packages loaded, 26021 targets configured).
+INFO: Found 290 targets...
 INFO: Build completed successfully, 0 total actions
 ```
 
-Zero actions, on purpose — `--nobuild` only loads and analyzes. `bazel:build:drift` and `bazel:tag:guard` read the same graph next, each against a floor of its own. Drift reads `//crates/...` and refuses to report on fewer than 56 targets across 20 packages. The tag guard reads the wider scope: measured today, 143 rule targets over `//crates/...` plus `//test/doc_scripts/...`, up from 101 before that second package grew 42 GIF-render targets.
+Zero actions, on purpose — `--nobuild` only loads and analyzes. `bazel:build:drift` and `bazel:tag:guard` read the same graph next, each against a floor of its own. Drift reads `//crates/...` and refuses to report on fewer than 56 targets across 20 packages. The tag guard reads the widest scope of all: measured today, 332 rule targets over `//...`, up from 143 over `//crates/...` plus `//test/doc_scripts/...`. It had to widen to reach the acceptance package, because that is where its one narrowed clause lives.
 
-280 is what a wildcard build or test reaches, not the size of the whole graph. `bazel query 'kind(rule, //...)'` still lists 322 — the 42 more are the GIF-render targets below, tagged `manual` so wildcard expansion skips them while `bazel query` keeps naming every one.
+The blanket rule is that a target running outside the sandbox carries the cache-excluding tag its kind was measured to need — `external` for a test action, `no-remote-cache` for a build action. The 181 acceptance targets break it on purpose: their results **are** cached, so `external` is exactly the tag they must not carry. What stands in for it is a declaration. An acceptance target is credited only while `//test:docker-compose.yml` and `//test:suite_anchor` — the compose definition, and the group carrying the `ocx` binary under test — are in its declared inputs. Those are the two inputs whose change a cached pass would otherwise hide, so losing either turns the exemption off and the gate red. A `no-sandbox` test target anywhere else in the graph is judged by the blanket rule however it declares its inputs.
+
+290 is what a wildcard build or test reaches, not the size of the whole graph. `bazel query 'kind(rule, //...)'` still lists 332 — the 42 more are the GIF-render targets below, tagged `manual` so wildcard expansion skips them while `bazel query` keeps naming every one.
 
 Those 42 are one `genrule` per cast recording rendering the `.cast` through [agg][agg] to an animated `.gif`, plus the `:gifs` filegroup that collects the 39 renders, the `:gif_check` test that proves them, and `:gif_check_probe`, the generated script it runs. Nothing on the site consumes a GIF — the site plays the `.cast` file directly, and a GIF is for a README or a social-media embed, a human picking one file rather than a build step. That is why `manual` sits on all 42: it takes them out of `//...` and `bazel test //...` while leaving them reachable by label.
 
@@ -81,6 +83,22 @@ Measured on this machine: 136 fonts installed, and `fc-list :spacing=mono` names
 :::
 
 That gate also writes the only [Build Event Protocol][bazel-bep] stream this repository produces, and it writes it to a scratch directory outside the checkout. Bazel serialises the whole client environment and every rc-file flag value into that stream, credentials included, so the task deletes the directory on its way out whatever the build did.
+
+## The acceptance suite, one target per module {#contributing-bazel-acceptance}
+
+`task bazel:test:accept` runs `bazel test //test:all --local_test_jobs=1`: one `sh_test` per acceptance test module — 181 of them, named `//test:<module stem>` — each shelling to `uv run pytest` against the docker-compose services this repository already starts. It replaces the direct `task test:parallel` call in `task verify` and in `verify-deep.yml`'s acceptance job. `task test:parallel` still exists and is still the fastest way to run the whole suite by hand — it keeps pytest-xdist, which this lane gives up.
+
+What the lane buys instead is **selection and caching**. Edit one module and one target re-runs; edit a doc and none does; run it twice on an unchanged tree and Bazel reports `Executed 0 out of 181 tests`. That is only sound because the inputs are declared: each target names its own module plus `//test:suite_inputs`, the shared group carrying `conftest.py`, `pyproject.toml`, `uv.lock`, the fixture tree, `docker-compose.yml` and the `ocx` binary under test. Rebuild `test/bin/ocx` with different bytes and all 181 re-run.
+
+`--local_test_jobs=1` is on that command line and in no rc file. There is one compose stack on one set of ports, so the targets have to run one at a time — the `exclusive` tag already guarantees that, and the runner takes a host-wide `flock` so a `task test:parallel` in a sibling worktree queues behind it too. The flag only stops Bazel from scheduling a dozen tests it will then run serially. An rc-file line would apply per command rather than per target pattern, so it would also serialise the 34 Rust test targets, which is the unit lane's whole win.
+
+Pass `NOCACHE=1` to add `--nocache_test_results` when you want the run regardless of what the cache says. Not `--force`, deliberately: `task verify --force` is what this repository tells everyone to type, so binding the escape hatch to it would have made every full gate run all 181 targets serially and left the caching unreachable from the one command that runs the lane.
+
+The lane also carries the suite's own shape gates, which used to live in the pytest entry point: `test/SUITE_FLOOR` (the suite never shrinks) and `test/SKIP_CEILING` / `test/XFAIL_CEILING` (a skip added to dodge a red). They are read off the 181 per-case JUnit reports Bazel writes, copied out of `bazel-testlogs` into `target/bazel/accept/<module>/junit.xml` — real per-test data, because the acceptance runner passes `--junit-xml=$XML_OUTPUT_FILE`. The unit lane's `test.xml` files are Bazel's synthesised one-testcase-per-target files and are not the same thing.
+
+::: warning What a cached acceptance pass does not cover
+The running compose stack is not an action input. `docker-compose.yml` is, so a bumped service image or a moved port re-keys every target — but a stack that is *up with different content* does not. Neither do the handful of modules that read `target/release/ocx_schema`, `crates/**`, `website/src/docs/**` or the `//test/doc_scripts` package across a package boundary. `test/bazel.bzl`'s module docstring lists every one of those gaps with its risk; they are declared rather than closed, and `//crates/...` and `//website/...` have gates of their own that red on their own content.
+:::
 
 ## Warm cache {#contributing-bazel-warm-cache}
 

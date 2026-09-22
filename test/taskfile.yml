@@ -509,22 +509,34 @@ tasks:
 
   bazel:tags:
     desc: >-
-      Emit `{label: [tag, ...]}` for every acceptance `sh_test` — the tag table
+      Emit `{label: {tags, inputs}}` for every acceptance `sh_test` — the table
       `scripts/bazel_accept_proofs.py --check-s015 --tags` judges.
     summary: |
-      S-015 rests on a claim about tags: every `//test:*` target carries
-      `external` (measured on bazel 9.2.0 as the only tag that stops a test
-      result being reused), `exclusive` (C-024's serialisation, on the target
-      and never as a global `--local_test_jobs`) and `local`.
+      S-015 rests on two claims about the graph, and both are read back out of
+      it rather than restated from `test/bazel.bzl`:
 
-      The claim is only checkable against the graph Bazel actually loaded, so
-      this task reads it back out of `bazel query` rather than restating the
-      list from `test/bazel.bzl`. Two readers of one fact; the comparator in
-      `bazel_accept_proofs.py` is what makes them agree.
+        * every `//test:*` target carries `exclusive` (C-024's serialisation,
+          on the target and never as a global `--local_test_jobs`) and
+          `no-sandbox`, and carries NONE of the cache-suppressing tags —
+          `external`, `local`, `no-cache`, `no-remote-cache` — because the
+          acceptance stage now runs with its results CACHED; and
+        * every one of them declares `//test:docker-compose.yml` and
+          `//test:suite_anchor` among its inputs, which is what stands in for
+          the missing `external` and is the same pair `bazel:tag:guard`
+          enforces from the graph side.
+
+      **The input closure is one hop expanded, and that is the whole reason
+      this reducer reads `kind(rule, ...)` rather than `kind(sh_test, ...)`.**
+      A target's `ruleInput` names `//test:suite_inputs`, not the 142 files
+      inside it; the group is itself a rule record in the same stream, so its
+      sources are reachable without a second query. A reader that stopped at
+      one hop would report every target as declaring nothing and the clause
+      would be vacuously red — or, with the requirement spelled the other way,
+      vacuously green.
 
       The floor is a COUNT, and it is read off `test/tests/`. A `bazel query`
       that matches nothing exits 0 — so an exit code here would certify an
-      empty table, and every tag assertion taken from that table would be
+      empty table, and every assertion taken from that table would be
       vacuously true.
     dir: '{{.TASKFILE_DIR}}'
     vars:
@@ -534,19 +546,25 @@ tasks:
       - |
         set -eu
         raw='{{.BAZEL_TAGS_JSON}}.jsonproto'
-        bazel query --output=streamed_jsonproto 'kind(sh_test, //test:all)' > "$raw"
+        # `ocx exec bazel --`, like every other bazel call in this repository:
+        # a plain shell has no `bazel` on PATH, and a hand-run query is not an
+        # exception to that (CLAUDE.md § Bazel, DX-42).
+        ocx exec bazel -- bazel query --output=streamed_jsonproto 'kind(rule, //test:all)' > "$raw"
         python3 - "$raw" '{{.BAZEL_TAGS_JSON}}' <<'PY'
         import json
         import pathlib
         import sys
 
         raw, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-        table: dict[str, list[str]] = {}
+        rules: dict[str, dict] = {}
         for line in raw.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             rule = json.loads(line)["rule"]
-            table[rule["name"]] = next(
+            rules[rule["name"]] = rule
+
+        def tags_of(rule: dict) -> list[str]:
+            return next(
                 (
                     attr.get("stringListValue", [])
                     for attr in rule.get("attribute", [])
@@ -554,6 +572,30 @@ tasks:
                 ),
                 [],
             )
+
+        def closure(name: str) -> list[str]:
+            """Every label reachable through `ruleInput`, expanding rule records.
+
+            Breadth-first with a visited set: nesting depth is not a number this
+            reducer has to know, and a cycle cannot hang it.
+            """
+            seen: set[str] = set()
+            queue = list(rules[name].get("ruleInput", []))
+            while queue:
+                label = queue.pop()
+                if label in seen:
+                    continue
+                seen.add(label)
+                nested = rules.get(label)
+                if nested is not None:
+                    queue.extend(nested.get("ruleInput", []))
+            return sorted(seen)
+
+        table = {
+            name: {"tags": sorted(tags_of(rule)), "inputs": closure(name)}
+            for name, rule in rules.items()
+            if rule.get("ruleClass") == "sh_test"
+        }
         # `dir:` above is `test/`, so this is `test/tests/` however a caller
         # relocated the output file.
         modules = len(list(pathlib.Path("tests").glob("test_*.py")))
@@ -565,11 +607,25 @@ tasks:
         if len(table) < modules:
             raise SystemExit(
                 f"bazel:tags: the query named {len(table)} sh_test target(s) for {modules} "
-                "test/tests/test_*.py module(s) — a short table makes every tag assertion "
+                "test/tests/test_*.py module(s) — a short table makes every assertion "
                 "taken from it a statement about a subset"
             )
+        # The closure floor, and it is separate from the table floor on purpose:
+        # a reducer that read every target and expanded no group would produce a
+        # full-length table whose every `inputs` list is three labels long, and
+        # the declaration clause reading it would be a statement about nothing.
+        thin = [name for name, entry in table.items() if len(entry["inputs"]) < 10]
+        if thin:
+            raise SystemExit(
+                f"bazel:tags: {len(thin)} target(s) carry fewer than 10 input labels, first "
+                f"{sorted(thin)[0]} — the group expansion did not happen, so every input "
+                "assertion taken from this table would be about the one-hop list"
+            )
         out.write_text(json.dumps(table, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print(f"bazel:tags: {len(table)} acceptance target(s) over {modules} module(s) -> {out}")
+        print(
+            f"bazel:tags: {len(table)} acceptance target(s) over {modules} module(s), "
+            f"{len(table[sorted(table)[0]]['inputs'])} declared inputs each -> {out}"
+        )
         PY
         rm -f "$raw"
 

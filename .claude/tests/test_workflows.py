@@ -656,10 +656,14 @@ _BUILD_TEST_ELSEWHERE = {
     "rust:license:check": ("verify-licenses.yml", "task rust:license:check"),
     "rust:license:deps": ("verify-licenses.yml", "task rust:license:deps"),
     "rust:license:notice:check": ("verify-licenses.yml", "task rust:license:notice:check"),
-    # The deep workflow runs the acceptance suite with the same xdist flags
-    # the local gate uses. It once spelled this `task test`, which is the
-    # SERIAL entry point: 21:41 for 3819 tests on an idle four-core runner.
-    "test:parallel": ("verify-deep.yml", "task test:parallel"),
+    # The deep workflow runs the acceptance suite. It once spelled this
+    # `task test`, the SERIAL pytest entry point (21:41 for 3819 tests on an
+    # idle four-core runner), then `task test:parallel`, and now the Bazel
+    # lane: 181 `sh_test` targets with their results cached, which is what
+    # pays for `--local_test_jobs=1` giving up xdist. `verify-basic.yml` is
+    # deliberately not the home for it — that workflow is the fast PR gate and
+    # the acceptance suite is the deep one's long half.
+    "bazel:test:accept": ("verify-deep.yml", "task bazel:test:accept"),
 }
 
 

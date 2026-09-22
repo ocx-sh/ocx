@@ -5,7 +5,7 @@
 
     scripts/bazel_accept_proofs.py --self-test
     scripts/bazel_accept_proofs.py --prove-s015 [--probe-root DIR]
-    scripts/bazel_accept_proofs.py --check-s015 --warm BEP --tags TAGS.json \
+    scripts/bazel_accept_proofs.py --check-s015 --warm BEP --mutated BEP --tags TAGS.json \
         [--built-binary FILE --binary-under-test FILE]
     scripts/bazel_accept_proofs.py --check-s004 --docs-bep BEP --crate-bep BEP \
         [--entry-taskfile taskfiles/bazel.taskfile.yml]
@@ -25,16 +25,26 @@ can red today, so — as WP-13 did for stage 1 — everything here is split:
   in this plan that *measures* rather than assumes the mechanism C-024 rests
   on, and it needs neither WP-36 nor the acceptance suite nor a registry.
 
-**S-015, and why the untagged sibling is not optional.** Run `bazel test`
-twice with no source change and read run 2: "no acceptance target reported
-cached" is equally consistent with *caching is off for these targets* and with
-*the second run never happened* — and with *caching is off everywhere*, which
-would be a different (and much worse) finding. One untagged sibling in the same
-invocation separates all three: it must report cached. Only then does the
-acceptance targets' silence mean anything.
+**S-015 is inverted, and the ADR says so.** Stage 4 ruled acceptance result
+caching **off** and this file asserted that. The ruling is amended
+(`adr_bazel_build_adoption.md` § Stage 4): the suite runs with its results
+**cached**, and the thing the ADR itself named as the precondition — A4's red
+half 3, "the declared input digest for the binary must change" — is what
+`--check-s015` now turns on.
 
-**The mechanism is measured, and one intuitive spelling of it is wrong.**
-`--prove-s015` on the pinned binary (bazel 9.2.0, `rules_shell` 0.8.0, four
+**Why the contract needs two runs and not one.** The green is now "every
+acceptance target reported cached on an unchanged tree", and that is exactly
+the answer a *broken reader* gives: proto3 omits a false boolean, so the
+natural spelling `payload.get("cachedLocally") is not False` reports every
+target that ran as cached. A one-run reading cannot tell a working cache from
+that reader. So `--check-s015` takes two BEPs — run 2 of an unchanged tree
+(everything cached) and a run after `test/bin/ocx` was rebuilt with different
+bytes (**nothing** cached) — and the second is the control. It is also the ADR's
+own half 3, which under the old contract was defence in depth and is now the
+only thing holding the green up.
+
+**The mechanism is measured, and two intuitive spellings of it are wrong.**
+`--prove-s015` on the pinned binary (bazel 9.2.0, `rules_shell` 0.8.0, five
 `sh_test` targets over one script, `--disk_cache` only):
 
     target            tags                             cold   warm    warm
@@ -44,18 +54,18 @@ acceptance targets' silence mean anything.
     acc_local_only    local, exclusive                  ran   CACHED  ran
     acc_nocache       local, exclusive, no-cache        ran   CACHED  ran
     acc_external      local, external, exclusive        ran   ran     ran
+    acc_no_sandbox    no-sandbox, exclusive             ran   CACHED  CACHED
 
-So **only `external` actually stops a test result being reused.** `no-cache`
-— the spelling a reader reaches for first — leaves the local action cache hit
-in place: on a developer running `bazel test //test:all` twice in a row, a
-`no-cache`-tagged acceptance target reports `(cached)`. `local` is not it
-either: it suppresses the *disk*-cache hit (Bazel treats `--disk_cache` as a
-remote cache, and `local` implies `no-remote`) while leaving the action-cache
-hit, which is the developer-machine case and the one that matters. The
-comparator therefore credits `external` and refuses to credit the other three
-(`accept-tag-insufficient`), and `_no_prefix_reader` is kept as a named control
-showing the natural "any `no-*` tag will do" reader calling `acc_nocache` safe
-on the same bytes.
+`external` is the only tag that stops a result being reused outright — which is
+why it had to come **off**. `local` is the one that cost a wave to see: it
+suppresses the *disk*-cache hit (Bazel treats `--disk_cache` as a remote cache,
+and `local` implies `no-remote`) while leaving the in-server action-cache hit.
+That reads as "cached" on a developer's second run and re-runs on a **fresh
+server**, which is the state every CI runner is in — so a lane tagged `local`
+would have cached on a laptop and recomputed the whole suite in CI. `no-sandbox`
+buys the execroot working directory the suite needs with none of that, and the
+last row is the measurement that says so. `CACHE_SUPPRESSING_TAGS` is the set of
+all three plus `no-remote-cache`, and `caching_on_findings` reds on any of them.
 
 **Serialisation is the tag, and that is measured too** (C-024). Same probe,
 three 0.7 s tests tagged `exclusive` and three not, one invocation, no
@@ -66,9 +76,13 @@ also serialise the 34 Rust test targets, which is stage 2's whole win — so an
 rc file naming that flag is its own finding.
 
 **S-015's second half — the binary under test.** A green suite against last
-week's `ocx` is silent, and this repository has shipped one. The proof is a
-content digest on both sides: what the build produced, and what the suite
-executed, resolved through symlinks. Path and mtime both answer "fine" on a
+week's `ocx` is silent, and this repository has shipped one. With results cached
+a *stale green* is the same defect reached one step earlier, which is why
+`bin/ocx*` is a declared input of every acceptance target (through
+`//test:suite_anchor`) and why `--check-s015` requires that declaration in the
+tag table as well as requiring the binary-swap run to re-execute everything.
+The proof is a content digest on both sides: what the build produced, and what
+the suite executed, resolved through symlinks. Path and mtime both answer "fine" on a
 freshly-*copied* stale binary — `test/bin/ocx` is a `cp` of
 `target/release/ocx` (`test/taskfile.yml:125`), so the stale file's mtime is
 the copy's, not the build's — and `_mtime_reader` and `_existence_reader` are
@@ -78,13 +92,14 @@ comparator reds.
 **S-004 — selection, through the entry point.** Two independent readings, and
 they answer different questions. The *selection* reading is the discriminator:
 a docs-only change must select zero acceptance targets while a crate-touching
-change selects some, or selection is unwired. The *BEP* reading is what makes
-it observable rather than asserted — and it only works because of S-015: since
-acceptance targets never cache, an acceptance target appearing in the BEP of a
-docs-only build **ran**, so "ran" and "was selected" are the same event. The
-Rust half is the opposite shape and must not be read the same way: Rust tests
-*do* cache, so a docs-only build re-running zero of them is true whether or not
-selection works, and it is floored, never used as the discriminator.
+change selects some, or selection is unwired. The *BEP* reading is what makes it
+observable rather than asserted, and it reads **presence**, not re-execution:
+`bazel test` publishes a `TestResult` for every target it was given, cached or
+executed, so an acceptance target in a docs-only build's BEP was *selected*.
+That reading is what survived stage 4's results becoming cacheable — "it ran"
+would not have. The Rust half stays a re-run set and is floored, never used as
+the discriminator: Rust tests have always cached, so a docs-only build re-running
+zero of them is true whether or not selection works.
 
 `SCOPED_ROWS` (`test/taskfile.yml`, 20 rows, two of them `escalate`) is read
 unchanged as the crate→target selection query; `escalate` maps to `//test:all`.
@@ -108,6 +123,18 @@ are synthetic, live under this repository's own `.tmp/` (never `/tmp`, which is
 a reaped tmpfs on the development host), and nothing is ever restored with
 `git checkout --`, which restores from the index and would make the run vacuous.
 
+**`--check-s015` and `--check-s004` are invoked by NO lane and no task, and
+that is deliberate rather than an oversight to be read past.** Only
+`--self-test` runs on its own, from `taskfiles/scripts.taskfile.yml`. The two
+`--check-*` modes each need inputs a gate cannot synthesise — a rebuilt binary
+and a warm run for S-015, a docs-only and a crate-touching BEP for S-004 — so
+they are commands a person runs. The graph-side half of the same contract *is*
+live and is a different file: `scripts/bazel_tag_guard.py` runs in `task verify`
+and in `verify-basic.yml`, and it reds an acceptance target that loses its input
+declaration, acquires a cache-suppressing tag, or stops declaring the sibling
+modules its own source sweeps — plus a `//test:suite_inputs` whose glob has been
+narrowed. Nothing in this file should be read as claiming more than that.
+
 Not wired into `taskfiles/scripts.taskfile.yml` — WP-17 owns that file. The one
 line it owes the `self-test:` list is named in `--self-test`'s closing output.
 """
@@ -129,6 +156,7 @@ from pathlib import Path
 
 from bazel_floor_proofs import task_cmds
 from bazel_gate_proofs import (
+    ACCEPTANCE_MODULE_TARGETS,
     REPO_ROOT,
     Finding,
     bep_line,
@@ -146,8 +174,13 @@ from bazel_gate_proofs import (
 # quietly widening or narrowing every floor below.
 # ---------------------------------------------------------------------------
 
-ACCEPTANCE_MODULES = 181
-"""`test/tests/test_*.py` — C-024's target count, one `sh_test` per module."""
+ACCEPTANCE_MODULES = ACCEPTANCE_MODULE_TARGETS
+"""`test/tests/test_*.py` — C-024's target count, one `sh_test` per module.
+
+An alias, not a second literal. The tree carried three spellings of this one
+number at once (`181` here, `172` in `test/BUILD.bazel`'s comment, `188` in a
+work order); `bazel_gate_proofs` is now the only place it is written down, and
+`prove_counts` below reads `test/tests/` to check even that."""
 
 SCOPED_ROWS = 20
 """Rows of `test/taskfile.yml`'s `SCOPED_ROWS` map — one per workspace member."""
@@ -164,10 +197,41 @@ ALL_TARGET = f"{ACCEPTANCE_PACKAGE}:all"
 # ---------------------------------------------------------------------------
 
 CACHE_DEFEATING_TAG = "external"
-"""The only tag measured to stop a test result being reused (both caches)."""
+"""The only tag measured to stop a test result being reused (both caches).
+
+**Under the amended stage-4 ruling this tag is the defect, not the fix.** The
+acceptance suite runs with its results cached, so `external` on an acceptance
+target turns that off; `caching_on_findings` reds on its presence. It keeps its
+name and its meaning because `bazel_tag_guard.py` imports it for the *blanket*
+clause, where it is still the credited tag for every other `no-sandbox` test
+action in the graph."""
+
+CACHE_SUPPRESSING_TAGS = frozenset({CACHE_DEFEATING_TAG, "local", "no-cache", "no-remote-cache"})
+"""Every tag measured to suppress a cache hit for a test action, in any tier.
+
+`external` suppresses both tiers; `local` and `no-cache` suppress the
+disk/remote tier and leave the in-server action cache (measured — `--prove-s015`
+run 3, a warm **fresh server**, is where they re-run, and that is the state
+every CI runner is in). None of them may appear on an acceptance target now that
+the suite's results are meant to be reused."""
 
 SERIALISING_TAG = "exclusive"
 """C-024's serialisation, measured disjoint without `--local_test_jobs`."""
+
+SANDBOX_TAG = "no-sandbox"
+"""What replaced `local`: the execroot working directory the suite needs, with
+none of `local`'s `no-remote` half. Measured on the pin (`--prove-s015`,
+`acc_no_sandbox`): cached in both warm states, exactly like an untagged
+sibling."""
+
+ACCEPTANCE_DECLARED_INPUTS = frozenset({"//test:docker-compose.yml", "//test:suite_anchor"})
+"""The declaration that makes caching these results defensible.
+
+The compose definition carries every service image reference and host port; `:suite_anchor`
+carries `bin/ocx*`, the binary under test. Same two labels
+`bazel_tag_guard.py` requires before it credits the `no-sandbox` exemption —
+one contract, checked from both ends: that gate reads the *graph*, this one
+reads the *run*."""
 
 INSUFFICIENT_TAGS = frozenset({"no-cache", "no-remote-cache", "no-remote", "local"})
 """Tags that read as "this will not be cached" and are not enough.
@@ -175,7 +239,8 @@ INSUFFICIENT_TAGS = frozenset({"no-cache", "no-remote-cache", "no-remote", "loca
 Measured: `no-cache` and `local` both reported `(cached)` on a second run in
 the same output base. `local` additionally suppresses the disk-cache hit, which
 makes it look sufficient on a fresh server and hides the developer-machine case.
-"""
+Imported by `bazel_tag_guard.py` to say *why* a blanket-clause target reds; it
+never decides whether one does."""
 
 GLOBAL_SERIALISATION = re.compile(r"--?local_test_jobs\b")
 """C-024's forbidden mechanism. An rc line is per-command, never per-target
@@ -197,20 +262,28 @@ REALM_ENV = re.compile(r"BAZEL_CACHE_[A-Z_]+")
 # write an assertion that also matches the opposite outcome (WP-13).
 # ---------------------------------------------------------------------------
 
-ACCEPT_CACHED_MSG = (
-    "S-015 BLOCK: {count} acceptance target(s) reported cached on a re-run, first {sample} — "
-    "nothing in the action graph tracks the compose stack the suite talks to, so a cached "
-    "pass is a pass against a world that may have changed"
+ACCEPT_NOT_CACHED_MSG = (
+    "S-015 BLOCK: {count} acceptance target(s) re-executed on an unchanged tree, first {sample} "
+    "— the suite's results are meant to be reused (adr_bazel_build_adoption.md § Stage 4, as "
+    "amended), so a re-execution here means an input moved that the tree did not. The usual "
+    "cause is a generated file inside //test:suite_inputs' globs"
 )
 ACCEPT_CONTROL_ABSENT_MSG = (
-    "S-015: no untagged control target was named. Without one, 'no acceptance target "
-    "reported cached' is equally consistent with caching being off and with the second run "
-    "never having happened — the control is what separates them, so a run without it is refused"
+    "S-015: no mutated-run results were supplied. 'every acceptance target reported cached' is "
+    "equally consistent with caching working and with a reader that calls everything cached, so "
+    "the run where the binary CHANGED is the control — A4 red half 3 — and a run without it is "
+    "refused"
 )
-ACCEPT_CONTROL_COLD_MSG = (
-    "S-015: the untagged control {sample} did not report cached either. Caching is off for "
-    "the whole invocation, or run 2 re-ran everything — either way the acceptance targets' "
-    "silence is not evidence about their tags"
+ACCEPT_CONTROL_CACHED_MSG = (
+    "S-015 BLOCK: {count} acceptance target(s) still reported cached after `test/bin/ocx` "
+    "changed, first {sample}. The binary is supposed to be a declared input through "
+    "//test:suite_anchor, so its bytes moving must move every target's key — that is ADR A4's "
+    "red half 3, and it is the whole control on the cached green above"
+)
+ACCEPT_CONTROL_UNSEEN_MSG = (
+    "S-015: the mutated-run BEP carries no result for {count} of the acceptance target(s), "
+    "first {sample} — the control reader stopped early, and a target it never saw cannot be "
+    "shown to have re-executed"
 )
 ACCEPT_READER_MSG = (
     "S-015: the BEP carries no result for {count} of the target(s) being judged, first "
@@ -220,23 +293,32 @@ ACCEPT_UNIVERSE_MSG = (
     "S-015: {read} acceptance target(s) named, expected >= {minimum} — the query read a "
     "subset of test/tests/, so every verdict below is about that subset"
 )
-ACCEPT_TAG_MSG = (
-    "S-015: {label} carries no `{tag}` tag — measured on bazel 9.2.0, it is the only tag "
-    "that stops a test result being reused from either cache"
+ACCEPT_TAG_SUPPRESSING_MSG = (
+    "S-015: {label} carries {present} — measured on bazel 9.2.0, each of those suppresses a "
+    "test-result cache hit in at least one tier (`external` in both; `local` and `no-cache` on "
+    "the disk/remote tier, which is the state every CI runner is in). The acceptance stage runs "
+    "CACHED now, so these tags are the defect rather than the contract"
 )
-ACCEPT_TAG_WEAK_MSG = (
-    "S-015: {label} carries {present} but not `{tag}`. Measured on the pin: a target tagged "
-    "no-cache/local reports (cached) on a second run in the same output base — `local` only "
-    "suppresses the disk-cache hit, which hides exactly the developer-machine case"
+ACCEPT_SANDBOX_MSG = (
+    "S-015: {label} carries no `{tag}` tag — the suite drives docker compose, a uv-managed "
+    "virtualenv and a cargo-built binary, none of which survive a sandboxed working directory. "
+    "`local` would also buy this and is refused: its `no-remote` half is what suppresses the "
+    "disk-cache hit"
 )
 ACCEPT_SERIAL_MSG = (
     "S-015/C-024: {label} carries no `{tag}` tag — one compose stack, so two acceptance "
     "targets running at once share it"
 )
+ACCEPT_INPUTS_MSG = (
+    "S-015: {label} does not declare {missing} among its inputs. With results cached, the "
+    "declared input set is the only thing standing between a changed binary or a changed "
+    "compose definition and a green that is about neither"
+)
 SERIAL_GLOBAL_MSG = (
     "C-024: {source} names {flag!r} — serialisation is the `{tag}` tag on the targets. An rc "
     "line is per-command and never per-target-pattern, so this also serialises the Rust test "
-    "targets and deletes stage 2's entire win"
+    "targets and deletes stage 2's entire win. `task bazel:test:accept` passes it on the "
+    "command line, where it is scoped to that one invocation"
 )
 
 BINARY_UNREADABLE_MSG = "S-015: no digest could be read for the {side} binary ({source}): {reason}"
@@ -285,9 +367,10 @@ SELECT_CONTROL_MSG = (
     "ever also selects nothing for a docs-only change, so the green above is vacuous"
 )
 SELECT_DOCS_RERAN_MSG = (
-    "S-004: {count} acceptance target(s) ran on the docs-only build, first {sample}. "
-    "Acceptance targets never cache (S-015), so an acceptance target in this BEP ran, and "
-    "a target that ran was selected"
+    "S-004: {count} acceptance target(s) appear in the docs-only build's BEP, first {sample}. "
+    "`bazel test` publishes a TestResult for every target it was GIVEN, cached or executed, so "
+    "presence here is selection — which is the reading that survived stage 4's results being "
+    "cached, where 'it re-ran' no longer would"
 )
 SELECT_RUST_RERAN_MSG = (
     "S-004: {count} Rust test target(s) re-ran on the docs-only build, first {sample}"
@@ -369,29 +452,43 @@ SELECTION_TOKENS = ("scoped_gate", ".DECISION", "CRATES", "SCOPED_ROWS", "--targ
 # ---------------------------------------------------------------------------
 
 
-def caching_off_findings(
+def caching_on_findings(
     *,
     warm: dict[str, bool],
+    mutated: dict[str, bool],
     acceptance: set[str],
-    control: set[str],
     tags: dict[str, set[str]],
+    inputs: dict[str, set[str]],
     minimum: int = ACCEPTANCE_MODULES,
 ) -> list[Finding]:
-    """S-015: run 2 of an unchanged tree. Empty list == the property holds.
+    """S-015, inverted. Empty list == the property holds.
 
-    `warm` is `read_test_results`' `{label: cached}` over run 2 — the BEP, not
-    the terminal summary line, and `cachedLocally` read for truth rather than
-    presence, because proto3 omits a false boolean and the natural spelling
-    (`payload.get("cachedLocally") is not False`) reports every target that ran
-    as cached.
+    The ADR ruled acceptance result caching **off** and this function asserted
+    that. The ruling is amended (§ Stage 4), so the contract it checks is the
+    opposite one, and inverting a contract inverts its failure modes too:
 
-    Ordered so the control and the reader floor are settled before the verdict:
-    a run where the reader stopped early would otherwise report "no acceptance
-    target cached" and read as the property holding.
+    * `warm` is run 2 of an **unchanged** tree and every acceptance target must
+      report cached. A target that re-executed means an input moved that the
+      tree did not — a generated file inside a glob is the way that happens.
+    * `mutated` is a run after `test/bin/ocx` was rebuilt with different bytes,
+      and **no** acceptance target may report cached. This is ADR A4's red half
+      3, and under the old contract it was defence in depth; it is now the only
+      control on `warm`. "Everything reported cached" is exactly what a reader
+      that credits key *presence* rather than truth would answer on any BEP, so
+      a one-run reading of this contract is vacuous by construction. Two runs,
+      opposite expected answers, one reader.
+
+    The tag and input clauses are the graph half of the same contract: no
+    cache-suppressing tag, `exclusive` and `no-sandbox` present, and the binary
+    and the compose definition among the declared inputs.
+
+    Ordered so the control and the two reader floors are settled before the
+    verdict: a run where either reader stopped early would otherwise report
+    the property holding.
     """
     findings: list[Finding] = []
 
-    if not control:
+    if not mutated:
         findings.append(Finding("accept-control-absent", ACCEPT_CONTROL_ABSENT_MSG))
 
     if len(acceptance) < minimum:
@@ -402,7 +499,7 @@ def caching_off_findings(
             )
         )
 
-    unseen = sorted((acceptance | control) - set(warm))
+    unseen = sorted(acceptance - set(warm))
     if unseen:
         findings.append(
             Finding(
@@ -411,49 +508,67 @@ def caching_off_findings(
             )
         )
 
-    cached_control = sorted(label for label in control if warm.get(label))
-    if control and not cached_control:
-        findings.append(
-            Finding(
-                "accept-control-cold",
-                ACCEPT_CONTROL_COLD_MSG.format(sample=min(control)),
+    if mutated:
+        unseen_control = sorted(acceptance - set(mutated))
+        if unseen_control:
+            findings.append(
+                Finding(
+                    "accept-control-floor",
+                    ACCEPT_CONTROL_UNSEEN_MSG.format(
+                        count=len(unseen_control), sample=unseen_control[0]
+                    ),
+                )
             )
-        )
+        still_cached = sorted(label for label in acceptance if mutated.get(label))
+        if still_cached:
+            findings.append(
+                Finding(
+                    "accept-control-cached",
+                    ACCEPT_CONTROL_CACHED_MSG.format(
+                        count=len(still_cached), sample=still_cached[0]
+                    ),
+                )
+            )
 
-    cached = sorted(label for label in acceptance if warm.get(label))
-    if cached:
+    ran = sorted(label for label in acceptance if label in warm and not warm[label])
+    if ran:
         findings.append(
             Finding(
-                "accept-cached",
-                ACCEPT_CACHED_MSG.format(count=len(cached), sample=cached[0]),
+                "accept-not-cached",
+                ACCEPT_NOT_CACHED_MSG.format(count=len(ran), sample=ran[0]),
             )
         )
 
     for label in sorted(acceptance):
         carried = tags.get(label, set())
-        if CACHE_DEFEATING_TAG not in carried:
-            weak = sorted(carried & INSUFFICIENT_TAGS)
-            if weak:
-                findings.append(
-                    Finding(
-                        "accept-tag-insufficient",
-                        ACCEPT_TAG_WEAK_MSG.format(
-                            label=label, present=weak, tag=CACHE_DEFEATING_TAG
-                        ),
-                    )
+        suppressing = sorted(carried & CACHE_SUPPRESSING_TAGS)
+        if suppressing:
+            findings.append(
+                Finding(
+                    "accept-tag-suppressing",
+                    ACCEPT_TAG_SUPPRESSING_MSG.format(label=label, present=suppressing),
                 )
-            else:
-                findings.append(
-                    Finding(
-                        "accept-tag-missing",
-                        ACCEPT_TAG_MSG.format(label=label, tag=CACHE_DEFEATING_TAG),
-                    )
+            )
+        if SANDBOX_TAG not in carried:
+            findings.append(
+                Finding(
+                    "accept-sandbox-tag-missing",
+                    ACCEPT_SANDBOX_MSG.format(label=label, tag=SANDBOX_TAG),
                 )
+            )
         if SERIALISING_TAG not in carried:
             findings.append(
                 Finding(
                     "accept-serial-tag-missing",
                     ACCEPT_SERIAL_MSG.format(label=label, tag=SERIALISING_TAG),
+                )
+            )
+        missing = sorted(ACCEPTANCE_DECLARED_INPUTS - inputs.get(label, set()))
+        if missing:
+            findings.append(
+                Finding(
+                    "accept-inputs-undeclared",
+                    ACCEPT_INPUTS_MSG.format(label=label, missing=missing),
                 )
             )
     return findings
@@ -818,9 +933,16 @@ def selection_findings(
             )
         )
 
-    # Acceptance targets never cache (S-015), so presence in this BEP is
-    # execution and execution is selection. Rust targets do cache, which is why
-    # the reading below is a *re-run* set and is never used as the discriminator.
+    # **Presence**, never `rerun_set`, and the distinction is load-bearing since
+    # stage 4's results started being cached. `bazel test` publishes a
+    # `TestResult` for every target in the set it was given, whether that target
+    # executed or was replayed from a cache — so presence is *selection*, which
+    # is what S-004 is about, and a re-run reading would call a selected but
+    # cached target unselected. (Under the old contract the two coincided
+    # because acceptance targets never cached; the reading did not have to
+    # change, but the reason it is correct did.) The Rust half below stays a
+    # re-run set on purpose: Rust tests have always cached, so it is floored
+    # and never used as the discriminator.
     docs_accept = sorted(label for label in docs_bep if label.startswith(acceptance_prefix))
     if docs_accept:
         findings.append(
@@ -963,6 +1085,7 @@ PROBE_TARGETS: dict[str, tuple[str, ...]] = {
     "acc_local_only": ("local", "exclusive"),
     "acc_nocache": ("local", "exclusive", "no-cache"),
     "acc_external": ("local", "external", "exclusive"),
+    "acc_no_sandbox": ("no-sandbox", "exclusive"),
 }
 
 #: The measurement. `True` means "reported cached", per run. Shipped as an
@@ -974,6 +1097,7 @@ PROBE_EXPECTED: dict[str, tuple[bool, bool, bool]] = {
     "acc_local_only": (False, True, False),
     "acc_nocache": (False, True, False),
     "acc_external": (False, False, False),
+    "acc_no_sandbox": (False, True, True),
 }
 
 SERIAL_TRIO = ("excl1", "excl2", "excl3")
@@ -1319,10 +1443,19 @@ def fixture_acceptance_labels(count: int = ACCEPTANCE_MODULES) -> list[str]:
 
 
 CONTROL_LABEL = "//crates/ocx_exit:ocx_exit_test"
+"""An untagged Rust test. No longer a *cache* control — the acceptance targets
+cache now, so a sibling that also caches separates nothing — but kept as the
+label the reader floors are shown to ignore."""
 
 
 def fixture_tags(labels: list[str]) -> dict[str, set[str]]:
-    return {label: {"local", CACHE_DEFEATING_TAG, SERIALISING_TAG} for label in labels}
+    """The tag set `test/bazel.bzl` ships, as `bazel:tags` would report it."""
+    return {label: {SANDBOX_TAG, SERIALISING_TAG} for label in labels}
+
+
+def fixture_inputs(labels: list[str]) -> dict[str, set[str]]:
+    """The input closure `bazel:tags` reports, one hop expanded through the group."""
+    return {label: set(ACCEPTANCE_DECLARED_INPUTS) | {f"{label}.py"} for label in labels}
 
 
 def fixture_named_set(basename: str, digest: str, length: int) -> str:
@@ -1381,120 +1514,178 @@ def _existence_reader(under_test: Path) -> bool:
     return under_test.is_file()
 
 
-def prove_caching_off(scratch: Path) -> int:
-    """S-015, first half — red and green on a 172-target fixture plus a control."""
+def prove_caching_on(scratch: Path) -> int:
+    """S-015, first half — red and green on a 181-target fixture and its control run."""
     checks = 0
     labels = fixture_acceptance_labels()
     acceptance = set(labels)
-    control = {CONTROL_LABEL}
     tags = fixture_tags(labels)
+    inputs = fixture_inputs(labels)
 
     warm_path = scratch / "warm.json"
-    green_outcomes = {label: False for label in labels} | {CONTROL_LABEL: True}
-    write_accept_bep(warm_path, green_outcomes)
+    mutated_path = scratch / "mutated.json"
+    # Run 2, unchanged tree: everything cached. Run 3, binary rebuilt: nothing.
+    warm_outcomes = {label: True for label in labels} | {CONTROL_LABEL: True}
+    mutated_outcomes = {label: False for label in labels} | {CONTROL_LABEL: True}
+    write_accept_bep(warm_path, warm_outcomes)
+    write_accept_bep(mutated_path, mutated_outcomes)
     warm, parse = read_test_results(warm_path)
     expect(parse == [], f"the green BEP must parse clean, got {codes(parse)}")
     expect(len(warm) == ACCEPTANCE_MODULES + 1, f"the fixture BEP read {len(warm)} labels")
+    mutated, parse = read_test_results(mutated_path)
+    expect(parse == [], f"the control BEP must parse clean, got {codes(parse)}")
 
-    green = caching_off_findings(warm=warm, acceptance=acceptance, control=control, tags=tags)
+    def judge(**overrides):
+        kwargs = {
+            "warm": warm,
+            "mutated": mutated,
+            "acceptance": acceptance,
+            "tags": tags,
+            "inputs": inputs,
+        }
+        kwargs.update(overrides)
+        return caching_on_findings(**kwargs)
+
+    green = judge()
     expect(green == [], f"the compliant run must be silent, got {[f.message for f in green]}")
     print(
-        f"S-015 GREEN: {ACCEPTANCE_MODULES} `external`-tagged acceptance targets re-ran on run 2 "
-        f"while the untagged control {CONTROL_LABEL} reported cached"
+        f"S-015 GREEN: {ACCEPTANCE_MODULES} acceptance targets reported cached on run 2 of an "
+        f"unchanged tree and every one of them re-executed once `test/bin/ocx` changed"
     )
     checks += 1
 
-    # --- one acceptance target reports cached. The Block-tier case.
-    mutated = dict(green_outcomes)
-    mutated[labels[7]] = True
-    write_accept_bep(warm_path, mutated)
+    # --- one target re-executed on the unchanged tree. An input moved that the
+    #     tree did not — a generated file inside a glob is how that happens, and
+    #     it is the defect that makes "second run fully cached" unreachable.
+    stirred = dict(warm_outcomes)
+    stirred[labels[7]] = False
+    write_accept_bep(warm_path, stirred)
     reread, _ = read_test_results(warm_path)
-    expect(reread[labels[7]] is True, "the cached-acceptance mutation did not land")
-    expect(reread[labels[8]] is False, "the mutation must touch exactly one label")
-    cached = caching_off_findings(warm=reread, acceptance=acceptance, control=control, tags=tags)
-    expect(codes(cached) == ["accept-cached"], f"got {codes(cached)}")
-    expect(labels[7] in cached[0].message, "the finding does not name the offending target")
-    print(f"S-015 RED  : {cached[0].message}")
+    expect(reread[labels[7]] is False, "the re-executed mutation did not land")
+    expect(reread[labels[8]] is True, "the mutation must touch exactly one label")
+    findings = judge(warm=reread)
+    expect(codes(findings) == ["accept-not-cached"], f"got {codes(findings)}")
+    expect(labels[7] in findings[0].message, "the finding does not name the offending target")
+    print(f"S-015 RED  : {findings[0].message}")
     checks += 1
 
-    # --- the control does not cache either. "No acceptance target cached" is
-    #     then consistent with caching being off for everything, or with run 2
-    #     never happening; the control is the only thing that separates them.
-    cold = dict(green_outcomes)
-    cold[CONTROL_LABEL] = False
-    write_accept_bep(warm_path, cold)
-    reread, _ = read_test_results(warm_path)
-    expect(reread[CONTROL_LABEL] is False, "the cold-control mutation did not land")
-    control_cold = caching_off_findings(
-        warm=reread, acceptance=acceptance, control=control, tags=tags
-    )
-    expect(codes(control_cold) == ["accept-control-cold"], f"got {codes(control_cold)}")
-    print(f"S-015 RED  : {control_cold[0].message}")
+    # --- ADR A4 red half 3, as the control it has become. The binary changed
+    #     and a target reported cached anyway: its declared input set does not
+    #     cover the binary, so every cached green above is about a world that
+    #     may have moved.
+    stale = dict(mutated_outcomes)
+    stale[labels[3]] = True
+    write_accept_bep(mutated_path, stale)
+    control_reread, _ = read_test_results(mutated_path)
+    expect(control_reread[labels[3]] is True, "the stale-control mutation did not land")
+    findings = judge(mutated=control_reread)
+    expect(codes(findings) == ["accept-control-cached"], f"got {codes(findings)}")
+    expect(labels[3] in findings[0].message, "the finding does not name the offending target")
+    print(f"S-015 RED  : {findings[0].message}")
     checks += 1
 
-    # --- no control at all. Refused rather than reported as the property
-    #     holding, which is what a control-free run would otherwise look like.
-    write_accept_bep(warm_path, green_outcomes)
+    # --- no control run at all. Refused rather than reported as the property
+    #     holding: this contract's green is "everything cached", which is also
+    #     what a reader crediting key presence answers on any BEP whatsoever.
+    write_accept_bep(warm_path, warm_outcomes)
     warm, _ = read_test_results(warm_path)
-    absent = caching_off_findings(warm=warm, acceptance=acceptance, control=set(), tags=tags)
+    write_accept_bep(mutated_path, mutated_outcomes)
+    mutated, _ = read_test_results(mutated_path)
+    absent = judge(mutated={})
     expect(codes(absent) == ["accept-control-absent"], f"got {codes(absent)}")
     print(f"S-015 RED  : {absent[0].message}")
     checks += 1
 
-    # --- the tag that reads as sufficient and is not. Measured, not assumed.
-    weak_tags = dict(tags)
-    weak_tags[labels[3]] = {"local", "exclusive", "no-cache"}
+    # The control for the control: a reader that reports every target cached —
+    # which is what reading `cachedLocally` for presence rather than truth does,
+    # the exact defect `read_test_results` was written against — is silent on
+    # the warm half and loud on this one. One-run readings of this contract
+    # cannot tell that reader from a working cache.
+    presence = judge(mutated={label: True for label in labels})
     expect(
-        CACHE_DEFEATING_TAG not in weak_tags[labels[3]] and "no-cache" in weak_tags[labels[3]],
-        "the weak-tag mutation did not land",
-    )
-    weak = caching_off_findings(warm=warm, acceptance=acceptance, control=control, tags=weak_tags)
-    expect(codes(weak) == ["accept-tag-insufficient"], f"got {codes(weak)}")
-    print(f"S-015 RED  : {weak[0].message}")
-    checks += 1
-
-    # The control: the natural "any no-* tag will do" reader calls it safe.
-    expect(
-        _no_prefix_reader(weak_tags[labels[3]]) is True,
-        "the control reader was expected to credit the no-cache tag",
+        codes(presence) == ["accept-control-cached"],
+        f"an everything-cached reader must red on the control run, got {codes(presence)}",
     )
     expect(
-        _no_prefix_reader(fixture_tags(labels)[labels[3]]) is True,
-        "the control reader credits the compliant tag set too — it cannot discriminate",
+        judge(warm={label: True for label in labels} | {CONTROL_LABEL: True}) == [],
+        "that same reader is silent on the warm half — which is why one run is not a reading",
     )
     print(
-        "S-015 RED  : on that same tag set the no-prefix reader control answers 'safe' — and it "
-        "answers 'safe' for the compliant set too, so it separates nothing. `--prove-s015` "
-        "measured `no-cache` reporting (cached) on the pin"
+        "S-015 CONTROL: a reader answering 'cached' for every target is silent on run 2 and "
+        f"reds on the binary-swap run ({codes(presence)}) — the two runs together are what "
+        "make either answer evidence"
     )
+    checks += 2
+
+    # --- a cache-suppressing tag is back. Each of these was measured to stop a
+    #     hit in at least one tier, and the acceptance stage now wants the hit.
+    sample_message = ""
+    for tag in sorted(CACHE_SUPPRESSING_TAGS):
+        suppressed = dict(tags)
+        suppressed[labels[4]] = set(tags[labels[4]]) | {tag}
+        expect(tag in suppressed[labels[4]], f"the {tag} mutation did not land")
+        findings = judge(tags=suppressed)
+        expect(codes(findings) == ["accept-tag-suppressing"], f"{tag}: got {codes(findings)}")
+        expect(repr(tag) in findings[0].message, f"the finding does not name {tag}")
+        if tag == CACHE_DEFEATING_TAG:
+            sample_message = findings[0].message
+    print(f"S-015 RED  : {sample_message}")
+    print(
+        f"S-015 RED  : and the same for each of {sorted(CACHE_SUPPRESSING_TAGS - {CACHE_DEFEATING_TAG})} "
+        "— every tag measured to suppress a hit in any tier reds on its own"
+    )
+    checks += len(CACHE_SUPPRESSING_TAGS)
+
+    # --- the sandbox tag dropped: the suite cannot run in a sandbox at all.
+    unsandboxed = dict(tags)
+    unsandboxed[labels[5]] = {SERIALISING_TAG}
+    expect(SANDBOX_TAG not in unsandboxed[labels[5]], "the no-sandbox drop did not land")
+    findings = judge(tags=unsandboxed)
+    expect(codes(findings) == ["accept-sandbox-tag-missing"], f"got {codes(findings)}")
+    print(f"S-015 RED  : {findings[0].message}")
     checks += 1
 
-    # --- no serialising tag: 172 targets, one compose stack.
+    # --- no serialising tag: 181 targets, one compose stack.
     unserialised = dict(tags)
-    unserialised[labels[9]] = {"local", CACHE_DEFEATING_TAG}
+    unserialised[labels[9]] = {SANDBOX_TAG}
     expect(SERIALISING_TAG not in unserialised[labels[9]], "the exclusive-drop did not land")
-    serial = caching_off_findings(
-        warm=warm, acceptance=acceptance, control=control, tags=unserialised
-    )
-    expect(codes(serial) == ["accept-serial-tag-missing"], f"got {codes(serial)}")
-    print(f"S-015 RED  : {serial[0].message}")
+    findings = judge(tags=unserialised)
+    expect(codes(findings) == ["accept-serial-tag-missing"], f"got {codes(findings)}")
+    print(f"S-015 RED  : {findings[0].message}")
     checks += 1
 
-    # --- reader floors. A query that read half the suite, and a BEP that did.
-    half = set(labels[:80])
-    narrow = caching_off_findings(
-        warm=warm, acceptance=half, control=control, tags=tags, minimum=ACCEPTANCE_MODULES
+    # --- the declaration that stands in for `external` in the tag guard, read
+    #     here from the run's own tag table rather than from the graph.
+    undeclared = dict(inputs)
+    undeclared[labels[6]] = set(inputs[labels[6]]) - {"//test:suite_anchor"}
+    expect(
+        "//test:suite_anchor" not in undeclared[labels[6]], "the input-drop mutation did not land"
     )
+    findings = judge(inputs=undeclared)
+    expect(codes(findings) == ["accept-inputs-undeclared"], f"got {codes(findings)}")
+    expect("//test:suite_anchor" in findings[0].message, "the finding does not name what is missing")
+    print(f"S-015 RED  : {findings[0].message}")
+    checks += 1
+
+    # --- reader floors. A query that read half the suite, a warm BEP that did,
+    #     and a control BEP that did.
+    half = set(labels[:80])
+    narrow = judge(acceptance=half)
     expect(codes(narrow) == ["accept-universe-floor"], f"got {codes(narrow)}")
     print(f"S-015 RED  : {narrow[0].message}")
     checks += 1
 
     short_path = scratch / "short.json"
-    write_accept_bep(short_path, {label: False for label in labels[:100]} | {CONTROL_LABEL: True})
+    write_accept_bep(short_path, {label: True for label in labels[:100]} | {CONTROL_LABEL: True})
     short, _ = read_test_results(short_path)
     expect(len(short) == 101, f"the short BEP read {len(short)} labels")
-    floored = caching_off_findings(warm=short, acceptance=acceptance, control=control, tags=tags)
+    floored = judge(warm=short)
     expect(codes(floored) == ["accept-reader-floor"], f"got {codes(floored)}")
+    print(f"S-015 RED  : {floored[0].message}")
+    checks += 1
+
+    floored = judge(mutated={label: False for label in labels[:100]})
+    expect(codes(floored) == ["accept-control-floor"], f"got {codes(floored)}")
     print(f"S-015 RED  : {floored[0].message}")
     checks += 1
 
@@ -1537,10 +1728,10 @@ def prove_caching_off(scratch: Path) -> int:
     print("S-015 RED  : three overlapping windows report 2 pairs — the trio was not serialised")
     checks += 1
 
-    half, floored_overlaps = timeline_overlaps("excl1 start 100.0\n", SERIAL_TRIO)
+    half_window, floored_overlaps = timeline_overlaps("excl1 start 100.0\n", SERIAL_TRIO)
     expect(
-        half == [] and floored_overlaps == 0,
-        f"a window with no end must not be read as one, got {half}",
+        half_window == [] and floored_overlaps == 0,
+        f"a window with no end must not be read as one, got {half_window}",
     )
     print(
         "S-015 RED  : a start with no matching end reads as 0 windows, so `--prove-s015`'s "
@@ -2119,7 +2310,7 @@ def self_test() -> int:
     checks = 0
     with tempfile.TemporaryDirectory(dir=scratch) as directory:
         work = Path(directory)
-        checks += prove_caching_off(work)
+        checks += prove_caching_on(work)
         checks += prove_binary_digest(work)
         checks += prove_selection(work)
         checks += prove_live_table()
@@ -2127,9 +2318,10 @@ def self_test() -> int:
         checks += prove_c029(work)
         checks += prove_counts()
     print(
-        f"bazel accept proofs self-test: {checks} checks passed — S-015 (caching off, and the "
-        "binary under test) and S-004 (selection, and the CI entry point) each shown red and "
-        "green, plus C-029 and the live table floors"
+        f"bazel accept proofs self-test: {checks} checks passed — S-015 (results CACHED on an "
+        "unchanged tree, every cache-suppressing tag refused, the declaration required, and the "
+        "binary-swap control that makes the green mean anything) and S-004 (selection, and the "
+        "CI entry point) each shown red and green, plus C-029 and the live table floors"
     )
     print(
         "  The tag semantics all of S-015 rests on are measured, not assumed: run "
@@ -2148,38 +2340,70 @@ def self_test() -> int:
 # ---------------------------------------------------------------------------
 
 
-def read_tag_table(path: Path) -> tuple[dict[str, set[str]], list[Finding]]:
-    """`{label: [tag, ...]}` JSON — WP-36's `bazel query --output=...` reduced."""
+def read_tag_table(
+    path: Path,
+) -> tuple[dict[str, set[str]], dict[str, set[str]], list[Finding]]:
+    """`{label: {"tags": [...], "inputs": [...]}}` JSON — `task test:bazel:tags`' output.
+
+    Two facts per label because the contract now has two graph halves: the tags
+    the target carries, and the input closure it declares. They come from one
+    `bazel query` in one reducer for the reason two readers of one fact always
+    stop agreeing.
+    """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        return {}, [Finding("tags-unreadable", f"S-015: cannot read the tag table {path}: {error}")]
+        return {}, {}, [
+            Finding("tags-unreadable", f"S-015: cannot read the tag table {path}: {error}")
+        ]
     if not isinstance(raw, dict) or not raw:
-        return {}, [
+        return {}, {}, [
             Finding("tags-empty", f"S-015: the tag table {path} carries no label — a query that "
                     "matched nothing exits 0, so the count is the floor, never the exit code")
         ]
-    return {label: set(tags) for label, tags in raw.items()}, []
+    if not all(isinstance(entry, dict) for entry in raw.values()):
+        return {}, {}, [
+            Finding(
+                "tags-shape",
+                f"S-015: {path} maps a label to something other than a "
+                '{"tags": [...], "inputs": [...]} object. The old shape was a bare tag list, '
+                "and reading it would leave every input clause below judging an empty set — "
+                "silently true. Re-run `task test:bazel:tags`",
+            )
+        ]
+    tags = {label: set(entry.get("tags", [])) for label, entry in raw.items()}
+    inputs = {label: set(entry.get("inputs", [])) for label, entry in raw.items()}
+    return tags, inputs, []
 
 
 def run_check_s015(
     *,
     warm: Path,
+    mutated: Path | None,
     tags_path: Path,
     built: Path | None,
     under_test: Path | None,
-    control_prefix: str,
 ) -> int:
+    """Judge a warm run against its binary-swap control (ADR A4, halves 2 and 3)."""
     findings: list[Finding] = []
     outcomes, parse = read_test_results(warm)
     findings.extend(parse)
-    tags, tag_findings = read_tag_table(tags_path)
+    control: dict[str, bool] = {}
+    if mutated is not None:
+        control, parse = read_test_results(mutated)
+        findings.extend(parse)
+    tags, inputs, tag_findings = read_tag_table(tags_path)
     findings.extend(tag_findings)
 
     acceptance = {label for label in tags if label.startswith(f"{ACCEPTANCE_PACKAGE}:")}
-    control = {label for label in outcomes if label.startswith(control_prefix)}
     findings.extend(
-        caching_off_findings(warm=outcomes, acceptance=acceptance, control=control, tags=tags)
+        caching_on_findings(
+            warm=outcomes,
+            mutated=control,
+            acceptance=acceptance,
+            tags=tags,
+            inputs=inputs,
+        )
     )
     rc_files = {
         str(path): path.read_text(encoding="utf-8")
@@ -2199,8 +2423,8 @@ def run_check_s015(
         print("S-015: NOT MET", flush=True)
         return sys_out
     print(
-        f"S-015: MET — {len(acceptance)} acceptance target(s) re-ran on an unchanged tree while "
-        f"{len(control)} untagged control target(s) reported cached"
+        f"S-015: MET — {len(acceptance)} acceptance target(s) reported cached on an unchanged "
+        f"tree and all {len(acceptance)} re-executed once the binary under test changed"
     )
     return 0
 
@@ -2268,14 +2492,27 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--self-test", action="store_true", help="prove all three pairs red and green")
     mode.add_argument("--prove-s015", action="store_true", help="measure the tag semantics live")
-    mode.add_argument("--check-s015", action="store_true", help="judge a warm acceptance run")
+    mode.add_argument(
+        "--check-s015", action="store_true", help="judge a warm acceptance run and its control"
+    )
     mode.add_argument("--check-s004", action="store_true", help="judge a change-selected run")
     parser.add_argument("--probe-root", type=Path, default=PROBE_DEFAULT_ROOT)
-    parser.add_argument("--warm", type=Path, help="--check-s015: run 2's BEP")
-    parser.add_argument("--tags", type=Path, help="--check-s015: {label: [tag, ...]} JSON")
+    parser.add_argument("--warm", type=Path, help="--check-s015: run 2's BEP (unchanged tree)")
+    parser.add_argument(
+        "--mutated",
+        type=Path,
+        help="--check-s015: the BEP of a run taken after `test/bin/ocx` was rebuilt with "
+        "different bytes. ADR A4's red half 3, and the control on --warm: without it "
+        "'everything cached' is what a broken reader answers too",
+    )
+    parser.add_argument(
+        "--tags",
+        type=Path,
+        help='--check-s015: {label: {"tags": [...], "inputs": [...]}} JSON from '
+        "`task test:bazel:tags`",
+    )
     parser.add_argument("--built-binary", type=Path, help="--check-s015: what the build produced")
     parser.add_argument("--binary-under-test", type=Path, help="--check-s015: what the suite runs")
-    parser.add_argument("--control-prefix", default="//crates/", help="--check-s015: control labels")
     parser.add_argument("--docs-bep", type=Path, help="--check-s004: the docs-only build's BEP")
     parser.add_argument("--crate-bep", type=Path, help="--check-s004: the control build's BEP")
     parser.add_argument("--entry-taskfile", type=Path, help="--check-s004: WP-39's taskfile")
@@ -2290,10 +2527,10 @@ def main() -> int:
             parser.error("--check-s015 needs --warm and --tags")
         return run_check_s015(
             warm=args.warm,
+            mutated=args.mutated,
             tags_path=args.tags,
             built=args.built_binary,
             under_test=args.binary_under_test,
-            control_prefix=args.control_prefix,
         )
     if args.docs_bep is None or args.crate_bep is None:
         parser.error("--check-s004 needs --docs-bep and --crate-bep")

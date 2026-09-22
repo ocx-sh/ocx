@@ -402,6 +402,29 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      # `ocx` on PATH is a prerequisite of the step below, not a convenience:
+      # every task in `taskfiles/bazel.taskfile.yml` shells out through
+      # `ocx exec bazel --`, which is how the 9.2.0 pin in this repository's own
+      # `ocx.toml` reaches the command. Without it the run exits 127. Same
+      # spelling and same reason as the `build` job's Linux leg.
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Default-off: the action would otherwise restore
+          # $OCX_HOME/{blobs,layers,packages,tags} across runs, and a restored
+          # object store is runner-executable content.
+          cache: false
+      # The **read** credential, never the write one — `write-auth` is not
+      # passed here in any spelling, so this job holds no write credential on
+      # any trigger. A fork PR sees no secrets, the binding is the empty string,
+      # the action writes nothing, and `bazel:test:accept` omits `--bazelrc` and
+      # reads the cache anonymously over `--disk_cache`. Copied from the `build`
+      # job's Linux leg, which is the only other lane that runs bazel.
+      - name: Bazel cache credential
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
       - name: Run Acceptance Tests
         shell: bash
         # `ubuntu-latest` ships systemd, so its `environment.d` generator is
@@ -412,15 +435,21 @@ jobs:
         # same. Fails closed: any value but empty or `0` arms the gate.
         env:
           __OCX_TESTING_REQUIRE_ENVIRONMENT_D: "1"
-        # `test:parallel`, not `test`: the serial run took 21:41 for 3819 tests
-        # at a 0.1 s median (run 35469230124) on a runner whose cores sat idle.
-        # Same xdist flags local `task verify` uses; `--dist loadgroup` keeps
-        # the registry-contended modules on one worker. The JUnit report is
-        # not asked for here any more: the task writes `test/results/junit.xml`
-        # on every run, local ones included, so the timings this workflow
-        # publishes and the ones a developer's run pushes come from one flag
-        # in one place (test/taskfile.yml `JUNIT_XML`).
-        run: task test:parallel
+        # `bazel:test:accept`, not `task test:parallel`. The 181 `sh_test`
+        # targets have existed since WP-36 and nothing ran them: this job and
+        # `task verify` both called pytest directly, so stage 4 was neither
+        # cached nor reported through Bazel. It is now, with its results CACHED
+        # (adr_bazel_build_adoption.md § Stage 4, amended) — which is what pays
+        # for the loss of xdist: `--local_test_jobs=1` serialises the run, and
+        # an unchanged tree executes 0 of the 181 targets.
+        #
+        # The suite floor and the skip/xfail ceilings did not leave with
+        # `test:parallel`: the task reads them off the 181 per-case JUnit
+        # reports Bazel writes, which is the same data at a finer grain than the
+        # terminal-summary parser they replace. Those reports are what the two
+        # steps below upload and push — `test/results/junit.xml` is written by
+        # the pytest entry points only, so it is not what this lane produces.
+        run: task bazel:test:accept
       - name: Stop Registry
         if: ${{ always() }}
         shell: bash
@@ -428,21 +457,41 @@ jobs:
         # profile-gated services running. Harmless on an ephemeral runner, but
         # this line gets copied to developer machines.
         run: docker compose -f test/docker-compose.yml --profile sigstore down 2>/dev/null || true
+      # C-015's caller half; the twin of the `build` job's. `always()` rather
+      # than `success()`: a cancelled or failed job must leave no credential on
+      # the runner either, and a composite action has no `post:` hook.
+      - name: Remove the Bazel cache credential
+        if: always()
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          cleanup: 'true'
+      # One report per module, copied out of `bazel-testlogs` by the task —
+      # real per-case pytest JUnit, because the acceptance runner passes
+      # `--junit-xml=$XML_OUTPUT_FILE` (the Rust lane's `test.xml` is Bazel's
+      # synthesised one target/one testcase file, which is why that leg uploads
+      # nothing). The paths land as `deep-acceptance-Linux/<module>/junit.xml`,
+      # which is what the `test-results` job's `artifacts/**/junit.xml` glob is
+      # written for.
       - name: Upload Test Results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: deep-acceptance-${{ matrix.job.name }}
-          path: test/results/junit.xml
+          path: target/bazel/accept/*/junit.xml
       # The acceptance suite is the long half of the run; these are the
       # timings the dashboards exist for. Same tolerance as the unit push.
+      #
+      # `timeout-minutes: 15` and not the unit lane's 5: the action pushes one
+      # trace per matched report and this lane produces 181 of them rather than
+      # one. The binary is downloaded once; what repeats is a re-emit and an
+      # export per module.
       - name: Push acceptance test timings
         if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
         continue-on-error: true
-        timeout-minutes: 5
+        timeout-minutes: 15
         uses: ./.github/actions/test-telemetry
         with:
-          junit: test/results/junit.xml
+          junit: target/bazel/accept/*/junit.xml
           suite: acceptance
 
   test-results:

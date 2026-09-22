@@ -193,6 +193,28 @@ rule targets to 87. The tag guard printed `143 rule targets read` against a
 floor of 101 and passed: 42 of headroom is a floor that has stopped
 discriminating, which is the state this constant exists to close."""
 
+ACCEPTANCE_MODULE_TARGETS = 181
+"""One `sh_test` per `test/tests/test_*.py` (C-024) — `bazel query
+'kind(sh_test, //test:all)'` answers 181 and `ls test/tests/test_*.py` answers
+181. The single home for that number: `bazel_accept_proofs.ACCEPTANCE_MODULES`
+is an alias of this, and `test/BUILD.bazel` states no count at all — the `glob`
+is the enumeration. Three spellings of one fact is how the tree carried 172,
+181 and "188" simultaneously."""
+
+ACCEPTANCE_SUPPORT_TARGETS = 4
+"""`:acceptance_runner` (`_acceptance_runner`) and the three filegroups
+`:suite_anchor`, `:suite_inputs` and `:recording_inputs`. No `sh_test`, but
+`kind(rule, ...)` counts them, so the floor has to."""
+
+ACCEPTANCE_RULE_TARGETS = ACCEPTANCE_MODULE_TARGETS + ACCEPTANCE_SUPPORT_TARGETS  # 185
+
+GRAPH_TAIL_TARGETS = 4
+"""What `//...` holds that no earlier stage's universe names: `//:all` (2 —
+`buildifier` and `buildifier.check`) and `//website/...` (2). Measured:
+`bazel query 'kind(rule, //...)'` answers 331 today and 56 + 45 + 42 + 184 + 4
+is 331, with `:suite_inputs` taking the acceptance package to 185 and the
+total to 332."""
+
 # ---------------------------------------------------------------------------
 # Two traps this graph has already sprung. Recorded here because both are
 # invisible in a diff and both produce a GREEN result while doing less.
@@ -357,9 +379,11 @@ class StageFloor:
 #: Stage-scoped and advancing, per the plan's [R1] correction to the ADR's flat
 #: 274: a `//...` floor at wave 5 would demand targets that arrive in wave 10.
 #: C-011 names the sequence — `//crates/...`, then `+//test/doc_scripts/...`,
-#: then `//...` >= 272 — and an undeclared stage is refused rather than run
-#: floorless, so `stage-4` (`//...`, WP-36's acceptance count) stays absent until
-#: someone has measured it.
+#: then `//...` — and an undeclared stage is refused rather than run floorless,
+#: which is what `stage-5` (a name no wave has) is used for in both self-tests.
+#: Stage 4 was held back until WP-36's acceptance count existed; it does now
+#: (181 modules, measured), and C-011's `>= 272` predates the 42 GIF targets and
+#: the shared input group, so the declared number is the sum below and not it.
 #:
 #: `minimum` is **every rule target of every kind**, not the Rust subset. It was
 #: the Rust subset while stage 1 was the only stage, and that reading does not
@@ -372,6 +396,22 @@ STAGE_FLOORS: dict[str, StageFloor] = {
     "stage-3": StageFloor(
         universe="//crates/... + //test/doc_scripts/...",
         minimum=DRIFT_TARGET_FLOOR + CAST_RULE_TARGETS + GIF_RULE_TARGETS,
+    ),
+    # Stage 4, declared now that WP-36's count exists to declare it with. The
+    # acceptance targets have to be in the guard's universe or the `no-sandbox`
+    # exemption `bazel_tag_guard.py` grants them is a branch nothing can reach
+    # — a clause whose red state is unreachable, which is the thing this whole
+    # corpus is written against. C-011 wrote `//...` >= 272 against a graph that
+    # had not grown the 42 GIF targets or the shared input group yet.
+    "stage-4": StageFloor(
+        universe="//...",
+        minimum=(
+            DRIFT_TARGET_FLOOR
+            + CAST_RULE_TARGETS
+            + GIF_RULE_TARGETS
+            + ACCEPTANCE_RULE_TARGETS
+            + GRAPH_TAIL_TARGETS
+        ),
     ),
 }
 
@@ -1269,7 +1309,10 @@ def prove_tags() -> int:
     # `stage-4` — `//...`, C-011's last step — is the undeclared one now that
     # stage 3 has a measured count. The red is the same shape and still real; it
     # moved because declaring a stage retires it as a subject for this proof.
-    unknown = tag_guard(**{**baseline, "stage": "stage-4"})
+    # `stage-5`, a name no wave has: stage 4 carries a declared floor now, and
+    # this case is about a stage that does not, so it needs a name that will
+    # stay undeclared rather than the next one due to be declared.
+    unknown = tag_guard(**{**baseline, "stage": "stage-5"})
     expect(codes(unknown) == ["tag-stage-unknown"], f"got {codes(unknown)}")
     print(f"S-012 RED  : {unknown[0].message}")
     checks += 1
@@ -1553,15 +1596,28 @@ def prove_counts() -> int:
         f"stage-3's floor is {STAGE_FLOORS['stage-3'].minimum}, the union universe has 143",
     )
     expect(
-        "stage-4" not in STAGE_FLOORS,
-        "stage-4 (//...) has a declared floor — C-011 puts it at wave 11 and nobody has "
-        "published WP-36's acceptance count, so a number here would be a guess, and an "
-        "undeclared stage is a hard red rather than a floorless run",
+        ACCEPTANCE_MODULE_TARGETS == 181,
+        f"acceptance modules is {ACCEPTANCE_MODULE_TARGETS}, test/tests/ holds 181",
+    )
+    expect(
+        ACCEPTANCE_RULE_TARGETS == 185,
+        f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 185",
+    )
+    expect(
+        STAGE_FLOORS["stage-4"].minimum == 332,
+        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 332",
+    )
+    expect(
+        STAGE_FLOORS["stage-4"].minimum
+        > STAGE_FLOORS["stage-3"].minimum + ACCEPTANCE_MODULE_TARGETS,
+        "stage-4's floor must exceed stage-3's by more than the module count, or a run that "
+        "read the acceptance modules and nothing else would clear it",
     )
     print(
         "counts  OK : 20 = 20 + 0, 53 = 19 + 34, 56 = 53 + 3, 45 = 40 + 5, 42 = 39 + 3, "
-        "143 = 56 + 45 + 42 — internal consistency only; WP-15/WP-16 must assert these against "
-        "WP-12's generated table, which is the reality check. stage-4 stays undeclared"
+        "143 = 56 + 45 + 42, 185 = 181 + 4, 332 = 143 + 185 + 4 — internal consistency only; "
+        "WP-15/WP-16 must assert these against WP-12's generated table, which is the reality "
+        "check"
     )
     return 1
 
