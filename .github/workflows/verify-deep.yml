@@ -187,6 +187,13 @@ jobs:
       # `cargo nextest run`, so the swap *adds* a coverage gate here rather
       # than moving one. `CARGO_BUILD_TARGET` is set job-wide and Bazel ignores
       # it; the Bazel lane's platform comes from its own toolchain resolution.
+      # The twin of `verify-basic.yml`'s, which carries the reasoning. Both
+      # lanes compile Rust under Bazel against one shared remote cache, so the
+      # linker the autoconfigured C++ toolchain picks has to be the same on
+      # both or neither ever hits the other's entries.
+      - name: Install lld
+        if: matrix.job.name == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y lld
       - name: Unit tests (Bazel)
         if: matrix.job.name == 'Linux'
         run: task bazel:test:unit
