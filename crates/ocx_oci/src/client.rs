@@ -127,7 +127,12 @@ pub use builder::ClientBuilder;
 /// `pub` rather than `pub(crate)` since the extraction: the index store's tag
 /// singleflight derives its own timeout from this one so the two cannot drift,
 /// and it now sits in another crate.
-pub use builder::REGISTRY_READ_TIMEOUT;
+///
+/// `PUSH_CHUNK_SIZE` and `REGISTRY_CONNECT_TIMEOUT` join it for `ocx-mirror`,
+/// which builds its own `native::ClientConfig`: a hand-built config inherits
+/// `None` for every timeout, so importing the values keeps its bounds from
+/// drifting away from ours.
+pub use builder::{PUSH_CHUNK_SIZE, REGISTRY_CONNECT_TIMEOUT, REGISTRY_READ_TIMEOUT};
 pub use mirror_map::MirrorMap;
 /// The buffering body a test double gives `OciTransport::push_blob_from_path`.
 /// Test-only by construction — the trait deliberately has no default, so a

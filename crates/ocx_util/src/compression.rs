@@ -90,7 +90,8 @@ impl CompressionLevel {
 /// Returns the default number of compression threads.
 /// Uses all available CPU cores, capped at 16 to limit memory on high-core machines.
 /// Falls back to 1 (single-threaded) if parallelism cannot be determined.
-pub(crate) fn default_threads() -> u32 {
+/// Public so downstream thread-count defaults import this cap instead of copying it.
+pub fn default_threads() -> u32 {
     std::thread::available_parallelism()
         .map(|n| (n.get() as u32).min(16))
         .unwrap_or(1)

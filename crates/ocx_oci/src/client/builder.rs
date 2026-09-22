@@ -20,11 +20,11 @@ pub(crate) const MAX_UPLOAD_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 /// A blob at or under this goes up in a single request; anything larger is split
 /// into this many bytes per `PATCH`, each carrying its own `Content-Range`, with
 /// the whole-blob digest committed by the final `PUT`. Held below
-/// [`MAX_UPLOAD_REQUEST_BYTES`] with a 1 MiB margin so transfer framing cannot
+/// `MAX_UPLOAD_REQUEST_BYTES` (4 MiB) with a 1 MiB margin so transfer framing cannot
 /// push a request over the registry's cap. Independent of the 128 KiB
 /// progress-frame size in `native_transport::progress_body_stream` — that governs
 /// progress granularity, this governs request size.
-pub(crate) const PUSH_CHUNK_SIZE: usize = MAX_UPLOAD_REQUEST_BYTES - 1024 * 1024;
+pub const PUSH_CHUNK_SIZE: usize = MAX_UPLOAD_REQUEST_BYTES - 1024 * 1024;
 
 /// Bound on every registry HTTP request, mapped to
 /// [`reqwest::ClientBuilder::read_timeout`].
@@ -83,7 +83,7 @@ pub const REGISTRY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// sibling bound on the index-document fetch: both are the connect phase
 /// against a registry-class endpoint, and one number is easier to reason about
 /// than two.
-pub(crate) const REGISTRY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub const REGISTRY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Everything [`TransportRecipe::build`] needs, and nothing that costs anything
 /// to hold — the deferred half of [`ClientBuilder`].
