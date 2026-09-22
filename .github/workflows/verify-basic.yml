@@ -341,6 +341,23 @@ jobs:
         with:
           read-auth: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.BAZEL_CACHE_READ_AUTH || '' }}
           write-auth: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}
+      # Ahead of every Bazel command in this job, because the C++ toolchain is
+      # autoconfigured on first use and the choice is made there, once, for the
+      # life of the output base. `rules_cc`'s `unix_cc_configure.bzl` probes
+      # `lld` then `gold` and bakes the winner into the toolchain as a forced
+      # `-fuse-ld=`; the runner image carries `ld.gold` and no unversioned
+      # `ld.lld`, so every rustc link action on this lane took gold and printed
+      # `warning: the gold linker is deprecated and has known bugs with Rust`.
+      # That is rustc's own warning about miscompiles, not cosmetic noise, and
+      # there is no flag that unpicks the choice: `--linkopt=-fuse-ld=bfd` would
+      # leave `supports_start_end_lib` on, and GNU ld has no `--start-lib`
+      # (checked on 2.45). Installing the linker Bazel already prefers is the
+      # only lever. `verify-deep.yml`'s Linux leg carries the same step for the
+      # same reason, and it must: the two lanes share one remote cache, and a
+      # toolchain difference between them is a different action key for every
+      # compile.
+      - name: Install lld
+        run: sudo apt-get update && sudo apt-get install -y lld
       - name: Bazel pin authority
         run: task bazel:pin:check
       # Per-target analysis timings to otel.ocx.sh (C-019, S-013) are pushed
