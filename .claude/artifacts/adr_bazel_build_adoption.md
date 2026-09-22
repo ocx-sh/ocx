@@ -298,7 +298,8 @@ ADR applies it here rather than deferring the whole of it to WP-0. Its
      > without `--target=` (5.8 min), one 210 s unit test + four 30 s timeouts.
 
      ~half non-compile, with the acceptance suite the largest single chunk — and
-     stage 4 is `local` + `external`-tagged with **no caching at all** (§ Stage 4).
+     stage 4 was `local` + `external`-tagged with **no caching at all** (§ Stage 4;
+     amended 2026-09-22 to `no-sandbox` + `exclusive` with results cached).
      So the one decomposition on record points at the half this design explicitly
      does not address, and a larger total does not convert into "the build is the
      cost" without one.
@@ -1407,6 +1408,47 @@ regression in wall-clock**, and A4's abort condition is keyed to it.
 
 #### Cache-result caching is disabled, deliberately
 
+> **AMENDED 2026-09-22 — result caching is ON.** The ruling below stands as
+> written until its last paragraph, which names its own exit condition: *"If a
+> future change ever wants result caching here, the precondition is a
+> demonstrated red on the binary-swap case — change the binary, require a miss —
+> and the `external` tag comes off in that same commit or not at all."* That is
+> what happened. The owner directed the reversal; the precondition was met in the
+> same change, and the amendment is recorded here rather than by rewriting the
+> reasoning, because the reasoning is what makes the conditions legible.
+>
+> **What changed, and what it cost.**
+>
+> * `external` came off, and `local` with it. `local` is `no-remote` +
+>   `no-sandbox`, and the `no-remote` half suppresses the `--disk_cache` hit —
+>   measured on the pin, a `local`-tagged test re-runs on a warm **fresh
+>   server**, which is the state every CI runner is in. `no-sandbox` buys the
+>   execroot working directory the suite needs with none of that; the five-row
+>   measured table is in `test/bazel.bzl`'s module docstring and is shipped as an
+>   expectation by `scripts/bazel_accept_proofs.py --prove-s015`, so a Bazel
+>   release moving a cell reds rather than silently invalidating this.
+> * The inputs stopped being aspirational. Each target declares its own module
+>   plus `//test:suite_inputs` — `conftest.py`, `pyproject.toml`, `uv.lock`,
+>   `ocx.toml`/`ocx.lock`, the floor and ceiling files, `src/**`, the fixture
+>   tree, `scenarios/`, `specs/`, `sigstore/`, `scripts/`, `docker/`,
+>   `docker-compose.yml`, `zot-config.json` and `bin/ocx*` — with every generated
+>   path excluded by a measured list rather than a guessed one.
+> * The two compensating controls are live rather than promised.
+>   `bazel:tag:guard` now runs at stage 4 (`//...`) and refuses any acceptance
+>   target that stops declaring `//test:docker-compose.yml` and
+>   `//test:suite_anchor`; `bazel_accept_proofs.py --check-s015` requires a
+>   warm run in which everything cached **and** a binary-swap run in which
+>   nothing did.
+> * **The under-declaration that remains is named rather than closed:** the
+>   compose stack's running state is not an action input, and ~20 modules read
+>   `target/release/ocx_schema`, `crates/**`, `website/src/docs/**` or
+>   `test/doc_scripts/**` across a package boundary. `test/bazel.bzl`'s docstring
+>   carries the list and each one's stale-green risk. This is the honest price of
+>   the reversal and it is not hidden behind the word "cached".
+> * **The wall clock got worse, not better, and A4's abort condition is
+>   breached.** See A4 below for the three measured numbers. The owner took the
+>   decision with the regression named; caching is the mitigation, not a denial.
+
 The previous draft based invalidation on `SCOPED_ROWS` plus "each test owning its own
 registry state — unchanged from today's assumption". That does not make a cache key.
 Nothing in it requires the **tested `ocx` binary's bytes**, the **compose
@@ -1467,6 +1509,19 @@ the main lane only** → **no remote execution, ever, under this ADR**.
    affects every developer on the project, and wiping the entire remote cache is
    not a feasible solution"). Any future tag trim on these targets is a
    BZL-CORE-01 violation ("never reach green by weakening the check").
+
+   > **AMENDED 2026-09-22.** The corollary's own case arrived: the acceptance
+   > stage dropped `local` and kept `no-sandbox`, which is exactly the trim this
+   > paragraph forbids. It is not a BZL-CORE-01 violation because the check was
+   > not weakened — it was **narrowed and given a subject**. `bazel:tag:guard`
+   > advanced to stage 4 so the acceptance package is in its universe at all,
+   > and it credits a `no-sandbox` acceptance target only while that target
+   > declares the binary under test and the compose definition among its inputs.
+   > The cast stage is untouched: its 40 genrules keep `no-remote-cache`, which
+   > is a *build* action's answer and was measured separately. What this
+   > paragraph gets right and keeps is that `no-sandbox` alone is cache-key
+   > unsound; what the amendment adds is that a declared input set is the other
+   > way to be sound, and that the gate has to be able to see it.
 
 1a. **The corollary gets a gate, because prose is not one.** This ADR's own
    non-negotiable is that every gate it creates has a demonstrable red state, and
@@ -2498,10 +2553,37 @@ shrank.
 
 ### A4 — Stage 4: acceptance
 
-**Scope:** **one `sh_test` per `test/tests/test_*.py`** — 172 targets today,
-`local` + `external`-tagged, `--local_test_jobs=1`, against the existing
-docker-compose services. `SCOPED_ROWS` is the crate → target **selection query**,
-not the unit (§ Stage 4).
+> **AMENDED 2026-09-22 — the lane exists, its results are cached, and the abort
+> condition below is breached.** Halves 1 and 3 stand; half 2 is inverted (see
+> the § Stage 4 amendment note). The lane is `task bazel:test:accept`, it runs in
+> `task verify` phase 2 and in `verify-deep.yml`'s acceptance job, and it is the
+> first thing that has ever executed these targets — both callers ran
+> `task test:parallel`, i.e. pytest directly, so the 181 targets existed and
+> nothing observed them.
+>
+> **The three measured wall clocks** — `task test:parallel`, the cold
+> `bazel test //test:all --local_test_jobs=1`, and the same run warm — are in
+> `plan_bazel_build_adoption.md`'s **DX-97** row with the arithmetic. **The 50 %
+> ceiling below is breached by a wide margin on the cold run**, for exactly the
+> reason this section predicted: 181 serial `uv run pytest` processes against one
+> xdist run. The owner directed the change with that named, and caching is the
+> mitigation — the *second* run is where the lane pays, and a docs-only commit
+> executes zero targets. The abort condition is recorded as **breached and
+> overruled**, not as met.
+>
+> **Scope, as built:** `//test:all` rather than `//test/...`. `bazel test` builds
+> the non-test targets a pattern expands to, and `//test/...` reaches
+> `//test/doc_scripts` — 79 genrules recording 39 casts and rendering 39 GIFs,
+> plus `:gif_check`, whose deps are all 39. That is stage 3's subject and its own
+> lane's cost; pulling it in would make this lane's wall clock a statement about
+> cast recording.
+
+**Scope:** **one `sh_test` per `test/tests/test_*.py`** — 181 targets today
+(the "172" this line carried was stale; the count is the `glob`'s, and
+`scripts/bazel_gate_proofs.ACCEPTANCE_MODULE_TARGETS` is now its one home),
+`no-sandbox` + `exclusive`-tagged, `--local_test_jobs=1` on the command line,
+against the existing docker-compose services. `SCOPED_ROWS` is the crate →
+target **selection query**, not the unit (§ Stage 4).
 
 **Green:** the suite runs as `sh_test`s shelling to `@tools//:uv run pytest`; a
 docs-only commit **selects zero** acceptance targets; `bazel test //test:all` on a
@@ -2518,19 +2600,24 @@ commit, and the `sh_test` count equals the `test/tests/test_*.py` file count.
    selected. Touch `crates/ocx` → the `escalate` row maps to `//test:all` and the
    whole suite is selected. **If a docs-only commit and a crate-touching commit
    select the same set, the selection is not wired and A4 is not met.**
-2. **Caching is off, and that is asserted rather than assumed.** Run
-   `bazel test //test:all` twice with no source change → **no target reports
-   `(cached)`**. Per BZL-TEST-08 this is how the `external` tag is *proven* rather
-   than read; an untagged sibling run must report `(cached)` to show the check can
-   distinguish the two states. A `(cached)` acceptance target is a Block-tier
-   finding, because nothing in stage 4's inputs tracks the compose stack.
-3. **The binary is not silently stale.** Change the `ocx` binary under test without
-   touching any `test/**` file → every selected target still re-executes (which
-   half 2 guarantees) **and** the declared input digest for the binary changes.
-   Until half 2 stays true, half 3 is defence in depth; the day anyone proposes
-   turning result caching on, half 3 becomes the control and must red on its own.
+2. **Caching is off, and that is asserted rather than assumed.** *(INVERTED
+   2026-09-22.)* Run `bazel test //test:all` twice with no source change →
+   **every** target reports `(cached)`; `Executed 0 out of 181 tests` is the
+   line. A target that re-executes on an unchanged tree is the finding now, and
+   its usual cause is a generated file inside one of `//test:suite_inputs`'
+   globs. The untagged-sibling control went with the contract it served: under
+   caching-on, "everything cached" is also what a reader crediting key
+   *presence* rather than truth answers on any BEP, so the control moved to
+   half 3, which must red on its own.
+3. **The binary is not silently stale.** Change the `ocx` binary under test
+   without touching any `test/**` file → every target re-executes **and** the
+   declared input digest for the binary changes. *(2026-09-22: no longer defence
+   in depth. It is the control, exactly as this sentence said it would become —
+   `scripts/bazel_accept_proofs.py --check-s015` takes the warm BEP and the
+   binary-swap BEP and refuses a run given only one of them.)*
 
-**Abort condition:** stage 4's wall-clock under `--local_test_jobs=1` exceeds
+**Abort condition** *(breached and overruled — see the amendment note at the head
+of this section)*: stage 4's wall-clock under `--local_test_jobs=1` exceeds
 `task test:parallel`'s measured wall-clock on the same commit by **more than 50 %**
 → stage 4 does not land, and the acceptance suite stays on Taskfile. Stage 4 buys
 selection only (§ Stage 4); selection that costs half again as much as the parallel
@@ -2778,4 +2865,5 @@ the questions being quietly dropped.
 | 2026-09-21 | Architect (`/hex-architect high`) | Initial draft. Reopens `adr_crate_split_workspace.md:19`. Rules the three bazel-adopt/bazel-quality frictions; closes six of the dossier's nine open questions; carries three open questions for the owner. |
 | 2026-09-21 | Architect (`/hex-architect high`, Round 1 fix pass) | Revised against a four-seat review panel (three opus seats plus a cross-model adversary). Material changes: the anonymous-read premise is withdrawn and replaced by a stated contradiction plus a hard WP-0 probe with a branch table; the `go-no-go.md` reading table is applied rather than sequenced, and the disposition recorded as the owner's scope decision; Option C rebuilt as the predecessor's measured ladder; Buck2 added to Option D; a delivery-cost row and a criterion-1 range added to the matrix, with the A-vs-B disagreement stated rather than weighted away; the Rust target shape corrected to 34 test targets; the floor reader moved to `$XML_OUTPUT_FILE` with observed per-target counts; the website hermeticity check split into declared-input invalidation, ambient-input isolation and tool-pin participation; stage 4's cache unit changed to one target per test module with result caching disabled; the credential mechanism resolved to a CI-only rc file with a trusted-event-conditioned secret and no developer write helper; the AC/CAS asymmetry, a generation salt, detection and rotation added; a tag-guard gate, a BEP→OTLP gate contract and an edited-file-set table added; 72 cast targets corrected to 39; A3 and A4 given abort conditions that abort. |
 | 2026-09-21 | Architect (`/hex-architect high`, measured-facts pass) | Five measurements arrived and closed both remaining open questions, taking the marker count to **zero**. Anonymous reads measured **401** (`ocx-sh-10-bazel-cache.conf:29-33`, no `limit_except`) — the dossier's premise traced to a stale `bazel-cache/README.md`, the second ratified decision in this run to rest on a stale record; branch (a), a read-only credential, ruled in. CI medians measured (verify-basic **1731 s**, verify-deep **3407 s**), superseding `hex.md`'s 3347 s; the go/no-go reading rewritten against them — reading 3's "cheaper fix named as insufficient" clause is now **evidenced as no demonstrated movement** (not as a regression: different measurement windows), and the reading still lands on the fallthrough because 3407 s is a **total, not a decomposition**, which is now the single remaining empty signal row. `rules_ocx` corrected from "API 0.1.0" to **v0.4.0** with `ocx.project()` already implemented — WP-0b resized from a build to a version bump, and Q9's coupling objection correspondingly weakened. `bazel` mirror confirmed published and enumerated (no linux/arm64 musl candidate). `agg` confirmed to need a **new mirror repository**, not a tag. Host envelope added as ruling 12 (`-Xmx2g`, `--jobs=12`, disk cache off `/tmp`). New § Orchestrator rulings pending owner ratification records R1 and R2 as chain decisions, not owner ones; Status stays **Proposed**. |
+| 2026-09-22 | Owner decision, executed | **Stage 4's "cache-result caching is disabled, deliberately" ruling reversed.** The acceptance suite runs as `task bazel:test:accept` (`bazel test //test:all --local_test_jobs=1`) in `task verify` phase 2 and in `verify-deep.yml`'s acceptance job, **with results cached**. The ruling's own exit condition was the precondition and it is met in the same change: `external` and `local` both off (measured — `local`'s `no-remote` half suppresses the disk-cache hit on a fresh server), `no-sandbox` in their place, the real input set declared through `//test:suite_inputs`, `bazel:tag:guard` advanced to stage 4 and narrowed so it refuses an acceptance target that stops declaring the binary and the compose definition, and `--check-s015` rebuilt around the binary-swap control. A4's red half 2 is inverted, half 3 is promoted from defence in depth to the control, and A4's 50 % wall-clock abort condition is recorded as **breached and overruled** with its three numbers in `plan_bazel_build_adoption.md`'s DX-97 row. The residual under-declaration (the live compose stack, and ~20 modules reading across a package boundary) is named in `test/bazel.bzl`'s docstring rather than closed. |
 | 2026-09-21 | Architect (`/hex-architect high`, R2 fix pass) | Closes the R2 residual, which was one systematic substitution the previous pass introduced. `54` (all `//crates/...` targets) replaced by **34** (test targets) at the five sites whose subject is test targets, `rust-suites` or `TEST_TARGET_MAP` rows, and by **57** at the two whose subject is every target in the 23 Rust BUILD files; the drift gate's false "the two floors cannot disagree" claim replaced by four floors each named on its own reader's universe (34 / 57 / 54 / ≥ 274); "23-crate pilot" corrected to 20; the `GITHUB_*` enumeration mirrored into the disposition table; BZL-CI-01 quoted instead of paraphrased, so ~300 reads as the signal to measure rather than half a trigger; the decision file's empty-cell count taken from the quoted check (three rows) instead of by eye, and the `Build owner` Answer cell filled; `build.rs` cited `:35-42`. NC#3 retired to WP-0b as a lookup rather than a decision, leaving **two** markers — three is a cap, not a quota. Every `hex.md` citation converted from a line number to a quoted phrase, that file being appended to at the top. |

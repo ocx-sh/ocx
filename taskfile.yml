@@ -119,7 +119,12 @@ tasks:
         parsers left this phase with the nextest run log they read),
         rust:test:doc
         (nextest runs no doctest, and the scoped gate's per-crate doctest step
-        is iterated over an empty CRATES on every escalate), then test:parallel
+        is iterated over an empty CRATES on every escalate), then
+        bazel:test:accept — one serial `bazel test` over the acceptance
+        package, the suite as 181 cached sh_test targets, carrying the suite
+        floor and the skip/xfail ceilings read off its own per-case JUnit
+        reports, and carrying the pytest entry point's own summary parser
+        fixtures where the step it replaces reached them
       Ends with a *full* verify mark (.verify:mark SCOPE=full) — the only
         mark a `release:` commit or a commit on main accepts.
       A step whose `sources:` are unchanged is skipped, and the full mark is
@@ -408,4 +413,24 @@ tasks:
       # change under the CLI crate is, `ocx` being in TABLE_ESCALATES. DX-58's
       # defect, fixed for `rust:doc:ratchet` and left standing here.
       - task: rust:test:doc
-      - task: test:parallel
+      # A7's fourth line over the acceptance half, replacing `test:parallel`.
+      # The 181 `sh_test` targets have existed since WP-36 and nothing ran
+      # them: both this phase and `verify-deep.yml`'s acceptance job called
+      # `task test:parallel`, i.e. pytest directly, so stage 4 was neither
+      # cached nor reported through Bazel. It is now, with its results CACHED
+      # (adr_bazel_build_adoption.md § Stage 4, amended) — which is what pays
+      # for the serial `--local_test_jobs=1` run: an unchanged tree executes 0
+      # of 181, and one edited module executes 1.
+      #
+      # `test/SUITE_FLOOR` and the skip/xfail ceilings did not leave with
+      # `test:parallel`: `bazel:test:accept` reads them off the 181 per-case
+      # JUnit reports Bazel writes, which is more than the terminal-summary
+      # parser they replace saw. `task test:parallel` survives as the local
+      # xdist convenience and as `verify:scoped`'s acceptance leg.
+      #
+      # That parser's own red/green fixtures stay on the gate — inside
+      # `bazel:test:accept` rather than beside it, which is where the step it
+      # replaces reached them (`test:parallel` -> `test:default` ->
+      # `ceilings:self-test`). Same obligation, same lane, and the phase keeps
+      # one entry where it had one.
+      - task: bazel:test:accept

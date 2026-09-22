@@ -423,7 +423,6 @@ tasks:
       report's case count is floored against the summary line the floor reads,
       so a libtest format change reds instead of shipping an empty report.
 
-
       **The stream never touches the checkout**, for the reason
       `build:nobuild` states at length: bazel serialises the whole client
       environment and every rc-file flag value into it. Same `mktemp -d`, the
@@ -495,40 +494,6 @@ tasks:
       # path with a space would need the flag built inside the `cmd:` body.
       CACHE_RC:
         sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
-      # `--bazelrc=$RUNNER_TEMP/bazel-cache.rc`, or the empty string. That file
-      # is the cache credential `.github/actions/bazel-cache-rc` writes; without
-      # it every request to the shared cache is an anonymous 401 and this lane
-      # compiles cold, which is what it did until now.
-      #
-      # **Derived from the file existing, never from a lane naming it.** Three
-      # states must all be green and only one has the file: `--bazelrc` on a
-      # missing path is a HARD error (measured on the pinned 9.2.0: exit 2,
-      # `Unable to read .bazelrc file`, before anything runs), a fork PR is
-      # given no secrets so the action writes nothing, and a developer shell has
-      # no `$RUNNER_TEMP` at all. Both of those then read the cache anonymously
-      # over `--disk_cache`, which is the documented fallback — a lane that
-      # fails loudly on a fork is the defect, not the fallback.
-      #
-      # It is a *startup* option, so it goes before the command word. It does
-      # not replace the tracked `.bazelrc`: measured with `--announce_rc`, Bazel
-      # reads the home rc, then the workspace rc, then this one, so
-      # `--remote_upload_local_results=false` still holds on every lane.
-      #
-      # `printf '%s' "<value>"`, and the spelling is measured rather than
-      # stylistic. go-task runs `sh:` through its own shell (mvdan/sh), not
-      # bash, and that `printf` builtin does **not** honour `--` as
-      # end-of-options: `printf -- '--bazelrc=%s' "$X"` takes `--` as the
-      # *format* and emits exactly two dashes, so the lane ran
-      # `bazel -- test //crates/...` with the credential silently dropped. It
-      # is green — the flag is simply gone — which is why it was caught by
-      # reading `task --dry`'s rendered command line and not by a bash probe of
-      # the same expression, where `--` works.
-      #
-      # ponytail: no quoting around the expansion at the call site —
-      # `$RUNNER_TEMP` is `/home/runner/work/_temp` on every GitHub runner. A
-      # path with a space would need the flag built inside the `cmd:` body.
-      CACHE_RC:
-        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
       - defer: rm -rf '{{.BEP_DIR}}'
       - task: bep:mode
@@ -547,6 +512,239 @@ tasks:
           chmod 600 '{{.BEP}}'
           mkdir -p "$(dirname '{{.JUNIT}}')"
           python3 {{.ROOT_DIR}}/scripts/bazel_test_floor.py --bep '{{.BEP}}' --junit '{{.JUNIT}}' || exit $?
+          exit "$status"
+
+  test:accept:
+    desc: The acceptance suite as Bazel test targets — `bazel test //test:all`, one stack, results cached
+    summary: |
+      Stage 4's lane (C-024), and the first thing that has ever run the 181
+      `sh_test` targets: `task verify` and `verify-deep.yml` both called
+      `task test:parallel`, i.e. pytest directly, so the targets existed and
+      nothing executed, cached or reported them.
+
+      **Results are CACHED here, and that is a reversal.** The ADR ruled stage-4
+      result caching off; `adr_bazel_build_adoption.md` § Stage 4 carries the
+      amendment and `test/bazel.bzl`'s docstring carries the measurement that
+      makes it work — `external` off (the only tag that stops a result being
+      reused) and `local` off too, because its `no-remote` half suppresses the
+      `--disk_cache` hit on a **fresh server**, which is the state every CI
+      runner is in. `no-sandbox` buys the execroot the runner needs with none of
+      that. The compensating control is A4's own red half 3: `bin/ocx*` is a
+      declared input through `//test:suite_anchor`, so a rebuilt binary re-keys
+      every target. `bazel:tag:guard` enforces that declaration on every one of
+      the 181 targets from the graph side, on every `task verify` and every
+      pull request — along with the tag set, the sibling-sweep declarations and
+      `//test:suite_inputs`' own contents.
+
+      **The run-side half is manual, and that is stated rather than implied.**
+      `scripts/bazel_accept_proofs.py --check-s015` compares the built and the
+      under-test binary's digests and requires a binary-swap run in which
+      nothing cached. No lane and no task invokes it: it needs a rebuilt binary
+      and a warm run. By hand:
+
+          task -d test bazel:tags
+          python3 scripts/bazel_accept_proofs.py --check-s015 \
+              --warm <unchanged-tree BEP> --mutated <binary-swap BEP> \
+              --tags test/results/bazel-acceptance-tags.json \
+              --built-binary target/release/ocx --binary-under-test test/bin/ocx
+
+      **`//test:all`, not `//test/...`, and that is a deviation with a measured
+      reason.** `bazel test` over a target pattern builds the non-test targets
+      it expands to, and `//test/...` reaches `//test/doc_scripts` — 79 genrules
+      that record 39 terminal casts and render 39 GIFs, plus `:gif_check`, whose
+      deps are all 39 renders. That chain is stage 3's subject and its own
+      lane's cost; dragging it into the acceptance lane would make this step's
+      wall clock a statement about cast recording. `//test:all` is exactly the
+      acceptance package: 181 `sh_test` targets, the runner and three
+      filegroups.
+
+      **`--local_test_jobs=1` on the command line, never in an rc file** (ADR
+      ruling 12). One compose stack on one set of ports, so the targets must
+      serialise — `exclusive` already does that, and the runner's own host-wide
+      `flock` serialises against a `task test:parallel` in a sibling worktree
+      that `exclusive` knows nothing about. What the flag adds is that Bazel
+      does not *queue* 12 tests it will then run one at a time. An rc line is
+      per-command and never per-target-pattern, so a global one would also
+      serialise the 34 Rust test targets and delete stage 2's entire win;
+      `bazel_accept_proofs.py::global_serialisation_findings` reds one, which is
+      why this is the flag's only home.
+
+      **`NOCACHE=1` is the escape hatch, and deliberately NOT `--force`.** The
+      first cut read `{{.CLI_FORCE}}`, which reads well — `--force` is what
+      everyone already types to defeat a fingerprint cache. It is also what
+      `task verify --force` sets, and this repository's conventions tell
+      everyone to pass it, so every full gate would have run
+      `--nocache_test_results` and the caching this lane exists for would have
+      been unreachable from the one command that runs it. Measured on this tree:
+      1421 s serial against `task test:parallel`'s 160 s, on every run, for a
+      cache nothing would ever hit. So:
+
+          task bazel:test:accept NOCACHE=1     # run all 181 regardless
+
+      `task verify` trusts the declared inputs, which is the whole point of
+      having declared them, and `bazel:tag:guard` is what keeps that
+      declaration honest on every run. A release lane, when one exists, is where
+      `NOCACHE=1` belongs as a matter of course — a release should re-execute
+      rather than believe a key.
+
+      **The reports are copied out, and the copy carries the floor.** Bazel
+      writes real per-case pytest JUnit here — the runner passes
+      `--junit-xml=$XML_OUTPUT_FILE`, unlike the Rust lane, where Bazel
+      synthesises one `testcase` per target. `bazel-testlogs` is a convenience
+      symlink into the output base, so the files are copied to
+      `target/bazel/accept/<module>/junit.xml` where a CI upload can glob real
+      paths. The same step reads them, because this lane replaces
+      `test:parallel` in `task verify` and `test:parallel` carried two gates
+      that would otherwise vanish with it: `test/SUITE_FLOOR` (the suite never
+      shrinks) and `test/SKIP_CEILING` / `XFAIL_CEILING` (a skip added to dodge
+      a red). Read here off the per-case XML rather than off a terminal summary
+      line, which is strictly more than the shell parser they replace had.
+
+      **The copy names the set it expects; it does not glob the output base.**
+      Bazel never prunes `bazel-testlogs` for a target that left the graph, so a
+      deleted or renamed module leaves its last report there for good — and a
+      glob would count it, which is precisely how `SUITE_FLOOR` would stop being
+      able to see a shrink. So the expected set is read off `test/tests/`, a
+      module with no report is refused by name, and a report belonging to no
+      current module is printed as an orphan and never counted. CI is unaffected
+      either way (fresh output base per job); a developer's `task verify` is the
+      lane this is for.
+    dir: '{{.ROOT_DIR}}'
+    vars:
+      REPORTS: '{{.ROOT_DIR}}/target/bazel/accept'
+      # Identical in shape and reason to `test:unit`'s: `--bazelrc` on a missing
+      # path is a hard error, a fork PR is given no secrets so the action writes
+      # nothing, and a developer shell has no $RUNNER_TEMP — so the flag is
+      # derived from the file existing, never from a lane naming it. `printf
+      # '%s'` and not `printf -- '%s'`: mvdan/sh's builtin takes `--` as the
+      # format string (measured; it silently dropped the credential).
+      CACHE_RC:
+        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
+    cmds:
+      - task: bootstrap
+      # `test/bin/ocx` and the generated JSON schemas. Not optional and not the
+      # runner's job: the runner refuses an absent binary out loud, which is the
+      # right failure but a late one, and several modules read a schema straight
+      # off disk. This is the task `test:default` uses, so both entry points
+      # build the same way.
+      - task: :test:build
+      # Inherited from the step this task replaces in `task verify` phase 2.
+      # `test:parallel` -> `test:default` reached `ceilings:self-test`, the
+      # red/green fixtures for the shell parser that reads a pytest summary
+      # line; this lane reads per-case XML instead and does not use that
+      # parser, but `task test:parallel` is still what a developer and
+      # `verify:scoped` run, and a parser whose fixtures run nowhere is how it
+      # stopped matching before. Same reason `rust:test:ceiling:self-test`
+      # outlived the nextest bracket. It costs 0.2 s and starts no registry.
+      - task: :test:ceilings:self-test
+      - cmd: |
+          set -o pipefail
+          status=0
+          ocx exec bazel -- bazel {{.CACHE_RC}} test //test:all \
+            --local_test_jobs=1 {{if .NOCACHE}}--nocache_test_results{{end}} {{.CLI_ARGS}} || status=$?
+          python3 - '{{.ROOT_DIR}}' '{{.REPORTS}}' <<'PY' || exit $?
+          import pathlib
+          import shutil
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+          testlogs = root / "bazel-testlogs" / "test"
+          shutil.rmtree(out, ignore_errors=True)
+          out.mkdir(parents=True, exist_ok=True)
+
+          # The set this run was MEANT to produce, read off the tree, not off
+          # `bazel-testlogs`. Bazel never prunes the output base for a target
+          # that left the graph, so a module deleted or renamed leaves its last
+          # report behind forever — and a glob over `*/test.xml` then counts a
+          # case that no longer exists. Every gate below would be blind to
+          # exactly what it is for: `SUITE_FLOOR`'s whole job is "the suite
+          # never shrinks", and the orphan makes the shrink invisible.
+          # `SKIP_CEILING` and `XFAIL_CEILING` are polluted the same way. CI
+          # never sees it (fresh output base per job); every developer's
+          # `task verify` does.
+          expected = sorted(p.stem for p in (root / "test" / "tests").glob("test_*.py"))
+          if not expected:
+              raise SystemExit(
+                  f"bazel accept: no acceptance module under {root / 'test' / 'tests'} — the "
+                  "reader found nothing, which is not the same as the suite being empty"
+              )
+
+          copied, missing = [], []
+          for module in expected:
+              report = testlogs / module / "test.xml"
+              if not report.is_file():
+                  missing.append(module)
+                  continue
+              target = out / module / "junit.xml"
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(report, target)
+              copied.append(target)
+
+          # A missing report is refused BY NAME: a `bazel test` that ran nothing
+          # exits 0, so a count alone cannot tell a skipped target from a whole
+          # suite that never collected a case.
+          if missing:
+              raise SystemExit(
+                  f"bazel accept: {len(missing)} of {len(expected)} acceptance module(s) left no "
+                  f"report under {testlogs} — first {missing[:5]}. The run covered less than the "
+                  "tree, so every count below would be about a subset"
+              )
+
+          # An orphan is NAMED and not counted. Ignored rather than refused on
+          # purpose: a leftover from a branch that had a module this one does
+          # not is a true statement about the output base, not a fault in this
+          # tree, and failing on it would red a `task verify` that a
+          # `git switch` alone caused. What it must never do is reach a count.
+          orphans = sorted(
+              path.parent.name
+              for path in testlogs.glob("*/test.xml")
+              if path.parent.name not in set(expected)
+          )
+          if orphans:
+              print(
+                  f"bazel accept: ignoring {len(orphans)} stale report(s) under {testlogs} for "
+                  f"target(s) no longer in the graph: {orphans[:5]}"
+                  + (" ..." if len(orphans) > 5 else "")
+                  + " — bazel does not prune these; `bazel clean` does",
+                  file=sys.stderr,
+              )
+
+          cases = skipped = xfailed = 0
+          for report in copied:
+              suite = ET.parse(report).getroot()
+              for case in suite.iter("testcase"):
+                  cases += 1
+                  for mark in case.findall("skipped"):
+                      if mark.get("type") == "pytest.xfail":
+                          xfailed += 1
+                      else:
+                          skipped += 1
+
+          def limit(name: str) -> int:
+              return int((root / "test" / name).read_text(encoding="utf-8").strip())
+
+          problems = []
+          if cases < limit("SUITE_FLOOR"):
+              problems.append(
+                  f"{cases} cases ran, test/SUITE_FLOOR is {limit('SUITE_FLOOR')} — the suite shrank"
+              )
+          if skipped > limit("SKIP_CEILING"):
+              problems.append(
+                  f"{skipped} skipped exceeds test/SKIP_CEILING ({limit('SKIP_CEILING')})"
+              )
+          if xfailed > limit("XFAIL_CEILING"):
+              problems.append(
+                  f"{xfailed} xfailed exceeds test/XFAIL_CEILING ({limit('XFAIL_CEILING')})"
+              )
+          if problems:
+              raise SystemExit("bazel accept: " + "; ".join(problems))
+          print(
+              f"bazel accept: {len(copied)} of {len(expected)} per-module report(s) -> {out}; "
+              f"{cases} cases (floor {limit('SUITE_FLOOR')}), {skipped} skipped (ceiling "
+              f"{limit('SKIP_CEILING')}), {xfailed} xfailed (ceiling {limit('XFAIL_CEILING')})"
+          )
+          PY
           exit "$status"
 
   test:
