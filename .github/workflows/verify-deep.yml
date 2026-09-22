@@ -136,15 +136,70 @@ jobs:
           # (__OCX_SELF_IMAGE) is gated behind ocx/__testing — match the
           # local `task test` build. These are test-only artifacts.
           features: ocx/__testing
+      # nextest is the engine on macOS and Windows only. The two legs are split
+      # rather than unified, and the reason is the floor: `crates/TEST_TARGET_MAP.toml`
+      # records a per-target case count measured on Linux, and `cfg`-gated tests make
+      # those counts platform-dependent — the same reason `rust:test:floor` and
+      # `rust:test:ceiling` have carried `platforms: [linux]` since they existed.
+      # A Bazel lane on Windows would red against Linux's numbers, and re-recording
+      # them per platform is three tables where there is one subject.
       - name: Install nextest
+        if: matrix.job.name != 'Linux'
         uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
         with:
           tool: cargo-nextest
       - name: Test
+        if: matrix.job.name != 'Linux'
         run: cargo nextest run --workspace --target=${{ matrix.job.target }} --profile ci --locked
       - name: Setup Task
         if: matrix.job.name == 'Linux'
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      # `ocx` on PATH is a prerequisite, not a convenience: every task in
+      # `taskfiles/bazel.taskfile.yml` shells out through `ocx exec bazel --`,
+      # and without it the step below exits 127. `project: ''` would be wrong
+      # here — `ocx exec` resolves the bazel binding from this repository's own
+      # `ocx.toml`, which is where the 9.2.0 pin `bazel:pin:check` asserts lives.
+      - name: Setup OCX
+        if: matrix.job.name == 'Linux'
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Default-off: the action would otherwise restore
+          # $OCX_HOME/{blobs,layers,packages,tags} across runs, and a restored
+          # object store is runner-executable content.
+          cache: false
+      # The **read** credential, on the Linux leg only because it is the only
+      # leg that runs bazel. Read, never write: `write-auth` is not passed here
+      # in any spelling, so this job holds no write credential and the cache
+      # stays read-only on every trigger this workflow has — which includes a
+      # non-draft pull request, the lane the cache exists for. A fork PR sees no
+      # secrets, the binding is the empty string, the action writes nothing and
+      # `bazel:test:unit` omits `--bazelrc` and reads anonymously. Without this
+      # step every request was an anonymous 401 and the step below compiled cold.
+      - name: Bazel cache credential
+        if: matrix.job.name == 'Linux'
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+      # C-016's other half. `verify-basic.yml`'s `smoke` job carries the same
+      # swap and the measurement behind it; this leg differs only in that its
+      # `Test` step had no floor and no ceiling at all — it was a bare
+      # `cargo nextest run`, so the swap *adds* a coverage gate here rather
+      # than moving one. `CARGO_BUILD_TARGET` is set job-wide and Bazel ignores
+      # it; the Bazel lane's platform comes from its own toolchain resolution.
+      - name: Unit tests (Bazel)
+        if: matrix.job.name == 'Linux'
+        run: task bazel:test:unit
+      # C-015's caller half; see the twin in `verify-basic.yml`. `always()`
+      # rather than `success()`, and no platform half in the condition: the
+      # cleanup is `rm -f` over two names, so it is green on the macOS and
+      # Windows legs where nothing was ever written, and a second condition is
+      # a second thing that can go stale.
+      - name: Remove the Bazel cache credential
+        if: always()
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          cleanup: 'true'
       - name: Generate Schema
         if: matrix.job.name == 'Linux'
         run: task schema:generate
@@ -168,8 +223,16 @@ jobs:
           path: target/${{ matrix.job.target }}/release/ocx_schema
           compression-level: 0
           retention-days: 1
+      # Both steps are nextest-only, and the `if:` says so rather than letting
+      # them find an absent file: after the swap the Linux leg writes no
+      # per-case JUnit, because rules_rust drives plain libtest and Bazel's
+      # synthesised `test.xml` carries one `testcase` per *target* (34, against
+      # 8213 cases). Uploading that under `deep-unit-Linux` would hand
+      # `test-results` a report whose scope is 240x narrower than its name.
+      # macOS and Windows keep both, and they are the legs whose timings the
+      # per-OS dashboards are actually about.
       - name: Upload Test Results
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.job.name != 'Linux' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: deep-unit-${{ matrix.job.name }}
@@ -181,7 +244,7 @@ jobs:
       # every one of its own failures into a warning, and this guards the case
       # where the runner kills it.
       - name: Push unit test timings
-        if: ${{ !cancelled() && env.OTEL_OTLP_AUTH != '' }}
+        if: ${{ !cancelled() && matrix.job.name != 'Linux' && env.OTEL_OTLP_AUTH != '' }}
         continue-on-error: true
         timeout-minutes: 5
         uses: ./.github/actions/test-telemetry
