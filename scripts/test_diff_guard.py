@@ -156,6 +156,11 @@ ALLOWED_CONFIG = frozenset(
         "test/SUITE_FLOOR",
         "test/SKIP_CEILING",
         "test/XFAIL_CEILING",
+        # The Bazel arm of the same suite (C-024). Both carry the acceptance
+        # target list, so an edit to either can narrow what runs — which is why
+        # they are judged here rather than exempted.
+        "test/BUILD.bazel",
+        "test/bazel.bzl",
     }
 )
 # pytest's ways of running fewer tests, or none, from a config or task line:
@@ -337,6 +342,26 @@ def _fixture_only(mode: str) -> bool:
 # a test module: a new one under `test/` changes how every existing test runs.
 _NEVER_NEW = frozenset({"conftest.py", "__init__.py", "pytest.ini", "tox.ini", "setup.cfg"})
 
+# The Bazel files the adoption adds under `test/`: the acceptance package and
+# the macro declaring its 172 `sh_test` targets (WP-36), the cast package and
+# its macro (WP-33). Enumerated rather than allowed by shape, so a further
+# Bazel file under `test/` is still a decision - a new package there moves the
+# boundary that `//:` labels resolve against, which has twice taken `//...`
+# down in this series.
+_NEW_BUILD_FILES = frozenset(
+    {
+        "test/BUILD.bazel",
+        "test/bazel.bzl",
+        "test/doc_scripts/BUILD.bazel",
+        "test/doc_scripts/cast.bzl",
+    }
+)
+
+# BEP fixtures for `scripts/bep_to_otlp.py`'s self-test. They are captured
+# Bazel output, read by a gate and by nothing pytest collects, so they change
+# no existing test's behaviour - the property this guard defends.
+_NEW_FIXTURE_PREFIX = "test/fixtures/bep/"
+
 
 def _new_file_allowed(path: str) -> bool:
     """Only a new `test/tests/**/*.py` module — the (b) of DEC-10 — may appear.
@@ -348,6 +373,9 @@ def _new_file_allowed(path: str) -> bool:
     turns the tree into a package and changes rootdir-relative module names.
     """
     return (
+        path in _NEW_BUILD_FILES
+        or (path.startswith(_NEW_FIXTURE_PREFIX) and path.endswith(".json"))
+    ) or (
         path.startswith("test/tests/")
         and path.endswith(".py")
         and Path(path).name not in _NEVER_NEW
@@ -1463,7 +1491,14 @@ def check_range(
             problems.extend(check_config_edit(repo, base, head, path))
         elif status == "A":
             if _new_file_allowed(path):
-                problems.extend(_module_problems(repo, head, path))
+                # The body rule is a Python AST rule about what a *test module*
+                # may touch. A Bazel file is Starlark: `attr.bool()` and
+                # `native.genrule()` are its ordinary vocabulary, and parsing
+                # them under DEC-10(b) reports six violations on a correct
+                # file. Their content has its own gate - `//:buildifier.check`
+                # - so this rule judges only the Python it was written for.
+                if path.endswith(".py"):
+                    problems.extend(_module_problems(repo, head, path))
             else:
                 problems.append(
                     f"{path}: only a new test/tests/**/*.py module may be added under test/ "

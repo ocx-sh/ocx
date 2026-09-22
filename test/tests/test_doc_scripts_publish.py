@@ -577,8 +577,31 @@ def test_pt6_no_test_path_literal_in_website_files() -> None:
     like discovery references (e.g. ``test/doc_scripts/``, ``../test/``).
     The ``test/bin/`` reference in ``recordings.taskfile.yml`` is allowed
     (binary path, not discovery).
+
+    **Two Bazel spellings are exempt, and they are exempt by their own text.**
+    ``website/recordings.taskfile.yml`` builds ``//test/doc_scripts:casts`` and
+    copies the result out of ``bazel-bin/test/doc_scripts/casts/`` (C-022).
+    Both resolve test-tree paths, and both are correct: a Bazel label is
+    resolved by ``bazel`` against the workspace root at *build* time, and
+    ``bazel-bin/`` is the output symlink farm that label produced.  Neither is
+    a path the shipped site resolves, which is what PT6b forbids — a
+    site-root-relative ``href="/test/doc_scripts/"`` or a
+    ``fetch('./test/doc_scripts/x.json')`` is, and both still red.
+
+    The exemption is therefore taken **by matched text, not by left-context
+    class**: the three Bazel heads are removed from the line and the original
+    alternation then runs unchanged.  A ``(?<![/\\w])`` lookbehind in front of
+    each alternative — the first cut of this — exempts far more than the two
+    spellings it was written for: every ``./test/tests``, every
+    ``{{.ROOT_DIR}}/test/src``, and every site-root-relative ``/test/…``,
+    which is precisely the class PT6b exists to catch.
     """
     website_dir = PROJECT_ROOT / "website"
+
+    # The three Bazel heads, stripped from the line before it is judged. A
+    # character class rather than `\S*`: a label and a genuine violation can
+    # sit on one line, and only the label may be eaten.
+    _bazel_ref_re = re.compile(r"(?://test/|bazel-bin/test/|bazel-out/)[\w./:*-]*")
 
     # Pattern: a "test/" reference that looks like a discovery path (doc_scripts,
     # or "../test/", not the binary bin/ path)
@@ -598,8 +621,14 @@ def test_pt6_no_test_path_literal_in_website_files() -> None:
     for p in sorted(website_dir.rglob("*")):
         if not p.is_file():
             continue
-        # Skip node_modules (third-party JS packages — not website source)
-        if "node_modules" in p.parts:
+        # Skip node_modules (third-party JS packages — not website source) and
+        # the gitignored VitePress build output. `dist/` is generated HTML and JS
+        # carrying every source page inline, so it re-reports each finding a
+        # second and third time — and, worse, it makes this gate's verdict depend
+        # on whether anyone has run a site build in this checkout rather than on
+        # what the tree says. A build artefact cannot hardcode a path; the page
+        # it was rendered from can, and that page is already in the corpus.
+        if "node_modules" in p.parts or ".vitepress" in p.parts:
             continue
         # Skip binary / lock / generated files
         if p.suffix in (".lock", ".cast", ".json", ".png", ".svg", ".ico", ".webmanifest"):
@@ -614,7 +643,7 @@ def test_pt6_no_test_path_literal_in_website_files() -> None:
             stripped = line.strip()
             if stripped.startswith("#") and not stripped.startswith("# !"):
                 continue
-            if _discovery_path_re.search(line):
+            if _discovery_path_re.search(_bazel_ref_re.sub("", line)):
                 violations.append(f"{p.relative_to(PROJECT_ROOT)}:{lineno}: {line.rstrip()}")
 
     assert violations == [], (

@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+#
+# The 39 cast recordings, as one `.cast` artifact each (C-022). The tag
+# decision, what puts the `ocx` binary into each cache key by content digest,
+# and why the manifest is Starlark are all in `cast.bzl`'s module docstring;
+# this file is the wiring.
+#
+# Declaring this BUILD file makes `test/doc_scripts/` a package, so `//test`
+# can no longer reach into it. Measured before and after on 9.2.0:
+# `bazel build --nobuild //...` went 232 -> 276 targets, exit 0 both times.
+# Nothing broke, because `test/BUILD.bazel`'s `exports_files` names no path
+# under `doc_scripts/` and no label anywhere spells `//test:doc_scripts/…`.
+# That is not the free outcome — WP-36's equivalent change invalidated 63
+# labels across eight files and took `//...` down — it is only what this
+# particular boundary happened to cut.
+
+load("//test/doc_scripts:cast.bzl", "cast_targets")
+load("//test/doc_scripts:gif.bzl", "gif_targets")
+
+# `glob` rather than `CAST_SCRIPTS`, and the difference is load-bearing.
+#
+# The macro checks the manifest against this set, and `:manifest_drift` is
+# keyed on it: a script that newly declares `# cast: true` is invisible to a
+# gate keyed on the manifest's own members, which is exactly the one drift
+# direction nothing else catches. `allow_empty = False` is the floor — a glob
+# that matched nothing would declare an empty package that `bazel build
+# //test/doc_scripts:all` reports success over.
+# `recording_inputs` is C-022's rest of the declared set, exported by the
+# package that owns those files: a glob never crosses a package boundary, so
+# `test/recordings/**`, `test/src/**`, `conftest.py`, `pyproject.toml`,
+# `uv.lock`, the enumerator and `bin/ocx` can only arrive here as a label. It is
+# a mandatory parameter of the macro, so this line is not optional wiring — it
+# is what puts the recorder and the `ocx` binary in all 40 action keys.
+cast_targets(
+    name = "casts",
+    recording_inputs = "//test:recording_inputs",
+    scripts = glob(
+        ["*.sh"],
+        allow_empty = False,
+    ),
+)
+
+# One `.gif` per cast, through `@tools//:agg`, plus `:gif_check` over all 39.
+#
+# Every target this declares is tagged `manual`, so none of the 42 is in
+# `//...` or `bazel test //...`: nothing in this repo reads a rendered GIF —
+# the site plays the `.cast` files — so they are README and social artefacts,
+# built on request. The one request is `task recordings:gifs`, which names
+# `:gif_check` and not only `:gifs`, so the proof still runs. `gif.bzl`'s
+# `manual` section carries the measurement and the reason the tag has to be on
+# the filegroup and the test as well as on the 39 renders.
+#
+# No `scripts`/`glob` parameter, unlike `cast_targets` above, and that asymmetry
+# is deliberate. The glob is there to make a *newly cast-enabled script* red the
+# drift gate — a direction only a set wider than the manifest can see. Rendering
+# has no such direction: a GIF exists for a cast or for nothing, so keying it on
+# `CAST_SCRIPTS` is not a second list, it is the same one.
+gif_targets(name = "gifs")
+
+# The website's coarse site rule declares every doc-script body as an input:
+# editing one must rebuild the site, and a cache hit there would mean the rule
+# is unsound (S-014). A filegroup rather than exports_files, because that
+# consumer is coarse by contract and the glob is the one cast_targets already
+# takes -- so a new script joins both sets at once.
+filegroup(
+    name = "doc_script_sources",
+    srcs = glob(
+        ["*.sh"],
+        allow_empty = False,
+    ),
+    visibility = ["//website:__pkg__"],
+)
