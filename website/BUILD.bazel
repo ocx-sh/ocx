@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+#
+# The VitePress site as one coarse target (C-023). The BZL-JS-01/BZL-JS-03
+# exemption, the tag decision, why the output is a `.tar`, and the one-label
+# patch that closes the `test/doc_scripts` gap are all in `site.bzl`'s module
+# docstring; this file is the wiring.
+#
+# Declaring this BUILD file makes `website/` a package, so `//:` labels can no
+# longer reach into it. Measured before and after on 9.2.0:
+# `bazel build --nobuild //...` went 277 -> 279 targets, exit 0 both times.
+# Nothing broke, because the root `exports_files` names only `Cargo.lock` and
+# no label anywhere spells `//:website/…`. That is not the free outcome — the
+# equivalent change under `test/` invalidated 63 labels across eight files and
+# took `//...` down — it is only what this particular boundary happened to cut.
+
+load("//website:site.bzl", "site_target")
+
+# Everything vitepress reads, as one glob.
+#
+# The four exclusions are the ones that would otherwise feed this rule its own
+# or another tool's output: `.vitepress/dist` is where vitepress writes when
+# `task website:build` runs the non-Bazel path, `.vitepress/cache` is vite's
+# transform cache, and the two `node_modules` entries are bun's install tree
+# (`website/node_modules` is also in `.bazelignore`, `src/node_modules` is not).
+# An input set containing a previous output re-keys the action on every run,
+# which reads exactly like a rule with an undeclared input and is not one.
+#
+# `src/**` deliberately includes the GENERATED, gitignored subtrees —
+# `src/_scripts/**` above all, which is a hard prerequisite (`site.bzl` records
+# the measured ENOENT), plus `src/public/casts`, `src/public/data`,
+# `src/public/schemas` and `src/docs/reference/dependencies.md`. They are files
+# the site embeds, so they belong in the key; a fresh clone has none of them
+# and the runner refuses by name rather than letting vitepress abort five
+# stages in.
+#
+# `allow_empty = False` is the floor — a glob that matched nothing would
+# otherwise declare a rule whose inputs are `package.json` alone, and
+# `bazel build //website:site` would report success over a site nobody built.
+_SITE_SRCS = glob(
+    [
+        ".vitepress/**",
+        "src/**",
+    ],
+    allow_empty = False,
+    exclude = [
+        ".vitepress/cache/**",
+        ".vitepress/dist/**",
+        "node_modules/**",
+        "src/node_modules/**",
+    ],
+) + [
+    "bun.lock",
+    "package.json",
+]
+
+site_target(
+    name = "site",
+    srcs = _SITE_SRCS,
+    # C-023's `test/doc_scripts/**/*.sh` edge, and it is EMPTY.
+    #
+    # Those sources live in the `//test/doc_scripts` package and are not
+    # exported; measured, a label naming one of them fails analysis with
+    # `Visibility error`. The one-label patch that package's owner applies is
+    # spelled out in `site.bzl`'s docstring, and this is the line that consumes
+    # it:
+    #
+    #     doc_scripts = ["//test/doc_scripts:doc_script_sources"],
+    #
+    # Nothing here enforces the flip, and nothing here should: the enforcement
+    # is `scripts/bazel_hermeticity_proofs.py --check-declared --label
+    # //website:site`, which reds `hermetic-declared-input-missing` for exactly
+    # as long as this stays `[]`. That red is S-014, and S-014 is what gates
+    # removing `no-remote-cache` from this rule.
+    doc_scripts = [],
+)

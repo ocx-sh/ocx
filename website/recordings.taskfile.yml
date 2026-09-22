@@ -68,14 +68,75 @@ tasks:
       OCX_COMMAND: "{{.OCX_BINARY}}"
       OCX_DOC_CASTS_DIR: "{{.CASTS_DIR}}"
 
+  bazel:build:
+    desc: Record every cast through the Bazel cast targets (//test/doc_scripts:casts)
+    # The Bazel path, ALONGSIDE `build`/`parallel` above, whose `sources:`
+    # lists are untouched and remain the rollback (C-022/C-023).
+    #
+    # It is not a drop-in equal. `//test/doc_scripts` cannot declare the `ocx`
+    # binary or the recorder as inputs — they live in `//test` and the one
+    # exported filegroup there is visible to that package alone — so a warm
+    # cast survives a changed binary, which `sources:` above does NOT allow
+    # (it names `{{.OCX_BINARY}}`). `cast.bzl`'s docstring carries the patch.
+    # Until it lands, `parallel` is the correct task for a binary change.
+    #
+    # Visibility does not block this: `//test/doc_scripts:casts` is
+    # package-private, and Bazel applies visibility to dependency edges only,
+    # never to a target named on the command line. Measured, exit 0.
+    dir: "{{.ROOT_DIR}}"
+    cmds:
+      - ocx exec bazel -- bazel build //test/doc_scripts:casts
+      - mkdir -p {{.CASTS_DIR}}
+      # `-L` dereferences (bazel-bin is a symlink farm) and `-f` unlinks the
+      # destination first — bazel writes its outputs read-only, so a plain
+      # overwrite of a previously copied cast fails with EACCES.
+      - cp -RLf {{.ROOT_DIR}}/bazel-bin/test/doc_scripts/casts/. {{.CASTS_DIR}}/
+      - chmod -R u+w {{.CASTS_DIR}}
+
   gifs:
-    desc: Convert all .cast files to animated GIFs (requires agg)
+    desc: Render every cast to a GIF and run the Bazel render proof (requires agg)
+    # The ONE consumer of the 42 GIF targets in `//test/doc_scripts`, all of
+    # which are tagged `manual`: nothing in this repo reads a rendered GIF —
+    # the site plays the `.cast` files through `Terminal.vue`, and the GIFs are
+    # for README and social embeds — so they are out of `//...` and out of
+    # `bazel test //...`, reachable by label alone. `gif.bzl`'s `manual`
+    # section is the other half of this task, and a `manual` proof that no task
+    # names is a proof that has stopped running. Do not drop the label below.
+    #
+    # Two renders, and they are different artefacts rather than a duplicate.
+    # Bazel's render is the PROOF: host fonts, agg's defaults, checked
+    # structurally by `:gif_check`. The Python render below is the
+    # PUBLISHABLE one: a pinned CaskaydiaCove Nerd Font at 32px into
+    # `out/recordings/`, which is what a README embed wants.
     deps: [ensure-font]
     dir: "{{.ROOT_DIR}}/test"
     sources:
-      - '{{.CASTS_DIR}}/*.cast'
+      # `**`, and that is a fix, not a style. Flat `*.cast` matched ZERO files
+      # against the nested `<doc>/<name>.cast` layout, so this fingerprint was
+      # vacuous: the task re-ran every time for the wrong reason, and the
+      # converter it re-ran then exited 1 on the identical flat glob.
+      - '{{.CASTS_DIR}}/**/*.cast'
       - recordings/cast_to_gif.py
-    cmd: uv run python recordings/cast_to_gif.py --font-dir "{{.FONTS_DIR}}/CascadiaCode" "{{.CASTS_DIR}}" "{{.GIFS_DIR}}"
+      # The proof's own inputs. Without these a `gif.bzl` edit — the change
+      # this task most exists to check — leaves the fingerprint unmoved and
+      # skips the whole task; `ocx.lock` is here because it pins `agg`, and a
+      # re-pinned agg re-keys all 39 renders.
+      - doc_scripts/gif.bzl
+      - doc_scripts/cast.bzl
+      - '{{.ROOT_DIR}}/ocx.lock'
+    cmds:
+      # One command for both halves: `bazel test` BUILDS the non-test labels it
+      # is given, so this builds the filegroup and builds-and-runs the proof
+      # over the 39 real renders. Measured: "Found 1 target and 1 test target".
+      #
+      # `cd` to the ROOT first, and it is not decoration. This task's `dir` is
+      # `test/`, and `test/ocx.toml` is its OWN ocx project whose groups carry
+      # no `bazel` binding — `ocx exec bazel` resolved from there exits 64 with
+      # "binding 'bazel' not found in selected groups". `bazel:build:` above
+      # avoids it by being rooted; this task cannot be, because `uv run` below
+      # needs `test/`.
+      - cd {{.ROOT_DIR}} && ocx exec bazel -- bazel test //test/doc_scripts:gifs //test/doc_scripts:gif_check
+      - uv run python recordings/cast_to_gif.py --font-dir "{{.FONTS_DIR}}/CascadiaCode" "{{.CASTS_DIR}}" "{{.GIFS_DIR}}"
 
   default:
     desc: Build all recordings and convert to GIFs

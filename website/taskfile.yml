@@ -62,6 +62,34 @@ tasks:
       - task: sbom:generate:page
       - bunx vitepress build
 
+  bazel:build:
+    desc: Render the site through the coarse Bazel rule (//website:site) and unpack it
+    # The Bazel path, ALONGSIDE `build` above, which is untouched and remains
+    # the rollback (C-023; the ADR's edited-file table requires the parallel
+    # path). This task is the fifth stage only — `bun install` + `vitepress
+    # build`. The four generators above it stay on Taskfile because they need
+    # `cargo`, `uv`, a compose registry and a network fetch of `agg`.
+    #
+    # `scripts:publish` is a hard prerequisite, not a convenience: the rule
+    # refuses by name without `src/_scripts/`, because ~30 pages `<<<`-include
+    # those snippets and vitepress aborts on the first miss.
+    #
+    # No `sources:`, deliberately — the whole point of the rule is that Bazel
+    # owns the skipping, off declared inputs rather than off a second list
+    # here that would then have to be kept in step with `website/BUILD.bazel`.
+    #
+    # `OCX_DEPLOY_TARGET` does NOT reach the rule: a build action inherits no
+    # environment and `--action_env` lives in `.bazelrc`. This task always
+    # produces the `dev` variant; the prod deploy stays on `build`.
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      - task: scripts:publish
+      - ocx exec bazel -- bazel build //website:site
+      - rm -rf .vitepress/dist
+      - mkdir -p .vitepress/dist
+      - tar -xf {{.ROOT_DIR}}/bazel-bin/website/site.tar -C .vitepress/dist
+      - chmod -R u+w .vitepress/dist
+
   # Site deploys ride CI: deploy-website.yml builds + pushes to Cloudflare
   # Pages (ocx-website); the hetzner nginx reverse-proxies (dev.)ocx.sh to the
   # Pages deployment. No local rsync path anymore.
