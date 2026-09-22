@@ -54,8 +54,11 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Env composition / visibility / entrypoints | [subsystem-package-manager.md](./rules/subsystem-package-manager.md), [subsystem-package.md](./rules/subsystem-package.md), website `reference/env-composition.md` |
 | Starlark host API (`ocx package test --script`, typed values) | [subsystem-script.md](./rules/subsystem-script.md), [subsystem-tests.md](./rules/subsystem-tests.md) |
 | Taskfiles / build pipeline / caching | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
+| A Bazel build that never worked on this host (toolchain pin, `~/.bazelrc`, libstdc++, cache credential) | skill `init-bazel-config`, `task bazel:doctor` — [bazel-quality.md](./rules/bazel-quality.md) is the ruleset, this is the machine |
 | Releases | [workflow-release.md](./rules/workflow-release.md) |
 | Bazel builds (`BUILD`/`MODULE.bazel`/Starlark) | [bazel-quality.md](./rules/bazel-quality.md) (shareable), skills `bazel-adopt`, `bazel-diagnose` |
+| Writing a flag into `.bazelrc`, a workflow or an rc file | [bazel-quality.md](./rules/bazel-quality.md) § BZL-FLAG-11 — prove it on the pinned binary's **two** help surfaces first; empty output is not a pass |
+| Bazel cache, credentials, `.bazelignore`, the module lockfile | [bazel-quality.md](./rules/bazel-quality.md) (shareable), [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) (`task` is the only entry point), [subsystem-ci.md](./rules/subsystem-ci.md) (which lane may write) |
 | Hex mode state (discussion artifacts, `/hex-finalize` backup refs, re-anchor after compaction) | [hex-state.md](./rules/hex-state.md) (global), skills `hex-discuss`, `hex-finalize` |
 
 ## By language
@@ -85,6 +88,7 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | CI / workflows | [subsystem-ci.md](./rules/subsystem-ci.md) | `.github/workflows/**` |
 | Dependencies | [subsystem-deps.md](./rules/subsystem-deps.md) | `Cargo.toml`, `deny.toml`, `.licenserc.toml` |
 | Taskfiles | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) | `taskfile.yml`, `taskfiles/**/*.yml`, `**/taskfile.yml` |
+| Bazel workspace | [bazel-quality.md](./rules/bazel-quality.md) (shareable) | `MODULE.bazel`, `MODULE.bazel.lock`, `.bazelrc`, `.bazelversion`, `.bazelignore`, `**/BUILD.bazel`, `**/*.bzl` |
 
 ## By auto-load path — "what fires when you edit"
 
@@ -110,7 +114,7 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `**/package.json`, `**/eslint.config.*`, `**/biome.json(c)` | [typescript-packaging.md](./rules/typescript-packaging.md) |
 | `**/vite.config.*`, `**/.vitepress/config.*` | [quality-vite.md](./rules/quality-vite.md) |
 | `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md) — the one git hook this repository writes lives at `scripts/pre-push.sh` and is *copied* under the name git insists on, so the source keeps its suffix and stays linted |
-| `**/BUILD.bazel`, `**/*.bzl`, `**/MODULE.bazel`, `**/.bazelrc` | [bazel-quality.md](./rules/bazel-quality.md) |
+| `**/BUILD.bazel`, `**/BUILD`, `**/*.bzl`, `**/*.star`, `**/*.scl`, `**/MODULE.bazel`, `**/MODULE.bazel.lock`, `**/REPO.bazel`, `**/WORKSPACE`, `**/WORKSPACE.bazel`, `**/WORKSPACE.bzlmod`, `**/.bazelrc`, `**/*.bazelrc`, `**/.bazelrc.*`, `**/.bazelversion`, `**/.bazelignore` | [bazel-quality.md](./rules/bazel-quality.md) |
 | `.github/workflows/**`, `.github/actions/**`, `renovate.json` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
 | `.github/ISSUE_TEMPLATE/**` | [workflow-github.md](./rules/workflow-github.md) |
 | `dist-workspace.toml`, `cliff.toml`, `CHANGELOG.md`, release workflows | [workflow-release.md](./rules/workflow-release.md), [workflow-git.md](./rules/workflow-git.md), [docs-quality.md](./rules/docs-quality.md) |
@@ -158,12 +162,15 @@ Exempt from overlap detection (intended broad coupling):
 | Code quality audit | `code-check` |
 | Triaging a large diff — what to actually read | `review-surface` |
 | Implementation / debugging | `builder` |
+| Standing a Bazel build up on a new machine | `init-bazel-config` (the same checks as `task bazel:doctor`, plus the prompts) |
 | Test strategy | `qa-engineer` |
 | Planning a feature (multi-agent) | `hex-plan` |
 | Executing a feature (multi-agent) | `hex-execute` |
 | Adversarial review | `hex-review` |
 | Talking a fuzzy problem through before a plan exists | `hex-discuss` |
 | Cross-model adversarial review under a second harness | `nox-review` |
+| Adopting Bazel in a repository, or planning the migration order | `bazel-adopt` |
+| A Bazel build that is slow, missing the cache, nondeterministic or refetching | `bazel-diagnose` |
 | Releases | (see [workflow-release.md](./rules/workflow-release.md)) |
 | AI config maintenance | `meta-maintain-config`, `meta-validate-context` |
 | Roadmap sync | `ocx-sync-roadmap` |
