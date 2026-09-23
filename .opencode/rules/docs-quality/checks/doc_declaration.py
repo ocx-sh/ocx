@@ -46,7 +46,7 @@ TIER_REQUIRED = ("tutorial", "how-to", "landing")
 # One comment opener per markup family, measured on MkDocs Material 9.7.7,
 # mdBook 0.5.3, VitePress 2.0.0-alpha.20 and an MDX 3.1.1 compile
 # (wave2-declaration-key.md section 1).
-DECL_RE = re.compile(r"^\s*(<!--|\{/\*|\.\.|%)\s*(doc_type|doc_tier)\s*:\s*([A-Za-z][\w-]*)")
+DECL_RE = re.compile(r"^\s*(<!--|\{/\*|\.\.|%|//)\s*(doc_type|doc_tier)\s*:\s*([A-Za-z][\w-]*)")
 FM_KEY_RE = re.compile(r"^\s*(doc_type|doc_tier)\s*:", re.MULTILINE)
 MAX_DECL_LINE = 12  # 12 lines (wave2-declaration-key.md section 3)
 
@@ -299,7 +299,11 @@ def seed(root: Path) -> list[tuple[str, str, str, str]]:
 def collect(root: Path, paths: list[str]) -> list[Path]:
     if paths:
         return [Path(p) for p in paths]
-    return sorted(p for p in root.rglob("*") if p.suffix in (".md", ".mdx", ".rst") and p.is_file())
+    return sorted(
+        p
+        for p in root.rglob("*")
+        if p.suffix in (".md", ".mdx", ".rst", ".adoc", ".asciidoc") and p.is_file()
+    )
 
 
 def self_test() -> int:
