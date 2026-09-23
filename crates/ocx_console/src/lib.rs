@@ -38,7 +38,7 @@ mod user_interface;
 
 pub use data_interface::{Annotation, Cell, Column, DataInterface, TreeItem};
 pub use human::{human_bytes, human_instant, human_time};
-pub use options::{ColorMode, ColorModeConfig, ProgressMode};
+pub use options::{ColorMode, ColorModeConfig, Format, FormatMode, ProgressMode};
 pub use printer::{Alignment, Line, Printer, Style};
 pub use styles::clap_styles;
 pub use theme::{Theme, VisibilityStyle};

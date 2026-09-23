@@ -8,7 +8,6 @@ mod consent;
 mod content_path;
 mod env_override;
 mod forge_write;
-mod format;
 mod group_selection;
 mod keep_tag;
 // `pub mod` rather than the sibling `mod` + `pub use` idiom: `Hook` has no
@@ -51,7 +50,8 @@ pub use consent::Consent;
 pub use content_path::ContentPath;
 pub use env_override::EnvOverride;
 pub use forge_write::ForgeWriteOptions;
-pub use format::{Format, FormatMode};
+// The global `--format` / `--json` group lives in `ocx_console`, shared with
+// every OCX binary; re-exported so `options::Format` keeps its path here.
 pub use group_selection::GroupSelection;
 pub use identifier::Identifier;
 pub use interactive::Interactive;
@@ -59,6 +59,7 @@ pub use keep_tag::KeepTag;
 pub use lazy_mode::LazyMode;
 pub use lazy_report::LazyReport;
 pub use modify_path::ModifyPath;
+pub use ocx_console::{Format, FormatMode};
 pub use pinned::Pinned;
 pub use platform::PlatformOption;
 pub use profiles::Profiles;

@@ -16,6 +16,9 @@ ocx_util.workspace = true
 # `ColorMode` is a `ValueEnum` and `clap_styles` builds a `Styles`, so the
 # `--color` flag and clap's own help rendering share one decision.
 clap_builder.workspace = true
+# The derive for `Format`, the flattenable `--format` / `--json` group every
+# OCX binary puts at its root (`ocx`, `ocx-mirror`).
+clap.workspace = true
 # Syntax-highlighted JSON on stdout. Returns `serde_json::Result`, which is why
 # the printer needs no error type of its own.
 colored_json.workspace = true
