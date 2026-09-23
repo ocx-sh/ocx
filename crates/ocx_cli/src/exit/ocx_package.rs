@@ -92,6 +92,9 @@ impl ClassifyExitCode for PublishGateError {
             // Delegate to the inner cause (auth → 80, network → 69, a missing
             // dependency tag → 79 via the wrapped `ocx_lib::Error`).
             PublishGateError::Verification { .. } | PublishGateError::AnyPinProvenanceUnavailable { .. } => None,
+            // The index error answers: an SSRF refusal is 78, an index outage
+            // 69, a malformed root 65 — none of them is the gate's to decide.
+            PublishGateError::Routing { .. } => None,
         }
     }
 }
@@ -478,6 +481,39 @@ mod tests {
             crate::exit::classify_library_error(&provenance_unavailable),
             ExitCode::Unavailable,
             "the wrapper delegates: a registry that would not answer is 69, not a data fault"
+        );
+
+        let routing = PublishGateError::Routing {
+            identifier: Box::new(pinned(&hex)),
+            source: ocx_index::error::Error::Ssrf {
+                source: ocx_oci::ssrf::PhysicalDialRefused {
+                    namespace: "ocx.sh".to_string(),
+                    source: ocx_oci::ssrf::SsrfError::ForbiddenTarget {
+                        host: "127.0.0.1".to_string(),
+                        ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    },
+                },
+            },
+        };
+        assert_eq!(routing.classify(), None, "Routing must delegate to the index error");
+        assert_eq!(
+            crate::exit::classify_library_error(&routing),
+            ExitCode::ConfigError,
+            "an SSRF refusal of the routed target is the index's 78, not a gate verdict"
+        );
+
+        let not_in_index = PublishGateError::Routing {
+            identifier: Box::new(pinned(&hex)),
+            source: ocx_index::error::Error::NotInIndex {
+                identifier: "ocx.sh/dep:1.0".to_string(),
+                namespace: "ocx.sh".to_string(),
+                base_url: "https://index.ocx.sh".to_string(),
+            },
+        };
+        assert_eq!(
+            crate::exit::classify_library_error(&not_in_index),
+            ExitCode::NotFound,
+            "a name the authoritative index does not hold is 79 through the delegation"
         );
     }
 

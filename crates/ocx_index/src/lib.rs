@@ -413,6 +413,47 @@ impl Index {
         self.inner.physical_reference(identifier).await
     }
 
+    /// The identifier a read of `identifier` must dial: the physical location
+    /// the index routes it to, or `identifier` itself when no source rewrites
+    /// it (registry-backed). Either way it carries `identifier`'s tag and
+    /// digest.
+    ///
+    /// For a caller that reads the registry **directly** through a `Client`
+    /// rather than through this index — `ocx package push`'s dependency-pin
+    /// gate. A logical name dialled as-is reaches whatever host shares its
+    /// spelling, not the registry the index points at (ocx#504). The dial-site
+    /// SSRF floor ([`Self::guard_physical_dial`]) runs inside, so routing
+    /// cannot be had without it. Transport-only (`adr_index_indirection.md`
+    /// C2): the answer is never a storage key, and anything reported to the
+    /// user still names `identifier`.
+    ///
+    /// No rewrite is passthrough only where no index is authoritative for the
+    /// name. Where one is, its miss is terminal — OCX never falls back from
+    /// the index protocol to the logical host — exactly as the resolve path's
+    /// authoritative miss is.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::physical_reference`] raises;
+    /// [`error::Error::NotInIndex`] when the index authoritative for the name
+    /// does not hold it; [`error::Error::Ssrf`] when the floor refuses the
+    /// rewritten target.
+    pub async fn route_for_dial(&self, identifier: &ocx_oci::Identifier) -> Result<ocx_oci::Identifier> {
+        let Some(physical) = self.physical_reference(identifier).await? else {
+            if let Some(base_url) = self.authoritative_index_base_url(identifier) {
+                return Err(error::Error::NotInIndex {
+                    identifier: identifier.to_string(),
+                    namespace: identifier.registry().to_string(),
+                    base_url: base_url.to_string(),
+                });
+            }
+            return Ok(identifier.clone());
+        };
+        let routed = at_version_of(physical.registry(), physical.repository(), identifier);
+        self.guard_physical_dial(identifier, &routed).await?;
+        Ok(routed)
+    }
+
     /// The physical transport identifier known **locally**, never dialling a
     /// source — see [`index_impl::IndexImpl::physical_reference_local`]. Used by
     /// the store-hit path of `PackageManager::find` (`ocx_lib`),
@@ -568,6 +609,12 @@ impl Index {
     /// [`index_impl::IndexImpl::index_base_url`].
     fn index_base_url(&self) -> Option<&str> {
         self.inner.index_base_url()
+    }
+
+    /// The base URL of the index authoritative for `identifier`, if any. See
+    /// [`index_impl::IndexImpl::authoritative_index_base_url`].
+    fn authoritative_index_base_url(&self, identifier: &ocx_oci::Identifier) -> Option<&str> {
+        self.inner.authoritative_index_base_url(identifier)
     }
 
     /// This source's provenance (`adr_index_indirection.md` A2/H) — `Published`
@@ -733,6 +780,29 @@ fn host_os_features(platform: &ocx_oci::Platform) -> Option<Vec<String>> {
         ocx_oci::Platform::Specific { os_features, .. } if !os_features.is_empty() => Some(os_features.clone()),
         _ => None,
     }
+}
+
+/// The physical location `registry/repository` addressed at `logical`'s
+/// version — its tag and its digest, whichever it carries.
+///
+/// The one place a rewrite stamps the logical version onto a physical
+/// location, so every source answers in one shape. The digest content-addresses
+/// a pinned read; the tag is what a read by tag needs (the `any`-provenance
+/// fetch of `ocx package push`'s gate). Tag first: `clone_with_tag` drops any
+/// digest.
+fn at_version_of(
+    registry: impl Into<String>,
+    repository: impl Into<String>,
+    logical: &ocx_oci::Identifier,
+) -> ocx_oci::Identifier {
+    let mut physical = ocx_oci::Identifier::new_registry(repository, registry);
+    if let Some(tag) = logical.tag() {
+        physical = physical.clone_with_tag(tag);
+    }
+    if let Some(digest) = logical.digest() {
+        physical = physical.clone_with_digest(digest);
+    }
+    physical
 }
 
 /// Collect the candidate platforms that share os+arch with the requested
@@ -1824,6 +1894,201 @@ mod tests {
             .guard_physical_dial(&logical, &physical_id(LOOPBACK))
             .await
             .expect("a root naming the identifier's own registry is not a rewrite");
+    }
+
+    // ── `route_for_dial`: routing, version carry, and the floor in one call ──
+
+    /// A source that serves every identifier it is asked about from
+    /// `registry/contrib/<repository>`, minted the way a source minted it
+    /// before C-2 — digest carried, tag dropped — so a tag on the routed
+    /// identifier can only be [`Index::route_for_dial`]'s doing.
+    #[derive(Clone)]
+    struct RewritingSource {
+        registry: &'static str,
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for RewritingSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn physical_reference(&self, identifier: &Identifier) -> Result<Option<Identifier>> {
+            let physical = Identifier::new_registry(format!("contrib/{}", identifier.repository()), self.registry);
+            Ok(Some(match identifier.digest() {
+                Some(digest) => physical.clone_with_digest(digest),
+                None => physical,
+            }))
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// A configured index that holds no root for anything: its jurisdiction
+    /// verdict is the one under test, and every question it is asked misses.
+    #[derive(Clone)]
+    struct EmptyIndexSource {
+        jurisdiction: Jurisdiction,
+    }
+
+    const EMPTY_INDEX_BASE_URL: &str = "https://index.example.invalid";
+
+    #[async_trait]
+    impl index_impl::IndexImpl for EmptyIndexSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn jurisdiction(&self, _: &Identifier) -> Jurisdiction {
+            self.jurisdiction
+        }
+        fn index_base_url(&self) -> Option<&str> {
+            Some(EMPTY_INDEX_BASE_URL)
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    fn versioned_logical_id() -> Identifier {
+        logical_id()
+            .clone_with_tag("3.28")
+            .clone_with_digest(Digest::Sha256("a".repeat(64)))
+    }
+
+    /// No source rewrites a registry-backed name, so the dial goes where the
+    /// name says — tag and digest untouched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_for_dial_passes_an_unrewritten_identifier_through() {
+        let directory = tempfile::tempdir().unwrap();
+        let logical = versioned_logical_id();
+        let routed = chained_with(&directory, vec![])
+            .route_for_dial(&logical)
+            .await
+            .expect("an unrewritten identifier routes to itself");
+        assert_eq!(routed, logical);
+    }
+
+    /// A name in a registry an index serves authoritatively, which that index
+    /// does not hold, is not in the index — never a dial to the logical host,
+    /// which is not a registry (`https://ocx.sh/v2`). Same verdict, same error
+    /// as the resolve path's authoritative miss, so push and pull agree.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_for_dial_refuses_a_name_its_authoritative_index_does_not_hold() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = Index::from_impl(EmptyIndexSource {
+            jurisdiction: Jurisdiction::Authoritative,
+        });
+        let logical = versioned_logical_id();
+        let error = chained_with(&directory, vec![source])
+            .route_for_dial(&logical)
+            .await
+            .expect_err("an authoritative index's miss must not fall back to the logical host");
+        match error {
+            error::Error::NotInIndex {
+                identifier,
+                namespace,
+                base_url,
+            } => {
+                assert_eq!(identifier, logical.to_string());
+                assert_eq!(namespace, "example.com");
+                assert_eq!(
+                    base_url, EMPTY_INDEX_BASE_URL,
+                    "the error names the index that answered"
+                );
+            }
+            other => panic!("expected NotInIndex, got: {other:?}"),
+        }
+    }
+
+    /// The same miss from a source that only falls through — a plain registry
+    /// claims nothing — is no verdict at all: the name is registry-backed and
+    /// routes to itself (S-5).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_for_dial_passes_through_a_miss_no_index_is_authoritative_for() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = Index::from_impl(EmptyIndexSource {
+            jurisdiction: Jurisdiction::FallThrough,
+        });
+        let logical = versioned_logical_id();
+        let routed = chained_with(&directory, vec![source])
+            .route_for_dial(&logical)
+            .await
+            .expect("a fall-through miss is a registry-backed name");
+        assert_eq!(routed, logical);
+    }
+
+    /// The routed identifier names the physical location at the logical
+    /// VERSION: the digest content-addresses the read, and the tag is what a
+    /// read by tag (the `any`-provenance fetch) needs. A source that drops the
+    /// tag must not cost the caller it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_for_dial_carries_the_logical_tag_and_digest_onto_the_physical_location() {
+        let logical = versioned_logical_id();
+        let routed = Index::from_impl(RewritingSource {
+            registry: "example.com",
+        })
+        .with_proxy_rules(ocx_oci::ssrf::ProxyRules::direct())
+        .route_for_dial(&logical)
+        .await
+        .expect("a same-registry rewrite is not judged by the floor");
+
+        assert_eq!(routed.registry(), "example.com");
+        assert_eq!(routed.repository(), "contrib/kitware/cmake");
+        assert_eq!(routed.tag(), Some("3.28"), "the logical tag must survive routing");
+        assert_eq!(routed.digest(), logical.digest(), "and so must the logical digest");
+    }
+
+    /// Routing and the dial-site floor are one call, so no caller can route
+    /// and forget to guard: a rewrite into a forbidden range is refused here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_for_dial_refuses_a_rewrite_into_a_forbidden_target() {
+        let error = Index::from_impl(RewritingSource { registry: LOOPBACK })
+            .with_proxy_rules(ocx_oci::ssrf::ProxyRules::direct())
+            .route_for_dial(&versioned_logical_id())
+            .await
+            .expect_err("a rewritten loopback target must be refused before anything dials it");
+        assert!(is_forbidden_refusal(&error), "expected an SSRF refusal, got: {error:?}");
+    }
+
+    /// C-2: one helper stamps the logical version onto a physical location,
+    /// and `clone_with_tag` drops a digest — so the order inside it matters.
+    #[test]
+    fn at_version_of_keeps_both_the_tag_and_the_digest() {
+        let logical = versioned_logical_id();
+        let physical = at_version_of("ghcr.io", "ocx-contrib/cmake", &logical);
+        assert_eq!(
+            physical.to_string(),
+            format!("ghcr.io/ocx-contrib/cmake:3.28@sha256:{}", "a".repeat(64))
+        );
+
+        let digest_only = logical.without_tag();
+        assert_eq!(at_version_of("ghcr.io", "ocx-contrib/cmake", &digest_only).tag(), None);
+        let tag_only = logical.without_digest();
+        assert_eq!(at_version_of("ghcr.io", "ocx-contrib/cmake", &tag_only).digest(), None);
     }
 
     // ── The dial-site floor under an HTTP proxy (ocx#407) ────────────────────

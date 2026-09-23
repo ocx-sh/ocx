@@ -450,7 +450,7 @@ impl PackagePush {
         // create` for that).
         {
             let _spin = context.progress().spinner("Verifying dependency pins");
-            publisher::verify_dependency_pins(publisher.client(), &valid, &platform).await?;
+            publisher::verify_dependency_pins(publisher.client(), context.default_index(), &valid, &platform).await?;
         }
 
         let infos = vec![ocx_package::info::Info {

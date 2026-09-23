@@ -1402,11 +1402,7 @@ impl OcxIndex {
                 source,
             },
         })?;
-        let mut physical = ocx_oci::Identifier::new_registry(repository, registry);
-        if let Some(digest) = identifier.digest() {
-            physical = physical.clone_with_digest(digest);
-        }
-        Ok(Some(physical))
+        Ok(Some(super::at_version_of(registry, repository, identifier)))
     }
 
     // ── catalog sync (F2) ────────────────────────────────────────────────────
@@ -3239,9 +3235,12 @@ mod tests {
         let source = make_source(transport, false);
 
         // Own-namespace leaf → the physical location the root's `repository`
-        // points at, with the leaf digest carried over (transport-only, C2).
+        // points at, with the logical tag and leaf digest carried over
+        // (transport-only, C2).
         let leaf = ocx_oci::Digest::Sha256("a".repeat(64));
-        let logical = ocx_oci::Identifier::new_registry(REPO, NAMESPACE).clone_with_digest(leaf.clone());
+        let logical = ocx_oci::Identifier::new_registry(REPO, NAMESPACE)
+            .clone_with_tag("3.28")
+            .clone_with_digest(leaf.clone());
         let physical = source
             .physical_reference(&logical)
             .await
@@ -3250,6 +3249,7 @@ mod tests {
         assert_eq!(physical.registry(), "ghcr.io");
         assert_eq!(physical.repository(), "ocx-contrib/cmake");
         assert_eq!(physical.digest(), Some(leaf));
+        assert_eq!(physical.tag(), Some("3.28"), "the logical tag survives the rewrite");
         assert_eq!(
             source.jurisdiction(&logical),
             super::super::Jurisdiction::Authoritative,

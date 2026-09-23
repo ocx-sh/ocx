@@ -280,6 +280,22 @@ pub trait IndexImpl: Send + Sync {
         None
     }
 
+    /// The base URL of the configured index that is
+    /// [`Authoritative`](super::Jurisdiction::Authoritative) for `identifier`,
+    /// or `None` when no index is — the question a terminal miss asks to name
+    /// the index that answered it (ocx#251, ocx#504). Cheap, synchronous, no
+    /// I/O.
+    ///
+    /// The default answers for this source alone;
+    /// [`ChainedIndex`](super::chained_index::ChainedIndex) asks each of its
+    /// sources, since its own [`Self::index_base_url`] has no single answer.
+    fn authoritative_index_base_url(&self, identifier: &ocx_oci::Identifier) -> Option<&str> {
+        match self.jurisdiction(identifier) {
+            super::Jurisdiction::Authoritative => self.index_base_url(),
+            super::Jurisdiction::FallThrough | super::Jurisdiction::Outside => None,
+        }
+    }
+
     /// This source's provenance (`adr_index_indirection.md` A2/H — the "two
     /// ifs" that distinguish a published copy from a derived one).
     ///
