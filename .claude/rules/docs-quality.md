@@ -1,16 +1,15 @@
 ---
 paths:
-  - "README.md"
-  - "CHANGELOG.md"
-  - "CONTRIBUTING.md"
-  - "docs/**"
-  - "doc/**"
-  - "website/**"
-  - "site/**"
-  - "mkdocs.yml"
-  - "book.toml"
-  - ".vitepress/config.*"
-  - "docusaurus.config.*"
+  - "**/*.md"
+  - "**/*.mdx"
+  - "**/*.rst"
+  - "**/*.adoc"
+  - "**/*.asciidoc"
+  - "**/mkdocs.yml"
+  - "**/book.toml"
+  - "**/.vitepress/config.*"
+  - "**/docusaurus.config.*"
+  - "**/antora.yml"
 summary: The documentation quality index. The page declaration every check reads, the 18 rules that block any docs edit, the runnable gate, and where the per-topic depth lives
 keywords: documentation,docs,technical-writing,diataxis,plain-english,readability,tested-examples,doctest,code-fences,asciinema,navigation,information-architecture,link-checking,anchors,changelog,readme,runbook,markdownlint,vale,mkdocs,vitepress,mdbook,docusaurus,starlight,sphinx,llms-txt,agent-readable
 license: Apache-2.0
@@ -23,6 +22,13 @@ This is a merge gate for documentation, expressed as counted limits and
 runnable scripts. It is not a voice, a template, or an opinion about how a page
 should read. Every rule in this set either names a command you can run, or says
 `unverified: reading heuristic` and states what a reviewer looks for.
+
+This rule loads on every markup file in any directory, because docs live
+wherever a project put them. It governs published documentation only. Skip
+agent config without comment: `CLAUDE.md`, `AGENTS.md`, `SKILL.md`, and
+anything under `.claude/`, `.agents/` or a client's own config directory. Skip
+vendored copies and build output the same way. To grade a page on
+demand, in any format, use the `docs-review` skill.
 
 Contents: [Declare the page](#declare-the-page) ·
 [Non-negotiables](#non-negotiables) · [The gate](#the-gate) ·
@@ -52,8 +58,8 @@ and `landing` require one. Both enums are pinned defaults.
 
 Placement is inside the file's first 12 lines and never above an existing front
 matter block. One comment opener per markup family: `<!--` for markdown, `{/*`
-for MDX, `..` for reStructuredText, `%` for MyST. Never YAML front matter,
-because mdBook 0.5.3 renders that block as a fake `<h2>` and puts the fake
+for MDX, `..` for reStructuredText, `%` for MyST, `//` for AsciiDoc. Never YAML
+front matter, because mdBook 0.5.3 renders that block as a fake `<h2>` and puts the fake
 heading into the search index with its own anchor.
 
 ```bash

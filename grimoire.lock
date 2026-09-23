@@ -5,7 +5,7 @@ lock_version = 1
 declaration_hash_version = 1
 declaration_hash = "sha256:e4370dc135bbe1596c7c86c2cd930a736a68c54bcaa3e437fce8d76d7f242584"
 generated_by = "grim 0.14.2"
-generated_at = "2026-09-20T10:30:44Z"
+generated_at = "2026-09-23T20:26:19Z"
 
 [[skill]]
 name = "bazel-adopt"
@@ -28,6 +28,12 @@ bundle_tag = "latest"
 [[skill]]
 name = "docs-plan"
 pinned = "ghcr.io/ocx-sh/lore/docs-plan@sha256:cbff12650842b27b1af5513caf447c516bb33b72735121902b48576fa0840778"
+bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "docs-review"
+pinned = "ghcr.io/ocx-sh/lore/docs-review@sha256:6008173170905e2f0e0562a10d840b5120496a7fb99564d985fce6bbeb05ac5f"
 bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
 bundle_tag = "latest"
 
@@ -93,7 +99,7 @@ bundle_tag = "latest"
 
 [[rule]]
 name = "docs-quality"
-pinned = "ghcr.io/ocx-sh/lore/docs-quality@sha256:c31e99d6d45536c089f643dd96d3fe23540fbbd918530bd68497ab029f2d12bf"
+pinned = "ghcr.io/ocx-sh/lore/docs-quality@sha256:cb951c2acc1c3b4c3e88989f72b664ff518c933e1805c535ec628be41d058bd3"
 bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
 bundle_tag = "latest"
 
@@ -164,7 +170,7 @@ id = "ghcr.io/ocx-sh/lore/bazel-quality:latest"
 name = "docs-essentials"
 repo = "ghcr.io/ocx-sh/lore/docs-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/docs-essentials@sha256:f6ef95d3c3668716d443af0338ca9a38642e9758235cedc1209b4f1feaa3cafc"
+pinned = "ghcr.io/ocx-sh/lore/docs-essentials@sha256:d8b090ccb9c7871b4fb03b7f1671a9464bf8d0a07e6d1ee8733a25ac79ae9c38"
 
 [[bundle.member]]
 kind = "skill"
@@ -175,6 +181,11 @@ id = "ghcr.io/ocx-sh/lore/docs-instrument:latest"
 kind = "skill"
 name = "docs-plan"
 id = "ghcr.io/ocx-sh/lore/docs-plan:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "docs-review"
+id = "ghcr.io/ocx-sh/lore/docs-review:latest"
 
 [[bundle.member]]
 kind = "rule"
