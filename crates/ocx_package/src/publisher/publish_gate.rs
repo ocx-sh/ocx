@@ -5,9 +5,11 @@
 //!
 //! Push makes no resolution decisions (`adr_dependency_manifest_pinning.md`):
 //! it reads the already-pinned published metadata and verifies each pin
-//! against the registry it names. A dependency with no digest cannot reach
-//! here — the published metadata type has no digest-less form, so an
-//! unresolved dependency fails at parse.
+//! against the registry the index routes it to — the logical name itself for
+//! a registry-backed dependency, the physical location an index names for an
+//! index-served one (ocx#504). A dependency with no digest cannot reach here —
+//! the published metadata type has no digest-less form, so an unresolved
+//! dependency fails at parse.
 
 use futures::stream::{self, StreamExt, TryStreamExt};
 
@@ -52,12 +54,18 @@ const DEPENDENCY_PIN_VERIFY_CONCURRENCY: usize = 16;
 /// the rest. Check 1 is skipped entirely for a concrete-target bundle — no
 /// extra network beyond the fetch checks 2 and 3 already make.
 ///
+/// Every read dials where `index` routes the pin
+/// ([`Index::route_for_dial`](ocx_index::Index::route_for_dial)), never the
+/// logical name as written: an index-served namespace such as `ocx.sh` is not
+/// a registry. Every error still names the logical pin.
+///
 /// # Errors
 ///
 /// See [`PublishGateError`]. Registry auth failures pass through so they
 /// classify to their own exit code.
 pub async fn verify_dependency_pins(
     client: &Client,
+    index: &ocx_index::Index,
     metadata: &Metadata,
     platform: &Platform,
 ) -> Result<(), PublishGateError> {
@@ -80,11 +88,23 @@ pub async fn verify_dependency_pins(
         .map(|(dependency_identifier, pin)| {
             let client = client.clone();
             async move {
+                let routed =
+                    index
+                        .route_for_dial(pin.as_identifier())
+                        .await
+                        .map_err(|source| PublishGateError::Routing {
+                            identifier: Box::new(pin.clone()),
+                            source,
+                        })?;
                 if is_any_target {
-                    verify_any_pin_provenance(&client, &dependency_identifier, &pin).await?;
+                    verify_any_pin_provenance(&client, &dependency_identifier, &routed.without_digest(), &pin).await?;
                 }
-                log::debug!("verifying dependency pin '{pin}'");
-                match client.pull_manifest(&pin).await {
+                // `route_for_dial` carries the digest; re-stamping the pin's own
+                // digest makes that local rather than a promise from another crate.
+                let routed_pin = ocx_oci::PinnedIdentifier::try_from(routed.clone_with_digest(pin.digest()))
+                    .expect("an identifier just given a digest is pinned");
+                log::debug!("verifying dependency pin '{pin}' at '{routed_pin}'");
+                match client.pull_manifest(&routed_pin).await {
                     Ok(_) => Ok(()),
                     Err(ClientError::UnexpectedManifestType) => Err(PublishGateError::DependencyPinnedToIndex {
                         identifier: Box::new(pin.clone()),
@@ -112,7 +132,8 @@ pub async fn verify_dependency_pins(
 /// the metadata itself could detect the forgery.
 ///
 /// This re-derives the fact from the dependency's own image index: fetch
-/// `dependency_identifier`'s current manifest by its advisory tag and require
+/// the dependency's current manifest by its advisory tag — at `routed`, the
+/// location the index serves `dependency_identifier` from — and require
 /// an entry whose declared platform is `any` **and** whose digest equals
 /// `pin`'s. A flat (non-index) manifest is `any`-offered by construction —
 /// the same convention
@@ -131,6 +152,7 @@ pub async fn verify_dependency_pins(
 async fn verify_any_pin_provenance(
     client: &Client,
     dependency_identifier: &ocx_oci::Identifier,
+    routed: &ocx_oci::Identifier,
     pin: &ocx_oci::PinnedIdentifier,
 ) -> Result<(), PublishGateError> {
     // Canonical, never a mirror: this read gates a publish, and Invariant #5
@@ -139,7 +161,7 @@ async fn verify_any_pin_provenance(
     // hostile — would otherwise admit exactly the forged provenance claim this
     // function exists to refuse, and the mirror never has to fail to do it.
     let (digest, manifest) = client
-        .fetch_manifest_addressed(dependency_identifier, ReadAddressing::Canonical)
+        .fetch_manifest_addressed(routed, ReadAddressing::Canonical)
         .await
         .map_err(|source| PublishGateError::AnyPinProvenanceUnavailable {
             identifier: Box::new(dependency_identifier.clone()),
@@ -203,12 +225,23 @@ pub enum PublishGateError {
         #[source]
         source: ClientError,
     },
+    /// The index could not say which registry serves the dependency, or the
+    /// dial-site SSRF floor refused the one it named. Names the logical pin;
+    /// the cause carries the rest.
+    #[error("failed to route dependency '{identifier}' through the index")]
+    Routing {
+        identifier: Box<ocx_oci::PinnedIdentifier>,
+        #[source]
+        source: ocx_index::error::Error,
+    },
 }
 
 // ── Specification tests — adr_dependency_manifest_pinning.md Phase 4 ─────
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ocx_index::IndexImpl;
+    use ocx_index::error::Result as IndexResult;
     use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
 
     fn hex(ch: char) -> String {
@@ -217,6 +250,95 @@ mod tests {
 
     fn stub_client(data: StubTransportData) -> Client {
         Client::with_transport(Box::new(StubTransport::new(data)))
+    }
+
+    // ── Index routing fixtures (ocx#504) ──────────────────────────────────
+    //
+    // An index source reduced to the one question the gate asks it: where does
+    // this dependency live? `physical` is `(registry, repository)` for every
+    // name it is asked about, or `None` for a source that rewrites nothing —
+    // a plain registry's answer, the passthrough every pre-#504 test runs under.
+    // `authoritative_base_url` makes it a configured index that is
+    // authoritative for every name it is asked about.
+
+    #[derive(Clone)]
+    struct RoutingSource {
+        physical: Option<(&'static str, &'static str)>,
+        authoritative_base_url: Option<&'static str>,
+    }
+
+    #[async_trait::async_trait]
+    impl IndexImpl for RoutingSource {
+        async fn list_repositories(&self, _: &str) -> IndexResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &ocx_oci::Identifier) -> IndexResult<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(
+            &self,
+            _: &ocx_oci::Identifier,
+            _: ocx_index::IndexOperation,
+        ) -> IndexResult<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            _: &ocx_oci::Identifier,
+            _: ocx_index::IndexOperation,
+        ) -> IndexResult<Option<ocx_oci::Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> IndexResult<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        /// Minted digest-only, the way a source answered before the tag was
+        /// carried — so a tag on the dialled reference proves the gate's routing
+        /// carries it, not this fixture.
+        async fn physical_reference(
+            &self,
+            identifier: &ocx_oci::Identifier,
+        ) -> IndexResult<Option<ocx_oci::Identifier>> {
+            Ok(self.physical.map(|(registry, repository)| {
+                let physical = ocx_oci::Identifier::new_registry(repository, registry);
+                match identifier.digest() {
+                    Some(digest) => physical.clone_with_digest(digest),
+                    None => physical,
+                }
+            }))
+        }
+        fn jurisdiction(&self, _: &ocx_oci::Identifier) -> ocx_index::Jurisdiction {
+            match self.authoritative_base_url {
+                Some(_) => ocx_index::Jurisdiction::Authoritative,
+                None => ocx_index::Jurisdiction::FallThrough,
+            }
+        }
+        fn index_base_url(&self) -> Option<&str> {
+            self.authoritative_base_url
+        }
+        fn box_clone(&self) -> Box<dyn IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    fn index_with(physical: Option<(&'static str, &'static str)>) -> ocx_index::Index {
+        ocx_index::Index::from_impl(RoutingSource {
+            physical,
+            authoritative_base_url: None,
+        })
+        .with_proxy_rules(ocx_oci::ssrf::ProxyRules::direct())
+    }
+
+    /// No source rewrites anything: every pin is read where it names.
+    fn passthrough_index() -> ocx_index::Index {
+        index_with(None)
+    }
+
+    /// `example.com/dep` is served from `example.com/contrib/dep`. Same
+    /// registry on both sides, so the dial-site floor's not-a-rewrite carve-out
+    /// answers without a DNS lookup.
+    fn routed_index() -> ocx_index::Index {
+        index_with(Some(("example.com", "contrib/dep")))
     }
 
     fn metadata(deps_json: &str) -> Metadata {
@@ -303,7 +425,7 @@ mod tests {
         let client = stub_client(data);
         let metadata = metadata_with_any_pin(&hex('a'));
 
-        let err = verify_dependency_pins(&client, &metadata, &Platform::any())
+        let err = verify_dependency_pins(&client, &passthrough_index(), &metadata, &Platform::any())
             .await
             .expect_err("a leaf not advertised as `any` in its own index must be rejected");
         let expected_digest = format!("sha256:{}", hex('a'));
@@ -330,7 +452,7 @@ mod tests {
         let client = stub_client(data);
         let metadata = metadata_with_any_pin(&hex('a'));
 
-        verify_dependency_pins(&client, &metadata, &Platform::any())
+        verify_dependency_pins(&client, &passthrough_index(), &metadata, &Platform::any())
             .await
             .expect("a genuinely `any`-offered leaf must pass the provenance check and the gate");
     }
@@ -381,9 +503,14 @@ mod tests {
             (IMAGE_MANIFEST_JSON.as_bytes().to_vec(), format!("sha256:{}", hex('a'))),
         );
 
-        let err = verify_dependency_pins(&client, &metadata_with_any_pin(&hex('a')), &Platform::any())
-            .await
-            .expect_err("a mirror-advertised `any` claim must not admit a publish the canonical registry refuses");
+        let err = verify_dependency_pins(
+            &client,
+            &passthrough_index(),
+            &metadata_with_any_pin(&hex('a')),
+            &Platform::any(),
+        )
+        .await
+        .expect_err("a mirror-advertised `any` claim must not admit a publish the canonical registry refuses");
         assert!(
             matches!(err, PublishGateError::AnyPinNotAdvertisedAsAny { .. }),
             "got: {err}"
@@ -398,7 +525,7 @@ mod tests {
         let client = stub_client(StubTransportData::new());
         let metadata = metadata_with_any_pin(&hex('a'));
 
-        let err = verify_dependency_pins(&client, &metadata, &Platform::any())
+        let err = verify_dependency_pins(&client, &passthrough_index(), &metadata, &Platform::any())
             .await
             .expect_err("an unfetchable dependency tag must fail closed");
         assert!(
@@ -414,7 +541,7 @@ mod tests {
         let client = stub_client(data);
         let metadata = metadata(&format!(r#"{{"identifier":"example.com/dep@sha256:{}"}}"#, hex('a')));
 
-        let err = verify_dependency_pins(&client, &metadata, &platform("linux/amd64"))
+        let err = verify_dependency_pins(&client, &passthrough_index(), &metadata, &platform("linux/amd64"))
             .await
             .expect_err("an index digest pin must be rejected");
         assert!(
@@ -430,7 +557,7 @@ mod tests {
         let client = stub_client(data);
         let metadata = metadata(&format!(r#"{{"identifier":"example.com/dep@sha256:{}"}}"#, hex('a')));
 
-        verify_dependency_pins(&client, &metadata, &platform("linux/amd64"))
+        verify_dependency_pins(&client, &passthrough_index(), &metadata, &platform("linux/amd64"))
             .await
             .expect("manifest pin passes the gate");
     }
@@ -440,7 +567,7 @@ mod tests {
         let client = stub_client(StubTransportData::new());
         let metadata = metadata(&format!(r#"{{"identifier":"example.com/dep@sha256:{}"}}"#, hex('a')));
 
-        let err = verify_dependency_pins(&client, &metadata, &platform("linux/amd64"))
+        let err = verify_dependency_pins(&client, &passthrough_index(), &metadata, &platform("linux/amd64"))
             .await
             .expect_err("absent manifest must be rejected");
         assert!(
@@ -465,7 +592,7 @@ mod tests {
             b = hex('b'),
         ));
 
-        verify_dependency_pins(&client, &metadata, &platform("linux/amd64"))
+        verify_dependency_pins(&client, &passthrough_index(), &metadata, &platform("linux/amd64"))
             .await
             .expect("gate passes");
 
@@ -492,7 +619,7 @@ mod tests {
         let client = stub_client(data);
         let metadata = metadata(&format!(r#"{{"identifier":"example.com/dep@sha256:{}"}}"#, hex('a')));
 
-        let err = verify_dependency_pins(&client, &metadata, &platform("linux/amd64"))
+        let err = verify_dependency_pins(&client, &passthrough_index(), &metadata, &platform("linux/amd64"))
             .await
             .expect_err("registry error must surface");
         assert!(matches!(err, PublishGateError::Verification { .. }), "got: {err}");
@@ -507,9 +634,147 @@ mod tests {
         let client = stub_client(data);
         let metadata = metadata(&format!(r#"{{"identifier":"example.com/dep@sha256:{}"}}"#, hex('a')));
 
-        let err = verify_dependency_pins(&client, &metadata, &platform("linux/amd64"))
+        let err = verify_dependency_pins(&client, &passthrough_index(), &metadata, &platform("linux/amd64"))
             .await
             .expect_err("authentication failure must surface");
         assert!(matches!(err, PublishGateError::Verification { .. }), "got: {err}");
+    }
+
+    // ── Pins read at the registry the index routes them to (ocx#504) ─────
+
+    /// A dependency in an index-served namespace lives at the physical
+    /// location the index names, not at the logical host — which serves no
+    /// registry at all (`ocx.sh`). Seeded only there, so a gate that dials the
+    /// logical name finds nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pin_served_through_an_index_is_verified_at_its_physical_registry() {
+        let data = StubTransportData::new();
+        data.write().manifests.insert(
+            format!("example.com/contrib/dep@sha256:{}", hex('a')),
+            (IMAGE_MANIFEST_JSON.as_bytes().to_vec(), format!("sha256:{}", hex('a'))),
+        );
+        let client = stub_client(data);
+        let metadata = metadata(&format!(r#"{{"identifier":"example.com/dep@sha256:{}"}}"#, hex('a')));
+
+        verify_dependency_pins(&client, &routed_index(), &metadata, &platform("linux/amd64"))
+            .await
+            .expect("the pin exists where the index routes it");
+    }
+
+    /// The `any`-provenance read is a read BY TAG, so routing must carry the
+    /// pin's advisory tag onto the physical location: without it the read asks
+    /// the physical repository for `latest`, which is not the dependency's own
+    /// image index. Both keys are seeded only at the physical location, under
+    /// the tag.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_any_target_reads_provenance_at_the_physical_registry_under_the_pins_tag() {
+        let data = StubTransportData::new();
+        data.write().manifests.insert(
+            "example.com/contrib/dep:1.0".to_string(),
+            (
+                image_index_with_entry(&hex('a'), ANY_ENTRY).into_bytes(),
+                format!("sha256:{}", hex('f')),
+            ),
+        );
+        data.write().manifests.insert(
+            format!("example.com/contrib/dep:1.0@sha256:{}", hex('a')),
+            (IMAGE_MANIFEST_JSON.as_bytes().to_vec(), format!("sha256:{}", hex('a'))),
+        );
+        let client = stub_client(data);
+
+        verify_dependency_pins(
+            &client,
+            &routed_index(),
+            &metadata_with_any_pin(&hex('a')),
+            &Platform::any(),
+        )
+        .await
+        .expect("the dependency's own index, read at the physical location under its tag, advertises the pin as `any`");
+    }
+
+    /// A pin the physical registry does not hold is not found — even though a
+    /// same-named manifest sits at the logical location, which is exactly what a
+    /// gate that never routed would find and wave through. The error names the
+    /// LOGICAL pin: that is what the publisher wrote and can fix.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pin_missing_at_the_physical_registry_is_not_found_under_its_logical_name() {
+        let data = StubTransportData::new();
+        seed_manifest(&data, &hex('a'), IMAGE_MANIFEST_JSON);
+        let client = stub_client(data);
+        let metadata = metadata(&format!(r#"{{"identifier":"example.com/dep@sha256:{}"}}"#, hex('a')));
+
+        let err = verify_dependency_pins(&client, &routed_index(), &metadata, &platform("linux/amd64"))
+            .await
+            .expect_err("the physical registry holds no such manifest");
+        match err {
+            PublishGateError::DependencyManifestNotFound { identifier } => assert_eq!(
+                identifier.to_string(),
+                format!("example.com/dep@sha256:{}", hex('a')),
+                "the error must name the logical pin, never its physical location"
+            ),
+            other => panic!("expected DependencyManifestNotFound, got: {other}"),
+        }
+    }
+
+    /// Routing brings the dial-site SSRF floor with it: a rewrite into a
+    /// forbidden range is refused before any registry request, and the refusal
+    /// names the logical pin.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pin_routed_into_a_forbidden_range_is_refused_before_any_dial() {
+        let data = StubTransportData::new();
+        let client = stub_client(data.clone());
+        let metadata = metadata(&format!(r#"{{"identifier":"example.com/dep@sha256:{}"}}"#, hex('a')));
+
+        let err = verify_dependency_pins(
+            &client,
+            &index_with(Some(("127.0.0.1:5999", "contrib/dep"))),
+            &metadata,
+            &platform("linux/amd64"),
+        )
+        .await
+        .expect_err("a loopback rewrite must be refused");
+        match &err {
+            PublishGateError::Routing {
+                identifier,
+                source: ocx_index::error::Error::Ssrf { .. },
+            } => assert_eq!(identifier.to_string(), format!("example.com/dep@sha256:{}", hex('a'))),
+            other => panic!("expected a Routing SSRF refusal, got: {other:?}"),
+        }
+        assert!(
+            data.read().calls.iter().all(|call| call != "pull_manifest_raw"),
+            "nothing may be dialled once the floor refuses the target"
+        );
+    }
+
+    /// A dependency in a namespace an index serves authoritatively, which that
+    /// index does not hold, is not in the index. Dialling the logical host
+    /// instead would reach something that is not a registry (`https://ocx.sh/v2`)
+    /// and report whatever it answers. The refusal names the logical pin and
+    /// nothing is dialled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pin_its_authoritative_index_does_not_hold_is_refused_before_any_dial() {
+        let data = StubTransportData::new();
+        seed_manifest(&data, &hex('a'), IMAGE_MANIFEST_JSON);
+        let client = stub_client(data.clone());
+        let metadata = metadata(&format!(r#"{{"identifier":"example.com/dep@sha256:{}"}}"#, hex('a')));
+        let index = ocx_index::Index::from_impl(RoutingSource {
+            physical: None,
+            authoritative_base_url: Some("https://index.example.invalid"),
+        });
+
+        let err = verify_dependency_pins(&client, &index, &metadata, &platform("linux/amd64"))
+            .await
+            .expect_err("an authoritative index's miss must not fall back to the logical host");
+        match &err {
+            PublishGateError::Routing {
+                identifier,
+                source: ocx_index::error::Error::NotInIndex { .. },
+            } => assert_eq!(identifier.to_string(), format!("example.com/dep@sha256:{}", hex('a'))),
+            other => panic!("expected a Routing NotInIndex refusal, got: {other:?}"),
+        }
+        assert!(
+            data.read().calls.iter().all(|call| call != "pull_manifest_raw"),
+            "the logical host must not be dialled — it holds the manifest here, so a dial would pass"
+        );
     }
 }

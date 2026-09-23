@@ -530,7 +530,8 @@ pub struct AdmittedClaims {
 /// Resolves the physical transport identifier for a logical pinned reference.
 ///
 /// Returns the registry the index points at (`index.ocx.sh`'s `repository`
-/// pointer, with the leaf digest carried over) when a source rewrites it, else
+/// pointer, with the logical tag and leaf digest carried over) when a source
+/// rewrites it, else
 /// `pinned` unchanged (registry-backed packages). Transport-only (C2).
 ///
 /// This is the one resolve that exists in order to *materialize*, so it is

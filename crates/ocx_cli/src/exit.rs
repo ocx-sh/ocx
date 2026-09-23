@@ -1824,6 +1824,17 @@ mod tests {
             pattern: "Self::Description(_)",
             value: "\"description\"",
         },
+        // #504 — the push gate routes each pin through the index before
+        // reading it; a routing failure delegates to the index error (an SSRF
+        // refusal 78, an index outage 69), the way `Verification` delegates.
+        NewArm {
+            target: "PublishGateError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "PublishGateError::Routing { .. }",
+            value: "None",
+        },
     ];
 
     /// A baseline arm whose **declaring type was deleted**, named with what

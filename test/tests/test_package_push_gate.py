@@ -19,8 +19,12 @@ from __future__ import annotations
 import io
 import json
 import tarfile
+from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
+
+from src import static_index
 from src.helpers import make_package, resolved_metadata_path, resolved_receipt_path
 from src.registry import (
     fetch_manifest_from_registry,
@@ -193,6 +197,106 @@ def test_push_accepts_manifest_pinned_dep(ocx: OcxRunner, unique_repo: str, tmp_
         ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle,
         "-m", str(metadata), "-p", current_platform(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Gate: a dependency served through an index is verified where the index
+# routes it (ocx#504). `index_server`/`_configure_index_source` mirror
+# `test_index_ocx_sh.py` (that fixture is file-local, not shared via
+# conftest.py). The namespace is `corp.example`, not `ocx.sh`: a gate that
+# dials the logical name then fails on a reserved TLD instead of reaching the
+# production host.
+# ---------------------------------------------------------------------------
+
+INDEX_NAMESPACE = "corp.example"
+
+
+@pytest.fixture()
+def index_server(tmp_path: Path) -> Iterator[static_index.StaticIndexServer]:
+    root = tmp_path / "static_index_root"
+    root.mkdir()
+    with static_index.running(root) as server:
+        yield server
+
+
+def _configure_index_source(ocx: OcxRunner, server: static_index.StaticIndexServer) -> None:
+    """Points `[registries."corp.example"] index` at the fixture and trusts the
+    loopback test registry the index routes to (the SSRF guard's
+    `trusted_hosts` escape hatch), mirroring
+    `test_index_ocx_sh.py::configure_index_source`."""
+    config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    registry_host = ocx.registry.split(":", 1)[0]
+    config_path.write_text(
+        f'[registries."{INDEX_NAMESPACE}"]\nindex = "{server.base_url}"\ntrusted_hosts = ["{registry_host}"]\n'
+    )
+    ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{server.host}"
+
+
+def _index_served_dependency(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, server: static_index.StaticIndexServer
+) -> tuple[str, str, str]:
+    """Publishes a package at a physical repository and serves it through the
+    fixture index under `corp.example/<unique_repo>/dep:1.0.0`. Returns the
+    logical tag identifier, the leaf manifest digest, and the platform."""
+    leaf = make_package(ocx, f"{unique_repo}_physical", "1.0.0", tmp_path, index=False)
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, leaf.repo, leaf.tag)
+    os_name, arch_name = leaf.platform.split("/")
+
+    _configure_index_source(ocx, server)
+    static_index.write_config(server.root)
+    repository = f"{unique_repo}/dep"
+    static_index.write_package(
+        server.root,
+        repository=repository,
+        tag="1.0.0",
+        physical_repository=f"oci://{ocx.registry}/{leaf.repo}",
+        platform_digest=leaf_digest,
+        os=os_name,
+        architecture=arch_name,
+    )
+    return f"{INDEX_NAMESPACE}/{repository}:1.0.0", leaf_digest, leaf.platform
+
+
+def test_push_verifies_an_index_served_dependency_at_its_physical_registry(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+):
+    """S-1 (ocx#504): `create` pins a dependency that only an index serves,
+    and `push` verifies that pin at the registry the index routes it to. The
+    logical host serves no registry, so a gate dialling it cannot pass."""
+    logical, leaf_digest, platform = _index_served_dependency(ocx, unique_repo, tmp_path, index_server)
+    bundle = _created_app(ocx, tmp_path, "routed", [{"identifier": logical}], platform)
+    pinned = json.loads(resolved_metadata_path(bundle).read_text(encoding="utf-8"))["dependencies"][0]["identifier"]
+    assert pinned == f"{logical}@{leaf_digest}", "create must pin the logical name at the leaf digest"
+
+    _push(ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle)
+
+
+def test_push_names_the_logical_pin_when_the_physical_registry_lacks_it(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+):
+    """S-2 (ocx#504): a pin the physical registry does not hold is not found
+    (79), and the message names the pin the publisher wrote — the logical
+    one — not where the index routed it."""
+    logical, _, platform = _index_served_dependency(ocx, unique_repo, tmp_path, index_server)
+    ghost_pin = f"{logical}@sha256:{'c' * 64}"
+    bundle = _bundle(ocx, tmp_path, "routedghost")
+    metadata = _write_metadata(tmp_path, "routedghost", {
+        "type": "bundle", "version": 1,
+        "dependencies": [{"identifier": ghost_pin}],
+    })
+
+    result = _push(
+        ocx, f"{ocx.registry}/{unique_repo}_app:1.0.0", bundle,
+        "-m", str(metadata), "-p", platform, check=False,
+    )
+    assert result.returncode == EXIT_NOT_FOUND, result.stderr
+    assert ghost_pin in result.stderr, result.stderr
 
 
 # ---------------------------------------------------------------------------

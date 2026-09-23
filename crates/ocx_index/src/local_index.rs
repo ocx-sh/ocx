@@ -1022,10 +1022,11 @@ impl LocalIndex {
     /// identifier — an indirected package silently reported as its own
     /// transport.
     ///
-    /// The logical digest is carried onto the physical location and the tag is
-    /// dropped — the exact shape [`super::OcxIndex`] mints — so a local answer
-    /// and a source answer for one identifier can never disagree. The physical
-    /// value is transport-only routing (C2), never a storage key.
+    /// The logical tag and digest are carried onto the physical location
+    /// ([`super::at_version_of`], the same helper [`super::OcxIndex`] mints
+    /// with) — so a local answer and a source answer for one identifier can
+    /// never disagree. The physical value is transport-only routing (C2),
+    /// never a storage key.
     ///
     /// `Ok(None)` = no root known locally. See
     /// [`ChainedIndex::physical_reference`](super::chained_index::ChainedIndex)
@@ -1048,11 +1049,7 @@ impl LocalIndex {
             return Ok(None);
         };
         let (registry, repository) = super::parse_physical_repository(&result.root.repository)?;
-        let physical = ocx_oci::Identifier::new_registry(repository, registry);
-        Ok(Some(match identifier.digest() {
-            Some(digest) => physical.clone_with_digest(digest),
-            None => physical,
-        }))
+        Ok(Some(super::at_version_of(registry, repository, identifier)))
     }
 
     /// Merge a fetched published root into the local copy
@@ -4494,10 +4491,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Tag AND digest on the input: the physical value must carry the digest
-        // (content addressing at the physical registry) and drop the tag — the
-        // exact shape `OcxIndex::physical_identifier` mints, so a local answer
-        // and a source answer can never disagree.
+        // Tag AND digest on the input: the physical value carries both — the
+        // digest content-addresses the read, the tag is what a read by tag
+        // needs — in the exact shape `OcxIndex::physical_identifier` mints, so
+        // a local answer and a source answer can never disagree.
         let (_, digest) = image_manifest_bytes();
         let logical = tagged_id("3.28").clone_with_digest(digest.clone());
         let physical = local
@@ -4511,8 +4508,8 @@ mod tests {
         assert_eq!(physical.digest(), Some(digest));
         assert_eq!(
             physical.tag(),
-            None,
-            "the physical reference is digest-addressed, never tagged"
+            Some("3.28"),
+            "the physical reference is addressed at the logical version, tag included"
         );
         assert_ne!(
             physical.registry(),
@@ -4522,7 +4519,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn physical_reference_carries_no_digest_when_the_logical_reference_has_none() {
+    async fn physical_reference_carries_only_the_tag_when_the_logical_reference_has_no_digest() {
         let dir = TempDir::new().unwrap();
         let local = make_index(&dir);
         local
@@ -4536,8 +4533,8 @@ mod tests {
             .unwrap()
             .expect("the root is present");
         assert_eq!(physical.digest(), None);
-        assert_eq!(physical.tag(), None);
-        assert_eq!(physical.to_string(), "ghcr.io/ocx-contrib/cmake");
+        assert_eq!(physical.tag(), Some("3.28"));
+        assert_eq!(physical.to_string(), "ghcr.io/ocx-contrib/cmake:3.28");
     }
 
     #[tokio::test]

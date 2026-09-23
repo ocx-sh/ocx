@@ -1600,6 +1600,12 @@ impl index_impl::IndexImpl for ChainedIndex {
         self.sources.iter().any(|source| source.serves_registry(registry))
     }
 
+    fn authoritative_index_base_url(&self, identifier: &ocx_oci::Identifier) -> Option<&str> {
+        self.sources
+            .iter()
+            .find_map(|source| source.authoritative_index_base_url(identifier))
+    }
+
     /// The `trusted_hosts` set configured for `registry` — the SSRF escape hatch
     /// the operator declared for that namespace, or empty when they declared
     /// none.
