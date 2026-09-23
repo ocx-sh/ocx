@@ -7,12 +7,16 @@ use clap::ValueEnum;
 ///
 /// Flatten into a command with `#[clap(flatten)]` to add `--format` plus its
 /// `--json` shorthand. The two are two spellings of one value, so they use
-/// POSIX last-wins semantics in both directions (`overrides_with`, same idiom
-/// as [`super::Pull`] / [`super::BinScan`]): combining them is not an error,
+/// POSIX last-wins semantics in both directions (`overrides_with`, the idiom
+/// `ocx_cli`'s `Pull` / `BinScan` options use too): combining them is not an error,
 /// and either can override the other. That keeps plain reachable when
 /// `--json` arrives from outside the command line — a shell alias or wrapper
 /// script — which a `conflicts_with` pair would make unexpressible. Resolve
-/// with [`Format::mode`] — never read the flags individually.
+/// with [`Format::mode`] (or [`Format::requested`]) — never read the flags
+/// individually.
+///
+/// Lives here rather than in `ocx_cli` so every OCX binary shares one
+/// `--format` / `--json` surface: `ocx-mirror` flattens it at its root too.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Format {
     /// Output format for stdout reports: `plain` (default) or `json`.
@@ -43,9 +47,15 @@ impl Format {
     /// last-wins with both — `overrides_with` guarantees clap has already
     /// dropped the losing occurrence, so at most one is set here.
     pub fn mode(&self) -> FormatMode {
-        self.format
-            .or(self.json.then_some(FormatMode::Json))
-            .unwrap_or_default()
+        self.requested().unwrap_or_default()
+    }
+
+    /// The format the command line asked for, or `None` when neither flag was
+    /// given — for a binary whose commands keep a default of their own (a
+    /// per-command `--format`, or JSON when running under CI), which an
+    /// explicit `--format plain` must override and an absent flag must not.
+    pub fn requested(&self) -> Option<FormatMode> {
+        self.format.or(self.json.then_some(FormatMode::Json))
     }
 }
 
@@ -71,6 +81,22 @@ mod tests {
     #[test]
     fn no_flags_yield_plain() {
         assert_eq!(mode(&[]), FormatMode::Plain);
+    }
+
+    fn requested(args: &[&str]) -> Option<FormatMode> {
+        let mut argv = vec!["harness"];
+        argv.extend_from_slice(args);
+        Harness::try_parse_from(argv).expect("parse").format.requested()
+    }
+
+    /// `requested` tells an absent flag from an explicit `plain`, and agrees
+    /// with `mode` whenever a flag was given.
+    #[test]
+    fn requested_is_none_only_without_a_flag() {
+        assert_eq!(requested(&[]), None);
+        assert_eq!(requested(&["--format", "plain"]), Some(FormatMode::Plain));
+        assert_eq!(requested(&["--json"]), Some(FormatMode::Json));
+        assert_eq!(requested(&["--json", "--format", "plain"]), Some(FormatMode::Plain));
     }
 
     /// Both spellings of JSON resolve identically.

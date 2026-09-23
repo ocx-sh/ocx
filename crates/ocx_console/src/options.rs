@@ -4,7 +4,9 @@
 //! Shared CLI option types for OCX binaries.
 
 mod color_mode;
+mod format;
 mod progress_mode;
 
 pub use color_mode::{ColorMode, ColorModeConfig};
+pub use format::{Format, FormatMode};
 pub use progress_mode::ProgressMode;
