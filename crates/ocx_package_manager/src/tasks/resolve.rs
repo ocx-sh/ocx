@@ -2096,6 +2096,19 @@ fn merge_companions(
 /// (`parse_physical_repository`) recovers the exact hostname so descriptor
 /// rule matching globs against the real identifier string.
 ///
+/// The recovered host is accepted only when its store slug
+/// ([`ocx_store::file_structure::slugify`], the function the directory names
+/// are made with) equals the directory's registry slug. An index-routed name
+/// (`ocx.sh/cmake`) has a root whose `repository` names the physical location
+/// on another registry (`oci://ghcr.io/ocx-contrib/cmake`); that host is not
+/// this name's registry, so the logical base is kept.
+///
+/// ponytail: a logical port-host (`localhost:5000`) that an index routes to a
+/// different physical host stays in slug form (`localhost_5000`), so a
+/// `localhost:5000/...` descriptor rule does not match it. Upgrade path:
+/// recover the logical host from the configured index sources instead of the
+/// root document.
+///
 /// Falls back to the slug-form identifier unchanged on any read/parse miss (a
 /// missing root document, malformed JSON, or a `repository` value that fails
 /// the `oci://` scheme parse) — the slug form still matches catch-all rules
@@ -2122,8 +2135,15 @@ pub(super) async fn recover_base_with_real_registry(
             .map(|(host, _path)| host),
         Ok(None) | Err(_) => None,
     };
+    // Only accept a host that un-slugs this directory name. An index-routed
+    // name's root points at its physical location on another registry, and
+    // physical data must never become package identity.
     match real_registry {
-        Some(registry) if registry != slug_base_id.registry() => {
+        Some(registry)
+            if registry != slug_base_id.registry()
+                && ocx_store::file_structure::slugify(&registry)
+                    == ocx_store::file_structure::slugify(slug_base_id.registry()) =>
+        {
             ocx_oci::Identifier::new_registry(slug_base_id.repository(), &registry)
                 .clone_with_tag(slug_base_id.tag_or_latest())
         }
@@ -7096,6 +7116,39 @@ mod phase5a_spec_tests {
              real-registry recovery from the tag file; got: {:?}",
             roots.companions
         );
+    }
+
+    // ── Slug recovery keeps package identity ─────────────────────────────────────
+
+    /// Seeds the root document for `(source, repository)` with the given
+    /// `repository` pointer and returns the recovered base for `slug_base_id`.
+    async fn recover_with_root_pointer(slug_base_id: &Identifier, pointer: &str) -> Identifier {
+        let dir = TempDir::new().unwrap();
+        let snapshot = IndexStore::machine_local(&FileStructure::with_root(dir.path().to_path_buf()));
+        let root_path = snapshot.root_document_path(slug_base_id.registry(), slug_base_id.repository());
+        std::fs::create_dir_all(root_path.parent().unwrap()).unwrap();
+        std::fs::write(&root_path, format!(r#"{{"repository":"{pointer}","tags":{{}}}}"#)).unwrap();
+        super::recover_base_with_real_registry(&snapshot, slug_base_id).await
+    }
+
+    /// An index-routed name's root document points at its PHYSICAL location on
+    /// another registry. That host is not the un-slugged form of the directory
+    /// name, so the logical base must survive unchanged — `ghcr.io/cmake` is
+    /// neither the package name nor the physical location.
+    #[tokio::test]
+    async fn recover_base_keeps_index_routed_name_off_its_physical_host() {
+        let slug_base_id = Identifier::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
+        let recovered = recover_with_root_pointer(&slug_base_id, "oci://ghcr.io/ocx-contrib/cmake").await;
+        assert_eq!(recovered.to_string(), "ocx.sh/cmake:3.28");
+    }
+
+    /// The original intent: a slugged directory name (`localhost_5000`) is
+    /// restored to the real hostname it was slugged from.
+    #[tokio::test]
+    async fn recover_base_unslugs_port_registry() {
+        let slug_base_id = Identifier::new_registry("cmake", "localhost_5000").clone_with_tag("3.28");
+        let recovered = recover_with_root_pointer(&slug_base_id, "oci://localhost:5000/cmake").await;
+        assert_eq!(recovered.to_string(), "localhost:5000/cmake:3.28");
     }
 }
 
