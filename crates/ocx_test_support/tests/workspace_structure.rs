@@ -61,7 +61,7 @@ mod floor {
     /// Every `crates/*/src` — 605 files at 2026-09-20.
     pub(crate) const ALL_CRATE_SOURCES: usize = 540;
     /// `crates/*/src` less the CLI, and the boundary subtrees, which differ by
-    /// the three crates not on that boundary — 414 and 403 at 2026-09-20.
+    /// the crates not on that boundary — 414 and 403 at 2026-09-20.
     pub(crate) const LIBRARY_SOURCES: usize = 360;
     /// `crates/ocx_cli/src`, where the downcast ladder lives — 191 at
     /// 2026-09-20.
@@ -218,7 +218,8 @@ impl CrateMap {
 /// `deps_direction` and `scripts/edge_inventory.py` both read the TOML, so a
 /// loosened edge there would green both with no red anywhere — this table is
 /// what reds. Source: ADR § "Architecture — the crate map" as corrected by
-/// D-037 (the 17 rows); the transition rows sit in [`ADR_TRANSITION_ROWS`].
+/// D-037 (the 17 rows), plus `ocx_python` (ecosystem tier, added with the
+/// crate); the transition rows sit in [`ADR_TRANSITION_ROWS`].
 /// Order within a row is irrelevant (compared as sets); the row set and every
 /// set are compared in both directions.
 const ADR_MAP: &[(&str, &[&str])] = &[
@@ -245,6 +246,7 @@ const ADR_MAP: &[(&str, &[&str])] = &[
             "ocx_exit",
         ],
     ),
+    ("ocx_python", &["ocx_oci", "ocx_package"]),
     (
         "ocx_shell",
         &[
@@ -322,7 +324,7 @@ const ADR_MAP: &[(&str, &[&str])] = &[
     ("ocx_test_support", &[]),
 ];
 
-/// The rows of the transition, beside the 17: the three packages that are not
+/// The rows of the transition, beside the 18: the three packages that are not
 /// extraction targets. These have no README of the shell shape. `ocx_lib`'s
 /// row left with the crate at WP-37.
 const ADR_TRANSITION_ROWS: &[(&str, &[&str])] = &[
@@ -845,7 +847,7 @@ fn internal_crates_block_is_complete_and_sorted() {
 
 /// Every crate README's `**May depend on:**` row is the prose copy of that
 /// crate's `ADR_MAP` row — the copy a reader trusts without running anything.
-/// Each of the 17 rows must have its README (a deleted one is red, not a
+/// Each of the 18 rows must have its README (a deleted one is red, not a
 /// shorter walk); a README on a crate with no row at all is red too.
 #[test]
 fn readme_may_depend_on_rows_match_the_crate_map() {
@@ -1049,14 +1051,19 @@ fn testing_feature_forward_list_matches_grep() {
     );
 }
 
-/// `ocx_util` `pub` items with no consumer outside the crate, tolerated for now
-/// and only ever shrinking. Named, never counted: a count reconciles one item
+/// `ocx_util` `pub` items with no consumer elsewhere in this workspace. Most are
+/// tolerated for now and only ever shrinking; the rest are consumed by a
+/// lockstep satellite this scan cannot see, each entry naming its consumer by
+/// path. Named, never counted: a count reconciles one item
 /// gaining a consumer against another losing its last, and reports the same
 /// number either way.
 const OCX_UTIL_WITHOUT_CONSUMER: &[&str] = &[
     "LockedTomlFile",
     "add_dir",
     "collect_and_descend",
+    // Consumed by ocx-mirror `crates/ocx_mirror_spec/src/concurrency_config.rs`
+    // (ocx-sh/ocx#500), a satellite outside this workspace.
+    "default_threads",
     "embedded_roots",
     "lock_exclusive_with_timeout",
     "open_shared_with_timeout",
@@ -1514,10 +1521,14 @@ fn boundary_subtrees() -> Vec<PathBuf> {
     /// - `ocx` is the consumer side of this boundary, not a crossing.
     /// - `ocx_schema` is build-only and links into no command.
     /// - `ocx_test_support` is this harness.
+    /// - `ocx_python` is an ecosystem crate `ocx` does not link: its errors
+    ///   never reach this ladder, and its consumers classify them (e.g.
+    ///   ocx-mirror's `ocx_mirror_error::pylock`). Arming it here would add
+    ///   the CLI→`ocx_python` edge the crate map does not allow.
     ///
     /// `ocx_shim` needs no entry: it is a Windows launcher binary with no
     /// `lib.rs`, so the filter below drops it without a judgement call.
-    const NOT_ON_THE_BOUNDARY: &[&str] = &["ocx", "ocx_schema", "ocx_test_support"];
+    const NOT_ON_THE_BOUNDARY: &[&str] = &["ocx", "ocx_python", "ocx_schema", "ocx_test_support"];
 
     let dirs = crate_dirs();
     for excluded in NOT_ON_THE_BOUNDARY {

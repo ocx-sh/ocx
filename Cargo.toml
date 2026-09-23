@@ -75,6 +75,7 @@ ocx_oci = { path = "crates/ocx_oci" }
 ocx_package = { path = "crates/ocx_package" }
 ocx_package_manager = { path = "crates/ocx_package_manager" }
 ocx_project = { path = "crates/ocx_project" }
+ocx_python = { path = "crates/ocx_python" }
 ocx_schema = { path = "crates/ocx_schema" }
 ocx_script = { path = "crates/ocx_script" }
 ocx_setup = { path = "crates/ocx_setup" }
@@ -246,6 +247,19 @@ liblzma = { version = "0.4", default-features = false, features = ["static"] }
 # in Client::pull_layer. New direct dep — confirmed absent from workspace before
 # this addition (grep 2026-06-12, 0 matches).
 tokio-util = { version = "0.7", default-features = false, features = ["io", "io-util"] }
+
+# Python packaging (PEP 751 / PEP 427 / PEP 508 / PEP 440), for `ocx_python`.
+# The four `uv-*` crates are pinned to ONE upstream rev (git, not a published
+# crate — astral-sh/uv does not publish these to crates.io). They share the rev
+# so filename parsing, tag compatibility, and PEP 508/440 marker/version
+# evaluation stay mutually consistent; bump all four together. The URL string
+# is byte-identical to ocx-mirror's, so its lock resolves the same git source.
+# `version-ranges` (pubgrub) is pulled in transitively by uv-pep508 — do NOT add
+# it here.
+uv-distribution-filename = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
+uv-platform-tags = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
+uv-pep508 = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
+uv-pep440 = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
 
 # Filesystem
 tempfile = "3.27.0"

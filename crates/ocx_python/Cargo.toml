@@ -1,0 +1,39 @@
+[package]
+name = "ocx_python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# Identifiers, platforms and layer layouts: the OCI vocabulary a composed
+# Python environment's metadata and wheel references are written in.
+ocx_oci.workspace = true
+# Package metadata — bundle, entrypoints, env, dependencies — that
+# `compose_env` emits for each composed environment.
+ocx_package.workspace = true
+
+# The `pylock.toml` document model `parse_pylock` deserializes into.
+serde.workspace = true
+# Entrypoint values `compose_env` builds through the metadata's own serde shape.
+serde_json.workspace = true
+# The source wheel's sha256 and the repacked layer's digest.
+sha2.workspace = true
+# The repacked layer: a wheel's zip entries re-emitted as a deterministic
+# tar+zstd archive.
+tar.workspace = true
+zip.workspace = true
+zstd.workspace = true
+thiserror.workspace = true
+# PEP 751 `pylock.toml` itself.
+toml.workspace = true
+# PEP 427 wheel filenames, PEP 425 platform tags, PEP 508 markers and PEP 440
+# versions — the four share one pinned upstream rev (root Cargo.toml).
+uv-distribution-filename.workspace = true
+uv-pep440.workspace = true
+uv-pep508.workspace = true
+uv-platform-tags.workspace = true
+
+[lints]
+workspace = true

@@ -101,7 +101,7 @@ would not have. The Rust half stays a re-run set and is floored, never used as
 the discriminator: Rust tests have always cached, so a docs-only build re-running
 zero of them is true whether or not selection works.
 
-`SCOPED_ROWS` (`test/taskfile.yml`, 20 rows, two of them `escalate`) is read
+`SCOPED_ROWS` (`test/taskfile.yml`, 21 rows, three of them `escalate`) is read
 unchanged as the crate→target selection query; `escalate` maps to `//test:all`.
 It is a YAML mapping and this file is stdlib-only (plan DEC-8), so it is read
 the way `scoped_gate.py` reads the same table — a regex over the block — and
@@ -182,11 +182,11 @@ number at once (`181` here, `172` in `test/BUILD.bazel`'s comment, `188` in a
 work order); `bazel_gate_proofs` is now the only place it is written down, and
 `prove_counts` below reads `test/tests/` to check even that."""
 
-SCOPED_ROWS = 20
+SCOPED_ROWS = 21
 """Rows of `test/taskfile.yml`'s `SCOPED_ROWS` map — one per workspace member."""
 
-SCOPED_ESCALATE_ROWS = 2
-"""`ocx_test_support` and `ocx`: rows whose subset is the whole suite."""
+SCOPED_ESCALATE_ROWS = 3
+"""`ocx_test_support`, `ocx` and `ocx_python`: rows whose subset is the whole suite."""
 
 ACCEPTANCE_PACKAGE = "//test"
 ALL_TARGET = f"{ACCEPTANCE_PACKAGE}:all"
@@ -1371,7 +1371,7 @@ def fixture_modules(count: int = ACCEPTANCE_MODULES) -> set[str]:
 
 
 def fixture_rows(modules: set[str]) -> dict[str, str]:
-    """A `SCOPED_ROWS`-shaped table: 20 rows, two of them `escalate`.
+    """A `SCOPED_ROWS`-shaped table: 21 rows, three of them `escalate`.
 
     Globs are two-digit prefixes over the fixture's own three-digit module
     names, so each of the 18 non-`escalate` rows owns a live decade and every
@@ -1379,7 +1379,11 @@ def fixture_rows(modules: set[str]) -> dict[str, str]:
     than this table's normal state, which is the only way `select-glob-dead`
     can be shown red on purpose.
     """
-    rows: dict[str, str] = {"ocx_test_support": "escalate", "ocx": "escalate"}
+    rows: dict[str, str] = {
+        "ocx_test_support": "escalate",
+        "ocx": "escalate",
+        "ocx_python": "escalate",
+    }
     glob_rows = SCOPED_ROWS - SCOPED_ESCALATE_ROWS
     # Decades are derived from the modules present, not from the row count: the
     # fixture's size follows the live acceptance suite, so hard-coding one decade
@@ -1415,11 +1419,13 @@ def fixture_crate_of_dir() -> dict[str, str]:
 
     `crates/ocx_cli` holds the package named `ocx`; every other member's
     directory is its package name. A selector keyed on the directory would
-    miss exactly that row, which is the `escalate` one.
+    miss exactly that row, `ocx` — one of the three `escalate` rows, beside
+    `ocx_test_support` and `ocx_python`.
     """
     mapping = {f"crates/crate{index:02d}": f"crate{index:02d}" for index in range(18)}
     mapping["crates/ocx_cli"] = "ocx"
     mapping["crates/ocx_test_support"] = "ocx_test_support"
+    mapping["crates/ocx_python"] = "ocx_python"
     return mapping
 
 

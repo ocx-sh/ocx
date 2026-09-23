@@ -16,7 +16,7 @@
 # (`crate_map_toml_matches_rust_table` asserts both).
 
 [allowed]
-# ---- the 17 crates of the map (16 product crates + ocx_test_support) ----
+# ---- the 18 crates of the map (17 product crates + ocx_test_support) ----
 ocx_exit = []
 ocx_util = []
 ocx_console = ["ocx_exit", "ocx_util"]
@@ -27,6 +27,9 @@ ocx_config = ["ocx_trust", "ocx_oci", "ocx_util", "ocx_exit"]
 ocx_store = ["ocx_config", "ocx_oci", "ocx_util", "ocx_exit"]
 ocx_index = ["ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit"]
 ocx_package = ["ocx_index", "ocx_store", "ocx_config", "ocx_oci", "ocx_util", "ocx_exit"]
+# PEP 751 lock -> OCX package translation. `ocx` does not link it; its
+# consumer is ocx-mirror (a lockstep satellite), ocx-dist is planned.
+ocx_python = ["ocx_oci", "ocx_package"]
 ocx_shell = ["ocx_package", "ocx_config", "ocx_store", "ocx_oci", "ocx_util", "ocx_console", "ocx_exit"]
 ocx_project = [
     "ocx_shell",

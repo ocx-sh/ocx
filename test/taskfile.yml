@@ -468,6 +468,9 @@ tasks:
           ocx_setup: tests/test_self_*.py tests/test_session_path.py tests/test_update_check_throttle.py
           # dev-dependency-only fixtures: no acceptance subset of its own
           ocx_test_support: escalate
+          # ecosystem crate `ocx` does not link (ocx-mirror's PEP 751 translation):
+          # no acceptance subset of its own, and the tier escalates anyway
+          ocx_python: escalate
           # phase 1: the monolith owns every verb
           # phase 1: the binary still holds every command file (crates/ocx_cli/src/command/*),
           # so a change there can touch any verb. Reverts to its own subset — exit codes,

@@ -147,6 +147,7 @@ ECOSYSTEM = frozenset(
         "ocx_config",
         "ocx_index",
         "ocx_package",
+        "ocx_python",
     }
 )
 HUB_RDEPS = 4
@@ -156,7 +157,8 @@ HUB_RDEPS = 4
 # left with the crate at WP-37. `ocx` is here for phase 1 only: the CLI crate still
 # holds every command file (crates/ocx_cli/src/command/*), so a change there
 # can touch any verb — the row reverts to its own subset when the verbs move out.
-TABLE_ESCALATES = frozenset({"ocx_test_support", "ocx"})
+# `ocx_python` has no acceptance subset: `ocx` does not link it.
+TABLE_ESCALATES = frozenset({"ocx_test_support", "ocx", "ocx_python"})
 TEST_TASKFILE = REPO_ROOT / "test" / "taskfile.yml"
 ROOT_TASKFILE = REPO_ROOT / "taskfile.yml"
 

@@ -1,0 +1,84 @@
+lock-version = "1.0"
+created-by = "ocx_python fixture generator"
+requires-python = ">=3.9"
+
+[[packages]]
+name = "abi3-pkg"
+version = "3.1.0"
+
+[[packages.wheels]]
+name = "abi3_pkg-3.1.0-cp312-abi3-manylinux_2_28_x86_64.whl"
+url = "{ASSET_BASE}/abi3_pkg-3.1.0-cp312-abi3-manylinux_2_28_x86_64.whl"
+hashes = { sha256 = "775addd27dbf2cd9fe6638d2ab83a22f3c71675eed00345b285e2ad15824c31c" }
+
+[[packages]]
+name = "cext-pkg"
+version = "2.0.0"
+
+[[packages.wheels]]
+name = "cext_pkg-2.0.0-cp312-cp312-linux_x86_64.whl"
+url = "{ASSET_BASE}/cext_pkg-2.0.0-cp312-cp312-linux_x86_64.whl"
+hashes = { sha256 = "2b8898818b65860ae60e715087f1c8b023ae3afe0fece4c58203eddc20e72511" }
+
+[[packages]]
+name = "console-pkg"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "console_pkg-1.0.0-py3-none-any.whl"
+url = "{ASSET_BASE}/console_pkg-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "c0f8a0c4fc929cb0619f1ca529e59cba4a3f7f5f9fcf7afdf35900c2c04b62b5" }
+
+[[packages]]
+name = "data-pkg"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "data_pkg-1.0.0-py3-none-any.whl"
+url = "{ASSET_BASE}/data_pkg-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "5d855a30746d3c01842170eeb2723bb180c50b821c0869ac77a5c400ceae8d2c" }
+
+[[packages]]
+name = "google-cloud-bar"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "google_cloud_bar-1.0.0-py3-none-any.whl"
+url = "{ASSET_BASE}/google_cloud_bar-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "438ec5922ff97c2cebc8fec3951a0c6ae69d57ae685fcf1ceaa9fa433a08a8c8" }
+
+[[packages]]
+name = "google-cloud-foo"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "google_cloud_foo-1.0.0-py3-none-any.whl"
+url = "{ASSET_BASE}/google_cloud_foo-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "6b827f17238f91759e5b356b61a6e7c84af75e195880cfc2c1e68e18e1bcf4f1" }
+
+[[packages]]
+name = "legacy-ns-pkg"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "legacy_ns_pkg-1.0.0-py3-none-any.whl"
+url = "{ASSET_BASE}/legacy_ns_pkg-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "8d3973c84f5690b63d4dc881bf39ad9cd83274693dba9c2fd02f55d81706ce79" }
+
+[[packages]]
+name = "purelib-pkg"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "purelib_pkg-1.0.0-py3-none-any.whl"
+url = "{ASSET_BASE}/purelib_pkg-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "db49e78827d5898d1ef19e6524fb04419c737c8ef0db38fe818652eb725a53f3" }
+
+[[packages]]
+name = "universal-pkg"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "universal_pkg-1.0.0-py2.py3-none-any.whl"
+url = "{ASSET_BASE}/universal_pkg-1.0.0-py2.py3-none-any.whl"
+hashes = { sha256 = "95eed3ce5dc93f5c2d9020d3dd9439648541ff6bbb8db66953ca107c9852b475" }

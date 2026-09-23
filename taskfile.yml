@@ -151,8 +151,9 @@ tasks:
       scripts/scoped_gate.py --plan decides (plan_crate_split_workspace.md C-019):
         escalate → task verify: a hub crate (≥ 4 reverse dependents), an
                    ecosystem crate, a crate whose test:scoped row reads
-                   `escalate` (TABLE_ESCALATES: ocx_test_support, ocx —
-                   until the verbs move out of the CLI crate), a path with no
+                   `escalate` (TABLE_ESCALATES: ocx_test_support, ocx,
+                   ocx_python — `ocx` until the verbs move out of the CLI
+                   crate), a path with no
                    route, or the gate tooling under `scripts/**` changed (its
                    self-tests are routed too, and the full run's
                    `.verify:lint` runs them)

@@ -1,0 +1,13 @@
+lock-version = "1.0"
+created-by = "ocx_python fixture generator"
+requires-python = ">=3.9"
+environments = ["sys_platform == \"linux\" and platform_machine == \"x86_64\""]
+
+[[packages]]
+name = "onlylinux-pkg"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "onlylinux_pkg-1.0.0-py3-none-any.whl"
+url = "{ASSET_BASE}/onlylinux_pkg-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "e3c93045a13257a56fef89b01473f4a19476813606333577c57aabc83a35a00c" }

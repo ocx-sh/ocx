@@ -14,7 +14,7 @@ Early stage. Core lib + CLI implemented.
 
 **Internal code structure has no stability at all.** Crate layout, module paths, type names, function signatures, enum shapes — all free to change. Never add a compat shim, deprecation window, re-export alias, or `_v2` name for an internal refactor. Rename in place and delete the old form as if it never existed. No `ocx_*` crate is a published library; the binary is the only consumer.
 
-**Ecosystem crates sit between the two: a crate a lockstep submodule consumer links.** `ocx_util`, `ocx_console`, `ocx_oci`, `ocx_trust`, `ocx_sign`, `ocx_config`, `ocx_index`, `ocx_package`. Breaking changes are allowed when justified — but the consumer is upgraded **in the same change series**, not afterwards, and `task satellite:verify` (a `verify-deep.yml` job) is what makes that an obligation rather than a label. A lockstep consumer does *not* promote a crate to interface. Tier table and rationale → [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md) § "Stability tiers and the ecosystem contract".
+**Ecosystem crates sit between the two: a crate a lockstep submodule consumer links.** `ocx_util`, `ocx_console`, `ocx_oci`, `ocx_trust`, `ocx_sign`, `ocx_config`, `ocx_index`, `ocx_package`, `ocx_python`. Breaking changes are allowed when justified — but the consumer is upgraded **in the same change series**, not afterwards, and `task satellite:verify` (a `verify-deep.yml` job) is what makes that an obligation rather than a label. A lockstep consumer does *not* promote a crate to interface. Tier table and rationale → [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md) § "Stability tiers and the ecosystem contract".
 
 **Interfaces are the CLI surface and every wire/persisted format** — command and flag grammar, exit codes, package metadata, OCI manifests, `ocx.lock`, the index format, `ocx.toml`. These are real contracts: other tools and published artifacts depend on them, so a change here is a decision, not a refactor.
 
@@ -73,7 +73,7 @@ Lint tooling setup (one-off): the first `ocx pull` (or `task` invocation) materi
 
 ## Architecture
 
-20 workspace members (`members = ["crates/*"]`), Rust 2024, resolver v3. `scripts/crate_map.toml` is the dependency map and the only allowed-edge table; the split that produced this layout is [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md). Tier in brackets.
+21 workspace members (`members = ["crates/*"]`), Rust 2024, resolver v3. `scripts/crate_map.toml` is the dependency map and the only allowed-edge table; the split that produced this layout is [`adr_crate_split_workspace.md`](./.claude/artifacts/adr_crate_split_workspace.md). Tier in brackets.
 
 | Crate | Owns |
 |---|---|
@@ -87,6 +87,7 @@ Lint tooling setup (one-off): the first `ocx pull` (or `task` invocation) materi
 | `ocx_store` [internal] | The on-disk layout: three-tier CAS, symlink namespace, package materialisation, shim blobs |
 | `ocx_index` [ecosystem] | The OCX resolution-index protocol and its local collection |
 | `ocx_package` [ecosystem] | Package identity, metadata, versioning, cascade, authoring, publication |
+| `ocx_python` [ecosystem] | PEP 751 lock → OCX package translation: lock parse, wheel selection/repack, env composition |
 | `ocx_shell` [internal] | Shell and CI export surface: export generation, per-prompt reconciliation, hook emission |
 | `ocx_project` [internal] | The project tier: `ocx.toml`/`ocx.lock`, consent, mutation, per-prompt activation |
 | `ocx_package_manager` [internal] | Resolution, install, environment composition, patches, launch, execution records |

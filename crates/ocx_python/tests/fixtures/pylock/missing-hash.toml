@@ -1,0 +1,10 @@
+lock-version = "1.0"
+created-by = "ocx_python fixture generator"
+
+[[packages]]
+name = "nohash-pkg"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "nohash_pkg-1.0.0-py3-none-any.whl"
+url = "{ASSET_BASE}/nohash_pkg-1.0.0-py3-none-any.whl"
