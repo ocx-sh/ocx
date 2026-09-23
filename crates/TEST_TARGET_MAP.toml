@@ -20,10 +20,10 @@
 # (`cargo nextest list --workspace --release --locked --message-format json`,
 # then `scripts/bazel_floor_proofs.py --derive --listing`):
 #
-#   nextest : 36 rust-suites (3 bin + 19 lib + 14 test), 8223 testcases,
+#   nextest : 37 rust-suites (3 bin + 20 lib + 14 test), 8295 testcases,
 #             8 of them `#[ignore]`d.
-#   bazel   : 34 `rust_test` targets, 8174 executed + 40 skipped + 8 ignored.
-#   8223 = 8174 + 40 + 8 + 1, the 1 being `ocx::linux_self_contained` below.
+#   bazel   : 35 `rust_test` targets, 8246 executed + 40 skipped + 8 ignored.
+#   8295 = 8246 + 40 + 8 + 1, the 1 being `ocx::linux_self_contained` below.
 #
 # `derive_exclusions` in that script no longer derives the set from
 # `kind != lib|test`. That rule was stale in both directions: `ocx::bin/ocx`
@@ -129,6 +129,11 @@ crate = "ocx_project"
 cases = 455
 skipped = 1
 ignored = 2
+
+[[target]]
+label = "//crates/ocx_python:ocx_python_test"
+crate = "ocx_python"
+cases = 72
 
 [[target]]
 label = "//crates/ocx_schema:borrowed_vocabulary_matches_spec"

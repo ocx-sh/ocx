@@ -4,7 +4,7 @@
 """Bazel BEP -> OTLP traces, so S-013 can be asked of a real build.
 
     scripts/bep_to_otlp.py --self-test
-    scripts/bep_to_otlp.py --bep bep.json --min-targets 53
+    scripts/bep_to_otlp.py --bep bep.json --min-targets 55
 
 Emits, per Bazel invocation found in the BEP, one `summary` span carrying the
 target count this reader actually read, plus one `target` span per
@@ -151,9 +151,9 @@ distinguishably from a clean build. Three floors, all loud:
 * every invocation must yield a `started.uuid` and at least one
   `TargetComplete`;
 * the invocations together must reach `--min-targets`, default
-  `CRATES_RULE_TARGETS` — **53** — imported from `bazel_gate_proofs` rather
-  than restated, so the number has one home. 53 is `bazel query 'kind("rust_.*
-  rule", //crates/...)'` on this tree today (19 `rust_library` + 34
+  `CRATES_RULE_TARGETS` — **55** — imported from `bazel_gate_proofs` rather
+  than restated, so the number has one home. 55 is `bazel query 'kind("rust_.*
+  rule", //crates/...)'` on this tree today (20 `rust_library` + 35
   `rust_test`); C-019's 52 and the ADR's 54 are both stale.
 
 ## Exits
@@ -1446,7 +1446,7 @@ def prove_silent_exit(scratch: Path) -> int:
     # And the floor it skipped must still be live when the endpoint is set —
     # otherwise the silent exit would be a way to never run the check at all.
     code = run_with(scratch, "crates_build.json", recording_poster(), minimum=CRATES_RULE_TARGETS)
-    expect(code == 1, f"with an endpoint set, 2 targets under a floor of 53 must exit 1, got {code}")
+    expect(code == 1, f"with an endpoint set, 2 targets under a floor of 55 must exit 1, got {code}")
     print("C-019 RED  : with the endpoint set, the same input exits 1 on the floor")
     checks += 1
 
@@ -1718,12 +1718,12 @@ def prove_bep_not_persisted() -> int:
 def prove_counts() -> int:
     """The floor has one home, and this asserts it is still that tree's answer."""
     expect(
-        CRATES_RULE_TARGETS == 53,
-        f"the //crates/... floor is {CRATES_RULE_TARGETS}; `bazel query` answers 53 today",
+        CRATES_RULE_TARGETS == 55,
+        f"the //crates/... floor is {CRATES_RULE_TARGETS}; `bazel query` answers 55 today",
     )
     print(
-        "counts  OK : min-targets defaults to CRATES_RULE_TARGETS = 53, imported from "
-        "bazel_gate_proofs (19 rust_library + 34 rust_test) — C-019's 52 and the ADR's 54 "
+        "counts  OK : min-targets defaults to CRATES_RULE_TARGETS = 55, imported from "
+        "bazel_gate_proofs (20 rust_library + 35 rust_test) — C-019's 52 and the ADR's 54 "
         "are both stale, and bazel_gate_proofs.prove_counts is what re-checks the number"
     )
     return 1

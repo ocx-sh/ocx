@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//crates:__subpackages__"])
+
+rust_library(
+    name = "ocx_python",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_python"},
+    version = "0.6.2",
+    deps = all_crate_deps(normal = True) + [
+        "//crates/ocx_oci",
+        "//crates/ocx_package",
+    ],
+)
+
+rust_test(
+    name = "ocx_python_test",
+    aliases = aliases(
+        normal_dev = True,
+        proc_macro_dev = True,
+    ),
+    crate = ":ocx_python",
+    # `repack`'s tests read the checked-in wheels through
+    # `env!("CARGO_MANIFEST_DIR")`, which `rustc_env` makes runfiles-relative.
+    data = glob(["tests/fixtures/**"]),
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_python"},
+    deps = all_crate_deps(normal_dev = True),
+)

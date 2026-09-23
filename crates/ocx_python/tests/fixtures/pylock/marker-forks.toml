@@ -1,0 +1,23 @@
+lock-version = "1.0"
+created-by = "ocx_python fixture generator"
+requires-python = ">=3.9"
+
+[[packages]]
+name = "colorama"
+version = "0.4.6"
+marker = "sys_platform == \"win32\""
+
+[[packages.wheels]]
+name = "colorama-0.4.6-py2.py3-none-any.whl"
+url = "{ASSET_BASE}/colorama-0.4.6-py2.py3-none-any.whl"
+hashes = { sha256 = "3df21b96cd48d13061d3fba05007222218a25eb36eca215af6281048db18eb1c" }
+
+[[packages]]
+name = "watchdog"
+version = "4.0.0"
+marker = "platform_system != \"Darwin\""
+
+[[packages.wheels]]
+name = "watchdog-4.0.0-py3-none-any.whl"
+url = "{ASSET_BASE}/watchdog-4.0.0-py3-none-any.whl"
+hashes = { sha256 = "6cf056130c0c0992c97bd22f7caf358604e022bdf6dd5a540a43d6b9f36bc406" }

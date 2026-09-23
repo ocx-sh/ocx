@@ -27,6 +27,7 @@ Tier in brackets; tiers are defined in `CLAUDE.md` § Stability tiers.
 | `ocx_store` [internal] | Three-tier CAS, symlink namespace, materialisation, shim blobs | `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_exit` |
 | `ocx_index` [ecosystem] | The resolution-index protocol and its local collection | `ocx_store`, `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_exit` |
 | `ocx_package` [ecosystem] | Package identity, metadata, versioning, cascade, authoring, publication | `ocx_index`, `ocx_store`, `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_exit` |
+| `ocx_python` [ecosystem] | PEP 751 lock → OCX package translation: lock parse, wheel selection/repack, env composition — `ocx` does not link it | `ocx_oci`, `ocx_package` |
 | `ocx_shell` [internal] | Shell/CI export, per-prompt reconciliation, hook emission | `ocx_package`, `ocx_config`, `ocx_store`, `ocx_oci`, `ocx_util`, `ocx_console`, `ocx_exit` |
 | `ocx_project` [internal] | `ocx.toml`/`ocx.lock`, consent, mutation, activation | `ocx_shell`, `ocx_package`, `ocx_index`, `ocx_store`, `ocx_config`, `ocx_trust`, `ocx_oci`, `ocx_util`, `ocx_exit` |
 | `ocx_package_manager` [internal] | Resolution, install, env composition, patches, launch, records | `ocx_project`, `ocx_package`, `ocx_index`, `ocx_sign`, `ocx_store`, `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_console`, `ocx_exit`, `ocx_trust`, `ocx_shell` |
@@ -34,7 +35,7 @@ Tier in brackets; tiers are defined in `CLAUDE.md` § Stability tiers.
 | `ocx_script` [internal] | The Starlark host API for `ocx package test --script` | `ocx_store`, `ocx_config`, `ocx_oci`, `ocx_util`, `ocx_console` |
 | `ocx_setup` [internal] | Bootstrap, env shim files, managed RC blocks, profile detection | `ocx_package_manager`, `ocx_shell`, `ocx_config`, `ocx_store`, `ocx_oci`, `ocx_util`, `ocx_exit`, `ocx_index`, `ocx_package` |
 | `ocx_test_support` [internal] | Unit-test fixtures and the process-env override seam | — (dev-dependency only) |
-| `ocx_cli` (pkg `ocx`) [interface] | Argv, context, commands, reports, subscriber setup, **all** error-to-exit-code classification | every tier crate |
+| `ocx_cli` (pkg `ocx`) [interface] | Argv, context, commands, reports, subscriber setup, **all** error-to-exit-code classification | every tier crate but `ocx_python` |
 | `ocx_schema` [internal] | JSON schema gen (build-only) | `ocx`, `ocx_oci`, `ocx_config`, `ocx_package`, `ocx_project`, `ocx_package_manager` |
 | `ocx_shim` [interface] | Windows `.exe` launcher and its wire ABI | — |
 | (mirror tool) | Own repo [ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror) — vendors ocx as submodule | ecosystem-tier crates only |

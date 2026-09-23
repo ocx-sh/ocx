@@ -84,6 +84,7 @@ graph TD
   IDX --> STORE
   STORE --> CFG[ocx_config]
   SIGN --> TRUST
+  PY[ocx_python] --> PKG & OCI
   CFG --> TRUST
   TRUST --> OCI[ocx_oci]
   OCI --> CONSOLE[ocx_console]
@@ -583,3 +584,4 @@ the Round 1 fix pass.
 | 2026-09-06 | Initial draft alongside the ADR. Status: Draft. |
 | 2026-09-06 | Round 1 review fixes. Removed the non-existent `GuardedTransport`; corrected `resolve_tiered` to stay in `ocx_trust`; split `SigstoreTrust` from `TrustRoot`; moved `layer_layout` to `ocx_oci` and subscriber init to `ocx_cli`; added `ocx_test_support`, the seven-crate `__testing` forward list, the `ocx_sign` inversions, the fully-qualified/re-export scanner requirement and the comment-stripping specification, the three-workflow correction, the fork-reconciliation note, and the mechanical hub definition. Container diagram made identical to the ADR's. |
 | 2026-09-16 | Owner rulings applied (ADR § Rulings): `ocx_exit` split out of `ocx_console` — new § 3.5 with contracts X1–X5, container diagram and grimoire's closure (six crates) updated, hub set and satellite rule gain `ocx_exit`, counts recounted (17 `ocx_*` library crates); decisions 6 and 8, T5, the SSRF row, § 9 (`task satellite:verify` in the deep tier), § 12.2 and § 13 carry the rulings. |
+| 2026-09-23 | `ocx_python` (ecosystem, moved from ocx-mirror) added to the container diagram, kept identical to the ADR's. It was never part of `ocx_lib`, so the executive summary's seventeen stands; `ocx_cli` does not link it and the classification ladder never names it. |

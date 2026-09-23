@@ -111,12 +111,12 @@ tasks:
       neither creates nor removes it. `bazel:build:nobuild` is the only
       caller and its `defer:` is what guarantees the removal.
 
-      **The floor is the script's own default** — `CRATES_RULE_TARGETS`, 53,
+      **The floor is the script's own default** — `CRATES_RULE_TARGETS`, 55,
       imported from `scripts/bazel_gate_proofs.py` — and no `--min-targets` is
       passed here. The one lane that writes a BEP analyses `//...`, which is
-      280 targets today, so 53 is a floor it clears by a wide margin. That is
+      280 targets today, so 55 is a floor it clears by a wide margin. That is
       the point of it: the floor exists to tell "the reader read nothing" from
-      "the build was clean", and 53 is the only number for this that has a
+      "the build was clean", and 55 is the only number for this that has a
       home. Spelling 280 here would mint the `//...` constant
       `bazel_gate_proofs.prove_counts` refuses to declare ("stage-4 stays
       undeclared … a number here would be a guess"), in a taskfile, where
