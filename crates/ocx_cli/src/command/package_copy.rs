@@ -136,17 +136,20 @@ impl PackageCopy {
             log::info!("copying {source} to {target}");
         }
         let outcome = publisher
-            .copy(CopyRequest {
-                source: &source,
-                target: &target,
-                platforms: self.platform.clone(),
-                cascade: self.cascade,
-                keep_tag: self.keep_tag.enabled(),
-                referrers: self.referrers.enabled(),
-                annotations: &annotations,
-                dry_run: self.dry_run,
-                scratch_root: &scratch_root,
-            })
+            .copy(
+                context.default_index(),
+                CopyRequest {
+                    source: &source,
+                    target: &target,
+                    platforms: self.platform.clone(),
+                    cascade: self.cascade,
+                    keep_tag: self.keep_tag.enabled(),
+                    referrers: self.referrers.enabled(),
+                    annotations: &annotations,
+                    dry_run: self.dry_run,
+                    scratch_root: &scratch_root,
+                },
+            )
             .await?;
 
         // The description is repository-level and independent of the version, so
@@ -161,7 +164,10 @@ impl PackageCopy {
             Some(DescriptionOutcome::SkippedDryRun)
         } else {
             let temp = tempfile::tempdir_in(&scratch_root)?;
-            match publisher.pull_description(&source, temp.path()).await? {
+            match publisher
+                .pull_description(&outcome.source_location, temp.path())
+                .await?
+            {
                 Some(description) => {
                     publisher.push_description(&target, &description).await?;
                     Some(DescriptionOutcome::Copied)

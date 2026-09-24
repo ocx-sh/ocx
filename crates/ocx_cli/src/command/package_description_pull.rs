@@ -51,6 +51,7 @@ impl PackageDescriptionPull {
         }
 
         let client = context.remote_client()?.clone();
+        let default_index = context.default_index().clone();
 
         // Single secure RAII temp root (mode 0700, random name) instead of a
         // predictable world-writable `ocx-info-{pid}` path — closes the
@@ -68,6 +69,7 @@ impl PackageDescriptionPull {
             tokio::task::JoinSet::new();
         for (index, identifier) in identifiers.iter().enumerate() {
             let client = client.clone();
+            let default_index = default_index.clone();
             let identifier = identifier.clone();
             let temp_dir = temp_root.path().join(index.to_string());
             join_set.spawn(async move {
@@ -76,7 +78,9 @@ impl PackageDescriptionPull {
                         .await
                         .map_err(|e| ocx_package::error::file_error(&temp_dir, e))?;
                     let publisher = Publisher::new(client);
-                    publisher.pull_description_mirrored(&identifier, &temp_dir).await
+                    publisher
+                        .pull_description_mirrored(&default_index, &identifier, &temp_dir)
+                        .await
                 }
                 .await;
                 (index, result)

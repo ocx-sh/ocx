@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
+from src import static_index
 from src.helpers import make_package
 from src.registry import (
     IMAGE_MANIFEST_MEDIA_TYPE,
@@ -965,3 +967,134 @@ def test_describe_from_copies_the_description_alone(
     assert _target_has_tag(target_registry, package.repo, "__ocx.desc")
     # The package itself was never promoted — this verb copies prose only.
     assert not _target_has_tag(target_registry, package.repo, package.tag)
+
+
+# ---------------------------------------------------------------------------
+# A source served through an index is read where the index routes it (ocx#504)
+#
+# `index_server` and `_serve_through_index` mirror `test_package_push_gate.py`
+# (that fixture is file-local). The namespace is `corp.example`, not `ocx.sh`:
+# a read that dials the logical name then fails on a reserved TLD instead of
+# reaching the production host.
+# ---------------------------------------------------------------------------
+
+INDEX_NAMESPACE = "corp.example"
+
+
+@pytest.fixture()
+def index_server(tmp_path: Path) -> Iterator[static_index.StaticIndexServer]:
+    root = tmp_path / "static_index_root"
+    root.mkdir()
+    with static_index.running(root) as server:
+        yield server
+
+
+def _serve_through_index(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    server: static_index.StaticIndexServer,
+    readme: str,
+) -> tuple[str, PackageInfo, str]:
+    """Publishes a described package at a physical repository and serves it
+    through the fixture index as `corp.example/<unique_repo>/tool:1.0.0`.
+    Returns the logical repository, the physical package, and the env the
+    commands below dial with (the index host is plain HTTP too)."""
+    physical = make_package(ocx, f"{unique_repo}_physical", "1.0.0", tmp_path, index=False)
+    readme_path = tmp_path / "README.md"
+    readme_path.write_text(readme)
+    ocx.run("package", "description", "push", "--readme", str(readme_path), physical.fq)
+    os_name, arch_name = physical.platform.split("/")
+
+    registry_host = ocx.registry.split(":", 1)[0]
+    (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(
+        f'[registries."{INDEX_NAMESPACE}"]\nindex = "{server.base_url}"\ntrusted_hosts = ["{registry_host}"]\n'
+    )
+    static_index.write_config(server.root)
+    static_index.write_package(
+        server.root,
+        repository=f"{unique_repo}/tool",
+        tag="1.0.0",
+        physical_repository=f"oci://{ocx.registry}/{physical.repo}",
+        platform_digest=fetch_platform_manifest_digest(ocx.registry, physical.repo, physical.tag),
+        os=os_name,
+        architecture=arch_name,
+    )
+    return f"{INDEX_NAMESPACE}/{unique_repo}/tool", physical, server.host
+
+
+def test_copy_reads_an_index_served_source_at_its_physical_registry(
+    ocx: OcxRunner,
+    target_registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """S-4: the logical host serves no registry, so a copy that dials the
+    source as typed cannot find it. Routed, the leaf and the description land
+    at the target, which is written as typed."""
+    logical, physical, index_host = _serve_through_index(ocx, unique_repo, tmp_path, index_server, "# Routed\n")
+
+    result = ocx.run(
+        "package",
+        "copy",
+        "--to",
+        target_registry,
+        "--description",
+        f"{logical}:1.0.0",
+        env_overlay={"OCX_INSECURE_REGISTRIES": f"{ocx.registry},{target_registry},{index_host}"},
+    )
+    assert result.returncode == 0, result.stderr
+
+    target_repo = f"{unique_repo}/tool"
+    assert fetch_platform_manifest_digest(target_registry, target_repo, "1.0.0") == fetch_platform_manifest_digest(
+        ocx.registry, physical.repo, physical.tag
+    )
+    assert _target_has_tag(target_registry, target_repo, "__ocx.desc")
+
+
+def test_description_pull_reads_an_index_served_package_at_its_physical_registry(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """S-3: `description pull` of a logical name reads the description the
+    physical repository publishes, keyed by the name as typed."""
+    logical, _, index_host = _serve_through_index(
+        ocx, unique_repo, tmp_path, index_server, "---\ntitle: Routed Tool\n---\n# Routed\n"
+    )
+
+    data = ocx.json(
+        "package",
+        "description",
+        "pull",
+        logical,
+        env_overlay={"OCX_INSECURE_REGISTRIES": f"{ocx.registry},{index_host}"},
+    )
+    assert data[logical]["title"] == "Routed Tool"
+
+
+def test_describe_from_reads_an_index_served_source_at_its_physical_registry(
+    ocx: OcxRunner,
+    target_registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """`description push --from <logical>` reads the source where the index
+    routes it and writes the target as typed."""
+    logical, _, index_host = _serve_through_index(ocx, unique_repo, tmp_path, index_server, "# Routed\n")
+    target_repo = f"{unique_repo}_described"
+
+    result = ocx.run(
+        "package",
+        "description",
+        "push",
+        "--from",
+        logical,
+        f"{target_registry}/{target_repo}",
+        env_overlay={"OCX_INSECURE_REGISTRIES": f"{ocx.registry},{target_registry},{index_host}"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert _target_has_tag(target_registry, target_repo, "__ocx.desc")

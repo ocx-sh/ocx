@@ -4285,7 +4285,7 @@ ocx package copy [OPTIONS] <SOURCE>
 
 **Arguments**
 
-- `<SOURCE>`: The published package to promote, as `registry/repository:tag` or `registry/repository@sha256:<hex>`. A tag names an image index (or, for a single-platform package, a bare manifest); a digest names one platform manifest and then `--platform` is required, because a platform manifest carries no platform of its own — OCX records the platform in the index entry, never in the manifest.
+- `<SOURCE>`: The published package to promote, as `registry/repository:tag` or `registry/repository@sha256:<hex>`. A tag names an image index (or, for a single-platform package, a bare manifest); a digest names one platform manifest and then `--platform` is required, because a platform manifest carries no platform of its own — OCX records the platform in the index entry, never in the manifest. A source in a namespace a [configured index][config-registries-index] serves, such as `ocx.sh`, is read from the registry that index points it to; the target is written exactly as given.
 
 **Options**
 
@@ -4364,7 +4364,7 @@ ocx package description push [OPTIONS] <IDENTIFIER>
 - `--title <TITLE>`: Short display title for the package catalog.
 - `--description <TEXT>`: One-line summary.
 - `--keywords <LIST>`: Comma-separated search keywords.
-- `--from <SOURCE>`: Copy the whole description — README, logo and catalog annotations — from another package repository, replacing the target's. Mutually exclusive with the field options above: this is a copy, not a merge, so mixing the two would silently pick a winner. Use it to promote a catalog page reviewed in staging without re-authoring it, or after an [`ocx package copy`](#package-copy) that ran without `--description`. A source that publishes no description exits 79 and the target is left untouched; the same code covers a source repository that does not exist at all.
+- `--from <SOURCE>`: Copy the whole description — README, logo and catalog annotations — from another package repository, replacing the target's. Mutually exclusive with the field options above: this is a copy, not a merge, so mixing the two would silently pick a winner. Use it to promote a catalog page reviewed in staging without re-authoring it, or after an [`ocx package copy`](#package-copy) that ran without `--description`. A source that publishes no description exits 79 and the target is left untouched; the same code covers a source repository that does not exist at all. A source in a namespace a [configured index][config-registries-index] serves is read from the registry that index points it to; the target is written exactly as given.
 - `-h`, `--help`: Print help information.
 
 At least one of the above metadata options must be provided, or `--from`.
@@ -5277,7 +5277,7 @@ ocx package description pull [OPTIONS] <IDENTIFIER>...
 
 **Arguments**
 
-- `<IDENTIFIER>...`: One or more package identifiers (repository only).
+- `<IDENTIFIER>...`: One or more package identifiers (repository only). A package in a namespace a [configured index][config-registries-index] serves is read from the registry that index points it to, and the output stays keyed by the identifier as given.
 
 **Options**
 

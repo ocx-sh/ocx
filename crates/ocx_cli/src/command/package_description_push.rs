@@ -173,7 +173,7 @@ impl PackageDescriptionPush {
         // (a tag listing) to change nothing the user would do differently, so
         // the message names the tag that was missing and stops there.
         let description = publisher
-            .pull_description(&source, temp_dir.path())
+            .pull_source_description(context.default_index(), &source, temp_dir.path())
             .await?
             .ok_or_else(|| no_description_to_copy(&source))?;
         publisher.push_description(target, &description).await?;
