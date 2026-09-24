@@ -1065,6 +1065,9 @@ const OCX_UTIL_WITHOUT_CONSUMER: &[&str] = &[
     // (ocx-sh/ocx#500), a satellite outside this workspace.
     "default_threads",
     "embedded_roots",
+    // Consumed by ocx-mirror `crates/ocx_mirror_pipeline/src/package.rs`, a
+    // satellite outside this workspace.
+    "from_file_magic",
     "lock_exclusive_with_timeout",
     "open_shared_with_timeout",
     "serde_ext",
