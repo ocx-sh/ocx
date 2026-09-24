@@ -5,9 +5,10 @@ not copies. Team-shared — commit it.
 
 ## Pointers
 
-- Verification: `CLAUDE.md` › "Build & Development" — run `task verify`
-  (full gate) after implementation; `task` = fast check. Subsystem-scoped
-  gates per each `.claude/rules/subsystem-*.md` › "Quality Gate".
+- Verification: `CLAUDE.md` › "Build & Development" — `task verify:scoped
+  --force` per task and review-fix iteration (escalates to the full gate
+  when a path demands it); `task verify` (full) at the work-package merge
+  and at finalize; `task` = fast check.
 - Research artifacts: `.claude/artifacts/research_<topic>.md` (project
   convention, per `.claude/templates/artifacts/adr.template.md`; committed).
   `hex-discuss` lanes default to `.agents/research/` (gitignored) — copy into
@@ -102,6 +103,16 @@ research-axes:
 
 ## Memory
 
+- **Plan `plan_test_speed_tiers.md` executed 2026-09-22…24 (goat checkout, `hex/test-speed-tiers`)** —
+  14 WPs merged, `State: review`, `Next: /hex-review`. Lessons: (1) a *resumed* subagent's final
+  report is delivered to the session lead, not to the sub-orchestrator that resumed it — ask every
+  resumed worker to write its report to a file and poll that; (2) from WP-07 on, every WP merge is
+  `git merge --no-ff --no-commit -m "Merge WP-…"` → stage the plan → `task verify --force` → commit
+  (`.tmp/hex-tiers/merge.sh` shape); shape-(e) ported-from ranges can only be guarded AFTER the
+  merge commit exists (tip must be an ancestor of HEAD, clean tree); (3) any `Cargo.toml` edit
+  stales each checkout's gitignored `Cargo.bazel.lock.json` — repin before the merge verify
+  (`TMPDIR=/var/tmp/ocx-splice CARGO_BAZEL_REPIN=1 bazel fetch --repo=@crates --repo_env=…`);
+  (4) the cross-model adversary found four holes all seven opus leaf seats missed — keep it.
 - **Active plan (sion): `.claude/artifacts/plan_bazel_build_adoption.md`** — the Bazel
   adoption ([ADR](../../.claude/artifacts/adr_bazel_build_adoption.md) Accepted 2026-09-21).
   `/hex-plan high`, 2026-09-21. **31 WPs, 12 waves, 4 repos** (ocx, rules_ocx,
@@ -215,6 +226,34 @@ research-axes:
   (converting a prior lane's `UNVERIFIED` markers into primary-source facts) — the second is a
   *reusable shape*, not a topic: when a dossier cites research that flagged its own gaps, that axis
   is not covered.
+- **Active plan: `.claude/artifacts/plan_test_speed_tiers.md`** (hex-plan, tier high,
+  2026-09-22), implementing `.claude/artifacts/adr_test_speed_tiers.md` (+ Amendment AM-1…AM-8).
+  State `plan-approved`, 14 WPs in 9 waves; pointer in `.claude/state/current_plan.md`.
+  Stage 7 porting waves need a follow-up plan after the pilot's GO. Cross-model plan review was
+  PARTIAL (Codex quota; thread `01a0ca87-0ca8-7052-b3a9-c054a282d4fa`). Deferred owner calls:
+  B2 (diff-guard shapes opt-in via `--tiered-shapes` vs default; DEC-10 untouched); D-2 (one
+  Deploy Dev dispatch for WP-04's `--exec` green). Research: `.claude/artifacts/research_cargo_dist_prehost_scan.md`
+  (`global-artifacts-jobs` gates `host`; `host-jobs` does not).
+  `Next: /hex-execute .claude/artifacts/plan_test_speed_tiers.md`
+- **ADR written (hex-architect xhigh, 2026-09-22): `.claude/artifacts/adr_test_speed_tiers.md`
+  (Status Proposed) + `.claude/artifacts/system_design_test_tiers.md`, from dossier
+  `.agents/discussions/test-suite-speed-tiers.md`.** Option A: test-build placeholder provenance
+  (the measured cause of the ~1.5% action-cache hit rate), a lint tier, verb markers + a
+  `[security]` escalation list, T2 enforced by a full mark on `--no-ff` WP merges, local-only
+  acceptance cache (no remote writer; any writer needs its own ruling), under-declared modules
+  tagged `external`, port-down pilot-gated. Research: `.claude/artifacts/research_test_tier_{tooling,patterns,operability}.md`.
+  Preference hint for the next `/hex-init`: research axis "operability & cost" mattered most
+  (Prometheus/Tempo measurement overturned the dossier's assumptions).
+  `Next: /hex-plan high "Tiered, cache-driven verification, per .claude/artifacts/adr_test_speed_tiers.md"`
+- **Discussion handed off (hex-discuss, 2026-09-22): `.agents/discussions/test-suite-speed-tiers.md`
+  → architect (tier high), on `goat`.** Test architecture for a fast AI loop, with Bazel caching
+  as the lever: a lint tier for the 12 structural sweeps; an inner loop of cached `rust_test` +
+  lint + smoke; verb-level `SCOPED_ROWS` with a coverage guard; full acceptance at WP merge and
+  finalize; a dedicated fan-out port-down to `rust_test` (originals deleted after a mutation
+  proof); agent files fixed to name the tiered gate; test builds carry placeholder provenance
+  (`build.rs` bakes in describe/SHA/`GITHUB_*`, which invalidates all 181 acceptance targets on
+  every commit). cucumber-rs rejected. Findings inlined under the artifact's `## Research`.
+  `Next: /hex-architect .agents/discussions/test-suite-speed-tiers.md`
 - **Discussion handed off (hex-discuss, 2026-09-21): `.agents/discussions/bazel-full-adoption.md`
   → architect (tier high), on `sion`.** Bazel 9 at all four stages (Rust unit tests per crate,
   casts, website, acceptance), existing bazel-cache.ocx.sh + otel.ocx.sh, no RBE, rules_ocx as

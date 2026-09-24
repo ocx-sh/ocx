@@ -299,7 +299,8 @@ ADR applies it here rather than deferring the whole of it to WP-0. Its
 
      ~half non-compile, with the acceptance suite the largest single chunk — and
      stage 4 was `local` + `external`-tagged with **no caching at all** (§ Stage 4;
-     amended 2026-09-22 to `no-sandbox` + `exclusive` with results cached).
+     amended 2026-09-22 to `no-sandbox` + `exclusive` with results cached;
+     `exclusive` superseded by `adr_test_speed_tiers.md` AM-9 — targets now run concurrently).
      So the one decomposition on record points at the half this design explicitly
      does not address, and a larger total does not convert into "the build is the
      cost" without one.
@@ -1396,6 +1397,12 @@ turn a crate name into a set of `//test:<module>` labels. **An `escalate` row ma
 
 #### Concurrency
 
+> **SUPERSEDED 2026-09-23 by `adr_test_speed_tiers.md` AM-9.** The targets run
+> concurrently at xdist parity behind the runner's host locks (`test/bazel.bzl`
+> § Concurrency). `--local_test_jobs=$ACCEPT_JOBS` (default `min(8, nproc)`) is
+> set on `task bazel:test:accept`'s command line and in no rc file; the paragraph
+> below is the original ruling.
+
 Today the suite is one pytest-xdist process against one docker-compose stack. Under
 Bazel each `sh_test` spawns its own `uv run pytest`, and N of them would contend for
 the registry/zot/sigstore ports. The contract: the compose-backed targets run under
@@ -2084,7 +2091,7 @@ in a workspace file; restore; show green.
     |---|---|---|
     | `--host_jvm_args=-Xmx2g` | 2 GB | Bazel's server is a scheduler, not a compiler; 2 GB is ample for a 274-target graph and leaves the 21 GB headroom for `rustc` and the eight `rust-analyzer` processes that are already resident. Default heap sizing off 32 GB total would reserve multiples of this for no benefit. |
     | `--jobs=12` | 12 | Matches the repository's existing `cargo build` job cap, which `project_cargo_jobs_temporarily_lowered` records as **a RAM cap, not a speed choice** — the same constraint binds Bazel, and using a different number for the same machine would be a second, contradictory answer to one question. |
-    | `--local_test_jobs=1` | 1 | Not a resource choice — stage 4's compose stack is on fixed ports (§ Stage 4). Stated here so a later reader tuning `--jobs` upward does not read it as one and raise it. |
+    | `--local_test_jobs=1` | 1 | Not a resource choice — stage 4's compose stack is on fixed ports (§ Stage 4). Stated here so a later reader tuning `--jobs` upward does not read it as one and raise it. *(Superseded by `adr_test_speed_tiers.md` AM-9: `--local_test_jobs=$ACCEPT_JOBS`, default `min(8, nproc)`, on `task bazel:test:accept`'s command line only.)* |
     | `--disk_cache` location | **under `$OCX_HOME`, never `/tmp`** | `/tmp` is a tmpfs at 76 % that this host's reaper also sweeps, and a tmpfs disk cache is RAM. Sized with `--experimental_disk_cache_gc_max_size` (BZL-CACHE-17: it defaults to `"0"` = unbounded even where supported). |
 
     **CI runners are the opposite shape** — 2–4 cores, no LSP, ephemeral — so these
@@ -2582,7 +2589,8 @@ shrank.
 (the "172" this line carried was stale; the count is the `glob`'s, and
 `scripts/bazel_gate_proofs.ACCEPTANCE_MODULE_TARGETS` is now its one home),
 `no-sandbox` + `exclusive`-tagged, `--local_test_jobs=1` on the command line,
-against the existing docker-compose services. `SCOPED_ROWS` is the crate →
+against the existing docker-compose services. *(Superseded by `adr_test_speed_tiers.md`
+AM-9: `exclusive` dropped, `--local_test_jobs=$ACCEPT_JOBS` (default `min(8, nproc)`), host locks in the runner.)* `SCOPED_ROWS` is the crate →
 target **selection query**, not the unit (§ Stage 4).
 
 **Green:** the suite runs as `sh_test`s shelling to `@tools//:uv run pytest`; a
@@ -2789,7 +2797,9 @@ the questions being quietly dropped.
   `external`-tagged and runs `--nocache_test_results`, because its real inputs
   (a compose stack, service images, the binary under test) cannot be represented.
   It buys selection only, and it **loses today's xdist parallelism** to
-  `--local_test_jobs=1`.
+  `--local_test_jobs=1`. *(Superseded: result caching is on since the
+  2026-09-22 Stage 4 amendment, and the targets run concurrently since
+  `adr_test_speed_tiers.md` AM-9.)*
 - The target count lands at 274, just under BZL-CI-01's ~300 tripwire — which is
   itself only the signal that says **measure the whole-repo median now**, never a
   trigger for target selection. Arriving within ~10 % of it on day one means the

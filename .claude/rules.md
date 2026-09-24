@@ -46,6 +46,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | AI config changes | [meta-ai-config.md](./rules/meta-ai-config.md) + this catalog, skill `meta-maintain-config` |
 | GitHub issues & PRs / planning artifacts | [workflow-github.md](./rules/workflow-github.md), [workflow-feature.md](./rules/workflow-feature.md) |
 | Commits, branches, rebasing, landing on main | [workflow-git.md](./rules/workflow-git.md), skills `commit`, `hex-finalize` |
+| Merging a work package (the merge commit needs a full mark of the merged tree) | [workflow-git.md](./rules/workflow-git.md) § Work-Package Merges — `git merge --no-ff --no-commit <branch>` → `task verify` → `git commit`; its named residuals |
 | Plan progress tracking (Status block + `.claude/state/current_plan.md`) | [meta-ai-config.md](./rules/meta-ai-config.md) "Plan Status Protocol", skills `hex-plan`, `hex-execute`, `hex-review`, `commit`, `hex-finalize`, `next` |
 | Swarm / multi-agent workflows | [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md), skills `hex-plan`, `hex-execute`, `hex-review` |
 | Code quality audit | [quality-core.md](./rules/quality-core.md), `quality-{lang}.md`, skill `code-check` |

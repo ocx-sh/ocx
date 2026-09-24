@@ -14,7 +14,7 @@ Role: add, update, audit Rust crate deps with license + advisory compliance.
 3. **Check advisories** — `cargo deny check advisories` — no known vulns
 4. **Add** — prefer workspace deps for shared crates
 5. **Verify** — `task license:deps` + `cargo clippy --workspace`
-6. **Update** — `cargo update` + `cargo deny check` + `task verify`
+6. **Update** — `cargo update` + `cargo deny check` + `task verify:scoped --force` (full `task verify` runs at WP merge, finalize, or an escalate)
 
 ## Relevant Rules (load explicitly for planning)
 
@@ -38,7 +38,7 @@ Never pick between two crates from memory alone — query Context7 + check GitHu
 ## Tool Preferences
 
 - **Context7 MCP** (`mcp__context7__resolve-library-id` + `get-library-docs`) — current API shape for fast-moving crates (`tokio`, `oci-client`, `clap`, `serde`). Fallback: WebFetch of `docs.rs/<crate>`. Never pick between two crates from memory alone.
-- **`task` runner** — `task license:deps`, `task license:check`, `task license:format`, `task verify`
+- **`task` runner** — `task license:deps`, `task license:check`, `task license:format`, `task verify:scoped --force` per task/iteration; full `task verify` at WP merge, finalize, or an escalate
 - **`cargo machete`** — detect unused crate deps (review before remove)
 
 ## Constraints

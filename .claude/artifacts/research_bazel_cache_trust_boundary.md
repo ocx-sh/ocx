@@ -71,3 +71,17 @@ Expires: 2027-03-21
 - Keep the nginx-based read/write split as-is; do not migrate to bazel-remote's native `--allow_unauthenticated_reads` without first reproducing/ruling out buchgr/bazel-remote#468 against the pinned v2.6.2.
 - Treat every `rules_ocx` `git_override` commit-pin bump as a reviewable supply-chain event (diff old SHA → new SHA, note upstream change) — there is no `integrity` hash to lean on instead, unlike a future BCR release.
 - Confirm bazel-remote's `/status` and `--enable_endpoint_metrics` Prometheus surface is not exposed on the same public anonymous-read listener without its own access control (config-review item, not a code change).
+
+## Stage 5 addendum (2026-09-23)
+
+Added by `plan_test_speed_tiers.md` WP-08b (C-020), per `adr_test_speed_tiers.md` § Security.
+
+**Finding #10's conclusion — acceptance is out of remote-cache scope — still holds, for a different reason than the one it gave.** #10 rested on the `local` tag (`no-remote` + `no-sandbox`) riding every acceptance `sh_test`. That tag is gone: the acceptance package runs with `no-sandbox` + `exclusive` and its results cached (`test/bazel.bzl` § "Result caching is ON"), so `local` no longer keeps anything off the shared cache. What does is that **no lane writes an acceptance verdict to it**:
+
+- `.bazelrc:73` sets `build --remote_upload_local_results=false` for every command, `test` included.
+- The only override is `--remote_upload_local_results=true` on the `main`-push leg of `verify-basic.yml`'s `Unit tests (Bazel)` step, which runs `task bazel:test:unit` — `//crates/...`, never `//test:all`. `.claude/tests/test_workflows.py::test_only_the_write_lane_may_upload` reds a grant anywhere else.
+- `verify-deep.yml`'s acceptance job passes the read credential only (the `bazel-cache-rc` action with no `write-auth`), so it holds no write credential on any trigger.
+
+With no writer, findings #4, #6 and #12 (a poisoned *trusted* writer) cannot reach an acceptance entry, and an acceptance result is only ever served on the machine that produced it. That bounds the one hole caching opened — an undeclared input serving a stale verdict — to a local disk cache, and C-UNCACHED closes it there: every module whose source names a path its target does not declare carries `external` (`test/bazel.bzl` `UNCACHED_MODULES`), `scripts/bazel_tag_guard.py` derives that set from the AST and reds both directions, and WP-08b declared the inputs of 22 of the 23 modules it listed. The residual is `test_windows_shim.py`, Windows-only and skipped on the Linux lane that runs the suite.
+
+**What would reopen #10:** an `--remote_upload_local_results=true` reaching any command that tests `//test:all`, or a write credential in the acceptance job. Either makes an under-declared module's cached verdict a cross-machine one, which is the #11 mechanism with the acceptance suite as its subject. Adding an acceptance writer is a D6 precondition in `adr_test_speed_tiers.md`, not a flag flip.

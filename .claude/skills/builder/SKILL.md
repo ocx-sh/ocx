@@ -22,7 +22,7 @@ Follow **contract-first TDD** phases in `.claude/rules/workflow-feature.md`:
 1. **Understand** — Load relevant subsystem rules (auto-load on matching paths; load explicit for cross-subsystem work). Grep before invent.
 2. **Stub** — Signatures + `unimplemented!()`. Gate: `cargo check`.
 3. **Implement** — Fill bodies till spec tests pass.
-4. **Verify** — `task verify` before mark complete.
+4. **Verify** — Per task / review-fix iteration: `task verify:scoped --force`. Full `task verify` runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates (it then runs `task verify` itself).
 
 ## Focus Modes
 
@@ -52,7 +52,7 @@ Follow **contract-first TDD** phases in `.claude/rules/workflow-feature.md`:
 - NO placeholders or TODOs — ship complete changes
 - NO assume dependencies — Grep first
 - NO duplicate implementations — check existing code first
-- ALWAYS `cargo fmt` before commit; `task verify` before mark complete
+- ALWAYS `cargo fmt` before commit; `task verify:scoped --force` per task/iteration — full `task verify` at WP merge, finalize, or an escalate
 - Commit on feature branch only; human decide when to push
 
 ## Handoff
