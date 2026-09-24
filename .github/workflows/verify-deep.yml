@@ -405,6 +405,13 @@ jobs:
         uses: ./.github/actions/bazel-cache-rc
         with:
           read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+      # The twin of the `build` job's step, for the same reason: this lane
+      # compiles Rust under Bazel too — `//crates/ocx_schema:ocx_schema_bin`,
+      # a declared data input of two acceptance targets — and its action keys
+      # only match the entries the cache writer uploaded when the
+      # autoconfigured C++ toolchain picks the same linker.
+      - name: Install lld
+        run: sudo apt-get update && sudo apt-get install -y lld
       - name: Run Acceptance Tests
         shell: bash
         # `ubuntu-latest` ships systemd, so its `environment.d` generator is
