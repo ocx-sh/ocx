@@ -240,8 +240,7 @@ pub enum PublishGateError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_index::IndexImpl;
-    use ocx_index::error::Result as IndexResult;
+    use ocx_index::test_source::RoutingSource;
     use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
 
     fn hex(ch: char) -> String {
@@ -253,92 +252,17 @@ mod tests {
     }
 
     // ── Index routing fixtures (ocx#504) ──────────────────────────────────
-    //
-    // An index source reduced to the one question the gate asks it: where does
-    // this dependency live? `physical` is `(registry, repository)` for every
-    // name it is asked about, or `None` for a source that rewrites nothing —
-    // a plain registry's answer, the passthrough every pre-#504 test runs under.
-    // `authoritative_base_url` makes it a configured index that is
-    // authoritative for every name it is asked about.
-
-    #[derive(Clone)]
-    struct RoutingSource {
-        physical: Option<(&'static str, &'static str)>,
-        authoritative_base_url: Option<&'static str>,
-    }
-
-    #[async_trait::async_trait]
-    impl IndexImpl for RoutingSource {
-        async fn list_repositories(&self, _: &str) -> IndexResult<Vec<String>> {
-            Ok(Vec::new())
-        }
-        async fn list_tags(&self, _: &ocx_oci::Identifier) -> IndexResult<Option<Vec<String>>> {
-            Ok(None)
-        }
-        async fn fetch_manifest(
-            &self,
-            _: &ocx_oci::Identifier,
-            _: ocx_index::IndexOperation,
-        ) -> IndexResult<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
-            Ok(None)
-        }
-        async fn fetch_manifest_digest(
-            &self,
-            _: &ocx_oci::Identifier,
-            _: ocx_index::IndexOperation,
-        ) -> IndexResult<Option<ocx_oci::Digest>> {
-            Ok(None)
-        }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> IndexResult<Option<Vec<u8>>> {
-            Ok(None)
-        }
-        /// Minted digest-only, the way a source answered before the tag was
-        /// carried — so a tag on the dialled reference proves the gate's routing
-        /// carries it, not this fixture.
-        async fn physical_reference(
-            &self,
-            identifier: &ocx_oci::Identifier,
-        ) -> IndexResult<Option<ocx_oci::Identifier>> {
-            Ok(self.physical.map(|(registry, repository)| {
-                let physical = ocx_oci::Identifier::new_registry(repository, registry);
-                match identifier.digest() {
-                    Some(digest) => physical.clone_with_digest(digest),
-                    None => physical,
-                }
-            }))
-        }
-        fn jurisdiction(&self, _: &ocx_oci::Identifier) -> ocx_index::Jurisdiction {
-            match self.authoritative_base_url {
-                Some(_) => ocx_index::Jurisdiction::Authoritative,
-                None => ocx_index::Jurisdiction::FallThrough,
-            }
-        }
-        fn index_base_url(&self) -> Option<&str> {
-            self.authoritative_base_url
-        }
-        fn box_clone(&self) -> Box<dyn IndexImpl> {
-            Box::new(self.clone())
-        }
-    }
-
-    fn index_with(physical: Option<(&'static str, &'static str)>) -> ocx_index::Index {
-        ocx_index::Index::from_impl(RoutingSource {
-            physical,
-            authoritative_base_url: None,
-        })
-        .with_proxy_rules(ocx_oci::ssrf::ProxyRules::direct())
-    }
 
     /// No source rewrites anything: every pin is read where it names.
     fn passthrough_index() -> ocx_index::Index {
-        index_with(None)
+        RoutingSource::passthrough().into_index()
     }
 
     /// `example.com/dep` is served from `example.com/contrib/dep`. Same
     /// registry on both sides, so the dial-site floor's not-a-rewrite carve-out
     /// answers without a DNS lookup.
     fn routed_index() -> ocx_index::Index {
-        index_with(Some(("example.com", "contrib/dep")))
+        RoutingSource::rewriting("example.com", "contrib/dep").into_index()
     }
 
     fn metadata(deps_json: &str) -> Metadata {
@@ -727,7 +651,7 @@ mod tests {
 
         let err = verify_dependency_pins(
             &client,
-            &index_with(Some(("127.0.0.1:5999", "contrib/dep"))),
+            &RoutingSource::rewriting("127.0.0.1:5999", "contrib/dep").into_index(),
             &metadata,
             &platform("linux/amd64"),
         )
@@ -757,10 +681,7 @@ mod tests {
         seed_manifest(&data, &hex('a'), IMAGE_MANIFEST_JSON);
         let client = stub_client(data.clone());
         let metadata = metadata(&format!(r#"{{"identifier":"example.com/dep@sha256:{}"}}"#, hex('a')));
-        let index = ocx_index::Index::from_impl(RoutingSource {
-            physical: None,
-            authoritative_base_url: Some("https://index.example.invalid"),
-        });
+        let index = RoutingSource::authoritative_miss("https://index.example.invalid").into_index();
 
         let err = verify_dependency_pins(&client, &index, &metadata, &platform("linux/amd64"))
             .await

@@ -195,6 +195,10 @@ pub struct CopiedPlatform {
 #[derive(Debug)]
 pub struct CopyOutcome {
     pub source: ocx_oci::Identifier,
+    /// Where `source` was read from: the location the index routed it to, or
+    /// `source` itself when nothing rewrote it. A later read of the same
+    /// source reuses it rather than asking the index again.
+    pub source_location: ocx_oci::Identifier,
     pub target: ocx_oci::Identifier,
     /// One row per platform, source-supplied and target-only alike.
     pub platforms: Vec<CopiedPlatform>,
@@ -236,14 +240,23 @@ impl Publisher {
     /// additions, invisible until a tag names them — and only then are the
     /// indexes merged and the rolling tags moved. An interruption during the
     /// first phase therefore leaves the target's tags exactly as they were.
-    pub async fn copy(&self, request: CopyRequest<'_>) -> std::result::Result<CopyOutcome, CopyError> {
+    ///
+    /// Every source read dials where `index` routes the source
+    /// ([`Index::route_for_dial`](ocx_index::Index::route_for_dial)), never the
+    /// name as typed — an index-served namespace such as `ocx.sh` is not a
+    /// registry (ocx#504). The target is written as typed.
+    pub async fn copy(
+        &self,
+        index: &ocx_index::Index,
+        request: CopyRequest<'_>,
+    ) -> std::result::Result<CopyOutcome, CopyError> {
         // The endpoints are attached once, here, so every `?` inside `run` can
         // stay on the bare kind — the alternative is threading two identifiers
         // through each conversion, which is what makes wrapper errors get
         // written as bare pass-throughs in the first place.
         let source_identifier = request.source.clone();
         let target_identifier = request.target.clone();
-        run(&self.client, request).await.map_err(|kind| CopyError {
+        run(&self.client, index, request).await.map_err(|kind| CopyError {
             source_identifier,
             target_identifier,
             kind,
@@ -251,8 +264,15 @@ impl Publisher {
     }
 }
 
-async fn run(client: &Client, request: CopyRequest<'_>) -> std::result::Result<CopyOutcome, CopyErrorKind> {
-    let source_leaves = resolve_source_leaves(client, request.source, &request.platforms).await?;
+async fn run(
+    client: &Client,
+    index: &ocx_index::Index,
+    request: CopyRequest<'_>,
+) -> std::result::Result<CopyOutcome, CopyErrorKind> {
+    // Routed once; every source read below dials `source_location`, and
+    // everything reported keeps naming `request.source`.
+    let source_location = index.route_for_dial(request.source).await.map_err(PackageError::from)?;
+    let source_leaves = resolve_source_leaves(client, request.source, &source_location, &request.platforms).await?;
     let target_entries = read_target_entries(client, request.target).await?;
 
     let mut rows = Vec::new();
@@ -296,7 +316,7 @@ async fn run(client: &Client, request: CopyRequest<'_>) -> std::result::Result<C
         //
         let copied = ocx_oci::copy::copy_leaf(
             client,
-            request.source,
+            &source_location,
             request.target,
             source_digest,
             request.referrers,
@@ -372,6 +392,7 @@ async fn run(client: &Client, request: CopyRequest<'_>) -> std::result::Result<C
 
     Ok(CopyOutcome {
         source: request.source.clone(),
+        source_location,
         target: request.target.clone(),
         platforms: rows,
         cascade_tags,
@@ -416,14 +437,16 @@ async fn target_tags(client: &Client, request: &CopyRequest<'_>, platform: &ocx_
     Ok(tags.into_iter().filter(|candidate| candidate != tag).collect())
 }
 
-/// The `(platform, leaf digest)` pairs this copy will move.
+/// The `(platform, leaf digest)` pairs this copy will move, read at
+/// `source_location`; a miss still names `source`.
 async fn resolve_source_leaves(
     client: &Client,
     source: &ocx_oci::Identifier,
+    source_location: &ocx_oci::Identifier,
     requested: &[ocx_oci::Platform],
 ) -> std::result::Result<Vec<(ocx_oci::Platform, ocx_oci::Digest)>, CopyErrorKind> {
     let (_, digest, manifest) = client
-        .fetch_manifest_raw_bytes(source)
+        .fetch_manifest_raw_bytes(source_location)
         .await?
         .ok_or_else(|| ClientError::ManifestNotFound(source.to_string()))?;
 
@@ -695,6 +718,11 @@ mod tests {
         }
     }
 
+    /// Nothing rewrites the source: it is read where it names, the shape every
+    /// test here ran under before the source was routed (ocx#504).
+    static PASSTHROUGH: std::sync::LazyLock<ocx_index::Index> =
+        std::sync::LazyLock::new(|| ocx_index::test_source::RoutingSource::passthrough().into_index());
+
     /// One scratch root for the whole test module.
     ///
     /// `CopyRequest::scratch_root` is non-optional, so every request needs a real
@@ -724,7 +752,7 @@ mod tests {
         );
 
         let outcome = publisher_for(&data)
-            .copy(request(&source, &target, &annotations))
+            .copy(&PASSTHROUGH, request(&source, &target, &annotations))
             .await
             .expect("copy");
 
@@ -757,18 +785,50 @@ mod tests {
         let publisher = publisher_for(&data);
 
         let first = publisher
-            .copy(request(&source, &target, &annotations))
+            .copy(&PASSTHROUGH, request(&source, &target, &annotations))
             .await
             .expect("first");
         assert_eq!(first.platforms[0].disposition, Disposition::Added);
         assert!(!first.is_no_op());
 
         let second = publisher
-            .copy(request(&source, &target, &annotations))
+            .copy(&PASSTHROUGH, request(&source, &target, &annotations))
             .await
             .expect("second");
         assert_eq!(second.platforms[0].disposition, Disposition::Unchanged);
         assert!(second.is_no_op(), "a repeated promotion has nothing left to do");
+    }
+
+    /// A source in an index-served namespace is read where the index routes it
+    /// (ocx#504): the package is seeded only at the physical `team/demo`, and
+    /// the logical `served/demo` holds nothing, so a copy that dials the name as
+    /// typed finds no manifest. The report still names the source as typed.
+    #[tokio::test]
+    async fn a_source_served_through_an_index_is_read_at_its_physical_location() {
+        let data = StubTransportData::new();
+        let leaves = seed_source(&data, "3.28.1", &[("linux/amd64", AMD64_LAYER)]);
+        let source = ocx_oci::Identifier::new_registry("served/demo", "dev.example.com").clone_with_tag("3.28.1");
+        let target = identifier("prod.example.com", "3.28.1");
+        let annotations = BTreeMap::new();
+        let index = ocx_index::test_source::RoutingSource::rewriting("dev.example.com", "team/demo").into_index();
+
+        let outcome = publisher_for(&data)
+            .copy(&index, request(&source, &target, &annotations))
+            .await
+            .unwrap_or_else(|error| panic!("copy: {}", chain(&error)));
+
+        assert_eq!(outcome.source, source, "the report names the source as typed");
+        assert_eq!(
+            outcome.source_location,
+            identifier("dev.example.com", "3.28.1"),
+            "the source was read where the index routed it, tag carried"
+        );
+        let landed: Vec<String> = pushed_index(&data, &target)
+            .manifests
+            .into_iter()
+            .map(|entry| entry.digest)
+            .collect();
+        assert_eq!(landed, vec![leaves[0].to_string()]);
     }
 
     /// The scratch root the caller supplies is the one each leaf spools into.
@@ -794,7 +854,7 @@ mod tests {
         let mut req = request(&source, &target, &annotations);
         req.scratch_root = &absent;
         let error = publisher_for(&data)
-            .copy(req)
+            .copy(&PASSTHROUGH, req)
             .await
             .expect_err("a scratch root that does not exist cannot be spooled into");
         assert!(
@@ -806,7 +866,7 @@ mod tests {
         let control = StubTransportData::new();
         seed_source(&control, "3.28.1", &[("linux/amd64", AMD64_LAYER)]);
         publisher_for(&control)
-            .copy(request(&source, &target, &annotations))
+            .copy(&PASSTHROUGH, request(&source, &target, &annotations))
             .await
             .expect("control: the same copy succeeds against a root that exists");
     }
@@ -833,7 +893,7 @@ mod tests {
 
         let mut req = request(&source, &target, &annotations);
         req.cascade = true;
-        publisher.copy(req).await.expect("copy");
+        publisher.copy(&PASSTHROUGH, req).await.expect("copy");
 
         let mirrored: Vec<String> = data
             .read()
@@ -879,7 +939,7 @@ mod tests {
         let mut req = request(&source, &target, &annotations);
         req.dry_run = true;
         let error = publisher_for(&data)
-            .copy(req)
+            .copy(&PASSTHROUGH, req)
             .await
             .expect_err("an unreadable target index must fail the copy");
 
@@ -918,7 +978,7 @@ mod tests {
         .expect("a test manifest fits i64");
 
         publisher_for(&data)
-            .copy(request(&source, &target, &annotations))
+            .copy(&PASSTHROUGH, request(&source, &target, &annotations))
             .await
             .expect("copy");
 
@@ -956,7 +1016,7 @@ mod tests {
         let annotations = BTreeMap::new();
 
         let error = publisher_for(&data)
-            .copy(request(&source, &target, &annotations))
+            .copy(&PASSTHROUGH, request(&source, &target, &annotations))
             .await
             .expect_err("a bare leaf needs a platform");
 
@@ -1003,7 +1063,7 @@ mod tests {
         let annotations = BTreeMap::new();
 
         let error = publisher_for(&data)
-            .copy(request(&source, &target, &annotations))
+            .copy(&PASSTHROUGH, request(&source, &target, &annotations))
             .await
             .expect_err("an absent source tag cannot be copied");
 
@@ -1029,7 +1089,7 @@ mod tests {
 
         let mut req = request(&source, &target, &annotations);
         req.platforms = vec![platform("linux/amd64")];
-        let outcome = publisher_for(&data).copy(req).await.expect("copy");
+        let outcome = publisher_for(&data).copy(&PASSTHROUGH, req).await.expect("copy");
 
         assert_eq!(outcome.platforms.len(), 1);
         assert_eq!(outcome.platforms[0].platform.to_string(), "linux/amd64");
@@ -1048,7 +1108,7 @@ mod tests {
 
         let mut req = request(&source, &target, &annotations);
         req.dry_run = true;
-        let outcome = publisher_for(&data).copy(req).await.expect("copy");
+        let outcome = publisher_for(&data).copy(&PASSTHROUGH, req).await.expect("copy");
 
         assert!(outcome.dry_run);
         assert_eq!(outcome.platforms[0].disposition, Disposition::Added);
@@ -1078,7 +1138,7 @@ mod tests {
         data.write().calls.clear();
 
         let error = publisher_for(&data)
-            .copy(request(&source, &target, &annotations))
+            .copy(&PASSTHROUGH, request(&source, &target, &annotations))
             .await
             .expect_err("an index digest must be refused");
         assert!(
@@ -1106,7 +1166,7 @@ mod tests {
         let annotations = BTreeMap::new();
 
         let _error = publisher_for(&data)
-            .copy(request(&source, &target, &annotations))
+            .copy(&PASSTHROUGH, request(&source, &target, &annotations))
             .await
             .expect_err("a bare leaf needs a platform");
 
@@ -1114,7 +1174,7 @@ mod tests {
         // registry has to stay distinguishable from a bad invocation.
         let unreachable = identifier("dev.example.com", "9.9.9");
         let _error = publisher_for(&data)
-            .copy(request(&unreachable, &target, &annotations))
+            .copy(&PASSTHROUGH, request(&unreachable, &target, &annotations))
             .await
             .expect_err("an absent source fails");
     }
@@ -1133,7 +1193,7 @@ mod tests {
         let annotations = BTreeMap::new();
 
         let error = publisher_for(&data)
-            .copy(request(&source, &target, &annotations))
+            .copy(&PASSTHROUGH, request(&source, &target, &annotations))
             .await
             .expect_err("a bare leaf needs a platform");
         assert!(
@@ -1145,7 +1205,7 @@ mod tests {
         let mut req = request(&source, &target, &annotations);
         req.platforms = vec![platform("linux/amd64"), platform("darwin/arm64")];
         let error = publisher_for(&data)
-            .copy(req)
+            .copy(&PASSTHROUGH, req)
             .await
             .expect_err("two platforms for one manifest is not a copy anyone meant");
         assert!(
@@ -1156,7 +1216,10 @@ mod tests {
 
         let mut req = request(&source, &target, &annotations);
         req.platforms = vec![platform("linux/amd64")];
-        let outcome = publisher_for(&data).copy(req).await.expect("one platform is enough");
+        let outcome = publisher_for(&data)
+            .copy(&PASSTHROUGH, req)
+            .await
+            .expect("one platform is enough");
         assert_eq!(outcome.platforms[0].platform.to_string(), "linux/amd64");
     }
 
@@ -1196,7 +1259,7 @@ mod tests {
 
         let mut req = request(&source, &target, &annotations);
         req.keep_tag = true;
-        let outcome = publisher_for(&data).copy(req).await.expect("copy");
+        let outcome = publisher_for(&data).copy(&PASSTHROUGH, req).await.expect("copy");
 
         let mut platforms: Vec<String> = outcome.platforms.iter().map(|row| row.platform.to_string()).collect();
         platforms.sort();
@@ -1263,7 +1326,7 @@ mod tests {
 
             let mut req = request(&source, &target, &annotations);
             req.cascade = true;
-            let outcome = publisher_for(&data).copy(req).await.expect("copy");
+            let outcome = publisher_for(&data).copy(&PASSTHROUGH, req).await.expect("copy");
 
             if target_has_newer {
                 assert!(
@@ -1301,7 +1364,7 @@ mod tests {
 
         let mut req = request(&source, &target, &annotations);
         req.cascade = true;
-        let outcome = publisher_for(&data).copy(req).await.expect("copy");
+        let outcome = publisher_for(&data).copy(&PASSTHROUGH, req).await.expect("copy");
 
         assert!(
             outcome.cascade_tags.contains(&"3.28".to_string()),
@@ -1330,7 +1393,7 @@ mod tests {
         let mut req = request(&source, &target, &annotations);
         req.cascade = true;
         let error = publisher_for(&data)
-            .copy(req)
+            .copy(&PASSTHROUGH, req)
             .await
             .expect_err("a failing tag listing must abort the promotion");
 
@@ -1407,7 +1470,7 @@ mod tests {
         req.keep_tag = true;
         req.referrers = true;
         let error = publisher_for(&data)
-            .copy(req)
+            .copy(&PASSTHROUGH, req)
             .await
             .expect_err("a rolling-tag plan needs a version to plan from");
         assert!(chain(&error).contains("candidate"), "{}", chain(&error));
@@ -1466,7 +1529,7 @@ mod tests {
         // The confusable one: the source publishes darwin/arm64, not linux/arm64.
         req.platforms = vec![platform("linux/arm64")];
         let error = publisher_for(&data)
-            .copy(req)
+            .copy(&PASSTHROUGH, req)
             .await
             .expect_err("a platform the source does not publish is not a copy");
 

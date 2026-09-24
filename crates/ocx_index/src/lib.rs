@@ -911,6 +911,93 @@ pub mod test_source {
             Box::new(self.clone())
         }
     }
+
+    /// A source reduced to the one question a direct registry reader asks an
+    /// index ([`Index::route_for_dial`]): where does this name live?
+    /// [`rewriting`](Self::rewriting) serves every name from one physical
+    /// `(registry, repository)`; [`passthrough`](Self::passthrough) rewrites
+    /// nothing, a plain registry's answer; [`authoritative_miss`](Self::authoritative_miss)
+    /// is a configured index that owns every name and holds none of them.
+    ///
+    /// Answers digest-only, the way a source answered before tags were carried,
+    /// so a tag on the dialled reference is the router's doing, not this
+    /// fixture's.
+    #[derive(Clone)]
+    pub struct RoutingSource {
+        physical: Option<(String, String)>,
+        authoritative_base_url: Option<String>,
+    }
+
+    impl RoutingSource {
+        pub fn rewriting(registry: &str, repository: &str) -> Self {
+            Self {
+                physical: Some((registry.to_string(), repository.to_string())),
+                authoritative_base_url: None,
+            }
+        }
+
+        pub fn passthrough() -> Self {
+            Self {
+                physical: None,
+                authoritative_base_url: None,
+            }
+        }
+
+        pub fn authoritative_miss(base_url: &str) -> Self {
+            Self {
+                physical: None,
+                authoritative_base_url: Some(base_url.to_string()),
+            }
+        }
+
+        /// This source wrapped as an [`Index`] on direct proxy rules, so the
+        /// dial-site floor never reads the ambient environment. Keep `registry`
+        /// equal to the logical one and the floor's not-a-rewrite carve-out
+        /// answers without a DNS lookup.
+        pub fn into_index(self) -> Index {
+            Index::from_impl(self).with_proxy_rules(ocx_oci::ssrf::ProxyRules::direct())
+        }
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for RoutingSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn physical_reference(&self, identifier: &Identifier) -> Result<Option<Identifier>> {
+            Ok(self.physical.as_ref().map(|(registry, repository)| {
+                let physical = Identifier::new_registry(repository, registry);
+                match identifier.digest() {
+                    Some(digest) => physical.clone_with_digest(digest),
+                    None => physical,
+                }
+            }))
+        }
+        fn jurisdiction(&self, _: &Identifier) -> super::Jurisdiction {
+            match self.authoritative_base_url {
+                Some(_) => super::Jurisdiction::Authoritative,
+                None => super::Jurisdiction::FallThrough,
+            }
+        }
+        fn index_base_url(&self) -> Option<&str> {
+            self.authoritative_base_url.as_deref()
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
 }
 
 // ── Index::select integration tests with multi-libc ImageIndex (Step 3.4) ──
@@ -1898,44 +1985,6 @@ mod tests {
 
     // ── `route_for_dial`: routing, version carry, and the floor in one call ──
 
-    /// A source that serves every identifier it is asked about from
-    /// `registry/contrib/<repository>`, minted the way a source minted it
-    /// before C-2 — digest carried, tag dropped — so a tag on the routed
-    /// identifier can only be [`Index::route_for_dial`]'s doing.
-    #[derive(Clone)]
-    struct RewritingSource {
-        registry: &'static str,
-    }
-
-    #[async_trait]
-    impl index_impl::IndexImpl for RewritingSource {
-        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
-            Ok(vec![])
-        }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
-            Ok(None)
-        }
-        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
-            Ok(None)
-        }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
-            Ok(None)
-        }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
-            Ok(None)
-        }
-        async fn physical_reference(&self, identifier: &Identifier) -> Result<Option<Identifier>> {
-            let physical = Identifier::new_registry(format!("contrib/{}", identifier.repository()), self.registry);
-            Ok(Some(match identifier.digest() {
-                Some(digest) => physical.clone_with_digest(digest),
-                None => physical,
-            }))
-        }
-        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
-            Box::new(self.clone())
-        }
-    }
-
     /// A configured index that holds no root for anything: its jurisdiction
     /// verdict is the one under test, and every question it is asked misses.
     #[derive(Clone)]
@@ -2048,13 +2097,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn route_for_dial_carries_the_logical_tag_and_digest_onto_the_physical_location() {
         let logical = versioned_logical_id();
-        let routed = Index::from_impl(RewritingSource {
-            registry: "example.com",
-        })
-        .with_proxy_rules(ocx_oci::ssrf::ProxyRules::direct())
-        .route_for_dial(&logical)
-        .await
-        .expect("a same-registry rewrite is not judged by the floor");
+        // `test_source::RoutingSource` mints digest-only, the way a source
+        // minted before C-2, so the tag can only be `route_for_dial`'s doing.
+        let routed = super::test_source::RoutingSource::rewriting("example.com", "contrib/kitware/cmake")
+            .into_index()
+            .route_for_dial(&logical)
+            .await
+            .expect("a same-registry rewrite is not judged by the floor");
 
         assert_eq!(routed.registry(), "example.com");
         assert_eq!(routed.repository(), "contrib/kitware/cmake");
@@ -2066,8 +2115,8 @@ mod tests {
     /// and forget to guard: a rewrite into a forbidden range is refused here.
     #[tokio::test(flavor = "multi_thread")]
     async fn route_for_dial_refuses_a_rewrite_into_a_forbidden_target() {
-        let error = Index::from_impl(RewritingSource { registry: LOOPBACK })
-            .with_proxy_rules(ocx_oci::ssrf::ProxyRules::direct())
+        let error = super::test_source::RoutingSource::rewriting(LOOPBACK, "contrib/kitware/cmake")
+            .into_index()
             .route_for_dial(&versioned_logical_id())
             .await
             .expect_err("a rewritten loopback target must be refused before anything dials it");

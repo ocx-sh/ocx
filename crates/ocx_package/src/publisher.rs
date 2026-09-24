@@ -377,6 +377,10 @@ impl Publisher {
     /// `package copy --description`, `package description push --from`, and the merge in
     /// `package description push` (invariant 5, `subsystem-oci.md`). A read that only
     /// renders is [`pull_description_mirrored`](Self::pull_description_mirrored).
+    ///
+    /// Reads `identifier` where it names, unrouted: a push target's own
+    /// description, or a location an index already routed. A source a package
+    /// name was typed for is [`pull_source_description`](Self::pull_source_description).
     pub async fn pull_description(
         &self,
         identifier: &ocx_oci::Identifier,
@@ -385,20 +389,35 @@ impl Publisher {
         Ok(crate::description::transport::pull_description(&self.client, identifier, temp_dir).await?)
     }
 
-    /// [`pull_description`](Self::pull_description) served by a configured
-    /// mirror.
+    /// [`pull_description`](Self::pull_description) of `source`, read where
+    /// `index` routes it ([`Index::route_for_dial`](ocx_index::Index::route_for_dial)):
+    /// an index-served namespace such as `ocx.sh` is not a registry (ocx#504).
+    pub async fn pull_source_description(
+        &self,
+        index: &ocx_index::Index,
+        source: &ocx_oci::Identifier,
+        temp_dir: &Path,
+    ) -> Result<Option<Description>> {
+        let routed = index.route_for_dial(source).await?;
+        self.pull_description(&routed, temp_dir).await
+    }
+
+    /// [`pull_source_description`](Self::pull_source_description) served by a
+    /// configured mirror of the registry `index` routes `identifier` to.
     ///
     /// Only for a description nothing is written from — `ocx package description pull`
     /// renders one and stops. Named rather than implied, because nothing in a
     /// call site's shape says whether its answer will back a write.
     pub async fn pull_description_mirrored(
         &self,
+        index: &ocx_index::Index,
         identifier: &ocx_oci::Identifier,
         temp_dir: &Path,
     ) -> Result<Option<Description>> {
+        let routed = index.route_for_dial(identifier).await?;
         Ok(crate::description::transport::pull_description_addressed(
             &self.client,
-            identifier,
+            &routed,
             temp_dir,
             ReadAddressing::Mirrored,
         )
@@ -983,6 +1002,61 @@ mod tests {
             inner.calls.iter().any(|c| c.starts_with("push_blob:")),
             "push_blob should follow ensure_auth, calls: {:?}",
             inner.calls
+        );
+    }
+
+    // ── Description reads routed through the index (ocx#504) ─────────────
+
+    /// `ghcr.io/served/tool` is served from `ghcr.io/owner/tool`: the logical
+    /// name holds nothing, so a read that dials it as typed reads the wrong
+    /// repository.
+    fn routed_index() -> ocx_index::Index {
+        ocx_index::test_source::RoutingSource::rewriting("ghcr.io", "owner/tool").into_index()
+    }
+
+    fn logical_identifier() -> ocx_oci::Identifier {
+        ocx_oci::Identifier::new_registry("served/tool", "ghcr.io")
+    }
+
+    /// `(registry, repository)` the description manifest read was handed.
+    fn description_read_target(data: &ocx_oci::client::test_transport::StubTransportData) -> (String, String) {
+        data.read()
+            .read_targets
+            .iter()
+            .find(|(method, _, _)| *method == "pull_manifest_raw")
+            .map(|(_, registry, repository)| (registry.clone(), repository.clone()))
+            .expect("the description manifest was never read")
+    }
+
+    #[tokio::test]
+    async fn pull_description_mirrored_reads_where_the_index_routes() {
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let publisher = Publisher::new(ocx_oci::client::test_transport::stub_client(&data));
+        let dir = tempfile::tempdir().unwrap();
+
+        let _ = publisher
+            .pull_description_mirrored(&routed_index(), &logical_identifier(), dir.path())
+            .await;
+
+        assert_eq!(
+            description_read_target(&data),
+            ("ghcr.io".to_string(), "owner/tool".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_source_description_reads_where_the_index_routes() {
+        let data = ocx_oci::client::test_transport::StubTransportData::new();
+        let publisher = Publisher::new(ocx_oci::client::test_transport::stub_client(&data));
+        let dir = tempfile::tempdir().unwrap();
+
+        let _ = publisher
+            .pull_source_description(&routed_index(), &logical_identifier(), dir.path())
+            .await;
+
+        assert_eq!(
+            description_read_target(&data),
+            ("ghcr.io".to_string(), "owner/tool".to_string())
         );
     }
 }

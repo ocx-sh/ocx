@@ -97,9 +97,10 @@ pub struct StubTransportInner {
     ///
     /// [`calls`](Self::calls) records method names only, so it cannot witness
     /// *where* a read went — which is the entire question for a mirror-addressed
-    /// read. Populated by `pull_manifest_raw` and `pull_blob_to_file`, the two
-    /// legs of an artifact read; a test needing another method's target adds the
-    /// `record_target` call there rather than asserting on an absent row.
+    /// or index-routed read. Populated by `pull_manifest_raw`, `pull_blob`,
+    /// `pull_blob_to_file` and `pull_blob_streaming`; a test needing another
+    /// method's target adds the `record_target` call there rather than
+    /// asserting on an absent row.
     pub read_targets: Vec<(&'static str, String, String)>,
     /// When true, `push_manifest_raw` stores pushed data back into `manifests`
     /// so subsequent reads see the updated content.
@@ -405,9 +406,10 @@ impl OciTransport for StubTransport {
         }
     }
 
-    async fn pull_blob(&self, _image: &crate::native::Reference, digest: &crate::Digest) -> Result<Vec<u8>> {
+    async fn pull_blob(&self, image: &crate::native::Reference, digest: &crate::Digest) -> Result<Vec<u8>> {
         let digest_key = digest.to_string();
         self.record(&format!("pull_blob:{}", digest_key));
+        self.record_target("pull_blob", image);
         let inner = self.data.read();
         Ok(inner.blobs.get(&digest_key).cloned().unwrap_or_default())
     }
@@ -441,11 +443,12 @@ impl OciTransport for StubTransport {
 
     async fn pull_blob_streaming(
         &self,
-        _image: &crate::native::Reference,
+        image: &crate::native::Reference,
         digest: &crate::Digest,
     ) -> Result<Box<dyn tokio::io::AsyncRead + Send + Unpin + 'static>> {
         let digest_key = digest.to_string();
         self.record(&format!("pull_blob_streaming:{digest_key}"));
+        self.record_target("pull_blob_streaming", image);
         // Overriding the trait default (temp file round-trip) is what makes read
         // boundaries controllable. Without a plan the whole blob is one chunk,
         // which is what the default delivers on its first fill anyway.

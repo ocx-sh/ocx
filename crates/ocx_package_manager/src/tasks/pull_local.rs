@@ -227,6 +227,9 @@ async fn stage_layers(
 ) -> Result<Vec<ocx_oci::Descriptor>, PackageErrorKind> {
     let fs = mgr.file_structure();
     let mut descriptors = Vec::with_capacity(layers.len());
+    // Routed once, by the first digest layer that has to be read from the
+    // registry: a run whose layers are all local asks the index nothing.
+    let routed = tokio::sync::OnceCell::new();
 
     for layer_ref in layers {
         match layer_ref {
@@ -309,7 +312,7 @@ async fn stage_layers(
                 // Check if the layer content is already present locally.
                 let layer_content = fs.layers.content(registry, digest);
                 if ocx_util::fs::path_exists_lossy(&layer_content).await {
-                    let size = resolve_digest_size(mgr, fs, base_identifier, registry, digest).await?;
+                    let size = resolve_digest_size(mgr, fs, base_identifier, &routed, registry, digest).await?;
                     descriptors.push(ocx_oci::Descriptor {
                         media_type: media_type.as_media_type().to_string(),
                         digest: digest.to_string(),
@@ -325,7 +328,8 @@ async fn stage_layers(
                     let layer_path = fs.layers.path(registry, digest);
                     let temp_layer = layer_path.with_extension("_tmp");
                     let blob_size =
-                        pull_digest_layer_to_temp(mgr, base_identifier, digest, media_type, &temp_layer).await?;
+                        pull_digest_layer_to_temp(mgr, base_identifier, &routed, digest, media_type, &temp_layer)
+                            .await?;
                     super::layer_staging::finalize_layer_dir(fs, registry, digest, &temp_layer).await?;
 
                     descriptors.push(ocx_oci::Descriptor {
@@ -387,6 +391,22 @@ async fn validate_file_layer(path: &std::path::Path) -> Result<(), PackageErrorK
     Ok(())
 }
 
+/// Where `base_identifier`'s layer blobs are read from: the location the
+/// index routes it to ([`ocx_index::Index::route_for_dial`]), never the name as
+/// typed — an index-served namespace such as `ocx.sh` is not a registry
+/// (ocx#504). Routed once per `routed` cell; storage stays keyed on the
+/// logical registry.
+async fn layer_source<'a>(
+    mgr: &PackageManager,
+    base_identifier: &ocx_oci::Identifier,
+    routed: &'a tokio::sync::OnceCell<ocx_oci::Identifier>,
+) -> Result<&'a ocx_oci::Identifier, PackageErrorKind> {
+    routed
+        .get_or_try_init(|| mgr.index().route_for_dial(base_identifier))
+        .await
+        .map_err(|error| PackageErrorKind::Internal(error.into()))
+}
+
 /// Resolve the byte size of a cached digest layer's blob.
 ///
 /// Order of strategies:
@@ -395,11 +415,12 @@ async fn validate_file_layer(path: &std::path::Path) -> Result<(), PackageErrorK
 ///    [`crate::Error::OfflineMode`]. Required for manifest parity with `package push`:
 ///    the OCI descriptor's `size` field cannot default to 0.
 /// 3. **HEAD fallback** — online with no local blob, capture content-length via
-///    [`ocx_oci::Client::head_blob`].
+///    [`ocx_oci::Client::head_blob`], at the routed [`layer_source`].
 async fn resolve_digest_size(
     mgr: &PackageManager,
     fs: &file_structure::FileStructure,
     base_identifier: &ocx_oci::Identifier,
+    routed: &tokio::sync::OnceCell<ocx_oci::Identifier>,
     registry: &str,
     digest: &ocx_oci::Digest,
 ) -> Result<i64, PackageErrorKind> {
@@ -422,8 +443,9 @@ async fn resolve_digest_size(
         return Err(PackageErrorKind::Internal(crate::Error::OfflineMode));
     }
     let client = mgr.require_client().map_err(PackageErrorKind::Internal)?;
+    let source = layer_source(mgr, base_identifier, routed).await?;
     let size_u64 = client
-        .head_blob(base_identifier, digest)
+        .head_blob(source, digest)
         .await
         .map_err(|e| PackageErrorKind::Internal(e.into()))?;
     i64::try_from(size_u64).map_err(|_| {
@@ -443,18 +465,21 @@ async fn resolve_digest_size(
 ///
 /// Calls `head_blob` first so the descriptor's `size` field has byte-for-byte parity
 /// with the manifest produced by `package push` (see `client.rs:602`). The synthesized
-/// pinned identifier is rooted at the real package repo because OCI layer blobs live
-/// in the same repo as the referencing manifest.
+/// pinned identifier is rooted at the package repo the index routes to
+/// ([`layer_source`]) because OCI layer blobs live in the same repo as the
+/// referencing manifest.
 async fn pull_digest_layer_to_temp(
     mgr: &PackageManager,
     base_identifier: &ocx_oci::Identifier,
+    routed: &tokio::sync::OnceCell<ocx_oci::Identifier>,
     digest: &ocx_oci::Digest,
     media_type: &ocx_oci::layer_ref::ArchiveMediaType,
     temp_layer: &std::path::Path,
 ) -> Result<i64, PackageErrorKind> {
     let client = mgr.require_client().map_err(PackageErrorKind::Internal)?;
+    let source = layer_source(mgr, base_identifier, routed).await?;
     let size_u64 = client
-        .head_blob(base_identifier, digest)
+        .head_blob(source, digest)
         .await
         .map_err(|e| PackageErrorKind::Internal(e.into()))?;
     let blob_size = i64::try_from(size_u64).map_err(|_| {
@@ -475,7 +500,7 @@ async fn pull_digest_layer_to_temp(
         annotations: None,
     };
 
-    let synth_pinned = ocx_oci::PinnedIdentifier::try_from(base_identifier.clone_with_digest(digest.clone()))
+    let synth_pinned = ocx_oci::PinnedIdentifier::try_from(source.clone_with_digest(digest.clone()))
         .map_err(|e| PackageErrorKind::Internal(e.into()))?;
 
     client.pull_layer(&synth_pinned, &layer_desc, temp_layer).await?;
@@ -1138,6 +1163,117 @@ mod tests {
                  got: {sizes:?}"
             );
         }
+    }
+
+    // ── digest layers are read where the index routes the package ─────────────
+    //
+    // ocx#504: `package test <pkg> sha256:<layer>` reads the layer from the
+    // registry the index routes the package to. The blob is placed only at the
+    // physical `example.com/contrib/tool`, so a HEAD at the logical
+    // `example.com/test/<name>` finds nothing. Storage stays keyed on the
+    // logical registry.
+
+    const ROUTED_REPOSITORY: &str = "contrib/tool";
+
+    /// An online manager whose index serves every package from
+    /// `example.com/contrib/tool`, the only repository holding the archive
+    /// fixture's blob. Returns the manager, its stub, the root and the digest.
+    fn routed_layer_manager() -> (
+        PackageManager,
+        ocx_oci::client::test_transport::StubTransportData,
+        tempfile::TempDir,
+        ocx_oci::Digest,
+    ) {
+        use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let archive_bytes = std::fs::read(ocx_test_support::data::archive_xz()).expect("archive fixture must exist");
+        let digest = ocx_oci::Algorithm::Sha256.hash(&archive_bytes);
+        let stub_data = StubTransportData::new();
+        {
+            let mut inner = stub_data.write();
+            inner.blobs.insert(digest.to_string(), archive_bytes);
+            inner.blob_locations = Some(std::collections::HashMap::from([(
+                format!("example.com/{ROUTED_REPOSITORY}"),
+                std::collections::BTreeSet::from([digest.to_string()]),
+            )]));
+        }
+        let client = ocx_oci::Client::with_transport(Box::new(StubTransport::new(stub_data.clone())));
+        let dir = tempfile::tempdir().unwrap();
+        let fs = FileStructure::with_root(dir.path().to_path_buf());
+        let index = ocx_index::test_source::RoutingSource::rewriting("example.com", ROUTED_REPOSITORY).into_index();
+        let mgr = PackageManager::new(fs, index, Some(client), "example.com");
+        (mgr, stub_data, dir, digest)
+    }
+
+    fn digest_layer(digest: &ocx_oci::Digest) -> [ocx_oci::layer_ref::LayerRef; 1] {
+        [ocx_oci::layer_ref::LayerRef::Digest {
+            digest: digest.clone(),
+            media_type: ocx_oci::layer_ref::ArchiveMediaType::TarXz,
+            layout: ocx_oci::LayerLayoutSpec::default(),
+            mount_from: None,
+        }]
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn digest_layer_is_read_where_the_index_routes_the_package() {
+        let (mgr, stub_data, dir, digest) = routed_layer_manager();
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let result = mgr
+            .pull_local(fixture_info("routed-layer-tool"), &digest_layer(&digest), Some(&dest))
+            .await;
+        assert!(
+            result.is_ok(),
+            "the layer exists where the index routes the package; err: {:?}",
+            result.err()
+        );
+        // The HEAD alone cannot witness the pull: the stub serves blob bytes
+        // from any repository, so the pull's own target is asserted.
+        let pulled: Vec<(String, String)> = stub_data
+            .read()
+            .read_targets
+            .iter()
+            .filter(|(method, _, _)| *method == "pull_blob_streaming")
+            .map(|(_, registry, repository)| (registry.clone(), repository.clone()))
+            .collect();
+        assert_eq!(
+            pulled,
+            vec![("example.com".to_string(), ROUTED_REPOSITORY.to_string())],
+            "the layer is pulled from the routed repository"
+        );
+        assert!(
+            tokio::fs::try_exists(mgr.file_structure().layers.content("example.com", &digest))
+                .await
+                .unwrap(),
+            "the layer is stored under the logical registry"
+        );
+    }
+
+    /// Layer content cached, blob data absent, online: the size comes from a
+    /// HEAD, and that HEAD goes where the index routes the package.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cached_digest_layer_size_is_read_where_the_index_routes_the_package() {
+        let (mgr, stub_data, dir, digest) = routed_layer_manager();
+        tokio::fs::create_dir_all(mgr.file_structure().layers.content("example.com", &digest))
+            .await
+            .unwrap();
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let result = mgr
+            .pull_local(fixture_info("routed-cached-tool"), &digest_layer(&digest), Some(&dest))
+            .await;
+        assert!(
+            result.is_ok(),
+            "the blob's size is known where the index routes the package; err: {:?}",
+            result.err()
+        );
+        let calls = stub_data.read().calls.clone();
+        assert!(
+            calls.iter().all(|call| !call.starts_with("pull_blob")),
+            "a cached layer is sized, never pulled; calls: {calls:?}"
+        );
     }
 
     // ── non_regular_file_layer_rejected ──────────────────────────────────────
