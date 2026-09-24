@@ -3,7 +3,6 @@
 # Copyright 2026 The OCX Authors
 """Stage-1 Bazel edge cases — the red states WP-14/15/16 and A1 are written against.
 
-    scripts/bazel_gate_proofs.py --self-test
     scripts/bazel_gate_proofs.py --a1 --warm W.json --leaf L.json --hub H.json \
         --rdeps-leaf rdeps_leaf.txt --rdeps-hub rdeps_hub.txt
 
@@ -49,11 +48,11 @@ BEP carries no published stability guarantee, and proto3 JSON *omits* a false
 boolean, so `cachedLocally` is simply absent on a target that ran. A reader
 written as `payload.get("cachedLocally") is not False` therefore reports every
 target cached on a build where nothing was — a green indistinguishable from the
-check never having run. `--self-test` ships that wrong reader as a named control
-and shows it green on the same bytes where the real one reports 33 re-runs.
+check never having run. The tests ship that wrong reader as a named control and
+show it green on the same bytes where the real one reports 33 re-runs.
 
 **C-029.** No proof here reaches the remote cache realm, which is owner-gated.
-That is asserted structurally rather than promised: `--self-test` parses this
+That is asserted structurally rather than promised: `prove_c029` parses this
 file's own AST and reds on any `subprocess`/`socket`/`urllib`/`http`/`ssl`
 import or any `os.environ` / `os.getenv` read. AST and not `grep`, because a
 grep would match the banned spellings in this docstring and in the check's own
@@ -61,12 +60,11 @@ table — a detector that matches its own text answers the same in every state.
 
 **Every mutation below is proven to have landed** before its result is trusted;
 until then a surviving green is *unexplained*, not excused. Fixtures are
-synthetic and live under the repo's own `.tmp/` (never `/tmp`), and nothing is
+synthetic and live under `tmp_path` (pytest's own scratch dir), and nothing is
 ever restored with `git checkout --`, which restores from the index and would
 make the whole run vacuous.
 
-Not wired into `taskfiles/scripts.taskfile.yml` — WP-17 owns that file. The one
-line it owes the `self-test:` list is named in `--self-test`'s closing output.
+Tests: `scripts/tests/test_bazel_gate_proofs.py`.
 """
 
 from __future__ import annotations
@@ -77,7 +75,6 @@ import dataclasses
 import json
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -1662,43 +1659,16 @@ def prove_counts() -> int:
     return 1
 
 
-def self_test() -> int:
-    """All five red/green pairs, on fixtures this file builds."""
-    scratch = REPO_ROOT / ".tmp"
-    scratch.mkdir(exist_ok=True)
-    checks = 0
-    with tempfile.TemporaryDirectory(dir=scratch) as directory:
-        work = Path(directory)
-        checks += prove_pin(work)
-        checks += prove_drift()
-        checks += prove_tags()
-        checks += prove_a1(work)
-        checks += prove_c029(work)
-        checks += prove_counts()
-    print(
-        f"bazel gate proofs self-test: {checks} checks passed — S-002, S-003, S-009, S-010, S-012 "
-        "each shown red and green, plus C-029 and the floor arithmetic"
-    )
-    print(
-        "  wired into taskfiles/scripts.taskfile.yml `self-test:` (WP-17): "
-        "`- python3 scripts/bazel_gate_proofs.py --self-test`"
-    )
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--self-test", action="store_true", help="prove all five pairs red and green")
-    mode.add_argument("--a1", action="store_true", help="decide A1 from a warm/leaf/hub BEP triple")
+    parser.add_argument(
+        "--a1", action="store_true", required=True, help="decide A1 from a warm/leaf/hub BEP triple"
+    )
     for name in ("warm", "leaf", "hub", "rdeps-leaf", "rdeps-hub"):
         parser.add_argument(f"--{name}", type=Path, help=f"--a1: the {name} input")
     args = parser.parse_args()
-
-    if args.self_test:
-        return self_test()
 
     inputs = (args.warm, args.leaf, args.hub, args.rdeps_leaf, args.rdeps_hub)
     if any(path is None for path in inputs):

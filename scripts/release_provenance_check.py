@@ -5,7 +5,6 @@
 
     scripts/release_provenance_check.py --scan <file>... [--min-files N]
     scripts/release_provenance_check.py --exec <binary>
-    scripts/release_provenance_check.py --self-test
 
 Test builds (`--features ocx/__testing`) bake fixed placeholder provenance into
 the binary, so the acceptance binary is byte-identical across commits. That
@@ -26,11 +25,11 @@ to the runner — and requires release provenance: `channel` is not `test`, a
 `https://github.com/ocx-sh/ocx/actions/runs/<digits>`, and a non-epoch
 `build.timestamp`. It can only be green in CI, where a run URL exists.
 
-`--self-test` shows every red on synthetic fixtures. Its greens exercise the
-parser only (ADR AM-2): the green on a real release build — the one proof that
-dependency bytes stay clear of the markers — is `task release:provenance:proof`,
-and the `cross-compile` job in `verify-deep.yml` repeats it on every push to
-`main`.
+Its proofs run as pytest, from `scripts/tests/test_release_provenance_check.py`,
+and show every red on synthetic fixtures; their greens exercise the parser only
+(ADR AM-2): the green on a real release build — the one proof that dependency
+bytes stay clear of the markers — is `task release:provenance:proof`, and the
+`cross-compile` job in `verify-deep.yml` repeats it on every push to `main`.
 
 Exit codes: 0 clean, 1 finding, 2 usage (bad arguments, unreadable file).
 Stdlib only.
@@ -39,14 +38,10 @@ Stdlib only.
 from __future__ import annotations
 
 import argparse
-import contextlib
-import io
 import json
-import os
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 MARKERS: tuple[bytes, ...] = (b"placeholder-g00000000", b"ci.invalid", b"placeholder/placeholder")
@@ -224,161 +219,11 @@ _REPORT_REDS: list[tuple[str, object, str]] = [
 ]
 
 
-def _run(argv: list[str]) -> int:
-    """`main(argv)`, its output swallowed: the self-test reports its own verdict."""
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        return main(argv)
-
-
-def _expect(condition: bool, message: str, failures: list[str]) -> None:
-    if not condition:
-        failures.append(message)
-
-
-def self_test() -> int:
-    failures: list[str] = []
-    with tempfile.TemporaryDirectory(prefix="release-provenance-") as tmp:
-        root = Path(tmp)
-
-        # --scan reds: one fixture per marker, marker at a known offset. The
-        # markers are spelled out here, not read from MARKERS: a marker
-        # dropped from MARKERS would otherwise drop its own red with it.
-        for marker in (b"placeholder-g00000000", b"ci.invalid", b"placeholder/placeholder"):
-            fixture = root / f"red-{marker.decode().replace('/', '_')}"
-            offset = 4096 + len(marker)
-            fixture.write_bytes(b"\x7fELF" + b"\0" * (offset - 4) + marker + b"\0" * 64)
-            findings = scan([fixture])
-            _expect(
-                len(findings) == 1 and marker.decode() in findings[0] and f"offset {offset}" in findings[0]
-                and str(fixture) in findings[0],
-                f"scan: a fixture carrying {marker!r} at offset {offset} gave {findings}",
-                failures,
-            )
-            _expect(
-                _run(["--scan", str(fixture)]) == EXIT_FINDING,
-                f"--scan over a fixture carrying {marker!r} did not exit {EXIT_FINDING}",
-                failures,
-            )
-
-        # Every occurrence is reported, not only the first.
-        twice = root / "red-twice"
-        twice.write_bytes(MARKERS[1] + b"\0" * 10 + MARKERS[1])
-        _expect(len(scan([twice])) == 2, f"scan: two occurrences gave {scan([twice])}", failures)
-
-        # --scan green (parser only): the all-zero SHA and near-misses are not markers.
-        clean = root / "clean"
-        clean.write_bytes(
-            b"\x7fELF" + b"0" * 40 + b"\0" * 32 + b"placeholder-g0000000\0" + b"placeholder/\0" + b"ci.inval1d"
-        )
-        _expect(scan([clean]) == [], f"scan: the clean fixture gave {scan([clean])}", failures)
-        _expect(_run(["--scan", str(clean)]) == EXIT_CLEAN, "--scan over the clean fixture did not exit 0", failures)
-
-        # Reader floor: fewer files than --min-files reds, even when every file is clean.
-        _expect(
-            _run(["--scan", str(clean), "--min-files", "2"]) == EXIT_FINDING,
-            "--scan read 1 file under --min-files 2 and did not red",
-            failures,
-        )
-        _expect(
-            _run(["--scan", str(clean), str(clean), "--min-files", "2"]) == EXIT_FINDING,
-            "--scan counted one file named twice as two files read",
-            failures,
-        )
-        second = root / "clean-2"
-        second.write_bytes(clean.read_bytes())
-        _expect(
-            _run(["--scan", str(clean), str(second), "--min-files", "2"]) == EXIT_CLEAN,
-            "--scan over 2 clean files under --min-files 2 did not exit 0",
-            failures,
-        )
-
-        # Usage: an unreadable file and a floor below one are not a verdict.
-        _expect(
-            _run(["--scan", str(root / "absent")]) == EXIT_USAGE,
-            "--scan over a missing file did not exit 2",
-            failures,
-        )
-        _expect(
-            _run(["--scan", str(root)]) == EXIT_USAGE,
-            "--scan over a directory did not exit 2",
-            failures,
-        )
-        _expect(
-            _run(["--scan", str(clean), "--min-files", "0"]) == EXIT_USAGE,
-            "--min-files 0 was accepted",
-            failures,
-        )
-        _expect(
-            _run(["--exec", str(clean), "--min-files", "2"]) == EXIT_USAGE,
-            "--min-files was accepted beside --exec",
-            failures,
-        )
-
-        # --exec reds on synthetic reports, one broken field each.
-        for name, report, needle in _REPORT_REDS:
-            findings = evaluate_report(report)
-            _expect(
-                bool(findings) and any(needle in finding for finding in findings),
-                f"evaluate_report[{name}]: expected a finding naming {needle!r}, got {findings}",
-                failures,
-            )
-        # --exec green (parser only): the release-shaped report, with and without `channel`.
-        _expect(evaluate_report(_GOOD_REPORT) == [], f"evaluate_report[good]: {evaluate_report(_GOOD_REPORT)}", failures)
-        with_channel = _broken(("channel",), "dev")
-        _expect(evaluate_report(with_channel) == [], f"evaluate_report[channel dev]: {evaluate_report(with_channel)}", failures)
-
-        # --exec end to end, through a fake binary that prints a report.
-        if os.name == "posix":
-            for name, report, expected in (
-                ("good", _GOOD_REPORT, EXIT_CLEAN),
-                ("placeholder", _broken(("channel",), "test"), EXIT_FINDING),
-            ):
-                fake = root / f"fake-ocx-{name}"
-                fake.write_text(
-                    f"#!{sys.executable}\nimport sys\n"
-                    f"assert sys.argv[1:] == ['--format', 'json', 'version'], sys.argv\n"
-                    f"print({json.dumps(json.dumps(report))})\n",
-                    encoding="utf-8",
-                )
-                fake.chmod(0o755)
-                _expect(_run(["--exec", str(fake)]) == expected, f"--exec over the {name} fake did not exit {expected}", failures)
-            broken = root / "fake-ocx-fails"
-            # A release-shaped report on stdout, so only the exit status can red it.
-            broken.write_text(
-                f"#!{sys.executable}\nimport sys\nprint({json.dumps(json.dumps(_GOOD_REPORT))})\nsys.exit(3)\n",
-                encoding="utf-8",
-            )
-            broken.chmod(0o755)
-            _expect(_run(["--exec", str(broken)]) == EXIT_FINDING, "--exec over a failing binary did not red", failures)
-            garbage = root / "fake-ocx-garbage"
-            garbage.write_text(f"#!{sys.executable}\nprint('not json')\n", encoding="utf-8")
-            garbage.chmod(0o755)
-            _expect(_run(["--exec", str(garbage)]) == EXIT_FINDING, "--exec over non-JSON output did not red", failures)
-        else:
-            # A shebang fake cannot execute here; say so rather than pass as if it had.
-            print(
-                f"release_provenance_check self-test: SKIP --exec end-to-end fakes (os.name={os.name!r}, needs posix)",
-                file=sys.stderr,
-            )
-
-    if failures:
-        for failure in failures:
-            print(f"release_provenance_check self-test: FAIL {failure}", file=sys.stderr)
-        return EXIT_FINDING
-    print(
-        f"release_provenance_check self-test: {len(MARKERS)} marker reds, the floor red, "
-        f"{len(_REPORT_REDS)} report reds; greens exercise the parser only (the real-binary green is "
-        "`task release:provenance:proof`)"
-    )
-    return EXIT_CLEAN
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--scan", nargs="+", type=Path, metavar="FILE", help="byte-scan these files for the markers")
     mode.add_argument("--exec", dest="exec_binary", type=Path, metavar="BINARY", help="run and check a native binary")
-    mode.add_argument("--self-test", action="store_true", help="show every red on synthetic fixtures")
     parser.add_argument("--min-files", type=int, help="with --scan: red when fewer files are read (default 1)")
     try:
         args = parser.parse_args(argv)
@@ -387,8 +232,6 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exit_:
         return EXIT_USAGE if exit_.code else EXIT_CLEAN  # `--help` exits 0
 
-    if args.self_test:
-        return self_test()
     try:
         if args.exec_binary is not None:
             findings = check_exec(args.exec_binary)

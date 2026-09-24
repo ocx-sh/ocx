@@ -2393,10 +2393,7 @@ class TestSelfTestsRunOnAGate:
     # names it here.
     _SELF_TESTS = frozenset(
         {
-            "rust:test:ceiling:self-test",
-            "rust:test:duration:self-test",
             "scripts:self-test",
-            "test:ceilings:self-test",
         }
     )
 

@@ -6,7 +6,6 @@
     scripts/bazel_tag_guard.py                       # the gate: stage-4, //...
     scripts/bazel_tag_guard.py --stage stage-1 [--bazel bazel] [--universe //crates/...]
     scripts/bazel_tag_guard.py --query-json FILE     # judge a captured query instead of running one
-    scripts/bazel_tag_guard.py --self-test
 
 The plan adds `local`, `external`, `no-sandbox`, `requires-network` and
 `no-remote-cache` to targets wholesale, which BZL-CORE-01 (**MUST**) names as
@@ -35,7 +34,7 @@ targets in the whole graph (`bazel query 'attr(tags, "no-sandbox", kind(rule,
 //...))'` answers 40 labels, all in that package), so until the stage advanced,
 clause 1's subject existed and the gate was not looking at it. Clause 2 is still
 vacuous by absence: 0 `rust_binary` anywhere. A clause that is vacuous today and
-untested is a clause that will be vacuous forever, so `--self-test` reds every
+untested is a clause that will be vacuous forever, so the tests reds every
 one of them on the **live capture**, one named mutation at a time, rather than
 on a synthetic fixture that could drift from what `bazel query` emits.
 
@@ -72,7 +71,7 @@ producing host is the declared-input set's job, which is
 `bazel_hermeticity_proofs.py --check-declared`, not a tag.
 
 Both allowlists have one member and each is refused for the other kind, proven
-both ways in `--self-test`. Anything outside them — including a tag nobody has
+both ways in the tests. Anything outside them — including a tag nobody has
 measured — is **refused, never greened**: an unmeasured tag reaches no green path
 by construction rather than by a branch someone could add a case to.
 
@@ -97,7 +96,7 @@ escape. The pair that still separates them is an explicit `stamp = 0`, which
 discharges clause 2 and buys clause 1 nothing — a `rust_binary` with
 `stamp = 0` tagged `no-sandbox` is green on clause 2 and red on clause 1, which
 is the correct answer to both. Collapsing the two into one set would green it
-twice, and an unsound cache key is not a stamping question. `--self-test` proves
+twice, and an unsound cache key is not a stamping question. the tests proves
 that exact pair rather than describing it.
 
 **Clause 2 narrowed with the kind split, and deliberately.** `external` used to
@@ -120,7 +119,7 @@ test. The compose definition and the binary are the inputs whose change a
 cached green would otherwise hide, which is what makes the declaration a
 compensating control rather than a formality. Lose either and `tag-acceptance-undeclared`
 fires beside the blanket finding; carry `external` after all and the blanket
-escape still works. `--self-test`'s mode 4 shows both, plus the case a one-hop
+escape still works. the tests' mode 4 shows both, plus the case a one-hop
 reader would miss (a source leaving the shared group, which reds every target at
 once) and an impostor outside `//test:` declaring the same two labels and still
 being refused.
@@ -180,14 +179,12 @@ trace (`os.environ`, a function argument), a subprocess that inherits the
 runner's `test/` cwd and reads the checkout implicitly (`git`), a helper
 starting a subprocess at the bare root, and a walk *of* `test/` itself.
 
-Every mutation in `--self-test` is proven to have landed before its result is
-trusted; until then a surviving green is *unexplained*, not excused. Fixtures
-are the live query's own bytes, mutated under this repository's `.tmp/` (never
-`/tmp`, a reaped tmpfs on the development host), and nothing is restored with
-`git checkout --`, which restores from the index and would make the run vacuous.
-
-Not wired into `taskfiles/scripts.taskfile.yml` — WP-17 owns that file. The one
-line it owes the `self-test:` list is named in `--self-test`'s closing output.
+Its proofs (the `prove_*` functions) run as pytest, from
+`scripts/tests/test_bazel_tag_guard.py`. Every mutation in them is proven to
+have landed before its result is trusted; until then a surviving green is
+*unexplained*, not excused. Fixtures are the live query's own bytes, mutated
+under the test's own `tmp_path`, and nothing is restored with `git checkout --`,
+which restores from the index and would make the run vacuous.
 """
 
 from __future__ import annotations
@@ -201,9 +198,6 @@ import functools
 import json
 import posixpath
 import subprocess
-import sys
-import tempfile
-import time
 from pathlib import Path
 
 from bazel_accept_proofs import (
@@ -3518,72 +3512,10 @@ def prove_counts() -> int:
     return 1
 
 
-SELF_TEST_BUDGET_S = 20.0
-"""Wall-clock ceiling for `--self-test`. It ran past 300 s once, because every
-scenario re-derived the whole tree; each file is now parsed and analysed once per
-run, and this red is what keeps it that way."""
-
-
-def self_test(bazel: str) -> int:
-    """All three modes, red and green, on the bytes the live graph produced."""
-    started = time.monotonic()
-    scratch = REPO_ROOT / ".tmp"
-    scratch.mkdir(exist_ok=True)
-    checks = 0
-    with tempfile.TemporaryDirectory(dir=scratch) as directory:
-        work = Path(directory)
-        _, live = capture_live(bazel, work)
-        checks += prove_counts()
-        checks += prove_no_sandbox(work, live)
-        checks += prove_build_action(work, live)
-        checks += prove_rust_binary(work, live)
-        checks += prove_acceptance(work, live)
-        checks += prove_suppressing_tags(work, live)
-        checks += prove_suite_inputs(work, live)
-        checks += prove_sweep(work, live)
-        checks += prove_predicate()
-        checks += prove_uncached(work, live)
-        checks += prove_slots(work, live)
-        checks += prove_hand_reads(work, live)
-        checks += prove_floor(work, live, bazel)
-    print(
-        f"bazel tag guard self-test: {checks} checks passed — C-011's clauses each shown "
-        "red and green on the live graph's own query output: clause 1 in BOTH kinds (a test "
-        "action without `external`, a build action without `no-remote-cache`, and each kind "
-        "refusing the other's tag), the acceptance package's narrowed exemption (the "
-        "declaration dropped at the target and at the shared group, `external` reddening the "
-        "acceptance package rather than excusing it, and an impostor outside //test: refused), "
-        "the three cache-suppressing tags each reddening an acceptance target, the shared "
-        "group's own floor (a directory glob deleted, a named file dropped, a glob narrowed "
-        "past the count), the derived sibling sweep (read off source, green on a live tree with "
-        "no sweeper, red at a planted sweeper even with every sibling declared), clause 2 (a rust_binary with "
-        "neither per-target escape), the xdist-group slot locks (a member's lock "
-        "dropped, a bystander's added, a one-module group undeclared, an unresolvable spelling, a "
-        "spelling in a helper or conftest), the hand-declared reads no AST derives (and a new "
-        "`task` launch or moved-out path left unreviewed), and the "
-        "stage-4 reader floor"
-    )
-    print(
-        "  wired into taskfiles/scripts.taskfile.yml `self-test:` (WP-17): "
-        "`- python3 scripts/bazel_tag_guard.py --self-test`"
-    )
-    elapsed = time.monotonic() - started
-    if elapsed > SELF_TEST_BUDGET_S:
-        print(
-            f"bazel tag guard self-test: took {elapsed:.1f} s, over its {SELF_TEST_BUDGET_S:.0f} s budget —"
-            " a scenario is re-deriving what one pass already computed (profile it:"
-            " `python3 -m cProfile -s cumulative scripts/bazel_tag_guard.py --self-test`)",
-            file=sys.stderr,
-        )
-        return 1
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--self-test", action="store_true", help="prove all three clauses red and green")
     parser.add_argument(
         "--stage",
         default="stage-4",
@@ -3612,15 +3544,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.self_test:
-        return self_test(args.bazel)
-
     findings, queried, census = run_check(
         stage=args.stage, bazel=args.bazel, universe=args.universe, query_json=args.query_json
     )
     # The runner's host locks (`test/bazel.bzl` § Concurrency) are text the
     # graph does not carry, so they are judged here, by running the generated
-    # script against logging fakes; `bazel_accept_proofs.py --self-test` shows
+    # script against logging fakes; `scripts/tests/test_bazel_accept_proofs.py` shows
     # each lock's removal red.
     findings.extend(runner_lock_findings())
     # AM-9's other refusal: `--local_test_jobs` in an rc file would serialise

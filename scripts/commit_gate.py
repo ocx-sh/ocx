@@ -13,7 +13,6 @@ or a ref-creating `--all`, which the push gate must see. Both armed by
     scripts/commit_gate.py --check-message <msg-file>   # prek appends it
     scripts/commit_gate.py --check-push <repo-root>          # git's pre-push stdin
     scripts/commit_gate.py --require-full-mark <repo-root>   # release:prepare's guard
-    scripts/commit_gate.py --self-test
 
 Why git runs this and not a Claude PreToolUse hook: deciding "is this shell
 command a git commit" means parsing an arbitrary shell string, and every round
@@ -86,7 +85,8 @@ the same file. Discriminating on HEAD alone they certify each other's
 unverified trees — fail-OPEN, inside one 5-minute window. The writer's
 realpath'd working tree is recorded in the mark and compared here.
 
-Stdlib only, and `--self-test` drives real git: it builds throwaway
+Stdlib only. Its proofs (`_self_test_cases`) run as pytest, from
+`scripts/tests/test_commit_gate.py`, and drive real git: it builds throwaway
 repositories under `.tmp/`, arms each one the way `task git:hooks` arms a
 clone — `prek install` against the real `.pre-commit-config.yaml`, plus the
 real `scripts/pre-push.sh` — and runs actual `git commit` / `git push`
@@ -104,7 +104,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -502,7 +501,7 @@ def require_full_mark_cli(repo_root: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# --self-test
+# Proof cases, driven by scripts/tests/test_commit_gate.py
 #
 # Every case drives real git through a real shell against a throwaway
 # repository armed with the REAL config and the REAL push script. Nothing
@@ -1357,26 +1356,6 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
     ]
 
 
-def self_test() -> int:
-    scratch_root = REPO_ROOT / ".tmp"
-    scratch_root.mkdir(exist_ok=True)
-    failures = 0
-    with tempfile.TemporaryDirectory(prefix="commit-gate-", dir=scratch_root) as tmp:
-        cases = _self_test_cases(Path(tmp))
-        for name, thunk in cases:
-            try:
-                problem = thunk()
-            except (SystemExit, NotImplementedError) as stop:
-                problem = f"{type(stop).__name__}: {stop}"
-            status = "ok  " if problem is None else "FAIL"
-            failures += problem is not None
-            print(f"{status} {name}")
-            if problem is not None:
-                print(f"       {problem}")
-    print(f"self-test: {len(cases) - failures}/{len(cases)} rules hold ({failures} wrong)")
-    return 1 if failures else 0
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1395,10 +1374,7 @@ def main(argv: list[str]) -> int:
     mode.add_argument(
         "--require-full-mark", nargs=1, metavar="REPO_ROOT", help="release:prepare's guard"
     )
-    mode.add_argument("--self-test", action="store_true", help="show every rule red/green")
     ns = parser.parse_args(argv)
-    if ns.self_test:
-        return self_test()
     if ns.require_full_mark:
         return require_full_mark_cli(ns.require_full_mark[0])
     reason = (

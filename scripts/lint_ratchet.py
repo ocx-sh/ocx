@@ -6,7 +6,8 @@
     cargo clippy --workspace --all-targets --locked --message-format=json \\
         -- --cap-lints warn -W unreachable_pub | scripts/lint_ratchet.py --check
     … | scripts/lint_ratchet.py --update
-    scripts/lint_ratchet.py --self-test
+
+Its proofs run as pytest, from `scripts/tests/test_lint_ratchet.py`.
 
 `cargo doc --message-format=json` emits the same `compiler-message` records,
 so the rustdoc backlog ratchets through this script too — `--by-file
@@ -446,490 +447,472 @@ def run(
     return 0
 
 
-def expect(cond: bool, problem: str) -> None:
-    """A failed check is a loud exit — a bare `assert` vanishes under `python3 -O`."""
-    if not cond:
-        raise SystemExit(f"lint ratchet self-test: {problem}")
+_SYNTHETIC_PREFIX = "path+file:///w/crates/"
 
 
-def self_test() -> int:
-    prefix = "path+file:///w/crates/"
+def _message(package: str, code: str | None, file: str, line: int, target: str = "lib") -> str:
+    """A synthetic `compiler-message` record, for the proofs below."""
+    return json.dumps(
+        {
+            "reason": "compiler-message",
+            "package_id": f"{package}#0.1.0",
+            "target": {"kind": [target]},
+            "message": {
+                "code": {"code": code} if code else None,
+                "level": "warning",
+                "spans": [
+                    {"is_primary": True, "file_name": file, "line_start": line, "column_start": 1}
+                ],
+                "rendered": f"{code} at {file}:{line}",
+            },
+        }
+    )
 
-    def message(
-        package: str, code: str | None, file: str, line: int, target: str = "lib"
-    ) -> str:
-        return json.dumps(
-            {
-                "reason": "compiler-message",
-                "package_id": f"{package}#0.1.0",
-                "target": {"kind": [target]},
-                "message": {
-                    "code": {"code": code} if code else None,
-                    "level": "warning",
-                    "spans": [
-                        {
-                            "is_primary": True,
-                            "file_name": file,
-                            "line_start": line,
-                            "column_start": 1,
-                        }
-                    ],
-                    "rendered": f"{code} at {file}:{line}",
-                },
-            }
-        )
 
+def _real_prefix() -> str:
+    """`run`'s member prefix, built off `REPO_ROOT` rather than a synthetic
+    one: `run` derives it the same way, so a proof using anything else would
+    fail every case with "no record for a workspace member" for the wrong
+    reason."""
+    return f"path+file://{REPO_ROOT}/crates/"
+
+
+def _covered(members: set[str], real: str, *records: str) -> list[str]:
+    """`records` inside what a whole-workspace cargo run emits around them: one
+    `compiler-artifact` per member, and the terminating `build-finished`. Every
+    end-to-end proof below is built through this, so a case that *omits*
+    coverage is visibly doing so."""
+    return [
+        json.dumps({"reason": "compiler-artifact", "package_id": f"{real}{name}#0.1.0"})
+        for name in sorted(members)
+    ] + [*records, '{"reason":"build-finished","success":true}']
+
+
+def _real_diagnostics(real: str) -> list[str]:
+    return [
+        _message(real + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "lib"),
+        _message(real + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "test"),
+        _message(real + "ocx_util", "unreachable_pub", "crates/ocx_util/src/b.rs", 9),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Proofs. Every mutation below is checked to have landed before its result is
+# trusted (`scripts/tests/test_lint_ratchet.py`), the same discipline the
+# module docstring asks of the ratchet itself.
+# ---------------------------------------------------------------------------
+
+
+def prove_count_codes_dedup_and_censuses() -> int:
+    """Dedup by primary span (the lib and lib-test targets report the same
+    span twice), the diagnosing/coverage censuses, and the code-less summary
+    record (`"code": null`), which must not count as a diagnostic."""
+    prefix = _SYNTHETIC_PREFIX
     stream = [
         '{"reason":"compiler-artifact","package_id":"x"}',
         "   Compiling foo",
-        message(
-            prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "lib"
-        ),
-        # The same span from the lib-test target: one diagnostic, not two.
-        message(
-            prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "test"
-        ),
-        message(prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/b.rs", 9),
-        # A vendored fork under external/ is not under our lint policy.
-        message(
-            "path+file:///w/external/fork", "dead_code", "external/fork/src/x.rs", 1
-        ),
-        # The "N warnings emitted" summary carries no code.
-        message(prefix + "ocx_util", None, "crates/ocx_util/src/a.rs", 1),
+        _message(prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "lib"),
+        _message(prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "test"),
+        _message(prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/b.rs", 9),
+        _message("path+file:///w/external/fork", "dead_code", "external/fork/src/x.rs", 1),
+        _message(prefix + "ocx_util", None, "crates/ocx_util/src/a.rs", 1),
     ]
     live, member_records, reported, finished, diagnosing = count_codes(stream, prefix)
-    expect(live == Counter({"unreachable_pub": 2}), f"grouping wrong: {live}")
+    assert live == Counter({"unreachable_pub": 2}), f"grouping wrong: {live}"
     # Three member `compiler-message` records carry a lint code (two of them
     # sharing a span); the artifact record, the `external/` fork and the
     # code-less summary do not. The summary is B5R-2: counting it made a
     # stream with no real diagnostic look like a stream that had been linted.
-    expect(member_records == 3, f"member records wrong: {member_records}")
-    expect(diagnosing == {"ocx_util"}, f"diagnosing census wrong: {diagnosing}")
-    # Coverage is a different census: it counts the member DIRECTORIES that
-    # reported anything at all, so the `external/` fork stays out while a
-    # crate with no diagnostic would still be in. This stream names one
-    # member and never finishes.
-    expect(reported == {"ocx_util"} and not finished, f"coverage census wrong: {(reported, finished)}")
-    checks = 1
-    # An empty stream, and one that names only a non-member, report 0 —
-    # `run` fails on that instead of reading it as "dropped to 0".
-    expect(
-        count_codes([], prefix) == (Counter(), 0, set(), None, set()),
-        "an empty stream must report 0 member records",
-    )
-    expect(
-        count_codes([stream[0], stream[5]], prefix) == (Counter(), 0, set(), None, set()),
-        "a stream naming only non-members must report 0 member records",
-    )
-    # THE BLOCK: an artifact-only stream describes the workspace but carries
-    # no diagnostic. Counting it as evidence let one such record satisfy the
-    # guard while every key read as a decrease — `--check` exits 0 and an
-    # `--update` on top erases the backlog.
+    assert member_records == 3, f"member records wrong: {member_records}"
+    assert diagnosing == {"ocx_util"}, f"diagnosing census wrong: {diagnosing}"
+    assert reported == {"ocx_util"} and not finished, f"coverage census wrong: {(reported, finished)}"
+    return 1
+
+
+def prove_count_codes_requires_a_real_stream() -> int:
+    """An empty stream, a non-member-only stream, and an artifact-only stream
+    (THE BLOCK, B5R-2) must all report 0 diagnostics — while an artifact-only
+    stream still counts as coverage for the member it names, which is the
+    other census."""
+    prefix = _SYNTHETIC_PREFIX
+    artifact_x = '{"reason":"compiler-artifact","package_id":"x"}'
+    non_member = _message("path+file:///w/external/fork", "dead_code", "external/fork/src/x.rs", 1)
     artifact_only = [
-        '{"reason":"compiler-artifact","package_id":"' + prefix + 'ocx_util#0.1.0"}',
+        f'{{"reason":"compiler-artifact","package_id":"{prefix}ocx_util#0.1.0"}}',
         '{"reason":"build-finished","success":true}',
     ]
-    expect(
-        count_codes(artifact_only, prefix) == (Counter(), 0, {"ocx_util"}, True, set()),
+    assert count_codes([], prefix) == (Counter(), 0, set(), None, set()), (
+        "an empty stream must report 0 member records"
+    )
+    assert count_codes([artifact_x, non_member], prefix) == (Counter(), 0, set(), None, set()), (
+        "a stream naming only non-members must report 0 member records"
+    )
+    assert count_codes(artifact_only, prefix) == (Counter(), 0, {"ocx_util"}, True, set()), (
         "an artifact-only stream carries no diagnostic and must report 0 — while still counting as "
-        "coverage for the member it names, which is the other census",
+        "coverage for the member it names, which is the other census"
     )
-    checks += 1
+    return 1
 
-    # A path dependency vendored INSIDE a member is not a member: the
-    # manifest says `members = ["crates/*"]`, one level deep.
-    expect(
-        is_member(prefix + "ocx_util#0.1.0", prefix)
-        and is_member(prefix + "ocx_util#ocx_util@0.6.2", prefix),
-        "both cargo package-id spellings must read as a member",
-    )
-    expect(
-        not is_member(prefix + "ocx_util/vendor/thing#0.1.0", prefix),
-        "a path dep nested under a member must not read as a member",
-    )
-    expect(
-        not is_member(prefix + "#0.1.0", prefix) and not is_member("path+file:///w/external/f#1", prefix),
-        "an empty tail and a non-member path must both be refused",
-    )
-    expect(
-        count_codes(
-            [message(prefix + "ocx_util/vendor/thing", "unreachable_pub", "v/src/a.rs", 1)],
-            prefix,
-        )
-        == (Counter(), 0, set(), None, set()),
-        "a nested path dep's diagnostics must not enter the count",
-    )
-    checks += 1
 
+def prove_is_member() -> int:
+    """A path dependency vendored INSIDE a member is not a member: the
+    manifest says `members = ["crates/*"]`, one level deep."""
+    prefix = _SYNTHETIC_PREFIX
+    assert is_member(prefix + "ocx_util#0.1.0", prefix) and is_member(
+        prefix + "ocx_util#ocx_util@0.6.2", prefix
+    ), "both cargo package-id spellings must read as a member"
+    assert not is_member(prefix + "ocx_util/vendor/thing#0.1.0", prefix), (
+        "a path dep nested under a member must not read as a member"
+    )
+    assert not is_member(prefix + "#0.1.0", prefix) and not is_member(
+        "path+file:///w/external/f#1", prefix
+    ), "an empty tail and a non-member path must both be refused"
+    assert count_codes(
+        [_message(prefix + "ocx_util/vendor/thing", "unreachable_pub", "v/src/a.rs", 1)], prefix
+    ) == (Counter(), 0, set(), None, set()), "a nested path dep's diagnostics must not enter the count"
+    return 1
+
+
+def prove_compare() -> int:
+    """`compare()`'s clauses: an exact match is silent, a regression and an
+    absent key's implicit 0 both fail, a decrease is a notice, a zero baseline
+    entry is refused, and LINT-16's double listing is refused."""
+    live = Counter({"unreachable_pub": 2})
     ok, notices = compare(live, {"unreachable_pub": 2}, set())
-    expect(ok == [] and notices == [], f"an exact baseline must be silent: {(ok, notices)}")
-    checks += 1
+    assert ok == [] and notices == [], f"an exact baseline must be silent: {(ok, notices)}"
     red, _ = compare(live, {"unreachable_pub": 1}, set())
-    expect(red == ["unreachable_pub: 2 live, baseline 1 (+1)"], f"regression not reported: {red}")
-    checks += 1
+    assert red == ["unreachable_pub: 2 live, baseline 1 (+1)"], f"regression not reported: {red}"
     red, _ = compare(Counter({"clippy::x": 1}), {}, set())
-    expect(red == ["clippy::x: 1 live, baseline 0 (+1)"], f"implicit 0 entry not applied: {red}")
-    checks += 1
+    assert red == ["clippy::x: 1 live, baseline 0 (+1)"], f"implicit 0 entry not applied: {red}"
     _, notice = compare(live, {"unreachable_pub": 3}, set())
-    expect(
-        notice == ["unreachable_pub: dropped to 2 (baseline 3) — run `--update` and commit"],
-        f"decrease notice wrong: {notice}",
+    assert notice == ["unreachable_pub: dropped to 2 (baseline 3) — run `--update` and commit"], (
+        f"decrease notice wrong: {notice}"
     )
-    checks += 1
     red, _ = compare(Counter(), {"unreachable_pub": 0}, set())
-    expect(
-        red == ["unreachable_pub: baseline entry is 0 — move it into [workspace.lints] and delete the entry"],
-        f"zero entry not refused: {red}",
-    )
-    checks += 1
+    assert red == [
+        "unreachable_pub: baseline entry is 0 — move it into [workspace.lints] and delete the entry"
+    ], f"zero entry not refused: {red}"
     red, _ = compare(live, {"unreachable_pub": 2}, {"unreachable_pub"})
-    expect(
-        red == ["unreachable_pub: listed in both the baseline and [workspace.lints]"],
-        f"LINT-16 double listing not refused: {red}",
+    assert red == ["unreachable_pub: listed in both the baseline and [workspace.lints]"], (
+        f"LINT-16 double listing not refused: {red}"
     )
-    checks += 1
+    return 1
 
-    # --by-file: the same stream, keyed per file. Two files, one code each —
-    # the shape a bare per-code count of 2 cannot tell apart from both hits
-    # landing in one file after the other was fixed.
+
+def prove_by_file() -> int:
+    """`--by-file` keys each entry `<file>::<code>`, so a hit that MOVED
+    between files reds even though the bare per-code census stays blind to it
+    — that blindness is what `--by-file` buys out — and `code_of` / LINT-16
+    both still work on the finer key."""
+    prefix = _SYNTHETIC_PREFIX
+    stream = [
+        _message(prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "lib"),
+        _message(prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "test"),
+        _message(prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/b.rs", 9),
+    ]
     per_file, *_ = count_codes(stream, prefix, by_file=True)
-    expect(
-        per_file
-        == Counter(
-            {
-                "crates/ocx_util/src/a.rs::unreachable_pub": 1,
-                "crates/ocx_util/src/b.rs::unreachable_pub": 1,
-            }
-        ),
-        f"--by-file grouping wrong: {per_file}",
-    )
-    checks += 1
-    # Both hits now in a.rs: the per-code census is unchanged at 2, so the
-    # bare-code ratchet is silent. That blindness is what --by-file buys out.
+    assert per_file == Counter(
+        {
+            "crates/ocx_util/src/a.rs::unreachable_pub": 1,
+            "crates/ocx_util/src/b.rs::unreachable_pub": 1,
+        }
+    ), f"--by-file grouping wrong: {per_file}"
+    # Both hits now in a.rs: the per-code census is unchanged at 2, so the bare
+    # per-code ratchet is silent. That blindness is what --by-file buys out.
     moved = Counter({"crates/ocx_util/src/a.rs::unreachable_pub": 2})
-    expect(
-        compare(Counter({"unreachable_pub": sum(moved.values())}), {"unreachable_pub": sum(per_file.values())}, set())
-        == ([], []),
-        "the per-code census must be blind to the move — that is what --by-file is for",
-    )
+    assert compare(
+        Counter({"unreachable_pub": sum(moved.values())}),
+        {"unreachable_pub": sum(per_file.values())},
+        set(),
+    ) == ([], []), "the per-code census must be blind to the move — that is what --by-file is for"
     red, notices = compare(moved, dict(per_file), set(), by_file=True)
-    expect(
-        red == ["crates/ocx_util/src/a.rs::unreachable_pub: 2 live, baseline 1 (+1)"]
-        and notices
-        == [
-            (
-                "crates/ocx_util/src/b.rs::unreachable_pub: dropped to 0 (baseline 1) — "
-                "run `--update` and commit"
-            )
-        ],
-        f"--by-file must red on a hit that moved between files: {(red, notices)}",
-    )
-    checks += 1
-    expect(
+    assert red == ["crates/ocx_util/src/a.rs::unreachable_pub: 2 live, baseline 1 (+1)"] and notices == [
+        (
+            "crates/ocx_util/src/b.rs::unreachable_pub: dropped to 0 (baseline 1) — "
+            "run `--update` and commit"
+        )
+    ], f"--by-file must red on a hit that moved between files: {(red, notices)}"
+    assert (
         code_of("crates/ocx_util/src/a.rs::clippy::foo", True) == "clippy::foo"
-        and code_of("clippy::foo", False) == "clippy::foo",
-        "a `clippy::`-prefixed code must survive the file split",
-    )
+        and code_of("clippy::foo", False) == "clippy::foo"
+    ), "a `clippy::`-prefixed code must survive the file split"
     # A `--by-file` key with no `::` used to yield `""`, and `"" in enforced`
     # is always false — the LINT-16 check skipped it in silence.
     try:
         code_of("unreachable_pub", True)
     except SystemExit as refusal:
-        expect("carries no `::`" in str(refusal), f"the refusal must name the cause: {refusal}")
+        assert "carries no `::`" in str(refusal), f"the refusal must name the cause: {refusal}"
     else:
-        expect(False, "a --by-file key with no `::` must be refused, not read as a code-less key")
+        raise AssertionError("a --by-file key with no `::` must be refused, not read as a code-less key")
     red, _ = compare(
         Counter(), {"crates/ocx_util/src/a.rs::unreachable_pub": 1}, {"unreachable_pub"}, by_file=True
     )
-    expect(
-        "listed in both the baseline and [workspace.lints]" in red[0],
-        f"LINT-16 must still fire on a --by-file key: {red}",
+    assert "listed in both the baseline and [workspace.lints]" in red[0], (
+        f"LINT-16 must still fire on a --by-file key: {red}"
     )
-    checks += 1
-    expect("warnings" in workspace_lints(), f"[workspace.lints] not read: {workspace_lints()}")
-    checks += 1
+    assert "warnings" in workspace_lints(), f"[workspace.lints] not read: {workspace_lints()}"
+    return 1
 
-    # --update's direction gate. `raised` is the same rule `compare` applies on
-    # --check, so the two cannot drift; asserted here purely, then end-to-end
-    # through `run` against a temporary baseline so the refusal is shown to
-    # gate the *write* and not merely the message.
-    expect(
-        raised(Counter({"a": 1}), {"a": 2}) == [] and raised(Counter(), {"a": 2}) == [],
-        "a downward move must not read as a raise",
-    )
-    expect(
-        raised(Counter({"a": 3}), {"a": 2}) == ["a: 3 live, baseline 2 (+1)"],
-        f"an upward move must be named: {raised(Counter({'a': 3}), {'a': 2})}",
-    )
-    expect(
-        raised(Counter({"a": 1}), {}) == ["a: 1 live, baseline 0 (+1)"],
-        "a key absent from the baseline rises from an implicit 0",
-    )
-    checks += 1
 
-    import tempfile
+def prove_raised() -> int:
+    """`raised()` is the same upward-move rule `compare` applies on --check,
+    kept as its own function so --update's direction gate cannot drift from
+    it."""
+    assert raised(Counter({"a": 1}), {"a": 2}) == [] and raised(Counter(), {"a": 2}) == [], (
+        "a downward move must not read as a raise"
+    )
+    assert raised(Counter({"a": 3}), {"a": 2}) == ["a: 3 live, baseline 2 (+1)"], (
+        f"an upward move must be named: {raised(Counter({'a': 3}), {'a': 2})}"
+    )
+    assert raised(Counter({"a": 1}), {}) == ["a: 1 live, baseline 0 (+1)"], (
+        "a key absent from the baseline rises from an implicit 0"
+    )
+    return 1
 
-    # `run` derives the member prefix from REPO_ROOT, so the end-to-end cases
-    # below are built against that prefix rather than the synthetic `/w` one —
-    # otherwise every call fails on "no record for a workspace member" and an
-    # `== 1` assertion passes for the wrong reason.
-    real = f"path+file://{REPO_ROOT}/crates/"
+
+def prove_workspace_members() -> int:
+    """The member set is read off the manifest and the filesystem; a silent
+    shrink would make the coverage gate easier to satisfy, which is the
+    direction that never reds."""
     members = workspace_members()
-    # The member set is read off the manifest and the filesystem; assert it
-    # names real crates rather than trusting the expansion. A census that
-    # silently shrank would make the coverage gate easier to satisfy, which is
-    # the direction that never reds.
-    expect(
-        len(members) > 1 and {"ocx_util", "ocx_cli"} <= members,
-        f"workspace_members() looks wrong: {sorted(members)}",
+    assert len(members) > 1 and {"ocx_util", "ocx_cli"} <= members, (
+        f"workspace_members() looks wrong: {sorted(members)}"
     )
-    expect(
-        all((REPO_ROOT / "crates" / name / "Cargo.toml").is_file() for name in members),
-        "every member the census names must be a crate directory that exists",
+    assert all((REPO_ROOT / "crates" / name / "Cargo.toml").is_file() for name in members), (
+        "every member the census names must be a crate directory that exists"
     )
+    return 1
 
-    def covered(*records: str) -> list[str]:
-        """`records` inside what a whole-workspace cargo run emits around them:
-        one `compiler-artifact` per member, and the terminating
-        `build-finished`. Every end-to-end case below is built through this, so
-        a case that *omits* coverage is visibly doing so."""
-        return [
-            json.dumps({"reason": "compiler-artifact", "package_id": f"{real}{name}#0.1.0"})
-            for name in sorted(members)
-        ] + [*records, '{"reason":"build-finished","success":true}']
 
-    diagnostics = [
-        message(real + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "lib"),
-        message(real + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "test"),
-        message(real + "ocx_util", "unreachable_pub", "crates/ocx_util/src/b.rs", 9),
-    ]
-    real_stream = covered(*diagnostics)
+def prove_end_to_end_fixture_sanity() -> int:
+    """The end-to-end fixture the proofs below share carries exactly the 2
+    diagnostics they assume, over full coverage."""
+    real = _real_prefix()
+    members = workspace_members()
+    real_stream = _covered(members, real, *_real_diagnostics(real))
     counts, _, reported, finished, _diagnosing = count_codes(real_stream, real)
-    expect(
-        counts == Counter({"unreachable_pub": 2}) and reported == members and finished,
-        "the end-to-end fixture must carry exactly the 2 the cases below assume, over full coverage",
+    assert counts == Counter({"unreachable_pub": 2}) and reported == members and finished, (
+        "the end-to-end fixture must carry exactly the 2 the cases below assume, over full coverage"
     )
+    return 1
 
-    # THE OTHER BLOCK (B3-3 / B2-7): truncation. The stream below stops right
-    # after the first member `compiler-message`, so it satisfies "a diagnostic
-    # was looked for" — WP-43's half — while every baseline key but one reads
-    # as a decrease. Without the coverage gate `--check` exits 0 and `--update`
-    # writes the partial payload needing no `--allow-regression`, because a
-    # decrease is not a rise. Both are refused here, and the pair is asserted:
-    # the same records with the workspace around them are green.
+
+def prove_finished_census_three_states() -> int:
+    """Absent, failed and succeeded are three distinct states — `not finished`
+    must not be satisfiable by the field's mere absence (B5R-11)."""
+    real = _real_prefix()
+    assert (
+        count_codes(['{"reason":"build-finished","success":true}'], real).finished is True
+        and count_codes(['{"reason":"build-finished","success":false}'], real).finished is False
+        and count_codes([], real).finished is None
+    ), "absent, failed and succeeded must be three states, not two"
+    return 1
+
+
+def prove_run_reds_a_truncated_stream(tmp_path: Path) -> int:
+    """A stream cut short after one member's first diagnostic (THE OTHER
+    BLOCK, B3-3 / B2-7) must red on both --check and --update — its erasure
+    arrives as decreases, which the upward-move gate cannot see — and must
+    leave the baseline byte-identical either way."""
+    real = _real_prefix()
+    members = workspace_members()
+    diagnostics = _real_diagnostics(real)
     truncated = [
         json.dumps({"reason": "compiler-artifact", "package_id": f"{real}ocx_util#0.1.0"}),
         diagnostics[0],
     ]
-    with tempfile.TemporaryDirectory() as directory:
-        backlog = Path(directory) / "backlog.json"
-        payload = json.dumps({"unreachable_pub": 2, "dead_code": 7}) + "\n"
-        backlog.write_text(payload, encoding="utf-8")
-        expect(run("check", truncated, backlog) == 1, "a truncated stream must red on --check")
-        expect(
-            run("update", truncated, backlog) == 1,
-            "a truncated stream must red on --update too — its erasure arrives as decreases, which "
-            "the --allow-regression gate cannot see",
-        )
-        expect(
-            backlog.read_text(encoding="utf-8") == payload,
-            "the refusal must leave the backlog byte-identical — this is the erasure it prevents",
-        )
-        # The green half, on the same records: only the coverage differs.
-        whole = covered(*diagnostics, message(real + "ocx_util", "dead_code", "crates/ocx_util/src/d.rs", 3))
-        expect(
-            run("check", whole, backlog) == 0,
-            "the same diagnostics over a whole-workspace stream must pass — otherwise the red above "
-            "says nothing about truncation",
-        )
-        # One member short of the whole is a truncation too, even carrying
-        # every diagnostic: coverage is the claim, not the diagnostic count.
-        short = [line for line in whole if f"{real}ocx_util#" not in line]
-        expect(run("check", short, backlog) == 1, "a stream missing one member must red")
-        expect(
-            run("check", [line for line in whole if "build-finished" not in line], backlog) == 1,
-            "a stream that never finished must red",
-        )
-    checks += 1
-
-    # THE THIRD BLOCK (B5R-2): `run` must refuse a stream that describes the
-    # whole workspace and carries no coded diagnostic. `count_codes` reporting
-    # 0 was asserted above and was never enough — nothing asserted that `run`
-    # *refuses* one, so moving the census below the code test could be reverted
-    # with all sixteen checks still green. The summary record is included
-    # because it is the exact shape that satisfied the old census: a
-    # `compiler-message` for a member with `"code": null`.
-    summary_only = covered(message(real + "ocx_util", None, "crates/ocx_util/src/a.rs", 1))
-    with tempfile.TemporaryDirectory() as directory:
-        backlog = Path(directory) / "backlog.json"
-        payload = json.dumps({"unreachable_pub": 2, "dead_code": 7}) + "\n"
-        backlog.write_text(payload, encoding="utf-8")
-        for mode in ("check", "update"):
-            expect(
-                run(mode, summary_only, backlog) == 1,
-                f"--{mode} must refuse a stream whose only member record is the code-less summary",
-            )
-        expect(
-            backlog.read_text(encoding="utf-8") == payload,
-            "the refusal must leave the backlog byte-identical — this is the 198-to-0 erasure",
-        )
-        # The green half: one real diagnostic beside the same summary passes.
-        expect(
-            run("check", covered(*diagnostics, summary_only[-2]), backlog) == 0,
-            "a coded diagnostic beside the summary must pass — else the red above says nothing "
-            "about the summary",
-        )
-    checks += 1
-
-    # B5R-11: `build-finished` was read for its presence and never for its
-    # verdict, so a failed build erased the backlog exactly as a truncated one
-    # did. The pair is the same records under both verdicts.
-    with tempfile.TemporaryDirectory() as directory:
-        backlog = Path(directory) / "backlog.json"
-        payload = json.dumps({"unreachable_pub": 2}) + "\n"
-        backlog.write_text(payload, encoding="utf-8")
-        failed = [
-            '{"reason":"build-finished","success":false}' if "build-finished" in line else line
-            for line in real_stream
-        ]
-        expect(
-            any('"success":false' in line for line in failed),
-            "the fixture must actually carry the failed verdict",
-        )
-        for mode in ("check", "update"):
-            expect(run(mode, failed, backlog) == 1, f"--{mode} must refuse a failed build")
-        expect(
-            backlog.read_text(encoding="utf-8") == payload,
-            "the refusal must leave the backlog byte-identical",
-        )
-        expect(run("check", real_stream, backlog) == 0, "the same records under success:true pass")
-    checks += 1
-
-    # B5R-11 at the census: the three verdicts are distinct, so `not finished`
-    # cannot be satisfied by the absence of the field.
-    expect(
-        count_codes(['{"reason":"build-finished","success":true}'], real).finished is True
-        and count_codes(['{"reason":"build-finished","success":false}'], real).finished is False
-        and count_codes([], real).finished is None,
-        "absent, failed and succeeded must be three states, not two",
+    backlog = tmp_path / "backlog.json"
+    payload = json.dumps({"unreachable_pub": 2, "dead_code": 7}) + "\n"
+    backlog.write_text(payload, encoding="utf-8")
+    assert run("check", truncated, backlog) == 1, "a truncated stream must red on --check"
+    assert run("update", truncated, backlog) == 1, (
+        "a truncated stream must red on --update too — its erasure arrives as decreases, which "
+        "the --allow-regression gate cannot see"
     )
-    checks += 1
+    assert backlog.read_text(encoding="utf-8") == payload, (
+        "the refusal must leave the backlog byte-identical — this is the erasure it prevents"
+    )
+    # The green half, on the same records: only the coverage differs.
+    whole = _covered(
+        members, real, *diagnostics, _message(real + "ocx_util", "dead_code", "crates/ocx_util/src/d.rs", 3)
+    )
+    assert run("check", whole, backlog) == 0, (
+        "the same diagnostics over a whole-workspace stream must pass — otherwise the red above "
+        "says nothing about truncation"
+    )
+    # One member short of the whole is a truncation too, even carrying every
+    # diagnostic: coverage is the claim, not the diagnostic count.
+    short = [line for line in whole if f"{real}ocx_util#" not in line]
+    assert run("check", short, backlog) == 1, "a stream missing one member must red"
+    assert run("check", [line for line in whole if "build-finished" not in line], backlog) == 1, (
+        "a stream that never finished must red"
+    )
+    return 1
 
-    # The dark-member rule: 21 artifacts and one member's diagnostics is what a
-    # run that linted one crate looks like AND what a workspace whose other 20
-    # crates are clean looks like. The baseline is the only record that tells
-    # them apart, so a member it attributes keys to that says nothing here is
-    # refused rather than silently dropped to 0.
-    with tempfile.TemporaryDirectory() as directory:
-        per_file = Path(directory) / "dark.json"
-        payload = (
-            json.dumps(
-                {
-                    "crates/ocx_util/src/a.rs::unreachable_pub": 2,
-                    "crates/ocx_util/src/b.rs::unreachable_pub": 1,
-                    "crates/ocx_console/src/z.rs::unreachable_pub": 1,
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
-        )
-        per_file.write_text(payload, encoding="utf-8")
-        for mode in ("check", "update"):
-            expect(
-                run(mode, real_stream, per_file, by_file=True) == 1,
-                f"--{mode} must refuse a stream in which ocx_console went quiet",
-            )
-        expect(
-            per_file.read_text(encoding="utf-8") == payload,
-            "the refusal must leave the baseline byte-identical — this is the 198-to-36 drop",
-        )
-        expect(
-            run("update", real_stream, per_file, by_file=True, allow_regression=True) == 0,
-            "--allow-regression must record the drop deliberately",
-        )
-        expect(
-            "crates/ocx_console/src/z.rs::unreachable_pub" not in json.loads(per_file.read_text(encoding="utf-8")),
-            "the flagged update must actually drop the quiet member's key",
-        )
-        # The green half: the same stream with a diagnostic for ocx_console too.
-        per_file.write_text(payload, encoding="utf-8")
-        speaking = covered(*diagnostics, message(real + "ocx_console", "unreachable_pub", "crates/ocx_console/src/z.rs", 1))
-        expect(
-            run("check", speaking, per_file, by_file=True) == 0,
-            "no member is quiet here, so the same baseline passes — else the red says nothing",
-        )
-        # And a per-code baseline attributes nothing, so the rule cannot fire
-        # on the clippy ratchet and refuse a run it knows nothing about.
-        per_code = Path(directory) / "per-code.json"
-        per_code.write_text(json.dumps({"unreachable_pub": 2}) + "\n", encoding="utf-8")
-        expect(
-            run("check", real_stream, per_code) == 0,
-            "a per-code baseline names no member, so the quiet-member rule must not fire",
-        )
-        expect(
-            member_of("crates/ocx_util/src/a.rs::unreachable_pub") == "ocx_util"
-            and member_of("unreachable_pub") is None
-            and member_of("external/fork/src/x.rs::dead_code") is None,
-            "member_of must read a member out of a by-file key and out of nothing else",
-        )
-    checks += 1
 
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "baseline.json"
-        path.write_text(json.dumps({"unreachable_pub": 2}) + "\n", encoding="utf-8")
-        before = path.read_text(encoding="utf-8")
-        # The stream carries 2; a third hit is a raise.
-        raising = covered(*diagnostics, message(real + "ocx_util", "unreachable_pub", "crates/ocx_util/src/c.rs", 1))
-        expect(run("update", raising, path) == 1, "--update must refuse a raise")
-        expect(
-            path.read_text(encoding="utf-8") == before,
-            "the refusal must leave the baseline byte-identical — a message is not a gate",
+def prove_run_reds_a_summary_only_stream(tmp_path: Path) -> int:
+    """A whole-workspace stream whose only member record is the code-less
+    summary (THE THIRD BLOCK, B5R-2) must red on both --check and --update —
+    the exact shape that satisfied the old census."""
+    real = _real_prefix()
+    members = workspace_members()
+    summary_only = _covered(members, real, _message(real + "ocx_util", None, "crates/ocx_util/src/a.rs", 1))
+    backlog = tmp_path / "backlog.json"
+    payload = json.dumps({"unreachable_pub": 2, "dead_code": 7}) + "\n"
+    backlog.write_text(payload, encoding="utf-8")
+    for mode in ("check", "update"):
+        assert run(mode, summary_only, backlog) == 1, (
+            f"--{mode} must refuse a stream whose only member record is the code-less summary"
         )
-        expect(
-            run("update", raising, path, allow_regression=True) == 0,
-            "--allow-regression must let the raise through",
-        )
-        expect(
-            json.loads(path.read_text(encoding="utf-8")) == {"unreachable_pub": 3},
-            f"the raised baseline was not written: {path.read_text(encoding='utf-8')}",
-        )
-        # A downward move still needs no flag: locking in an improvement is
-        # the point of the ratchet.
-        expect(run("update", real_stream, path) == 0, "--update must accept a decrease unflagged")
-        expect(
-            json.loads(path.read_text(encoding="utf-8")) == {"unreachable_pub": 2},
-            "the decrease was not written",
-        )
-        # Identical on the `--by-file` path the rustdoc ratchet drives, which
-        # is the whole of "both ratchets behave the same": one `run`, one gate.
-        per_file_path = Path(directory) / "by-file.json"
-        per_file_path.write_text(
-            json.dumps({"crates/ocx_util/src/a.rs::unreachable_pub": 1}) + "\n", encoding="utf-8"
-        )
-        before = per_file_path.read_text(encoding="utf-8")
-        expect(
-            run("update", real_stream, per_file_path, by_file=True) == 1,
-            "--by-file --update must refuse a raise too (b.rs is new to this baseline)",
-        )
-        expect(
-            per_file_path.read_text(encoding="utf-8") == before,
-            "--by-file refusal must leave the baseline byte-identical",
-        )
-        expect(
-            run("update", real_stream, per_file_path, by_file=True, allow_regression=True) == 0,
-            "--by-file --allow-regression must let the raise through",
-        )
-        # A baseline that does not exist yet reads as `{}`, so creating one is
-        # itself a raise and takes the flag once.
-        fresh = Path(directory) / "absent.json"
-        expect(run("update", real_stream, fresh) == 1, "creating a baseline is an upward move")
-        expect(not fresh.exists(), "the refusal must not create the file")
-        expect(run("update", real_stream, fresh, allow_regression=True) == 0, "the flag creates it")
-    checks += 1
+    assert backlog.read_text(encoding="utf-8") == payload, (
+        "the refusal must leave the backlog byte-identical — this is the 198-to-0 erasure"
+    )
+    # The green half: one real diagnostic beside the same summary passes.
+    diagnostics = _real_diagnostics(real)
+    assert run("check", _covered(members, real, *diagnostics, summary_only[-2]), backlog) == 0, (
+        "a coded diagnostic beside the summary must pass — else the red above says nothing "
+        "about the summary"
+    )
+    return 1
 
-    print(f"lint ratchet self-test: {checks} checks passed")
-    return 0
+
+def prove_run_reds_a_failed_build(tmp_path: Path) -> int:
+    """`build-finished` is read for its VERDICT, not merely its presence
+    (B5R-11): a failed build must not erase the backlog the way a truncated
+    one does."""
+    real = _real_prefix()
+    members = workspace_members()
+    diagnostics = _real_diagnostics(real)
+    real_stream = _covered(members, real, *diagnostics)
+    backlog = tmp_path / "backlog.json"
+    payload = json.dumps({"unreachable_pub": 2}) + "\n"
+    backlog.write_text(payload, encoding="utf-8")
+    failed = [
+        '{"reason":"build-finished","success":false}' if "build-finished" in line else line
+        for line in real_stream
+    ]
+    assert any('"success":false' in line for line in failed), "the fixture must actually carry the failed verdict"
+    for mode in ("check", "update"):
+        assert run(mode, failed, backlog) == 1, f"--{mode} must refuse a failed build"
+    assert backlog.read_text(encoding="utf-8") == payload, "the refusal must leave the backlog byte-identical"
+    assert run("check", real_stream, backlog) == 0, "the same records under success:true pass"
+    return 1
+
+
+def prove_run_reds_a_dark_member(tmp_path: Path) -> int:
+    """A member the baseline attributes keys to that produced no diagnostic
+    here (the dark-member rule) must red rather than silently drop to 0 — and
+    a per-code baseline, which names no member, must not fire the rule."""
+    real = _real_prefix()
+    members = workspace_members()
+    diagnostics = _real_diagnostics(real)
+    real_stream = _covered(members, real, *diagnostics)
+    per_file = tmp_path / "dark.json"
+    payload = (
+        json.dumps(
+            {
+                "crates/ocx_util/src/a.rs::unreachable_pub": 2,
+                "crates/ocx_util/src/b.rs::unreachable_pub": 1,
+                "crates/ocx_console/src/z.rs::unreachable_pub": 1,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    per_file.write_text(payload, encoding="utf-8")
+    for mode in ("check", "update"):
+        assert run(mode, real_stream, per_file, by_file=True) == 1, (
+            f"--{mode} must refuse a stream in which ocx_console went quiet"
+        )
+    assert per_file.read_text(encoding="utf-8") == payload, (
+        "the refusal must leave the baseline byte-identical — this is the 198-to-36 drop"
+    )
+    assert run("update", real_stream, per_file, by_file=True, allow_regression=True) == 0, (
+        "--allow-regression must record the drop deliberately"
+    )
+    assert "crates/ocx_console/src/z.rs::unreachable_pub" not in json.loads(
+        per_file.read_text(encoding="utf-8")
+    ), "the flagged update must actually drop the quiet member's key"
+    # The green half: the same stream with a diagnostic for ocx_console too.
+    per_file.write_text(payload, encoding="utf-8")
+    speaking = _covered(
+        members,
+        real,
+        *diagnostics,
+        _message(real + "ocx_console", "unreachable_pub", "crates/ocx_console/src/z.rs", 1),
+    )
+    assert run("check", speaking, per_file, by_file=True) == 0, (
+        "no member is quiet here, so the same baseline passes — else the red says nothing"
+    )
+    # And a per-code baseline attributes nothing, so the rule cannot fire on
+    # the clippy ratchet and refuse a run it knows nothing about.
+    per_code = tmp_path / "per-code.json"
+    per_code.write_text(json.dumps({"unreachable_pub": 2}) + "\n", encoding="utf-8")
+    assert run("check", real_stream, per_code) == 0, (
+        "a per-code baseline names no member, so the quiet-member rule must not fire"
+    )
+    assert (
+        member_of("crates/ocx_util/src/a.rs::unreachable_pub") == "ocx_util"
+        and member_of("unreachable_pub") is None
+        and member_of("external/fork/src/x.rs::dead_code") is None
+    ), "member_of must read a member out of a by-file key and out of nothing else"
+    return 1
+
+
+def prove_run_update_gate(tmp_path: Path) -> int:
+    """--update refuses a raise without --allow-regression, accepts a decrease
+    unflagged on both the per-code and --by-file paths — identical, which is
+    the whole of "both ratchets behave the same" — and creating a baseline
+    that does not exist yet is itself an upward move."""
+    real = _real_prefix()
+    members = workspace_members()
+    diagnostics = _real_diagnostics(real)
+    real_stream = _covered(members, real, *diagnostics)
+    path = tmp_path / "baseline.json"
+    path.write_text(json.dumps({"unreachable_pub": 2}) + "\n", encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+    # The stream carries 2; a third hit is a raise.
+    raising = _covered(
+        members, real, *diagnostics, _message(real + "ocx_util", "unreachable_pub", "crates/ocx_util/src/c.rs", 1)
+    )
+    assert run("update", raising, path) == 1, "--update must refuse a raise"
+    assert path.read_text(encoding="utf-8") == before, (
+        "the refusal must leave the baseline byte-identical — a message is not a gate"
+    )
+    assert run("update", raising, path, allow_regression=True) == 0, (
+        "--allow-regression must let the raise through"
+    )
+    assert json.loads(path.read_text(encoding="utf-8")) == {"unreachable_pub": 3}, (
+        f"the raised baseline was not written: {path.read_text(encoding='utf-8')}"
+    )
+    # A downward move still needs no flag: locking in an improvement is the
+    # point of the ratchet.
+    assert run("update", real_stream, path) == 0, "--update must accept a decrease unflagged"
+    assert json.loads(path.read_text(encoding="utf-8")) == {"unreachable_pub": 2}, "the decrease was not written"
+    # Identical on the `--by-file` path the rustdoc ratchet drives.
+    per_file_path = tmp_path / "by-file.json"
+    per_file_path.write_text(
+        json.dumps({"crates/ocx_util/src/a.rs::unreachable_pub": 1}) + "\n", encoding="utf-8"
+    )
+    before = per_file_path.read_text(encoding="utf-8")
+    assert run("update", real_stream, per_file_path, by_file=True) == 1, (
+        "--by-file --update must refuse a raise too (b.rs is new to this baseline)"
+    )
+    assert per_file_path.read_text(encoding="utf-8") == before, (
+        "--by-file refusal must leave the baseline byte-identical"
+    )
+    assert run("update", real_stream, per_file_path, by_file=True, allow_regression=True) == 0, (
+        "--by-file --allow-regression must let the raise through"
+    )
+    # A baseline that does not exist yet reads as `{}`, so creating one is
+    # itself a raise and takes the flag once.
+    fresh = tmp_path / "absent.json"
+    assert run("update", real_stream, fresh) == 1, "creating a baseline is an upward move"
+    assert not fresh.exists(), "the refusal must not create the file"
+    assert run("update", real_stream, fresh, allow_regression=True) == 0, "the flag creates it"
+    return 1
+
 
 
 def main() -> int:
@@ -942,11 +925,6 @@ def main() -> int:
     )
     mode.add_argument(
         "--update", action="store_true", help="rewrite the baseline from the stream"
-    )
-    mode.add_argument(
-        "--self-test",
-        action="store_true",
-        help="prove the grouping and the comparison inline",
     )
     parser.add_argument("--input", type=Path, help="clippy JSON lines (default: stdin)")
     parser.add_argument("--baseline", type=Path, default=BASELINE)
@@ -961,8 +939,6 @@ def main() -> int:
         help="let --update raise an entry; prints every key it raises",
     )
     args = parser.parse_args()
-    if args.self_test:
-        return self_test()
     if args.input:
         lines = args.input.read_text(encoding="utf-8").splitlines()
     else:

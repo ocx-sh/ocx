@@ -497,7 +497,7 @@ def test_deep_build_matrix_covers_the_three_oses() -> None:
 #: The parser gate live in CI today, and the invocation that proves it, as two
 #: needles into **one task's recipe**. Both are substrings of the same
 #: `scripts/bazel_test_floor.py` command, so they are matched with the argument
-#: that distinguishes them attached — `--bep` versus `--self-test` — never on
+#: that distinguishes them attached — `--bep` versus the pytest module — never on
 #: the script name, which both carry.
 #:
 #: This was a `<CI gate step>` → `<CI proof step>` pairing over the workflow
@@ -510,7 +510,7 @@ def test_deep_build_matrix_covers_the_three_oses() -> None:
 #: edit can schedule them apart, and a job running the gate runs the proof by
 #: construction.
 _FLOOR_PARSER_GATE = "scripts/bazel_test_floor.py --bep"
-_FLOOR_PARSER_PROOF = "scripts/bazel_test_floor.py --self-test"
+_FLOOR_PARSER_PROOF = "scripts/tests/test_bazel_test_floor.py"
 
 
 def _recipe(taskfile: str, task: str) -> str:
@@ -546,10 +546,13 @@ def test_the_unit_lane_runs_its_floor_parser_and_that_parser_s_self_test() -> No
     )
 
 
+_DURATION_PROOF = "uv run --project test pytest scripts/tests/test_unit_test_duration_gate.py -q"
+
+
 def test_the_duration_budget_is_proved_where_it_runs() -> None:
-    """`rust:test:duration` is a shell parser over a run it does not own, so a job
-    that runs it without `rust:test:duration:self-test` is green whether or not the
-    parser still matches anything.
+    """`rust:test:duration` is a parser over a run it does not own, so a job that
+    runs it without its proof (`scripts/tests/test_unit_test_duration_gate.py`) is
+    green whether or not the parser still matches anything.
 
     This pairing arrived on `main` while the Bazel branch was replacing the
     `rust:test:ceiling` half of the same table; resolving that rebase dropped the
@@ -568,17 +571,16 @@ def test_the_duration_budget_is_proved_where_it_runs() -> None:
     for name, document in _documents():
         for job_name, job in (document.get("jobs") or {}).items():
             runs = {str(step.get("run", "")).strip() for step in (job.get("steps") or [])}
-            if "task rust:test:duration:self-test" in runs:
+            if _DURATION_PROOF in runs:
                 proved.append(f"{name}:{job_name}")
             if "task rust:test:duration" not in runs:
                 continue
-            assert "task rust:test:duration:self-test" in runs, (
+            assert _DURATION_PROOF in runs, (
                 f"{name}:{job_name} runs `task rust:test:duration` and never "
-                f"`task rust:test:duration:self-test` — the budget parser is then "
-                f"proved nowhere the budget runs"
+                f"`{_DURATION_PROOF}` — the budget parser is then proved nowhere the budget runs"
             )
     assert proved, (
-        "no workflow runs `task rust:test:duration:self-test` — the budget parser's "
+        f"no workflow runs `{_DURATION_PROOF}` — the budget parser's "
         "red/red/green fixtures then run nowhere, and the loop above is vacuous"
     )
 

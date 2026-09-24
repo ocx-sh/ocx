@@ -192,7 +192,7 @@ the suite an unmodified proof while `ocx_lib` is taken apart. Four mechanisms:
   one-line-for-one-line hunk (the trampoline blob path, DEC-10 d). The plan's own oracles
   (`test/lint/test_smoke_coverage.py`, `test/lint/test_logging_structure.py`,
   `test/lint/test_no_crate_path_assertions.py`) are the only modules exempt from
-  the line checks. `--self-test` shows every shape red and green.
+  the line checks. Its tests in `scripts/tests/` show every shape red and green.
 - **Adding a verb** (see `subsystem-cli-commands.md`): its acceptance test carries a `smoke`
   row and a `command` marker, or `test:rows:check` (T0) and
   `test/lint/test_smoke_coverage.py` (T0) both red; `SUITE_FLOOR` rises in the same commit.
@@ -273,7 +273,7 @@ on `.verify:build-test` and in `verify-basic.yml`'s `smoke` job.
 - **Never `#[ignore]` a test to get under the budget.** That lands on
   `rust:test:ceiling` instead, which is the gate for exactly that move. Making
   the test fake what it is waiting on is the fix.
-- **Seeing it red.** `task rust:test:duration:self-test` shows every state on
+- **Seeing it red.** `scripts/tests/test_unit_test_duration_gate.py` shows every state on
   throwaway fixture logs — red over budget, red under the reader floor, red on
   a pattern that matches nothing, red on an unbounded pattern, green in all
   three log spellings and through a pattern entry, and the same over-budget log

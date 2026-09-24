@@ -186,4 +186,4 @@ to make it pass.
 - **`fc-list | grep -qi mono`.** It is at `/usr/sbin/fc-list` here, off a plain
   PATH, so that answers "no font" for the wrong reason.
 - **Re-implementing a check in this file.** Add it to `scripts/bazel_doctor.py`
-  with a red/green pair in its `--self-test`, which `task scripts:verify` runs.
+  with a red/green pair in its tests (`scripts/tests/test_bazel_doctor.py`), which `task scripts:verify` runs.

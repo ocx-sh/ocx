@@ -116,18 +116,13 @@ tasks:
         skip ceiling read per target off that run's own build event stream —
         it replaces the three-step cargo nextest bracket, whose listing step
         alone measured 536.5 s on CI against 173.5 s for the run it fenced),
-        that nextest ceiling parser's own red/green fixtures
-        (rust:test:ceiling:self-test), the per-test duration budget's own
-        red/red/green fixtures (rust:test:duration:self-test — both live
-        parsers left this phase with the nextest run log they read),
         rust:test:doc
         (nextest runs no doctest, and the scoped gate's per-crate doctest step
         is iterated over an empty CRATES on every escalate), then
         bazel:test:accept — one concurrent `bazel test` over the acceptance
         package, the suite as one cached sh_test target per module, carrying the suite
         floor and the skip/xfail ceilings read off its own per-case JUnit
-        reports, and carrying the pytest entry point's own summary parser
-        fixtures where the step it replaces reached them
+        reports
       Ends with a *full* verify mark (.verify:mark SCOPE=full) — the only
         mark a `release:` commit, a commit on main or a merge commit accepts
         (a `release:` commit only one from `task verify NOCACHE=1`).
@@ -513,18 +508,14 @@ tasks:
       # It is per target rather than a sum, because `crates/NEXTEST_FLOOR`
       # carries 10 cases of headroom and `bazel test` exits 0 over a graph
       # that shrank — both measured, and both shown in the reader's own
-      # `--self-test`, which is this task's first item.
+      # tests (`scripts/tests/test_bazel_test_floor.py`), this task's first item.
       #
       # `rust:test:floor` / `:unit` / `:ceiling` survive as the local nextest
       # convenience and as `verify-deep.yml`'s macOS and Windows legs; they
       # are simply not what the gate reads any more.
       - task: bazel:test:unit
-      # The nextest ceiling is a shell parser and this is its red/green proof.
-      # It stays on the gate although `rust:test:ceiling` no longer runs here:
-      # the task is still the answer on a machine `bazel:test:unit` does not
-      # cover (it is `platforms: [linux]`, as the floor and ceiling were), and
-      # a parser whose fixtures run nowhere is how it stopped matching before.
-      - task: rust:test:ceiling:self-test
+      # The nextest ceiling parser's red/green proof is
+      # scripts/tests/test_nextest_ceiling.py, run with the gate-tooling suite.
       # `rust:test:duration` is NOT here, for the reason `rust:test:ceiling`
       # is not: its subject is `target/nextest/run.log`, which the bracket the
       # swap removed was what wrote — `rust:test:floor` deleted it, `Test`
@@ -536,10 +527,8 @@ tasks:
       # logs the floor already reads; a per-TARGET budget off `TestResult`
       # is a different property and its own work package.
       #
-      # Its red/red/green fixtures stay, exactly as the ceiling's do: the task
-      # is still the answer on a machine `bazel:test:unit` does not cover, and
-      # a parser whose fixtures run nowhere is how it stopped matching before.
-      - task: rust:test:duration:self-test
+      # Its red/red/green fixtures are scripts/tests/test_unit_test_duration_gate.py,
+      # run with the gate-tooling suite.
       # nextest cannot run doctests, so nothing above this line executes one.
       # The per-crate `cargo test --doc` in `verify:scoped` runs under
       # `for: {var: CRATES}`, and CRATES is empty on an escalate — which a
@@ -565,9 +554,6 @@ tasks:
       # xdist convenience and as `verify:scoped`'s leg for a touched
       # `test/tests/test_*.py` (the scoped arm runs `test:smoke` + `test:scoped`).
       #
-      # That parser's own red/green fixtures stay on the gate — inside
-      # `bazel:test:accept` rather than beside it, which is where the step it
-      # replaces reached them (`test:parallel` -> `test:default` ->
-      # `ceilings:self-test`). Same obligation, same lane, and the phase keeps
-      # one entry where it had one.
+      # That parser's own red/green fixtures are
+      # scripts/tests/test_suite_ceilings.py, run with the gate-tooling suite.
       - task: bazel:test:accept

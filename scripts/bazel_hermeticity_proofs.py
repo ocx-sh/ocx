@@ -3,7 +3,6 @@
 # Copyright 2026 The OCX Authors
 """Stage-3 hermeticity — the three checks that gate removing `no-remote-cache` (C-023).
 
-    scripts/bazel_hermeticity_proofs.py --self-test
     scripts/bazel_hermeticity_proofs.py --prove-hermeticity [--probe-root DIR]
     scripts/bazel_hermeticity_proofs.py --check-declared --label L \
         --unchanged U.json --edited E.json --control C.json
@@ -22,10 +21,10 @@ survives `bazel clean` and comes back out of the disk cache.
 wave 7. A harness that could only red after WP-34 landed is a harness nobody can red
 today, so — as WP-13 and WP-35 did — everything is split three ways:
 
-* **Comparators** — pure functions over already-read inputs, red-proven in
-  `--self-test` on fixtures built here. WP-34 owns the `bazel build` invocations and
-  calls `--check-*` for the verdict, so the check its implementation is written
-  against is one already watched go red.
+* **Comparators** — pure functions over already-read inputs, red-proven as pytest
+  (`scripts/tests/test_bazel_hermeticity_proofs.py`) on fixtures built here. WP-34
+  owns the `bazel build` invocations and calls `--check-*` for the verdict, so the
+  check its implementation is written against is one already watched go red.
 * **`--prove-hermeticity`** — a live Bazel run with a subject of its own: eight
   targets in a throwaway workspace, four of them deliberately unsound, built by the
   pinned binary with **no network fetch and no remote flag**. It is what makes the
@@ -194,13 +193,10 @@ server, and warm on a fresh server after `bazel clean` + `shutdown`. Two runs ca
 separate the action cache from `--disk_cache`, and the third is where the probe's
 sharpest red lives.
 
-Every mutation in `--self-test` is proven to have landed before its result is
+Every mutation in the proofs is proven to have landed before its result is
 trusted; a surviving green is *unexplained*, not excused. Fixtures are synthetic,
-live under this repository's own `.tmp/` (never `/tmp`, a reaped tmpfs on this host),
+live under pytest's own `tmp_path` (never `/tmp`, a reaped tmpfs on this host),
 and nothing is restored with `git checkout --`, which restores from the index.
-
-Not wired into `taskfiles/scripts.taskfile.yml` — WP-17 owns that file. The one line
-it owes the `self-test:` list is named in `--self-test`'s closing output.
 """
 
 from __future__ import annotations
@@ -211,11 +207,10 @@ import hashlib
 import json
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 from bazel_accept_proofs import env_reads, realm_findings
-from bazel_gate_proofs import REPO_ROOT, Finding, codes, report
+from bazel_gate_proofs import Finding, codes, report
 
 # ---------------------------------------------------------------------------
 # Measured facts. Each is one observation on the pinned binary, kept as a
@@ -1832,36 +1827,6 @@ def prove_counts() -> int:
     return 1
 
 
-def self_test() -> int:
-    """Every red and green, on fixtures this file builds."""
-    scratch = REPO_ROOT / ".tmp"
-    scratch.mkdir(exist_ok=True)
-    checks = 0
-    with tempfile.TemporaryDirectory(dir=scratch) as directory:
-        work = Path(directory)
-        checks += prove_reader(work)
-        checks += prove_declared(work)
-        checks += prove_ambient(work)
-        checks += prove_tool_pin(work)
-        checks += prove_sandbox_waiver()
-        checks += prove_c029(work)
-        checks += prove_counts()
-    print(
-        f"bazel hermeticity proofs self-test: {checks} checks passed — (a) declared-input "
-        "invalidation, (b) ambient isolation (both legs, polarity stated), (c) tool-pin "
-        "participation each shown red and green, plus the BEP floors, the sandbox waiver and C-029"
-    )
-    print(
-        "  live subject: `--prove-hermeticity` builds eight targets on the pinned bazel, no "
-        "network, --disk_cache only, and re-measures all three tables"
-    )
-    print(
-        "  wired into taskfiles/scripts.taskfile.yml `self-test:` (WP-17): "
-        "`- python3 scripts/bazel_hermeticity_proofs.py --self-test`"
-    )
-    return 0
-
-
 # ---------------------------------------------------------------------------
 # The three check modes WP-34 drives.
 # ---------------------------------------------------------------------------
@@ -1926,7 +1891,6 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--self-test", action="store_true", help="every red and green, on fixtures")
     mode.add_argument("--prove-hermeticity", action="store_true", help="the live probe")
     mode.add_argument("--check-declared", action="store_true", help="(a) S-014, three BEP readings")
     mode.add_argument("--check-ambient", action="store_true", help="(b) isolation, one BEP + three pairs")
@@ -1939,8 +1903,6 @@ def main() -> int:
         parser.add_argument(f"--{name}", help="BEP.json:OUTPUT")
     args = parser.parse_args()
 
-    if args.self_test:
-        return self_test()
     if args.prove_hermeticity:
         return run_prove_hermeticity(args.probe_root)
 
