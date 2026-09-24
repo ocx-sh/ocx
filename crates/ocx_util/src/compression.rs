@@ -31,7 +31,55 @@ impl CompressionAlgorithm {
             _ => None,
         }
     }
+
+    /// Identifies the compressor from a stream's leading bytes (its magic
+    /// number); `head` needs at most [`MAGIC_LEN`] bytes, fewer only near EOF.
+    ///
+    /// Content, not name: an upstream asset can be compressed without saying
+    /// so (`tool` holding a gzip stream) or say so without being an archive
+    /// (`tool.gz` holding a bare executable). No ELF, Mach-O, PE or `#!` file
+    /// starts with any of these, so a hit is unambiguous.
+    pub(crate) fn from_magic(head: &[u8]) -> Option<Self> {
+        match head {
+            [0x1f, 0x8b, ..] => Some(CompressionAlgorithm::Gzip),
+            [0xfd, b'7', b'z', b'X', b'Z', 0x00, ..] => Some(CompressionAlgorithm::Lzma),
+            [0x28, 0xb5, 0x2f, 0xfd, ..] => Some(CompressionAlgorithm::Zstd),
+            // `BZh` alone is printable — a plain tar whose first entry is named
+            // `BZh…` would match — so require the block size digit and the
+            // first block's (or the empty stream's end-of-stream) magic too.
+            [b'B', b'Z', b'h', b'1'..=b'9', 0x31, 0x41, 0x59, 0x26, 0x53, 0x59, ..]
+            | [b'B', b'Z', b'h', b'1'..=b'9', 0x17, 0x72, 0x45, 0x38, 0x50, 0x90, ..] => {
+                Some(CompressionAlgorithm::Bzip2)
+            }
+            _ => None,
+        }
+    }
+
+    /// Identifies the compressor from the magic number `file` starts with,
+    /// by content rather than by name; `None` when it carries none of them.
+    pub async fn from_file_magic(file: impl AsRef<std::path::Path>) -> Result<Option<Self>> {
+        use tokio::io::AsyncReadExt as _;
+
+        let file = file.as_ref();
+        let mut handle = tokio::fs::File::open(file).await.map_err(|e| error::Error::Open {
+            path: file.to_path_buf(),
+            source: e,
+        })?;
+        let mut head = [0u8; MAGIC_LEN];
+        let mut filled = 0;
+        while filled < head.len() {
+            let read = handle.read(&mut head[filled..]).await.map_err(error::Error::Io)?;
+            if read == 0 {
+                break;
+            }
+            filled += read;
+        }
+        Ok(Self::from_magic(&head[..filled]))
+    }
 }
+
+/// The longest magic number [`CompressionAlgorithm::from_magic`] matches (bzip2).
+pub(crate) const MAGIC_LEN: usize = 10;
 
 impl std::fmt::Display for CompressionAlgorithm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -313,7 +361,10 @@ pub async fn read_file(
                 source: e,
             })?;
             let buffered = std::io::BufReader::with_capacity(READ_FILE_BUF_CAPACITY, handle);
-            Ok(Box::new(lzma_rust2::XzReader::new(buffered, false)))
+            // Multi-stream: `xz` appends a stream per invocation (`xz -c a >> f`),
+            // and `xz -d` decodes them all. Single-stream stopped after the
+            // first and reported success on a truncated payload.
+            Ok(Box::new(lzma_rust2::XzReader::new(buffered, true)))
         }
         CompressionAlgorithm::Gzip => {
             let handle = std::fs::File::open(file).map_err(|e| error::Error::Open {
@@ -321,7 +372,11 @@ pub async fn read_file(
                 source: e,
             })?;
             let buffered = std::io::BufReader::with_capacity(READ_FILE_BUF_CAPACITY, handle);
-            Ok(Box::new(flate2::read::GzDecoder::new(buffered)))
+            // `MultiGzDecoder`, for the reason the bzip2 arm below uses
+            // `MultiBzDecoder`: `pigz --independent`, `bgzip` and `cat a.gz
+            // b.gz` produce several members, `gzip -d` decodes every one, and
+            // `GzDecoder` stopped after the first as if the file ended there.
+            Ok(Box::new(flate2::read::MultiGzDecoder::new(buffered)))
         }
         CompressionAlgorithm::Zstd => {
             let handle = std::fs::File::open(file).map_err(|e| error::Error::Open {
@@ -371,6 +426,78 @@ mod tests {
     use std::io::{Read as _, Write as _};
 
     use super::*;
+
+    #[test]
+    fn from_magic_identifies_each_compressor_and_nothing_else() {
+        let cases: [(&[u8], Option<&str>); 12] = [
+            (&[0x1f, 0x8b, 0x08, 0x00], Some("gzip")),
+            (&[0xfd, b'7', b'z', b'X', b'Z', 0x00], Some("lzma")),
+            (&[0x28, 0xb5, 0x2f, 0xfd, 0x00], Some("zstd")),
+            (b"BZh91AY&SY", Some("bzip2")),
+            (b"BZh9\x17\x72\x45\x38\x50\x90", Some("bzip2")), // empty stream
+            (b"BZh-notes.txt\0\0", None),                     // a tar entry name
+            (b"BZh9", None),                                  // truncated bzip2 magic
+            (b"\x7fELF\x02\x01", None),                       // ELF
+            (&[0xcf, 0xfa, 0xed, 0xfe], None),                // Mach-O
+            (b"MZ\x90\x00", None),                            // PE
+            (b"#!/bin/sh", None),
+            (&[0xfd, b'7', b'z'], None), // truncated xz magic is not xz
+        ];
+        for (head, expected) in cases {
+            let found = CompressionAlgorithm::from_magic(head).map(|algorithm| algorithm.to_string());
+            assert_eq!(found.as_deref(), expected, "head {head:02x?}");
+        }
+    }
+
+    /// Two independently compressed members concatenated — `cat a.gz b.gz`,
+    /// `pigz --independent`, `xz -c b >> a.xz` — must decode to both payloads,
+    /// as `gzip -d` / `xz -d` do. The single-member decoders stopped after the
+    /// first and reported success on half the bytes.
+    #[tokio::test]
+    async fn read_file_decodes_every_concatenated_member() {
+        for algorithm in [CompressionAlgorithm::Gzip, CompressionAlgorithm::Lzma] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut concatenated = Vec::new();
+            for (index, part) in [b"first member ".as_slice(), b"second member"].into_iter().enumerate() {
+                let path = dir.path().join(format!("part{index}"));
+                {
+                    let mut writer = write_file(&path, &CompressionOptions::new(algorithm)).await.unwrap();
+                    writer.write_all(part).unwrap();
+                }
+                concatenated.extend(std::fs::read(&path).unwrap());
+            }
+            let path = dir.path().join("joined");
+            std::fs::write(&path, concatenated).unwrap();
+
+            let mut decoded = Vec::new();
+            read_file(&path, Some(algorithm))
+                .await
+                .unwrap()
+                .read_to_end(&mut decoded)
+                .unwrap();
+            assert_eq!(decoded, b"first member second member", "{algorithm} stopped early");
+        }
+    }
+
+    #[tokio::test]
+    async fn from_file_magic_reads_the_leading_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let compressed = dir.path().join("no-extension");
+        {
+            let mut writer = write_file(&compressed, &CompressionOptions::new(CompressionAlgorithm::Zstd))
+                .await
+                .unwrap();
+            writer.write_all(b"payload").unwrap();
+        }
+        let short = dir.path().join("short");
+        std::fs::write(&short, [0x1f]).unwrap();
+
+        assert!(matches!(
+            CompressionAlgorithm::from_file_magic(&compressed).await.unwrap(),
+            Some(CompressionAlgorithm::Zstd)
+        ));
+        assert!(CompressionAlgorithm::from_file_magic(&short).await.unwrap().is_none());
+    }
 
     #[test]
     fn from_file_infers_zstd() {
