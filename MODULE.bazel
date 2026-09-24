@@ -20,11 +20,7 @@ module(
 bazel_dep(name = "rules_rust", version = "0.74.0")
 bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.4")
-
-# The one exception, and it carries its own paragraph below: `rules_ocx` is
-# resolved by `git_override`, not by the registry, so the version here is the
-# module's self-declared one and no registry is consulted for it.
-bazel_dep(name = "rules_ocx", version = "0.4.0")
+bazel_dep(name = "rules_ocx", version = "0.5.0")
 
 # ---------------------------------------------------------------------------
 # Rust toolchain
@@ -68,18 +64,6 @@ use_repo(crate, "crates")
 # The project toolchain — `@tools//:<bin>`
 # ---------------------------------------------------------------------------
 
-# Deliberate and temporary. `rules_ocx` has no BCR release carrying its Bazel 9
-# support yet, so the module is taken from the branch that does; the pin is a
-# commit, never a branch name, because a branch re-points. Dropped — this whole
-# stanza, not just the `commit` line — in the commit that bumps the `bazel_dep`
-# above to the first BCR release, which is also when the version there starts
-# meaning something.
-git_override(
-    module_name = "rules_ocx",
-    commit = "9ced5ffb79a77d37d6f479498bf32517a49b3dc7",
-    remote = "https://github.com/ocx-sh/rules_ocx",
-)
-
 # One runnable target per binary the toolchain declares, resolved from the same
 # `ocx.toml`/`ocx.lock` pair the per-prompt shell hook reads. `name` is
 # mandatory: without it the call does not load, and `@tools//:bun` is `@tools`
@@ -95,13 +79,8 @@ git_override(
 #   - Tool *content* is not a Bazel action input: a launcher execs an absolute
 #     `$OCX_HOME/packages/…/<digest>/content/<bin>` path, where `<digest>` is a
 #     128-bit prefix of the content digest. The launcher is the action's tool,
-#     so an action does re-key on a tool change — **but only once the repository
-#     refetches**, and on this pin the eager form watches neither `ocx.toml` nor
-#     `ocx.lock`: the repo marker records no entry for either, so a lock bump
-#     alone leaves every action cached until `bazel fetch --force --repo=@tools`.
-#     Measured here, both directions, against a throwaway probe project. That is
-#     a rules_ocx defect — its lazy `bins =` form watches both and re-keys on a
-#     plain build — so a hermeticity check must not assume the eager edge.
+#     so an action re-keys on a tool change once the repository refetches, and
+#     since rules_ocx 0.5.0 an `ocx.lock` edit is what triggers that refetch.
 #   - There is no remote execution on this path, ever. An absolute store path
 #     cannot resolve on a remote executor, so `--remote_cache` is the ceiling
 #     here as a structural fact rather than a scope decision.
