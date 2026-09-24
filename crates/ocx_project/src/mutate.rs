@@ -22,7 +22,7 @@ use crate::Error;
 use crate::error::{ProjectError, ProjectErrorKind};
 use crate::mutation::ManifestSnapshot;
 use crate::project_lock::acquire_project_lock_for_file;
-use ocx_oci::Identifier;
+use ocx_oci::PackageRef;
 
 /// Publish `bytes` as the entire contents of `path` by atomic rename: a
 /// tempfile in the same directory, the existing file's Unix mode carried onto
@@ -175,7 +175,7 @@ pub(crate) async fn publish_by_rename_async(path: &Path, bytes: Vec<u8>) -> Resu
 ///
 /// Promoted to `pub` so CLI commands (`add.rs`, `remove.rs`) in `ocx_cli`
 /// can reuse the same derivation instead of duplicating it inline.
-pub fn binding_key(identifier: &Identifier) -> String {
+pub fn binding_key(identifier: &PackageRef) -> String {
     identifier
         .repository()
         .rsplit('/')
@@ -387,7 +387,7 @@ pub async fn read_manifest_snapshot(config_path: &Path) -> Result<ManifestSnapsh
 pub fn add_binding_in_memory(
     config: &mut crate::config::ProjectConfig,
     path: &Path,
-    identifier: &Identifier,
+    identifier: &PackageRef,
     name: Option<&str>,
     group: Option<&str>,
 ) -> Result<String, Error> {
@@ -694,12 +694,12 @@ mod tests {
 
     use super::*;
     use crate::{ProjectConfig, ProjectErrorKind};
-    use ocx_oci::Identifier;
+    use ocx_oci::PackageRef;
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
-    fn test_id(registry: &str, repo: &str, tag: &str) -> Identifier {
-        Identifier::new_registry(repo, registry).clone_with_tag(tag)
+    fn test_id(registry: &str, repo: &str, tag: &str) -> PackageRef {
+        PackageRef::new_registry(repo, registry).clone_with_tag(tag)
     }
 
     fn write_minimal_toml(dir: &std::path::Path, body: &str) {
@@ -791,7 +791,7 @@ mod tests {
     async fn add_binding(
         config_path: &Path,
         locks_root: &Path,
-        identifier: &Identifier,
+        identifier: &PackageRef,
         name: Option<&str>,
         group: Option<&str>,
     ) -> Result<(), Error> {

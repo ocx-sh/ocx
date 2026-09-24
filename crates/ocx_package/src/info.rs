@@ -13,7 +13,7 @@ use ocx_oci::manifest_builder::ManifestBuilder;
 /// It carries no identifier on purpose. A publish writes it to a physical
 /// [`OciIdentifier`](ocx_oci::OciIdentifier) the caller names; a local
 /// materialization stores it under a package
-/// [`Identifier`](ocx_oci::Identifier). One field could not be both without
+/// [`PackageRef`](ocx_oci::PackageRef). One field could not be both without
 /// a conversion between the two, which is the thing ocx#504 made impossible.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]

@@ -408,9 +408,9 @@ mod tests {
     /// `ripgrep` in both `[tools]` (default) and `[group.ci]`; `fd` only in
     /// default; `cmake` only in `ci`.
     fn sample_config() -> ProjectConfig {
-        use ocx_oci::Identifier;
+        use ocx_oci::PackageRef;
         use std::collections::BTreeMap;
-        let id = |repo: &str| Identifier::new_registry(repo, "ocx.sh");
+        let id = |repo: &str| PackageRef::new_registry(repo, "ocx.sh");
         let tools = BTreeMap::from([("ripgrep".to_string(), id("ripgrep")), ("fd".to_string(), id("fd"))]);
         let ci = BTreeMap::from([
             ("ripgrep".to_string(), id("ripgrep")),

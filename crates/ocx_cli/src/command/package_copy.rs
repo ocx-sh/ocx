@@ -205,7 +205,7 @@ impl PackageCopy {
     /// the source named a different one.
     fn resolve_target(
         &self,
-        source: &ocx_oci::Identifier,
+        source: &ocx_oci::PackageRef,
         default_registry: &str,
     ) -> anyhow::Result<ocx_oci::OciIdentifier> {
         if let Some(identifier) = &self.identifier {

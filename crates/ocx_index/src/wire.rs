@@ -96,7 +96,7 @@ pub(crate) fn gate_format_version(version: u64) -> super::error::Result<()> {
 pub struct IndexFormatConfig {
     pub format_version: u64,
     /// Slash-separated segment count a package name must have under this index,
-    /// counted on the name **within** the namespace ([`ocx_oci::Identifier::repository`]).
+    /// counted on the name **within** the namespace ([`ocx_oci::PackageRef::repository`]).
     /// `index.ocx.sh` serves `2` — its root schema pins the logical name to
     /// `<ns>/<pkg>`, so it can never hold a root for a flat name.
     ///

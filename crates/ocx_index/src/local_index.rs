@@ -235,7 +235,7 @@ impl LocalIndex {
     /// the **caller's** call — `ocx index sync` refreshes against the source that
     /// published the catalog row, while `ocx index update` picks the source that
     /// serves the identifier's registry.
-    pub async fn refresh_tags(&self, identifier: &ocx_oci::Identifier, source: &super::Index) -> Result<()> {
+    pub async fn refresh_tags(&self, identifier: &ocx_oci::PackageRef, source: &super::Index) -> Result<()> {
         // One info line per identifier; per-tag detail is debug-only so an index
         // update over a many-tagged package does not flood info logs.
         log::info!("Refreshing tags for identifier '{}'.", identifier);
@@ -264,7 +264,7 @@ impl LocalIndex {
     /// pointing at an absent `o/` object.
     async fn refresh_published(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         source: &super::Index,
         bytes: &[u8],
         root: &super::wire::IndexRoot,
@@ -421,7 +421,7 @@ impl LocalIndex {
 
     /// Derived-source refresh (`adr_index_indirection.md` A2/A3): persist each
     /// tag's dispatch object, then author the root document field-wise.
-    async fn refresh_derived(&self, identifier: &ocx_oci::Identifier, source: &super::Index) -> Result<()> {
+    async fn refresh_derived(&self, identifier: &ocx_oci::PackageRef, source: &super::Index) -> Result<()> {
         let tags = match identifier.tag() {
             Some(tag) => vec![tag.to_owned()],
             None => source.list_tags(identifier).await?.unwrap_or_default(),
@@ -565,7 +565,7 @@ impl LocalIndex {
     /// bookkeeping over a fan-out that can span a whole catalog — at `info!` or
     /// above it would be per-package noise on every `ocx index sync`
     /// (C-026, the silence rule this module's log budget enforces).
-    async fn sweep_dispatch_orphans(&self, identifier: &ocx_oci::Identifier, pins: &RootPins) {
+    async fn sweep_dispatch_orphans(&self, identifier: &ocx_oci::PackageRef, pins: &RootPins) {
         let source = identifier.registry();
         let repository = identifier.repository();
         match super::regenerate::sweep_orphan_objects(
@@ -627,7 +627,7 @@ impl LocalIndex {
     pub async fn persist_dispatch(
         &self,
         source: &super::Index,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
         let Some((bytes, digest, manifest)) = source.fetch_manifest_raw_bytes(identifier).await? else {
             return Ok(None);
@@ -658,7 +658,7 @@ impl LocalIndex {
     pub async fn fetch_dispatch_only(
         &self,
         source: &super::Index,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
         source.fetch_manifest_raw_bytes(identifier).await
     }
@@ -696,7 +696,7 @@ impl LocalIndex {
     /// contract.
     pub(super) async fn commit_root_tag(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         content: &ocx_oci::Digest,
     ) -> Result<()> {
         let tag = identifier
@@ -723,7 +723,7 @@ impl LocalIndex {
     /// one `observed` stamp — they were confirmed against the source together.
     async fn commit_root_tags(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         entries: &[(String, ocx_oci::Digest)],
     ) -> Result<RootPins> {
         if entries.is_empty() {
@@ -838,7 +838,7 @@ impl LocalIndex {
     /// caller turns into a chain walk.
     pub(super) async fn resolve_dispatch(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         kind: SourceKind,
     ) -> Result<Option<DispatchResolution>> {
         let source = identifier.registry();
@@ -982,7 +982,7 @@ impl LocalIndex {
     /// map. `Ok(None)` when the root is not known locally.
     pub(super) async fn list_local_tags(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         kind: SourceKind,
     ) -> Result<Option<Vec<String>>> {
         let Some(result) = self
@@ -1041,7 +1041,7 @@ impl LocalIndex {
     /// pointer — the same strict C3 parse the root-read hook applies.
     pub(super) async fn physical_reference(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         kind: SourceKind,
     ) -> Result<Option<ocx_oci::OciIdentifier>> {
         let Some(result) = self
@@ -1089,7 +1089,7 @@ impl LocalIndex {
     /// writes the config — but every other failure propagates.
     pub(super) async fn commit_published_root(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         fetched_bytes: &[u8],
         scope: RootScope<'_>,
     ) -> Result<RootPins> {
@@ -1168,7 +1168,7 @@ impl LocalIndex {
     /// re-staging the same digest is idempotent.
     pub async fn stage_dispatch_bytes(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         digest: &ocx_oci::Digest,
         bytes: &[u8],
     ) -> Result<()> {
@@ -1187,7 +1187,7 @@ impl LocalIndex {
     /// more — every real write merges ([`LocalIndex::commit_published_root`]) —
     /// but a test needs a way to put a package into a known committed state
     /// without going through the code under test.
-    pub(super) async fn seed_root_document(&self, identifier: &ocx_oci::Identifier, bytes: &[u8]) -> Result<()> {
+    pub(super) async fn seed_root_document(&self, identifier: &ocx_oci::PackageRef, bytes: &[u8]) -> Result<()> {
         let mut transaction = self
             .index_store
             .begin_catalog_transaction(identifier.registry())
@@ -1338,7 +1338,7 @@ fn is_lock_timeout(error: &super::error::Error) -> bool {
 /// `warn!` and not `debug!` — this is the one path in this module where a tag's
 /// per-tag detail is the only detail there is.
 fn withheld_by_commit_failure(
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     withheld: &super::error::Error,
     commit: super::error::Error,
 ) -> super::error::Error {
@@ -1564,7 +1564,7 @@ impl index_impl::IndexImpl for LocalIndex {
         self.list_local_repositories(registry, SourceKind::Derived).await
     }
 
-    async fn list_tags(&self, identifier: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+    async fn list_tags(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
         Ok(self
             .list_local_tags(identifier, SourceKind::Derived)
             .await?
@@ -1573,7 +1573,7 @@ impl index_impl::IndexImpl for LocalIndex {
 
     async fn fetch_manifest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         _op: IndexOperation,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
         log::trace!("Fetching manifest for identifier '{}'.", identifier);
@@ -1591,7 +1591,7 @@ impl index_impl::IndexImpl for LocalIndex {
 
     async fn fetch_manifest_digest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         _op: IndexOperation,
     ) -> Result<Option<ocx_oci::Digest>> {
         match self.resolve_dispatch(identifier, SourceKind::Derived).await? {
@@ -1603,7 +1603,7 @@ impl index_impl::IndexImpl for LocalIndex {
         }
     }
 
-    async fn fetch_blob(&self, _blob_ref: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+    async fn fetch_blob(&self, _blob_ref: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
         // `LocalIndex` serves the wire grammar only (root documents + dispatch
         // objects) — genuine content-addressed blobs (config blobs) live
         // exclusively in the machine-global blob store (`$OCX_HOME/blobs`),
@@ -1615,7 +1615,7 @@ impl index_impl::IndexImpl for LocalIndex {
         Ok(None)
     }
 
-    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+    async fn physical_reference(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
         // Never take the trait default here: it answers `Ok(None)` = "no
         // rewrite", which a caller turns into the logical identifier even
         // though the committed root names a different physical location.
@@ -1857,11 +1857,11 @@ mod tests {
         document.into_packages().unwrap()
     }
 
-    fn repo_id() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry(REPO, REGISTRY)
+    fn repo_id() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry(REPO, REGISTRY)
     }
 
-    fn tagged_id(tag: &str) -> ocx_oci::Identifier {
+    fn tagged_id(tag: &str) -> ocx_oci::PackageRef {
         repo_id().clone_with_tag(tag)
     }
 
@@ -1927,12 +1927,12 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(vec![self.tag.clone()]))
         }
         async fn fetch_manifest(
             &self,
-            identifier: &ocx_oci::Identifier,
+            identifier: &ocx_oci::PackageRef,
             _op: IndexOperation,
         ) -> Result<Option<(ocx_oci::Digest, Manifest)>> {
             Ok(self
@@ -1942,17 +1942,17 @@ mod tests {
         }
         async fn fetch_manifest_digest(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<ocx_oci::Digest>> {
             Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, digest, _)| digest))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
         ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, Manifest)>> {
             let (leaf_bytes, leaf_digest) = image_manifest_bytes();
             let (index_object_bytes, index_digest) = index_bytes();
@@ -1987,12 +1987,12 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(vec![self.tag.clone()]))
         }
         async fn fetch_manifest(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
             _op: IndexOperation,
         ) -> Result<Option<(ocx_oci::Digest, Manifest)>> {
             Ok(self
@@ -2002,17 +2002,17 @@ mod tests {
         }
         async fn fetch_manifest_digest(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<ocx_oci::Digest>> {
             Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, digest, _)| digest))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
         ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, Manifest)>> {
             let (bytes, digest) = image_manifest_bytes();
             let manifest = serde_json::from_slice(&bytes).unwrap();
@@ -2131,12 +2131,12 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(self.tags.clone()))
         }
         async fn fetch_manifest(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<(ocx_oci::Digest, Manifest)>> {
             let (bytes, digest) = index_bytes();
@@ -2144,18 +2144,18 @@ mod tests {
         }
         async fn fetch_manifest_digest(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<ocx_oci::Digest>> {
             let (_, digest) = index_bytes();
             Ok(Some(digest))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
         ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, Manifest)>> {
             let (bytes, digest) = index_bytes();
             let manifest = serde_json::from_slice(&bytes).unwrap();
@@ -2227,29 +2227,29 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(vec!["1.0".to_string(), "2.0".to_string()]))
         }
         async fn fetch_manifest(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<(ocx_oci::Digest, Manifest)>> {
             Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, d, m)| (d, m)))
         }
         async fn fetch_manifest_digest(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<ocx_oci::Digest>> {
             Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, d, _)| d))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
         ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, Manifest)>> {
             // Each tag resolves to a DISTINCT single-platform image index.
             let leaf_char = match id.tag() {
@@ -2264,7 +2264,7 @@ mod tests {
         }
         async fn fetch_root_document(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
         ) -> Result<Option<(Vec<u8>, super::super::wire::IndexRoot)>> {
             let (_, obs1) = index_for_leaf(&ocx_oci::Digest::Sha256("a".repeat(64)));
             let (_, obs2) = index_for_leaf(&ocx_oci::Digest::Sha256("b".repeat(64)));
@@ -2404,29 +2404,29 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(self.script.keys().cloned().collect()))
         }
         async fn fetch_manifest(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<(ocx_oci::Digest, Manifest)>> {
             Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, d, m)| (d, m)))
         }
         async fn fetch_manifest_digest(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<ocx_oci::Digest>> {
             Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, d, _)| d))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
         ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, Manifest)>> {
             let tag = id
                 .tag()
@@ -2476,7 +2476,7 @@ mod tests {
         }
         async fn fetch_root_document(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
         ) -> Result<Option<(Vec<u8>, super::super::wire::IndexRoot)>> {
             if !self.published {
                 return Ok(None);
@@ -3232,12 +3232,12 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(self.tags.clone()))
         }
         async fn fetch_manifest(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<(ocx_oci::Digest, Manifest)>> {
             let (bytes, digest) = index_bytes();
@@ -3245,18 +3245,18 @@ mod tests {
         }
         async fn fetch_manifest_digest(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<ocx_oci::Digest>> {
             let (_, digest) = index_bytes();
             Ok(Some(digest))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
         ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, Manifest)>> {
             let (bytes, digest) = index_bytes();
             let manifest = serde_json::from_slice(&bytes).unwrap();
@@ -3485,29 +3485,29 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
             Ok(None)
         }
         async fn fetch_manifest(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<(ocx_oci::Digest, Manifest)>> {
             Ok(None)
         }
         async fn fetch_manifest_digest(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<ocx_oci::Digest>> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
         ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, Manifest)>> {
             Ok(None)
         }
@@ -3698,12 +3698,12 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(vec!["3.28".to_string()]))
         }
         async fn fetch_manifest(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<(ocx_oci::Digest, Manifest)>> {
             Ok(self
@@ -3713,17 +3713,17 @@ mod tests {
         }
         async fn fetch_manifest_digest(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<ocx_oci::Digest>> {
             Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, digest, _)| digest))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
         ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, Manifest)>> {
             self.fetches.fetch_add(1, Ordering::SeqCst);
             if id.digest().is_some() {

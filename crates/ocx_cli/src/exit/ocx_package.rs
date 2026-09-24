@@ -261,10 +261,10 @@ mod tests {
     /// arm was still asserted anywhere.
     #[test]
     fn every_dependency_pinning_variant_classifies_as_it_did_before_the_split() {
-        fn identifier() -> Box<ocx_oci::Identifier> {
+        fn identifier() -> Box<ocx_oci::PackageRef> {
             Box::new(
                 "example.com/dep:1.0"
-                    .parse::<ocx_oci::Identifier>()
+                    .parse::<ocx_oci::PackageRef>()
                     .expect("the fixture identifier parses"),
             )
         }
@@ -393,11 +393,11 @@ mod tests {
 
     // ── moved from ocx_package::publisher::publish_gate with the impl ──
 
-    fn pinned(digest_hex: &str) -> ocx_oci::PinnedIdentifier {
-        let identifier: ocx_oci::Identifier = format!("example.com/dep:1.0@sha256:{digest_hex}")
+    fn pinned(digest_hex: &str) -> ocx_oci::PinnedPackageRef {
+        let identifier: ocx_oci::PackageRef = format!("example.com/dep:1.0@sha256:{digest_hex}")
             .parse()
             .expect("the fixture identifier parses");
-        ocx_oci::PinnedIdentifier::try_from(identifier).expect("a digest-bearing identifier is pinnable")
+        ocx_oci::PinnedPackageRef::try_from(identifier).expect("a digest-bearing identifier is pinnable")
     }
 
     /// Every arm of `PublishGateError::classify`, per variant.
@@ -433,7 +433,7 @@ mod tests {
         let forged_any = PublishGateError::AnyPinNotAdvertisedAsAny {
             identifier: Box::new(
                 "example.com/dep:1.0"
-                    .parse::<ocx_oci::Identifier>()
+                    .parse::<ocx_oci::PackageRef>()
                     .expect("the fixture identifier parses"),
             ),
             digest: format!("sha256:{hex}"),
@@ -471,7 +471,7 @@ mod tests {
         let provenance_unavailable = PublishGateError::AnyPinProvenanceUnavailable {
             identifier: Box::new(
                 "example.com/dep:1.0"
-                    .parse::<ocx_oci::Identifier>()
+                    .parse::<ocx_oci::PackageRef>()
                     .expect("the fixture identifier parses"),
             ),
             source: ocx_oci::client::error::ClientError::Registry(Box::new(std::io::Error::other("503"))),
@@ -550,8 +550,8 @@ mod tests {
         // DataError — DependencyNotInstalled maps to NotFound (79), matching
         // an env value carrying the same token today.
         let hex = "a".repeat(64);
-        let identifier: ocx_oci::Identifier = format!("ocx.sh/ninja:1@sha256:{hex}").parse().unwrap();
-        let pinned = ocx_oci::PinnedIdentifier::try_from(identifier).unwrap();
+        let identifier: ocx_oci::PackageRef = format!("ocx.sh/ninja:1@sha256:{hex}").parse().unwrap();
+        let pinned = ocx_oci::PinnedPackageRef::try_from(identifier).unwrap();
 
         let err = PackageError::IntegrationInterpolation {
             namespace: "com.example".to_owned(),

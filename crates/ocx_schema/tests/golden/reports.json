@@ -1155,7 +1155,7 @@
       "type": "object",
       "properties": {
         "identifier": {
-          "$ref": "#/$defs/Identifier"
+          "$ref": "#/$defs/PackageRef"
         },
         "repeated": {
           "type": "boolean"
@@ -1185,7 +1185,7 @@
       ],
       "description": "A node in the dependency tree (for tree view output).\n\n`visibility` is `None` for root nodes (the packages the user asked about)\nand `Some(v)` for dependencies, where `v` is the visibility as declared\nby the parent — not the propagated result."
     },
-    "Identifier": {
+    "PackageRef": {
       "type": "string",
       "description": "OCI identifier in the format 'registry/repository[:tag][@digest]'."
     },
@@ -1206,7 +1206,7 @@
           "items": {
             "type": "array",
             "items": {
-              "$ref": "#/$defs/Identifier"
+              "$ref": "#/$defs/PackageRef"
             }
           }
         },
@@ -1238,7 +1238,7 @@
       "type": "object",
       "properties": {
         "identifier": {
-          "$ref": "#/$defs/Identifier"
+          "$ref": "#/$defs/PackageRef"
         },
         "visibility": {
           "$ref": "#/$defs/Visibility"
@@ -1503,7 +1503,7 @@
       "type": "object",
       "properties": {
         "identifier": {
-          "$ref": "#/$defs/Identifier"
+          "$ref": "#/$defs/PackageRef"
         },
         "metadata": {
           "$ref": "#/$defs/Metadata"
@@ -1679,7 +1679,7 @@
       "type": "object",
       "properties": {
         "identifier": {
-          "$ref": "#/$defs/PinnedIdentifier",
+          "$ref": "#/$defs/PinnedPackageRef",
           "description": "Fully qualified pinned OCX identifier with required explicit registry\nand digest. The tag portion is advisory (for update tooling) — only\nthe digest is used for resolution."
         },
         "visibility": {
@@ -1705,7 +1705,7 @@
       ],
       "description": "A pinned dependency descriptor.\n\nThe digest references either an OCI Image Index (for platform-aware\nresolution) or a single manifest (for explicit platform pinning).\nFor cross-compilation, pin the platform-specific manifest digest directly."
     },
-    "PinnedIdentifier": {
+    "PinnedPackageRef": {
       "type": "string",
       "description": "Pinned OCI identifier with a required digest and an optional advisory tag: 'registry/repository[:tag]@digest'.",
       "examples": [
@@ -1914,7 +1914,7 @@
         "logical": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Identifier"
+              "$ref": "#/$defs/PackageRef"
             },
             {
               "type": "null"
@@ -2717,7 +2717,7 @@
           "type": "string"
         },
         "identifier": {
-          "$ref": "#/$defs/Identifier"
+          "$ref": "#/$defs/PackageRef"
         },
         "pinned_identifier": {
           "type": "string"
@@ -3364,7 +3364,7 @@
       "type": "object",
       "properties": {
         "package": {
-          "$ref": "#/$defs/PinnedIdentifier"
+          "$ref": "#/$defs/PinnedPackageRef"
         },
         "status": {
           "$ref": "#/$defs/PullStatus"
@@ -3381,7 +3381,7 @@
         "status",
         "path"
       ],
-      "description": "A single dry-run preview row.\n\n`package` is held typed rather than pre-formatted so plain and JSON can\nrender it differently: `PinnedIdentifier`'s `Serialize` is its `Display`,\nso JSON keeps the pinned `…@sha256:<64hex>` form, while the plain table\ndrops the digest.\n\n`path` is `Some` for cached entries (the package root directory,\nparent of `content/` and `entrypoints/`) and `None` for `WouldFetch`\nrows where nothing has been materialised yet. Mirrors the contract\ndocumented on [`crate::api::data::paths::PathEntry`]: consumers\ntraverse into `<path>/content/` for installed files or\n`<path>/entrypoints/` for generated launchers."
+      "description": "A single dry-run preview row.\n\n`package` is held typed rather than pre-formatted so plain and JSON can\nrender it differently: `PinnedPackageRef`'s `Serialize` is its `Display`,\nso JSON keeps the pinned `…@sha256:<64hex>` form, while the plain table\ndrops the digest.\n\n`path` is `Some` for cached entries (the package root directory,\nparent of `content/` and `entrypoints/`) and `None` for `WouldFetch`\nrows where nothing has been materialised yet. Mirrors the contract\ndocumented on [`crate::api::data::paths::PathEntry`]: consumers\ntraverse into `<path>/content/` for installed files or\n`<path>/entrypoints/` for generated launchers."
     },
     "PullStatus": {
       "type": "string",
@@ -5928,7 +5928,7 @@
         "from": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Identifier"
+              "$ref": "#/$defs/PackageRef"
             },
             {
               "type": "null"
@@ -5939,7 +5939,7 @@
         "to": {
           "anyOf": [
             {
-              "$ref": "#/$defs/Identifier"
+              "$ref": "#/$defs/PackageRef"
             },
             {
               "type": "null"
@@ -5981,7 +5981,7 @@
           "description": "The tag the declaration spells, `null` when it is digest-pinned."
         },
         "digest": {
-          "$ref": "#/$defs/Identifier",
+          "$ref": "#/$defs/PackageRef",
           "description": "The unchanged pull identifier — the same\n`registry/repository@sha256:<hex>` form `BindingChange::from` / `to`\ncarry, so the two arrays are directly comparable."
         }
       },

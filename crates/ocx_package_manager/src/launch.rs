@@ -426,7 +426,7 @@ mod tests {
     use crate::record::RecordsOptions;
     use crate::tasks::resolve::AdmittedClaims;
     use ocx_config::env::OcxConfigView;
-    use ocx_oci::{Digest, Identifier, PinnedIdentifier};
+    use ocx_oci::{Digest, PackageRef, PinnedPackageRef};
     use ocx_package::install_info::InstallInfo;
     use ocx_package::resolved_package::ResolvedPackage;
     use ocx_store::file_structure::PackageDir;
@@ -442,13 +442,13 @@ mod tests {
         shim_root: PathBuf,
         argv: Vec<String>,
         config: OcxConfigView,
-        auto_installed: Vec<Identifier>,
+        auto_installed: Vec<PackageRef>,
     }
 
     impl Frame {
         fn new(packages: usize, argv: &[&str]) -> Self {
-            let identifier = PinnedIdentifier::try_from(
-                Identifier::new_registry("ocx/cmake", "index.ocx.sh")
+            let identifier = PinnedPackageRef::try_from(
+                PackageRef::new_registry("ocx/cmake", "index.ocx.sh")
                     .clone_with_digest(Digest::Sha256(HEX.to_string())),
             )
             .expect("digest present");

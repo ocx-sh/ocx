@@ -192,7 +192,7 @@ mod tests {
         // chain. Was routed through `ocx_lib::Error::PackageManager` until
         // WP-37 dissolved that wrapper; the tier error now reaches the ladder
         // on its own arm, which is the same code by the same delegation.
-        let identifier = ocx_oci::Identifier::new_registry("pkg", "example.com");
+        let identifier = ocx_oci::PackageRef::new_registry("pkg", "example.com");
         let inner = PackageError::new(identifier, PackageErrorKind::NotFound);
         let pm_err = ocx_package_manager::error::Error::FindFailed(vec![inner]);
         assert_eq!(classify(pm_err), ExitCode::NotFound);
@@ -280,9 +280,9 @@ mod tests {
     #[test]
     fn identifier_error_maps_to_data_error() {
         // Plan taxonomy: IdentifierError (any kind) → DataError (65)
-        let err = ocx_oci::identifier::error::IdentifierError::new(
+        let err = ocx_oci::package_ref::error::IdentifierError::new(
             "bad-input",
-            ocx_oci::identifier::error::IdentifierErrorKind::InvalidFormat,
+            ocx_oci::package_ref::error::IdentifierErrorKind::InvalidFormat,
         );
         assert_eq!(classify(err), ExitCode::DataError);
     }
@@ -363,7 +363,7 @@ mod tests {
         // Project-layer policy block (offline / frozen during lock resolution)
         // → PolicyBlocked (81), same category as the index-layer block.
         use ocx_project::error::{ProjectError, ProjectErrorKind};
-        let id = ocx_oci::Identifier::new_registry("cmake", "registry.test");
+        let id = ocx_oci::PackageRef::new_registry("cmake", "registry.test");
         let kind = ProjectErrorKind::PolicyBlocked {
             identifier: Box::new(id),
             policy: "offline",
@@ -376,7 +376,7 @@ mod tests {
     fn patch_policy_blocked_maps_to_policy_blocked() {
         // Patch-tier policy block (offline, companion with no recorded pin) →
         // PolicyBlocked (81), the same family as the index and project blocks.
-        let id = ocx_oci::Identifier::new_registry("certs/ca-bundle", "patches.test");
+        let id = ocx_oci::PackageRef::new_registry("certs/ca-bundle", "patches.test");
         let err = ocx_package_manager::patch::PatchError::PolicyBlocked {
             identifier: Box::new(id),
         };
@@ -622,7 +622,7 @@ mod tests {
         // Plan contract 6: setup::Error::Bootstrap delegates to the inner
         // package-manager error. An offline-mode bootstrap failure classifies
         // to PolicyBlocked (81) via the inner cause, not a setup-specific code.
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", "ocx.sh");
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", "ocx.sh");
         let inner = PackageError::new(
             identifier,
             PackageErrorKind::Internal(ocx_package_manager::Error::OfflineMode),
@@ -678,7 +678,7 @@ mod tests {
     #[test]
     fn sign_error_oidc_token_rejected_maps_to_auth_error() {
         // Slice 1 C-S1-1: SignError delegates to SignErrorKind; OidcTokenRejected → 80
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let err = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::OidcTokenRejected);
         assert_eq!(classify(err), ExitCode::AuthError);
     }
@@ -687,14 +687,14 @@ mod tests {
     fn sign_error_transparency_log_unavailable_maps_to_transparency_log_unavailable() {
         // Slice 1: distinct exit code 83 so operators can distinguish Rekor
         // outage from registry outage.
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let err = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::TransparencyLogUnavailable);
         assert_eq!(classify(err), ExitCode::TransparencyLogUnavailable);
     }
 
     #[test]
     fn sign_error_referrers_unsupported_maps_to_referrers_unsupported() {
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let err = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::ReferrersUnsupported);
         assert_eq!(classify(err), ExitCode::ReferrersUnsupported);
     }
@@ -702,7 +702,7 @@ mod tests {
     #[test]
     fn sign_error_offline_sign_refused_maps_to_permission_denied() {
         // Slice 1 policy: `ocx package sign --offline` is rejected at the CLI.
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let err = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::OfflineSignRefused);
         assert_eq!(classify(err), ExitCode::PermissionDenied);
     }
@@ -713,7 +713,7 @@ mod tests {
     fn verify_error_no_signatures_found_maps_to_not_found() {
         // Slice 1 C-S1-2: "not signed" must exit 79 so scripts can distinguish
         // "no signature" from "bad signature" without stderr parsing.
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let err = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::NoSignaturesFound);
         assert_eq!(classify(err), ExitCode::NotFound);
     }
@@ -721,21 +721,21 @@ mod tests {
     #[test]
     fn verify_error_identity_mismatch_maps_to_permission_denied() {
         // Slice 1: "verified, but not by the signer you expected" = 77.
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let err = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::IdentityMismatch);
         assert_eq!(classify(err), ExitCode::PermissionDenied);
     }
 
     #[test]
     fn verify_error_issuer_mismatch_maps_to_permission_denied() {
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let err = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::IssuerMismatch);
         assert_eq!(classify(err), ExitCode::PermissionDenied);
     }
 
     #[test]
     fn verify_error_bundle_parse_failed_maps_to_data_error() {
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let err = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::BundleParseFailed);
         assert_eq!(classify(err), ExitCode::DataError);
     }
@@ -745,14 +745,14 @@ mod tests {
         // RekorSetInvalid is a crypto / data integrity failure (tampered bundle),
         // not a service-unavailability signal. Exit 65 (DataError) so retry
         // handlers do not retry a tampered SET.
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let err = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::RekorSetInvalid);
         assert_eq!(classify(err), ExitCode::DataError);
     }
 
     #[test]
     fn verify_error_trust_root_unavailable_maps_to_config_error() {
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let err = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::TrustRootUnavailable);
         assert_eq!(classify(err), ExitCode::ConfigError);
     }
@@ -790,7 +790,7 @@ mod tests {
             }
         }
 
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let sign_err = ocx_sign::sign::SignError::new(
             id,
             ocx_sign::sign::SignErrorKind::IdentityTokenFilePermissive {

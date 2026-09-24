@@ -508,7 +508,7 @@ impl StateStore {
     /// In all three cases the atomic-touch contract holds. See
     /// <https://doc.rust-lang.org/std/fs/fn.rename.html> for the cross-platform
     /// shim's documented invariants.
-    pub fn update_check_file(&self, identifier: &ocx_oci::Identifier) -> PathBuf {
+    pub fn update_check_file(&self, identifier: &ocx_oci::PackageRef) -> PathBuf {
         let slug = identifier.to_string().to_slug();
         self.update_check_dir().join(slug)
     }
@@ -854,7 +854,7 @@ mod tests {
     #[test]
     fn update_check_file_produces_correct_path() {
         let store = StateStore::new("/ocx/state");
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
         let path = store.update_check_file(&identifier);
         assert_eq!(path, PathBuf::from("/ocx/state/update-check/ocx_sh_ocx_cli"));
     }
@@ -863,7 +863,7 @@ mod tests {
     #[test]
     fn update_check_file_slug_is_dot_free() {
         let store = StateStore::new("/state");
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
         let path = store.update_check_file(&identifier);
         let file_name = path.file_name().unwrap().to_str().unwrap();
         assert!(!file_name.contains('.'), "slug must not contain dots; got: {file_name}");

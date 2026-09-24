@@ -136,19 +136,19 @@ pub enum TemplateError {
     AmbiguousDependencyRef {
         ref_name: DependencyName,
         /// Boxed, with `second` and `DependencyNotInstalled`'s identifier: a
-        /// bare `PinnedIdentifier` is ~100 bytes, and three of them across two
+        /// bare `PinnedPackageRef` is ~100 bytes, and three of them across two
         /// variants put every `Result<_, TemplateError>` in this subsystem over
         /// clippy's `result_large_err` threshold — a cost the `Ok` path pays on
         /// every call to silence a lint on a path taken once, at the end.
-        first: Box<ocx_oci::PinnedIdentifier>,
-        second: Box<ocx_oci::PinnedIdentifier>,
+        first: Box<ocx_oci::PinnedPackageRef>,
+        second: Box<ocx_oci::PinnedPackageRef>,
     },
 
     /// A `${deps.NAME.*}` token names a known dependency that is not installed on disk.
     #[error("references dependency '{ref_name}' ({dep_identifier}) which is not installed")]
     DependencyNotInstalled {
         ref_name: DependencyName,
-        dep_identifier: Box<ocx_oci::PinnedIdentifier>,
+        dep_identifier: Box<ocx_oci::PinnedPackageRef>,
     },
 
     /// A `${…}` OCX does not recognise: a body that fails the anchored grammar,

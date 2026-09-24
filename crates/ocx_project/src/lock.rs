@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use super::error::{ProjectError, ProjectErrorKind};
-use ocx_oci::{Digest, Identifier, Platform};
+use ocx_oci::{Digest, PackageRef, Platform};
 
 /// Derive the canonical `ocx.lock` data-file path for a given config file path.
 ///
@@ -168,7 +168,7 @@ pub struct LockedTool {
     /// `[tools]` table; otherwise the named `[group.*]` key.
     pub group: String,
     /// Bare registry/repo coordinates shared by every platform leaf.
-    pub repository: Identifier,
+    pub repository: PackageRef,
     /// Available-only per-platform leaf digests, keyed by the canonical
     /// grammar [`Platform`] string. `BTreeMap` for byte-stable output
     /// without requiring `Ord` on `Platform`.
@@ -577,7 +577,7 @@ mod tests {
     //! Determinism is a permanent contract.
     use super::*;
     use crate::error::ProjectErrorKind;
-    use ocx_oci::{Digest, Identifier};
+    use ocx_oci::{Digest, PackageRef};
 
     /// Assert an [`Error`] carries a specific [`ProjectErrorKind`]
     /// pattern. Uses `let else` on the inner kind (not exhaustive
@@ -620,10 +620,10 @@ mod tests {
         Digest::Sha256(sha256_of(byte))
     }
 
-    /// Construct a bare `registry/repo` [`Identifier`] (no tag, no digest) —
+    /// Construct a bare `registry/repo` [`PackageRef`] (no tag, no digest) —
     /// the `repository` coordinate shape.
-    fn bare_repo(registry: &str, repo: &str) -> Identifier {
-        Identifier::new_registry(repo, registry)
+    fn bare_repo(registry: &str, repo: &str) -> PackageRef {
+        PackageRef::new_registry(repo, registry)
     }
 
     /// Build a [`LockedTool`] pinning `default/<name>` to one

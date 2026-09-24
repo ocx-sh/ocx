@@ -34,7 +34,7 @@ pub struct PatchProvenance {
     /// The descriptor rule `match` glob that admitted the companion for the base.
     pub rule_match: String,
     /// The companion identifier whose interface projection produced this entry.
-    pub companion: ocx_oci::Identifier,
+    pub companion: ocx_oci::PackageRef,
     /// The install the companion identifier resolved to, digest-complete.
     ///
     /// Separate from [`Self::companion`] because the two answer different
@@ -42,7 +42,7 @@ pub struct PatchProvenance {
     /// digest that tag reaches depends on the active `PatchSnapshot` and on what
     /// the last `ocx patch sync` recorded. An audit trail that carried only the
     /// tag could not say which companion bytes were composed.
-    pub pinned: ocx_oci::PinnedIdentifier,
+    pub pinned: ocx_oci::PinnedPackageRef,
 }
 
 /// The companion-overlay region of a composed entry vector, and the only way to
@@ -92,13 +92,13 @@ impl<'a> PatchOverlay<'a> {
 #[cfg(test)]
 mod patch_overlay_tests {
     use super::{PatchOverlay, PatchProvenance};
-    use ocx_oci::{Digest, Identifier, PinnedIdentifier};
+    use ocx_oci::{Digest, PackageRef, PinnedPackageRef};
 
     fn provenance(rule: &str) -> PatchProvenance {
-        let companion = Identifier::new_registry("companion", "ocx.sh");
+        let companion = PackageRef::new_registry("companion", "ocx.sh");
         PatchProvenance {
             rule_match: rule.to_string(),
-            pinned: PinnedIdentifier::try_from(companion.clone_with_digest(Digest::Sha256("a".repeat(64))))
+            pinned: PinnedPackageRef::try_from(companion.clone_with_digest(Digest::Sha256("a".repeat(64))))
                 .expect("digest present"),
             companion,
         }
@@ -155,7 +155,7 @@ mod patch_overlay_tests {
 /// (`adr_package_integrations.md` C-017).
 pub struct CompanionOverlay {
     pub entries: Vec<(Entry, PatchProvenance)>,
-    pub integrations: Vec<(ocx_oci::PinnedIdentifier, IntegrationEntry)>,
+    pub integrations: Vec<(ocx_oci::PinnedPackageRef, IntegrationEntry)>,
 }
 
 /// What a companion's one-time projection produced, cached per companion
@@ -187,7 +187,7 @@ enum CompanionOutcome {
 ///
 /// Built offline from local `PatchTagMap` + `BlobStore` state (no network).
 /// Applied globally last in [`PackageManager::resolve_env`] (invariant C1).
-pub type SitePatchSet = HashMap<ocx_oci::PinnedIdentifier, CompanionOverlay>;
+pub type SitePatchSet = HashMap<ocx_oci::PinnedPackageRef, CompanionOverlay>;
 
 /// Which CLI tier a caller resolves env for, and what that caller contributes
 /// on top of the package-composed set. Forced at every env-resolution site.
@@ -382,7 +382,7 @@ fn log_project_env_shadowing(composed: &[Entry], project_env: &[Entry]) {
 #[derive(Debug, Clone, Default)]
 pub struct SitePatchRoots {
     /// Pinned identifiers for every companion package that should be retained.
-    pub companions: Vec<ocx_oci::PinnedIdentifier>,
+    pub companions: Vec<ocx_oci::PinnedPackageRef>,
     /// Registry + blob digest pairs for every patch descriptor blob that should
     /// be retained.  The registry is required so the GC can call
     /// `BlobStore::path(registry, digest)` without a linear shard-suffix scan.
@@ -457,7 +457,7 @@ impl std::fmt::Display for ChainRole {
 #[derive(Debug, Clone)]
 pub struct ChainBlob {
     /// The blob pinned by its own digest.
-    pub identifier: ocx_oci::PinnedIdentifier,
+    pub identifier: ocx_oci::PinnedPackageRef,
     /// What this blob is in the OCI walk.
     pub role: ChainRole,
     /// The blob's media type (descriptor `mediaType`, or the spec default
@@ -484,7 +484,7 @@ pub struct ResolvedChain {
     /// The platform-selected pinned identifier — same value the old
     /// `resolve` method returned. Keys every storage path (logical identity,
     /// Decision C2).
-    pub pinned: ocx_oci::PinnedIdentifier,
+    pub pinned: ocx_oci::PinnedPackageRef,
     /// The **physical** transport identifier for content downloads. Equal to
     /// [`Self::pinned`] for registry-backed packages; for an `index.ocx.sh`
     /// source it is the registry the root's `repository` pointer names, so
@@ -507,7 +507,7 @@ pub struct ResolvedChain {
 impl ResolvedChain {
     /// Walk-order pinned identifiers for every chain blob — the input
     /// `ReferenceManager::link_blobs` consumes to populate `refs/blobs/`.
-    pub fn blobs(&self) -> impl Iterator<Item = &ocx_oci::PinnedIdentifier> {
+    pub fn blobs(&self) -> impl Iterator<Item = &ocx_oci::PinnedPackageRef> {
         self.chain.iter().map(|blob| &blob.identifier)
     }
 }
@@ -517,14 +517,14 @@ impl ResolvedChain {
 ///
 /// A straight passthrough of `ComposeOutput::admitted_binaries` /
 /// `admitted_entrypoints` / `admitted_integrations` — each pair names a
-/// declared claim together with the admitted [`ocx_oci::PinnedIdentifier`] that
+/// declared claim together with the admitted [`ocx_oci::PinnedPackageRef`] that
 /// contributed it. See `adr_declared_binaries_metadata.md` §4 Decision A and
 /// `adr_package_integrations.md` C-013.
 #[derive(Debug, Clone, Default)]
 pub struct AdmittedClaims {
-    pub binaries: Vec<(ocx_oci::PinnedIdentifier, BinaryName)>,
-    pub entrypoints: Vec<(ocx_oci::PinnedIdentifier, EntrypointName)>,
-    pub integrations: Vec<(ocx_oci::PinnedIdentifier, IntegrationEntry)>,
+    pub binaries: Vec<(ocx_oci::PinnedPackageRef, BinaryName)>,
+    pub entrypoints: Vec<(ocx_oci::PinnedPackageRef, EntrypointName)>,
+    pub integrations: Vec<(ocx_oci::PinnedPackageRef, IntegrationEntry)>,
 }
 
 /// Resolves the physical transport identifier for a logical pinned reference.
@@ -545,7 +545,7 @@ pub struct AdmittedClaims {
 /// has to set — hence [`ocx_index::Index::route_to_materialize`], not [`ocx_index::Index::route`].
 async fn resolve_transport_pinned(
     index: &ocx_index::Index,
-    pinned: &ocx_oci::PinnedIdentifier,
+    pinned: &ocx_oci::PinnedPackageRef,
 ) -> Result<ocx_oci::PinnedOciIdentifier, PackageErrorKind> {
     let routed = index
         .route_to_materialize(pinned.as_identifier())
@@ -560,7 +560,7 @@ impl PackageManager {
     /// blobs that backed the resolution.
     pub async fn resolve(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
     ) -> Result<ResolvedChain, PackageErrorKind> {
         // Walk the manifest chain through ChainedIndex. Each `fetch_manifest`
@@ -600,7 +600,7 @@ impl PackageManager {
 
                 let config_digest = ocx_oci::Digest::try_from(img.config.digest.as_str())
                     .map_err(|_| PackageErrorKind::DigestMissing)?;
-                let config_pinned = ocx_oci::PinnedIdentifier::try_from(top_id.clone_with_digest(config_digest))
+                let config_pinned = ocx_oci::PinnedPackageRef::try_from(top_id.clone_with_digest(config_digest))
                     .map_err(|_| PackageErrorKind::DigestMissing)?;
                 chain.push(ChainBlob {
                     identifier: config_pinned,
@@ -637,7 +637,7 @@ impl PackageManager {
 
                 let pinned = match self.index().select(&top_id, &platform, IndexOperation::Resolve).await {
                     Ok(SelectResult::Found(id)) => {
-                        ocx_oci::PinnedIdentifier::try_from(id).map_err(|_| PackageErrorKind::DigestMissing)?
+                        ocx_oci::PinnedPackageRef::try_from(id).map_err(|_| PackageErrorKind::DigestMissing)?
                     }
                     Ok(SelectResult::Ambiguous(v)) => return Err(PackageErrorKind::SelectionAmbiguous(v)),
                     Ok(SelectResult::NotFound) => return Err(PackageErrorKind::NotFound),
@@ -682,7 +682,7 @@ impl PackageManager {
                         ));
                     }
                 };
-                let child_pinned = ocx_oci::PinnedIdentifier::try_from(child_id.clone_with_digest(child_digest))
+                let child_pinned = ocx_oci::PinnedPackageRef::try_from(child_id.clone_with_digest(child_digest))
                     .map_err(|_| PackageErrorKind::DigestMissing)?;
                 // The image-index entry that selected this child carries its
                 // authoritative descriptor (media type + size) — no extra
@@ -720,7 +720,7 @@ impl PackageManager {
 
                 let config_digest = ocx_oci::Digest::try_from(final_manifest.config.digest.as_str())
                     .map_err(|_| PackageErrorKind::DigestMissing)?;
-                let config_pinned = ocx_oci::PinnedIdentifier::try_from(top_id.clone_with_digest(config_digest))
+                let config_pinned = ocx_oci::PinnedPackageRef::try_from(top_id.clone_with_digest(config_digest))
                     .map_err(|_| PackageErrorKind::DigestMissing)?;
                 chain.push(ChainBlob {
                     identifier: config_pinned,
@@ -744,7 +744,7 @@ impl PackageManager {
     /// Resolves multiple identifiers in parallel, preserving input order.
     pub async fn resolve_all(
         &self,
-        packages: &[ocx_oci::Identifier],
+        packages: &[ocx_oci::PackageRef],
         platform: ocx_oci::Platform,
     ) -> Result<Vec<ResolvedChain>, crate::error::Error> {
         if packages.is_empty() {
@@ -959,7 +959,7 @@ impl PackageManager {
             // see once arrives twice, with two different `package` strings. Only
             // the KEY is stripped; the emitted attribution keeps the identifier the
             // contributor named.
-            let mut seen_integrations: HashSet<(ocx_oci::PinnedIdentifier, String)> = attribution
+            let mut seen_integrations: HashSet<(ocx_oci::PinnedPackageRef, String)> = attribution
                 .integrations
                 .iter()
                 .map(|(identifier, entry)| (identifier.strip_advisory(), entry.namespace.clone()))
@@ -1059,7 +1059,7 @@ impl PackageManager {
     /// integrations at all.
     async fn build_site_patch_set(
         &self,
-        admitted: &[ocx_oci::PinnedIdentifier],
+        admitted: &[ocx_oci::PinnedPackageRef],
         no_patches: &std::collections::BTreeSet<String>,
         platform: &ocx_oci::Platform,
         collect_integrations: bool,
@@ -1121,7 +1121,7 @@ impl PackageManager {
         // the same companion for every admitted identifier.  Without a cache,
         // `find_companion_local` + `compose` would be called N times for the same
         // companion (N = admitted set size).  The cache below keys by companion
-        // `Identifier` so each (companion, required) pair is projected exactly once.
+        // `PackageRef` so each (companion, required) pair is projected exactly once.
         //
         // It dedups the *emission* by the same stroke, and carries no payload for
         // that: a projection lands in the overlay of the admitted base that
@@ -1134,7 +1134,7 @@ impl PackageManager {
         // Deliberately does NOT gate the fail-closed paths: a required companion
         // that is missing must still fail on every base, whether or not an earlier
         // base already failed on it.
-        let mut companion_projection_cache: HashMap<ocx_oci::Identifier, CompanionOutcome> = HashMap::new();
+        let mut companion_projection_cache: HashMap<ocx_oci::PackageRef, CompanionOutcome> = HashMap::new();
 
         // ── Step 3: Iterate admitted identifiers, collect companions per identifier. ──
         //
@@ -1319,7 +1319,7 @@ impl PackageManager {
                 // current base's overlay. The pin is a parameter rather than captured:
                 // it is only in hand once the companion has been resolved, which is the
                 // same moment the entries it produced are.
-                let make_provenance = |pinned: &ocx_oci::PinnedIdentifier| PatchProvenance {
+                let make_provenance = |pinned: &ocx_oci::PinnedPackageRef| PatchProvenance {
                     rule_match: companion_entry.rule_match.clone(),
                     companion: companion_id.clone(),
                     pinned: pinned.clone(),
@@ -1418,7 +1418,7 @@ impl PackageManager {
                 // read here. A companion is a package loaded into the environment,
                 // so it contributes every carrier a package contributes and gets no
                 // exceptional rules. Attribution rides the pair's own
-                // `PinnedIdentifier` — the companion's, never the base's — so a
+                // `PinnedPackageRef` — the companion's, never the base's — so a
                 // consumer can always tell site policy from what it asked for.
                 //
                 // `admitted_binaries` / `admitted_entrypoints` stay discarded, and
@@ -1500,7 +1500,7 @@ impl PackageManager {
     /// fires as normal).
     pub(super) async fn companion_pin(
         &self,
-        companion_id: &ocx_oci::Identifier,
+        companion_id: &ocx_oci::PackageRef,
     ) -> crate::Result<Option<ocx_oci::Digest>> {
         if let Some(snapshot) = self.patch_snapshot()
             && let Some(pinned_digest) = snapshot
@@ -1520,7 +1520,7 @@ impl PackageManager {
     /// own snapshot.
     pub(super) async fn companion_pin_recorded(
         &self,
-        companion_id: &ocx_oci::Identifier,
+        companion_id: &ocx_oci::PackageRef,
     ) -> crate::Result<Option<ocx_oci::Digest>> {
         let path = self.file_structure().patch_companion_path(companion_id);
         let Some(recorded) = super::patch_discovery::PatchTagMap::read_tag(&path, companion_id.tag_or_latest()).await?
@@ -1575,7 +1575,7 @@ impl PackageManager {
     /// that already names a platform manifest leaves nothing to select from.
     async fn find_companion_local(
         &self,
-        companion_id: &ocx_oci::Identifier,
+        companion_id: &ocx_oci::PackageRef,
         platform: &ocx_oci::Platform,
     ) -> crate::Result<Option<InstallInfo>> {
         use super::common::find_in_store;
@@ -1599,7 +1599,7 @@ impl PackageManager {
             let pinned_id = match top_manifest {
                 // Single-platform image: tag-store digest IS the platform manifest digest.
                 (digest, ocx_oci::Manifest::Image(_)) => {
-                    match ocx_oci::PinnedIdentifier::try_from(companion_id.clone_with_digest(digest)) {
+                    match ocx_oci::PinnedPackageRef::try_from(companion_id.clone_with_digest(digest)) {
                         Ok(id) => id,
                         Err(_) => return Ok(None),
                     }
@@ -1616,7 +1616,7 @@ impl PackageManager {
                         SelectResult::Ambiguous(_) => return Ok(None),
                         SelectResult::FeatureMismatch { .. } => return Ok(None),
                     };
-                    match ocx_oci::PinnedIdentifier::try_from(selected_id) {
+                    match ocx_oci::PinnedPackageRef::try_from(selected_id) {
                         Ok(id) => id,
                         Err(_) => return Ok(None),
                     }
@@ -1636,7 +1636,7 @@ impl PackageManager {
         // produced. Try `find_in_store` with it: present → that was the case;
         // absent → the companion is genuinely not installed locally and
         // `find_in_store` returns `None` → caller treats as missing.
-        let pinned_id = match ocx_oci::PinnedIdentifier::try_from(companion_id.clone_with_digest(top_digest)) {
+        let pinned_id = match ocx_oci::PinnedPackageRef::try_from(companion_id.clone_with_digest(top_digest)) {
             Ok(id) => id,
             Err(_) => return Ok(None),
         };
@@ -1712,7 +1712,7 @@ impl PackageManager {
         //
         // We collect descriptor digests (manifest + layer) and companion entries.
 
-        let mut companion_set: Vec<ocx_oci::Identifier> = Vec::new();
+        let mut companion_set: Vec<ocx_oci::PackageRef> = Vec::new();
         let mut descriptor_digests: Vec<(String, ocx_oci::Digest)> = Vec::new();
         // Per-source manifest pins (source key "registry/repository" → manifest
         // digest) used by `ocx patch freeze` to make compose select descriptors
@@ -1820,7 +1820,7 @@ impl PackageManager {
         // This is required for both GC root correctness and `patch freeze` snapshot
         // accuracy: the pinned identifier must match the path at which the package was
         // actually installed.
-        let mut companions: Vec<ocx_oci::PinnedIdentifier> = Vec::new();
+        let mut companions: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
         // Dedup companion identifiers before resolution (same companion may appear
         // in multiple descriptor sources).
         companion_set.sort_by_key(|id| id.to_string());
@@ -1899,7 +1899,7 @@ impl PackageManager {
 /// digest writes byte-identical content — a race cannot yield a wrong size.
 async fn blob_data_size(
     file_structure: &ocx_store::file_structure::FileStructure,
-    pinned: &ocx_oci::PinnedIdentifier,
+    pinned: &ocx_oci::PinnedPackageRef,
 ) -> i64 {
     let path = file_structure.blobs.data(pinned.registry(), &pinned.digest());
     match tokio::fs::metadata(&path).await {
@@ -2017,7 +2017,7 @@ fn host_platform() -> ocx_oci::Platform {
 async fn load_descriptor_frozen_or_live(
     blob_store: &ocx_store::file_structure::BlobStore,
     registry: &str,
-    descriptor_id: &ocx_oci::Identifier,
+    descriptor_id: &ocx_oci::PackageRef,
     tags_path: &std::path::Path,
     snapshot: Option<&crate::patch::PatchSnapshot>,
 ) -> crate::Result<DescriptorLoadResult> {
@@ -2050,15 +2050,15 @@ async fn load_descriptor_frozen_or_live(
 /// in both descriptors, the package-specific entry overrides the global one
 /// (last-wins semantics matching the Phase 3 install algorithm).
 fn merge_companions(
-    base_id: &ocx_oci::Identifier,
+    base_id: &ocx_oci::PackageRef,
     tier_required_default: bool,
     global_descriptor: Option<&PatchDescriptor>,
     pkg_descriptor: Option<&PatchDescriptor>,
 ) -> Vec<crate::patch::CompanionEntry> {
     use std::collections::HashMap;
 
-    let mut companion_order: Vec<ocx_oci::Identifier> = Vec::new();
-    let mut companion_map: HashMap<ocx_oci::Identifier, crate::patch::CompanionEntry> = HashMap::new();
+    let mut companion_order: Vec<ocx_oci::PackageRef> = Vec::new();
+    let mut companion_map: HashMap<ocx_oci::PackageRef, crate::patch::CompanionEntry> = HashMap::new();
 
     // Collect from global first, then package-specific.
     for descriptor in [global_descriptor, pkg_descriptor].into_iter().flatten() {
@@ -2114,8 +2114,8 @@ fn merge_companions(
 /// this helper without duplicating the slug-recovery logic.
 pub(super) async fn recover_base_with_real_registry(
     snapshot: &ocx_index::IndexStore,
-    slug_base_id: &ocx_oci::Identifier,
-) -> ocx_oci::Identifier {
+    slug_base_id: &ocx_oci::PackageRef,
+) -> ocx_oci::PackageRef {
     // The wire-grammar root document carries a `"repository"` field
     // (`oci://<registry>/<repo>`, A2), so the slug-recovery parse below reads
     // it and strips the C3 `oci://` scheme via `OciIdentifier::parse_repository_pointer`.
@@ -2139,7 +2139,7 @@ pub(super) async fn recover_base_with_real_registry(
                 && ocx_store::file_structure::slugify(&registry)
                     == ocx_store::file_structure::slugify(slug_base_id.registry()) =>
         {
-            ocx_oci::Identifier::new_registry(slug_base_id.repository(), &registry)
+            ocx_oci::PackageRef::new_registry(slug_base_id.repository(), &registry)
                 .clone_with_tag(slug_base_id.tag_or_latest())
         }
         _ => slug_base_id.clone(),
@@ -2154,7 +2154,7 @@ pub(super) async fn recover_base_with_real_registry(
 /// ```
 ///
 /// This function is called recursively: when the current directory is
-/// `candidates`, each child entry is a tag, and an `Identifier` is
+/// `candidates`, each child entry is a tag, and an `PackageRef` is
 /// constructed from `(registry_slug, repo_components, tag)`.  Otherwise the
 /// function descends into each child directory, appending it to
 /// `repo_components`.
@@ -2172,7 +2172,7 @@ pub(super) async fn collect_candidates_from_dir(
     dir: &std::path::Path,
     registry_slug: &str,
     repo_components: &mut Vec<String>,
-    out: &mut Vec<ocx_oci::Identifier>,
+    out: &mut Vec<ocx_oci::PackageRef>,
 ) -> crate::Result<()> {
     let dir_name = match dir.file_name().and_then(|n| n.to_str()) {
         Some(name) => name.to_string(),
@@ -2196,10 +2196,10 @@ pub(super) async fn collect_candidates_from_dir(
             if tag.is_empty() {
                 continue;
             }
-            // Build an Identifier using the registry slug as the registry
+            // Build an PackageRef using the registry slug as the registry
             // (the slug is used by tag_store.patch_descriptor_path() via the same slugify
             // function, so tag lookups use the same path).
-            let base_id = ocx_oci::Identifier::new_registry(&repo, registry_slug).clone_with_tag(&tag);
+            let base_id = ocx_oci::PackageRef::new_registry(&repo, registry_slug).clone_with_tag(&tag);
             out.push(base_id);
         }
         return Ok(());
@@ -2265,7 +2265,7 @@ pub(super) async fn collect_candidates_from_dir(
 /// active snapshot) derive it from the SAME `global_descriptor_id` /
 /// `patch_descriptor_id` identifiers, so the freeze side and the compose side
 /// always agree on the key for a given source.
-fn descriptor_source_key(descriptor_id: &ocx_oci::Identifier) -> String {
+fn descriptor_source_key(descriptor_id: &ocx_oci::PackageRef) -> String {
     format!("{}/{}", descriptor_id.registry(), descriptor_id.repository())
 }
 
@@ -2347,7 +2347,7 @@ async fn collect_descriptor_digests(
 fn snapshot_companion_roots(
     manager: &PackageManager,
     scope: PatchRootScope,
-) -> Vec<(ocx_oci::Identifier, ocx_oci::Digest)> {
+) -> Vec<(ocx_oci::PackageRef, ocx_oci::Digest)> {
     if scope != PatchRootScope::RecordedAndSnapshot {
         return Vec::new();
     }
@@ -2372,7 +2372,7 @@ async fn seed_snapshot_descriptor_digests(
     manager: &PackageManager,
     scope: PatchRootScope,
     blob_store: &ocx_store::file_structure::BlobStore,
-    descriptor_id: &ocx_oci::Identifier,
+    descriptor_id: &ocx_oci::PackageRef,
     recorded_manifest: Option<&ocx_oci::Digest>,
     descriptor_digests: &mut Vec<(String, ocx_oci::Digest)>,
 ) {
@@ -2446,21 +2446,21 @@ fn companion_manifest_index(manager: &PackageManager) -> ocx_index::Index {
 /// two tags is two companions, and a tagless pin would collapse them.
 async fn resolve_companion_pinned(
     local_index: &ocx_index::Index,
-    companion_id: &ocx_oci::Identifier,
+    companion_id: &ocx_oci::PackageRef,
     top_digest: &ocx_oci::Digest,
     host_platform: &ocx_oci::Platform,
-) -> Option<ocx_oci::PinnedIdentifier> {
+) -> Option<ocx_oci::PinnedPackageRef> {
     fn pin(
         repository: &str,
         registry: &str,
         digest: ocx_oci::Digest,
-        companion_id: &ocx_oci::Identifier,
-    ) -> Option<ocx_oci::PinnedIdentifier> {
-        let mut pinned_id = ocx_oci::Identifier::new_registry(repository, registry);
+        companion_id: &ocx_oci::PackageRef,
+    ) -> Option<ocx_oci::PinnedPackageRef> {
+        let mut pinned_id = ocx_oci::PackageRef::new_registry(repository, registry);
         if let Some(tag) = companion_id.tag() {
             pinned_id = pinned_id.clone_with_tag(tag);
         }
-        ocx_oci::PinnedIdentifier::try_from(pinned_id.clone_with_digest(digest))
+        ocx_oci::PinnedPackageRef::try_from(pinned_id.clone_with_digest(digest))
             .inspect_err(|_| {
                 log::debug!(
                     "resolve-site-patch-roots: could not pin companion '{}'; skipping",
@@ -2592,7 +2592,7 @@ mod spec_tests {
     use super::ChainRole;
     use crate::{PackageManager, test_support::manifest_source::FakeManifestSource};
     use ocx_index::{ChainMode, Index, IndexStore, LocalConfig, LocalIndex};
-    use ocx_oci::{self, Algorithm, Digest, Identifier};
+    use ocx_oci::{self, Algorithm, Digest, PackageRef};
     use ocx_store::file_structure::FileStructure;
 
     const REGISTRY: &str = "example.com";
@@ -2601,8 +2601,8 @@ mod spec_tests {
     const CONFIG_DIGEST: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
     const FLAT_MANIFEST_JSON: &str = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2},"layers":[]}"#;
 
-    fn tagged_id() -> Identifier {
-        Identifier::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
+    fn tagged_id() -> PackageRef {
+        PackageRef::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
     }
 
     fn linux_amd64() -> ocx_oci::Platform {
@@ -2821,7 +2821,7 @@ mod phase4_spec_tests {
 
     use crate::{PackageManager, composer};
     use ocx_index::{ChainMode, Index, IndexStore, LocalConfig, LocalIndex};
-    use ocx_oci::{Digest, Identifier, PinnedIdentifier};
+    use ocx_oci::{Digest, PackageRef, PinnedPackageRef};
     use ocx_package::{
         install_info::InstallInfo,
         metadata::{
@@ -2848,9 +2848,9 @@ mod phase4_spec_tests {
         Digest::Sha256(hex_char.to_string().repeat(64))
     }
 
-    fn pinned(repo: &str, hex_char: char) -> PinnedIdentifier {
-        let id = Identifier::new_registry(repo, REGISTRY).clone_with_digest(sha256(hex_char));
-        PinnedIdentifier::try_from(id).unwrap()
+    fn pinned(repo: &str, hex_char: char) -> PinnedPackageRef {
+        let id = PackageRef::new_registry(repo, REGISTRY).clone_with_digest(sha256(hex_char));
+        PinnedPackageRef::try_from(id).unwrap()
     }
 
     fn make_store(root: &std::path::Path) -> PackageStore {
@@ -2886,7 +2886,7 @@ mod phase4_spec_tests {
     /// Seed the patch tier's companion pin (tag → digest) the way a discovery
     /// or `ocx patch sync` records it, so `find_companion_local` resolves the
     /// companion without any index or network access.
-    pub(super) fn seed_companion_pin(file_structure: &FileStructure, companion_tag_id: &Identifier, digest: &Digest) {
+    pub(super) fn seed_companion_pin(file_structure: &FileStructure, companion_tag_id: &PackageRef, digest: &Digest) {
         let pin_path = file_structure.patch_companion_path(companion_tag_id);
         std::fs::create_dir_all(pin_path.parent().unwrap()).unwrap();
         let record = serde_json::json!({ companion_tag_id.tag_or_latest(): digest.to_string() });
@@ -2901,7 +2901,7 @@ mod phase4_spec_tests {
     /// about the same repository.
     pub(super) fn write_companion_root_document(
         file_structure: &FileStructure,
-        companion_tag_id: &Identifier,
+        companion_tag_id: &PackageRef,
         digest: &Digest,
     ) {
         let registry = companion_tag_id.registry();
@@ -2935,9 +2935,9 @@ mod phase4_spec_tests {
         let file_structure = manager.file_structure().clone();
 
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -2973,7 +2973,7 @@ mod phase4_spec_tests {
     }
 
     /// Write a minimal on-disk package directory (metadata.json + resolve.json).
-    pub(super) fn seed_package_in_store(store: &PackageStore, id: &PinnedIdentifier, resolved: &ResolvedPackage) {
+    pub(super) fn seed_package_in_store(store: &PackageStore, id: &PinnedPackageRef, resolved: &ResolvedPackage) {
         let pkg_path = store.path(id);
         std::fs::create_dir_all(pkg_path.join("content")).unwrap();
         let meta = serde_json::json!({ "type": "bundle", "version": 1 });
@@ -2985,7 +2985,7 @@ mod phase4_spec_tests {
     /// Seed a package with one env var of the given key/value/visibility.
     pub(super) fn seed_package_with_constant_var(
         store: &PackageStore,
-        id: &PinnedIdentifier,
+        id: &PinnedPackageRef,
         resolved: &ResolvedPackage,
         var_key: &str,
         var_value: &str,
@@ -3023,7 +3023,7 @@ mod phase4_spec_tests {
     /// whole document instead of growing another parameter onto those two.
     pub(super) fn seed_package_with_metadata(
         store: &PackageStore,
-        id: &PinnedIdentifier,
+        id: &PinnedPackageRef,
         resolved: &ResolvedPackage,
         metadata: &serde_json::Value,
     ) {
@@ -3413,9 +3413,9 @@ mod phase4_spec_tests {
         // Companion is stored with PATCH_REGISTRY so find_companion_local's
         // PackageStore lookup (keyed by registry) resolves to the right path.
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("companion-pkg", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("companion-pkg", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        let companion_tag_id = PackageRef::new_registry("companion-pkg", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("companion-pkg", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -3565,9 +3565,9 @@ mod phase4_spec_tests {
 
         // ── Companion: INTERFACE var COMPANION_VAR=once ────────────────────────
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("shared-companion", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("shared-companion", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        let companion_tag_id = PackageRef::new_registry("shared-companion", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("shared-companion", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -3705,14 +3705,14 @@ mod phase4_spec_tests {
         //    version identity is observable in the overlay entries. ────────────
         let companion_digest_v1 = sha256('c');
         let companion_digest_v2 = sha256('d');
-        let companion_tag_id_v1 = Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_tag("1.0.0");
-        let companion_tag_id_v2 = Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_tag("2.0.0");
-        let companion_pinned_v1 = PinnedIdentifier::try_from(
-            Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_digest(companion_digest_v1.clone()),
+        let companion_tag_id_v1 = PackageRef::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_tag("1.0.0");
+        let companion_tag_id_v2 = PackageRef::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_tag("2.0.0");
+        let companion_pinned_v1 = PinnedPackageRef::try_from(
+            PackageRef::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_digest(companion_digest_v1.clone()),
         )
         .unwrap();
-        let companion_pinned_v2 = PinnedIdentifier::try_from(
-            Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_digest(companion_digest_v2.clone()),
+        let companion_pinned_v2 = PinnedPackageRef::try_from(
+            PackageRef::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_digest(companion_digest_v2.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -3872,9 +3872,9 @@ mod phase4_spec_tests {
 
         // ── Companion: INTERFACE var DEP_PATCH_VAR=present ─────────────────────
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("dep-companion", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("dep-companion", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        let companion_tag_id = PackageRef::new_registry("dep-companion", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("dep-companion", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -4131,9 +4131,9 @@ mod phase4_spec_tests {
         // Store under PATCH_REGISTRY so find_companion_local's PackageStore
         // lookup resolves to the same registry the tag-store entry uses.
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("private-companion", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("private-companion", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        let companion_tag_id = PackageRef::new_registry("private-companion", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("private-companion", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -4344,7 +4344,7 @@ mod phase4_spec_tests {
         let tag_store = manager.file_structure().clone();
 
         // A companion identifier that is NOT installed locally.
-        let companion_tag_id = Identifier::new_registry("required-companion", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("required-companion", PATCH_REGISTRY).clone_with_tag("latest");
 
         // Global descriptor: rule "*" → required companion (via tier required=true).
         let descriptor_json = serde_json::json!({
@@ -4476,9 +4476,9 @@ mod phase4_spec_tests {
             // Companion: one interface var OVERLAY_<suffix>, stored under the patch
             // registry so `find_companion_local` resolves it.
             let companion_digest = sha256(companion_hex);
-            let companion_tag_id = Identifier::new_registry(companion_repo, PATCH_REGISTRY).clone_with_tag("latest");
-            let companion_pinned = PinnedIdentifier::try_from(
-                Identifier::new_registry(companion_repo, PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+            let companion_tag_id = PackageRef::new_registry(companion_repo, PATCH_REGISTRY).clone_with_tag("latest");
+            let companion_pinned = PinnedPackageRef::try_from(
+                PackageRef::new_registry(companion_repo, PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
             )
             .unwrap();
             seed_package_with_constant_var(
@@ -4616,7 +4616,7 @@ mod phase4_spec_tests {
         let tag_store = manager.file_structure().clone();
 
         // Companion: NOT installed locally so find_companion_local → Ok(None).
-        let companion_tag_id = Identifier::new_registry("shared-companion", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("shared-companion", PATCH_REGISTRY).clone_with_tag("latest");
 
         // Helper: write a descriptor blob and return its manifest digest.
         let write_descriptor = |required_flag: bool| {
@@ -4764,9 +4764,9 @@ mod phase4_spec_tests {
         // read_tag_digest parses the stored digest string.
         let global_companion_digest = sha256('a');
         let global_companion_tag_id =
-            Identifier::new_registry("global-companion", PATCH_REGISTRY).clone_with_tag("latest");
-        let global_companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("global-companion", PATCH_REGISTRY)
+            PackageRef::new_registry("global-companion", PATCH_REGISTRY).clone_with_tag("latest");
+        let global_companion_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("global-companion", PATCH_REGISTRY)
                 .clone_with_digest(global_companion_digest.clone()),
         )
         .unwrap();
@@ -4782,9 +4782,9 @@ mod phase4_spec_tests {
 
         // ── Pkg-specific companion: CERT_FILE=pkg_cert ────────────────────────
         let pkg_companion_digest = sha256('b');
-        let pkg_companion_tag_id = Identifier::new_registry("pkg-companion", PATCH_REGISTRY).clone_with_tag("latest");
-        let pkg_companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("pkg-companion", PATCH_REGISTRY).clone_with_digest(pkg_companion_digest.clone()),
+        let pkg_companion_tag_id = PackageRef::new_registry("pkg-companion", PATCH_REGISTRY).clone_with_tag("latest");
+        let pkg_companion_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("pkg-companion", PATCH_REGISTRY).clone_with_digest(pkg_companion_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -4798,7 +4798,7 @@ mod phase4_spec_tests {
         seed_companion_pin(&tag_store, &pkg_companion_tag_id, &pkg_companion_digest);
 
         // ── Helper: write a descriptor blob and return manifest digest ─────────
-        let write_descriptor_blob = |companion_tag: &Identifier| {
+        let write_descriptor_blob = |companion_tag: &PackageRef| {
             let descriptor_json = serde_json::json!({
                 "version": 1,
                 "rules": [{ "match": "*", "packages": [companion_tag.to_string()] }]
@@ -4933,9 +4933,9 @@ mod phase4_spec_tests {
 
         // ── Companion: has PATH = "/companion/bin" (interface, Path modifier). ──
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("path-companion", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("path-companion", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        let companion_tag_id = PackageRef::new_registry("path-companion", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("path-companion", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
         )
         .unwrap();
 
@@ -5349,7 +5349,7 @@ mod phase4_spec_tests {
         let tag_store = manager.file_structure().clone();
 
         // Companion: NOT installed locally (no tag-store entry, no package dir).
-        let companion_tag_id = Identifier::new_registry("required-companion", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("required-companion", PATCH_REGISTRY).clone_with_tag("latest");
 
         // Global descriptor: rule "*" → required companion (matches both dep1 and root).
         let descriptor_json = serde_json::json!({
@@ -5476,7 +5476,7 @@ mod phase4_spec_tests {
         // Companion tag ID whose root document will be written in the REAL
         // envelope format — but no package is installed (no package dir, no blob).
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("required-ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("required-ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
 
         // Write the companion's root document in the correct schema.
         // Before the fix, `read_tag_digest` would fail to parse this and silently
@@ -5579,9 +5579,9 @@ mod phase4_spec_tests {
 
         // ── Companion: fully installed (root-document tag + package dir + interface var). ──
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
         )
         .unwrap();
 
@@ -5763,11 +5763,11 @@ mod phase4_spec_tests {
         let tag_store = manager.file_structure().clone();
 
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
 
         if seed_package {
-            let companion_pinned = PinnedIdentifier::try_from(
-                Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+            let companion_pinned = PinnedPackageRef::try_from(
+                PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
             )
             .unwrap();
             seed_package_with_constant_var(
@@ -5795,7 +5795,7 @@ mod phase4_spec_tests {
     pub(super) async fn seed_global_descriptor(
         manager: &PackageManager,
         patch_config: &ocx_config::patch::ResolvedPatchConfig,
-        companion_tag_ids: &[&Identifier],
+        companion_tag_ids: &[&PackageRef],
     ) {
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use ocx_oci::Algorithm;
@@ -5989,7 +5989,7 @@ mod phase4_spec_tests {
 
     /// Seed `store` with a dependency that declares exactly one integrations
     /// namespace, and return it together with the TC that reaches it.
-    fn seed_shared_customizing_dep(store: &PackageStore) -> (PinnedIdentifier, ResolvedPackage) {
+    fn seed_shared_customizing_dep(store: &PackageStore) -> (PinnedPackageRef, ResolvedPackage) {
         let shared_dep = pinned("shareddep", 'd');
         seed_package_with_metadata(
             store,
@@ -6005,7 +6005,7 @@ mod phase4_spec_tests {
     }
 
     /// A transitive closure whose single PUBLIC dependency is `identifier`.
-    fn tc_reaching(identifier: &PinnedIdentifier) -> ResolvedPackage {
+    fn tc_reaching(identifier: &PinnedPackageRef) -> ResolvedPackage {
         ResolvedPackage {
             dependencies: vec![ResolvedDependency {
                 identifier: identifier.clone(),
@@ -6024,10 +6024,10 @@ mod phase4_spec_tests {
     ///
     /// The package store keys on registry + digest, so the tagged name loads the
     /// same seeded package.
-    fn with_advisory_tag(identifier: &PinnedIdentifier, tag: &str) -> PinnedIdentifier {
+    fn with_advisory_tag(identifier: &PinnedPackageRef, tag: &str) -> PinnedPackageRef {
         // `clone_with_tag` drops the digest and `clone_with_digest` keeps the
         // tag, so this order — and only this order — yields both.
-        let tagged = PinnedIdentifier::try_from(
+        let tagged = PinnedPackageRef::try_from(
             identifier
                 .as_identifier()
                 .clone_with_tag(tag)
@@ -6070,10 +6070,10 @@ mod phase4_spec_tests {
         name: &str,
         hex_char: char,
         resolved: &ResolvedPackage,
-    ) -> (Identifier, PinnedIdentifier) {
+    ) -> (PackageRef, PinnedPackageRef) {
         let digest = sha256(hex_char);
-        let tag_id = Identifier::new_registry(name, PATCH_REGISTRY).clone_with_tag("latest");
-        let pinned_id = PinnedIdentifier::try_from(tag_id.clone_with_digest(digest.clone())).unwrap();
+        let tag_id = PackageRef::new_registry(name, PATCH_REGISTRY).clone_with_tag("latest");
+        let pinned_id = PinnedPackageRef::try_from(tag_id.clone_with_digest(digest.clone())).unwrap();
         seed_package_with_metadata(
             &manager.file_structure().packages,
             &pinned_id,
@@ -6093,7 +6093,7 @@ mod phase4_spec_tests {
     /// row per (package, namespace), and two advisory tags on one digest are one
     /// package. A tag-sensitive count would report 1 for each of two rows that
     /// name the same package differently, which is the duplicate itself.
-    fn integration_rows(attribution: &super::AdmittedClaims, identifier: &PinnedIdentifier, namespace: &str) -> usize {
+    fn integration_rows(attribution: &super::AdmittedClaims, identifier: &PinnedPackageRef, namespace: &str) -> usize {
         attribution
             .integrations
             .iter()
@@ -6227,9 +6227,9 @@ mod phase4_spec_tests {
         // which is exactly what payload resolution asserts.
         let absent_dep = pinned("absentdep", 'a');
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
         )
         .unwrap();
         seed_package_with_metadata(
@@ -6275,8 +6275,8 @@ mod phase4_spec_tests {
     /// decides; a fixture that needs the two to differ per base writes its own.
     async fn seed_descriptor_with_required(
         manager: &PackageManager,
-        descriptor_id: &Identifier,
-        companion_tag_id: &Identifier,
+        descriptor_id: &PackageRef,
+        companion_tag_id: &PackageRef,
         required: bool,
     ) {
         use super::super::patch_discovery::PatchTagMap;
@@ -6340,7 +6340,7 @@ mod phase4_spec_tests {
         let store = manager.file_structure().packages.clone();
 
         // Named by both descriptors, never installed locally.
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
         // Global rule, optional: the first admitted base warn-skips it.
         seed_descriptor_with_required(&manager, &global_descriptor_id(&config), &companion_tag_id, false).await;
 
@@ -6377,7 +6377,7 @@ mod phase4_spec_tests {
 //
 // Traceability:
 //   Spec test 1 — seeded installed base + global descriptor + installed companion
-//                 → companion PinnedIdentifier in .companions; descriptor manifest+layer
+//                 → companion PinnedPackageRef in .companions; descriptor manifest+layer
 //                 digests in .descriptors.
 //   Spec test 2 — ChainMode::Remote manager with companion installed locally
 //                 → still returns companion (proves network-free, local-only).
@@ -6391,7 +6391,7 @@ mod phase5a_spec_tests {
     use crate::PackageManager;
     use ocx_config::patch::ResolvedPatchConfig;
     use ocx_index::{ChainMode, Index, IndexStore, LocalConfig, LocalIndex};
-    use ocx_oci::{Algorithm, Digest, Identifier, PinnedIdentifier};
+    use ocx_oci::{Algorithm, Digest, PackageRef, PinnedPackageRef};
     use ocx_package::{metadata::visibility::Visibility, resolved_package::ResolvedPackage};
     use ocx_store::file_structure::{BlobStore, FileStructure};
 
@@ -6465,7 +6465,7 @@ mod phase5a_spec_tests {
     /// `resolve_site_patch_roots` discover the base identifier, we just need
     /// the candidate path to exist. We create the parent dirs and a placeholder
     /// (regular file) for the candidate entry itself.
-    pub(super) fn seed_installed_base_symlink(dir: &TempDir, base_id: &Identifier) {
+    pub(super) fn seed_installed_base_symlink(dir: &TempDir, base_id: &PackageRef) {
         let symlink_store = ocx_store::file_structure::SymlinkStore::new(dir.path().join("symlinks"));
         let candidate_path = symlink_store.candidate(base_id);
         std::fs::create_dir_all(candidate_path.parent().unwrap()).unwrap();
@@ -6483,7 +6483,7 @@ mod phase5a_spec_tests {
     pub(super) async fn seed_global_descriptor_with_companion(
         dir: &TempDir,
         patch_config: &ResolvedPatchConfig,
-        companion_tag_id: &Identifier,
+        companion_tag_id: &PackageRef,
     ) -> (Digest, Digest) {
         let blob_store = BlobStore::new(dir.path().join("blobs"));
         let tag_store = FileStructure::with_root(dir.path().to_path_buf());
@@ -6529,7 +6529,7 @@ mod phase5a_spec_tests {
 
     /// `resolve_site_patch_roots` with an installed base, a global descriptor
     /// (rule `*` → companion), and an installed companion returns:
-    ///   - the companion `PinnedIdentifier` in `.companions`
+    ///   - the companion `PinnedPackageRef` in `.companions`
     ///   - the descriptor manifest digest + layer digest in `.descriptors`
     ///
     /// This is the primary contract test for the GC root derivation.
@@ -6545,16 +6545,16 @@ mod phase5a_spec_tests {
         let tag_store = manager.file_structure().clone();
 
         // Seed an installed base: place a candidate symlink under the symlink store.
-        let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
+        let base_id = PackageRef::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
         seed_installed_base_symlink(&dir, &base_id);
 
         // Seed the companion package in the package store.
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
         // Keeps the advisory tag: `resolve_site_patch_roots` now carries it on the
         // resolved pin so a freeze can key per tag. Store path is unaffected.
         let companion_pinned =
-            PinnedIdentifier::try_from(companion_tag_id.clone_with_digest(companion_digest.clone())).unwrap();
+            PinnedPackageRef::try_from(companion_tag_id.clone_with_digest(companion_digest.clone())).unwrap();
         seed_package_with_constant_var(
             &store,
             &companion_pinned,
@@ -6619,18 +6619,18 @@ mod phase5a_spec_tests {
     async fn site_patch_roots_retain_the_snapshot_pinned_companion_for_garbage_collection() {
         let dir = TempDir::new().unwrap();
         let patch_config = test_patch_config();
-        let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
+        let base_id = PackageRef::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
         seed_installed_base_symlink(&dir, &base_id);
 
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
         // The record advanced to v2 (a sync); the snapshot still pins v1.
         let frozen_digest = sha256('c');
         let synced_digest = sha256('d');
         // A resolved companion root keeps its advisory tag (the freeze keys on
         // it); the package store still locates it by registry + digest alone.
         let pinned_at = |digest: &Digest| {
-            PinnedIdentifier::try_from(
-                Identifier::new_registry("ca-bundle", PATCH_REGISTRY)
+            PinnedPackageRef::try_from(
+                PackageRef::new_registry("ca-bundle", PATCH_REGISTRY)
                     .clone_with_tag("latest")
                     .clone_with_digest(digest.clone()),
             )
@@ -6645,9 +6645,9 @@ mod phase5a_spec_tests {
         // rule was dropped by the same sync that advanced the record. The
         // frozen build still composes it, so GC still has to retain it.
         let dropped_digest = sha256('e');
-        let dropped_companion = Identifier::new_registry("legacy-ca", PATCH_REGISTRY).clone_with_tag("latest");
+        let dropped_companion = PackageRef::new_registry("legacy-ca", PATCH_REGISTRY).clone_with_tag("latest");
         let dropped_pinned =
-            PinnedIdentifier::try_from(dropped_companion.clone_with_digest(dropped_digest.clone())).unwrap();
+            PinnedPackageRef::try_from(dropped_companion.clone_with_digest(dropped_digest.clone())).unwrap();
 
         let snapshot = crate::patch::PatchSnapshot {
             version: crate::patch::snapshot::SnapshotVersion::CURRENT,
@@ -6707,10 +6707,10 @@ mod phase5a_spec_tests {
     async fn site_patch_roots_retain_the_snapshot_pinned_descriptor_blobs() {
         let dir = TempDir::new().unwrap();
         let patch_config = test_patch_config();
-        let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
+        let base_id = PackageRef::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
         seed_installed_base_symlink(&dir, &base_id);
 
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
         let (recorded_manifest, _) =
             seed_global_descriptor_with_companion(&dir, &patch_config, &companion_tag_id).await;
 
@@ -6806,16 +6806,16 @@ mod phase5a_spec_tests {
         let tag_store = manager.file_structure().clone();
 
         // Seed installed base.
-        let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
+        let base_id = PackageRef::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
         seed_installed_base_symlink(&dir, &base_id);
 
         // Seed companion.
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
         // Keeps the advisory tag: `resolve_site_patch_roots` now carries it on the
         // resolved pin so a freeze can key per tag. Store path is unaffected.
         let companion_pinned =
-            PinnedIdentifier::try_from(companion_tag_id.clone_with_digest(companion_digest.clone())).unwrap();
+            PinnedPackageRef::try_from(companion_tag_id.clone_with_digest(companion_digest.clone())).unwrap();
         seed_package_with_constant_var(
             &store,
             &companion_pinned,
@@ -6860,7 +6860,7 @@ mod phase5a_spec_tests {
 
         // Seed an installed base so we can prove the early-return fires, not a
         // "nothing to enumerate" path.
-        let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
+        let base_id = PackageRef::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
         seed_installed_base_symlink(&dir, &base_id);
 
         let roots = manager
@@ -6914,16 +6914,16 @@ mod phase5a_spec_tests {
         //   symlinks/{registry_slug}/cmake/candidates/3.28
         // The correctly-reconstructed base identifier must be `cmake:3.28`
         // in registry `example.com` — not `cmake/candidates:3.28`.
-        let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
+        let base_id = PackageRef::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
         seed_installed_base_symlink(&dir, &base_id);
 
         // Seed a companion package.
         let companion_digest = sha256('6');
-        let companion_tag_id = Identifier::new_registry("ca-certs", PATCH_REGISTRY).clone_with_tag("v1");
+        let companion_tag_id = PackageRef::new_registry("ca-certs", PATCH_REGISTRY).clone_with_tag("v1");
         // Keeps the advisory tag: `resolve_site_patch_roots` now carries it on the
         // resolved pin so a freeze can key per tag. Store path is unaffected.
         let companion_pinned =
-            PinnedIdentifier::try_from(companion_tag_id.clone_with_digest(companion_digest.clone())).unwrap();
+            PinnedPackageRef::try_from(companion_tag_id.clone_with_digest(companion_digest.clone())).unwrap();
         seed_package_with_constant_var(
             &store,
             &companion_pinned,
@@ -7024,7 +7024,7 @@ mod phase5a_spec_tests {
         let tag_store = manager.file_structure().clone();
 
         // Installed base whose registry carries a PORT → symlink slug `localhost_5000`.
-        let base_id = Identifier::new_registry("cmake", "localhost:5000").clone_with_tag("3.28");
+        let base_id = PackageRef::new_registry("cmake", "localhost:5000").clone_with_tag("3.28");
         seed_installed_base_symlink(&dir, &base_id);
 
         // Seed the base's root document recording the canonical `oci://` `repository`
@@ -7044,11 +7044,11 @@ mod phase5a_spec_tests {
 
         // Companion installed locally.
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
         // Keeps the advisory tag: `resolve_site_patch_roots` now carries it on the
         // resolved pin so a freeze can key per tag. Store path is unaffected.
         let companion_pinned =
-            PinnedIdentifier::try_from(companion_tag_id.clone_with_digest(companion_digest.clone())).unwrap();
+            PinnedPackageRef::try_from(companion_tag_id.clone_with_digest(companion_digest.clone())).unwrap();
         seed_package_with_constant_var(
             &store,
             &companion_pinned,
@@ -7117,7 +7117,7 @@ mod phase5a_spec_tests {
 
     /// Seeds the root document for `(source, repository)` with the given
     /// `repository` pointer and returns the recovered base for `slug_base_id`.
-    async fn recover_with_root_pointer(slug_base_id: &Identifier, pointer: &str) -> Identifier {
+    async fn recover_with_root_pointer(slug_base_id: &PackageRef, pointer: &str) -> PackageRef {
         let dir = TempDir::new().unwrap();
         let snapshot = IndexStore::machine_local(&FileStructure::with_root(dir.path().to_path_buf()));
         let root_path = snapshot.root_document_path(slug_base_id.registry(), slug_base_id.repository());
@@ -7132,7 +7132,7 @@ mod phase5a_spec_tests {
     /// neither the package name nor the physical location.
     #[tokio::test]
     async fn recover_base_keeps_index_routed_name_off_its_physical_host() {
-        let slug_base_id = Identifier::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
+        let slug_base_id = PackageRef::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
         let recovered = recover_with_root_pointer(&slug_base_id, "oci://ghcr.io/ocx-contrib/cmake").await;
         assert_eq!(recovered.to_string(), "ocx.sh/cmake:3.28");
     }
@@ -7141,7 +7141,7 @@ mod phase5a_spec_tests {
     /// restored to the real hostname it was slugged from.
     #[tokio::test]
     async fn recover_base_unslugs_port_registry() {
-        let slug_base_id = Identifier::new_registry("cmake", "localhost_5000").clone_with_tag("3.28");
+        let slug_base_id = PackageRef::new_registry("cmake", "localhost_5000").clone_with_tag("3.28");
         let recovered = recover_with_root_pointer(&slug_base_id, "oci://localhost:5000/cmake").await;
         assert_eq!(recovered.to_string(), "localhost:5000/cmake:3.28");
     }
@@ -7165,7 +7165,7 @@ mod phase5b_spec_tests {
 
     use crate::patch::snapshot::{PatchSnapshot, SnapshotVersion};
     use ocx_index::{IndexStore, LocalConfig, LocalIndex};
-    use ocx_oci::{Identifier, PinnedIdentifier};
+    use ocx_oci::{PackageRef, PinnedPackageRef};
     use ocx_package::{metadata::visibility::Visibility, resolved_package::ResolvedPackage};
 
     use super::{
@@ -7207,11 +7207,11 @@ mod phase5b_spec_tests {
         let live_digest = sha256('a');
         let snap_digest = sha256('b');
 
-        let companion_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
 
         // Live companion: tag → A, package at A carries live_value.
-        let live_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(live_digest.clone()),
+        let live_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(live_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -7225,8 +7225,8 @@ mod phase5b_spec_tests {
         seed_companion_pin(&tag_store, &companion_id, &live_digest);
 
         // Snapshot companion: package at digest B carries snapshot_value.
-        let snap_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(snap_digest.clone()),
+        let snap_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(snap_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -7305,10 +7305,10 @@ mod phase5b_spec_tests {
         let tag_store = manager.file_structure().clone();
 
         let live_digest = sha256('a');
-        let companion_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
 
-        let live_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(live_digest.clone()),
+        let live_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(live_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -7371,11 +7371,11 @@ mod phase5b_spec_tests {
         // ── One companion repository, two tags, two installs, two values ──────
         let digest_v1 = sha256('c');
         let digest_v2 = sha256('d');
-        let companion_v1 = Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_tag("1.0.0");
-        let companion_v2 = Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_tag("2.0.0");
+        let companion_v1 = PackageRef::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_tag("1.0.0");
+        let companion_v2 = PackageRef::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_tag("2.0.0");
         for (digest, value) in [(&digest_v1, "one"), (&digest_v2, "two")] {
-            let pinned = PinnedIdentifier::try_from(
-                Identifier::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_digest(digest.clone()),
+            let pinned = PinnedPackageRef::try_from(
+                PackageRef::new_registry("dedup_companion", PATCH_REGISTRY).clone_with_digest(digest.clone()),
             )
             .unwrap();
             seed_package_with_constant_var(
@@ -7438,7 +7438,7 @@ mod phase5b_spec_tests {
 
         // An installed base is what makes the catch-all rule contribute
         // companions to the freeze's root set.
-        let base_id = Identifier::new_registry("alpha", "example.com").clone_with_tag("1.0.0");
+        let base_id = PackageRef::new_registry("alpha", "example.com").clone_with_tag("1.0.0");
         super::phase5a_spec_tests::seed_installed_base_symlink(&dir, &base_id);
 
         // ── Freeze: live roots → snapshot ─────────────────────────────────────
@@ -7504,10 +7504,10 @@ mod phase5b_spec_tests {
         let tag_store = make_manager(&dir).file_structure().clone();
 
         // Frozen companion `ca-bundle` at digest dC1 → SNAP_VAR=frozen.
-        let frozen_companion = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let frozen_companion = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
         let frozen_digest = sha256('1');
-        let frozen_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(frozen_digest.clone()),
+        let frozen_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(frozen_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -7521,10 +7521,10 @@ mod phase5b_spec_tests {
         seed_companion_pin(&tag_store, &frozen_companion, &frozen_digest);
 
         // Advanced companion `ca-bundle-v2` at digest dC2 → SNAP_VAR=advanced.
-        let advanced_companion = Identifier::new_registry("ca-bundle-v2", PATCH_REGISTRY).clone_with_tag("latest");
+        let advanced_companion = PackageRef::new_registry("ca-bundle-v2", PATCH_REGISTRY).clone_with_tag("latest");
         let advanced_digest = sha256('2');
-        let advanced_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle-v2", PATCH_REGISTRY).clone_with_digest(advanced_digest.clone()),
+        let advanced_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("ca-bundle-v2", PATCH_REGISTRY).clone_with_digest(advanced_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -7980,7 +7980,7 @@ mod c036_reserved_key_gate {
     use tempfile::TempDir;
 
     use crate::PackageManager;
-    use ocx_oci::{Digest, Identifier, PinnedIdentifier};
+    use ocx_oci::{Digest, PackageRef, PinnedPackageRef};
     use ocx_package::{install_info::InstallInfo, metadata, resolved_package::ResolvedPackage};
     use ocx_shell::shell::Shell;
     use ocx_store::file_structure::{PackageDir, PackageStore};
@@ -8000,9 +8000,9 @@ mod c036_reserved_key_gate {
     /// passes by resolving to nothing at all is impossible.
     const BENIGN: (&str, &str) = ("TOOL_HOME", "/opt/tool");
 
-    fn pinned(repo: &str, registry: &str, hex_char: char) -> PinnedIdentifier {
+    fn pinned(repo: &str, registry: &str, hex_char: char) -> PinnedPackageRef {
         let digest = Digest::Sha256(hex_char.to_string().repeat(64));
-        PinnedIdentifier::try_from(Identifier::new_registry(repo, registry).clone_with_digest(digest)).unwrap()
+        PinnedPackageRef::try_from(PackageRef::new_registry(repo, registry).clone_with_digest(digest)).unwrap()
     }
 
     /// Seed an **already-published** package declaring `vars` verbatim and
@@ -8135,9 +8135,9 @@ mod c036_reserved_key_gate {
         let store = manager.file_structure().packages.clone();
 
         let companion_digest = Digest::Sha256("c".repeat(64));
-        let companion_tag = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        let companion_tag = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(

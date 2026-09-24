@@ -3,14 +3,14 @@
 
 use serde::Serialize;
 
-use super::identifier::error::{IdentifierError, IdentifierErrorKind};
-use super::{Digest, Identifier, PinnedIdentifier, native};
+use super::package_ref::error::{IdentifierError, IdentifierErrorKind};
+use super::{Digest, PackageRef, PinnedPackageRef, native};
 
 const DOCKER_HUB_DOMAINS: &[&str] = &["docker.io", "index.docker.io"];
 
 /// A **physical** OCI location: the registry and repository a request dials.
 ///
-/// [`Identifier`] is the package name a user, a lock or package metadata
+/// [`PackageRef`] is the package name a user, a lock or package metadata
 /// spells; it is logical and may be served by an index that points somewhere
 /// else entirely (`ocx.sh/cmake` → `ghcr.io/ocx-contrib/cmake`). Every
 /// [`Client`](crate::Client) read and write takes this type instead, so a
@@ -18,7 +18,7 @@ const DOCKER_HUB_DOMAINS: &[&str] = &["docker.io", "index.docker.io"];
 /// the logical host is the defect class of ocx#504, and here it does not
 /// compile.
 ///
-/// There is no conversion from or to [`Identifier`]: no `From`, `Into`,
+/// There is no conversion from or to [`PackageRef`]: no `From`, `Into`,
 /// `AsRef`, `Deref` or `FromStr`. The ways to obtain one are:
 ///
 /// - routing a package identifier through the index (`ocx_index::Index::route`,
@@ -34,24 +34,24 @@ const DOCKER_HUB_DOMAINS: &[&str] = &["docker.io", "index.docker.io"];
 /// site of those four constructors, so a new one is a reviewed decision.
 ///
 /// Serializes to the same `registry/repository[:tag][@digest]` string as
-/// [`Identifier`], for reports. It deliberately does not deserialize: nothing
+/// [`PackageRef`], for reports. It deliberately does not deserialize: nothing
 /// OCX persists names a physical location in that grammar.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct OciIdentifier(Identifier);
+pub struct OciIdentifier(PackageRef);
 
 impl OciIdentifier {
     /// Parses a location the user named as a **write target** — `--to`, `-i`,
     /// a managed-config source — using `default_registry` when the input names
     /// no registry.
     ///
-    /// The same grammar as [`Identifier::parse_with_default_registry`]. The
+    /// The same grammar as [`PackageRef::parse_with_default_registry`]. The
     /// input is taken as a location, not a package name: nothing routes it.
     ///
     /// # Errors
     ///
     /// [`IdentifierError`] exactly as the identifier grammar raises it.
     pub fn parse_target(input: &str, default_registry: &str) -> Result<Self, IdentifierError> {
-        Identifier::parse_with_default_registry(input, default_registry).map(Self)
+        PackageRef::parse_with_default_registry(input, default_registry).map(Self)
     }
 
     /// Parses an index root's `repository` pointer (`oci://host/path`).
@@ -78,7 +78,7 @@ impl OciIdentifier {
         if host.is_empty() || path.is_empty() {
             return Err(malformed());
         }
-        let parsed = Identifier::parse_with_default_registry(rest, host).map_err(|_| malformed())?;
+        let parsed = PackageRef::parse_with_default_registry(rest, host).map_err(|_| malformed())?;
         if parsed.registry() != host
             || parsed.repository() != path
             || parsed.tag().is_some()
@@ -95,7 +95,7 @@ impl OciIdentifier {
     /// For the index internals that decide a name is not rewritten. Anything
     /// else wants `ocx_index::Index::route`, which reaches this only after
     /// establishing that no index serves the name.
-    pub fn passthrough(identifier: &Identifier) -> Self {
+    pub fn passthrough(identifier: &PackageRef) -> Self {
         Self(identifier.clone())
     }
 
@@ -105,7 +105,7 @@ impl OciIdentifier {
     /// For locations that arrive already split — a mirror spec's target — and
     /// for fixtures.
     pub fn from_parts(repository: impl Into<String>, registry: impl Into<String>) -> Self {
-        Self(Identifier::new_registry(repository, registry))
+        Self(PackageRef::new_registry(repository, registry))
     }
 
     /// This location at `logical`'s version: its tag and its digest, each
@@ -115,7 +115,7 @@ impl OciIdentifier {
     /// tag goes on first because [`clone_with_tag`](Self::clone_with_tag)
     /// drops a digest.
     #[must_use]
-    pub fn at_version_of(self, logical: &Identifier) -> Self {
+    pub fn at_version_of(self, logical: &PackageRef) -> Self {
         let mut location = self.without_specifiers();
         if let Some(tag) = logical.tag() {
             location = location.clone_with_tag(tag);
@@ -130,7 +130,7 @@ impl OciIdentifier {
     /// for a pinned package identifier, whose digest makes the result pinned
     /// too.
     #[must_use]
-    pub fn at_pin_of(self, pinned: &PinnedIdentifier) -> PinnedOciIdentifier {
+    pub fn at_pin_of(self, pinned: &PinnedPackageRef) -> PinnedOciIdentifier {
         self.at_version_of(pinned.as_identifier()).pinned_at(pinned.digest())
     }
 
@@ -231,7 +231,7 @@ impl OciIdentifier {
         if DOCKER_HUB_DOMAINS.iter().any(|domain| registry == *domain) {
             return Err(IdentifierError::new(input, IdentifierErrorKind::DockerHubDefault));
         }
-        let mut identifier = Identifier::new_registry(reference.repository(), registry);
+        let mut identifier = PackageRef::new_registry(reference.repository(), registry);
         if let Some(tag) = reference.tag() {
             identifier = identifier.clone_with_tag(tag);
         }
@@ -293,7 +293,7 @@ impl schemars::JsonSchema for OciIdentifier {
 /// (`pull_manifest`, `pull_blob`, `pull_layer`) addresses.
 ///
 /// Deliberately **no serde**: a physical pin has no business in a lock file
-/// or in package metadata, which name the package ([`PinnedIdentifier`]).
+/// or in package metadata, which name the package ([`PinnedPackageRef`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PinnedOciIdentifier {
     identifier: OciIdentifier,
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn at_version_of_carries_the_tag_and_the_digest() {
-        let logical = Identifier::new_registry("cmake", "ocx.sh")
+        let logical = PackageRef::new_registry("cmake", "ocx.sh")
             .clone_with_tag("3.28")
             .clone_with_digest(digest());
         let location = OciIdentifier::from_parts("ocx-contrib/cmake", "ghcr.io").at_version_of(&logical);
@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn at_pin_of_yields_a_pinned_location() {
         let pinned =
-            PinnedIdentifier::try_from(Identifier::new_registry("cmake", "ocx.sh").clone_with_digest(digest()))
+            PinnedPackageRef::try_from(PackageRef::new_registry("cmake", "ocx.sh").clone_with_digest(digest()))
                 .unwrap();
         let location = OciIdentifier::from_parts("ocx-contrib/cmake", "ghcr.io").at_pin_of(&pinned);
         assert_eq!(location.digest(), digest());

@@ -64,14 +64,14 @@ const _: () = assert!(
 /// This is shared across all instances of the index, and is used to avoid redundant file reads.
 pub struct Cache {
     repositories: RwLock<HashMap<String, Vec<String>>>,
-    tags: RwLock<HashMap<ocx_oci::Identifier, Vec<String>>>,
-    tag_digests: RwLock<HashMap<ocx_oci::Identifier, ocx_oci::Digest>>,
+    tags: RwLock<HashMap<ocx_oci::PackageRef, Vec<String>>>,
+    tag_digests: RwLock<HashMap<ocx_oci::PackageRef, ocx_oci::Digest>>,
     /// Coalesces concurrent misses on [`Self::get_tags`]. Beside the map it
     /// guards, never around it — see [`SharedCache`] on why there is no outer
     /// lock, which a group wrapping the whole struct would reintroduce.
-    tag_group: singleflight::Group<ocx_oci::Identifier, Vec<String>>,
+    tag_group: singleflight::Group<ocx_oci::PackageRef, Vec<String>>,
     /// Coalesces concurrent misses on [`Self::get_tag_digest`], same shape.
-    tag_digest_group: singleflight::Group<ocx_oci::Identifier, ocx_oci::Digest>,
+    tag_digest_group: singleflight::Group<ocx_oci::PackageRef, ocx_oci::Digest>,
 }
 
 impl Default for Cache {
@@ -88,12 +88,12 @@ impl Default for Cache {
 
 impl Cache {
     /// The coalescing group guarding [`Self::get_tags`]' misses.
-    pub fn tag_group(&self) -> &singleflight::Group<ocx_oci::Identifier, Vec<String>> {
+    pub fn tag_group(&self) -> &singleflight::Group<ocx_oci::PackageRef, Vec<String>> {
         &self.tag_group
     }
 
     /// The coalescing group guarding [`Self::get_tag_digest`]' misses.
-    pub fn tag_digest_group(&self) -> &singleflight::Group<ocx_oci::Identifier, ocx_oci::Digest> {
+    pub fn tag_digest_group(&self) -> &singleflight::Group<ocx_oci::PackageRef, ocx_oci::Digest> {
         &self.tag_digest_group
     }
 
@@ -105,19 +105,19 @@ impl Cache {
         self.repositories.write().await.insert(registry, repositories);
     }
 
-    pub async fn get_tags(&self, identifier: &ocx_oci::Identifier) -> Option<Vec<String>> {
+    pub async fn get_tags(&self, identifier: &ocx_oci::PackageRef) -> Option<Vec<String>> {
         self.tags.read().await.get(identifier).cloned()
     }
 
-    pub async fn set_tags(&self, identifier: ocx_oci::Identifier, tags: Vec<String>) {
+    pub async fn set_tags(&self, identifier: ocx_oci::PackageRef, tags: Vec<String>) {
         self.tags.write().await.insert(identifier, tags);
     }
 
-    pub async fn get_tag_digest(&self, identifier: &ocx_oci::Identifier) -> Option<ocx_oci::Digest> {
+    pub async fn get_tag_digest(&self, identifier: &ocx_oci::PackageRef) -> Option<ocx_oci::Digest> {
         self.tag_digests.read().await.get(identifier).cloned()
     }
 
-    pub async fn set_tag_digest(&self, identifier: &ocx_oci::Identifier, digest: ocx_oci::Digest) {
+    pub async fn set_tag_digest(&self, identifier: &ocx_oci::PackageRef, digest: ocx_oci::Digest) {
         self.tag_digests.write().await.insert(identifier.clone(), digest);
     }
 }

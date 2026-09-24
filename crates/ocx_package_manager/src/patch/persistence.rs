@@ -29,7 +29,7 @@
 //! re-check), tag-store recording, companion install, and GC root seeding are
 //! **Phase 3+** concerns (`SitePatchResolver`).
 
-use ocx_oci::{Algorithm, Digest, Identifier, tag::InternalTag};
+use ocx_oci::{Algorithm, Digest, PackageRef, tag::InternalTag};
 use ocx_store::file_structure::BlobStore;
 
 use super::{
@@ -121,7 +121,7 @@ pub struct FetchedDescriptorBlobs {
 ///   [`MAX_DESCRIPTOR_LAYER_BYTES`].
 pub async fn fetch_patch_descriptor_blobs(
     client: &ocx_oci::client::Client,
-    patch_identifier: &Identifier,
+    patch_identifier: &PackageRef,
 ) -> Result<Option<FetchedDescriptorBlobs>, PatchError> {
     // Build the tag identifier: clone with the `__ocx.patch` well-known tag.
     // The patch registry is the one `[patches]` names, dialled as named: a

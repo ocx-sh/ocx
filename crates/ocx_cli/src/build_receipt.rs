@@ -65,13 +65,13 @@ pub struct BuildReceipt {
     /// The identifier `ocx package create --identifier` declared, resolved
     /// against the default registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identifier: Option<ocx_oci::Identifier>,
+    pub identifier: Option<ocx_oci::PackageRef>,
 }
 
 impl BuildReceipt {
     /// A receipt in the current format version recording whatever `create`
     /// knew. `None` when it knew neither: there is nothing to write.
-    pub fn new(platform: Option<ocx_oci::Platform>, identifier: Option<ocx_oci::Identifier>) -> Option<Self> {
+    pub fn new(platform: Option<ocx_oci::Platform>, identifier: Option<ocx_oci::PackageRef>) -> Option<Self> {
         (platform.is_some() || identifier.is_some()).then_some(Self {
             version: ReceiptVersion::V1,
             platform,
@@ -162,9 +162,9 @@ pub fn resolve_target_platform(
 ///
 /// [`UsageError`] (64) when neither `--identifier` nor the receipt names one.
 pub fn resolve_target_identifier(
-    explicit: Option<ocx_oci::Identifier>,
+    explicit: Option<ocx_oci::PackageRef>,
     receipt: Option<&BuildReceipt>,
-) -> Result<ocx_oci::Identifier, UsageError> {
+) -> Result<ocx_oci::PackageRef, UsageError> {
     if let Some(explicit) = explicit {
         // The same-repository check is what keeps this a gap-fill rather than
         // an override: only a receipt describing THIS repository may say which
@@ -229,7 +229,7 @@ mod tests {
         value.parse().expect("platform parses")
     }
 
-    fn identifier(value: &str) -> ocx_oci::Identifier {
+    fn identifier(value: &str) -> ocx_oci::PackageRef {
         value.parse().expect("identifier parses")
     }
 

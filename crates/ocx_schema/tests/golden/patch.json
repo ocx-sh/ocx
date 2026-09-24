@@ -40,7 +40,7 @@
           "description": "Companion packages to apply when this rule matches.\n\nIdentifiers are stored as strings on the wire and parsed on\ndeserialization. The project-default registry (`ocx.sh`) is used as\nthe fallback when no registry is present in the string.",
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Identifier"
+            "$ref": "#/$defs/PackageRef"
           }
         },
         "required": {
@@ -56,7 +56,7 @@
         "packages"
       ]
     },
-    "Identifier": {
+    "PackageRef": {
       "description": "OCI identifier in the format 'registry/repository[:tag][@digest]'.",
       "type": "string"
     }

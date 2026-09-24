@@ -37,7 +37,7 @@ use ocx_oci::client::error::ClientError;
 #[error("copying {source_identifier} to {target_identifier}")]
 pub struct CopyError {
     /// The package the copy was reading from.
-    pub source_identifier: ocx_oci::Identifier,
+    pub source_identifier: ocx_oci::PackageRef,
     /// The package the copy was writing to.
     pub target_identifier: ocx_oci::OciIdentifier,
     /// Discriminant kind of the failure.
@@ -121,7 +121,7 @@ pub struct CopyRequest<'a> {
     /// then `platforms` must name its platform, because a leaf manifest does not
     /// carry one — OCX records the platform in the index entry and the build
     /// receipt, never in the manifest (`package/metadata/authoring.rs`).
-    pub source: &'a ocx_oci::Identifier,
+    pub source: &'a ocx_oci::PackageRef,
     /// Where to write. Carries the tag the promoted package lands on.
     pub target: &'a ocx_oci::OciIdentifier,
     /// Empty means every platform the source index offers.
@@ -194,7 +194,7 @@ pub struct CopiedPlatform {
 /// The result of a promotion.
 #[derive(Debug)]
 pub struct CopyOutcome {
-    pub source: ocx_oci::Identifier,
+    pub source: ocx_oci::PackageRef,
     /// Where `source` was read from: the location the index routed it to, or
     /// `source` itself when nothing rewrote it. A later read of the same
     /// source reuses it rather than asking the index again.
@@ -441,7 +441,7 @@ async fn target_tags(client: &Client, request: &CopyRequest<'_>, platform: &ocx_
 /// `source_location`; a miss still names `source`.
 async fn resolve_source_leaves(
     client: &Client,
-    source: &ocx_oci::Identifier,
+    source: &ocx_oci::PackageRef,
     source_location: &ocx_oci::OciIdentifier,
     requested: &[ocx_oci::Platform],
 ) -> std::result::Result<Vec<(ocx_oci::Platform, ocx_oci::Digest)>, CopyErrorKind> {
@@ -609,12 +609,12 @@ mod tests {
 
     /// The package a copy of `location` is asked for — registry-backed, so
     /// under `PASSTHROUGH` it routes back to `location` itself.
-    fn package_at(location: &ocx_oci::OciIdentifier) -> ocx_oci::Identifier {
-        ocx_oci::Identifier::parse(&location.to_string()).expect("a location spells a package identifier")
+    fn package_at(location: &ocx_oci::OciIdentifier) -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::parse(&location.to_string()).expect("a location spells a package identifier")
     }
 
     /// The seam production reads and writes through; building the reference off
-    /// `Identifier` directly is allow-listed away from this file (T-arch-A1).
+    /// `PackageRef` directly is allow-listed away from this file (T-arch-A1).
     fn canonical(identifier: &ocx_oci::OciIdentifier) -> ocx_oci::native::Reference {
         client_for(&StubTransportData::new()).read_reference(identifier, ocx_oci::client::ReadAddressing::Canonical)
     }
@@ -707,7 +707,7 @@ mod tests {
     }
 
     fn request<'a>(
-        source: &'a ocx_oci::Identifier,
+        source: &'a ocx_oci::PackageRef,
         target: &'a ocx_oci::OciIdentifier,
         annotations: &'a BTreeMap<String, String>,
     ) -> CopyRequest<'a> {
@@ -813,7 +813,7 @@ mod tests {
     async fn a_source_served_through_an_index_is_read_at_its_physical_location() {
         let data = StubTransportData::new();
         let leaves = seed_source(&data, "3.28.1", &[("linux/amd64", AMD64_LAYER)]);
-        let served = ocx_oci::Identifier::new_registry("served/demo", "dev.example.com").clone_with_tag("3.28.1");
+        let served = ocx_oci::PackageRef::new_registry("served/demo", "dev.example.com").clone_with_tag("3.28.1");
         let target = identifier("prod.example.com", "3.28.1");
         let annotations = BTreeMap::new();
         let index = ocx_index::test_source::RoutingSource::rewriting("dev.example.com", "team/demo").into_index();

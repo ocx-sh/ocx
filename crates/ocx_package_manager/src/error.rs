@@ -160,7 +160,7 @@ pub enum Error {
     /// An OCI signing operation failed.
     ///
     /// Boxed because [`ocx_sign::sign::SignError`] carries a full
-    /// [`ocx_oci::Identifier`] plus a kind enum — materializing it
+    /// [`ocx_oci::PackageRef`] plus a kind enum — materializing it
     /// unboxed bloats every `Result<T, Error>` in the workspace past the
     /// `clippy::result_large_err` threshold.
     #[error(transparent)]
@@ -210,7 +210,7 @@ pub enum Error {
     Platform(#[from] ocx_oci::platform::error::PlatformError),
     /// A pinned identifier validation failed.
     #[error(transparent)]
-    PinnedIdentifier(#[from] ocx_oci::pinned_identifier::PinnedIdentifierError),
+    PinnedIdentifier(#[from] ocx_oci::pinned_package_ref::PinnedIdentifierError),
     /// A path has an unexpected structure.
     #[error("path '{}' has an unexpected structure", .0.display())]
     InternalPathInvalid(std::path::PathBuf),
@@ -253,12 +253,12 @@ pub enum Error {
 #[error("{}{kind}", identifier_prefix(identifier))]
 #[non_exhaustive]
 pub struct PackageError {
-    pub identifier: ocx_oci::Identifier,
+    pub identifier: ocx_oci::PackageRef,
     pub kind: PackageErrorKind,
 }
 
 impl PackageError {
-    pub fn new(identifier: ocx_oci::Identifier, kind: PackageErrorKind) -> Self {
+    pub fn new(identifier: ocx_oci::PackageRef, kind: PackageErrorKind) -> Self {
         Self { identifier, kind }
     }
 }
@@ -267,7 +267,7 @@ impl PackageError {
 /// empty identifier [`crate::Error::from`] fabricates when a
 /// [`PackageErrorKind`] arrives with no package in scope. Rendering that one
 /// would print a bare `/` — a package name the user never supplied.
-fn identifier_prefix(identifier: &ocx_oci::Identifier) -> String {
+fn identifier_prefix(identifier: &ocx_oci::PackageRef) -> String {
     if identifier.registry().is_empty() && identifier.repository().is_empty() {
         String::new()
     } else {
@@ -280,7 +280,7 @@ fn identifier_prefix(identifier: &ocx_oci::Identifier) -> String {
 /// `clippy::result_large_err` lint).
 #[derive(Debug)]
 pub struct OfflineManifestMissing {
-    pub identifier: ocx_oci::Identifier,
+    pub identifier: ocx_oci::PackageRef,
     pub digest: ocx_oci::Digest,
 }
 
@@ -299,7 +299,7 @@ pub struct OfflineManifestMissing {
 /// deep in the closure while the identifier is the tool the user asked for.
 #[derive(Debug)]
 pub struct ShimClaim {
-    pub package: ocx_oci::PinnedIdentifier,
+    pub package: ocx_oci::PinnedPackageRef,
     pub name: BinaryName,
 }
 
@@ -327,7 +327,7 @@ pub enum PackageErrorKind {
     BlobNotFound(Box<ocx_oci::PinnedOciIdentifier>),
     /// Multiple candidates matched the platform selection.
     #[error("ambiguous selection: {}", _0.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", "))]
-    SelectionAmbiguous(Vec<ocx_oci::Identifier>),
+    SelectionAmbiguous(Vec<ocx_oci::PackageRef>),
     /// A symlink-based path was requested but the identifier carries a digest.
     #[error("symlink resolution requires a tag, not a digest")]
     SymlinkRequiresTag,
@@ -355,7 +355,7 @@ pub enum PackageErrorKind {
     )]
     EntrypointCollision {
         name: EntrypointName,
-        owners: Vec<ocx_oci::PinnedIdentifier>,
+        owners: Vec<ocx_oci::PinnedPackageRef>,
     },
 
     /// A required companion package install failed during patch discovery.
@@ -368,7 +368,7 @@ pub enum PackageErrorKind {
     #[error("required companion install failed for '{companion}'")]
     RequiredCompanionFailed {
         /// Identifier of the companion package that failed to install.
-        companion: ocx_oci::Identifier,
+        companion: ocx_oci::PackageRef,
         /// The underlying package error kind from the companion's install.
         #[source]
         source: Box<PackageErrorKind>,
@@ -423,7 +423,7 @@ pub enum PackageErrorKind {
     #[error(
         "cannot defer '{package}': it claims no binaries and no entry points, so its interface names are not enumerable"
     )]
-    ShimNamesNotEnumerable { package: ocx_oci::PinnedIdentifier },
+    ShimNamesNotEnumerable { package: ocx_oci::PinnedPackageRef },
 
     /// A shim name is not a valid [`BinaryName`] (plan contract C-009 / C-011).
     ///
@@ -537,7 +537,7 @@ pub enum DependencyError {
     #[error("conflicting versions for {repository}: {}", identifiers.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "))]
     Conflict {
         repository: ocx_oci::Repository,
-        identifiers: Vec<ocx_oci::PinnedIdentifier>,
+        identifiers: Vec<ocx_oci::PinnedPackageRef>,
     },
     /// Dependency setup coordination failed (capacity, timeout, or abandoned leader).
     ///
@@ -585,7 +585,7 @@ mod tests {
     fn batch_renders_the_io_cause_of_an_internal_entry_exactly_once() {
         let io_error = std::io::Error::other("permission denied by fixture");
         let entry = PackageError::new(
-            ocx_oci::Identifier::new_registry("cmake", "example.com").clone_with_tag("3.28"),
+            ocx_oci::PackageRef::new_registry("cmake", "example.com").clone_with_tag("3.28"),
             PackageErrorKind::Internal(crate::error::file_error("/tmp/example/data", io_error)),
         );
         let rendered = format!("{:#}", anyhow::Error::from(Error::InstallFailed(vec![entry])));
@@ -605,14 +605,14 @@ mod tests {
     fn multi_entry_batch_renders_each_entrys_cause_once() {
         let entries = vec![
             PackageError::new(
-                ocx_oci::Identifier::new_registry("cmake", "example.com"),
+                ocx_oci::PackageRef::new_registry("cmake", "example.com"),
                 PackageErrorKind::Internal(crate::error::file_error(
                     "/tmp/a",
                     std::io::Error::other("first cause fixture"),
                 )),
             ),
             PackageError::new(
-                ocx_oci::Identifier::new_registry("ninja", "example.com"),
+                ocx_oci::PackageRef::new_registry("ninja", "example.com"),
                 PackageErrorKind::Internal(crate::error::file_error(
                     "/tmp/b",
                     std::io::Error::other("second cause fixture"),
@@ -629,7 +629,7 @@ mod tests {
     #[test]
     fn self_check_failed_renders_its_entrys_cause_exactly_once() {
         let entry = PackageError::new(
-            ocx_oci::Identifier::new_registry("ocx/cli", "ocx.sh"),
+            ocx_oci::PackageRef::new_registry("ocx/cli", "ocx.sh"),
             PackageErrorKind::Internal(crate::error::file_error(
                 "/tmp/self-check",
                 std::io::Error::other("self-check cause fixture"),
@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn batch_does_not_double_a_leaf_error_that_inlines_its_own_source() {
         let entry = PackageError::new(
-            ocx_oci::Identifier::new_registry("cmake", "example.com"),
+            ocx_oci::PackageRef::new_registry("cmake", "example.com"),
             PackageErrorKind::Internal(crate::Error::Archive(ocx_util::archive::Error::Tar(
                 std::io::Error::other("unexpected end of archive fixture"),
             ))),
@@ -667,9 +667,9 @@ mod tests {
     #[test]
     fn batch_renders_a_required_companion_cause_exactly_once() {
         let entry = PackageError::new(
-            ocx_oci::Identifier::new_registry("java", "example.com"),
+            ocx_oci::PackageRef::new_registry("java", "example.com"),
             PackageErrorKind::RequiredCompanionFailed {
-                companion: ocx_oci::Identifier::new_registry("license-server", "patches.corp.com"),
+                companion: ocx_oci::PackageRef::new_registry("license-server", "patches.corp.com"),
                 source: Box::new(PackageErrorKind::NotFound),
             },
         );
@@ -750,7 +750,7 @@ impl Error {
     /// identifier when the caller has one. Ported verbatim from
     /// `ocx_lib::Error::package`; the only change is that the batch error IS
     /// this type now, so there is no wrapper variant to put it in.
-    pub fn package(identifier: ocx_oci::Identifier, kind: PackageErrorKind) -> Self {
+    pub fn package(identifier: ocx_oci::PackageRef, kind: PackageErrorKind) -> Self {
         match kind {
             // An internal kind already carries a full `Error`; re-wrapping it
             // in a batch would only nest this type inside itself.
@@ -764,7 +764,7 @@ impl From<PackageErrorKind> for Error {
     fn from(kind: PackageErrorKind) -> Self {
         // No identifier in scope: the empty one is rendered as no prefix at all
         // by `PackageError::Display`.
-        Error::package(ocx_oci::Identifier::new_registry("", ""), kind)
+        Error::package(ocx_oci::PackageRef::new_registry("", ""), kind)
     }
 }
 

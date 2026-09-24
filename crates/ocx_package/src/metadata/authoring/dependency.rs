@@ -28,7 +28,7 @@ pub struct AuthoringDependency {
     /// optional in the authoring form: absent means "pin me at
     /// `ocx package create` time". The tag is advisory once a digest is
     /// present.
-    pub identifier: ocx_oci::Identifier,
+    pub identifier: ocx_oci::PackageRef,
 
     /// Controls how this dependency's environment variables propagate.
     /// Default: `sealed` — no env contribution.
@@ -89,9 +89,9 @@ impl AuthoringDependency {
     }
 
     /// Returns the digest pin, when present.
-    pub fn pinned(&self) -> Option<ocx_oci::PinnedIdentifier> {
+    pub fn pinned(&self) -> Option<ocx_oci::PinnedPackageRef> {
         self.identifier.digest().is_some().then(|| {
-            ocx_oci::PinnedIdentifier::try_from(self.identifier.clone()).expect("digest presence checked above")
+            ocx_oci::PinnedPackageRef::try_from(self.identifier.clone()).expect("digest presence checked above")
         })
     }
 
@@ -117,7 +117,7 @@ impl AuthoringDependency {
 /// Serializes as a JSON array; array position defines the canonical
 /// environment import order. Construction and deserialization enforce the
 /// same invariants as the published [`Dependencies`](crate::metadata::dependency::Dependencies):
-/// explicit registry per identifier (via [`ocx_oci::Identifier`]'s deserializer),
+/// explicit registry per identifier (via [`ocx_oci::PackageRef`]'s deserializer),
 /// unique `(registry, repository)` pairs, unique explicit names.
 #[derive(Debug, Clone, Default)]
 pub struct AuthoringDependencies {

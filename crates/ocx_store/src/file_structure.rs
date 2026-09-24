@@ -171,7 +171,7 @@ impl FileStructure {
     /// this (registry, repo) pair", NOT the committed reproducibility index
     /// snapshot — so it lives under `state/`, never in the redirectable index
     /// home, and never carries `--index` / `OCX_INDEX` redirection.
-    pub fn patch_descriptor_path(&self, identifier: &ocx_oci::Identifier) -> PathBuf {
+    pub fn patch_descriptor_path(&self, identifier: &ocx_oci::PackageRef) -> PathBuf {
         self.root
             .join("state")
             .join("patch-descriptors")
@@ -191,7 +191,7 @@ impl FileStructure {
     /// the local index (`subsystem-oci`: a pin moves only when named). Like
     /// [`patch_descriptor_path`](Self::patch_descriptor_path) it lives under
     /// `state/` and never carries `--index` / `OCX_INDEX` redirection.
-    pub fn patch_companion_path(&self, identifier: &ocx_oci::Identifier) -> PathBuf {
+    pub fn patch_companion_path(&self, identifier: &ocx_oci::PackageRef) -> PathBuf {
         self.root
             .join("state")
             .join("patch-companions")

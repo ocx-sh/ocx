@@ -19,7 +19,7 @@ use super::common::{ClosureEnvVar, ClosureNode};
 #[derive(Debug, Clone)]
 pub struct Candidate {
     /// The child manifest pinned by its own digest.
-    pub identifier: ocx_oci::PinnedIdentifier,
+    pub identifier: ocx_oci::PinnedPackageRef,
     /// Declared platform, or [`ocx_oci::Platform::any`] when the entry omits one.
     pub platform: ocx_oci::Platform,
     /// The child descriptor's media type.
@@ -47,12 +47,12 @@ pub struct Candidate {
 pub enum InspectResult {
     Candidates {
         /// The image-index digest the candidates came from.
-        pinned: ocx_oci::PinnedIdentifier,
+        pinned: ocx_oci::PinnedPackageRef,
         candidates: Vec<Candidate>,
     },
     Manifest {
         /// The manifest digest at the reference.
-        pinned: ocx_oci::PinnedIdentifier,
+        pinned: ocx_oci::PinnedPackageRef,
         metadata: ValidMetadata,
         /// The manifest's layer descriptors (digest, media type, size).
         /// Already carried by the fetched manifest — surfaced so a default
@@ -64,7 +64,7 @@ pub enum InspectResult {
     },
     Resolved {
         /// The platform-selected pinned identifier.
-        pinned: ocx_oci::PinnedIdentifier,
+        pinned: ocx_oci::PinnedPackageRef,
         metadata: ValidMetadata,
         /// Boxed — `ResolvedChain` is large relative to the other variants
         /// (`clippy::large_enum_variant`).
@@ -130,20 +130,20 @@ pub struct InspectClosure {
 pub struct Surface {
     /// Binary claims from every admitted node, attributed to the declaring
     /// package.
-    pub binaries: Vec<(ocx_oci::PinnedIdentifier, metadata::BinaryName)>,
+    pub binaries: Vec<(ocx_oci::PinnedPackageRef, metadata::BinaryName)>,
     /// Entrypoint names from every admitted node, attributed likewise.
-    pub entrypoints: Vec<(ocx_oci::PinnedIdentifier, metadata::EntrypointName)>,
+    pub entrypoints: Vec<(ocx_oci::PinnedPackageRef, metadata::EntrypointName)>,
     /// Env keys each admitted node exposes on this axis. The concrete VALUE is
     /// omitted — it is `${installPath}`-templated and only known post-install;
     /// the summary answers "which env keys would be set", not "to what".
-    pub env: Vec<(ocx_oci::PinnedIdentifier, ClosureEnvVar)>,
+    pub env: Vec<(ocx_oci::PinnedPackageRef, ClosureEnvVar)>,
     /// Integration NAMESPACE keys each admitted node declares, attributed to
     /// it. Payload-free on purpose: a closure node is not installed, so
     /// `${installPath}` has no value and an interpolated payload would be a
     /// half-truth — the same reason `env` omits values. Interface surface only
     /// (`composer::integrations_cross`), so the private projection is always
     /// empty.
-    pub integrations: Vec<(ocx_oci::PinnedIdentifier, String)>,
+    pub integrations: Vec<(ocx_oci::PinnedPackageRef, String)>,
     /// `false` iff at least one admitted node has UNDECLARED binaries
     /// (`ClosureNode.binaries == None`). Entrypoints are always complete.
     pub binaries_complete: bool,
@@ -164,7 +164,7 @@ pub struct ClosureConflicts {
 #[derive(Debug)]
 pub struct EntrypointConflict {
     pub name: metadata::EntrypointName,
-    pub packages: Vec<ocx_oci::PinnedIdentifier>,
+    pub packages: Vec<ocx_oci::PinnedPackageRef>,
 }
 
 /// One repository resolved to two or more distinct digests on the interface
@@ -212,7 +212,7 @@ impl PackageManager {
     ///   wrong media type, or metadata validation failure.
     pub async fn inspect(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
         options: InspectOptions,
     ) -> Result<InspectResult, PackageErrorKind> {
@@ -266,7 +266,7 @@ impl PackageManager {
                     let digest = ocx_oci::Digest::try_from(entry.digest.as_str())
                         .map_err(|e| PackageErrorKind::Internal(crate::Error::from(e)))?;
                     let identifier =
-                        ocx_oci::PinnedIdentifier::try_from(top_pinned.as_identifier().clone_with_digest(digest))
+                        ocx_oci::PinnedPackageRef::try_from(top_pinned.as_identifier().clone_with_digest(digest))
                             .map_err(|_| PackageErrorKind::DigestMissing)?;
                     let platform = ocx_oci::Platform::try_from(entry.platform)
                         .map_err(|e| PackageErrorKind::Internal(e.into()))?;
@@ -295,7 +295,7 @@ impl PackageManager {
     /// (deterministic exit code). Mirrors [`find_all`](PackageManager::find_all).
     pub async fn inspect_all(
         &self,
-        packages: Vec<ocx_oci::Identifier>,
+        packages: Vec<ocx_oci::PackageRef>,
         platform: ocx_oci::Platform,
         options: InspectOptions,
     ) -> Result<Vec<InspectResult>, crate::error::Error> {
@@ -336,8 +336,8 @@ impl PackageManager {
 /// as-is.
 async fn fetch_top_manifest(
     mgr: &PackageManager,
-    package: &ocx_oci::Identifier,
-) -> Result<(ocx_oci::PinnedIdentifier, ocx_oci::Manifest), PackageErrorKind> {
+    package: &ocx_oci::PackageRef,
+) -> Result<(ocx_oci::PinnedPackageRef, ocx_oci::Manifest), PackageErrorKind> {
     super::common::resolve_top_manifest(mgr.index(), package, IndexOperation::Resolve).await
 }
 
@@ -351,7 +351,7 @@ async fn fetch_top_manifest(
 /// reached when `options.closure` already holds).
 async fn resolve_with_closure(
     mgr: &PackageManager,
-    package: &ocx_oci::Identifier,
+    package: &ocx_oci::PackageRef,
     platform: ocx_oci::Platform,
     deps: bool,
 ) -> Result<InspectResult, PackageErrorKind> {
@@ -386,7 +386,7 @@ async fn resolve_with_closure(
 async fn maybe_walk_closure(
     mgr: &PackageManager,
     deps: bool,
-    pinned: &ocx_oci::PinnedIdentifier,
+    pinned: &ocx_oci::PinnedPackageRef,
     metadata: &ValidMetadata,
     config_digest: ocx_oci::Digest,
     platform: &ocx_oci::Platform,
@@ -429,7 +429,7 @@ async fn walk_closure(
     fs: &file_structure::FileStructure,
     index: &ocx_index::Index,
     offline: bool,
-    root_pinned: &ocx_oci::PinnedIdentifier,
+    root_pinned: &ocx_oci::PinnedPackageRef,
     root_metadata: &ValidMetadata,
     root_config_digest: ocx_oci::Digest,
     platform: &ocx_oci::Platform,
@@ -558,7 +558,7 @@ pub(super) fn admitted_on_surface(node: &ClosureNode, self_view: bool) -> bool {
 /// admission and exclusion rules, adapted to read from [`ClosureNode`]s
 /// instead of installed [`ocx_package::install_info::InstallInfo`].
 fn detect_closure_conflicts(nodes: &[ClosureNode]) -> ClosureConflicts {
-    let mut entrypoint_owners: BTreeMap<metadata::EntrypointName, Vec<ocx_oci::PinnedIdentifier>> = BTreeMap::new();
+    let mut entrypoint_owners: BTreeMap<metadata::EntrypointName, Vec<ocx_oci::PinnedPackageRef>> = BTreeMap::new();
     let mut repository_digests: BTreeMap<ocx_oci::Repository, Vec<ocx_oci::Digest>> = BTreeMap::new();
 
     for node in nodes.iter().filter(|node| admitted_on_surface(node, false)) {
@@ -607,7 +607,7 @@ mod spec_tests {
     use ocx_index::{ChainMode, Index, IndexImpl, IndexOperation, LocalConfig, LocalIndex};
     use ocx_oci::Algorithm;
     use ocx_oci::Digest;
-    use ocx_oci::Identifier;
+    use ocx_oci::PackageRef;
     use ocx_oci::media_type::MEDIA_TYPE_PACKAGE_METADATA_V1;
     use ocx_package::{metadata::ValidMetadata, metadata::visibility::Visibility};
     use ocx_store::file_structure::FileStructure;
@@ -627,8 +627,8 @@ mod spec_tests {
 
     const METADATA_JSON: &str = r#"{"type":"bundle","version":1,"env":[{"key":"PATH","type":"path","value":"${installPath}/bin","visibility":"public"}],"dependencies":[],"entrypoints":{}}"#;
 
-    fn tagged_id() -> Identifier {
-        Identifier::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
+    fn tagged_id() -> PackageRef {
+        PackageRef::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
     }
     fn digest(hex: &str) -> Digest {
         Digest::Sha256(hex.to_string())
@@ -999,26 +999,26 @@ mod spec_tests {
         Digest::Sha256(hex)
     }
 
-    /// A digest-addressed `PinnedIdentifier` for `repo`, with no advisory tag.
-    fn closure_pinned(repo: &str, d: &Digest) -> ocx_oci::PinnedIdentifier {
-        let id = Identifier::new_registry(repo, REGISTRY).clone_with_digest(d.clone());
-        ocx_oci::PinnedIdentifier::try_from(id).unwrap()
+    /// A digest-addressed `PinnedPackageRef` for `repo`, with no advisory tag.
+    fn closure_pinned(repo: &str, d: &Digest) -> ocx_oci::PinnedPackageRef {
+        let id = PackageRef::new_registry(repo, REGISTRY).clone_with_digest(d.clone());
+        ocx_oci::PinnedPackageRef::try_from(id).unwrap()
     }
 
-    /// A digest-addressed `PinnedIdentifier` for `repo` that also carries an
+    /// A digest-addressed `PinnedPackageRef` for `repo` that also carries an
     /// advisory tag — used by the diamond-repeat plain-render test to prove
     /// dedup is keyed by content digest, not by the tag-bearing identifier.
-    fn closure_pinned_tagged(repo: &str, tag: &str, d: &Digest) -> ocx_oci::PinnedIdentifier {
-        let id = Identifier::new_registry(repo, REGISTRY)
+    fn closure_pinned_tagged(repo: &str, tag: &str, d: &Digest) -> ocx_oci::PinnedPackageRef {
+        let id = PackageRef::new_registry(repo, REGISTRY)
             .clone_with_tag(tag)
             .clone_with_digest(d.clone());
-        ocx_oci::PinnedIdentifier::try_from(id).unwrap()
+        ocx_oci::PinnedPackageRef::try_from(id).unwrap()
     }
 
     /// One `dependencies[]` entry as authored (ADR D2 wire shape): the
     /// dep's pinned identifier, its DECLARED edge visibility, and its
     /// interpolation name.
-    fn closure_edge(identifier: &ocx_oci::PinnedIdentifier, visibility: &str, name: &str) -> serde_json::Value {
+    fn closure_edge(identifier: &ocx_oci::PinnedPackageRef, visibility: &str, name: &str) -> serde_json::Value {
         serde_json::json!({ "identifier": identifier.to_string(), "visibility": visibility, "name": name })
     }
 
@@ -1083,7 +1083,7 @@ mod spec_tests {
 
     /// Registers one closure node's manifest + config blob into `source`,
     /// keyed by the manifest's own real content digest, and returns that
-    /// digest so the caller can build the node's `PinnedIdentifier`
+    /// digest so the caller can build the node's `PinnedPackageRef`
     /// (`closure_pinned`) for edge references and assertions.
     ///
     /// Both digests are the real hash of their bytes: `stage_leaf_manifest`
@@ -1113,7 +1113,7 @@ mod spec_tests {
         source: FakeManifestSource,
         root_digest: &Digest,
         root_config_json: &str,
-    ) -> (PackageManager, ocx_oci::PinnedIdentifier, ValidMetadata) {
+    ) -> (PackageManager, ocx_oci::PinnedPackageRef, ValidMetadata) {
         let root_config_digest = Algorithm::Sha256.hash(root_config_json.as_bytes());
         let root_manifest_json = closure_manifest_json(&root_config_digest, root_config_json);
         let source = source
@@ -1174,13 +1174,13 @@ mod spec_tests {
             Ok(Vec::new())
         }
 
-        async fn list_tags(&self, _: &Identifier) -> ocx_index::error::Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
             Ok(None)
         }
 
         async fn fetch_manifest(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
             _op: IndexOperation,
         ) -> ocx_index::error::Result<Option<(Digest, ocx_oci::Manifest)>> {
             if identifier.digest().as_ref() != Some(&self.manifest_digest) {
@@ -1193,7 +1193,7 @@ mod spec_tests {
 
         async fn fetch_manifest_digest(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
             _op: IndexOperation,
         ) -> ocx_index::error::Result<Option<Digest>> {
             Ok(if identifier.digest().as_ref() == Some(&self.manifest_digest) {
@@ -1203,7 +1203,7 @@ mod spec_tests {
             })
         }
 
-        async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedIdentifier) -> ocx_index::error::Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
             *self.blob_calls.lock().unwrap() += 1;
             if blob_ref.digest() == self.config_digest {
                 Ok(Some(self.config_bytes.clone()))

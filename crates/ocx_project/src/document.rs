@@ -31,7 +31,7 @@ use toml_edit::{DocumentMut, Item, Table, TableLike, value};
 use crate::Error;
 use crate::config::{ProjectConfig, parse_tool_value};
 use crate::error::{ProjectError, ProjectErrorKind};
-use ocx_oci::Identifier;
+use ocx_oci::PackageRef;
 
 /// Render `candidate` as `ocx.toml` text, preserving everything in `original`
 /// that the typed model does not own: comments, key order, spacing, and table
@@ -179,7 +179,7 @@ fn sync_activate(root: &mut dyn TableLike, activate: Option<crate::activate::Act
 
 /// Sync one `tools` table under `parent`, creating it only when there is
 /// something to put in it.
-fn sync_section(parent: &mut dyn TableLike, key: &str, bindings: &BTreeMap<String, Identifier>) -> Option<()> {
+fn sync_section(parent: &mut dyn TableLike, key: &str, bindings: &BTreeMap<String, PackageRef>) -> Option<()> {
     if bindings.is_empty() && !parent.contains_key(key) {
         return Some(());
     }
@@ -196,7 +196,7 @@ fn sync_section(parent: &mut dyn TableLike, key: &str, bindings: &BTreeMap<Strin
 /// a bare `registry/repo`, so `cmake = "ocx.sh/cmake"` renders as
 /// `ocx.sh/cmake:latest` and a text comparison would rewrite a line the
 /// mutation never targeted, taking its comments and key quoting with it.
-fn sync_bindings(table: &mut dyn TableLike, bindings: &BTreeMap<String, Identifier>) {
+fn sync_bindings(table: &mut dyn TableLike, bindings: &BTreeMap<String, PackageRef>) {
     let stale: Vec<String> = table
         .iter()
         .map(|(key, _)| key.to_owned())
@@ -261,8 +261,8 @@ mod tests {
         PathBuf::from("ocx.toml")
     }
 
-    fn identifier(repo: &str, tag: &str) -> Identifier {
-        Identifier::new_registry(repo, "example.com").clone_with_tag(tag)
+    fn identifier(repo: &str, tag: &str) -> PackageRef {
+        PackageRef::new_registry(repo, "example.com").clone_with_tag(tag)
     }
 
     /// Parse `original`, apply an `add` of `repo:tag` into `group`, and render.

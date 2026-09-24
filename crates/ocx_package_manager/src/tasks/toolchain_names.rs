@@ -57,13 +57,13 @@ pub(crate) enum NotEnumerablePolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NameOwner {
     /// The tool whose claim won.
-    pub tool: ocx_oci::PinnedIdentifier,
+    pub tool: ocx_oci::PinnedPackageRef,
     /// Whether `tool` is the closure's own root, as opposed to an
     /// interface-admitted dependency.
     pub is_root: bool,
     /// Every other tool that also claimed this name and lost, oldest walked
     /// first.
-    pub shadowed: Vec<ocx_oci::PinnedIdentifier>,
+    pub shadowed: Vec<ocx_oci::PinnedPackageRef>,
     /// The position of the winning claim in the merged multi-root node slice
     /// [`exposed_names`] walked (RUL-12), zero-based.
     ///
@@ -341,9 +341,9 @@ mod tests {
         ocx_oci::Digest::Sha256(seed.repeat(32))
     }
 
-    fn pinned(repository: &str, seed: &str) -> ocx_oci::PinnedIdentifier {
-        ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry(repository, "example.com").clone_with_digest(digest_from(seed)),
+    fn pinned(repository: &str, seed: &str) -> ocx_oci::PinnedPackageRef {
+        ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry(repository, "example.com").clone_with_digest(digest_from(seed)),
         )
         .expect("digest-bearing identifier is pinned")
     }
@@ -367,7 +367,7 @@ mod tests {
     /// A closure node carrying only what the interface-surface name set is
     /// derived from; every other field is the inert value for this axis.
     fn node(
-        identifier: ocx_oci::PinnedIdentifier,
+        identifier: ocx_oci::PinnedPackageRef,
         claimed: Option<&[&str]>,
         entries: &[&str],
         is_root: bool,
@@ -389,7 +389,7 @@ mod tests {
     /// effective visibility — the field `admitted_on_surface` gates on
     /// (C-023). A root has none, which is why [`node`] leaves it `None`.
     fn dependency(
-        identifier: ocx_oci::PinnedIdentifier,
+        identifier: ocx_oci::PinnedPackageRef,
         claimed: Option<&[&str]>,
         entries: &[&str],
         effective: Visibility,
@@ -416,7 +416,7 @@ mod tests {
     /// [`fold_case_insensitive`] inputs directly. `walk_index` is a
     /// placeholder — [`map_of`] overwrites it from the fixture's own
     /// construction order, which is what "last walked" means in these tests.
-    fn owner_of(tool: ocx_oci::PinnedIdentifier, is_root: bool) -> NameOwner {
+    fn owner_of(tool: ocx_oci::PinnedPackageRef, is_root: bool) -> NameOwner {
         NameOwner {
             tool,
             is_root,
@@ -834,7 +834,7 @@ mod tests {
         let alpha = pinned("ns/alpha", "b");
         let omega = pinned("ns/omega", "c");
         let claim =
-            |id: &ocx_oci::PinnedIdentifier| dependency(id.clone(), Some(&["make"]), &[], Visibility::INTERFACE);
+            |id: &ocx_oci::PinnedPackageRef| dependency(id.clone(), Some(&["make"]), &[], Visibility::INTERFACE);
 
         let forward = exposed_names(&[claim(&alpha), claim(&omega)], NotEnumerablePolicy::Refuse)
             .expect("a collision is never a refusal");

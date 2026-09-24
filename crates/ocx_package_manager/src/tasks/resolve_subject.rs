@@ -27,7 +27,7 @@
 
 use ocx_index::{Index, IndexOperation};
 use ocx_oci::resolve_target::ResolvedSubject;
-use ocx_oci::{Digest, Identifier, Manifest};
+use ocx_oci::{Digest, Manifest, PackageRef};
 use ocx_sign::sign::SignErrorKind;
 use ocx_sign::sign::pipeline::{SubjectResolver, sign_target_from_resolution};
 use ocx_sign::verify::VerifyErrorKind;
@@ -40,7 +40,7 @@ use ocx_sign::verify::pipeline::{VerifySubjectResolver, verify_target_from_resol
 /// back is enforced upstream in the shared index choke point
 /// (`ChainedIndex::guard_local_physical`) and again at the dial site, by the
 /// pipeline, through its `DialPolicy`.
-async fn physical_of(index: &Index, subject: &Identifier) -> ocx_index::error::Result<ocx_oci::OciIdentifier> {
+async fn physical_of(index: &Index, subject: &PackageRef) -> ocx_index::error::Result<ocx_oci::OciIdentifier> {
     index.route(subject).await
 }
 
@@ -128,8 +128,8 @@ mod tests {
         Digest::Sha256(format!("{byte:064x}"))
     }
 
-    fn identifier() -> Identifier {
-        Identifier::parse("registry.example/acme/tool:1.0").expect("identifier")
+    fn identifier() -> PackageRef {
+        PackageRef::parse("registry.example/acme/tool:1.0").expect("identifier")
     }
 
     fn platform(value: &str) -> Platform {
@@ -180,13 +180,13 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_tags(&self, _: &Identifier) -> ocx_index::error::Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
             Ok(None)
         }
 
         async fn fetch_manifest(
             &self,
-            _: &Identifier,
+            _: &PackageRef,
             _: IndexOperation,
         ) -> ocx_index::error::Result<Option<(Digest, Manifest)>> {
             Ok(None)
@@ -194,13 +194,13 @@ mod tests {
 
         async fn fetch_manifest_digest(
             &self,
-            _: &Identifier,
+            _: &PackageRef,
             _: IndexOperation,
         ) -> ocx_index::error::Result<Option<Digest>> {
             Ok(None)
         }
 
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> ocx_index::error::Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
             Ok(None)
         }
 

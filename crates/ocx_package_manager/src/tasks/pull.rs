@@ -22,7 +22,7 @@ use ocx_util::singleflight;
 use super::super::PackageManager;
 
 /// Singleflight group capacity — maximum number of unique
-/// [`PinnedIdentifier`](ocx_oci::PinnedIdentifier)s (root packages + transitive
+/// [`PinnedPackageRef`](ocx_oci::PinnedPackageRef)s (root packages + transitive
 /// dependencies) tracked across all packages in a single `pull_all` call.
 ///
 /// 8192 is the soft worst-case bound for realistic large-closure workloads:
@@ -51,9 +51,9 @@ const LAYER_SETUP_TIMEOUT: Duration = Duration::from_mins(30);
 /// caller-supplied local metadata).
 pub const PULL_LOCAL_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Singleflight group keyed by [`PinnedIdentifier`](ocx_oci::PinnedIdentifier)
+/// Singleflight group keyed by [`PinnedPackageRef`](ocx_oci::PinnedPackageRef)
 /// (advisory tag stripped) for in-process dedup of concurrent dependency setups.
-type SetupGroup = singleflight::Group<ocx_oci::PinnedIdentifier, InstallInfo>;
+type SetupGroup = singleflight::Group<ocx_oci::PinnedPackageRef, InstallInfo>;
 
 /// Singleflight group for in-process dedup of concurrent layer extractions.
 /// Two packages that share a layer run the extraction exactly once.
@@ -118,7 +118,7 @@ impl PackageManager {
     ///    only happen after this gate, avoiding redundant network calls.
     pub fn pull(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
     ) -> Pin<Box<dyn Future<Output = Result<InstallInfo, PackageErrorKind>> + Send + '_>> {
         let groups = SetupGroups::new();
@@ -140,7 +140,7 @@ impl PackageManager {
     /// permit held by its own ancestor (deadlock).
     pub async fn pull_all(
         &self,
-        packages: &[ocx_oci::Identifier],
+        packages: &[ocx_oci::PackageRef],
         platform: ocx_oci::Platform,
         concurrency: Concurrency,
     ) -> Result<Vec<InstallInfo>, crate::error::Error> {
@@ -183,7 +183,7 @@ impl PackageManager {
 /// dedup state across parallel pulls.
 fn setup_with_tracker<'a>(
     mgr: &'a PackageManager,
-    package: &ocx_oci::Identifier,
+    package: &ocx_oci::PackageRef,
     platform: ocx_oci::Platform,
     groups: SetupGroups,
 ) -> Pin<Box<dyn Future<Output = Result<InstallInfo, PackageErrorKind>> + Send + 'a>> {
@@ -201,7 +201,7 @@ fn setup_with_tracker<'a>(
 /// directly, bypassing this function's singleflight gate).
 async fn setup_impl(
     mgr: &PackageManager,
-    package: &ocx_oci::Identifier,
+    package: &ocx_oci::PackageRef,
     platform: ocx_oci::Platform,
     groups: SetupGroups,
     dest_override: Option<&std::path::Path>,
@@ -293,7 +293,7 @@ async fn setup_impl(
 /// registry via `client.pull_metadata`.
 pub async fn setup_owned(
     mgr: &PackageManager,
-    pinned: &ocx_oci::PinnedIdentifier,
+    pinned: &ocx_oci::PinnedPackageRef,
     resolved: super::resolve::ResolvedChain,
     platform: ocx_oci::Platform,
     groups: SetupGroups,
@@ -327,7 +327,7 @@ pub async fn setup_owned(
 
 async fn setup_owned_impl(
     mgr: &PackageManager,
-    pinned: &ocx_oci::PinnedIdentifier,
+    pinned: &ocx_oci::PinnedPackageRef,
     resolved: super::resolve::ResolvedChain,
     platform: ocx_oci::Platform,
     groups: SetupGroups,
@@ -618,7 +618,7 @@ async fn setup_owned_impl(
 /// the `pull_local` offline path).
 pub async fn acquire_temp_dir(
     fs: &file_structure::FileStructure,
-    identifier: &ocx_oci::PinnedIdentifier,
+    identifier: &ocx_oci::PinnedPackageRef,
     lock_timeout: Duration,
 ) -> Result<ocx_store::file_structure::TempAcquireResult, PackageErrorKind> {
     let temp_path = fs
@@ -664,7 +664,7 @@ pub async fn acquire_temp_dir(
 async fn setup_dependencies(
     mgr: &PackageManager,
     metadata: &ocx_package::metadata::Metadata,
-    parent: &ocx_oci::PinnedIdentifier,
+    parent: &ocx_oci::PinnedPackageRef,
     platform: ocx_oci::Platform,
     groups: SetupGroups,
 ) -> Result<Vec<Arc<InstallInfo>>, PackageErrorKind> {
@@ -715,12 +715,12 @@ async fn setup_dependencies(
 /// - Writes the `digest` file for recovery of the full digest from the truncated CAS path.
 async fn post_download_actions(
     pkg: &file_structure::PackageDir,
-    pinned: &ocx_oci::PinnedIdentifier,
+    pinned: &ocx_oci::PinnedPackageRef,
     resolved: &ResolvedPackage,
 ) -> Result<(), PackageErrorKind> {
     // Tag-preservation policy: `resolve.json` deliberately keeps each
     // dependency's advisory tag (the form that won the install-time race).
-    // `ocx.lock` strips it via `PinnedIdentifier::strip_advisory()` because
+    // `ocx.lock` strips it via `PinnedPackageRef::strip_advisory()` because
     // a project lock is the canonical pinned record and a tag-only churn
     // would bust `generated_at` preservation. The two files have different
     // jobs: install-time audit trail vs. canonical project pin. Do not
@@ -761,7 +761,7 @@ async fn post_download_actions(
 /// existing callers pass `None`.
 async fn move_temp_to_object_store(
     fs: &file_structure::FileStructure,
-    identifier: &ocx_oci::PinnedIdentifier,
+    identifier: &ocx_oci::PinnedPackageRef,
     metadata: &metadata::Metadata,
     resolved: ResolvedPackage,
     temp: ocx_store::file_structure::TempAcquireResult,
@@ -791,7 +791,7 @@ async fn move_temp_to_object_store(
 /// recheck, and atomic move into `layers/{digest}/`.
 async fn extract_layers(
     mgr: &PackageManager,
-    pinned: &ocx_oci::PinnedIdentifier,
+    pinned: &ocx_oci::PinnedPackageRef,
     transport: &ocx_oci::PinnedOciIdentifier,
     manifest: &ocx_oci::ImageManifest,
     layer_group: LayerGroup,
@@ -899,7 +899,7 @@ impl std::error::Error for DialRefusal {
 /// refusal stays refused ([`DialVerdict`]).
 async fn extract_layer_atomic(
     mgr: &PackageManager,
-    pinned: &ocx_oci::PinnedIdentifier,
+    pinned: &ocx_oci::PinnedPackageRef,
     transport: &ocx_oci::PinnedOciIdentifier,
     layer: &ocx_oci::Descriptor,
     layer_digest: &ocx_oci::Digest,
@@ -971,7 +971,7 @@ async fn extract_layer_atomic(
 
 /// Inner extraction implementation — runs only for the leader task.
 async fn extract_layer_inner(
-    pinned: &ocx_oci::PinnedIdentifier,
+    pinned: &ocx_oci::PinnedPackageRef,
     transport: &ocx_oci::PinnedOciIdentifier,
     layer: &ocx_oci::Descriptor,
     layer_digest: &ocx_oci::Digest,
@@ -1158,8 +1158,8 @@ mod tests {
         let manager = PackageManager::new(file_structure, index, None, "example.com");
 
         let digest = ocx_oci::Digest::Sha256("d".repeat(64));
-        let pinned = ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry("test/foreign", "example.com")
+        let pinned = ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry("test/foreign", "example.com")
                 .clone_with_tag("1.0.0")
                 .clone_with_digest(digest.clone()),
         )
@@ -1320,8 +1320,8 @@ mod tests {
         let layer_digests: Vec<ocx_oci::Digest> = (0..layers)
             .map(|index| ocx_oci::Digest::Sha256(format!("{index:064}")))
             .collect();
-        let pinned = ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry("test/indirected", "example.com")
+        let pinned = ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry("test/indirected", "example.com")
                 .clone_with_tag("1.0.0")
                 .clone_with_digest(manifest_digest.clone()),
         )

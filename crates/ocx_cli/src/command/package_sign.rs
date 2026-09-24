@@ -244,7 +244,7 @@ impl PackageSign {
     async fn sweep(
         &self,
         context: &crate::app::Context,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         tags: &[String],
         options: &SignOptions,
     ) -> anyhow::Result<ExitCode> {
@@ -312,7 +312,7 @@ impl PackageSign {
 /// test — the sweep itself needs a live `PackageManager`, so nothing that can
 /// run in-process could otherwise read the row back.
 fn swept_signature_report(
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     tag: &str,
     result: ocx_sign::sign::SignResult,
 ) -> crate::api::data::signature::SignatureReport {
@@ -344,8 +344,8 @@ mod tests {
     use super::*;
     use ocx_sign::sign::SignError;
 
-    fn test_identifier() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("static parse")
+    fn test_identifier() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::parse("registry.example/pkg:1.0").expect("static parse")
     }
 
     /// A pipeline-stage `SignError` wrapped in a `PackageError` (the shape the
@@ -395,7 +395,7 @@ mod tests {
         use ocx_sign::sign::pipeline::{LegDigests, SignResult, SignatureLeg};
 
         let digest = |fill: char| ocx_oci::Digest::Sha256(fill.to_string().repeat(64));
-        let positional = ocx_oci::Identifier::parse("registry.example/pkg:9.9.9").expect("static parse");
+        let positional = ocx_oci::PackageRef::parse("registry.example/pkg:9.9.9").expect("static parse");
         let result = SignResult {
             subject_digest: digest('a'),
             legs: vec![SignatureLeg {

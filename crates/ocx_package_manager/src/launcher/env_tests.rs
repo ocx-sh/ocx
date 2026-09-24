@@ -81,8 +81,8 @@ async fn the_marker_admits_the_shipped_launcher_and_shim_bodies_and_refuses_only
     );
 
     // 2. The real deferred-tool shim, from the shipped generator.
-    let identifier = ocx_oci::PinnedIdentifier::try_from(
-        ocx_oci::Identifier::new_registry("cmake", "example.com")
+    let identifier = ocx_oci::PinnedPackageRef::try_from(
+        ocx_oci::PackageRef::new_registry("cmake", "example.com")
             .clone_with_digest(ocx_oci::Digest::Sha256("a".repeat(64))),
     )
     .expect("a digest-bearing identifier is pinned");

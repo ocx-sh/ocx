@@ -233,7 +233,7 @@ impl PackageAttest {
     async fn sweep(
         &self,
         context: &crate::app::Context,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         tags: &[String],
         options: &AttestOptions,
     ) -> anyhow::Result<ExitCode> {

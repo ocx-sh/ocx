@@ -18,7 +18,7 @@ use crate::api::Printable;
 /// host pointer (issue #179).
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct InstallEntry {
-    pub identifier: ocx_oci::Identifier,
+    pub identifier: ocx_oci::PackageRef,
     pub metadata: Metadata,
     pub path: Option<PathBuf>,
 }
@@ -52,7 +52,7 @@ impl Printable for Installs {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (package, entry) in &self.packages {
             rows[0].push(package.clone());
-            // `Identifier::Display` always appends `@sha256:<64hex>`, which alone
+            // `PackageRef::Display` always appends `@sha256:<64hex>`, which alone
             // is 71 columns — it widens every row of the most-run command for a
             // value the user already pinned. JSON keeps the full form.
             rows[1].push(crate::api::data::ink_identifier(
@@ -76,7 +76,7 @@ impl Printable for Installs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_oci::Identifier;
+    use ocx_oci::PackageRef;
 
     fn sample_metadata() -> Metadata {
         serde_json::from_str(r#"{"type":"bundle","version":1}"#).expect("metadata parses")
@@ -115,7 +115,7 @@ mod tests {
                 (
                     (*name).to_string(),
                     InstallEntry {
-                        identifier: Identifier::new_registry(*name, "registry.example"),
+                        identifier: PackageRef::new_registry(*name, "registry.example"),
                         metadata: sample_metadata(),
                         path: Some(PathBuf::from(format!("/packages/{name}"))),
                     },

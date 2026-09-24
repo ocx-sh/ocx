@@ -93,14 +93,14 @@ pub struct PatchSyncReport {
 /// have been installed). Returns an error only on unexpected I/O failures.
 pub async fn enumerate_installed_bases(
     file_structure: &ocx_store::file_structure::FileStructure,
-) -> crate::Result<Vec<ocx_oci::Identifier>> {
+) -> crate::Result<Vec<ocx_oci::PackageRef>> {
     use ocx_util::fs::path_exists_lossy;
 
     let snapshot = ocx_index::IndexStore::machine_local(file_structure);
     let snapshot = &snapshot;
     let symlink_root = file_structure.symlinks.root().to_path_buf();
 
-    let mut slug_base_ids: Vec<ocx_oci::Identifier> = Vec::new();
+    let mut slug_base_ids: Vec<ocx_oci::PackageRef> = Vec::new();
 
     if path_exists_lossy(&symlink_root).await {
         match tokio::fs::read_dir(&symlink_root).await {
@@ -130,7 +130,7 @@ pub async fn enumerate_installed_bases(
     }
 
     // Restore real registry hostnames (slug → canonical form).
-    let mut real_base_ids: Vec<ocx_oci::Identifier> = Vec::with_capacity(slug_base_ids.len());
+    let mut real_base_ids: Vec<ocx_oci::PackageRef> = Vec::with_capacity(slug_base_ids.len());
     for slug_id in &slug_base_ids {
         real_base_ids.push(super::resolve::recover_base_with_real_registry(snapshot, slug_id).await);
     }
@@ -187,7 +187,7 @@ fn descriptor_digest_advanced(before: &PatchDiscoveryState, after: &PatchDiscove
 /// Fallback to `NeverLooked` on error is best-effort: the sync continues, but the
 /// delta for the affected descriptor will be 0 (both before and after would need to
 /// succeed and differ to count as an advance).
-async fn read_tag_state_best_effort(tags_path: &std::path::Path, id: &ocx_oci::Identifier) -> PatchDiscoveryState {
+async fn read_tag_state_best_effort(tags_path: &std::path::Path, id: &ocx_oci::PackageRef) -> PatchDiscoveryState {
     match PatchTagMap::read(tags_path).await {
         Ok(state) => state,
         Err(err) => {
@@ -283,7 +283,7 @@ impl PackageManager {
         let global_id = global_descriptor_id(patches);
         let global_tags_path = file_structure.patch_descriptor_path(&global_id);
 
-        let mut sources: std::collections::BTreeMap<std::path::PathBuf, (ocx_oci::Identifier, PatchDiscoveryState)> =
+        let mut sources: std::collections::BTreeMap<std::path::PathBuf, (ocx_oci::PackageRef, PatchDiscoveryState)> =
             std::collections::BTreeMap::new();
         let global_before = read_tag_state_best_effort(&global_tags_path, &global_id).await;
         sources.insert(global_tags_path.clone(), (global_id.clone(), global_before));
@@ -554,7 +554,7 @@ mod tests {
     async fn sync_mode_offline_short_circuits() {
         let tmp = TempDir::new().unwrap();
         let manager = make_offline_manager(tmp.path()).with_patches(Some(test_patch_config()));
-        let base_id = ocx_oci::Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base_id = ocx_oci::PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
 
         // In Sync mode, offline still short-circuits to Ok(()) at the
         // `is_offline()` check inside the method — the caller (sync_patches)
@@ -582,7 +582,7 @@ mod tests {
     /// Traces: F-A — sync fail-closed on required-companion failure.
     #[test]
     fn required_companion_failure_is_fatal_for_sync() {
-        let companion = ocx_oci::Identifier::parse("patches.corp.com/corp-ca:1.0").expect("valid identifier");
+        let companion = ocx_oci::PackageRef::parse("patches.corp.com/corp-ca:1.0").expect("valid identifier");
         let err = PackageErrorKind::RequiredCompanionFailed {
             companion,
             source: Box::new(PackageErrorKind::NotFound),
@@ -658,7 +658,7 @@ mod tests {
         //   symlinks/ocx_sh/cmake/candidates/3.28
         // enumerate_installed_bases walks this tree and returns the base identifier.
         let symlink_store = ocx_store::file_structure::SymlinkStore::new(tmp.path().join("symlinks"));
-        let base_id = ocx_oci::Identifier::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
+        let base_id = ocx_oci::PackageRef::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
         let candidate_path = symlink_store.candidate(&base_id);
         tokio::fs::create_dir_all(candidate_path.parent().unwrap())
             .await
@@ -715,7 +715,7 @@ mod tests {
 
         // Seed a candidate symlink for enumerate_installed_bases.
         let symlink_store = ocx_store::file_structure::SymlinkStore::new(tmp.path().join("symlinks"));
-        let base_id = ocx_oci::Identifier::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
+        let base_id = ocx_oci::PackageRef::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
         let candidate_path = symlink_store.candidate(&base_id);
         tokio::fs::create_dir_all(candidate_path.parent().unwrap())
             .await
@@ -910,7 +910,7 @@ mod tests {
         let fs = ocx_store::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
         let tag_store = &fs;
 
-        let base_id = ocx_oci::Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base_id = ocx_oci::PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
 
         // Seed LookedNoDescriptor for the global descriptor.
         let global_id = crate::tasks::patch_discovery::global_descriptor_id(&patch_config);
@@ -1056,7 +1056,7 @@ mod tests {
         .await
         .unwrap();
 
-        let base_id = ocx_oci::Identifier::parse("ocx.sh/cmake:3.28").expect("valid");
+        let base_id = ocx_oci::PackageRef::parse("ocx.sh/cmake:3.28").expect("valid");
 
         // ── Lazy mode: loads from CAS (offline OK) ──
         let offline_manager = make_offline_manager(tmp.path()).with_patches(Some(patch_config.clone()));
@@ -1114,8 +1114,8 @@ mod tests {
 
         // Seed two distinct installed bases.
         let symlink_store = ocx_store::file_structure::SymlinkStore::new(tmp.path().join("symlinks"));
-        let base_cmake = ocx_oci::Identifier::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
-        let base_ninja = ocx_oci::Identifier::new_registry("ninja", "ocx.sh").clone_with_tag("1.12");
+        let base_cmake = ocx_oci::PackageRef::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
+        let base_ninja = ocx_oci::PackageRef::new_registry("ninja", "ocx.sh").clone_with_tag("1.12");
 
         for base_id in [&base_cmake, &base_ninja] {
             let candidate_path = symlink_store.candidate(base_id);
@@ -1287,7 +1287,7 @@ mod tests {
 
         // ── Build the NEW descriptor (what the stub registry now serves) ──
         // NOTE: `packages` is a flat list of identifier strings (not objects).
-        // See PatchRule.packages: Vec<Identifier> which deserializes from strings.
+        // See PatchRule.packages: Vec<PackageRef> which deserializes from strings.
         //
         // The companion is marked `required: false` because this test measures the
         // `descriptors_updated` counter, not companion enforcement — the stub
@@ -1711,8 +1711,8 @@ mod tests {
         use ocx_package::resolved_package::ResolvedPackage;
         let store = manager.file_structure().packages.clone();
         let digest = ocx_oci::Algorithm::Sha256.hash(repo.as_bytes());
-        let pinned = ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry(repo, "ocx.sh").clone_with_digest(digest),
+        let pinned = ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry(repo, "ocx.sh").clone_with_digest(digest),
         )
         .expect("pinned identifier must build");
         let pkg_path = store.path(&pinned);
@@ -1964,7 +1964,7 @@ mod tests {
 
         // Seed one installed base candidate → sync uses the Both scope for it.
         let symlink_store = ocx_store::file_structure::SymlinkStore::new(tmp.path().join("symlinks"));
-        let base_id = ocx_oci::Identifier::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
+        let base_id = ocx_oci::PackageRef::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
         let candidate_path = symlink_store.candidate(&base_id);
         tokio::fs::create_dir_all(candidate_path.parent().unwrap())
             .await
@@ -2149,7 +2149,7 @@ mod tests {
 
         // Lazy discovery (Both scope) over a real base: the global corrupt-cache heal
         // re-fetches EAGERLY; the required companion then fails → fail closed.
-        let base_id = ocx_oci::Identifier::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
+        let base_id = ocx_oci::PackageRef::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
         let result = manager
             .discover_and_install_patches(&base_id, &ocx_oci::Platform::any())
             .await;

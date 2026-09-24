@@ -55,13 +55,13 @@ use super::{
 /// The `usize` is the task index for stable topological re-ordering after join.
 type DepLoadResult = (
     usize,
-    crate::Result<(metadata::Metadata, ResolvedPackage, ocx_oci::PinnedIdentifier)>,
+    crate::Result<(metadata::Metadata, ResolvedPackage, ocx_oci::PinnedPackageRef)>,
 );
 
 /// The return value of [`compose`].
 ///
 /// Carries the emitted env entries together with the **admitted set** — the
-/// ordered, deduped set of `PinnedIdentifier`s whose surface contributions
+/// ordered, deduped set of `PinnedPackageRef`s whose surface contributions
 /// were actually emitted.  The admitted set is used by `SitePatchResolver` in
 /// `resolve_env` to gate the companion overlay: only identifiers that compose
 /// actually visited get a patch overlay applied.
@@ -81,7 +81,7 @@ pub struct ComposeOutput {
     /// are appended at the end in the same order as `roots`.  Cross-root
     /// dedup is applied: a shared dep appears only once, at its first-seen
     /// position across all roots.
-    pub admitted: Vec<ocx_oci::PinnedIdentifier>,
+    pub admitted: Vec<ocx_oci::PinnedPackageRef>,
 
     /// Declared `binaries` claims contributed by each admitted identifier.
     ///
@@ -90,14 +90,14 @@ pub struct ComposeOutput {
     /// unconditionally; deps iff `has_interface()`/`has_private()`). Consumed
     /// by `ocx env` / `ocx package env`'s `binaries` JSON array. See
     /// `adr_declared_binaries_metadata.md` §4 Decision A.
-    pub admitted_binaries: Vec<(ocx_oci::PinnedIdentifier, BinaryName)>,
+    pub admitted_binaries: Vec<(ocx_oci::PinnedPackageRef, BinaryName)>,
 
     /// Declared `entrypoints` claims contributed by each admitted identifier.
     ///
     /// Same shape and admission rule as `admitted_binaries`, sourced from
     /// `Metadata::entrypoints()`. Consumed by `ocx env` / `ocx package
     /// env`'s `entrypoints` JSON array.
-    pub admitted_entrypoints: Vec<(ocx_oci::PinnedIdentifier, EntrypointName)>,
+    pub admitted_entrypoints: Vec<(ocx_oci::PinnedPackageRef, EntrypointName)>,
 
     /// Declared `integrations` contributed by each admitted identifier.
     ///
@@ -110,7 +110,7 @@ pub struct ComposeOutput {
     /// a caller merging two calls' outputs owns the dedup across them. Within
     /// one package, lexicographic by namespace. See
     /// `adr_package_integrations.md` C-012.
-    pub admitted_integrations: Vec<(ocx_oci::PinnedIdentifier, IntegrationEntry)>,
+    pub admitted_integrations: Vec<(ocx_oci::PinnedPackageRef, IntegrationEntry)>,
 }
 
 // ── Surface algebra: the single source of truth ─────────────────────────────
@@ -329,21 +329,21 @@ async fn compose_gated(
     check_repo_digest_conflicts(roots, self_view)?;
 
     let mut entries: Vec<Entry> = Vec::new();
-    let mut seen: HashSet<ocx_oci::PinnedIdentifier> = HashSet::new();
+    let mut seen: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
     // The admitted set records every stripped identifier emitted during this
     // compose call, in visit order.  Built in parallel with `seen` so the
     // patch overlay can iterate admitted identifiers in the same topological
     // order without a second walk.
-    let mut admitted: Vec<ocx_oci::PinnedIdentifier> = Vec::new();
+    let mut admitted: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
     // Declared `binaries`/`entrypoints` claims for every admitted identifier
     // (root or dep), collected alongside `admitted` under the identical
     // surface gate. See `adr_declared_binaries_metadata.md` §4 Decision A.
-    let mut admitted_binaries: Vec<(ocx_oci::PinnedIdentifier, BinaryName)> = Vec::new();
-    let mut admitted_entrypoints: Vec<(ocx_oci::PinnedIdentifier, EntrypointName)> = Vec::new();
+    let mut admitted_binaries: Vec<(ocx_oci::PinnedPackageRef, BinaryName)> = Vec::new();
+    let mut admitted_entrypoints: Vec<(ocx_oci::PinnedPackageRef, EntrypointName)> = Vec::new();
     // Interface-surface-only carrier, gated by `integrations_cross` rather
     // than the visibility algebra (ADR §4.1) — collected at the same two sites
     // as the claims above.
-    let mut admitted_integrations: Vec<(ocx_oci::PinnedIdentifier, IntegrationEntry)> = Vec::new();
+    let mut admitted_integrations: Vec<(ocx_oci::PinnedPackageRef, IntegrationEntry)> = Vec::new();
 
     // Pre-compute root keys (stripped identifiers) so a TC entry that is
     // also an explicit root is deferred to the root-emission pass instead
@@ -351,7 +351,7 @@ async fn compose_gated(
     // composer "root-as-dep" dedup discussion). Explicit roots emit
     // unconditionally; transitive deps dedup against each other AND
     // against the explicit-root set.
-    let root_keys: HashSet<ocx_oci::PinnedIdentifier> = roots.iter().map(|r| r.identifier().strip_advisory()).collect();
+    let root_keys: HashSet<ocx_oci::PinnedPackageRef> = roots.iter().map(|r| r.identifier().strip_advisory()).collect();
 
     for root in roots {
         // A deferred root's whole block — its own carriers and its closure's —
@@ -374,7 +374,7 @@ async fn compose_gated(
         // order is preserved after join (per quality-rust.md JoinSet pattern).
         //
         // Step 1: collect the surface-visible, deduplicated entries for this root.
-        let mut visible_entries: Vec<(usize, ocx_oci::PinnedIdentifier)> = Vec::new();
+        let mut visible_entries: Vec<(usize, ocx_oci::PinnedPackageRef)> = Vec::new();
         for tc_entry in &root.resolved().dependencies {
             let key = tc_entry.identifier.strip_advisory();
 
@@ -429,7 +429,7 @@ async fn compose_gated(
         }
 
         // Collect results preserving index for topological re-ordering.
-        let mut loaded: Vec<Option<(metadata::Metadata, ResolvedPackage, ocx_oci::PinnedIdentifier)>> =
+        let mut loaded: Vec<Option<(metadata::Metadata, ResolvedPackage, ocx_oci::PinnedPackageRef)>> =
             vec![None; visible_entries.len()];
         while let Some(join_result) = tasks.join_next().await {
             let (idx, result) = match join_result {
@@ -632,8 +632,8 @@ async fn compose_gated(
 /// [`tc_entry_object_data`] — from `store` for a materialized root, from the
 /// ref-linked closure for a deferred one.
 pub async fn check_entrypoints(roots: &[Arc<InstallInfo>], store: &PackageStore) -> Result<(), PackageErrorKind> {
-    let mut owners: BTreeMap<EntrypointName, Vec<ocx_oci::PinnedIdentifier>> = BTreeMap::new();
-    let mut seen: HashSet<ocx_oci::PinnedIdentifier> = HashSet::new();
+    let mut owners: BTreeMap<EntrypointName, Vec<ocx_oci::PinnedPackageRef>> = BTreeMap::new();
+    let mut seen: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
 
     for root in roots {
         // Each root's own entrypoints are unconditionally on the interface
@@ -714,7 +714,7 @@ fn build_dep_context_map(
     store: &PackageStore,
     paths: &ComposePaths,
 ) -> HashMap<DependencyName, DependencyContext> {
-    let resolved_id_map: HashMap<ocx_oci::Repository, &ocx_oci::PinnedIdentifier> = resolved
+    let resolved_id_map: HashMap<ocx_oci::Repository, &ocx_oci::PinnedPackageRef> = resolved
         .dependencies
         .iter()
         .map(|d| (ocx_oci::Repository::from(d.identifier.as_identifier()), &d.identifier))
@@ -1004,7 +1004,7 @@ pub fn warn_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_view: bool) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DigestConflict {
     pub repository: ocx_oci::Repository,
-    pub identifiers: Vec<ocx_oci::PinnedIdentifier>,
+    pub identifiers: Vec<ocx_oci::PinnedPackageRef>,
 }
 
 /// Collects version conflicts across the surface-projected union TC.
@@ -1018,7 +1018,7 @@ pub(crate) fn collect_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_vie
     // Per repository, the distinct-digest identifiers observed on the active
     // surface, in first-seen order. A repository with two or more entries is a
     // version conflict.
-    let mut by_repository: BTreeMap<ocx_oci::Repository, Vec<ocx_oci::PinnedIdentifier>> = BTreeMap::new();
+    let mut by_repository: BTreeMap<ocx_oci::Repository, Vec<ocx_oci::PinnedPackageRef>> = BTreeMap::new();
     for root in roots {
         // Roots themselves always participate — explicit roots emit
         // unconditionally during compose, so a collision between roots (or
@@ -1050,8 +1050,8 @@ pub(crate) fn collect_repo_digest_conflicts(roots: &[Arc<InstallInfo>], self_vie
 }
 
 fn record_repo_identifier(
-    id: &ocx_oci::PinnedIdentifier,
-    by_repository: &mut BTreeMap<ocx_oci::Repository, Vec<ocx_oci::PinnedIdentifier>>,
+    id: &ocx_oci::PinnedPackageRef,
+    by_repository: &mut BTreeMap<ocx_oci::Repository, Vec<ocx_oci::PinnedPackageRef>>,
 ) {
     let repository = ocx_oci::Repository::from(&**id);
     let seen = by_repository.entry(repository).or_default();
@@ -1549,7 +1549,7 @@ fn emit_shim_slot(root: &InstallInfo, self_view: bool, entries: &mut Vec<Entry>)
 async fn tc_entry_object_data(
     root: &InstallInfo,
     store: &PackageStore,
-    dep_id: &ocx_oci::PinnedIdentifier,
+    dep_id: &ocx_oci::PinnedPackageRef,
 ) -> crate::Result<(metadata::Metadata, ResolvedPackage)> {
     let Some(deferred) = root.deferred() else {
         return common::load_object_data(store, &store.content(dep_id)).await;
@@ -1576,7 +1576,7 @@ async fn tc_entry_object_data(
 #[derive(Debug, Clone)]
 pub struct ComposeRequest {
     /// The identifier to compose, as the caller's tier resolved it.
-    pub identifier: ocx_oci::Identifier,
+    pub identifier: ocx_oci::PackageRef,
     /// The resolved `lazy-mode`: [`LazyMode::Always`] defers, [`LazyMode::Never`]
     /// materializes.
     pub mode: LazyMode,
@@ -1609,7 +1609,7 @@ pub enum Materialization {
 #[derive(Debug)]
 pub struct ComposeOmission {
     /// The request that was dropped, as the caller named it.
-    pub identifier: ocx_oci::Identifier,
+    pub identifier: ocx_oci::PackageRef,
     /// Why it was dropped, verbatim from the probe that dropped it — the
     /// vocabulary [`unavailable_locally`] admits, which is wider than
     /// [`PackageErrorKind::NotFound`]: a tag no cached index answers under
@@ -1655,7 +1655,7 @@ pub struct ComposeRoots {
     /// A plain list rather than an outcome aligned with [`Self::roots`]: the
     /// only consumer asks "which of these did this invocation fetch", and an
     /// aligned vector would carry a `Cached` entry per root that nobody reads.
-    pub pulled: Vec<ocx_oci::Identifier>,
+    pub pulled: Vec<ocx_oci::PackageRef>,
 }
 
 impl PackageManager {
@@ -1705,9 +1705,9 @@ impl PackageManager {
         let mut slots: Vec<Option<Arc<InstallInfo>>> = (0..requests.len()).map(|_| None).collect();
         let mut advisories: Vec<LazyAdvisory> = Vec::new();
         let mut omitted: Vec<ComposeOmission> = Vec::new();
-        let mut pulled: Vec<ocx_oci::Identifier> = Vec::new();
+        let mut pulled: Vec<ocx_oci::PackageRef> = Vec::new();
 
-        let eager: Vec<(usize, ocx_oci::Identifier)> = requests
+        let eager: Vec<(usize, ocx_oci::PackageRef)> = requests
             .iter()
             .enumerate()
             .filter(|(_, request)| request.mode == LazyMode::Never)
@@ -1716,7 +1716,7 @@ impl PackageManager {
 
         // The eager half runs the calling command's own policy, batched exactly
         // as that command batched it before the lazy split existed.
-        let identifiers: Vec<ocx_oci::Identifier> = eager.iter().map(|(_, id)| id.clone()).collect();
+        let identifiers: Vec<ocx_oci::PackageRef> = eager.iter().map(|(_, id)| id.clone()).collect();
         match &materialization {
             Materialization::Install => {
                 let found = self
@@ -1837,10 +1837,10 @@ impl PackageManager {
     /// omission from failure through [`unavailable_locally`].
     async fn local_root(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         platform: &ocx_oci::Platform,
     ) -> Result<InstallInfo, PackageErrorKind> {
-        match ocx_oci::PinnedIdentifier::try_from(identifier.clone()) {
+        match ocx_oci::PinnedPackageRef::try_from(identifier.clone()) {
             Ok(pinned) => self.find_plain(&pinned).await?.ok_or(PackageErrorKind::NotFound),
             Err(_) => self.find(identifier, platform.clone()).await,
         }
@@ -1864,7 +1864,7 @@ impl PackageManager {
     /// keeps reachable.
     async fn deferred_root(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
     ) -> Result<(Arc<InstallInfo>, Vec<LazyAdvisory>), PackageErrorKind> {
         let prepared = self.prepare_lazy(package, platform).await?;
@@ -2042,7 +2042,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::error::PackageErrorKind;
-    use ocx_oci::{Digest, Identifier, PinnedIdentifier};
+    use ocx_oci::{Digest, PackageRef, PinnedPackageRef};
     use ocx_package::{
         install_info::InstallInfo,
         metadata::{
@@ -2072,9 +2072,9 @@ mod tests {
         Digest::Sha256(hex_char.to_string().repeat(64))
     }
 
-    fn pinned(repo: &str, hex_char: char) -> PinnedIdentifier {
-        let id = Identifier::new_registry(repo, REGISTRY).clone_with_digest(sha256(hex_char));
-        PinnedIdentifier::try_from(id).unwrap()
+    fn pinned(repo: &str, hex_char: char) -> PinnedPackageRef {
+        let id = PackageRef::new_registry(repo, REGISTRY).clone_with_digest(sha256(hex_char));
+        PinnedPackageRef::try_from(id).unwrap()
     }
 
     /// Build a minimal `InstallInfo` with an empty env and the given resolved closure.
@@ -2175,7 +2175,7 @@ mod tests {
     /// Write a minimal on-disk package directory (metadata.json + resolve.json)
     /// so `PackageStore::lookup` can find it. Mirrors the visible.rs
     /// `seed_package_in_store` helper.
-    fn seed_package_in_store(store: &PackageStore, id: &PinnedIdentifier, resolved: &ResolvedPackage) {
+    fn seed_package_in_store(store: &PackageStore, id: &PinnedPackageRef, resolved: &ResolvedPackage) {
         let pkg_path = store.path(id);
         std::fs::create_dir_all(pkg_path.join("content")).unwrap();
         let meta = serde_json::json!({ "type": "bundle", "version": 1 });
@@ -5740,7 +5740,7 @@ mod tests {
     /// Write a package directory `common::load_object_data` can read back.
     fn seed_package_with_metadata(
         store: &PackageStore,
-        id: &PinnedIdentifier,
+        id: &PinnedPackageRef,
         metadata: &metadata::Metadata,
         resolved: &ResolvedPackage,
     ) {
@@ -5955,8 +5955,8 @@ mod tests {
         ));
         let deferred = DeferredComposition::new(shim_dir_at(dir.path().join("shims")), vec![Arc::clone(&member)]);
 
-        let tagged = PinnedIdentifier::try_from(
-            Identifier::new_registry("dep", REGISTRY)
+        let tagged = PinnedPackageRef::try_from(
+            PackageRef::new_registry("dep", REGISTRY)
                 .clone_with_tag("1.2.3")
                 .clone_with_digest(sha256('d')),
         )
@@ -6414,7 +6414,7 @@ mod tests {
             Vec<Arc<InstallInfo>>,
             Vec<LazyAdvisory>,
             Vec<ComposeOmission>,
-            Vec<ocx_oci::Identifier>,
+            Vec<ocx_oci::PackageRef>,
         ) {
             let ComposeRoots {
                 roots,
@@ -6439,7 +6439,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manager = offline_manager(dir.path());
         let request = ComposeRequest {
-            identifier: Identifier::new_registry("tool", REGISTRY),
+            identifier: PackageRef::new_registry("tool", REGISTRY),
             mode: LazyMode::Always,
         };
 
@@ -6554,7 +6554,7 @@ mod tests {
         let requests: Vec<ComposeRequest> = names
             .iter()
             .map(|name| ComposeRequest {
-                identifier: Identifier::new_registry(*name, REGISTRY),
+                identifier: PackageRef::new_registry(*name, REGISTRY),
                 mode: LazyMode::Never,
             })
             .collect();
@@ -6648,8 +6648,8 @@ mod tests {
     // green there whatever the wiring did, which is no check at all. The host
     // floor gets its own two-halved row at the end of this block.
 
-    fn tool_identifier() -> Identifier {
-        Identifier::new_registry("ns/tool", REGISTRY).clone_with_tag("1.2.3")
+    fn tool_identifier() -> PackageRef {
+        PackageRef::new_registry("ns/tool", REGISTRY).clone_with_tag("1.2.3")
     }
 
     /// A `ProjectConfig` carrying the three config tiers C-006 gives
@@ -6968,7 +6968,7 @@ mod tests {
 
     /// One `dependencies[]` entry as authored: pinned identifier, declared edge
     /// visibility, interpolation name.
-    fn lazy_edge(identifier: &PinnedIdentifier, visibility: &str, name: &str) -> serde_json::Value {
+    fn lazy_edge(identifier: &PinnedPackageRef, visibility: &str, name: &str) -> serde_json::Value {
         serde_json::json!({ "identifier": identifier.to_string(), "visibility": visibility, "name": name })
     }
 
@@ -7014,7 +7014,7 @@ mod tests {
                 mode: LazyMode::Never,
             },
             ComposeRequest {
-                identifier: Identifier::new_registry("deferred", REGISTRY).clone_with_tag("1.0"),
+                identifier: PackageRef::new_registry("deferred", REGISTRY).clone_with_tag("1.0"),
                 mode: LazyMode::Always,
             },
         ];
@@ -7073,8 +7073,8 @@ mod tests {
             crate::test_support::manifest_source::FakeManifestSource::default(),
             &dep_config,
         );
-        let dep_id = PinnedIdentifier::try_from(
-            Identifier::new_registry("dep", REGISTRY).clone_with_digest(dep_manifest_digest.clone()),
+        let dep_id = PinnedPackageRef::try_from(
+            PackageRef::new_registry("dep", REGISTRY).clone_with_digest(dep_manifest_digest.clone()),
         )
         .unwrap();
 
@@ -7083,7 +7083,7 @@ mod tests {
 
         let manager = lazy_manager(dir.path(), source);
         let request = ComposeRequest {
-            identifier: Identifier::new_registry("tool", REGISTRY).clone_with_tag("2.0"),
+            identifier: PackageRef::new_registry("tool", REGISTRY).clone_with_tag("2.0"),
             mode: LazyMode::Always,
         };
 
@@ -7201,7 +7201,7 @@ mod wp15_following_lane_spec_tests {
         LockedTool {
             name: name.to_string(),
             group: group.to_string(),
-            repository: ocx_oci::Identifier::new_registry(repository, REGISTRY),
+            repository: ocx_oci::PackageRef::new_registry(repository, REGISTRY),
             platforms: BTreeMap::from([(PLATFORM_KEY.to_string(), digest_of(seed))]),
         }
     }
@@ -7213,7 +7213,7 @@ mod wp15_following_lane_spec_tests {
         LockedTool {
             name: name.to_string(),
             group: group.to_string(),
-            repository: ocx_oci::Identifier::new_registry(repository, REGISTRY),
+            repository: ocx_oci::PackageRef::new_registry(repository, REGISTRY),
             platforms: BTreeMap::from([("windows/arm64".to_string(), digest_of(seed))]),
         }
     }
@@ -7284,7 +7284,7 @@ mod wp15_following_lane_spec_tests {
             let identifier = ocx_project::compose::host_leaf_identifier(tool, &platform())
                 .expect("the fixture lock ships a leaf compatible with the fixture platform");
             let pinned =
-                ocx_oci::PinnedIdentifier::try_from(identifier).expect("a resolved host leaf is digest-bearing");
+                ocx_oci::PinnedPackageRef::try_from(identifier).expect("a resolved host leaf is digest-bearing");
             self.file_structure.packages.path(&pinned)
         }
 
@@ -7761,8 +7761,8 @@ mod wp15_following_lane_spec_tests {
         let foreign = locked_tool_for_another_platform("ninja", DEFAULT_GROUP, "ns/ninja", 'b');
         let reachable_root = tree.seed_digest_root(&reachable);
         let foreign_root = tree.file_structure.packages.path(
-            &ocx_oci::PinnedIdentifier::try_from(
-                ocx_oci::Identifier::new_registry("ns/ninja", REGISTRY).clone_with_digest(digest_of('b')),
+            &ocx_oci::PinnedPackageRef::try_from(
+                ocx_oci::PackageRef::new_registry("ns/ninja", REGISTRY).clone_with_digest(digest_of('b')),
             )
             .expect("a digest-bearing identifier is pinned"),
         );
@@ -8125,7 +8125,7 @@ mod wp15_following_lane_spec_tests {
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
         let digest_root = tree.seed_digest_root(&tool);
 
-        let identifier = ocx_oci::PinnedIdentifier::try_from(
+        let identifier = ocx_oci::PinnedPackageRef::try_from(
             ocx_project::compose::host_leaf_identifier(&tool, &platform()).expect("a compatible leaf"),
         )
         .expect("a resolved host leaf is digest-bearing");
@@ -8216,7 +8216,7 @@ mod wp15_following_lane_spec_tests {
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
         let digest_root = tree.seed_digest_root(&tool);
 
-        let identifier = ocx_oci::PinnedIdentifier::try_from(
+        let identifier = ocx_oci::PinnedPackageRef::try_from(
             ocx_project::compose::host_leaf_identifier(&tool, &platform()).expect("a compatible leaf"),
         )
         .expect("a resolved host leaf is digest-bearing");

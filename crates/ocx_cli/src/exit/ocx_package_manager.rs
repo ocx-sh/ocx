@@ -219,7 +219,7 @@ mod tests {
 
     use super::*;
     use ocx_oci::client::error::ClientError;
-    use ocx_oci::identifier::Identifier;
+    use ocx_oci::package_ref::PackageRef;
 
     use ocx_package_manager::patch::snapshot::PatchSnapshot;
 
@@ -377,11 +377,11 @@ mod tests {
     fn inspect_failed_classifies_from_first_error() {
         let errors = vec![
             PackageError::new(
-                ocx_oci::Identifier::new_registry("a", "example.com"),
+                ocx_oci::PackageRef::new_registry("a", "example.com"),
                 PackageErrorKind::NotFound,
             ),
             PackageError::new(
-                ocx_oci::Identifier::new_registry("b", "example.com"),
+                ocx_oci::PackageRef::new_registry("b", "example.com"),
                 PackageErrorKind::SymlinkRequiresTag,
             ),
         ];
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn select_failed_classifies_from_first_error() {
         let errors = vec![PackageError::new(
-            ocx_oci::Identifier::new_registry("a", "example.com"),
+            ocx_oci::PackageRef::new_registry("a", "example.com"),
             PackageErrorKind::SelectionAmbiguous(vec![]),
         )];
         assert_eq!(
@@ -431,7 +431,7 @@ mod tests {
         // `PackageErrorKind` the way `From<ClientError>` does at the `?` site.
         let kind = PackageErrorKind::from(ClientError::internal(traversal));
         let entry = PackageError::new(
-            ocx_oci::Identifier::new_registry("cmake", "example.com").clone_with_tag("1.1.0"),
+            ocx_oci::PackageRef::new_registry("cmake", "example.com").clone_with_tag("1.1.0"),
             kind,
         );
         let boxed = anyhow::Error::from(PackageManagerError::InstallFailed(vec![entry]));
@@ -455,7 +455,7 @@ mod tests {
 
         // Source = NotFound → should classify to NotFound (79).
         let kind = PackageErrorKind::RequiredCompanionFailed {
-            companion: Identifier::parse("patches.corp.com/ca:latest").expect("valid"),
+            companion: PackageRef::parse("patches.corp.com/ca:latest").expect("valid"),
             source: Box::new(PackageErrorKind::NotFound),
         };
         let code = kind.classify();
@@ -480,13 +480,13 @@ mod tests {
 
         let name = EntrypointName::try_from("cmake").unwrap();
         let hex = "a".repeat(64);
-        let id_a: ocx_oci::Identifier = format!("ocx.sh/foo:1.0@sha256:{hex}").parse().unwrap();
-        let id_b: ocx_oci::Identifier = format!("ocx.sh/bar:1.0@sha256:{hex}").parse().unwrap();
+        let id_a: ocx_oci::PackageRef = format!("ocx.sh/foo:1.0@sha256:{hex}").parse().unwrap();
+        let id_b: ocx_oci::PackageRef = format!("ocx.sh/bar:1.0@sha256:{hex}").parse().unwrap();
         let inner = PackageErrorKind::EntrypointCollision {
             name,
             owners: vec![
-                ocx_oci::PinnedIdentifier::try_from(id_a).unwrap(),
-                ocx_oci::PinnedIdentifier::try_from(id_b).unwrap(),
+                ocx_oci::PinnedPackageRef::try_from(id_a).unwrap(),
+                ocx_oci::PinnedPackageRef::try_from(id_b).unwrap(),
             ],
         };
         let shared = singleflight::SharedError::for_test(inner);

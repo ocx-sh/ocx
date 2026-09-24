@@ -1933,7 +1933,7 @@ mod tests {
                 rung: "ocx_package_manager.rs",
             },
         },
-        // `Self::Identifier(e)`, inner `ocx_oci::identifier::error::IdentifierError`.
+        // `Self::Identifier(e)`, inner `ocx_oci::package_ref::error::IdentifierError`.
         Dissolved {
             baseline_source: "crates/ocx_lib/src/error.rs:385",
             claim: DissolvedClaim::ArmedDelegation {

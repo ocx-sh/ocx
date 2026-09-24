@@ -535,7 +535,7 @@ mod tests {
     ///
     /// Creates `packages/{registry_slug}/{cas_shard}/content/` so `list_all`
     /// discovers it during the GC build scan.
-    fn seed_companion_pkg_dir(root: &std::path::Path, pinned: &ocx_oci::PinnedIdentifier) -> std::path::PathBuf {
+    fn seed_companion_pkg_dir(root: &std::path::Path, pinned: &ocx_oci::PinnedPackageRef) -> std::path::PathBuf {
         let store = ocx_store::file_structure::PackageStore::new(root.join("packages"));
         let pkg_path = store.path(pinned);
         std::fs::create_dir_all(pkg_path.join("content")).unwrap();
@@ -582,8 +582,8 @@ mod tests {
         let registry = "patches.example.com";
         let companion_digest = ocx_oci::Digest::Sha256("c".repeat(64));
         let companion_id =
-            ocx_oci::Identifier::new_registry("ca-bundle", registry).clone_with_digest(companion_digest.clone());
-        let companion_pinned = ocx_oci::PinnedIdentifier::try_from(companion_id).unwrap();
+            ocx_oci::PackageRef::new_registry("ca-bundle", registry).clone_with_digest(companion_digest.clone());
+        let companion_pinned = ocx_oci::PinnedPackageRef::try_from(companion_id).unwrap();
 
         let descriptor_digest = ocx_oci::Digest::Sha256("d".repeat(64));
 
@@ -642,8 +642,8 @@ mod tests {
         let registry = "patches.example.com";
         let companion_digest = ocx_oci::Digest::Sha256("e".repeat(64));
         let companion_id =
-            ocx_oci::Identifier::new_registry("ca-bundle2", registry).clone_with_digest(companion_digest.clone());
-        let companion_pinned = ocx_oci::PinnedIdentifier::try_from(companion_id).unwrap();
+            ocx_oci::PackageRef::new_registry("ca-bundle2", registry).clone_with_digest(companion_digest.clone());
+        let companion_pinned = ocx_oci::PinnedPackageRef::try_from(companion_id).unwrap();
 
         let descriptor_digest = ocx_oci::Digest::Sha256("f".repeat(64));
 

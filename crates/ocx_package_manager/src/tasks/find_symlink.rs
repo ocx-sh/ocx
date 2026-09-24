@@ -36,7 +36,7 @@ impl PackageManager {
     /// digest-reading half of `tasks/common.rs::identifier_for_symlink`.
     pub async fn installed_current_digest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> crate::Result<Option<ocx_oci::Digest>> {
         let current = self.file_structure().symlinks.current(identifier);
 
@@ -74,7 +74,7 @@ impl PackageManager {
     /// at install time.
     pub async fn find_symlink(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         kind: SymlinkKind,
     ) -> Result<InstallInfo, PackageErrorKind> {
         log::debug!("Finding {:?} symlink for '{}'.", kind, package);
@@ -123,7 +123,7 @@ impl PackageManager {
 
     pub async fn find_symlink_all(
         &self,
-        packages: Vec<ocx_oci::Identifier>,
+        packages: Vec<ocx_oci::PackageRef>,
         kind: SymlinkKind,
     ) -> Result<Vec<InstallInfo>, crate::error::Error> {
         let mut infos = Vec::with_capacity(packages.len());
@@ -173,7 +173,7 @@ mod tests {
     async fn installed_current_digest_absent_symlink_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
 
         // No symlink created; `current` path does not exist.
         let result = manager.installed_current_digest(&identifier).await;
@@ -188,7 +188,7 @@ mod tests {
     async fn installed_current_digest_healthy_install_returns_digest() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
 
         // Build a fake package root directory with a `digest` file.
         // `digest_file_for_content` calls `dunce::canonicalize` on the `current`
@@ -222,7 +222,7 @@ mod tests {
     async fn installed_current_digest_dangling_symlink_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
 
         // Create a `current` symlink pointing at a directory that does not exist.
         let current_path = manager.file_structure().symlinks.current(&identifier);
@@ -244,7 +244,7 @@ mod tests {
     async fn installed_current_digest_malformed_digest_file_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
 
         let package_root = tmp.path().join("packages").join("malformed_pkg");
         tokio::fs::create_dir_all(&package_root).await.unwrap();

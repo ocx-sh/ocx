@@ -558,7 +558,7 @@ pub async fn materialize_lock(
     // leaf via `repository.clone_with_digest(leaf)` (host key → `Any`-offer
     // fallback); a genuinely unshipped platform surfaces `NoHostLeaf` (exit
     // 78).
-    let mut identifiers: Vec<ocx_oci::Identifier> = Vec::new();
+    let mut identifiers: Vec<ocx_oci::PackageRef> = Vec::new();
     for tool in &lock.tools {
         let identifier = host_materialize_identifier(tool, &platform)?;
         // ponytail: O(n) dedup over tools — tiny (a handful). A HashSet buys
@@ -574,7 +574,7 @@ pub async fn materialize_lock(
     Ok(())
 }
 
-/// Resolve a locked tool to its host-platform pull [`ocx_oci::Identifier`]
+/// Resolve a locked tool to its host-platform pull [`ocx_oci::PackageRef`]
 /// for materialization.
 ///
 /// Delegates the V1/V2 host-leaf resolution to
@@ -588,7 +588,7 @@ pub async fn materialize_lock(
 fn host_materialize_identifier(
     tool: &ocx_project::LockedTool,
     host: &ocx_oci::Platform,
-) -> anyhow::Result<ocx_oci::Identifier> {
+) -> anyhow::Result<ocx_oci::PackageRef> {
     ocx_project::host_leaf_identifier(tool, host).map_err(anyhow::Error::from)
 }
 
@@ -801,7 +801,7 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
 
 #[cfg(test)]
 mod tests {
-    use ocx_oci::{Digest, Identifier, PinnedIdentifier};
+    use ocx_oci::{Digest, PackageRef, PinnedPackageRef};
     use ocx_project::ToolSource;
 
     use super::*;
@@ -1025,10 +1025,10 @@ mod tests {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
-    fn pin(repository: &str, marker: char) -> PinnedIdentifier {
+    fn pin(repository: &str, marker: char) -> PinnedPackageRef {
         let digest = Digest::Sha256(std::iter::repeat_n(marker, 64).collect());
-        let identifier = Identifier::new_registry(repository, "ocx.sh").clone_with_digest(digest);
-        PinnedIdentifier::try_from(identifier).expect("digest present")
+        let identifier = PackageRef::new_registry(repository, "ocx.sh").clone_with_digest(digest);
+        PinnedPackageRef::try_from(identifier).expect("digest present")
     }
 
     fn tool(binding: &str, marker: char, group: &str) -> SelectedTool {

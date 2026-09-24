@@ -172,7 +172,7 @@ impl Registry {
         gather(
             &self.client,
             &identifier(),
-            &ocx_oci::Identifier::new_registry(REPOSITORY, REGISTRY),
+            &ocx_oci::PackageRef::new_registry(REPOSITORY, REGISTRY),
             None,
         )
         .await

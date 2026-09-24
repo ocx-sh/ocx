@@ -124,7 +124,7 @@ impl ShimStore {
     ///
     /// Unlike [`PackageStore::path`](super::PackageStore::path), the
     /// **repository is part of the path** — see the module docs.
-    pub fn path(&self, identifier: &ocx_oci::PinnedIdentifier) -> PathBuf {
+    pub fn path(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.root
             .join(super::slugify(identifier.registry()))
             .join(super::repository_path(identifier.repository()))
@@ -135,7 +135,7 @@ impl ShimStore {
     ///
     /// Equivalent to `ShimDir { dir: self.path(identifier) }` — prefer this
     /// over hand-rolled construction so call sites stay grep-able.
-    pub fn shim_dir(&self, identifier: &ocx_oci::PinnedIdentifier) -> ShimDir {
+    pub fn shim_dir(&self, identifier: &ocx_oci::PinnedPackageRef) -> ShimDir {
         ShimDir {
             dir: self.path(identifier),
         }
@@ -204,9 +204,9 @@ mod tests {
         ocx_oci::Digest::Sha256(SHA256_HEX.to_string())
     }
 
-    fn pinned(registry: &str, repository: &str) -> ocx_oci::PinnedIdentifier {
-        let identifier = ocx_oci::Identifier::new_registry(repository, registry).clone_with_digest(digest());
-        ocx_oci::PinnedIdentifier::try_from(identifier).expect("a digest-bearing identifier is pinned")
+    fn pinned(registry: &str, repository: &str) -> ocx_oci::PinnedPackageRef {
+        let identifier = ocx_oci::PackageRef::new_registry(repository, registry).clone_with_digest(digest());
+        ocx_oci::PinnedPackageRef::try_from(identifier).expect("a digest-bearing identifier is pinned")
     }
 
     /// The C-003 layout written out by hand:

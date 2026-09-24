@@ -194,7 +194,7 @@ impl PackageDescriptionPush {
 /// Carries the cause [`Publisher::pull_description`] swallowed into `Ok(None)`
 /// on the way here, so the chain walk reaches a classifiable error and the
 /// process exits 79 rather than the unclassified 1.
-fn no_description_to_copy(source: &ocx_oci::Identifier) -> anyhow::Error {
+fn no_description_to_copy(source: &ocx_oci::PackageRef) -> anyhow::Error {
     anyhow::Error::new(ClientError::ManifestNotFound(format!(
         "{source}:{}",
         InternalTag::DESCRIPTION_TAG
@@ -215,7 +215,7 @@ mod tests {
     /// cannot be the walker classifying every error as 79.
     #[test]
     fn an_undescribed_source_exits_not_found() {
-        let source: ocx_oci::Identifier = "dev.example.com/acme/tool:1.4.2".parse().expect("identifier");
+        let source: ocx_oci::PackageRef = "dev.example.com/acme/tool:1.4.2".parse().expect("identifier");
         let error = no_description_to_copy(&source);
 
         assert_eq!(

@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::Identifier;
+use super::PackageRef;
 
 /// A parsed OCI repository reference: `registry/repository` without tag or digest.
 ///
@@ -41,8 +41,8 @@ impl std::fmt::Display for Repository {
     }
 }
 
-impl From<&Identifier> for Repository {
-    fn from(id: &Identifier) -> Self {
+impl From<&PackageRef> for Repository {
+    fn from(id: &PackageRef) -> Self {
         Self {
             registry: id.registry().to_owned(),
             repository: id.repository().to_owned(),
@@ -65,7 +65,7 @@ impl<'de> Deserialize<'de> for Repository {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        let id = Identifier::parse(&s).map_err(serde::de::Error::custom)?;
+        let id = PackageRef::parse(&s).map_err(serde::de::Error::custom)?;
         if id.tag().is_some() || id.digest().is_some() {
             return Err(serde::de::Error::custom("repository must not contain a tag or digest"));
         }
@@ -76,7 +76,7 @@ impl<'de> Deserialize<'de> for Repository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Digest, PinnedIdentifier};
+    use crate::{Digest, PinnedPackageRef};
 
     #[test]
     fn construction() {
@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn from_identifier() {
-        let id: Identifier = "ghcr.io/cmake:3.28".parse().unwrap();
+        let id: PackageRef = "ghcr.io/cmake:3.28".parse().unwrap();
         let repo = Repository::from(&id);
         assert_eq!(repo.registry(), "ghcr.io");
         assert_eq!(repo.repository(), "cmake");
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn from_identifier_strips_tag_and_digest() {
         let hex = "a".repeat(64);
-        let id: Identifier = format!("ghcr.io/cmake:3.28@sha256:{hex}").parse().unwrap();
+        let id: PackageRef = format!("ghcr.io/cmake:3.28@sha256:{hex}").parse().unwrap();
         let repo = Repository::from(&id);
         assert_eq!(repo.registry(), "ghcr.io");
         assert_eq!(repo.repository(), "cmake");
@@ -116,10 +116,10 @@ mod tests {
 
     #[test]
     fn from_pinned_identifier_via_deref() {
-        let id = Identifier::new_registry("cmake", "example.com")
+        let id = PackageRef::new_registry("cmake", "example.com")
             .clone_with_tag("3.28")
             .clone_with_digest(Digest::Sha256("a".repeat(64)));
-        let pinned = PinnedIdentifier::try_from(id).unwrap();
+        let pinned = PinnedPackageRef::try_from(id).unwrap();
         let repo = Repository::from(&*pinned);
         assert_eq!(repo.registry(), "example.com");
         assert_eq!(repo.repository(), "cmake");

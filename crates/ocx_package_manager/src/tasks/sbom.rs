@@ -113,7 +113,7 @@ impl PackageManager {
     /// is `AttestationNotFound` (79), including the `--type` narrowing miss.
     pub async fn sbom_one(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         platform: Option<&ocx_oci::Platform>,
         opts: SbomOptions<'_>,
     ) -> Result<SbomReport, PackageError> {

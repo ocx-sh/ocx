@@ -680,7 +680,7 @@ pub fn retired_session_path_directories(file_structure: &FileStructure) -> Vec<P
 /// snapshot directory (no ghost tier), warning if `OCX_MANAGED_CONFIG` is
 /// still exported (it would re-activate the tier on the next command).
 ///
-/// `Some(ref)` adopts: re-parses `ref` as an [`ocx_oci::Identifier`]
+/// `Some(ref)` adopts: re-parses `ref` as an [`ocx_oci::PackageRef`]
 /// (CWE-74 defense — the fence body below is real TOML serialization, never
 /// `format!` interpolation of the raw ref), then follows ADR "Setup ordering":
 /// synchronous fetch+persist FIRST, fence written only on success. A dirty
@@ -1362,7 +1362,7 @@ mod tests {
 
     /// Builds a manager whose managed-config client serves the v2 package
     /// shape for `identifier` (stub transport, no network).
-    fn manager_with_stub(root: &Path, identifier: &ocx_oci::Identifier, config_toml: &str) -> PackageManager {
+    fn manager_with_stub(root: &Path, identifier: &ocx_oci::PackageRef, config_toml: &str) -> PackageManager {
         let physical = ocx_oci::OciIdentifier::passthrough(identifier);
         let (client, _) = ocx_config::managed_config::test_support::stub_client_with_package(&physical, config_toml);
         let fs = FileStructure::with_root(root.to_path_buf());
@@ -1381,7 +1381,7 @@ mod tests {
         env.remove("OCX_MANAGED_CONFIG");
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
-        let identifier = ocx_oci::Identifier::parse(reference).unwrap();
+        let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let manager = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"healed\"\n");
 
@@ -1440,7 +1440,7 @@ mod tests {
         let locked_ref = "corp.example.com/ocx-config:user";
         let manager = manager_with_stub(
             home.path(),
-            &ocx_oci::Identifier::parse(locked_ref).unwrap(),
+            &ocx_oci::PackageRef::parse(locked_ref).unwrap(),
             "[registry]\ndefault = \"x\"\n",
         );
         let locked = ocx_config::Config {
@@ -1489,7 +1489,7 @@ mod tests {
         env.remove("OCX_MANAGED_CONFIG");
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
-        let identifier = ocx_oci::Identifier::parse(reference).unwrap();
+        let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let manager = manager_with_stub(home.path(), &identifier, "[registry]\ndefault = \"healed\"\n");
 
@@ -1551,7 +1551,7 @@ mod tests {
     /// Adopt `reference` against a stub serving `payload`, asserting the first
     /// run wrote the fence and the snapshot. Returns the persisted digest.
     async fn adopt(home: &Path, file_structure: &FileStructure, reference: &str, payload: &str) -> ocx_oci::Digest {
-        let identifier = ocx_oci::Identifier::parse(reference).unwrap();
+        let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
         let manager = manager_with_stub(home, &identifier, payload);
         let outcome = apply_managed_config(
             &ocx_config::Config::default(),
@@ -1573,7 +1573,7 @@ mod tests {
     /// every fetch for the seed under test resolves to `SourceNotFound` — the
     /// unit-test stand-in for an unreachable registry.
     fn manager_with_failing_fetch(root: &Path) -> PackageManager {
-        let elsewhere = ocx_oci::Identifier::parse("other.example.com/unrelated-config:v1").unwrap();
+        let elsewhere = ocx_oci::PackageRef::parse("other.example.com/unrelated-config:v1").unwrap();
         manager_with_stub(root, &elsewhere, "[registry]\ndefault = \"unrelated\"\n")
     }
 
@@ -1587,7 +1587,7 @@ mod tests {
         env.remove("OCX_MANAGED_CONFIG");
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
-        let identifier = ocx_oci::Identifier::parse(reference).unwrap();
+        let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
 
         let first_digest = adopt(
@@ -1644,7 +1644,7 @@ mod tests {
         env.remove("OCX_MANAGED_CONFIG");
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
-        let identifier = ocx_oci::Identifier::parse(reference).unwrap();
+        let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let payload = "[registry]\ndefault = \"adopted\"\n";
 
@@ -1745,7 +1745,7 @@ mod tests {
         for payload in ["not = [valid toml", unusable_pem.as_str()] {
             let home = tempfile::TempDir::new().unwrap();
             let reference = "corp.example.com/ocx-config:user";
-            let identifier = ocx_oci::Identifier::parse(reference).unwrap();
+            let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
             let file_structure = FileStructure::with_root(home.path().to_path_buf());
 
             let first_digest = adopt(
@@ -1793,7 +1793,7 @@ mod tests {
         env.remove("OCX_MANAGED_CONFIG");
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
-        let identifier = ocx_oci::Identifier::parse(reference).unwrap();
+        let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
 
         let first_digest = adopt(
@@ -1918,7 +1918,7 @@ mod tests {
         env.remove("OCX_MANAGED_CONFIG");
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
-        let identifier = ocx_oci::Identifier::parse(reference).unwrap();
+        let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
 
         let first_digest = adopt(
@@ -1994,7 +1994,7 @@ mod tests {
         env.remove("OCX_MANAGED_CONFIG");
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
-        let identifier = ocx_oci::Identifier::parse(reference).unwrap();
+        let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
 
         let first_digest = adopt(
@@ -2042,7 +2042,7 @@ mod tests {
         env.remove("OCX_MANAGED_CONFIG");
         let home = tempfile::TempDir::new().unwrap();
         let reference = "corp.example.com/ocx-config:user";
-        let identifier = ocx_oci::Identifier::parse(reference).unwrap();
+        let identifier = ocx_oci::PackageRef::parse(reference).unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
 
         let first_digest = adopt(

@@ -297,7 +297,7 @@ mod tests {
     use super::*;
     use ocx_oci::client::error::ClientError;
 
-    use ocx_oci::identifier::Identifier;
+    use ocx_oci::package_ref::PackageRef;
 
     use ocx_trust::key_ref::KeyRefError;
 
@@ -993,8 +993,8 @@ mod tests {
     // ── moved from ocx_lib::oci::verify::pipeline with the impl ──
 
     // fixture from ocx_lib (oci/sign/pipeline)
-    fn sign_id() -> Identifier {
-        Identifier::parse("registry.example/pkg:1.0").expect("parse test identifier")
+    fn sign_id() -> PackageRef {
+        PackageRef::parse("registry.example/pkg:1.0").expect("parse test identifier")
     }
 
     // ── moved from ocx_lib::oci::attest::pipeline with the impl ──
@@ -1004,7 +1004,7 @@ mod tests {
     /// pipeline holds.
     #[test]
     fn registry_faults_keep_their_own_exit_codes_through_attest() {
-        let identifier = Identifier::parse("registry.example/pkg:1.0").expect("identifier");
+        let identifier = PackageRef::parse("registry.example/pkg:1.0").expect("identifier");
         let cases = [
             (
                 ClientError::RegistryTransient(Box::new(std::io::Error::other("503 from registry"))),
@@ -1145,8 +1145,8 @@ mod tests {
     }
 
     // fixture from ocx_lib (oci/sign/error)
-    fn id() -> Identifier {
-        Identifier::parse("registry.example/pkg:1.0").expect("parse test identifier")
+    fn id() -> PackageRef {
+        PackageRef::parse("registry.example/pkg:1.0").expect("parse test identifier")
     }
 
     // fixture from ocx_lib (oci/verify/error)
@@ -1207,8 +1207,8 @@ mod tests {
     }
 
     // fixture from ocx_lib (oci/verify/pipeline)
-    fn verify_id() -> Identifier {
-        Identifier::parse("registry.example/pkg:1.0").expect("parse test identifier")
+    fn verify_id() -> PackageRef {
+        PackageRef::parse("registry.example/pkg:1.0").expect("parse test identifier")
     }
 
     // recovered from ocx_lib::oci::sign::error

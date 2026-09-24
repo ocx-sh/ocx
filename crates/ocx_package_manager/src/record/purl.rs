@@ -34,7 +34,7 @@
 
 use packageurl::PackageUrl;
 
-use ocx_oci::{PinnedIdentifier, Platform};
+use ocx_oci::{PinnedPackageRef, Platform};
 
 /// The purl type OCX packages are published under. OCX packages *are* OCI
 /// artifacts, so the registered type applies and an invented `pkg:ocx` would
@@ -57,7 +57,7 @@ const PLACEHOLDER_REPOSITORY_PREFIX: &str = "file-url-mode/";
 /// be configured and its repository is a digest — neither is a fact about where
 /// the package came from, so nothing derived from it (a purl, an index source)
 /// may be emitted as identity.
-pub fn has_logical_identity(identifier: &PinnedIdentifier) -> bool {
+pub fn has_logical_identity(identifier: &PinnedPackageRef) -> bool {
     !identifier.repository().starts_with(PLACEHOLDER_REPOSITORY_PREFIX)
 }
 
@@ -77,7 +77,7 @@ pub fn has_logical_identity(identifier: &PinnedIdentifier) -> bool {
 /// name-and-segment invariants above; should one occur it is logged at debug and
 /// treated as absent identity, because an environmental surprise here must never
 /// fail the invocation.
-pub fn package_url(identifier: &PinnedIdentifier, platform: Option<&Platform>) -> Option<String> {
+pub fn package_url(identifier: &PinnedPackageRef, platform: Option<&Platform>) -> Option<String> {
     if !has_logical_identity(identifier) {
         return None;
     }
@@ -92,7 +92,7 @@ pub fn package_url(identifier: &PinnedIdentifier, platform: Option<&Platform>) -
 
 /// Build the purl, keeping the crate's rejections in one place so the caller
 /// above can degrade rather than propagate.
-fn render(identifier: &PinnedIdentifier, platform: Option<&Platform>) -> packageurl::Result<String> {
+fn render(identifier: &PinnedPackageRef, platform: Option<&Platform>) -> packageurl::Result<String> {
     let mut purl = PackageUrl::new(PURL_TYPE, identifier.name())?;
     purl.with_version(identifier.digest().to_string())?;
     purl.add_qualifier("repository_url", repository_url(identifier))?;
@@ -115,7 +115,7 @@ fn render(identifier: &PinnedIdentifier, platform: Option<&Platform>) -> package
 /// `gcr.io/distroless/static` for name `static`. Identity is name +
 /// `repository_url` + digest, so this qualifier is still what keeps `a/cli` and
 /// `b/cli` apart.
-fn repository_url(identifier: &PinnedIdentifier) -> String {
+fn repository_url(identifier: &PinnedPackageRef) -> String {
     format!("{}/{}", identifier.registry(), identifier.repository())
 }
 
@@ -125,16 +125,16 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
-    use ocx_oci::{Architecture, Digest, Identifier, OperatingSystem};
+    use ocx_oci::{Architecture, Digest, OperatingSystem, PackageRef};
 
     const LEAF_HEX: &str = "3f7a2b9c5d1e8f04a6b3c7d2e9f1a5b8c4d6e0f2a3b7c9d1e5f8a0b2c4d6e8f0";
 
-    fn pinned(repository: &str, registry: &str, tag: Option<&str>) -> PinnedIdentifier {
-        let mut identifier = Identifier::new_registry(repository, registry);
+    fn pinned(repository: &str, registry: &str, tag: Option<&str>) -> PinnedPackageRef {
+        let mut identifier = PackageRef::new_registry(repository, registry);
         if let Some(tag) = tag {
             identifier = identifier.clone_with_tag(tag);
         }
-        PinnedIdentifier::try_from(identifier.clone_with_digest(Digest::Sha256(LEAF_HEX.to_string())))
+        PinnedPackageRef::try_from(identifier.clone_with_digest(Digest::Sha256(LEAF_HEX.to_string())))
             .expect("digest present")
     }
 

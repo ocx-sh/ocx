@@ -174,7 +174,7 @@ impl DirenvExport {
             // would re-run `prepare_lazy` for every tool that already composed
             // — a second closure walk each, on a partially-warm store, because
             // one unrelated eager tool was missing.
-            let missing: Vec<ocx_oci::Identifier> = composed
+            let missing: Vec<ocx_oci::PackageRef> = composed
                 .omitted
                 .iter()
                 .map(|omission| omission.identifier.clone())

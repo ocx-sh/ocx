@@ -16,8 +16,8 @@ use std::path::Path;
 use crate::DEFAULT_GROUP;
 use crate::config::ProjectConfig;
 use crate::lock::{LockedTool, ProjectLock, locked_tool_content_equal};
-use ocx_oci::identifier::error::IdentifierErrorKind;
-use ocx_oci::{Identifier, Platform, Selection};
+use ocx_oci::package_ref::error::IdentifierErrorKind;
+use ocx_oci::{PackageRef, Platform, Selection};
 use ocx_package::metadata::env::entry::Entry;
 
 use super::error::{ProjectError, ProjectErrorKind};
@@ -78,7 +78,7 @@ pub enum Origin {
 #[derive(Debug, Clone)]
 pub struct ResolvedTool {
     pub binding: String,
-    pub identifier: Identifier,
+    pub identifier: PackageRef,
     pub origin: Origin,
 }
 
@@ -86,7 +86,7 @@ pub struct ResolvedTool {
 ///
 /// Selection ([`select_tool_set`]) records *where* a binding came from without
 /// touching the host platform; [`resolve_selected_tools`] later maps each
-/// source to a concrete pull [`Identifier`]. Splitting selection from
+/// source to a concrete pull [`PackageRef`]. Splitting selection from
 /// resolution lets a caller narrow the set to a requested NAME subset *before*
 /// resolving host leaves, so an unrelated sibling that ships no leaf for the
 /// host never aborts a narrowly-named run.
@@ -97,7 +97,7 @@ pub enum ToolSource {
     Locked(LockedTool),
     /// A positional `name=identifier` package — already a concrete tag-style
     /// identifier, resolved verbatim.
-    Explicit(Identifier),
+    Explicit(PackageRef),
 }
 
 /// One tool selected by [`select_tool_set`], before host-leaf resolution.
@@ -116,21 +116,21 @@ pub struct SelectedTool {
 /// One positional package parsed from the command line.
 ///
 /// The `binding` is either explicit (`name=identifier` form) or inferred from
-/// the identifier's repository basename via [`Identifier::name`].
+/// the identifier's repository basename via [`PackageRef::name`].
 #[derive(Debug, Clone)]
 pub struct PositionalPackage {
     pub binding: String,
-    pub identifier: Identifier,
+    pub identifier: PackageRef,
 }
 
 /// Parse a positional package argument of the form `[name=]identifier`.
 ///
 /// When the `name=` prefix is present, that name is the explicit binding.
 /// Otherwise, the binding is inferred from the identifier's repository
-/// basename (`Identifier::name`), e.g. `cmake:3.29` → binding `cmake`,
+/// basename (`PackageRef::name`), e.g. `cmake:3.29` → binding `cmake`,
 /// `ghcr.io/acme/foo:1` → binding `foo`.
 ///
-/// Identifier parsing uses [`Identifier::parse_with_default_registry`] so
+/// PackageRef parsing uses [`PackageRef::parse_with_default_registry`] so
 /// short forms like `cmake:3.28` resolve against the configured default
 /// registry, matching the rest of the `ocx` CLI.
 pub fn parse_positional(input: &str, default_registry: &str) -> Result<PositionalPackage, super::Error> {
@@ -143,7 +143,7 @@ pub fn parse_positional(input: &str, default_registry: &str) -> Result<Positiona
     };
 
     let identifier =
-        Identifier::parse_with_default_registry(ident_str, default_registry).map_err(|e| -> super::Error {
+        PackageRef::parse_with_default_registry(ident_str, default_registry).map_err(|e| -> super::Error {
             let kind = match e.kind {
                 IdentifierErrorKind::MissingRegistry => ProjectErrorKind::ToolValueMissingRegistry {
                     name: explicit_binding.clone().unwrap_or_else(|| ident_str.to_string()),
@@ -450,7 +450,7 @@ pub fn resolve_selected_tools(
 /// [`resolve_selected_tools`]: selection builds the binding set and applies
 /// positional overrides, the check reports a binding two selected groups
 /// disagree about, then resolution maps every surviving entry to its
-/// host-platform pull [`Identifier`]. The three concerns are split so a caller
+/// host-platform pull [`PackageRef`]. The three concerns are split so a caller
 /// that needs only a subset can filter between selection and the check;
 /// `compose_tool_set` keeps the "resolve everything" contract by checking and
 /// resolving the entire selection.
@@ -477,7 +477,7 @@ pub fn compose_tool_set(
     resolve_selected_tools(&selected, current_platform)
 }
 
-/// Resolve a locked tool to its host-platform pull [`Identifier`].
+/// Resolve a locked tool to its host-platform pull [`PackageRef`].
 ///
 /// Looks up the host platform's compatible leaf via
 /// [`crate::resolve::lookup_host_leaf`] and reconstructs
@@ -501,7 +501,7 @@ pub fn compose_tool_set(
 /// Returns [`ProjectErrorKind::NoHostLeaf`] when the entry ships no leaf
 /// compatible with the host platform at the locked version, or
 /// [`ProjectErrorKind::AmbiguousHostLeaf`] when two or more leaves tie.
-pub fn host_leaf_identifier(tool: &LockedTool, current_platform: &Platform) -> Result<Identifier, super::Error> {
+pub fn host_leaf_identifier(tool: &LockedTool, current_platform: &Platform) -> Result<PackageRef, super::Error> {
     match super::resolve::lookup_host_leaf(&tool.platforms, current_platform) {
         Selection::Found((leaf, _key)) => Ok(tool.repository.clone_with_digest(leaf.clone())),
         Selection::None => Err(super::Error::Project(ProjectError::new(
@@ -539,7 +539,7 @@ fn is_valid_binding(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::lock::{LockMetadata, LockVersion, LockedTool, ProjectLock};
-    use ocx_oci::{Digest, Identifier};
+    use ocx_oci::{Digest, PackageRef};
     use std::collections::BTreeMap;
 
     fn sha(c: char) -> String {
@@ -579,7 +579,7 @@ mod tests {
         LockedTool {
             name: name.into(),
             group: group.into(),
-            repository: Identifier::new_registry(repo, reg),
+            repository: PackageRef::new_registry(repo, reg),
             platforms,
         }
     }
@@ -595,7 +595,7 @@ mod tests {
         LockedTool {
             name: name.into(),
             group: group.into(),
-            repository: Identifier::new_registry(repo, reg),
+            repository: PackageRef::new_registry(repo, reg),
             platforms,
         }
     }

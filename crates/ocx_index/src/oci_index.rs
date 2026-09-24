@@ -36,7 +36,7 @@ impl OciIndex {
     ///
     /// D7 at the derived listing boundary: this seeds the tag cache, so a tag
     /// that slips the filter here is wrong for the rest of the invocation.
-    async fn fetch_tags(&self, identifier: &ocx_oci::Identifier) -> Result<Vec<String>> {
+    async fn fetch_tags(&self, identifier: &ocx_oci::PackageRef) -> Result<Vec<String>> {
         Ok(self
             .client
             .list_tags_addressed(
@@ -64,7 +64,7 @@ impl index_impl::IndexImpl for OciIndex {
         Ok(repositories)
     }
 
-    async fn list_tags(&self, identifier: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+    async fn list_tags(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
         if let Some(cached) = self.cache.get_tags(identifier).await {
             return Ok(Some(cached));
         }
@@ -94,7 +94,7 @@ impl index_impl::IndexImpl for OciIndex {
 
     async fn fetch_manifest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         _op: IndexOperation,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
         Ok(Some(
@@ -109,7 +109,7 @@ impl index_impl::IndexImpl for OciIndex {
 
     async fn fetch_manifest_digest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         _op: IndexOperation,
     ) -> Result<Option<ocx_oci::Digest>> {
         if let Some(cached) = self.cache.get_tag_digest(identifier).await {
@@ -145,7 +145,7 @@ impl index_impl::IndexImpl for OciIndex {
         }
     }
 
-    async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+    async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
         let location = ocx_oci::OciIdentifier::passthrough(blob_ref.as_identifier()).at_pin_of(blob_ref);
         let bytes = self.client.pull_blob(&location).await?;
         Ok(Some(bytes))
@@ -156,7 +156,7 @@ impl index_impl::IndexImpl for OciIndex {
     /// persists without re-serialisation (`adr_index_indirection.md` A3).
     async fn fetch_manifest_raw_bytes(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
         Ok(self
             .client
@@ -199,7 +199,7 @@ mod tests {
         });
 
         let tags =
-            index_impl::IndexImpl::list_tags(&index, &ocx_oci::Identifier::new_registry("ns/pkg", "example.com"))
+            index_impl::IndexImpl::list_tags(&index, &ocx_oci::PackageRef::new_registry("ns/pkg", "example.com"))
                 .await
                 .unwrap()
                 .expect("the stub answers");
@@ -226,7 +226,7 @@ mod tests {
         let index = OciIndex::new(OciIndexConfig {
             client: ocx_oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))),
         });
-        let identifier = ocx_oci::Identifier::new_registry("ns/pkg", "example.com");
+        let identifier = ocx_oci::PackageRef::new_registry("ns/pkg", "example.com");
 
         let results = futures::future::join_all(
             (0..CALLERS).map(|_| async { index_impl::IndexImpl::list_tags(&index, &identifier).await }),
@@ -258,7 +258,7 @@ mod tests {
         let index = OciIndex::new(OciIndexConfig {
             client: ocx_oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))),
         });
-        let identifier = ocx_oci::Identifier::new_registry("ns/pkg", "example.com").clone_with_tag("3.28");
+        let identifier = ocx_oci::PackageRef::new_registry("ns/pkg", "example.com").clone_with_tag("3.28");
 
         let results = futures::future::join_all((0..CALLERS).map(|_| async {
             index_impl::IndexImpl::fetch_manifest_digest(&index, &identifier, IndexOperation::Query).await
@@ -281,7 +281,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_digest_read_is_re_requested_and_recovers() {
         let data = StubTransportData::new();
-        let identifier = ocx_oci::Identifier::new_registry("ns/pkg", "example.com").clone_with_tag("3.28");
+        let identifier = ocx_oci::PackageRef::new_registry("ns/pkg", "example.com").clone_with_tag("3.28");
         data.write()
             .manifest_errors
             .insert("example.com/ns/pkg:3.28".to_string(), "registry is down".to_string());

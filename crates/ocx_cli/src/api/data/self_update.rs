@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn update_check_data_update_available_carries_identifier() {
         let identifier =
-            ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY).clone_with_tag("1.2.3".to_string());
+            ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY).clone_with_tag("1.2.3".to_string());
         let data = UpdateCheckData::from_result(&UpdateCheckResult::UpdateAvailable(identifier));
         let value = serde_json::to_value(&data).unwrap();
         assert_eq!(value["status"], json!("update_available"));

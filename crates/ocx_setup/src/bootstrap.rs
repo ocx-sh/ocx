@@ -73,7 +73,7 @@ enum Decision {
     /// report [`BootstrapOutcome::WouldPull`]). `version` is the latest
     /// published version string.
     Install {
-        identifier: ocx_oci::Identifier,
+        identifier: ocx_oci::PackageRef,
         version: String,
     },
     /// Bootstrap cannot proceed — surface this error to the caller.
@@ -307,7 +307,7 @@ async fn ensure_pinned(
 async fn resolve_pinned_digest(
     manager: &PackageManager,
     spec: &VersionSpec,
-    id: &ocx_oci::Identifier,
+    id: &ocx_oci::PackageRef,
 ) -> Result<ocx_oci::Digest, SetupError> {
     // For a `tag@digest` pin, resolve via the TAG (digest dropped) so the index
     // performs a real tag → digest resolution and the cross-check compares the
@@ -350,7 +350,7 @@ async fn resolve_pinned_digest(
 async fn maybe_warn_downgrade(
     manager: &PackageManager,
     spec: &VersionSpec,
-    id: &ocx_oci::Identifier,
+    id: &ocx_oci::PackageRef,
     installed: Option<&ocx_oci::Digest>,
 ) {
     use ocx_package::version::Version;
@@ -476,7 +476,7 @@ fn registry_unavailable(detail: impl Into<String>) -> PmError {
 mod tests {
     use super::*;
 
-    fn latest_identifier(version: &str) -> ocx_oci::Identifier {
+    fn latest_identifier(version: &str) -> ocx_oci::PackageRef {
         ocx_oci::ocx_cli_identifier().clone_with_tag(version.to_string())
     }
 

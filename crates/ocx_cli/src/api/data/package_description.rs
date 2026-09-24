@@ -20,11 +20,11 @@ pub struct Inner {
 /// JSON format: flat object with title/description/keywords, or `null` when absent.
 pub struct PackageDescription {
     inner: Option<Inner>,
-    identifier: ocx_oci::Identifier,
+    identifier: ocx_oci::PackageRef,
 }
 
 impl PackageDescription {
-    pub fn new(inner: Option<Inner>, identifier: ocx_oci::Identifier) -> Self {
+    pub fn new(inner: Option<Inner>, identifier: ocx_oci::PackageRef) -> Self {
         Self { inner, identifier }
     }
 }

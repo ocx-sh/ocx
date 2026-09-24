@@ -345,7 +345,7 @@ impl ConfigLoader {
     /// seed activate `Context::try_init`'s required-gate without ever folding
     /// its payload here), then merges the snapshot ONLY when its embedded
     /// provenance `source` equals that effective source under canonical
-    /// [`ocx_oci::Identifier`] equality (tag and digest significant). The
+    /// [`ocx_oci::PackageRef`] equality (tag and digest significant). The
     /// snapshot's embedded TOML is parsed as a [`Config`], its `[managed]`
     /// table is stripped before the merge (one hop — a payload can never
     /// redirect the tier that fetched it; a present `[managed]` is WARNed,
@@ -435,7 +435,7 @@ impl ConfigLoader {
             return Ok((accumulator, None, Some(resolved), ManagedSnapshotState::Unmatched, None));
         };
 
-        // Canonical `ocx_oci::Identifier` equality (tag/digest significant) —
+        // Canonical `ocx_oci::PackageRef` equality (tag/digest significant) —
         // never applies a snapshot fetched under a different identity, even
         // for `required = false` tiers (CI cache-poison defense). Uses the
         // shared `snapshot_matches_source` predicate so this gate and

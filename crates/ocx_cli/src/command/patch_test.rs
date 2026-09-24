@@ -371,7 +371,7 @@ async fn materialize_companions(
             .map_err(|error| ocx_util::error::FileError::new(&metadata_path, error))
             .with_context(|| format!("reading companion metadata from {}", metadata_path.display()))?;
         let metadata = parse_companion_metadata(&metadata_path, &metadata_bytes)?;
-        let identifier = ocx_oci::Identifier::parse_with_default_registry(
+        let identifier = ocx_oci::PackageRef::parse_with_default_registry(
             metadata_identifier_or_error(&metadata_path, &metadata_bytes)?.as_str(),
             manager.default_registry(),
         )
@@ -449,7 +449,7 @@ async fn materialize_companions(
 /// just handed over, with no mention of the archive.
 fn cross_check_companion_archive(
     archive: &std::path::Path,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     companions: &[ocx_package_manager::patch::CompanionEntry],
 ) -> anyhow::Result<()> {
     let exact_match = companions.iter().any(|entry| {
@@ -470,7 +470,7 @@ fn cross_check_companion_archive(
 /// Name the descriptor companion closest to `identifier` and the component that
 /// differs, so a near-miss reads as a near-miss instead of a flat rejection.
 fn nearest_companion_hint(
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     companions: &[ocx_package_manager::patch::CompanionEntry],
 ) -> String {
     let same_repository = companions.iter().find(|entry| {

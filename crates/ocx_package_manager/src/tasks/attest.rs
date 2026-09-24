@@ -85,7 +85,7 @@ impl PackageManager {
     /// classification routes via [`ocx_sign::sign::SignErrorKind`].
     pub async fn attest_one(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         platform: Option<&ocx_oci::Platform>,
         opts: AttestOptions,
         resolved: Option<&(ocx_oci::Digest, ocx_oci::Manifest)>,
@@ -180,7 +180,7 @@ impl PackageManager {
     /// the sweep starts.
     pub async fn attest_tags(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         tags: &[String],
         opts: &AttestOptions,
     ) -> Vec<super::sign::SweptTag<AttestReport>> {
@@ -232,7 +232,7 @@ impl PackageManager {
 
 /// Wrap a [`SignError`] in a [`PackageError`] tagged with `identifier`,
 /// preserving the attest exit code through `PackageErrorKind::Internal`.
-fn map_attest_error(identifier: ocx_oci::Identifier, err: SignError) -> PackageError {
+fn map_attest_error(identifier: ocx_oci::PackageRef, err: SignError) -> PackageError {
     PackageError::new(
         identifier,
         PackageErrorKind::Internal(crate::Error::Sign(Box::new(err))),
@@ -301,7 +301,7 @@ mod tests {
     async fn attest_one_refuses_offline_as_a_policy_rejection_not_a_missing_client() {
         let temp = tempfile::TempDir::new().expect("ocx home");
         let manager = offline_manager(temp.path());
-        let package = ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("identifier");
+        let package = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").expect("identifier");
 
         let error = manager
             .attest_one(
@@ -331,7 +331,7 @@ mod tests {
     async fn attest_one_refuses_a_predicate_that_is_not_json() {
         let temp = tempfile::TempDir::new().expect("ocx home");
         let manager = offline_manager(temp.path());
-        let package = ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("identifier");
+        let package = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").expect("identifier");
 
         for bytes in [b"not json at all".to_vec(), vec![0xff, 0xfe, 0xfd]] {
             let error = manager

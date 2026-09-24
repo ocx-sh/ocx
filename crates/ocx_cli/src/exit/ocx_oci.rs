@@ -10,9 +10,9 @@ use ocx_oci::auth::error::AuthError;
 use ocx_oci::client::error::ClientError;
 use ocx_oci::digest::error::DigestError;
 use ocx_oci::endpoint::UrlRejection;
-use ocx_oci::identifier::error::IdentifierError;
 use ocx_oci::layer_layout::LayerLayoutError;
-use ocx_oci::pinned_identifier::PinnedIdentifierError;
+use ocx_oci::package_ref::error::IdentifierError;
+use ocx_oci::pinned_package_ref::PinnedIdentifierError;
 use ocx_oci::platform::error::PlatformError;
 use ocx_oci::ssrf::SsrfError;
 

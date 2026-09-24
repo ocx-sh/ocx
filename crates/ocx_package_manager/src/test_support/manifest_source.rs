@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 
 use ocx_index::{IndexImpl, IndexOperation};
-use ocx_oci::{self, Algorithm, Digest, Identifier};
+use ocx_oci::{self, Algorithm, Digest, PackageRef};
 
 /// Peak-concurrency probe for [`FakeManifestSource::fetch_manifest_raw_bytes`]:
 /// every clone shares the same counters via `Arc`, so it survives `box_clone`
@@ -121,7 +121,7 @@ impl FakeManifestSource {
         self
     }
 
-    fn lookup(&self, identifier: &Identifier) -> Option<(Vec<u8>, Digest, ocx_oci::Manifest)> {
+    fn lookup(&self, identifier: &PackageRef) -> Option<(Vec<u8>, Digest, ocx_oci::Manifest)> {
         let key = match identifier.digest() {
             Some(digest) => digest.to_string(),
             None => identifier.tag_or_latest().to_string(),
@@ -135,24 +135,24 @@ impl IndexImpl for FakeManifestSource {
     async fn list_repositories(&self, _: &str) -> ocx_index::error::Result<Vec<String>> {
         Ok(Vec::new())
     }
-    async fn list_tags(&self, _: &Identifier) -> ocx_index::error::Result<Option<Vec<String>>> {
+    async fn list_tags(&self, _: &PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
         Ok(None)
     }
     async fn fetch_manifest(
         &self,
-        identifier: &Identifier,
+        identifier: &PackageRef,
         _op: IndexOperation,
     ) -> ocx_index::error::Result<Option<(Digest, ocx_oci::Manifest)>> {
         Ok(self.lookup(identifier).map(|(_, digest, manifest)| (digest, manifest)))
     }
     async fn fetch_manifest_digest(
         &self,
-        identifier: &Identifier,
+        identifier: &PackageRef,
         _op: IndexOperation,
     ) -> ocx_index::error::Result<Option<Digest>> {
         Ok(self.lookup(identifier).map(|(_, digest, _)| digest))
     }
-    async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedIdentifier) -> ocx_index::error::Result<Option<Vec<u8>>> {
+    async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
         // Config blobs are fetched by digest via `Index::fetch_blob`
         // (`load_config_metadata`), a separate seam from
         // `fetch_manifest_raw_bytes`.
@@ -160,7 +160,7 @@ impl IndexImpl for FakeManifestSource {
     }
     async fn fetch_manifest_raw_bytes(
         &self,
-        identifier: &Identifier,
+        identifier: &PackageRef,
     ) -> ocx_index::error::Result<Option<(Vec<u8>, Digest, ocx_oci::Manifest)>> {
         // The actual network-touching seam for a genuine (uncached) digest
         // lookup under `ChainMode::Default` — `ChainedIndex::fetch_manifest`

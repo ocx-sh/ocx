@@ -7,7 +7,7 @@
 //! `collect_project_roots` (in `tasks/clean.rs`) and consumed by
 //! [`super::super::reachability_graph::ReachabilityGraph::build`]. Each
 //! instance pairs an `ocx.lock` path (for diagnostic output in dry-run
-//! previews) with the set of [`ocx_oci::PinnedIdentifier`]s that lock
+//! previews) with the set of [`ocx_oci::PinnedPackageRef`]s that lock
 //! pins.
 //!
 //! See `adr_project_gc_symlink_ledger.md` for the full design rationale.
@@ -17,7 +17,7 @@
 
 use std::path::PathBuf;
 
-use ocx_oci::PinnedIdentifier;
+use ocx_oci::PinnedPackageRef;
 
 /// Resolved GC roots derived from a single registered project's `ocx.lock`.
 ///
@@ -38,5 +38,5 @@ pub struct ProjectRootDigests {
     pub ocx_lock_path: PathBuf,
     /// Pinned identifiers resolved from the lock's tool entries. Each digest
     /// maps to a package-store path that will be treated as a GC root.
-    pub digests: Vec<PinnedIdentifier>,
+    pub digests: Vec<PinnedPackageRef>,
 }

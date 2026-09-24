@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use crate::patch::PatchDescriptor;
 use ocx_config::patch::ResolvedPatchConfig;
-use ocx_oci::{self, Identifier};
+use ocx_oci::{self, PackageRef};
 use ocx_package::{install_info::InstallInfo, metadata::env::entry::Entry};
 
 use super::super::{PackageManager, error::PackageErrorKind};
@@ -51,7 +51,7 @@ use super::resolve::{PatchOverlay, PatchProvenance};
 pub struct PatchTestComposition {
     /// Companion identifiers matched for the base under the descriptor's rules,
     /// in descriptor rule order.
-    pub matched_companions: Vec<Identifier>,
+    pub matched_companions: Vec<PackageRef>,
     /// Composed environment entries: the base's interface surface followed by the
     /// companion overlay (global-last), exactly as `resolve_env` produces them.
     pub entries: Vec<Entry>,
@@ -213,7 +213,7 @@ impl PackageManager {
         // Re-run the pure matcher over the base so the report names the matched
         // companions independently of whether each was present in the store.
         let base_id = base.identifier().as_identifier();
-        let matched_companions: Vec<Identifier> = descriptor
+        let matched_companions: Vec<PackageRef> = descriptor
             .collect_companions(base_id, patches.required)
             .into_iter()
             .map(|entry| entry.identifier)
@@ -250,7 +250,7 @@ impl PackageManager {
     /// pin write.
     pub async fn materialize_test_companion(
         &self,
-        companion_tag_id: &ocx_oci::Identifier,
+        companion_tag_id: &ocx_oci::PackageRef,
         info: ocx_package::info::Info,
         layers: &[ocx_oci::layer_ref::LayerRef],
     ) -> Result<String, PackageErrorKind> {
@@ -336,7 +336,7 @@ mod tests {
 
     use ocx_config::patch::ResolvedPatchConfig;
     use ocx_index::{ChainMode, Index, LocalConfig, LocalIndex};
-    use ocx_oci::{Digest, Identifier, PinnedIdentifier};
+    use ocx_oci::{Digest, PackageRef, PinnedPackageRef};
     use ocx_package::{
         install_info::InstallInfo, metadata, metadata::bundle, metadata::dependency, metadata::entrypoint::Entrypoints,
         metadata::env as metadata_env, metadata::visibility::Visibility, resolved_package::ResolvedPackage,
@@ -355,8 +355,8 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(dir.path().to_path_buf());
-        let id_a = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("1.0");
-        let id_b = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("2.0");
+        let id_a = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("1.0");
+        let id_b = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("2.0");
         let digest_a = Digest::Sha256("a".repeat(64));
         let digest_b = Digest::Sha256("b".repeat(64));
         let pin_path = file_structure.patch_companion_path(&id_a);
@@ -426,15 +426,15 @@ mod tests {
     }
 
     /// A pinned identifier rooted at the patch registry.
-    fn pinned(repo: &str, fill: char) -> PinnedIdentifier {
-        PinnedIdentifier::try_from(Identifier::new_registry(repo, PATCH_REGISTRY).clone_with_digest(sha256(fill)))
+    fn pinned(repo: &str, fill: char) -> PinnedPackageRef {
+        PinnedPackageRef::try_from(PackageRef::new_registry(repo, PATCH_REGISTRY).clone_with_digest(sha256(fill)))
             .unwrap()
     }
 
     /// Write a minimal on-disk package directory carrying one constant env var.
     fn seed_package_with_constant_var(
         store: &PackageStore,
-        id: &PinnedIdentifier,
+        id: &PinnedPackageRef,
         var_key: &str,
         var_value: &str,
         visibility: Visibility,
@@ -466,7 +466,7 @@ mod tests {
 
     /// Seed the patch tier's companion pin the way `materialize_test_companion`
     /// records it, so companion resolution finds the scratch-store package.
-    fn seed_companion_pin(file_structure: &FileStructure, companion_tag_id: &Identifier, digest: &Digest) {
+    fn seed_companion_pin(file_structure: &FileStructure, companion_tag_id: &PackageRef, digest: &Digest) {
         let pin_path = file_structure.patch_companion_path(companion_tag_id);
         std::fs::create_dir_all(pin_path.parent().unwrap()).unwrap();
         let record = serde_json::json!({ companion_tag_id.tag_or_latest(): digest.to_string() });
@@ -502,7 +502,7 @@ mod tests {
     }
 
     /// A single-rule global descriptor (`match: "*"`) naming `companion`.
-    fn catch_all_descriptor(companion: &Identifier) -> Vec<u8> {
+    fn catch_all_descriptor(companion: &PackageRef) -> Vec<u8> {
         serde_json::json!({
             "version": 1,
             "rules": [{ "match": "*", "packages": [companion.to_string()] }]
@@ -533,9 +533,9 @@ mod tests {
 
         // Companion: fully installed with an INTERFACE var.
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -646,9 +646,9 @@ mod tests {
         // independent of the (path-prefixed) patch registry — only the
         // descriptor's own storage location is affected by the prefix.
         let companion_digest = sha256('c');
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
-        let companion_pinned = PinnedIdentifier::try_from(
-            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedPackageRef::try_from(
+            PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
         )
         .unwrap();
         seed_package_with_constant_var(
@@ -714,7 +714,7 @@ mod tests {
         // The companion is deliberately absent: with an optional tier that is a
         // successful, zero-companion compose — exactly the case the guard has to
         // tell apart from an unreadable seed.
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
         let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
         manager
             .seed_and_compose_patch_test(&base, &descriptor_bytes, &patches, Vec::new(), &host_platform())
@@ -757,7 +757,7 @@ mod tests {
         let store = manager.file_structure().packages.clone();
         let base = make_base(dir.path(), &store, "cmake", 'r');
 
-        let companion_tag_id = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
         let descriptor_bytes = catch_all_descriptor(&companion_tag_id);
 
         let global_id = global_descriptor_id(&patches);
@@ -799,7 +799,7 @@ mod tests {
         let store = manager.file_structure().packages.clone();
 
         // Companion identifier the descriptor names — deliberately NOT installed.
-        let companion_tag_id = Identifier::new_registry("license-server", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_tag_id = PackageRef::new_registry("license-server", PATCH_REGISTRY).clone_with_tag("latest");
 
         // Base present; companion absent.
         let base = make_base(dir.path(), &store, "java", 'r');

@@ -75,7 +75,7 @@ pub async fn verify_dependency_pins(
     // alongside each pin so an `any`-target provenance check
     // (`verify_any_pin_provenance`) can re-fetch the dependency's own
     // manifest by its advisory tag.
-    let pins: Vec<(ocx_oci::Identifier, ocx_oci::PinnedIdentifier)> = metadata
+    let pins: Vec<(ocx_oci::PackageRef, ocx_oci::PinnedPackageRef)> = metadata
         .dependencies()
         .iter()
         .map(|dep| (dep.identifier.without_digest(), dep.identifier.clone()))
@@ -141,7 +141,7 @@ pub async fn verify_dependency_pins(
 /// (there is no other leaf it could be).
 ///
 /// A dependency pinned without an advisory tag is fetched at `latest`
-/// ([`Identifier::tag_or_latest`](ocx_oci::Identifier::tag_or_latest)), so
+/// ([`PackageRef::tag_or_latest`](ocx_oci::PackageRef::tag_or_latest)), so
 /// it passes exactly when the registry currently advertises the pinned digest
 /// as `any` under `latest` — a moving tag deciding a fixed pin. Otherwise it
 /// is [`AnyPinNotAdvertisedAsAny`](PublishGateError::AnyPinNotAdvertisedAsAny)
@@ -150,9 +150,9 @@ pub async fn verify_dependency_pins(
 /// when there is no `latest` to fetch at all.
 async fn verify_any_pin_provenance(
     client: &Client,
-    dependency_identifier: &ocx_oci::Identifier,
+    dependency_identifier: &ocx_oci::PackageRef,
     routed: &ocx_oci::OciIdentifier,
-    pin: &ocx_oci::PinnedIdentifier,
+    pin: &ocx_oci::PinnedPackageRef,
 ) -> Result<(), PublishGateError> {
     // Canonical, never a mirror: this read gates a publish, and Invariant #5
     // says a read that decides a write names the same host the write lands on.
@@ -192,7 +192,7 @@ pub enum PublishGateError {
     #[error(
         "dependency '{identifier}' pins an image INDEX digest; a tag's index is rewritten on every platform push and its old digest is garbage-collected, so this pin will break — re-run `ocx package create` to pin platform manifest digests"
     )]
-    DependencyPinnedToIndex { identifier: Box<ocx_oci::PinnedIdentifier> },
+    DependencyPinnedToIndex { identifier: Box<ocx_oci::PinnedPackageRef> },
     /// D5 provenance check: a dependency of an `any`-targeted bundle is not
     /// advertised as `any` in the dependency's own image index — the pin is a
     /// publisher claim, not registry evidence, so it cannot forge a
@@ -201,7 +201,7 @@ pub enum PublishGateError {
         "dependency '{identifier}' pins digest '{digest}' for the `any` platform, but the dependency's own image index does not advertise that digest as `any`; re-run `ocx package create --platform any` to re-resolve it"
     )]
     AnyPinNotAdvertisedAsAny {
-        identifier: Box<ocx_oci::Identifier>,
+        identifier: Box<ocx_oci::PackageRef>,
         digest: String,
     },
     /// The D5 `any`-pin provenance check ([`AnyPinNotAdvertisedAsAny`](Self::AnyPinNotAdvertisedAsAny))
@@ -210,17 +210,17 @@ pub enum PublishGateError {
     /// is treated as untrusted, never silently accepted.
     #[error("failed to verify `any` pin provenance for dependency '{identifier}'")]
     AnyPinProvenanceUnavailable {
-        identifier: Box<ocx_oci::Identifier>,
+        identifier: Box<ocx_oci::PackageRef>,
         #[source]
         source: ocx_oci::client::error::ClientError,
     },
     /// The pinned manifest does not exist in the registry.
     #[error("dependency manifest '{identifier}' not found in the registry")]
-    DependencyManifestNotFound { identifier: Box<ocx_oci::PinnedIdentifier> },
+    DependencyManifestNotFound { identifier: Box<ocx_oci::PinnedPackageRef> },
     /// Pin verification failed for another reason (auth, network, ...).
     #[error("failed to verify dependency pin '{identifier}'")]
     Verification {
-        identifier: Box<ocx_oci::PinnedIdentifier>,
+        identifier: Box<ocx_oci::PinnedPackageRef>,
         #[source]
         source: ClientError,
     },
@@ -229,7 +229,7 @@ pub enum PublishGateError {
     /// the cause carries the rest.
     #[error("failed to route dependency '{identifier}' through the index")]
     Routing {
-        identifier: Box<ocx_oci::PinnedIdentifier>,
+        identifier: Box<ocx_oci::PinnedPackageRef>,
         #[source]
         source: ocx_index::error::Error,
     },

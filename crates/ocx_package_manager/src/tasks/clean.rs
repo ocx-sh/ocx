@@ -65,14 +65,14 @@ pub struct CleanResult {
 /// [`leaf_present_in_any_tier`] for why the gate spans two tiers rather than
 /// only the package store.
 async fn collect_tool_roots(
-    repository: &ocx_oci::Identifier,
+    repository: &ocx_oci::PackageRef,
     platforms: &std::collections::BTreeMap<String, ocx_oci::Digest>,
     file_structure: &FileStructure,
-) -> Vec<ocx_oci::PinnedIdentifier> {
+) -> Vec<ocx_oci::PinnedPackageRef> {
     let mut roots = Vec::new();
     for leaf in platforms.values() {
         let child_id = repository.clone_with_digest(leaf.clone());
-        let child_pinned = match ocx_oci::PinnedIdentifier::try_from(child_id) {
+        let child_pinned = match ocx_oci::PinnedPackageRef::try_from(child_id) {
             Ok(p) => p,
             Err(_) => continue,
         };
@@ -100,7 +100,7 @@ async fn collect_tool_roots(
 /// two tiers are probed independently and the graph re-checks each against the
 /// walked entry set, so a pin present in one tier and absent in the other roots
 /// only the tier that exists.
-async fn leaf_present_in_any_tier(file_structure: &FileStructure, leaf: &ocx_oci::PinnedIdentifier) -> bool {
+async fn leaf_present_in_any_tier(file_structure: &FileStructure, leaf: &ocx_oci::PinnedPackageRef) -> bool {
     ocx_util::fs::path_exists_lossy(&file_structure.packages.path(leaf)).await
         || ocx_util::fs::path_exists_lossy(&file_structure.shims.path(leaf)).await
 }
@@ -254,7 +254,7 @@ pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructu
 
     // Step 2 — resolve every (lock, tool) pair under a bounded semaphore.
     let sem = Arc::new(Semaphore::new(COLLECT_ROOTS_CONCURRENCY));
-    let mut resolve_set: JoinSet<(usize, String, String, Vec<ocx_oci::PinnedIdentifier>)> = JoinSet::new();
+    let mut resolve_set: JoinSet<(usize, String, String, Vec<ocx_oci::PinnedPackageRef>)> = JoinSet::new();
     for (index, loaded_lock) in loaded.iter().enumerate() {
         for tool in &loaded_lock.tools {
             let sem = Arc::clone(&sem);
@@ -283,7 +283,7 @@ pub async fn collect_project_roots(ocx_home: &Path, file_structure: &FileStructu
     // can sort tool-level results by (group, name) inside each entry without
     // depending on JoinSet completion order. `index` is in `0..loaded.len()`
     // by construction, so `buckets[index]` cannot panic.
-    let mut buckets: Vec<Vec<(String, String, Vec<ocx_oci::PinnedIdentifier>)>> =
+    let mut buckets: Vec<Vec<(String, String, Vec<ocx_oci::PinnedPackageRef>)>> =
         (0..loaded.len()).map(|_| Vec::new()).collect();
     while let Some(join) = resolve_set.join_next().await {
         let (index, group, name, resolved) = join.expect("collect_project_roots resolve task panicked");
@@ -821,7 +821,7 @@ mod tests {
     // digest keyed by the canonical grammar `Platform` string (D2).
     //
     // Registry must contain `.` or `:` or be "localhost" to be parsed as an
-    // explicit registry (see `ocx_oci::identifier::has_explicit_registry`).
+    // explicit registry (see `ocx_oci::package_ref::has_explicit_registry`).
     // Using `localhost:5000` which carries a colon and is always valid.
     const LOCK_WITH_ONE_TOOL: &str = r#"
 [metadata]
@@ -866,7 +866,7 @@ repository = "localhost:5000/shfmt"
 "linux/amd64" = "sha256:bbbb0000000000000000000000000000000000000000000000000000000000cc"
 "#;
 
-    /// Build the `PinnedIdentifier` a `repository`/leaf-digest pair in the
+    /// Build the `PinnedPackageRef` a `repository`/leaf-digest pair in the
     /// fixtures above resolves to, and pre-create its package-store
     /// directory so `collect_tool_roots`'s presence gate passes.
     ///
@@ -878,7 +878,7 @@ repository = "localhost:5000/shfmt"
         repository: &str,
         registry: &str,
         digest_hex: &str,
-    ) -> ocx_oci::PinnedIdentifier {
+    ) -> ocx_oci::PinnedPackageRef {
         let pinned = pinned_leaf(repository, registry, digest_hex);
         tokio::fs::create_dir_all(file_structure.packages.path(&pinned))
             .await
@@ -886,11 +886,11 @@ repository = "localhost:5000/shfmt"
         pinned
     }
 
-    /// The `PinnedIdentifier` a `repository`/leaf-digest pair in the fixtures
+    /// The `PinnedPackageRef` a `repository`/leaf-digest pair in the fixtures
     /// above resolves to, with nothing seeded on disk.
-    fn pinned_leaf(repository: &str, registry: &str, digest_hex: &str) -> ocx_oci::PinnedIdentifier {
-        ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry(repository, registry)
+    fn pinned_leaf(repository: &str, registry: &str, digest_hex: &str) -> ocx_oci::PinnedPackageRef {
+        ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry(repository, registry)
                 .clone_with_digest(ocx_oci::Digest::Sha256(digest_hex.to_string())),
         )
         .unwrap()
@@ -902,7 +902,7 @@ repository = "localhost:5000/shfmt"
     /// Pre-create the shim directory for `pinned` — its `bin/` child is the
     /// completeness marker (C-022), and its presence is the whole on-disk
     /// evidence a deferred tool leaves behind.
-    async fn seed_pinned_shim_dir(file_structure: &FileStructure, pinned: &ocx_oci::PinnedIdentifier) {
+    async fn seed_pinned_shim_dir(file_structure: &FileStructure, pinned: &ocx_oci::PinnedPackageRef) {
         tokio::fs::create_dir_all(file_structure.shims.shim_dir(pinned).bin())
             .await
             .unwrap();

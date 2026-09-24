@@ -42,7 +42,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
-use ocx_oci::Identifier;
+use ocx_oci::PackageRef;
 
 // ── Structural limits ─────────────────────────────────────────────────────────
 
@@ -147,7 +147,7 @@ pub struct PatchRule {
     /// Identifiers are stored as strings on the wire and parsed on
     /// deserialization. The project-default registry (`ocx.sh`) is used as
     /// the fallback when no registry is present in the string.
-    pub packages: Vec<Identifier>,
+    pub packages: Vec<PackageRef>,
 
     /// Per-rule fail posture override.
     ///
@@ -191,12 +191,12 @@ pub struct PatchDescriptor {
 
 /// A resolved companion entry produced by [`PatchDescriptor::collect_companions`].
 ///
-/// Carries the companion package [`Identifier`] and the effective `required`
+/// Carries the companion package [`PackageRef`] and the effective `required`
 /// flag after applying per-rule overrides and the tier default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompanionEntry {
     /// The companion package to load.
-    pub identifier: Identifier,
+    pub identifier: PackageRef,
     /// Effective fail posture for this companion.
     ///
     /// `true` = fail closed (abort if unavailable); `false` = fail open (warn
@@ -337,7 +337,7 @@ impl PatchDescriptor {
     ///
     /// The caller is responsible for not reading config inside `compose` or GC
     /// leaf paths — this is a pure function over the already-loaded descriptor.
-    pub fn collect_companions(&self, base_identifier: &Identifier, tier_required_default: bool) -> Vec<CompanionEntry> {
+    pub fn collect_companions(&self, base_identifier: &PackageRef, tier_required_default: bool) -> Vec<CompanionEntry> {
         use crate::patch::matcher::glob_match;
 
         let base_str = base_identifier.to_string();
@@ -363,7 +363,7 @@ impl PatchDescriptor {
 
             for package_id in &rule.packages {
                 // Dedup by identifier (structural equality via PartialEq; first-match
-                // wins for the `required` value). Identifier derives PartialEq which
+                // wins for the `required` value). PackageRef derives PartialEq which
                 // compares all fields — semantically identical to Display equality but
                 // without heap allocation on every comparison.
                 let already_seen = result.iter().any(|e| &e.identifier == package_id);
@@ -443,7 +443,7 @@ mod tests {
         );
     }
 
-    /// Companion identifiers inside `packages` arrays are deserialized as `Identifier`.
+    /// Companion identifiers inside `packages` arrays are deserialized as `PackageRef`.
     #[test]
     fn packages_parse_to_identifier() {
         let descriptor = PatchDescriptor::from_json_bytes(&adr_example_json()).expect("must parse");
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn collect_companions_catch_all_rule() {
         let descriptor = PatchDescriptor::from_json_bytes(&adr_example_json()).expect("must parse");
-        let base = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         // cmake matches "*" (rule 0) but NOT "ocx.sh/java:*" (rule 1).
         let companions = descriptor.collect_companions(&base, true);
         assert_eq!(companions.len(), 1, "only the catch-all companion should match");
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn collect_companions_both_rules_match_java() {
         let descriptor = PatchDescriptor::from_json_bytes(&adr_example_json()).expect("must parse");
-        let base = Identifier::parse("ocx.sh/java:21").expect("valid identifier");
+        let base = PackageRef::parse("ocx.sh/java:21").expect("valid identifier");
         // Matches rule 0 (*) → zscaler-root:latest with tier default required
         // AND rule 1 (ocx.sh/java:*) → jdk21-truststore:1.0 with required=false
         let companions = descriptor.collect_companions(&base, true);
@@ -582,7 +582,7 @@ mod tests {
         .expect("must parse");
         // Compose-time base id: tag AND install digest (what `admitted` carries).
         let digest = format!("sha256:{}", "a".repeat(64));
-        let base = Identifier::parse(&format!("ocx.sh/java:21@{digest}")).expect("valid digest-pinned identifier");
+        let base = PackageRef::parse(&format!("ocx.sh/java:21@{digest}")).expect("valid digest-pinned identifier");
         let companions = descriptor.collect_companions(&base, true);
         assert_eq!(
             companions.len(),
@@ -596,7 +596,7 @@ mod tests {
 
         // And it must ALSO match the digest-less discovery form — both phases
         // resolve identically (no drift).
-        let discovery_base = Identifier::parse("ocx.sh/java:21").expect("valid");
+        let discovery_base = PackageRef::parse("ocx.sh/java:21").expect("valid");
         assert_eq!(
             descriptor.collect_companions(&discovery_base, true).len(),
             1,
@@ -619,7 +619,7 @@ mod tests {
         .to_string()
         .into_bytes();
         let descriptor = PatchDescriptor::from_json_bytes(&json).expect("must parse");
-        let base = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         let companions = descriptor.collect_companions(&base, false);
         // Dedup: only one companion despite appearing in both rules.
         assert_eq!(companions.len(), 1, "dedup must yield exactly one entry");
@@ -641,7 +641,7 @@ mod tests {
         .to_string()
         .into_bytes();
         let descriptor = PatchDescriptor::from_json_bytes(&json).expect("must parse");
-        let base = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         // Tier default = false (fail-open)
         let companions = descriptor.collect_companions(&base, false);
         assert_eq!(companions.len(), 1);
@@ -664,7 +664,7 @@ mod tests {
         .to_string()
         .into_bytes();
         let descriptor = PatchDescriptor::from_json_bytes(&json).expect("must parse");
-        let base = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         let companions = descriptor.collect_companions(&base, true);
         assert!(companions.is_empty(), "cmake must not match a java-only descriptor");
     }

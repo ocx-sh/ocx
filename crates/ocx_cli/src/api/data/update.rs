@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ocx_console::{Cell, DataInterface};
-use ocx_oci::Identifier;
+use ocx_oci::PackageRef;
 use ocx_project::{DEFAULT_GROUP, LockedTool, ProjectConfig, ProjectLock};
 use serde::Serialize;
 
@@ -52,9 +52,9 @@ pub struct BindingChange {
     /// Pull identifier before the update; `null` when newly pinned. Held
     /// typed so `Serialize` emits the full pinned form while the plain table
     /// renders the shared short-digest abbreviation.
-    pub from: Option<Identifier>,
+    pub from: Option<PackageRef>,
     /// Pull identifier after the update; `null` when dropped.
-    pub to: Option<Identifier>,
+    pub to: Option<PackageRef>,
 }
 
 /// One `(group, binding, platform)` pin the update left where it was.
@@ -71,7 +71,7 @@ pub struct BindingState {
     /// The unchanged pull identifier — the same
     /// `registry/repository@sha256:<hex>` form `BindingChange::from` / `to`
     /// carry, so the two arrays are directly comparable.
-    pub digest: Identifier,
+    pub digest: PackageRef,
 }
 
 /// Report emitted by `ocx update` (and by `ocx update --check` before it
@@ -111,7 +111,7 @@ pub struct UpdateReport {
 }
 
 /// The compared value of one pin: its reconstructed pull identifier.
-fn pull_identifier(tool: &LockedTool, leaf: &ocx_oci::Digest) -> Identifier {
+fn pull_identifier(tool: &LockedTool, leaf: &ocx_oci::Digest) -> PackageRef {
     tool.repository.clone_with_digest(leaf.clone())
 }
 
@@ -120,7 +120,7 @@ fn pull_identifier(tool: &LockedTool, leaf: &ocx_oci::Digest) -> Identifier {
 /// `BTreeMap` for the ordering the report and the table inherit: a lock's
 /// `tools` vector is sorted by `(group, name)` at write time but an in-memory
 /// candidate need not be.
-fn pins(lock: &ProjectLock) -> BTreeMap<(String, String, String), Identifier> {
+fn pins(lock: &ProjectLock) -> BTreeMap<(String, String, String), PackageRef> {
     let mut out = BTreeMap::new();
     for tool in &lock.tools {
         for (platform, leaf) in &tool.platforms {
@@ -153,7 +153,7 @@ fn declared_tag(config: &ProjectConfig, group: &str, name: &str) -> Option<Strin
 /// The fallback cannot be reached through [`UpdateReport::diff`], which builds
 /// every value with `clone_with_digest`; it is the honest answer rather than a
 /// dash if some later caller hands over a tagless, digestless coordinate.
-fn short_digest(pull: &Identifier) -> String {
+fn short_digest(pull: &PackageRef) -> String {
     pull.digest()
         .map_or_else(|| pull.to_string(), |digest| digest.to_short_string())
 }
@@ -346,7 +346,7 @@ impl schemars::JsonSchema for VerboseUpdateReport {
 mod tests {
     use std::collections::BTreeMap;
 
-    use ocx_oci::{Digest, Identifier};
+    use ocx_oci::{Digest, PackageRef};
     use ocx_project::{LockMetadata, LockVersion};
 
     use super::*;
@@ -376,7 +376,7 @@ mod tests {
         LockedTool {
             name: name.to_string(),
             group: DEFAULT_GROUP.to_string(),
-            repository: Identifier::new_registry(repo, "ocx.sh"),
+            repository: PackageRef::new_registry(repo, "ocx.sh"),
             platforms: leaves
                 .iter()
                 .map(|(key, byte)| ((*key).to_string(), digest_of(*byte)))
@@ -394,14 +394,14 @@ mod tests {
     /// `[tools] cmake = "ocx.sh/cmake:3.28"` — the declaration the tag column
     /// reads from.
     fn config() -> ProjectConfig {
-        let declared = Identifier::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
+        let declared = PackageRef::new_registry("cmake", "ocx.sh").clone_with_tag("3.28");
         ProjectConfig::from_parts(BTreeMap::from([("cmake".to_string(), declared)]), BTreeMap::new())
     }
 
     /// The pull identifier `tool()` produces for `repo` at the leaf filled
     /// with `byte` — built the way the report builds it, from the parts.
-    fn pull(repo: &str, byte: char) -> Identifier {
-        Identifier::new_registry(repo, "ocx.sh").clone_with_digest(digest_of(byte))
+    fn pull(repo: &str, byte: char) -> PackageRef {
+        PackageRef::new_registry(repo, "ocx.sh").clone_with_digest(digest_of(byte))
     }
 
     const LINUX: &str = "linux/amd64";

@@ -168,6 +168,6 @@ pub enum PatchError {
     )]
     PolicyBlocked {
         /// The companion whose tag could not be resolved.
-        identifier: Box<ocx_oci::Identifier>,
+        identifier: Box<ocx_oci::PackageRef>,
     },
 }

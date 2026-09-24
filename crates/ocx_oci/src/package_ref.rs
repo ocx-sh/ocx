@@ -26,14 +26,14 @@ const MAX_REPOSITORY_LENGTH: usize = 255;
 /// it through the index (`ocx_index::Index::route`). The two types have no
 /// conversion either way (ocx#504).
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct Identifier {
+pub struct PackageRef {
     registry: String,
     repository: String,
     tag: Option<String>,
     digest: Option<Digest>,
 }
 
-impl Identifier {
+impl PackageRef {
     /// Creates an identifier from explicit repository and registry strings.
     ///
     /// No parsing is performed — the values are taken as-is.
@@ -59,7 +59,7 @@ impl Identifier {
     /// project-config layer (`ocx_project::config::ProjectConfig::from_toml_str`,
     /// still in `ocx_lib`) applies its own `:latest` default at the schema boundary so an
     /// `ocx.toml` entry without a tag resolves predictably; that default
-    /// does not apply to other [`Identifier::parse`] callers.
+    /// does not apply to other [`PackageRef::parse`] callers.
     pub fn parse(input: &str) -> Result<Self, IdentifierError> {
         validate_segments(input)?;
         if !has_explicit_registry(input) {
@@ -243,7 +243,7 @@ impl Identifier {
 /// The seam below is a **test-only** override, gated behind `cfg(test)` or the
 /// `__testing` Cargo feature so release artifacts physically lack the code
 /// path. The override only honors loopback registries.
-pub fn ocx_cli_identifier() -> Identifier {
+pub fn ocx_cli_identifier() -> PackageRef {
     #[cfg(any(test, feature = "__testing"))]
     {
         if let Ok(spec) = std::env::var("__OCX_SELF_IMAGE")
@@ -256,10 +256,10 @@ pub fn ocx_cli_identifier() -> Identifier {
                 is_loopback_registry(registry),
                 "__OCX_SELF_IMAGE override must target a loopback registry; got `{registry}`"
             );
-            return Identifier::new_registry(repository, registry);
+            return PackageRef::new_registry(repository, registry);
         }
     }
-    Identifier::new_registry("ocx/cli", OCX_SH_REGISTRY)
+    PackageRef::new_registry("ocx/cli", OCX_SH_REGISTRY)
 }
 
 /// Parses the `__OCX_SELF_IMAGE` test-only seam value.
@@ -292,7 +292,7 @@ fn is_loopback_registry(registry: &str) -> bool {
     host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-impl std::fmt::Display for Identifier {
+impl std::fmt::Display for PackageRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/{}", self.registry, self.repository)?;
         if let Some(tag) = &self.tag {
@@ -305,7 +305,7 @@ impl std::fmt::Display for Identifier {
     }
 }
 
-impl std::str::FromStr for Identifier {
+impl std::str::FromStr for PackageRef {
     type Err = IdentifierError;
 
     fn from_str(value: &str) -> Result<Self, IdentifierError> {
@@ -313,7 +313,7 @@ impl std::str::FromStr for Identifier {
     }
 }
 
-impl Serialize for Identifier {
+impl Serialize for PackageRef {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -322,13 +322,13 @@ impl Serialize for Identifier {
     }
 }
 
-impl<'de> Deserialize<'de> for Identifier {
+impl<'de> Deserialize<'de> for PackageRef {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Identifier::parse(&s).map_err(serde::de::Error::custom)
+        PackageRef::parse(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -370,7 +370,7 @@ fn has_explicit_registry(input: &str) -> bool {
     }
 }
 
-fn parse_internal(input: &str, default_registry: &str) -> Result<Identifier, IdentifierError> {
+fn parse_internal(input: &str, default_registry: &str) -> Result<PackageRef, IdentifierError> {
     if input.is_empty() {
         return Err(IdentifierError {
             input: String::new(),
@@ -407,7 +407,7 @@ fn parse_internal(input: &str, default_registry: &str) -> Result<Identifier, Ide
         });
     }
 
-    Ok(Identifier {
+    Ok(PackageRef {
         registry,
         repository,
         tag,
@@ -418,14 +418,14 @@ fn parse_internal(input: &str, default_registry: &str) -> Result<Identifier, Ide
 /// The reason `repository` is not a legal repository path, or `None`.
 ///
 /// The single statement of the repository grammar: [`parse_internal`] applies it
-/// to the repository it decomposed, [`Identifier::validate_repository`] applies
+/// to the repository it decomposed, [`PackageRef::validate_repository`] applies
 /// it to a string a caller means to use verbatim. Returns the *kind* rather than
 /// a full error so each caller can quote the input the user actually gave.
 ///
 /// Extracting it widened `parse_internal` by one rule: the `.`/`..` segment
 /// check used to run only in `validate_segments`, which
-/// [`Identifier::parse`] and [`Identifier::parse_with_default_registry`] call
-/// and [`FromStr`] does not. So `"ocx.sh/ns/../evil".parse::<Identifier>()`
+/// [`PackageRef::parse`] and [`PackageRef::parse_with_default_registry`] call
+/// and [`FromStr`] does not. So `"ocx.sh/ns/../evil".parse::<PackageRef>()`
 /// was `Ok` with a traversing repository and is now
 /// [`IdentifierErrorKind::DirectoryTraversal`]. Deliberate — a traversing
 /// repository is never a legal one, and the two entry points disagreeing about
@@ -532,9 +532,9 @@ fn prepend_domain(name: &str, domain: &str) -> String {
     }
 }
 
-impl schemars::JsonSchema for Identifier {
+impl schemars::JsonSchema for PackageRef {
     fn schema_name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("Identifier")
+        std::borrow::Cow::Borrowed("PackageRef")
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -552,15 +552,15 @@ mod tests {
     // ── Path segments ────────────────────────────────────────────────────
 
     /// C-026: the first repository segment is the org — the mirror image of
-    /// [`Identifier::name`], and the half of a consent source that is not the
+    /// [`PackageRef::name`], and the half of a consent source that is not the
     /// registry.
     #[test]
     fn first_path_segment_is_the_org() {
-        let nested: Identifier = "ghcr.io/acme/tools/cmake:3.28".parse().unwrap();
+        let nested: PackageRef = "ghcr.io/acme/tools/cmake:3.28".parse().unwrap();
         assert_eq!(nested.first_path_segment(), "acme");
         assert_eq!(nested.name(), "cmake", "the last segment is unchanged");
 
-        let flat: Identifier = "ocx.sh/python".parse().unwrap();
+        let flat: PackageRef = "ocx.sh/python".parse().unwrap();
         assert_eq!(
             flat.first_path_segment(),
             "python",
@@ -568,7 +568,7 @@ mod tests {
         );
         assert_eq!(flat.name(), "python");
 
-        let two: Identifier = "ghcr.io/acme/cmake".parse().unwrap();
+        let two: PackageRef = "ghcr.io/acme/cmake".parse().unwrap();
         assert_eq!(two.first_path_segment(), "acme");
         assert_eq!(two.name(), "cmake");
     }
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn parse_bare_name() {
-        let id: Identifier = "python".parse().unwrap();
+        let id: PackageRef = "python".parse().unwrap();
         assert_eq!(id.registry(), DEFAULT_REGISTRY);
         assert_eq!(id.repository(), "python");
         assert_eq!(id.tag(), None);
@@ -587,7 +587,7 @@ mod tests {
 
     #[test]
     fn parse_name_with_tag() {
-        let id: Identifier = "python:3.12".parse().unwrap();
+        let id: PackageRef = "python:3.12".parse().unwrap();
         assert_eq!(id.registry(), DEFAULT_REGISTRY);
         assert_eq!(id.repository(), "python");
         assert_eq!(id.tag(), Some("3.12"));
@@ -596,14 +596,14 @@ mod tests {
 
     #[test]
     fn parse_explicit_latest() {
-        let id: Identifier = "python:latest".parse().unwrap();
+        let id: PackageRef = "python:latest".parse().unwrap();
         assert_eq!(id.tag(), Some("latest"));
         assert_eq!(id.tag_or_latest(), "latest");
     }
 
     #[test]
     fn parse_with_registry() {
-        let id: Identifier = "test.com/repo:tag".parse().unwrap();
+        let id: PackageRef = "test.com/repo:tag".parse().unwrap();
         assert_eq!(id.registry(), "test.com");
         assert_eq!(id.repository(), "repo");
         assert_eq!(id.tag(), Some("tag"));
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn parse_registry_with_port() {
-        let id: Identifier = "test:5000/repo:tag".parse().unwrap();
+        let id: PackageRef = "test:5000/repo:tag".parse().unwrap();
         assert_eq!(id.registry(), "test:5000");
         assert_eq!(id.repository(), "repo");
         assert_eq!(id.tag(), Some("tag"));
@@ -621,7 +621,7 @@ mod tests {
     fn parse_registry_port_digest_only() {
         let hex = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
         let input = format!("test:5000/repo@sha256:{hex}");
-        let id: Identifier = input.parse().unwrap();
+        let id: PackageRef = input.parse().unwrap();
         assert_eq!(id.registry(), "test:5000");
         assert_eq!(id.repository(), "repo");
         assert_eq!(id.tag(), None);
@@ -632,7 +632,7 @@ mod tests {
     fn parse_tag_and_digest() {
         let hex = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
         let input = format!("test:5000/repo:tag@sha256:{hex}");
-        let id: Identifier = input.parse().unwrap();
+        let id: PackageRef = input.parse().unwrap();
         assert_eq!(id.registry(), "test:5000");
         assert_eq!(id.repository(), "repo");
         assert_eq!(id.tag(), Some("tag"));
@@ -641,7 +641,7 @@ mod tests {
 
     #[test]
     fn parse_nested_repo_no_tag() {
-        let id: Identifier = "sub-dom1.foo.com/bar/baz/quux".parse().unwrap();
+        let id: PackageRef = "sub-dom1.foo.com/bar/baz/quux".parse().unwrap();
         assert_eq!(id.registry(), "sub-dom1.foo.com");
         assert_eq!(id.repository(), "bar/baz/quux");
         assert_eq!(id.tag(), None);
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn parse_complex_nested() {
-        let id: Identifier = "b.gcr.io/test.example.com/my-app:tag".parse().unwrap();
+        let id: PackageRef = "b.gcr.io/test.example.com/my-app:tag".parse().unwrap();
         assert_eq!(id.registry(), "b.gcr.io");
         assert_eq!(id.repository(), "test.example.com/my-app");
         assert_eq!(id.tag(), Some("tag"));
@@ -657,7 +657,7 @@ mod tests {
 
     #[test]
     fn parse_org_repo_gets_default_registry() {
-        let id: Identifier = "myorg/cmake:3.28".parse().unwrap();
+        let id: PackageRef = "myorg/cmake:3.28".parse().unwrap();
         assert_eq!(id.registry(), DEFAULT_REGISTRY);
         assert_eq!(id.repository(), "myorg/cmake");
         assert_eq!(id.tag(), Some("3.28"));
@@ -667,18 +667,18 @@ mod tests {
 
     #[test]
     fn parse_with_default_registry_preserves_tag_presence() {
-        let bare = Identifier::parse_with_default_registry("python", "localhost:5000").unwrap();
+        let bare = PackageRef::parse_with_default_registry("python", "localhost:5000").unwrap();
         assert_eq!(bare.tag(), None);
         assert_eq!(bare.tag_or_latest(), "latest");
         assert_eq!(bare.registry(), "localhost:5000");
 
-        let tagged = Identifier::parse_with_default_registry("python:3.12", "localhost:5000").unwrap();
+        let tagged = PackageRef::parse_with_default_registry("python:3.12", "localhost:5000").unwrap();
         assert_eq!(tagged.tag(), Some("3.12"));
     }
 
     #[test]
     fn parse_with_default_registry_ignores_default_when_registry_present() {
-        let id = Identifier::parse_with_default_registry("ghcr.io/myorg/tool:1.0", "localhost:5000").unwrap();
+        let id = PackageRef::parse_with_default_registry("ghcr.io/myorg/tool:1.0", "localhost:5000").unwrap();
         assert_eq!(id.registry(), "ghcr.io");
         assert_eq!(id.repository(), "myorg/tool");
         assert_eq!(id.tag(), Some("1.0"));
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn clone_with_tag_always_explicit() {
-        let bare: Identifier = "python".parse().unwrap();
+        let bare: PackageRef = "python".parse().unwrap();
         assert_eq!(bare.tag(), None);
 
         let tagged = bare.clone_with_tag("3.12");
@@ -697,7 +697,7 @@ mod tests {
 
     #[test]
     fn clone_with_digest_preserves_fields() {
-        let id: Identifier = "test.com/repo:tag".parse().unwrap();
+        let id: PackageRef = "test.com/repo:tag".parse().unwrap();
         let digest = Digest::Sha256("a".repeat(64));
         let with_digest = id.clone_with_digest(digest.clone());
         assert_eq!(with_digest.registry(), "test.com");
@@ -710,14 +710,14 @@ mod tests {
 
     #[test]
     fn empty_string_errors() {
-        let err = "".parse::<Identifier>().unwrap_err();
+        let err = "".parse::<PackageRef>().unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::Empty));
         assert_eq!(err.input, "");
     }
 
     #[test]
     fn uppercase_repo_errors() {
-        let err = "test.com/Foo".parse::<Identifier>().unwrap_err();
+        let err = "test.com/Foo".parse::<PackageRef>().unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::UppercaseRepository));
     }
 
@@ -729,7 +729,7 @@ mod tests {
     #[test]
     fn repository_char_class_accepts_allowed_boundary() {
         // All allowed special characters across nested segments.
-        let id: Identifier = "test.com/foo.bar_baz-qux/a1b2"
+        let id: PackageRef = "test.com/foo.bar_baz-qux/a1b2"
             .parse()
             .expect("allowed char classes must parse");
         assert_eq!(id.repository(), "foo.bar_baz-qux/a1b2");
@@ -737,7 +737,7 @@ mod tests {
 
     #[test]
     fn repository_char_class_rejects_space() {
-        let err = "test.com/foo bar".parse::<Identifier>().unwrap_err();
+        let err = "test.com/foo bar".parse::<PackageRef>().unwrap_err();
         assert!(
             matches!(err.kind, IdentifierErrorKind::InvalidFormat),
             "a space in a repository segment must be rejected as InvalidFormat, got {:?}",
@@ -748,7 +748,7 @@ mod tests {
     #[test]
     fn repository_char_class_rejects_disallowed_punctuation() {
         for input in ["test.com/foo!bar", "test.com/foo~bar", "test.com/foo%bar"] {
-            let err = input.parse::<Identifier>().unwrap_err();
+            let err = input.parse::<PackageRef>().unwrap_err();
             assert!(
                 matches!(err.kind, IdentifierErrorKind::InvalidFormat),
                 "disallowed punctuation in '{input}' must be rejected as InvalidFormat, got {:?}",
@@ -759,7 +759,7 @@ mod tests {
 
     #[test]
     fn repository_char_class_rejects_empty_segment() {
-        let err = "test.com/foo//bar".parse::<Identifier>().unwrap_err();
+        let err = "test.com/foo//bar".parse::<PackageRef>().unwrap_err();
         assert!(
             matches!(err.kind, IdentifierErrorKind::InvalidFormat),
             "an empty repository segment must be rejected as InvalidFormat, got {:?}",
@@ -769,13 +769,13 @@ mod tests {
 
     #[test]
     fn bad_digest_algo_errors() {
-        let err = "test.com/repo@md5:abcdef".parse::<Identifier>().unwrap_err();
+        let err = "test.com/repo@md5:abcdef".parse::<PackageRef>().unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::DigestInvalidFormat));
     }
 
     #[test]
     fn bad_digest_length_errors() {
-        let err = "test.com/repo@sha256:abc".parse::<Identifier>().unwrap_err();
+        let err = "test.com/repo@sha256:abc".parse::<PackageRef>().unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::DigestInvalidFormat));
     }
 
@@ -789,9 +789,9 @@ mod tests {
             "sub-dom1.foo.com/bar/baz/quux",
         ];
         for &input in cases {
-            let id: Identifier = input.parse().unwrap();
+            let id: PackageRef = input.parse().unwrap();
             let displayed = id.to_string();
-            let reparsed: Identifier = displayed.parse().unwrap();
+            let reparsed: PackageRef = displayed.parse().unwrap();
             assert_eq!(id, reparsed, "roundtrip failed for: {input}");
         }
     }
@@ -800,14 +800,14 @@ mod tests {
     fn display_with_digest_roundtrip() {
         let hex = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
         let input = format!("test:5000/repo:tag@sha256:{hex}");
-        let id: Identifier = input.parse().unwrap();
-        let reparsed: Identifier = id.to_string().parse().unwrap();
+        let id: PackageRef = input.parse().unwrap();
+        let reparsed: PackageRef = id.to_string().parse().unwrap();
         assert_eq!(id, reparsed);
     }
 
     #[test]
     fn display_bare_name_includes_default_registry() {
-        let id: Identifier = "python".parse().unwrap();
+        let id: PackageRef = "python".parse().unwrap();
         assert_eq!(id.to_string(), format!("{DEFAULT_REGISTRY}/python"));
     }
 
@@ -815,9 +815,9 @@ mod tests {
 
     #[test]
     fn serde_roundtrip() {
-        let id: Identifier = "test.com/repo:tag".parse().unwrap();
+        let id: PackageRef = "test.com/repo:tag".parse().unwrap();
         let json = serde_json::to_string(&id).unwrap();
-        let deserialized: Identifier = serde_json::from_str(&json).unwrap();
+        let deserialized: PackageRef = serde_json::from_str(&json).unwrap();
         assert_eq!(id, deserialized);
     }
 
@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn new_registry_creates_identifier() {
-        let id = Identifier::new_registry("cmake", "example.com");
+        let id = PackageRef::new_registry("cmake", "example.com");
         assert_eq!(id.registry(), "example.com");
         assert_eq!(id.repository(), "cmake");
         assert_eq!(id.tag(), None);
@@ -836,35 +836,35 @@ mod tests {
 
     #[test]
     fn parse_normalizes_plus_to_underscore_in_tag() {
-        let id: Identifier = "cmake:3.28.1+20260216".parse().unwrap();
+        let id: PackageRef = "cmake:3.28.1+20260216".parse().unwrap();
         assert_eq!(id.tag(), Some("3.28.1_20260216"));
     }
 
     #[test]
     fn parse_preserves_underscore_in_tag() {
-        let id: Identifier = "cmake:3.28.1_20260216".parse().unwrap();
+        let id: PackageRef = "cmake:3.28.1_20260216".parse().unwrap();
         assert_eq!(id.tag(), Some("3.28.1_20260216"));
     }
 
     #[test]
     fn parse_normalizes_plus_with_registry_port() {
-        let id: Identifier = "test:5000/repo:1.0+build".parse().unwrap();
+        let id: PackageRef = "test:5000/repo:1.0+build".parse().unwrap();
         assert_eq!(id.registry(), "test:5000");
         assert_eq!(id.tag(), Some("1.0_build"));
     }
 
     #[test]
     fn parse_plus_display_roundtrip() {
-        let id1: Identifier = "test.com/repo:3.28.1+b1".parse().unwrap();
+        let id1: PackageRef = "test.com/repo:3.28.1+b1".parse().unwrap();
         let displayed = id1.to_string();
-        let id2: Identifier = displayed.parse().unwrap();
+        let id2: PackageRef = displayed.parse().unwrap();
         assert_eq!(id1, id2);
         assert_eq!(id2.tag(), Some("3.28.1_b1"));
     }
 
     #[test]
     fn clone_with_tag_normalizes_plus() {
-        let base: Identifier = "test.com/repo".parse().unwrap();
+        let base: PackageRef = "test.com/repo".parse().unwrap();
         let tagged = base.clone_with_tag("3.28.1+b1");
         assert_eq!(tagged.tag(), Some("3.28.1_b1"));
     }
@@ -873,19 +873,19 @@ mod tests {
 
     #[test]
     fn parse_rejects_bare_name() {
-        let err = Identifier::parse("cmake:3.28").unwrap_err();
+        let err = PackageRef::parse("cmake:3.28").unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::MissingRegistry));
     }
 
     #[test]
     fn parse_rejects_org_repo() {
-        let err = Identifier::parse("myorg/cmake").unwrap_err();
+        let err = PackageRef::parse("myorg/cmake").unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::MissingRegistry));
     }
 
     #[test]
     fn parse_accepts_explicit_registry() {
-        let id = Identifier::parse("ocx.sh/cmake:3.28").unwrap();
+        let id = PackageRef::parse("ocx.sh/cmake:3.28").unwrap();
         assert_eq!(id.registry(), "ocx.sh");
         assert_eq!(id.repository(), "cmake");
         assert_eq!(id.tag(), Some("3.28"));
@@ -893,37 +893,37 @@ mod tests {
 
     #[test]
     fn parse_accepts_localhost() {
-        let id = Identifier::parse("localhost/repo:tag").unwrap();
+        let id = PackageRef::parse("localhost/repo:tag").unwrap();
         assert_eq!(id.registry(), "localhost");
     }
 
     #[test]
     fn parse_accepts_port() {
-        let id = Identifier::parse("localhost:5000/repo:tag").unwrap();
+        let id = PackageRef::parse("localhost:5000/repo:tag").unwrap();
         assert_eq!(id.registry(), "localhost:5000");
     }
 
     #[test]
     fn parse_rejects_dotdot_traversal() {
-        let err = Identifier::parse("ocx.sh/../evil").unwrap_err();
+        let err = PackageRef::parse("ocx.sh/../evil").unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::DirectoryTraversal));
     }
 
     #[test]
     fn parse_rejects_dot_traversal() {
-        let err = Identifier::parse("ocx.sh/org/./evil").unwrap_err();
+        let err = PackageRef::parse("ocx.sh/org/./evil").unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::DirectoryTraversal));
     }
 
     #[test]
     fn parse_rejects_dotdot_with_tag() {
-        let err = Identifier::parse("ocx.sh/..:tag").unwrap_err();
+        let err = PackageRef::parse("ocx.sh/..:tag").unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::DirectoryTraversal));
     }
 
     #[test]
     fn deserialize_rejects_bare_name() {
-        let err = serde_json::from_str::<Identifier>(r#""cmake:3.28""#).unwrap_err();
+        let err = serde_json::from_str::<PackageRef>(r#""cmake:3.28""#).unwrap_err();
         assert!(err.to_string().contains("explicit registry"));
     }
 
@@ -931,7 +931,7 @@ mod tests {
 
     #[test]
     fn parse_with_default_registry_accepts_bare_name() {
-        let id = Identifier::parse_with_default_registry("cmake:3.28", "ocx.sh").unwrap();
+        let id = PackageRef::parse_with_default_registry("cmake:3.28", "ocx.sh").unwrap();
         assert_eq!(id.registry(), "ocx.sh");
         assert_eq!(id.repository(), "cmake");
         assert_eq!(id.tag(), Some("3.28"));
@@ -939,20 +939,20 @@ mod tests {
 
     #[test]
     fn parse_with_default_registry_accepts_org_repo() {
-        let id = Identifier::parse_with_default_registry("myorg/cmake", "ocx.sh").unwrap();
+        let id = PackageRef::parse_with_default_registry("myorg/cmake", "ocx.sh").unwrap();
         assert_eq!(id.registry(), "ocx.sh");
         assert_eq!(id.repository(), "myorg/cmake");
     }
 
     #[test]
     fn parse_with_default_registry_rejects_dotdot_traversal() {
-        let err = Identifier::parse_with_default_registry("../evil/cmake", "ocx.sh").unwrap_err();
+        let err = PackageRef::parse_with_default_registry("../evil/cmake", "ocx.sh").unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::DirectoryTraversal));
     }
 
     #[test]
     fn parse_with_default_registry_rejects_dotdot_segment() {
-        let err = Identifier::parse_with_default_registry("ocx.sh/../evil", "ocx.sh").unwrap_err();
+        let err = PackageRef::parse_with_default_registry("ocx.sh/../evil", "ocx.sh").unwrap_err();
         assert!(matches!(err.kind, IdentifierErrorKind::DirectoryTraversal));
     }
 
@@ -966,14 +966,14 @@ mod tests {
     fn from_str_applies_the_traversal_rule_the_parse_entry_points_apply() {
         // `FromStr` reaches `parse_internal` without `validate_segments`, so
         // until the grammar was extracted these were `Ok` with a traversing
-        // repository while `Identifier::parse` refused them. Two entry points
+        // repository while `PackageRef::parse` refused them. Two entry points
         // disagreeing about whether `..` is a legal path segment is the defect;
         // this pins the agreement rather than the old asymmetry.
         // Not `"../evil"`: a leading segment carrying a dot is read as the
         // registry, so that one decomposes to the legal repository `evil` and is
         // a hostname question, not a traversal one.
         for traversing in ["ocx.sh/ns/../evil", "ns/../../evil", "ns/./pkg"] {
-            let Err(error) = traversing.parse::<Identifier>() else {
+            let Err(error) = traversing.parse::<PackageRef>() else {
                 panic!("`{traversing}` traverses and must not parse as an identifier");
             };
             assert!(
@@ -996,11 +996,11 @@ mod tests {
             "ns/pkg@sha256:0000000000000000000000000000000000000000000000000000000000000000",
         ] {
             assert!(
-                Identifier::parse_with_default_registry(admitted, "ocx.sh").is_ok(),
+                PackageRef::parse_with_default_registry(admitted, "ocx.sh").is_ok(),
                 "precondition: `{admitted}` is exactly what parsing admits today"
             );
             assert!(
-                Identifier::validate_repository(admitted).is_err(),
+                PackageRef::validate_repository(admitted).is_err(),
                 "`{admitted}` is not a legal repository path and must not be used as one"
             );
         }
@@ -1019,7 +1019,7 @@ mod tests {
             ("ns/pk g", IdentifierErrorKind::InvalidFormat),
             ("ns/pkg\u{202e}", IdentifierErrorKind::InvalidFormat),
         ] {
-            let Err(error) = Identifier::validate_repository(repository) else {
+            let Err(error) = PackageRef::validate_repository(repository) else {
                 panic!("`{repository}` must be refused");
             };
             assert_eq!(
@@ -1040,14 +1040,14 @@ mod tests {
         // `new_registry` pins the registry separately, so a key can no more
         // redirect itself to another host than it can carry a tag.
         for repository in ["cmake", "kitware/cmake", "ns/sub/pkg", "foo.bar/pkg", "a-b_c.d/e1"] {
-            Identifier::validate_repository(repository)
+            PackageRef::validate_repository(repository)
                 .unwrap_or_else(|error| panic!("`{repository}` is a legal catalog key: {error}"));
         }
     }
 
     #[test]
     fn from_str_uses_default_registry() {
-        let id: Identifier = "cmake:3.28".parse().unwrap();
+        let id: PackageRef = "cmake:3.28".parse().unwrap();
         assert_eq!(id.registry(), DEFAULT_REGISTRY);
         assert_eq!(id.repository(), "cmake");
     }

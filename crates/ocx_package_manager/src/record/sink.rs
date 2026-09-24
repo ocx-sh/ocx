@@ -291,7 +291,7 @@ mod tests {
     use crate::record::{RecordsOptions, resolve_records};
     use crate::tasks::resolve::AdmittedClaims;
     use ocx_config::env::OcxConfigView;
-    use ocx_oci::{Digest, Identifier, PinnedIdentifier};
+    use ocx_oci::{Digest, PackageRef, PinnedPackageRef};
     use ocx_package::install_info::InstallInfo;
     use ocx_package::resolved_package::ResolvedPackage;
     use ocx_store::file_structure::PackageDir;
@@ -662,8 +662,8 @@ mod tests {
     /// A minimal launcher-frame record — this file tests publication, not the
     /// payload, so the frame carries one package and nothing else.
     fn record(recorded_at: DateTime<Utc>, pid: u32) -> ExecutionRecord {
-        let identifier = PinnedIdentifier::try_from(
-            Identifier::new_registry("ocx/cmake", "index.ocx.sh").clone_with_digest(Digest::Sha256(HEX.to_string())),
+        let identifier = PinnedPackageRef::try_from(
+            PackageRef::new_registry("ocx/cmake", "index.ocx.sh").clone_with_digest(Digest::Sha256(HEX.to_string())),
         )
         .expect("digest present");
         let packages = vec![Arc::new(InstallInfo::new(

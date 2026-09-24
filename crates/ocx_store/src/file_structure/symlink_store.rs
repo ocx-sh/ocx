@@ -48,7 +48,7 @@ impl SymlinkStore {
     }
 
     /// Returns the base directory for all symlinks belonging to the given identifier.
-    fn base(&self, identifier: &ocx_oci::Identifier) -> PathBuf {
+    fn base(&self, identifier: &ocx_oci::PackageRef) -> PathBuf {
         self.root
             .join(super::slugify(identifier.registry()))
             .join(super::repository_path(identifier.repository()))
@@ -59,22 +59,22 @@ impl SymlinkStore {
     /// Targets the package root: `packages/{registry}/{algorithm}/{2hex}/{30hex}`.
     /// Consumers traverse into `<current>/content/`, `<current>/entrypoints/`,
     /// or `<current>/metadata.json` as needed.
-    pub fn current(&self, identifier: &ocx_oci::Identifier) -> PathBuf {
+    pub fn current(&self, identifier: &ocx_oci::PackageRef) -> PathBuf {
         self.base(identifier).join("current")
     }
 
     /// Returns the `candidates/` directory path for the given identifier.
-    pub fn candidates(&self, identifier: &ocx_oci::Identifier) -> PathBuf {
+    pub fn candidates(&self, identifier: &ocx_oci::PackageRef) -> PathBuf {
         self.base(identifier).join("candidates")
     }
 
     /// Returns the candidate symlink path for the given identifier and tag.
-    pub fn candidate(&self, identifier: &ocx_oci::Identifier) -> PathBuf {
+    pub fn candidate(&self, identifier: &ocx_oci::PackageRef) -> PathBuf {
         self.candidates(identifier).join(identifier.tag_or_latest())
     }
 
     /// Returns the symlink path selected by `kind`.
-    pub fn symlink(&self, identifier: &ocx_oci::Identifier, kind: SymlinkKind) -> PathBuf {
+    pub fn symlink(&self, identifier: &ocx_oci::PackageRef, kind: SymlinkKind) -> PathBuf {
         match kind {
             SymlinkKind::Candidate => self.candidate(identifier),
             SymlinkKind::Current => self.current(identifier),
@@ -87,7 +87,7 @@ impl SymlinkStore {
     /// `deselect`, `uninstall --deselect`, and the standalone `select`
     /// command so concurrent invocations cannot interleave a symlink
     /// rewrite with the per-registry entry-points index update.
-    pub fn select_lock(&self, identifier: &ocx_oci::Identifier) -> PathBuf {
+    pub fn select_lock(&self, identifier: &ocx_oci::PackageRef) -> PathBuf {
         self.base(identifier).join(".select.lock")
     }
 
@@ -101,16 +101,16 @@ impl SymlinkStore {
 mod tests {
     use super::*;
 
-    fn id_with_tag() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry("cmake", "example.com").clone_with_tag("3.28")
+    fn id_with_tag() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry("cmake", "example.com").clone_with_tag("3.28")
     }
 
-    fn id_nested_with_tag() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry("org/sub/pkg", "example.com").clone_with_tag("1.0")
+    fn id_nested_with_tag() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry("org/sub/pkg", "example.com").clone_with_tag("1.0")
     }
 
-    fn id_no_tag() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry("cmake", "example.com")
+    fn id_no_tag() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry("cmake", "example.com")
     }
 
     // ── path structure ────────────────────────────────────────────────────────

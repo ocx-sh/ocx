@@ -49,7 +49,7 @@ use crate::api::data::signature::{SignatureLegReport, SignatureReport};
 /// touches a credential.
 pub(super) fn refuse_when_offline(
     context: &crate::app::Context,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     kind: SignErrorKind,
 ) -> anyhow::Result<()> {
     if context.is_offline() {
@@ -100,7 +100,7 @@ fn redacted_token_path(path: &std::path::Path) -> std::path::PathBuf {
 pub(super) async fn resolve_override_token(
     identity_token_file: Option<&Path>,
     identity_token_stdin: bool,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
 ) -> anyhow::Result<Option<Zeroizing<String>>> {
     // On a non-Unix target (Windows), ACL-based permission validation is not
     // implemented for Slice 1 (windows-acl integration is out of scope).
@@ -355,7 +355,7 @@ pub(crate) fn resolve_endpoint(
 /// [`SignErrorKind::InvalidEndpointUrl`] (exit 64) naming the rejected flag.
 pub(super) fn resolve_sigstore_pair(
     configured: Option<&ocx_trust::SigstoreTrust>,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     fulcio_flag: Option<&str>,
     rekor_flag: Option<&str>,
 ) -> anyhow::Result<(Url, Url)> {
@@ -389,7 +389,7 @@ pub(super) fn resolve_sigstore_pair(
 /// [`VerifyErrorKind::InvalidEndpointUrl`] (exit 64) naming `--rekor-url`.
 pub(super) fn resolve_rekor_endpoint(
     configured: Option<&ocx_trust::SigstoreTrust>,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     rekor_flag: Option<&str>,
 ) -> anyhow::Result<Url> {
     let rekor = resolve_endpoint(rekor_flag, configured, SigstoreEndpoint::Rekor);
@@ -436,7 +436,7 @@ pub(super) fn iso8601(epoch_secs: u64) -> String {
 /// its own command files, so this shared leaf is not edited again.
 pub(super) async fn resolve_policies(
     context: &crate::app::Context,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     certificate_identity: Option<&str>,
     certificate_oidc_issuer: Option<&str>,
     key: Option<&KeyRef>,
@@ -465,7 +465,7 @@ pub(super) async fn resolve_policies(
 /// through the keyless path they were written for.
 pub(super) async fn resolve_policies_lenient(
     context: &crate::app::Context,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     certificate_identity: Option<&str>,
     certificate_oidc_issuer: Option<&str>,
     key: Option<&KeyRef>,
@@ -499,7 +499,7 @@ pub(super) async fn resolve_policies_lenient(
 /// which OCI-tier commands otherwise never consult (see `adr_trust_policy.md`).
 async fn project_trust_policies(
     context: &crate::app::Context,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
 ) -> anyhow::Result<Vec<ocx_trust::TrustPolicy>> {
     // A missing/inaccessible CWD is non-fatal: `ProjectConfig::resolve` still
     // honors an explicit `--project` / `OCX_PROJECT`, and with no project file
@@ -569,7 +569,7 @@ pub(crate) fn explicit_trust_root_path(value: std::path::PathBuf) -> std::path::
 /// below never learns which was written.
 pub(super) async fn resolve_trust_root(
     context: &crate::app::Context,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     rekor_cache_key: &str,
     offline: bool,
     trusted_root: Option<&std::path::Path>,
@@ -620,7 +620,7 @@ pub(super) fn verify_error_into_anyhow(err: PackageError) -> anyhow::Error {
 /// exit code (64) and the same offending flag by construction rather than by
 /// three call sites agreeing.
 fn invalid_endpoint(
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     flag: &'static str,
 ) -> impl Fn(ocx_oci::endpoint::UrlRejection) -> anyhow::Error {
     let identifier = identifier.clone();
@@ -649,7 +649,7 @@ fn invalid_endpoint(
 ///
 /// [`SignErrorKind::PredicateTooLarge`] (exit 65) past the limit; an I/O error
 /// (exit 74) naming the path otherwise, including the symlink refusal.
-pub(super) async fn read_predicate(path: &Path, identifier: &ocx_oci::Identifier) -> anyhow::Result<Vec<u8>> {
+pub(super) async fn read_predicate(path: &Path, identifier: &ocx_oci::PackageRef) -> anyhow::Result<Vec<u8>> {
     let file = open_predicate(path).await?;
 
     // One byte past the ceiling: enough to tell "at the limit" from "over it"
@@ -830,7 +830,7 @@ pub(super) fn attest_error_into_anyhow(err: PackageError) -> anyhow::Error {
 /// carries the same document a single run prints — the sweep aggregates the
 /// existing report rather than modelling a second one.
 pub(super) fn signature_report(
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     platform: Option<&ocx_oci::Platform>,
     result: ocx_sign::sign::SignResult,
 ) -> SignatureReport {
@@ -1049,8 +1049,8 @@ mod tests {
         );
     }
 
-    fn test_identifier() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("static parse")
+    fn test_identifier() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::parse("registry.example/pkg:1.0").expect("static parse")
     }
 
     /// Write `contents` to a new file in `dir` and set the given Unix mode.
@@ -1240,7 +1240,7 @@ mod tests {
     /// regresses, `context.identifier` vanishes and this test fails.
     #[test]
     fn verify_error_wrapped_in_package_error_still_populates_envelope_identifier() {
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("parse identifier");
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").expect("parse identifier");
         let package_error = PackageError::new(
             id.clone(),
             PackageErrorKind::Internal(PmError::Verify(Box::new(VerifyError::new(
@@ -1363,7 +1363,7 @@ mod tests {
     /// reach a terminal (CWE-150).
     #[test]
     fn failed_outcome_sanitizes_the_message() {
-        let hostile = ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("parse");
+        let hostile = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").expect("parse");
         let err = anyhow::Error::from(SignError::new(
             hostile,
             SignErrorKind::TargetNotFound {

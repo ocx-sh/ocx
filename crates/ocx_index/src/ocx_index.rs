@@ -915,7 +915,7 @@ impl OcxIndex {
     /// the [`resolve_root`](Self::resolve_root) that follows raises the real
     /// `UnsupportedIndexFormat` / transport error — an index outage stays a loud
     /// error and never degrades into "this package does not exist".
-    pub fn jurisdiction(&self, identifier: &ocx_oci::Identifier) -> super::Jurisdiction {
+    pub fn jurisdiction(&self, identifier: &ocx_oci::PackageRef) -> super::Jurisdiction {
         if self.serves_registry(identifier.registry()) {
             super::Jurisdiction::Authoritative
         } else {
@@ -1309,7 +1309,7 @@ impl OcxIndex {
     /// delegates to the shared [`surface_root_status`] with this source's
     /// `allow_yanked` opt-in. Called on the tag path only; a digest-pinned
     /// resolve skips it (immutability).
-    fn surface_status(&self, identifier: &ocx_oci::Identifier, root: &IndexRoot, tag: &RootTag) -> Result<()> {
+    fn surface_status(&self, identifier: &ocx_oci::PackageRef, root: &IndexRoot, tag: &RootTag) -> Result<()> {
         surface_root_status(identifier, root, tag, self.allow_yanked)
     }
 
@@ -1320,7 +1320,7 @@ impl OcxIndex {
     /// or a dispatch-object digest mismatch.
     async fn resolve_tag(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::ImageIndex)>> {
         let Some(root) = self.resolve_root(identifier.repository()).await? else {
             return Ok(None);
@@ -1341,7 +1341,7 @@ impl OcxIndex {
     /// Builds the physical [`ocx_oci::OciIdentifier`] for `identifier` by dereferencing
     /// the root's `repository` pointer. The logical tag/digest are copied onto
     /// the physical location; the physical value is transport-only routing (C2).
-    async fn physical_identifier(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+    async fn physical_identifier(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
         let Some(root) = self.resolve_root(identifier.repository()).await? else {
             return Ok(None);
         };
@@ -1442,7 +1442,7 @@ impl OcxIndex {
 /// digest-pinned resolve skips it (a yank is a tag-lane signal, never checked on
 /// an immutable pin).
 pub(super) fn surface_root_status(
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     root: &IndexRoot,
     tag: &RootTag,
     allow_yanked: bool,
@@ -1502,7 +1502,7 @@ impl index_impl::IndexImpl for OcxIndex {
         Ok(repositories)
     }
 
-    async fn list_tags(&self, identifier: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+    async fn list_tags(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
         if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
@@ -1514,7 +1514,7 @@ impl index_impl::IndexImpl for OcxIndex {
 
     async fn fetch_manifest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         _op: IndexOperation,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
         if !self.serves_registry(identifier.registry()) {
@@ -1545,7 +1545,7 @@ impl index_impl::IndexImpl for OcxIndex {
 
     async fn fetch_manifest_digest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         _op: IndexOperation,
     ) -> Result<Option<ocx_oci::Digest>> {
         if !self.serves_registry(identifier.registry()) {
@@ -1559,7 +1559,7 @@ impl index_impl::IndexImpl for OcxIndex {
         Ok(self.resolve_tag(identifier).await?.map(|(digest, _)| digest))
     }
 
-    async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+    async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
         if !self.serves_registry(blob_ref.as_identifier().registry()) {
             return Ok(None);
         }
@@ -1573,7 +1573,7 @@ impl index_impl::IndexImpl for OcxIndex {
 
     async fn fetch_manifest_raw_bytes(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
         if !self.serves_registry(identifier.registry()) {
             return Ok(None);
@@ -1610,7 +1610,7 @@ impl index_impl::IndexImpl for OcxIndex {
         Ok(Some((bytes, content, ocx_oci::Manifest::ImageIndex(index))))
     }
 
-    async fn fetch_root_document(&self, identifier: &ocx_oci::Identifier) -> Result<Option<(Vec<u8>, IndexRoot)>> {
+    async fn fetch_root_document(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<(Vec<u8>, IndexRoot)>> {
         // A published source serves the verbatim `p/<ns>/<pkg>.json` bytes paired
         // with the parsed root, so `LocalIndex::persist_published_root` grows the
         // local copy byte-for-byte (copy-a-mirror, A2). The bytes are returned
@@ -1662,7 +1662,7 @@ impl index_impl::IndexImpl for OcxIndex {
         }
     }
 
-    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+    async fn physical_reference(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
         if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
@@ -1671,7 +1671,7 @@ impl index_impl::IndexImpl for OcxIndex {
         self.physical_identifier(identifier).await
     }
 
-    fn jurisdiction(&self, identifier: &ocx_oci::Identifier) -> super::Jurisdiction {
+    fn jurisdiction(&self, identifier: &ocx_oci::PackageRef) -> super::Jurisdiction {
         // Forwards to the inherent method (same shape as `namespace()`) so the
         // one caller that holds a concrete `OcxIndex` — `ocx index update`'s
         // source routing — reaches it without the private trait.
@@ -1865,8 +1865,8 @@ mod tests {
     fn catalog_body(packages_json: &str) -> Vec<u8> {
         format!(r#"{{"format_version":1,"packages":{packages_json}}}"#).into_bytes()
     }
-    fn tagged_id() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry(REPO, NAMESPACE).clone_with_tag("3.28")
+    fn tagged_id() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry(REPO, NAMESPACE).clone_with_tag("3.28")
     }
 
     /// A two-platform OCI image index (glibc + musl leaves) as the verbatim
@@ -2083,8 +2083,8 @@ mod tests {
 
     /// A digest-addressed identifier in this source's namespace/repo — routes
     /// straight through `physical_identifier` to the physical fetch.
-    fn digest_id() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry(REPO, NAMESPACE).clone_with_digest(ocx_oci::Digest::Sha256("b".repeat(64)))
+    fn digest_id() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry(REPO, NAMESPACE).clone_with_digest(ocx_oci::Digest::Sha256("b".repeat(64)))
     }
 
     /// X3 ordering + #218 regression: a root whose physical host resolves to a
@@ -2395,7 +2395,7 @@ mod tests {
         // returns the pinned digest without touching the root at all.
         let source = make_source(StubIndexTransport::new(), false);
         let pinned = ocx_oci::Digest::Sha256("c".repeat(64));
-        let id = ocx_oci::Identifier::new_registry(REPO, NAMESPACE).clone_with_digest(pinned.clone());
+        let id = ocx_oci::PackageRef::new_registry(REPO, NAMESPACE).clone_with_digest(pinned.clone());
 
         let resolved = source
             .fetch_manifest_digest(&id, IndexOperation::Resolve)
@@ -3020,7 +3020,7 @@ mod tests {
         seed_package(&transport, false);
         let source = make_source(transport.clone(), false);
 
-        let foreign = ocx_oci::Identifier::new_registry("cmake", "ghcr.io").clone_with_tag("3.28");
+        let foreign = ocx_oci::PackageRef::new_registry("cmake", "ghcr.io").clone_with_tag("3.28");
         assert!(
             source
                 .fetch_manifest(&foreign, IndexOperation::Resolve)
@@ -3117,13 +3117,13 @@ mod tests {
             *self.calls.lock().unwrap() += 1;
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
             *self.calls.lock().unwrap() += 1;
             Ok(Some(vec!["1.0".to_string()]))
         }
         async fn fetch_manifest(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
             Ok(self
@@ -3133,17 +3133,17 @@ mod tests {
         }
         async fn fetch_manifest_digest(
             &self,
-            id: &ocx_oci::Identifier,
+            id: &ocx_oci::PackageRef,
             _: IndexOperation,
         ) -> Result<Option<ocx_oci::Digest>> {
             Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, digest, _)| digest))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
         ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
             *self.calls.lock().unwrap() += 1;
             let (bytes, digest) = registry_manifest();
@@ -3182,7 +3182,7 @@ mod tests {
             super::super::ChainMode::Default,
         );
 
-        let id = ocx_oci::Identifier::new_registry("ns/pkg", NAMESPACE).clone_with_tag("1.0");
+        let id = ocx_oci::PackageRef::new_registry("ns/pkg", NAMESPACE).clone_with_tag("1.0");
         let (digest, _) = chained
             .fetch_manifest(&id, IndexOperation::Resolve)
             .await
@@ -3211,7 +3211,7 @@ mod tests {
         // points at, with the logical tag and leaf digest carried over
         // (transport-only, C2).
         let leaf = ocx_oci::Digest::Sha256("a".repeat(64));
-        let logical = ocx_oci::Identifier::new_registry(REPO, NAMESPACE)
+        let logical = ocx_oci::PackageRef::new_registry(REPO, NAMESPACE)
             .clone_with_tag("3.28")
             .clone_with_digest(leaf.clone());
         let physical = source
@@ -3230,7 +3230,7 @@ mod tests {
         );
 
         // A foreign namespace is neither rewritten nor owned.
-        let foreign = ocx_oci::Identifier::new_registry("x/y", "ghcr.io")
+        let foreign = ocx_oci::PackageRef::new_registry("x/y", "ghcr.io")
             .clone_with_digest(ocx_oci::Digest::Sha256("b".repeat(64)));
         assert!(source.physical_reference(&foreign).await.unwrap().is_none());
         assert_eq!(source.jurisdiction(&foreign), super::super::Jurisdiction::Outside);
@@ -3327,7 +3327,7 @@ mod tests {
 
         // A foreign registry: the index returns None (namespace isolation), so
         // the registry source resolves it — index-first must not break this.
-        let foreign = ocx_oci::Identifier::new_registry("x/y", "ghcr.io").clone_with_tag("1.0");
+        let foreign = ocx_oci::PackageRef::new_registry("x/y", "ghcr.io").clone_with_tag("1.0");
         let (digest, _) = chained
             .fetch_manifest(&foreign, IndexOperation::Resolve)
             .await
@@ -3361,8 +3361,8 @@ mod tests {
         transport.fail(&config_url());
         let source = make_source(transport.clone(), false);
 
-        let first = ocx_oci::Identifier::new_registry("a/one", NAMESPACE).clone_with_tag("1.0");
-        let second = ocx_oci::Identifier::new_registry("b/two", NAMESPACE).clone_with_tag("1.0");
+        let first = ocx_oci::PackageRef::new_registry("a/one", NAMESPACE).clone_with_tag("1.0");
+        let second = ocx_oci::PackageRef::new_registry("b/two", NAMESPACE).clone_with_tag("1.0");
         assert!(
             source.fetch_manifest(&first, IndexOperation::Resolve).await.is_err(),
             "a dead index must be a hard error, never a silent soft miss"
@@ -3424,7 +3424,7 @@ mod tests {
         );
         let source = make_source(transport.clone(), false);
 
-        let second_id = ocx_oci::Identifier::new_registry("other/pkg", NAMESPACE).clone_with_tag("1.0");
+        let second_id = ocx_oci::PackageRef::new_registry("other/pkg", NAMESPACE).clone_with_tag("1.0");
         assert!(
             source
                 .fetch_manifest(&tagged_id(), IndexOperation::Resolve)
@@ -3542,7 +3542,7 @@ mod tests {
         let transport = StubIndexTransport::new();
         transport.insert(&config_url(), br#"{"format_version":1}"#);
         let source = make_source(transport, false);
-        let foreign = ocx_oci::Identifier::new_registry(REPO, "other.io").clone_with_tag("3.28");
+        let foreign = ocx_oci::PackageRef::new_registry(REPO, "other.io").clone_with_tag("3.28");
         assert!(
             source.fetch_root_document(&foreign).await.unwrap().is_none(),
             "a foreign-namespace identifier is not this source's concern"
@@ -3582,14 +3582,14 @@ mod tests {
         let source = make_source(transport.clone(), false);
 
         source
-            .fetch_root_document(&ocx_oci::Identifier::new_registry(REPO, NAMESPACE))
+            .fetch_root_document(&ocx_oci::PackageRef::new_registry(REPO, NAMESPACE))
             .await
             .unwrap()
             .expect("the published root is served");
         for tag in ["3.28", "3.29"] {
             source
                 .fetch_manifest(
-                    &ocx_oci::Identifier::new_registry(REPO, NAMESPACE).clone_with_tag(tag),
+                    &ocx_oci::PackageRef::new_registry(REPO, NAMESPACE).clone_with_tag(tag),
                     IndexOperation::Resolve,
                 )
                 .await
@@ -3612,7 +3612,7 @@ mod tests {
         let transport = StubIndexTransport::new();
         transport.insert(&config_url(), br#"{"format_version":1}"#);
         let source = make_source(transport.clone(), false);
-        let identifier = ocx_oci::Identifier::new_registry(REPO, NAMESPACE);
+        let identifier = ocx_oci::PackageRef::new_registry(REPO, NAMESPACE);
 
         assert!(source.fetch_root_document(&identifier).await.unwrap().is_none());
         assert!(source.fetch_root_document(&identifier).await.unwrap().is_none());
@@ -3640,7 +3640,7 @@ mod tests {
         seed_package(&transport, false);
         let source = make_source(transport.clone(), false);
 
-        let foreign = ocx_oci::Identifier::new_registry(REPO, "other.io");
+        let foreign = ocx_oci::PackageRef::new_registry(REPO, "other.io");
         assert!(
             source.fetch_root_document(&foreign).await.unwrap().is_none(),
             "a foreign-namespace identifier is not this source's concern"
@@ -3896,8 +3896,8 @@ mod tests {
 
     const FLAT_REPO: &str = "go-task";
 
-    fn flat_id() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry(FLAT_REPO, NAMESPACE).clone_with_tag("3")
+    fn flat_id() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry(FLAT_REPO, NAMESPACE).clone_with_tag("3")
     }
 
     fn flat_root_url() -> String {
@@ -3918,7 +3918,7 @@ mod tests {
         seed_with_config(&transport, br#"{"format_version":1}"#);
         let source = make_source(transport.clone(), false);
 
-        let foreign = ocx_oci::Identifier::new_registry(REPO, "ghcr.io").clone_with_tag("3.28");
+        let foreign = ocx_oci::PackageRef::new_registry(REPO, "ghcr.io").clone_with_tag("3.28");
         assert_eq!(source.jurisdiction(&foreign), super::super::Jurisdiction::Outside);
         assert_eq!(
             transport.request_urls(),
@@ -4036,7 +4036,7 @@ mod tests {
     /// deliverable of ocx#251: someone hitting it must learn, from this string
     /// alone, that the name is absent from a specific index, which index that
     /// was, and both ways out.
-    fn assert_names_the_index(error: &crate::error::Error, identifier: &ocx_oci::Identifier) {
+    fn assert_names_the_index(error: &crate::error::Error, identifier: &ocx_oci::PackageRef) {
         let text = format!("{error:#}");
         for expected in [
             &identifier.to_string(),
@@ -4093,7 +4093,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let chained = chain_with(&dir, source, registry.clone());
 
-        let absent = ocx_oci::Identifier::new_registry("ns/absent", NAMESPACE).clone_with_tag("1.0");
+        let absent = ocx_oci::PackageRef::new_registry("ns/absent", NAMESPACE).clone_with_tag("1.0");
         let error = chained
             .fetch_manifest(&absent, IndexOperation::Resolve)
             .await
@@ -4204,8 +4204,8 @@ mod tests {
         let chained = chain_with(&dir, source, registry);
 
         assert!(chained.physical_reference(&flat_id()).await.unwrap().is_none());
-        let pinned = ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry(FLAT_REPO, NAMESPACE)
+        let pinned = ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry(FLAT_REPO, NAMESPACE)
                 .clone_with_digest(ocx_oci::Digest::Sha256("c".repeat(64))),
         )
         .unwrap();

@@ -31,7 +31,7 @@ const SHA256_PREFIX: &str = "sha256:";
 ///       "group.<name>": [[name, identifier], ...] }`
 ///    where every inner pair list is sorted lexicographically by binding
 ///    name, and `identifier` is the `Display` form of the parsed
-///    [`ocx_oci::Identifier`] (`registry/repo:tag[@digest]`).
+///    [`ocx_oci::PackageRef`] (`registry/repo:tag[@digest]`).
 /// 2. Serialize via RFC 8785 JCS (`serde_json_canonicalizer`).
 /// 3. SHA-256 the UTF-8 bytes.
 /// 4. Return `"sha256:<hex>"`.
@@ -100,7 +100,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use ocx_oci::Identifier;
+    use ocx_oci::PackageRef;
 
     // --- Helpers ------------------------------------------------------------
 
@@ -109,12 +109,12 @@ mod tests {
     }
 
     /// Build a tool map from `(binding, identifier)` pairs. Every value
-    /// is run through strict [`Identifier::parse`] — bare-tag forms are
+    /// is run through strict [`PackageRef::parse`] — bare-tag forms are
     /// rejected, mirroring the production `ocx.toml` parser.
-    fn tools(pairs: &[(&str, &str)]) -> BTreeMap<String, Identifier> {
+    fn tools(pairs: &[(&str, &str)]) -> BTreeMap<String, PackageRef> {
         pairs
             .iter()
-            .map(|(k, v)| ((*k).to_string(), Identifier::parse(v).expect("valid identifier")))
+            .map(|(k, v)| ((*k).to_string(), PackageRef::parse(v).expect("valid identifier")))
             .collect()
     }
 
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn hash_corpus_case_4_digest_suffixed_version() {
         // Tag string is opaque to the hash — the `@sha256:...` suffix
-        // passes through verbatim in the canonical JSON via Identifier::Display.
+        // passes through verbatim in the canonical JSON via PackageRef::Display.
         // Canonical JSON shape:
         //   {"default":[["cmake","ocx.sh/cmake:3.28@sha256:deadbeef..."]]}
         let config = ProjectConfig::from_parts(
@@ -288,22 +288,22 @@ mod tests {
             ("zlib", "ocx.sh/zlib:1.3"),
         ]);
 
-        let mut reversed: BTreeMap<String, Identifier> = BTreeMap::new();
-        reversed.insert("zlib".to_string(), Identifier::parse("ocx.sh/zlib:1.3").expect("valid"));
+        let mut reversed: BTreeMap<String, PackageRef> = BTreeMap::new();
+        reversed.insert("zlib".to_string(), PackageRef::parse("ocx.sh/zlib:1.3").expect("valid"));
         reversed.insert(
             "ninja".to_string(),
-            Identifier::parse("ocx.sh/ninja:1.11").expect("valid"),
+            PackageRef::parse("ocx.sh/ninja:1.11").expect("valid"),
         );
         reversed.insert(
             "cmake".to_string(),
-            Identifier::parse("ocx.sh/cmake:3.28").expect("valid"),
+            PackageRef::parse("ocx.sh/cmake:3.28").expect("valid"),
         );
 
-        let mut groups_forward: BTreeMap<String, BTreeMap<String, Identifier>> = BTreeMap::new();
+        let mut groups_forward: BTreeMap<String, BTreeMap<String, PackageRef>> = BTreeMap::new();
         groups_forward.insert("alpha".to_string(), tools(&[("a", "ocx.sh/a:1"), ("b", "ocx.sh/b:2")]));
         groups_forward.insert("beta".to_string(), tools(&[("c", "ocx.sh/c:3"), ("d", "ocx.sh/d:4")]));
 
-        let mut groups_reversed: BTreeMap<String, BTreeMap<String, Identifier>> = BTreeMap::new();
+        let mut groups_reversed: BTreeMap<String, BTreeMap<String, PackageRef>> = BTreeMap::new();
         groups_reversed.insert("beta".to_string(), tools(&[("d", "ocx.sh/d:4"), ("c", "ocx.sh/c:3")]));
         groups_reversed.insert("alpha".to_string(), tools(&[("b", "ocx.sh/b:2"), ("a", "ocx.sh/a:1")]));
 
@@ -332,7 +332,7 @@ mod tests {
         let mut clone = config.clone();
         clone.tools.insert(
             "transient".to_string(),
-            Identifier::parse("ocx.sh/transient:0.0").expect("valid"),
+            PackageRef::parse("ocx.sh/transient:0.0").expect("valid"),
         );
         clone.tools.remove("transient");
 
@@ -369,8 +369,8 @@ mod tests {
         // Special-character tags must hash deterministically without
         // panic or canonicalization error. The set below covers the
         // characters most likely to round-trip through JSON badly that
-        // also survive strict `Identifier::parse`:
-        // - `+` is normalized to `_` by `Identifier::parse` (OCI spec
+        // also survive strict `PackageRef::parse`:
+        // - `+` is normalized to `_` by `PackageRef::parse` (OCI spec
         //   forbids `+` in tags), so the *pre-normalization* form
         //   `1.0+build.1` becomes `1.0_build.1` in `Display` and the
         //   hash is computed against the normalized form.
@@ -380,7 +380,7 @@ mod tests {
         // covered here but were dropped: although today's permissive
         // tag-splitter accepts them, they violate the OCI tag charset
         // (`[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`) and may be rejected by
-        // a future `Identifier::parse` tightening.
+        // a future `PackageRef::parse` tightening.
         let special = &[
             ("build_meta", "ocx.sh/build_meta:1.0+build.1"),
             (

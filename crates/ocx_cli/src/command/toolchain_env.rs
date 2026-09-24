@@ -712,7 +712,7 @@ pub(crate) async fn resolve_global_pinned_env(
             let ocx_oci::Selection::Found((leaf, _key)) = ocx_project::lookup_host_leaf(&tool.platforms, target) else {
                 continue;
             };
-            let identifier: ocx_oci::Identifier = tool.repository.clone_with_digest(leaf.clone());
+            let identifier: ocx_oci::PackageRef = tool.repository.clone_with_digest(leaf.clone());
             match manager.find(&identifier, target.clone()).await {
                 Ok(info) => infos.push(Arc::new(info)),
                 // Pinned package not materialised locally — skip silently
@@ -848,7 +848,7 @@ mod tests {
     // ── selected_groups_global ────────────────────────────────────────────────
 
     fn lock_with_groups(groups: &[&str]) -> ProjectLock {
-        use ocx_oci::{Digest, Identifier};
+        use ocx_oci::{Digest, PackageRef};
         use ocx_project::{LockMetadata, LockVersion, LockedTool};
         let tools = groups
             .iter()
@@ -862,7 +862,7 @@ mod tests {
                 LockedTool {
                     name: format!("tool{i}"),
                     group: (*group).to_owned(),
-                    repository: Identifier::new_registry(format!("tool{i}"), "ocx.sh"),
+                    repository: PackageRef::new_registry(format!("tool{i}"), "ocx.sh"),
                     platforms,
                 }
             })

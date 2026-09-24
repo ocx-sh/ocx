@@ -124,7 +124,7 @@ impl PackageManager {
     /// install pipeline.
     pub async fn pull_local(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         info: ocx_package::info::Info,
         layers: &[ocx_oci::layer_ref::LayerRef],
         dest_override: Option<&std::path::Path>,
@@ -161,7 +161,7 @@ impl PackageManager {
         // Step 4: Synthesize a PinnedIdentifier keyed by the manifest digest.
         let pinned = {
             let id_with_digest = identifier.clone_with_digest(parts.manifest_digest.clone());
-            ocx_oci::PinnedIdentifier::try_from(id_with_digest).map_err(|e| PackageErrorKind::Internal(e.into()))?
+            ocx_oci::PinnedPackageRef::try_from(id_with_digest).map_err(|e| PackageErrorKind::Internal(e.into()))?
         };
 
         // Step 5: Validate metadata (same gate as setup_owned applies to registry-fetched
@@ -226,7 +226,7 @@ impl PackageManager {
 async fn stage_layers(
     mgr: &PackageManager,
     layers: &[ocx_oci::layer_ref::LayerRef],
-    base_identifier: &ocx_oci::Identifier,
+    base_identifier: &ocx_oci::PackageRef,
     registry: &str,
     coordinator: &PullCoordinator,
 ) -> Result<Vec<ocx_oci::Descriptor>, PackageErrorKind> {
@@ -403,7 +403,7 @@ async fn validate_file_layer(path: &std::path::Path) -> Result<(), PackageErrorK
 /// logical registry.
 async fn layer_source<'a>(
     mgr: &PackageManager,
-    base_identifier: &ocx_oci::Identifier,
+    base_identifier: &ocx_oci::PackageRef,
     routed: &'a tokio::sync::OnceCell<ocx_oci::OciIdentifier>,
 ) -> Result<&'a ocx_oci::OciIdentifier, PackageErrorKind> {
     routed
@@ -424,7 +424,7 @@ async fn layer_source<'a>(
 async fn resolve_digest_size(
     mgr: &PackageManager,
     fs: &file_structure::FileStructure,
-    base_identifier: &ocx_oci::Identifier,
+    base_identifier: &ocx_oci::PackageRef,
     routed: &tokio::sync::OnceCell<ocx_oci::OciIdentifier>,
     registry: &str,
     digest: &ocx_oci::Digest,
@@ -475,7 +475,7 @@ async fn resolve_digest_size(
 /// referencing manifest.
 async fn pull_digest_layer_to_temp(
     mgr: &PackageManager,
-    base_identifier: &ocx_oci::Identifier,
+    base_identifier: &ocx_oci::PackageRef,
     routed: &tokio::sync::OnceCell<ocx_oci::OciIdentifier>,
     digest: &ocx_oci::Digest,
     media_type: &ocx_oci::layer_ref::ArchiveMediaType,
@@ -630,9 +630,9 @@ mod tests {
     ///
     /// Uses a deterministic tag identifier (no digest). `pull_local` will
     /// compute and assign a digest internally after manifest assembly.
-    fn fixture_info(dir_name: &str) -> (ocx_oci::Identifier, Info) {
+    fn fixture_info(dir_name: &str) -> (ocx_oci::PackageRef, Info) {
         let identifier =
-            ocx_oci::Identifier::new_registry(format!("test/{dir_name}"), "example.com").clone_with_tag("1.0.0");
+            ocx_oci::PackageRef::new_registry(format!("test/{dir_name}"), "example.com").clone_with_tag("1.0.0");
         let metadata = Metadata::Bundle(Bundle {
             binaries: None,
             version: Version::V1,
@@ -653,7 +653,7 @@ mod tests {
 
     /// Build a minimal [`Info`] fixture with one entrypoint so launcher
     /// generation is exercised.
-    fn fixture_info_with_entrypoint(dir_name: &str) -> (ocx_oci::Identifier, Info) {
+    fn fixture_info_with_entrypoint(dir_name: &str) -> (ocx_oci::PackageRef, Info) {
         let (identifier, mut info) = fixture_info(dir_name);
         let name = ocx_package::metadata::entrypoint::EntrypointName::try_from("hello").unwrap();
         let Metadata::Bundle(ref mut b) = info.metadata;

@@ -62,7 +62,7 @@ impl DeferredComposition {
     /// `None` means the composer reached a TC entry this closure does not
     /// carry, which is the C-020 defect condition — a consumer must surface it,
     /// never fall back to reading a package directory that does not exist.
-    pub fn member(&self, identifier: &ocx_oci::PinnedIdentifier) -> Option<&Arc<InstallInfo>> {
+    pub fn member(&self, identifier: &ocx_oci::PinnedPackageRef) -> Option<&Arc<InstallInfo>> {
         let wanted = identifier.strip_advisory();
         self.closure
             .iter()
@@ -72,7 +72,7 @@ impl DeferredComposition {
 
 #[derive(Debug, Clone)]
 pub struct InstallInfo {
-    identifier: ocx_oci::PinnedIdentifier,
+    identifier: ocx_oci::PinnedPackageRef,
     metadata: metadata::Metadata,
     resolved: ResolvedPackage,
     dir: PackageDir,
@@ -125,7 +125,7 @@ pub struct InstallInfo {
 
 impl InstallInfo {
     pub fn new(
-        identifier: ocx_oci::PinnedIdentifier,
+        identifier: ocx_oci::PinnedPackageRef,
         metadata: metadata::Metadata,
         resolved: ResolvedPackage,
         dir: PackageDir,
@@ -197,7 +197,7 @@ impl InstallInfo {
         ocx_oci::Platform::host_can_run(self.platform())
     }
 
-    pub fn identifier(&self) -> &ocx_oci::PinnedIdentifier {
+    pub fn identifier(&self) -> &ocx_oci::PinnedPackageRef {
         &self.identifier
     }
 

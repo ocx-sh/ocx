@@ -59,7 +59,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ocx_config::env;
-use ocx_oci::{Identifier, PinnedIdentifier};
+use ocx_oci::{PackageRef, PinnedPackageRef};
 use ocx_package::metadata::BinaryName;
 use ocx_package_manager::Arrival;
 use ocx_package_manager::EnvScope;
@@ -86,7 +86,7 @@ pub struct LauncherShim {
     /// (`registry/repository[:tag]@sha256:...`), because ocx wrote it: the
     /// download it triggers is addressed by that digest, never by the tag.
     #[clap(value_name = "PINNED-ID", value_parser = parse_pinned_identifier)]
-    identifier: PinnedIdentifier,
+    identifier: PinnedPackageRef,
 
     /// The shim's own filename (argv0 passed after `--`), then the user's
     /// arguments. The filename selects which of the tool's declared names was
@@ -134,7 +134,7 @@ impl LauncherShim {
         // place `resolution.autoInstalled` can truthfully report that event for
         // a deferred tool. A second invocation finds the same package already in
         // the store and records an empty set.
-        let auto_installed: Vec<Identifier> = match found.arrival {
+        let auto_installed: Vec<PackageRef> = match found.arrival {
             Arrival::Pulled => vec![self.identifier.as_identifier().clone()],
             Arrival::Cached => Vec::new(),
         };
@@ -284,7 +284,7 @@ impl LauncherShim {
 /// that an unfulfilled claim would blame the publisher for a loop guard firing.
 fn resolve_claimed(
     process_env: &env::Env,
-    identifier: &PinnedIdentifier,
+    identifier: &PinnedPackageRef,
     name: BinaryName,
 ) -> anyhow::Result<std::path::PathBuf> {
     match process_env.resolve_command(name.as_str()) {
@@ -302,7 +302,7 @@ fn resolve_claimed(
 /// into a `match` arm and an `if`, and the error must be byte-identical from
 /// both — the message is the only thing distinguishing this from a generic
 /// resolution failure, since the two share an exit code.
-fn shim_claim_unfulfilled(package: &PinnedIdentifier, name: BinaryName) -> anyhow::Error {
+fn shim_claim_unfulfilled(package: &PinnedPackageRef, name: BinaryName) -> anyhow::Error {
     anyhow::Error::new(PackageErrorKind::ShimClaimUnfulfilled(Box::new(ShimClaim {
         package: package.clone(),
         name,
@@ -371,13 +371,13 @@ async fn project_in_scope(context: &crate::app::Context) -> Option<ProjectConfig
 /// Parses the baked positional into a digest-bearing identifier.
 ///
 /// The wire value is always fully qualified, so it goes through
-/// [`Identifier::parse`] rather than the default-registry form: a shim body is
+/// [`PackageRef::parse`] rather than the default-registry form: a shim body is
 /// written by ocx and must not depend on the ambient default registry of
 /// whatever shell later runs it. A value that fails either step is a clap
 /// invalid-value error, so a malformed shim body exits 64 and names the field.
-fn parse_pinned_identifier(value: &str) -> Result<PinnedIdentifier, String> {
-    let identifier = Identifier::parse(value).map_err(|error| error.to_string())?;
-    PinnedIdentifier::try_from(identifier).map_err(|error| error.to_string())
+fn parse_pinned_identifier(value: &str) -> Result<PinnedPackageRef, String> {
+    let identifier = PackageRef::parse(value).map_err(|error| error.to_string())?;
+    PinnedPackageRef::try_from(identifier).map_err(|error| error.to_string())
 }
 
 /// Validates the wire's `argv0` against both legs of the name contract.
@@ -406,7 +406,7 @@ fn parse_pinned_identifier(value: &str) -> Result<PinnedIdentifier, String> {
 #[allow(clippy::result_large_err)]
 fn validate_argv0(
     argv0: &str,
-    package: &PinnedIdentifier,
+    package: &PinnedPackageRef,
     claimed: &BTreeSet<BinaryName>,
 ) -> Result<BinaryName, PackageErrorKind> {
     // Grammar first. It is the security leg — a value carrying `/` or `\` would
@@ -701,9 +701,9 @@ mod tests {
 
     // ── C-011: the two `argv0` legs ──────────────────────────────────────────
 
-    fn pinned() -> PinnedIdentifier {
-        let identifier = Identifier::parse(PINNED).expect("fixture parses");
-        PinnedIdentifier::try_from(identifier).expect("fixture is digest-bearing")
+    fn pinned() -> PinnedPackageRef {
+        let identifier = PackageRef::parse(PINNED).expect("fixture parses");
+        PinnedPackageRef::try_from(identifier).expect("fixture is digest-bearing")
     }
 
     fn names(values: &[&str]) -> BTreeSet<BinaryName> {

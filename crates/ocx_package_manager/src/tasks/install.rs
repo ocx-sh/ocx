@@ -26,7 +26,7 @@ impl PackageManager {
     /// back-references in the object store for GC tracking.
     pub async fn install(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
         candidate: bool,
         select: bool,
@@ -80,7 +80,7 @@ impl PackageManager {
     /// discovered after every user-requested install.
     pub async fn install_all(
         &self,
-        packages: Vec<ocx_oci::Identifier>,
+        packages: Vec<ocx_oci::PackageRef>,
         platform: ocx_oci::Platform,
         candidate: bool,
         select: bool,
@@ -231,7 +231,7 @@ impl PackageManager {
 #[allow(clippy::result_large_err)]
 async fn create_install_symlinks(
     mgr: &PackageManager,
-    package: &ocx_oci::Identifier,
+    package: &ocx_oci::PackageRef,
     info: &InstallInfo,
     candidate: bool,
     select: bool,
@@ -270,8 +270,8 @@ mod tests {
     /// the helper makes this fail.
     #[test]
     fn install_failures_are_sorted_by_index_for_deterministic_exit_code() {
-        fn package(name: &str) -> ocx_oci::Identifier {
-            ocx_oci::Identifier::new_registry(name, "example.com")
+        fn package(name: &str) -> ocx_oci::PackageRef {
+            ocx_oci::PackageRef::new_registry(name, "example.com")
         }
 
         // Index 0 fails with NotFound (→ NotFound exit code 79); index 1 fails
@@ -305,8 +305,8 @@ mod tests {
     /// helper, would flip this.
     #[test]
     fn discovery_failures_are_sorted_by_index_for_deterministic_exit_code() {
-        fn package(name: &str) -> ocx_oci::Identifier {
-            ocx_oci::Identifier::new_registry(name, "example.com")
+        fn package(name: &str) -> ocx_oci::PackageRef {
+            ocx_oci::PackageRef::new_registry(name, "example.com")
         }
 
         fn required_companion_failed(companion: &str, source: PackageErrorKind) -> PackageErrorKind {

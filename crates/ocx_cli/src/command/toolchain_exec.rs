@@ -640,7 +640,7 @@ fn attribute_to_selected_project(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_oci::{Digest, Identifier, Platform};
+    use ocx_oci::{Digest, PackageRef, Platform};
     use ocx_project::{LockMetadata, LockVersion, LockedTool, ProjectConfig, ProjectLock};
     use std::collections::BTreeMap;
 
@@ -721,7 +721,7 @@ mod tests {
             LockedTool {
                 name: name.into(),
                 group: "default".into(),
-                repository: Identifier::new_registry(name, "ocx.sh"),
+                repository: PackageRef::new_registry(name, "ocx.sh"),
                 platforms,
             }
         }

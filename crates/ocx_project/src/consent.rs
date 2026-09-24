@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{ProjectError, ProjectErrorKind};
 use crate::lock::ProjectLock;
 use ocx_config::shell::{ShellConsent, consent_path_matches};
-use ocx_oci::Identifier;
+use ocx_oci::PackageRef;
 use ocx_shell::shell::coexistence::Observation;
 use ocx_shell::shell::reconcile::ScopeId;
 use ocx_store::file_structure::StateStore;
@@ -266,8 +266,8 @@ pub enum Reason {
 /// This is the same string `[shell.consent] namespaces` matches against — one
 /// normalization, two surfaces.
 #[must_use]
-pub fn source_of(identifier: &Identifier) -> String {
-    // `Identifier` always carries an explicit registry (the project tier
+pub fn source_of(identifier: &PackageRef) -> String {
+    // `PackageRef` always carries an explicit registry (the project tier
     // refuses a registry-less `[tools]` value), so the default registry is
     // spelled `ocx.sh/…` here without a fallback branch. The host is
     // lowercased; the port, when present, is part of `registry()` and is
@@ -387,7 +387,7 @@ pub fn verified_sources(
                 return None;
             }
         };
-        let pinned = match ocx_oci::PinnedIdentifier::try_from(leaf) {
+        let pinned = match ocx_oci::PinnedPackageRef::try_from(leaf) {
             Ok(pinned) => pinned,
             Err(error) => {
                 log::debug!(
@@ -424,7 +424,7 @@ fn source_of_origin(origin: &str) -> Option<String> {
     if registry.is_empty() || repository.is_empty() {
         return None;
     }
-    Some(source_of(&Identifier::new_registry(repository, registry)))
+    Some(source_of(&PackageRef::new_registry(repository, registry)))
 }
 
 /// The one project identity: canonicalize the resolved **config file**, then
@@ -949,8 +949,8 @@ mod tests {
         }
     }
 
-    fn identifier(registry: &str, repository: &str) -> Identifier {
-        Identifier::new_registry(repository, registry)
+    fn identifier(registry: &str, repository: &str) -> PackageRef {
+        PackageRef::new_registry(repository, registry)
     }
 
     // ── clause-2 corroboration fixtures ──────────────────────────────────────
@@ -1004,7 +1004,7 @@ mod tests {
         registry: &str,
     ) -> ocx_store::file_structure::PackageDir {
         let pinned =
-            ocx_oci::PinnedIdentifier::try_from(identifier(registry, "any/repo").clone_with_digest(leaf_digest()))
+            ocx_oci::PinnedPackageRef::try_from(identifier(registry, "any/repo").clone_with_digest(leaf_digest()))
                 .expect("a digest-bearing identifier is pinned");
         store.package_dir(&pinned)
     }

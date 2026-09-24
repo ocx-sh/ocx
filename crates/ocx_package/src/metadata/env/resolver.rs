@@ -245,10 +245,10 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
 
-    fn pinned(repo: &str) -> ocx_oci::PinnedIdentifier {
+    fn pinned(repo: &str) -> ocx_oci::PinnedPackageRef {
         let hex = "a".repeat(64);
-        let id: ocx_oci::Identifier = format!("ocx.sh/{repo}:1.0@sha256:{hex}").parse().unwrap();
-        ocx_oci::PinnedIdentifier::try_from(id).unwrap()
+        let id: ocx_oci::PackageRef = format!("ocx.sh/{repo}:1.0@sha256:{hex}").parse().unwrap();
+        ocx_oci::PinnedPackageRef::try_from(id).unwrap()
     }
 
     fn ctx(dir: &TempDir, repo: &str) -> DependencyContext {

@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ProjectConfig",
-  "description": "Project-tier configuration parsed from `ocx.toml`.\n\nSchema follows ADR \"Project-Level Toolchain Config\" decision 1A:\nflat `[tools]` table as the implicit default group, plus additive\n`[group.<name>]` tables for optional named groups. Values are\nregistry-qualified [`Identifier`] strings of the form\n`registry/repo[:tag][@digest]`. Bare-tag forms (no registry, e.g.\n`cmake = \"3.28\"`) are rejected with\n[`super::error::ProjectErrorKind::ToolValueMissingRegistry`].\n\nBare-repo entries with no tag and no digest (e.g.\n`cmake = \"ocx.sh/cmake\"`) parse with `:latest` injected at the\nschema boundary — see [`parse_tool_value`] for the contract. The\ndefault does not apply to digest-pinned entries\n(`tool = \"ghcr.io/acme/tool@sha256:...\"`); the digest is the\ncanonical pin.\n\n`#[serde(deny_unknown_fields)]` is enforced at the struct level so\nschema drift in consumer `ocx.toml` files surfaces as a parse error\nrather than silent ignore.\n\nPhase 2.1 NOTE: the `platforms` field is removed in this revision.\nThe effective platform set is sourced ambient from the project tier\n(currently the canonical five-platform set) until ADR-driven\nper-tool platform overrides land.",
+  "description": "Project-tier configuration parsed from `ocx.toml`.\n\nSchema follows ADR \"Project-Level Toolchain Config\" decision 1A:\nflat `[tools]` table as the implicit default group, plus additive\n`[group.<name>]` tables for optional named groups. Values are\nregistry-qualified [`PackageRef`] strings of the form\n`registry/repo[:tag][@digest]`. Bare-tag forms (no registry, e.g.\n`cmake = \"3.28\"`) are rejected with\n[`super::error::ProjectErrorKind::ToolValueMissingRegistry`].\n\nBare-repo entries with no tag and no digest (e.g.\n`cmake = \"ocx.sh/cmake\"`) parse with `:latest` injected at the\nschema boundary — see [`parse_tool_value`] for the contract. The\ndefault does not apply to digest-pinned entries\n(`tool = \"ghcr.io/acme/tool@sha256:...\"`); the digest is the\ncanonical pin.\n\n`#[serde(deny_unknown_fields)]` is enforced at the struct level so\nschema drift in consumer `ocx.toml` files surfaces as a parse error\nrather than silent ignore.\n\nPhase 2.1 NOTE: the `platforms` field is removed in this revision.\nThe effective platform set is sourced ambient from the project tier\n(currently the canonical five-platform set) until ADR-driven\nper-tool platform overrides land.",
   "type": "object",
   "properties": {
     "tools": {
-      "description": "Tools in the reserved `default` group (the top-level `[tools]`\ntable in `ocx.toml`). Values are fully-qualified\n[`Identifier`]s.",
+      "description": "Tools in the reserved `default` group (the top-level `[tools]`\ntable in `ocx.toml`). Values are fully-qualified\n[`PackageRef`]s.",
       "type": "object",
       "additionalProperties": {
-        "$ref": "#/$defs/Identifier"
+        "$ref": "#/$defs/PackageRef"
       },
       "default": {}
     },
@@ -86,7 +86,7 @@
   },
   "additionalProperties": false,
   "$defs": {
-    "Identifier": {
+    "PackageRef": {
       "description": "OCI identifier in the format 'registry/repository[:tag][@digest]'.",
       "type": "string"
     },
@@ -138,10 +138,10 @@
       "type": "object",
       "properties": {
         "tools": {
-          "description": "Tool bindings for this group. Values are fully-qualified\n[`Identifier`]s, validated on the second parse pass exactly as\n`[tools]` is.",
+          "description": "Tool bindings for this group. Values are fully-qualified\n[`PackageRef`]s, validated on the second parse pass exactly as\n`[tools]` is.",
           "type": "object",
           "additionalProperties": {
-            "$ref": "#/$defs/Identifier"
+            "$ref": "#/$defs/PackageRef"
           }
         },
         "env": {

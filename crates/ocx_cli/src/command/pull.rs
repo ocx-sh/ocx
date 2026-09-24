@@ -117,7 +117,7 @@ impl Pull {
                 .filter(|t| expanded.iter().any(|g| g == &t.group))
                 .collect()
         };
-        let mut pinned: Vec<ocx_oci::PinnedIdentifier> = Vec::new();
+        let mut pinned: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
         for tool in &selected {
             let id = host_pull_pinned(tool, &platform)?;
             // ponytail: O(n) dedup over tools — tiny.
@@ -138,7 +138,7 @@ impl Pull {
             return run_dry_run(&context, &pinned, platform).await;
         }
 
-        let identifiers: Vec<ocx_oci::Identifier> = pinned.iter().cloned().map(Into::into).collect();
+        let identifiers: Vec<ocx_oci::PackageRef> = pinned.iter().cloned().map(Into::into).collect();
 
         // ── Phase 5: pull + report ───────────────────────────────────────
 
@@ -161,7 +161,7 @@ impl Pull {
                 self.lazy_mode.mode(),
             ));
         }
-        let eager: Vec<ocx_oci::Identifier> = identifiers
+        let eager: Vec<ocx_oci::PackageRef> = identifiers
             .iter()
             .zip(modes.iter())
             .filter(|(_, mode)| **mode == ocx_project::lazy::LazyMode::Never)
@@ -175,7 +175,7 @@ impl Pull {
         // interleaves both halves, so a positional cursor into the eager
         // results would depend on `pull_all` returning exactly one entry per
         // input — a guarantee worth reading off the data instead of asserting.
-        let eager_paths: std::collections::HashMap<&ocx_oci::Identifier, &_> = eager.iter().zip(info.iter()).collect();
+        let eager_paths: std::collections::HashMap<&ocx_oci::PackageRef, &_> = eager.iter().zip(info.iter()).collect();
 
         // Both halves, in lock order, so the report stays a single ordered walk
         // over `identifiers`.
@@ -252,7 +252,7 @@ impl Pull {
     }
 }
 
-/// Resolve a locked tool to its host-platform pull [`ocx_oci::PinnedIdentifier`].
+/// Resolve a locked tool to its host-platform pull [`ocx_oci::PinnedPackageRef`].
 ///
 /// Delegates the V1/V2 host-leaf resolution to
 /// [`ocx_project::host_leaf_identifier`] — the single source of the
@@ -265,9 +265,9 @@ impl Pull {
 fn host_pull_pinned(
     tool: &ocx_project::LockedTool,
     host: &ocx_oci::Platform,
-) -> anyhow::Result<ocx_oci::PinnedIdentifier> {
+) -> anyhow::Result<ocx_oci::PinnedPackageRef> {
     let id = ocx_project::host_leaf_identifier(tool, host).map_err(anyhow::Error::from)?;
-    ocx_oci::PinnedIdentifier::try_from(id).map_err(|e| {
+    ocx_oci::PinnedPackageRef::try_from(id).map_err(|e| {
         anyhow::anyhow!(
             "locked leaf for binding '{}' is not a valid pinned identifier: {e}",
             tool.name
@@ -387,7 +387,7 @@ type DryRunProbe = (api::data::pull_dry_run::PullStatus, Option<std::path::PathB
 
 async fn run_dry_run(
     context: &crate::app::Context,
-    pinned: &[ocx_oci::PinnedIdentifier],
+    pinned: &[ocx_oci::PinnedPackageRef],
     platform: ocx_oci::Platform,
 ) -> anyhow::Result<ExitCode> {
     use api::data::pull_dry_run::{DryRunEntry, PullDryRun, PullStatus};
@@ -400,7 +400,7 @@ async fn run_dry_run(
     let mut join_set: tokio::task::JoinSet<(usize, anyhow::Result<DryRunProbe>)> = tokio::task::JoinSet::new();
     for (index, id) in pinned.iter().enumerate() {
         let manager = context.manager().clone();
-        let identifier: ocx_oci::Identifier = id.clone().into();
+        let identifier: ocx_oci::PackageRef = id.clone().into();
         let platform = platform.clone();
         join_set.spawn(async move {
             let result = async {

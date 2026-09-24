@@ -24,7 +24,7 @@ use super::{LockMetadata, LockVersion, LockedTool, ProjectConfig, ProjectLock};
 use crate::hash::DECLARATION_HASH_VERSION;
 use ocx_index::{Index, IndexOperation};
 use ocx_oci::client::error::ClientError;
-use ocx_oci::{Digest, Identifier, Platform, Selection, select_best};
+use ocx_oci::{Digest, PackageRef, Platform, Selection, select_best};
 
 /// Default per-tool timeout wrapping the entire retry chain.
 pub const DEFAULT_PER_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -112,7 +112,7 @@ pub async fn resolve_lock(
 /// not sort, since partial-update callers compose its output with
 /// preserved entries before sorting.
 async fn resolve_work(
-    work: Vec<(String, String, Identifier)>,
+    work: Vec<(String, String, PackageRef)>,
     index: Arc<Index>,
     options: &ResolveLockOptions,
 ) -> Result<Vec<LockedTool>, super::Error> {
@@ -230,7 +230,7 @@ pub async fn resolve_lock_touched(
     // above already collapses predecessor duplicates; the work vector must too so
     // a duplicate (group, name) in the caller's touched slice resolves at most once.
     let mut seen: HashSet<(&str, &str)> = HashSet::new();
-    let mut work: Vec<(String, String, Identifier)> = Vec::with_capacity(touched.len());
+    let mut work: Vec<(String, String, PackageRef)> = Vec::with_capacity(touched.len());
     for (group, name) in touched {
         if !seen.insert((group.as_str(), name.as_str())) {
             // Already queued this pair; skip before the declared_identifier lookup
@@ -427,8 +427,8 @@ fn normalize_groups(groups: &[String], config: &ProjectConfig) -> Result<Option<
 
 /// Collect the `(group, name, identifier)` tuples that should be
 /// resolved given the `selected` filter. `None` means "all groups".
-fn collect_work(config: &ProjectConfig, selected: &Option<Vec<String>>) -> Vec<(String, String, Identifier)> {
-    let mut work: Vec<(String, String, Identifier)> = Vec::new();
+fn collect_work(config: &ProjectConfig, selected: &Option<Vec<String>>) -> Vec<(String, String, PackageRef)> {
+    let mut work: Vec<(String, String, PackageRef)> = Vec::new();
 
     // Top-level `[tools]` → reserved `default` group.
     let include_default = selected
@@ -460,7 +460,7 @@ fn collect_work(config: &ProjectConfig, selected: &Option<Vec<String>>) -> Vec<(
 /// the matching `[group.<group>]` table. Returns `None` when the binding is no
 /// longer declared (e.g. the entry was carried forward from a lock whose
 /// `ocx.toml` declaration has since been removed).
-fn declared_identifier(config: &ProjectConfig, group: &str, name: &str) -> Option<Identifier> {
+fn declared_identifier(config: &ProjectConfig, group: &str, name: &str) -> Option<PackageRef> {
     if group == super::internal::DEFAULT_GROUP {
         config.tools.get(name).cloned()
     } else {
@@ -483,7 +483,7 @@ async fn resolve_one(
     index: Arc<Index>,
     group: String,
     name: String,
-    identifier: Identifier,
+    identifier: PackageRef,
     options: ResolveLockOptions,
 ) -> Result<LockedTool, super::Error> {
     // Wrap the whole resolve (retry + policy classification + candidate
@@ -528,7 +528,7 @@ async fn resolve_one(
 /// advertised child; a `None`/empty candidate set surfaces as `TagNotFound`.
 async fn resolve_to_platforms(
     index: &Index,
-    identifier: Identifier,
+    identifier: PackageRef,
     options: ResolveLockOptions,
 ) -> Result<BTreeMap<String, Digest>, super::Error> {
     // Validate the tag resolves + classify policy/auth/transient failures.
@@ -544,7 +544,7 @@ async fn resolve_to_platforms(
 /// silent empty map.
 async fn fan_out_candidates(
     index: &Index,
-    identifier: &Identifier,
+    identifier: &PackageRef,
     op: IndexOperation,
 ) -> Result<BTreeMap<String, Digest>, super::Error> {
     let candidates = index
@@ -568,7 +568,7 @@ async fn fan_out_candidates(
 /// policy-block classification (offline/frozen → PolicyBlocked) so a
 /// no-resolve policy refusal during the candidate fan-out is not laundered
 /// into a generic registry error.
-fn candidate_fetch_error(err: crate::Error, identifier: Identifier) -> super::Error {
+fn candidate_fetch_error(err: crate::Error, identifier: PackageRef) -> super::Error {
     if let Some(policy) = policy_block_label(&err) {
         return ProjectError::new(
             PathBuf::new(),
@@ -596,7 +596,7 @@ fn candidate_fetch_error(err: crate::Error, identifier: Identifier) -> super::Er
 /// the finished map as a write-site defense-in-depth check (D3) — every key
 /// here is already canonical by construction (it comes straight from
 /// `Platform::to_string()`), so this never fires in practice.
-fn build_platforms_map(candidates: Vec<(Identifier, Platform)>) -> Result<BTreeMap<String, Digest>, super::Error> {
+fn build_platforms_map(candidates: Vec<(PackageRef, Platform)>) -> Result<BTreeMap<String, Digest>, super::Error> {
     // Each child's leaf digest is inserted through `guard_unique_key` keyed
     // by `platform.to_string()`. A candidate without a digest is skipped: the
     // resolver always pins each child to its leaf digest via
@@ -671,7 +671,7 @@ pub fn lookup_host_leaf<'a>(
 /// terminal classification returns immediately.
 async fn retry_fetch(
     index: &Index,
-    identifier: Identifier,
+    identifier: PackageRef,
     options: ResolveLockOptions,
 ) -> Result<ocx_oci::Digest, super::Error> {
     let mut attempt: u8 = 0;
@@ -988,10 +988,10 @@ mod classify_tests {
 
     #[test]
     fn blob_not_found_is_not_found() {
-        use ocx_oci::{Digest, Identifier, OciIdentifier, PinnedIdentifier};
-        let id = Identifier::parse("registry.test/repo:tag").expect("valid");
+        use ocx_oci::{Digest, OciIdentifier, PackageRef, PinnedPackageRef};
+        let id = PackageRef::parse("registry.test/repo:tag").expect("valid");
         let pinned =
-            PinnedIdentifier::try_from(id.clone_with_digest(Digest::Sha256("a".repeat(64)))).expect("valid pinned");
+            PinnedPackageRef::try_from(id.clone_with_digest(Digest::Sha256("a".repeat(64)))).expect("valid pinned");
         let pinned = OciIdentifier::passthrough(pinned.as_identifier()).at_pin_of(&pinned);
         assert_not_found(ClientError::BlobNotFound(Box::new(pinned)));
     }
@@ -1076,8 +1076,8 @@ mod classify_tests {
 /// the chain — the chain is preserved either way via `#[source]`.
 fn project_err_from_client(
     err: crate::Error,
-    identifier: Identifier,
-    ctor: impl FnOnce(Identifier, Box<dyn std::error::Error + Send + Sync>) -> ProjectErrorKind,
+    identifier: PackageRef,
+    ctor: impl FnOnce(PackageRef, Box<dyn std::error::Error + Send + Sync>) -> ProjectErrorKind,
 ) -> super::Error {
     // `crate::Error::OciClient(ClientError)` is the common shape. Pull the
     // inner `ClientError` out verbatim so downstream code can `downcast`
@@ -1144,7 +1144,7 @@ mod tests {
     use super::*;
     use ocx_index::IndexImpl;
     use ocx_oci::client::error::ClientError;
-    use ocx_oci::{Digest, Identifier, ImageIndex, ImageIndexEntry, ImageManifest, Manifest};
+    use ocx_oci::{Digest, ImageIndex, ImageIndexEntry, ImageManifest, Manifest, PackageRef};
 
     // ── Test fixtures ───────────────────────────────────────────────────────
 
@@ -1161,8 +1161,8 @@ mod tests {
 
     /// Fully-qualified cmake identifier for the fake registry.
     #[allow(dead_code, reason = "Phase 3 — kept available for multi-tool tests Phase 5 may add")]
-    fn tool_identifier() -> Identifier {
-        Identifier::parse(&identifier_string()).expect("valid test identifier")
+    fn tool_identifier() -> PackageRef {
+        PackageRef::parse(&identifier_string()).expect("valid test identifier")
     }
 
     /// Stable test digest — 64 lowercase hex characters. Not a real SHA-256
@@ -1300,13 +1300,13 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_tags(&self, _: &Identifier) -> ocx_index::error::Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
             Ok(None)
         }
 
         async fn fetch_manifest(
             &self,
-            _: &Identifier,
+            _: &PackageRef,
             _op: IndexOperation,
         ) -> ocx_index::error::Result<Option<(Digest, Manifest)>> {
             Ok(None)
@@ -1314,7 +1314,7 @@ mod tests {
 
         async fn fetch_manifest_digest(
             &self,
-            _: &Identifier,
+            _: &PackageRef,
             _op: IndexOperation,
         ) -> ocx_index::error::Result<Option<Digest>> {
             if let Some(delay) = self.per_call_delay {
@@ -1328,7 +1328,7 @@ mod tests {
             }
         }
 
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> ocx_index::error::Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
             Ok(None)
         }
 
@@ -1346,19 +1346,19 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> ocx_index::error::Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &Identifier) -> ocx_index::error::Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
             Ok(None)
         }
         async fn fetch_manifest(
             &self,
-            _: &Identifier,
+            _: &PackageRef,
             _op: IndexOperation,
         ) -> ocx_index::error::Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
         async fn fetch_manifest_digest(
             &self,
-            _: &Identifier,
+            _: &PackageRef,
             _op: IndexOperation,
         ) -> ocx_index::error::Result<Option<Digest>> {
             if let Some(delay) = self.per_call_delay {
@@ -1371,7 +1371,7 @@ mod tests {
                 None => panic!("SharedMock script exhausted — unexpected extra call"),
             }
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> ocx_index::error::Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
             Ok(None)
         }
 
@@ -1443,12 +1443,12 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> ocx_index::error::Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &Identifier) -> ocx_index::error::Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
             Ok(None)
         }
         async fn fetch_manifest(
             &self,
-            _: &Identifier,
+            _: &PackageRef,
             _op: IndexOperation,
         ) -> ocx_index::error::Result<Option<(Digest, Manifest)>> {
             *self.manifest_calls.lock().unwrap() += 1;
@@ -1456,7 +1456,7 @@ mod tests {
         }
         async fn fetch_manifest_digest(
             &self,
-            _: &Identifier,
+            _: &PackageRef,
             _op: IndexOperation,
         ) -> ocx_index::error::Result<Option<Digest>> {
             *self.digest_calls.lock().unwrap() += 1;
@@ -1469,7 +1469,7 @@ mod tests {
             }
             Ok(self.manifest.as_ref().as_ref().map(|_| self.head.clone()))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> ocx_index::error::Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
             Ok(None)
         }
         fn box_clone(&self) -> Box<dyn IndexImpl> {
@@ -1478,7 +1478,7 @@ mod tests {
     }
 
     /// Extract a [`LockedTool`]'s `(repository, platforms)` pair.
-    fn resolved_platforms(tool: &LockedTool) -> (&Identifier, &BTreeMap<String, Digest>) {
+    fn resolved_platforms(tool: &LockedTool) -> (&PackageRef, &BTreeMap<String, Digest>) {
         (&tool.repository, &tool.platforms)
     }
 
@@ -1963,24 +1963,24 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> ocx_index::error::Result<Vec<String>> {
             panic!("PanicMock: list_repositories called — untouched carry-forward must not contact the registry");
         }
-        async fn list_tags(&self, _: &Identifier) -> ocx_index::error::Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
             panic!("PanicMock: list_tags called — untouched carry-forward must not contact the registry");
         }
         async fn fetch_manifest(
             &self,
-            _: &Identifier,
+            _: &PackageRef,
             _: IndexOperation,
         ) -> ocx_index::error::Result<Option<(Digest, Manifest)>> {
             panic!("PanicMock: fetch_manifest called — untouched carry-forward must not contact the registry");
         }
         async fn fetch_manifest_digest(
             &self,
-            _: &Identifier,
+            _: &PackageRef,
             _: IndexOperation,
         ) -> ocx_index::error::Result<Option<Digest>> {
             panic!("PanicMock: fetch_manifest_digest called — untouched carry-forward must not contact the registry");
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> ocx_index::error::Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
             panic!("PanicMock: fetch_blob called — untouched carry-forward must not contact the registry");
         }
         fn box_clone(&self) -> Box<dyn IndexImpl> {
@@ -2010,7 +2010,7 @@ gamma = "{r}/gamma:1"
         LockedTool {
             name: name.to_string(),
             group: "default".to_string(),
-            repository: Identifier::new_registry(name, TEST_REGISTRY),
+            repository: PackageRef::new_registry(name, TEST_REGISTRY),
             platforms,
         }
     }
@@ -2155,7 +2155,7 @@ delta = "{r}/delta:1"
         // it carries verbatim through the PanicMock; reuse locked_tool_fixture's
         // shape but with the right repo coordinates.
         let cmake = LockedTool {
-            repository: Identifier::new_registry(TOOL_REPO, TEST_REGISTRY),
+            repository: PackageRef::new_registry(TOOL_REPO, TEST_REGISTRY),
             platforms: {
                 let mut p = BTreeMap::new();
                 p.insert("linux/amd64".to_string(), Digest::Sha256("a".repeat(64)));
@@ -2349,7 +2349,7 @@ gamma = "{r}/gamma:1"
         // `beta`'s carried entry points at a DIFFERENT repository than the
         // candidate declares (`registry.test/beta`). A corrupt/hand-edited lock.
         let mut beta_wrong = locked_tool_fixture("beta", "b");
-        beta_wrong.repository = Identifier::new_registry("wrong-repo", TEST_REGISTRY);
+        beta_wrong.repository = PackageRef::new_registry("wrong-repo", TEST_REGISTRY);
         let previous = predecessor_lock(
             &config,
             vec![
@@ -2544,7 +2544,7 @@ gamma = "{r}/gamma:1"
     fn build_platforms_map_keys_by_lossless_platform() {
         let amd64: Platform = "linux/amd64".parse().unwrap();
         let arm64: Platform = "darwin/arm64".parse().unwrap();
-        let repo = Identifier::new_registry(TOOL_REPO, TEST_REGISTRY);
+        let repo = PackageRef::new_registry(TOOL_REPO, TEST_REGISTRY);
         let candidates = vec![
             (repo.clone_with_digest(Digest::Sha256("a".repeat(64))), amd64),
             (repo.clone_with_digest(Digest::Sha256("b".repeat(64))), arm64),
@@ -2563,7 +2563,7 @@ gamma = "{r}/gamma:1"
     #[test]
     fn build_platforms_map_dup_key_fails_cleanly() {
         let amd64: Platform = "linux/amd64".parse().unwrap();
-        let repo = Identifier::new_registry(TOOL_REPO, TEST_REGISTRY);
+        let repo = PackageRef::new_registry(TOOL_REPO, TEST_REGISTRY);
         let candidates = vec![
             (repo.clone_with_digest(Digest::Sha256("a".repeat(64))), amd64.clone()),
             (repo.clone_with_digest(Digest::Sha256("b".repeat(64))), amd64),
