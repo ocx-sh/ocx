@@ -89,7 +89,8 @@ Trait dispatch (`IndexImpl`) swap local/remote index impls + inject test transpo
 | `ocx_index/src/local_index.rs` | `LocalIndex`: owns the local index collection — wire-grammar, dispatch-object-only CAS (see "LocalIndex" below) |
 | `ocx_index/src/ocx_index.rs` | `OcxIndex`: remote client of a **published** ocx-index — root → dispatch object → `select_best` |
 | `ocx_index/src/oci_index.rs` | `OciIndex`: remote client that **derives** an index from a plain OCI registry's tags API |
-| `oci/identifier.rs` | `Identifier`: parsed OCI reference with validation |
+| `oci/package_ref.rs` | `PackageRef`: parsed logical package identifier (never dialled) |
+| `oci/oci_identifier.rs` | `OciIdentifier`: parsed physical/dial-able OCI reference — the only type `Client` accepts, minted only by `Index::route*` and the two parse entry points (see "Identifier" below) |
 | `oci/digest.rs` | `Digest` enum: Sha256, Sha384, Sha512 |
 | `oci/platform.rs` | `Platform`: os/arch matching, `any()` for platform-agnostic packages |
 | `oci/client.rs` | `Client`: registry operations (list, fetch, push, pull) |
@@ -161,7 +162,7 @@ The enum exists because the trait used to conflate query and update — a cache 
 | `fetch_manifest` tag+`Op::Resolve` | source only, write blobs+tag | local only; unpinned miss → **PolicyBlocked (81)** | local only; unpinned miss → **PolicyBlocked (81)** | local only (→ 81) | local first, miss → fetch+write |
 | `fetch_manifest` digest, any op | local first | local only | local first | local only | local first |
 | `fetch_manifest` digest+`Op::Resolve` (pinned-id pull) | source on miss, write blobs only, **no tag** | local only | source on miss, write blobs only, **no tag** | local only | local first, miss → fetch blobs only |
-| `physical_reference` (root `repository` pointer) | source first, local on miss or outage | local only (no sources) | local first, miss → source | local only | local first, miss → source |
+| `Index::route*` (root `repository` pointer → `OciIdentifier`) | source first, local on miss or outage | local only (no sources) | local first, miss → source | local only | local first, miss → source |
 
 **No-resolve policy block (offline + frozen).** Both `Offline` and `Frozen` refuse to resolve an unpinned (tag-only) reference from a source. The shared gate at the top of `ChainedIndex::walk_chain` is an exhaustive `match self.mode` — the `Offline | Frozen` arm with an `identifier.digest().is_none()` guard raises `oci::index::error::Error::PolicyResolutionBlocked { identifier, policy }` → `ExitCode::PolicyBlocked` (81); adding a new `ChainMode` variant forces a compile error at this routing decision. This is a deliberate behaviour change for offline: an unpinned-tag `Op::Resolve` miss now surfaces as `PolicyBlocked` (81), not `TagNotFound` (79) — realizing offline's documented "errors if missing" contract and aligning it with frozen. `TagNotFound` (79) now means strictly "a source *was* consulted and the tag genuinely does not exist" (Default / Remote). The two policies still differ on the digest axis: offline blocks the pinned digest's *content* fetch, frozen lets it through (only unpinned-tag *resolution* is refused). The project-lock layer mirrors this with `ProjectErrorKind::PolicyBlocked` (terminal, no retry).
 
@@ -181,9 +182,14 @@ The enum exists because the trait used to conflate query and update — a cache 
 
 **`remote_view` — the second `ReadOnly` view.** `IndexImpl::remote_view` (default = `box_clone`; `ChainedIndex` returns `read_only()` with `mode` flipped) → `Index::remote_view`: `ChainMode::Remote` **and** `LocalWritePolicy::ReadOnly` in one view. Consumer: the update-check probe (`TagProbe::Remote` in `package_manager/tasks/update_check.rs`), which must see the freshest *published* release regardless of the ambient ChainMode — `ocx.sh/ocx/cli` is a logical name the published index routes to a physical repository, so listing it through the chain rather than a registry's tags API is what makes the newest release visible at all. `ReadOnly` is stronger than the listing needs (a listing writes under no policy) and deliberately so: a look for an update must be incapable of moving a pin. Unit: `chain_refs_tests::remote_view_lists_from_source_under_default_mode_and_writes_nothing`.
 
-### Identifier
+### Identifier — two types, no conversion (ocx#504)
 
-Parsed OCI reference: `registry/repository[:tag][@digest]`.
+`ocx_oci` splits "an OCI reference" into two distinct types with no conversion either way — a
+[`PackageRef`] is never dialled, and a value reaching `oci::Client` is always an [`OciIdentifier`]. See
+`adr_index_indirection.md` "C2 addendum" for the full rationale and enforcement.
+
+**`PackageRef`** — the logical package identity a user, lock, or package metadata spells:
+`registry/repository[:tag][@digest]`.
 
 - `parse_with_default_registry(s, default)` — main entry point
 - `tag()` returns `Option<&str>` — does NOT inject "latest" (unlike `oci_spec::Reference`)
@@ -191,6 +197,21 @@ Parsed OCI reference: `registry/repository[:tag][@digest]`.
 - `clone_with_tag(tag)` — new identifier with tag, drops digest (tag change invalidates digest)
 - Tags with `+` normalized to `_` on parse (OCI spec forbids `+`)
 - Repository must be lowercase (validated on parse)
+
+**`OciIdentifier`** — the physical, dial-able reference `oci::Client` accepts. Minted **only** by:
+
+- `Index::route` / `route_for_dial` / `route_local` / `route_to_materialize` (`ocx_index::Index`, each
+  taking a `&PackageRef` and returning an `OciIdentifier`) — the index-resolved path;
+- `OciIdentifier::parse_repository_pointer` — parses a root document's `repository` field (the one
+  legitimate physical-rewrite input, C2's transport seam);
+- `OciIdentifier::parse_target` / `as_target` / `passthrough` / `from_parts` — the plain-OCI-registry path
+  with no index in front of it.
+
+Every other mint site is refused: `oci_identifier_mint_ratchet`
+(`crates/ocx_test_support/tests/fixtures/oci_identifier_mint_allowlist.txt`) enumerates the allowed
+constructors structurally, and five `compile_fail` doctests in `crates/ocx_oci/src/lib.rs` prove at
+compile time that no code path can build one from a bare `PackageRef`. A routing miss on an
+index-owned namespace is `NotInIndex`, never a silent fall-back to a logical host.
 
 ### Index (public wrapper)
 
@@ -206,8 +227,8 @@ Key methods: `list_tags()`, `fetch_manifest()`, `fetch_candidates()`, `select(id
 ```rust
 #[non_exhaustive]
 pub enum SelectResult {
-    Found(Identifier),           // Exactly one match
-    Ambiguous(Vec<Identifier>),  // Multiple matches
+    Found(PackageRef),           // Exactly one match
+    Ambiguous(Vec<PackageRef>),  // Multiple matches
     NotFound,                    // No candidates (no os/arch match, or package absent)
     FeatureMismatch {            // os/arch present, but no candidate's os_features ⊆ host
         host_features: Vec<String>,
@@ -222,9 +243,9 @@ pub enum SelectResult {
 
 ```rust
 async fn list_repositories(&self, registry: &str) -> Result<Vec<String>>;
-async fn list_tags(&self, id: &Identifier) -> Result<Option<Vec<String>>>;
-async fn fetch_manifest(&self, id: &Identifier, op: IndexOperation) -> Result<Option<(Digest, Manifest)>>;
-async fn fetch_manifest_digest(&self, id: &Identifier, op: IndexOperation) -> Result<Option<Digest>>;
+async fn list_tags(&self, id: &PackageRef) -> Result<Option<Vec<String>>>;
+async fn fetch_manifest(&self, id: &PackageRef, op: IndexOperation) -> Result<Option<(Digest, Manifest)>>;
+async fn fetch_manifest_digest(&self, id: &PackageRef, op: IndexOperation) -> Result<Option<Digest>>;
 ```
 
 `list_tags` / `list_repositories` are query-only by definition and do **not** take `op`. `fetch_manifest{,_digest}` callers must pass `Op::Query` for pure reads or `Op::Resolve` for install/pull paths.

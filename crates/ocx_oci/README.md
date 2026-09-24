@@ -11,11 +11,16 @@ capability detection, registry auth, and the SSRF guard.
 **Named dependency exceptions:** none
 
 The tier is closed around `OciTransport` (sealed — see `client` module docs)
-and the `Client` that drives it: `identifier`, `digest`, `platform`,
-`host_capabilities`, `media_type`, `layer_layout`/`layer_ref`, `repository`,
-`pinned_identifier`, `annotations`, `tag`, `referrer`, `manifest`/
-`manifest_builder`, `endpoint`, `resolve_target`, `copy` and `ssrf` are all
-either inputs to a transport call or types a transport call returns.
+and the `Client` that drives it: `package_ref`, `oci_identifier`, `digest`,
+`platform`, `host_capabilities`, `media_type`, `layer_layout`/`layer_ref`,
+`repository`, `pinned_package_ref`, `annotations`, `tag`, `referrer`,
+`manifest`/`manifest_builder`, `endpoint`, `resolve_target`, `copy` and `ssrf`
+are all either inputs to a transport call or types a transport call returns.
+`package_ref` and `oci_identifier` are two distinct, unconvertible types — a
+`PackageRef` is a logical package identity, never dialled; an `OciIdentifier`
+is the physical, dial-able reference `Client` accepts, minted only through
+`ocx_index::Index::route*` or `oci_identifier`'s own parse entry points
+(ocx#504).
 `ocx_console` is linked so the pull/push paths report byte progress through
 its bars and the login flow prompts for a secret through it; `ocx_exit` names
 the process-outcome vocabulary the transport's retry ladder and `ssrf`'s
