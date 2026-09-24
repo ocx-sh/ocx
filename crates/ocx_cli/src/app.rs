@@ -207,7 +207,12 @@ impl App {
             Ok(code) => Ok(code),
             Err(err) if format == FormatMode::Json && !reported.load(std::sync::atomic::Ordering::Relaxed) => {
                 match render_error_envelope(command_name, &err) {
-                    Ok(rendered) => println!("{rendered}"),
+                    // Through the printer, not `println!`, so the one stdout
+                    // path every report takes carries the envelope too.
+                    Ok(rendered) => ocx_console::Printer::new(false, false)
+                        .cout()
+                        .plain(rendered)
+                        .end_line(),
                     Err(render_err) => {
                         // Envelope rendering is infallible-by-design, but if serde
                         // ever fails we surface both causes rather than swallowing
