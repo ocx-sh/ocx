@@ -211,6 +211,23 @@ pub enum SelectResult {
     },
 }
 
+/// Who says which content a package's tag names — see [`Index::resolve_version`].
+#[derive(Debug)]
+pub enum ResolvedVersion {
+    /// No index owns the name, or the identifier carries its own digest: the
+    /// registry's reference is the version, read there as before.
+    Registry,
+    /// The index resolved the tag, and this is its committed answer — the
+    /// dispatch manifest and its digest, never whatever the physical tag names
+    /// now.
+    Indexed {
+        digest: ocx_oci::Digest,
+        manifest: Box<ocx_oci::Manifest>,
+    },
+    /// The index owns the name and holds no such tag.
+    Absent,
+}
+
 /// Note, some operations are cached and the cache is shared between clones of the index.
 /// This means that if you clone the index, they will share the same cache and benefit from each other's cached data.
 /// On the other hand, if you have a long-running index instance, you may want to periodically clear the cache to avoid memory bloat and ensure that you always have the latest data.
@@ -454,6 +471,50 @@ impl Index {
         };
         self.guard_physical_dial(identifier, &routed).await?;
         Ok(routed)
+    }
+
+    /// Which content `identifier`'s tag names, asked of whoever owns the
+    /// answer. `routed` is what [`Self::route_for_dial`] answered for it.
+    ///
+    /// For a direct registry reader that reads a package **by tag**
+    /// (`ocx package copy`, `ocx package push`'s `any`-provenance check). Routing
+    /// carries the tag onto the physical location, but for an index-served name
+    /// the physical tag is not the version: the index's own resolution — tag
+    /// existence, yank status, the committed dispatch — is, exactly as install
+    /// reads it. A physical tag moved since publication would otherwise be
+    /// read as the package. The index is asked through
+    /// [`Self::read_only_view`], so a read-only command grows nothing locally,
+    /// and under the ambient [`ChainMode`] like every other resolve.
+    ///
+    /// Index-served means an index rewrote the name or is authoritative for
+    /// its registry; neither is [`ResolvedVersion::Registry`] (S-5).
+    ///
+    /// # Errors
+    ///
+    /// Whatever the index raises resolving the tag — a yanked tag and a
+    /// `--offline`/`--frozen` refusal included.
+    pub async fn resolve_version(
+        &self,
+        identifier: &ocx_oci::PackageRef,
+        routed: &ocx_oci::OciIdentifier,
+    ) -> Result<ResolvedVersion> {
+        let index_served = !identifier.is_located_at(routed) || self.authoritative_index_base_url(identifier).is_some();
+        if identifier.digest().is_some() || !index_served {
+            return Ok(ResolvedVersion::Registry);
+        }
+        Ok(
+            match self
+                .read_only_view()
+                .fetch_manifest(identifier, IndexOperation::Resolve)
+                .await?
+            {
+                Some((digest, manifest)) => ResolvedVersion::Indexed {
+                    digest,
+                    manifest: Box::new(manifest),
+                },
+                None => ResolvedVersion::Absent,
+            },
+        )
     }
 
     /// Where the **locally committed** root routes `identifier`, never
@@ -966,10 +1027,17 @@ pub mod test_source {
     /// Answers digest-only, the way a source answered before tags were carried,
     /// so a tag on the dialled reference is the router's doing, not this
     /// fixture's.
+    ///
+    /// Resolves no tag unless told to: [`with_tag`](Self::with_tag) commits a
+    /// tag to a dispatch manifest, [`with_yanked_tag`](Self::with_yanked_tag)
+    /// yanks one — the index's own answers, independent of what any registry
+    /// holds under the same tag.
     #[derive(Clone)]
     pub struct RoutingSource {
         physical: Option<(String, String)>,
         authoritative_base_url: Option<String>,
+        tags: Vec<(String, Digest, Manifest)>,
+        yanked: Vec<String>,
     }
 
     impl RoutingSource {
@@ -977,6 +1045,8 @@ pub mod test_source {
             Self {
                 physical: Some((registry.to_string(), repository.to_string())),
                 authoritative_base_url: None,
+                tags: Vec::new(),
+                yanked: Vec::new(),
             }
         }
 
@@ -984,6 +1054,8 @@ pub mod test_source {
             Self {
                 physical: None,
                 authoritative_base_url: None,
+                tags: Vec::new(),
+                yanked: Vec::new(),
             }
         }
 
@@ -991,7 +1063,28 @@ pub mod test_source {
             Self {
                 physical: None,
                 authoritative_base_url: Some(base_url.to_string()),
+                tags: Vec::new(),
+                yanked: Vec::new(),
             }
+        }
+
+        /// Claims authority for every name, as a configured index does: its
+        /// silence is a miss, never a hand-off to the registry.
+        pub fn authoritative(mut self, base_url: &str) -> Self {
+            self.authoritative_base_url = Some(base_url.to_string());
+            self
+        }
+
+        /// Commits `tag` to `manifest` under `digest`.
+        pub fn with_tag(mut self, tag: &str, digest: Digest, manifest: Manifest) -> Self {
+            self.tags.push((tag.to_string(), digest, manifest));
+            self
+        }
+
+        /// Yanks `tag`: resolving it is refused.
+        pub fn with_yanked_tag(mut self, tag: &str) -> Self {
+            self.yanked.push(tag.to_string());
+            self
         }
 
         /// This source wrapped as an [`Index`] on direct proxy rules, so the
@@ -1011,11 +1104,35 @@ pub mod test_source {
         async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(None)
         }
-        async fn fetch_manifest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
-            Ok(None)
+        async fn fetch_manifest(
+            &self,
+            identifier: &PackageRef,
+            _: IndexOperation,
+        ) -> Result<Option<(Digest, Manifest)>> {
+            if identifier.digest().is_some() {
+                return Ok(None);
+            }
+            let tag = identifier.tag_or_latest();
+            if self.yanked.iter().any(|yanked| yanked == tag) {
+                return Err(super::error::Error::YankedRefused {
+                    identifier: identifier.to_string(),
+                });
+            }
+            Ok(self
+                .tags
+                .iter()
+                .find(|(committed, _, _)| committed == tag)
+                .map(|(_, digest, manifest)| (digest.clone(), manifest.clone())))
         }
-        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
-            Ok(None)
+        async fn fetch_manifest_digest(
+            &self,
+            identifier: &PackageRef,
+            operation: IndexOperation,
+        ) -> Result<Option<Digest>> {
+            Ok(self
+                .fetch_manifest(identifier, operation)
+                .await?
+                .map(|(digest, _)| digest))
         }
         async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)

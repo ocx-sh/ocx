@@ -4285,7 +4285,7 @@ ocx package copy [OPTIONS] <SOURCE>
 
 **Arguments**
 
-- `<SOURCE>`: The published package to promote, as `registry/repository:tag` or `registry/repository@sha256:<hex>`. A tag names an image index (or, for a single-platform package, a bare manifest); a digest names one platform manifest and then `--platform` is required, because a platform manifest carries no platform of its own — OCX records the platform in the index entry, never in the manifest. A source in a namespace a [configured index][config-registries-index] serves, such as `ocx.sh`, is read from the registry that index points it to; the target is written exactly as given.
+- `<SOURCE>`: The published package to promote, as `registry/repository:tag` or `registry/repository@sha256:<hex>`. A tag names an image index (or, for a single-platform package, a bare manifest); a digest names one platform manifest and then `--platform` is required, because a platform manifest carries no platform of its own — OCX records the platform in the index entry, never in the manifest. A source in a namespace a [configured index][config-registries-index] serves, such as `ocx.sh`, is resolved by that index — its tag names the platforms the index recorded, not whatever the registry's tag holds now, and a tag the index does not hold or has yanked is refused — and its platform manifests are read from the registry the index points it to; the target is written exactly as given.
 
 **Options**
 

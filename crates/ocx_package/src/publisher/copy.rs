@@ -272,7 +272,8 @@ async fn run(
     // Routed once; every source read below dials `source_location`, and
     // everything reported keeps naming `request.source`.
     let source_location = index.route_for_dial(request.source).await.map_err(PackageError::from)?;
-    let source_leaves = resolve_source_leaves(client, request.source, &source_location, &request.platforms).await?;
+    let source_leaves =
+        resolve_source_leaves(client, index, request.source, &source_location, &request.platforms).await?;
     let target_entries = read_target_entries(client, request.target).await?;
 
     let mut rows = Vec::new();
@@ -437,18 +438,38 @@ async fn target_tags(client: &Client, request: &CopyRequest<'_>, platform: &ocx_
     Ok(tags.into_iter().filter(|candidate| candidate != tag).collect())
 }
 
-/// The `(platform, leaf digest)` pairs this copy will move, read at
-/// `source_location`; a miss still names `source`.
+/// The `(platform, leaf digest)` pairs this copy will move; a miss still
+/// names `source`.
+///
+/// Which leaves a tag names is the index's answer for an index-served source
+/// ([`Index::resolve_version`](ocx_index::Index::resolve_version)) — its tag
+/// existence, yank status and committed dispatch — and the registry's own tag
+/// otherwise. Only the leaves, immutable by digest, are then read at
+/// `source_location`: a physical tag moved since publication must not be what
+/// a promotion of the logical version carries.
 async fn resolve_source_leaves(
     client: &Client,
+    index: &ocx_index::Index,
     source: &ocx_oci::PackageRef,
     source_location: &ocx_oci::OciIdentifier,
     requested: &[ocx_oci::Platform],
 ) -> std::result::Result<Vec<(ocx_oci::Platform, ocx_oci::Digest)>, CopyErrorKind> {
-    let (_, digest, manifest) = client
-        .fetch_manifest_raw_bytes(source_location)
-        .await?
-        .ok_or_else(|| ClientError::ManifestNotFound(source.to_string()))?;
+    let not_found = || ClientError::ManifestNotFound(source.to_string());
+    let (digest, manifest) = match index
+        .resolve_version(source, source_location)
+        .await
+        .map_err(PackageError::from)?
+    {
+        ocx_index::ResolvedVersion::Indexed { digest, manifest } => (digest, *manifest),
+        ocx_index::ResolvedVersion::Absent => return Err(not_found().into()),
+        ocx_index::ResolvedVersion::Registry => {
+            let (_, digest, manifest) = client
+                .fetch_manifest_raw_bytes(source_location)
+                .await?
+                .ok_or_else(not_found)?;
+            (digest, manifest)
+        }
+    };
 
     match manifest {
         ocx_oci::Manifest::ImageIndex(index) => {
@@ -813,10 +834,13 @@ mod tests {
     async fn a_source_served_through_an_index_is_read_at_its_physical_location() {
         let data = StubTransportData::new();
         let leaves = seed_source(&data, "3.28.1", &[("linux/amd64", AMD64_LAYER)]);
-        let served = ocx_oci::PackageRef::new_registry("served/demo", "dev.example.com").clone_with_tag("3.28.1");
+        let served = served_at("3.28.1");
         let target = identifier("prod.example.com", "3.28.1");
         let annotations = BTreeMap::new();
-        let index = ocx_index::test_source::RoutingSource::rewriting("dev.example.com", "team/demo").into_index();
+        let (digest, dispatch) = dispatch_of(&[("linux/amd64", &leaves[0])]);
+        let index = ocx_index::test_source::RoutingSource::rewriting("dev.example.com", "team/demo")
+            .with_tag("3.28.1", digest, dispatch)
+            .into_index();
 
         let outcome = publisher_for(&data)
             .copy(&index, request(&served, &target, &annotations))
@@ -835,6 +859,136 @@ mod tests {
             .map(|entry| entry.digest)
             .collect();
         assert_eq!(landed, vec![leaves[0].to_string()]);
+    }
+
+    /// `served/demo` at `tag`: the logical name the index-served tests copy,
+    /// which the index routes to the physical `team/demo`.
+    fn served_at(tag: &str) -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry("served/demo", "dev.example.com").clone_with_tag(tag)
+    }
+
+    /// An image index over `entries` and its digest — the dispatch an index
+    /// commits a tag to. Never stored at the registry: an index serves its own.
+    fn dispatch_of(entries: &[(&str, &ocx_oci::Digest)]) -> (ocx_oci::Digest, Manifest) {
+        let manifest = index_of(entries);
+        let digest = Algorithm::Sha256.hash(serde_json::to_vec(&manifest).expect("serialize"));
+        (digest, manifest)
+    }
+
+    /// The version an index-served copy carries is the one the index committed,
+    /// not whatever the physical tag names now. The physical `3.28.1` is moved
+    /// to a different leaf after the index committed it; a copy that read the
+    /// physical tag would promote that leaf under the logical version.
+    #[tokio::test]
+    async fn an_index_served_copy_carries_the_indexs_version_not_the_moved_physical_tag() {
+        let data = StubTransportData::new();
+        let committed = seed_source(&data, "3.28.1", &[("linux/amd64", AMD64_LAYER)]);
+        let moved = seed_source(&data, "3.28.1", &[("linux/amd64", ARM64_LAYER)]);
+        assert_ne!(
+            committed, moved,
+            "the fixture only discriminates while the two leaves differ"
+        );
+        let target = identifier("prod.example.com", "3.28.1");
+        let annotations = BTreeMap::new();
+        let (digest, dispatch) = dispatch_of(&[("linux/amd64", &committed[0])]);
+        let index = ocx_index::test_source::RoutingSource::rewriting("dev.example.com", "team/demo")
+            .with_tag("3.28.1", digest, dispatch)
+            .into_index();
+
+        let outcome = publisher_for(&data)
+            .copy(&index, request(&served_at("3.28.1"), &target, &annotations))
+            .await
+            .unwrap_or_else(|error| panic!("copy: {}", chain(&error)));
+
+        assert_eq!(
+            outcome.platforms[0].digest, committed[0],
+            "the report names the index's leaf"
+        );
+        let landed: Vec<String> = pushed_index(&data, &target)
+            .manifests
+            .into_iter()
+            .map(|entry| entry.digest)
+            .collect();
+        assert_eq!(landed, vec![committed[0].to_string()]);
+    }
+
+    /// A tag the authoritative index does not hold, or has yanked, is not
+    /// copied — even though the physical registry still answers for it, which
+    /// is exactly what a copy reading the physical tag would find and promote.
+    #[tokio::test]
+    async fn an_index_served_tag_the_index_does_not_hold_or_has_yanked_is_refused() {
+        let data = StubTransportData::new();
+        seed_source(&data, "3.28.1", &[("linux/amd64", AMD64_LAYER)]);
+        let target = identifier("prod.example.com", "3.28.1");
+        let annotations = BTreeMap::new();
+        let owning = || {
+            ocx_index::test_source::RoutingSource::rewriting("dev.example.com", "team/demo")
+                .authoritative("https://index.example.invalid")
+        };
+
+        let absent = publisher_for(&data)
+            .copy(
+                &owning().into_index(),
+                request(&served_at("3.28.1"), &target, &annotations),
+            )
+            .await
+            .expect_err("a tag the index does not hold must not be copied");
+        let rendered = chain(&absent);
+        assert!(
+            rendered.contains("served/demo:3.28.1") && !rendered.contains("dev.example.com/team/demo"),
+            "the miss names the source as typed: {rendered}"
+        );
+        assert!(
+            matches!(
+                absent.kind,
+                CopyErrorKind::Registry(PackageError::OciClient(ClientError::ManifestNotFound(_)))
+            ),
+            "an absent tag is the same not-found a registry miss is: {rendered}"
+        );
+
+        let yanked = publisher_for(&data)
+            .copy(
+                &owning().with_yanked_tag("3.28.1").into_index(),
+                request(&served_at("3.28.1"), &target, &annotations),
+            )
+            .await
+            .expect_err("a yanked tag must not be copied");
+        assert!(chain(&yanked).contains("yanked"), "{}", chain(&yanked));
+
+        assert!(
+            !data.read().manifests.contains_key(&canonical(&target).to_string()),
+            "nothing may land at the target"
+        );
+    }
+
+    /// S-5: a registry-backed name is read from the registry's own tag, as
+    /// before. The index here holds a stale answer for that tag — a derived
+    /// root pointing at the name itself — and is not asked, because no index
+    /// serves the name.
+    #[tokio::test]
+    async fn a_registry_backed_copy_reads_the_registrys_tag_not_an_index_answer() {
+        let data = StubTransportData::new();
+        let stale = seed_source(&data, "3.28.1", &[("linux/amd64", AMD64_LAYER)]);
+        let current = seed_source(&data, "3.28.1", &[("linux/amd64", ARM64_LAYER)]);
+        let source = identifier("dev.example.com", "3.28.1");
+        let target = identifier("prod.example.com", "3.28.1");
+        let annotations = BTreeMap::new();
+        let (digest, dispatch) = dispatch_of(&[("linux/amd64", &stale[0])]);
+        let index = ocx_index::test_source::RoutingSource::passthrough()
+            .with_tag("3.28.1", digest, dispatch)
+            .into_index();
+
+        publisher_for(&data)
+            .copy(&index, request(&package_at(&source), &target, &annotations))
+            .await
+            .unwrap_or_else(|error| panic!("copy: {}", chain(&error)));
+
+        let landed: Vec<String> = pushed_index(&data, &target)
+            .manifests
+            .into_iter()
+            .map(|entry| entry.digest)
+            .collect();
+        assert_eq!(landed, vec![current[0].to_string()]);
     }
 
     /// The scratch root the caller supplies is the one each leaf spools into.
