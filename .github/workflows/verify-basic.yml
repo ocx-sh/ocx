@@ -449,7 +449,7 @@ jobs:
       # neither can arrive without the other.
       - name: Unit tests (Bazel)
         env:
-          __OCX_TESTING_REQUIRE_LIVE_SHELLS: nu,elvish,fish
+          __OCX_TESTING_REQUIRE_LIVE_SHELLS: nu,elvish,fish,pwsh
         run: >-
           task bazel:test:unit --
           --test_env=PATH --test_env=__OCX_TESTING_REQUIRE_LIVE_SHELLS

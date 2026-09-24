@@ -545,6 +545,58 @@ def test_interactive_login_shell_registers_the_prompt_hook(shell: str, tmp_path:
     )
 
 
+_SEPARATOR_PROBE = "OCX_SEPARATOR:"
+
+
+def test_powershell_wrapper_keeps_the_double_dash_separator(tmp_path: Path) -> None:
+    """ocx#524: ``ocx package exec <pkg> -- <tool> -h`` through the installed wrapper.
+
+    PowerShell's binder drops the first bare ``--`` of a *function* call, so the
+    wrapper handed ocx ``exec <pkg> <tool> -h`` and clap read ``-h`` as ocx's
+    own help flag: usage text, exit 0, the tool never ran. With the separator
+    kept, ocx instead tries to resolve the package, which ``--offline`` refuses
+    for an uninstalled one — a non-zero exit with no usage text.
+
+    Both colours in one session: the same call without ``--`` is the red state
+    the defect produced, printed beside it so a shell that never reached ocx
+    cannot pass. ``CommandType`` pins that the call went through the wrapper
+    function at all — without it the native binary would pass trivially.
+    """
+    arm = _HOOK_ARMS["pwsh"]
+    shell_abs = _require(arm.binary)
+    home, _, profile = _hook_arm_home(arm, shell_abs, tmp_path, "home_tty")
+    call = "ocx --offline package exec example.com/absent/pkg:1"
+    probe = (
+        f"$kept = {call} -- tool -h 2>&1 | Out-String; $keptCode = $LASTEXITCODE\n"
+        f"$lost = {call} tool -h 2>&1 | Out-String; $lostCode = $LASTEXITCODE\n"
+        f"Write-Output ('{_SEPARATOR_PROBE}' + (Get-Command ocx).CommandType + ':' + $keptCode + ':' "
+        f"+ ($kept -match 'Usage:') + ':' + $lostCode + ':' + ($lost -match 'Usage:'))\n"
+    )
+    with profile.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n{probe}{arm.exit_command}\n")
+    env = _clean_env(home, shell_abs)
+    env["TERM"] = "dumb"
+    transcript = matrix.pty_session([shell_abs, *arm.login], [], cwd=home, env=env, timeout=60)
+
+    # The pty echoes nothing of a profile, but match only a fully formed line anyway.
+    verdicts = [
+        line.strip()[len(_SEPARATOR_PROBE) :]
+        for line in transcript.splitlines()
+        if line.strip().startswith(_SEPARATOR_PROBE) and line.count(":") >= 5
+    ]
+    assert verdicts, f"pwsh: the probe never printed its verdict\nsession output:\n{transcript}"
+    kind, kept_code, kept_usage, lost_code, lost_usage = verdicts[-1].split(":")
+    assert kind == "Function", f"pwsh: `ocx` must resolve to the wrapper function, got {kind!r}\n{transcript}"
+    assert (lost_code, lost_usage) == ("0", "True"), (
+        f"pwsh: without `--`, ocx must read `-h` as its own help flag — the red state this test "
+        f"distinguishes from; got exit {lost_code}, usage printed {lost_usage}\n{transcript}"
+    )
+    assert kept_usage == "False" and kept_code != "0", (
+        f"pwsh: the wrapper dropped `--`, so ocx printed its own usage instead of resolving the "
+        f"package; got exit {kept_code}, usage printed {kept_usage}\n{transcript}"
+    )
+
+
 # Markers the elvish prompt-hook session prints. Distinctive so they survive the
 # terminal-init escapes an interactive pty emits around them.
 _ELVISH_FIRE_PROBE = "OCX_ELVISH_FIRES:"

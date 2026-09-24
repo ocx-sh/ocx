@@ -913,12 +913,58 @@ fn power_shell_wrapper(binary: &str) -> String {
     // lives in a `finally` — on the throwing path there is no statement after
     // the call to reach — and why the reconcile's own `$LASTEXITCODE` is
     // discarded in favour of the captured one either way.
+    //
+    // ocx#524: the parameter binder claims the first bare `--` of a *function*
+    // call as its own end-of-parameters token and drops it before `$args` is
+    // populated — `$args`, `ValueFromRemainingArguments` and `[CmdletBinding()]`
+    // all lose it alike, while a native call keeps it. So `ocx exec -- tool -h`
+    // reached ocx as `exec tool -h`. The source line still holds the separator:
+    // parse `$MyInvocation.Line`, find this call by its column (so a nested or
+    // `;`-joined `ocx` on the same line is never mistaken for it), and count the
+    // elements *before* the first bare `--` to find its slot — a colon-form
+    // parameter (`-x:1`) is two `$args` entries, anything else one. Counting
+    // from the front is what makes a continued line safe: the lines `.Line`
+    // does not carry all sit after the separator. Two cases stay unrepaired
+    // rather than guessed at: a separator on a continuation line (`.Line` never
+    // sees it) and a splat before it (its width is unknowable from source).
+    // `.Line` and not `.Statement`, which Windows PowerShell 5.1 lacks. The
+    // `catch` is deliberate: any failure leaves `$args` exactly as the binder
+    // produced it, which is the pre-repair behaviour, never worse. Prior art:
+    // jdx/mise#13202; the binder behaviour is PowerShell/PowerShell#21208.
+    // Language constructs and .NET calls only — no cmdlet a user function
+    // could shadow, on the same rule as C-045.
     format!(
         "function global:ocx {{\n\
          $__ocxSt = $null\n\
          $__ocxOk = $true\n\
+         $__ocxArgs = [System.Collections.Generic.List[object]]::new()\n\
+         foreach ($__ocxArg in $args) {{ $__ocxArgs.Add($__ocxArg) }}\n\
          try {{\n\
-         & '{quoted}' @args\n\
+         if ($MyInvocation.Line -match '(^|\\s)--(\\s|$)') {{\n\
+         $__ocxColumn = $MyInvocation.OffsetInLine\n\
+         $__ocxCommand = [System.Management.Automation.Language.Parser]::ParseInput($MyInvocation.Line, [ref]$null, [ref]$null).Find({{ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.Extent.StartLineNumber -eq 1 -and $node.Extent.StartColumnNumber -eq $__ocxColumn }}, $true)\n\
+         if ($null -ne $__ocxCommand) {{\n\
+         $__ocxAt = 0\n\
+         $__ocxElements = $__ocxCommand.CommandElements\n\
+         for ($__ocxIndex = 1; $__ocxIndex -lt $__ocxElements.Count; $__ocxIndex++) {{\n\
+         $__ocxElement = $__ocxElements[$__ocxIndex]\n\
+         if ($__ocxElement -is [System.Management.Automation.Language.CommandParameterAst]) {{\n\
+         if ($__ocxElement.Extent.Text -eq '--') {{\n\
+         if ($__ocxAt -le $__ocxArgs.Count) {{ $__ocxArgs.Insert($__ocxAt, '--') }}\n\
+         break\n\
+         }}\n\
+         if ($null -ne $__ocxElement.Argument) {{ $__ocxAt += 2 }} else {{ $__ocxAt += 1 }}\n\
+         }} elseif ($__ocxElement -is [System.Management.Automation.Language.VariableExpressionAst] -and $__ocxElement.Splatted) {{\n\
+         break\n\
+         }} else {{\n\
+         $__ocxAt += 1\n\
+         }}\n\
+         }}\n\
+         }}\n\
+         }}\n\
+         }} catch {{ }}\n\
+         try {{\n\
+         & '{quoted}' @__ocxArgs\n\
          $__ocxOk = $?\n\
          $__ocxSt = $LASTEXITCODE\n\
          }} finally {{\n\
@@ -1421,8 +1467,34 @@ mod tests {
                 "function global:ocx {\n\
                  $__ocxSt = $null\n\
                  $__ocxOk = $true\n\
+                 $__ocxArgs = [System.Collections.Generic.List[object]]::new()\n\
+                 foreach ($__ocxArg in $args) { $__ocxArgs.Add($__ocxArg) }\n\
                  try {\n\
-                 & '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' @args\n\
+                 if ($MyInvocation.Line -match '(^|\\s)--(\\s|$)') {\n\
+                 $__ocxColumn = $MyInvocation.OffsetInLine\n\
+                 $__ocxCommand = [System.Management.Automation.Language.Parser]::ParseInput($MyInvocation.Line, [ref]$null, [ref]$null).Find({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.Extent.StartLineNumber -eq 1 -and $node.Extent.StartColumnNumber -eq $__ocxColumn }, $true)\n\
+                 if ($null -ne $__ocxCommand) {\n\
+                 $__ocxAt = 0\n\
+                 $__ocxElements = $__ocxCommand.CommandElements\n\
+                 for ($__ocxIndex = 1; $__ocxIndex -lt $__ocxElements.Count; $__ocxIndex++) {\n\
+                 $__ocxElement = $__ocxElements[$__ocxIndex]\n\
+                 if ($__ocxElement -is [System.Management.Automation.Language.CommandParameterAst]) {\n\
+                 if ($__ocxElement.Extent.Text -eq '--') {\n\
+                 if ($__ocxAt -le $__ocxArgs.Count) { $__ocxArgs.Insert($__ocxAt, '--') }\n\
+                 break\n\
+                 }\n\
+                 if ($null -ne $__ocxElement.Argument) { $__ocxAt += 2 } else { $__ocxAt += 1 }\n\
+                 } elseif ($__ocxElement -is [System.Management.Automation.Language.VariableExpressionAst] -and $__ocxElement.Splatted) {\n\
+                 break\n\
+                 } else {\n\
+                 $__ocxAt += 1\n\
+                 }\n\
+                 }\n\
+                 }\n\
+                 }\n\
+                 } catch { }\n\
+                 try {\n\
+                 & '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' @__ocxArgs\n\
                  $__ocxOk = $?\n\
                  $__ocxSt = $LASTEXITCODE\n\
                  } finally {\n\
@@ -1956,7 +2028,7 @@ mod tests {
             // `$LASTEXITCODE` is untouched by assignments, so it can follow.
             (
                 Shell::PowerShell,
-                format!("& '{path}' @args\n"),
+                format!("& '{path}' @__ocxArgs\n"),
                 "$__ocxOk = $?\n$__ocxSt = $LASTEXITCODE",
             ),
         ] {
@@ -1995,7 +2067,7 @@ mod tests {
             "pwsh must replay `$?` as its final statement, or `ocx nope; if ($?)` reads true: {pwsh}"
         );
         assert!(
-            pwsh.contains("& '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' @args\n$__ocxOk = $?"),
+            pwsh.contains("& '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' @__ocxArgs\n$__ocxOk = $?"),
             "pwsh must capture `$?` immediately after the wrapped call: {pwsh}"
         );
     }
@@ -2433,6 +2505,31 @@ mod tests {
         let pwsh = wrapper(Shell::PowerShell, &windows).unwrap_or_default();
         assert!(pwsh.contains(r"'C:\Users\u\ocx.exe'"), "{pwsh}");
     }
+}
+
+/// Is an absent `name` allowed to skip, or does the environment promise it?
+///
+/// `__OCX_TESTING_REQUIRE_LIVE_SHELLS` (`1` / `all`, or a comma-separated
+/// list of interpreter binaries) is the same seam `shell.rs`'s live tests
+/// read, spelled again here because that module's copy lives inside its own
+/// private `#[cfg(test)]` mod. At file level so both live modules below — one
+/// `unix`-only, one not — share it. Off by default: no `cargo nextest` leg
+/// installs elvish, and a hard default would red every runner rather than the
+/// emit. Set it where the interpreter does exist and a skip becomes a
+/// failure — because a skip and a pass otherwise carry the same evidence.
+#[cfg(test)]
+fn absence_may_skip(name: &str) -> bool {
+    let Ok(raw) = std::env::var("__OCX_TESTING_REQUIRE_LIVE_SHELLS") else {
+        return true;
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return true;
+    }
+    if raw == "1" || raw.eq_ignore_ascii_case("all") {
+        return false;
+    }
+    !raw.split(',').any(|want| want.trim() == name)
 }
 
 /// Live-shell coverage for what only a real shell can prove about an emitted
@@ -3029,29 +3126,6 @@ mod live_shell_tests {
         );
     }
 
-    /// Is an absent `name` allowed to skip, or does the environment promise it?
-    ///
-    /// `__OCX_TESTING_REQUIRE_LIVE_SHELLS` (`1` / `all`, or a comma-separated
-    /// list of interpreter binaries) is the same seam `shell.rs`'s live tests
-    /// read, spelled again here because that module's copy lives inside its own
-    /// private `#[cfg(test)]` mod. Off by default: no `cargo nextest` leg
-    /// installs elvish, and a hard default would red every runner rather than the
-    /// emit. Set it where the interpreter does exist and a skip becomes a
-    /// failure — because a skip and a pass otherwise carry the same evidence.
-    fn absence_may_skip(name: &str) -> bool {
-        let Ok(raw) = std::env::var("__OCX_TESTING_REQUIRE_LIVE_SHELLS") else {
-            return true;
-        };
-        let raw = raw.trim();
-        if raw.is_empty() {
-            return true;
-        }
-        if raw == "1" || raw.eq_ignore_ascii_case("all") {
-            return false;
-        }
-        !raw.split(',').any(|want| want.trim() == name)
-    }
-
     /// The elvish probe ignores a user hook whose *body mentions* the marker.
     ///
     /// This is the shipped bug, in a real elvish. The guard used to be
@@ -3121,6 +3195,226 @@ mod live_shell_tests {
                 "zsh" => Shell::Zsh,
                 "fish" => Shell::Fish,
                 other => panic!("unmapped live interpreter {other}"),
+            }
+        }
+    }
+}
+
+/// The PowerShell wrapper against a real interpreter, judged by the one oracle
+/// that cannot drift: the same line typed at a native program directly.
+///
+/// PowerShell's parameter binder claims the first bare `--` of a *function*
+/// call as its own end-of-parameters token and drops it before `$args` exists
+/// (ocx#524); a native call keeps it. So every case runs twice in one script —
+/// once through the emitted wrapper, once as `& <echo>` — and the two argv
+/// dumps must agree. A case the wrapper deliberately does not repair names its
+/// oracle line explicitly, so a change on that side is a red too, not a
+/// silent improvement.
+///
+/// Not `unix`-gated, unlike the module above: the argv echo is a `.cmd` on
+/// Windows, and there both `pwsh` and the built-in Windows PowerShell 5.1 run.
+/// 5.1 is the interpreter this repair exists for as much as 7.x — it has no
+/// `$MyInvocation.Statement` — and the Windows nextest leg is the only place
+/// it runs.
+#[cfg(test)]
+mod live_power_shell_wrapper_tests {
+    use std::process::Command;
+
+    use super::*;
+
+    /// `(name, wrapper line, oracle line)`. `{call}` expands to `ocx` in the
+    /// wrapper line and to `& $echo` in the oracle line; `{name}` to `ocx` and
+    /// `$echo`, for the one case that spells the call operator itself.
+    const CASES: &[(&str, &str, &str)] = &[
+        ("plain", "{call} pkg -- grant -h", "{call} pkg -- grant -h"),
+        ("no separator", "{call} pkg grant -h", "{call} pkg grant -h"),
+        (
+            "quoted separator",
+            "{call} pkg '--' grant -h",
+            "{call} pkg '--' grant -h",
+        ),
+        (
+            "second separator",
+            "{call} -g pkg -- grant -- -h",
+            "{call} -g pkg -- grant -- -h",
+        ),
+        ("leading separator", "{call} -- x", "{call} -- x"),
+        ("trailing separator", "{call} x --", "{call} x --"),
+        (
+            "variables",
+            "{call} pkg -- $v $arr 'a b' -h",
+            "{call} pkg -- $v $arr 'a b' -h",
+        ),
+        ("splat after", "{call} pkg -- @h -h", "{call} pkg -- @h -h"),
+        (
+            "pipeline",
+            "'in' | {call} pkg -- grant -h",
+            "'in' | {call} pkg -- grant -h",
+        ),
+        (
+            "two statements",
+            "{call} a b -- c; {call} d -- e",
+            "{call} a b -- c; {call} d -- e",
+        ),
+        (
+            "subexpression",
+            "{call} pkg -- $(1+1) tail",
+            "{call} pkg -- $(1+1) tail",
+        ),
+        (
+            "nested call",
+            "{call} pkg -- $({call} inner -- deep) tail",
+            "{call} pkg -- $({call} inner -- deep) tail",
+        ),
+        ("call operator", "& {name} pkg -- grant", "& {name} pkg -- grant"),
+        (
+            "continued line",
+            "{call} pkg -- grant `\n  -h",
+            "{call} pkg -- grant `\n  -h",
+        ),
+        // A colon-form parameter before the separator is two `$args` entries;
+        // counted as one, the separator lands a slot early. The oracle spells
+        // the pair the way the wrapper forwards it, since `-x:1` and `-x: 1`
+        // are one native argument and two respectively.
+        (
+            "colon parameter",
+            "{call} -x:1 pkg -- grant",
+            "{call} -x: 1 pkg -- grant",
+        ),
+        // With no separator at all the list copy still matters: `@args` splats a
+        // colon pair back as a named parameter, which a native call drops on
+        // pwsh 7 (`-x:1 b` arrived as `1 b`); the copied list forwards both.
+        ("colon parameter, no separator", "{call} -x:1 b", "{call} -x: 1 b"),
+        // Not repaired, by design: the separator sits on a continuation line
+        // `$MyInvocation.Line` does not carry, or behind a splat whose width
+        // the line cannot tell. Both keep the pre-repair argv.
+        (
+            "separator on continuation",
+            "{call} pkg `\n  -- grant",
+            "{call} pkg `\n  grant",
+        ),
+        ("splat before", "{call} @h pkg -- grant", "{call} @h pkg grant"),
+    ];
+
+    fn expand(line: &str, call: &str, name: &str) -> String {
+        line.replace("{call}", call).replace("{name}", name)
+    }
+
+    /// A native program that prints its argv, one bracketed item each.
+    fn argv_echo(dir: &Path) -> PathBuf {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let path = dir.join("argv-echo");
+            std::fs::write(
+                &path,
+                "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done\necho\n",
+            )
+            .expect("write the argv echo");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod the argv echo");
+            path
+        }
+        #[cfg(windows)]
+        {
+            // `%*` is the raw argument tail PowerShell built, which is exactly
+            // the thing both sides of the comparison produce.
+            let path = dir.join("argv-echo.cmd");
+            std::fs::write(&path, "@echo [%*]\r\n").expect("write the argv echo");
+            path
+        }
+    }
+
+    /// Run `script` as a file under `interpreter`, or `None` when it is absent.
+    ///
+    /// A file rather than `-Command`, because the repair reads
+    /// `$MyInvocation.Line` and a file is what a profile or a user script is.
+    fn run(interpreter: &str, dir: &Path, script: &str) -> Option<String> {
+        let file = dir.join(format!("{interpreter}-cases.ps1"));
+        std::fs::write(&file, script).expect("write the case script");
+        let mut command = Command::new(interpreter);
+        command.args(["-NoProfile", "-NonInteractive"]);
+        if cfg!(windows) {
+            command.args(["-ExecutionPolicy", "Bypass"]);
+        }
+        let output = match command.arg("-File").arg(&file).output() {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => panic!("failed to spawn {interpreter}: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "{interpreter} exited {} on:\n{script}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Some(String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"))
+    }
+
+    /// Split `@@ <label>` sections out of `stdout`.
+    fn sections(stdout: &str) -> std::collections::BTreeMap<String, String> {
+        let mut out = std::collections::BTreeMap::new();
+        let mut current: Option<(String, Vec<&str>)> = None;
+        for line in stdout.lines() {
+            if let Some(label) = line.strip_prefix("@@ ") {
+                if let Some((label, body)) = current.take() {
+                    out.insert(label, body.join("\n"));
+                }
+                current = Some((label.to_string(), Vec::new()));
+            } else if let Some((_, body)) = current.as_mut() {
+                body.push(line.trim_end());
+            }
+        }
+        if let Some((label, body)) = current {
+            out.insert(label, body.join("\n"));
+        }
+        out
+    }
+
+    #[test]
+    fn the_wrapper_forwards_the_argv_a_native_call_would_receive() {
+        let interpreters: &[&str] = if cfg!(windows) {
+            &["pwsh", "powershell"]
+        } else {
+            &["pwsh"]
+        };
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let echo = argv_echo(dir.path());
+        let wrapper = wrapper(Shell::PowerShell, &echo).expect("pwsh has a wrapper");
+
+        let mut script = format!(
+            "{wrapper}\n$echo = '{echo}'\n$v = 'VAL'; $arr = @('p', 'q'); $h = @('s1', 's2')\n",
+            echo = single_quoted_doubled(&echo.to_string_lossy())
+        );
+        for (name, wrapped, oracle) in CASES {
+            script.push_str(&format!(
+                "Write-Output '@@ {name} wrapped'\n{}\n",
+                expand(wrapped, "ocx", "ocx")
+            ));
+            script.push_str(&format!(
+                "Write-Output '@@ {name} oracle'\n{}\n",
+                expand(oracle, "& $echo", "$echo")
+            ));
+        }
+
+        for interpreter in interpreters {
+            let Some(stdout) = run(interpreter, dir.path(), &script) else {
+                assert!(
+                    absence_may_skip(interpreter),
+                    "{interpreter} is absent, so nothing about the separator repair was proven \
+                     (__OCX_TESTING_REQUIRE_LIVE_SHELLS names it); install it"
+                );
+                eprintln!("# ocx: UNPROVEN — {interpreter} is not installed, so this live arm asserted nothing");
+                continue;
+            };
+            let sections = sections(&stdout);
+            for (name, _, _) in CASES {
+                let wrapped = &sections[&format!("{name} wrapped")];
+                let oracle = &sections[&format!("{name} oracle")];
+                assert!(!oracle.is_empty(), "{interpreter}: `{name}` printed nothing natively");
+                assert_eq!(
+                    wrapped, oracle,
+                    "{interpreter}: `{name}` reached the program differently through the wrapper"
+                );
             }
         }
     }
