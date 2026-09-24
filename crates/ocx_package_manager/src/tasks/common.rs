@@ -1853,8 +1853,9 @@ mod tests {
         let manifest_pin = pin(&manifest_digest);
         let resolved = ResolvedChain {
             pinned: manifest_pin.clone(),
-            transport_pinned: ocx_oci::OciIdentifier::passthrough(manifest_pin.as_identifier())
-                .at_pin_of(&manifest_pin),
+            transport_pinned: Ok(
+                ocx_oci::OciIdentifier::passthrough(manifest_pin.as_identifier()).at_pin_of(&manifest_pin)
+            ),
             chain: vec![
                 chain_blob(&manifest_digest, ChainRole::Manifest),
                 chain_blob(&config_digest, ChainRole::Config),
@@ -2005,8 +2006,9 @@ mod tests {
         let manifest_pin = pin(&manifest_digest);
         let resolved = ResolvedChain {
             pinned: manifest_pin.clone(),
-            transport_pinned: ocx_oci::OciIdentifier::passthrough(manifest_pin.as_identifier())
-                .at_pin_of(&manifest_pin),
+            transport_pinned: Ok(
+                ocx_oci::OciIdentifier::passthrough(manifest_pin.as_identifier()).at_pin_of(&manifest_pin)
+            ),
             chain: vec![
                 chain_blob(&dispatch_digest, ChainRole::Index),
                 chain_blob(&manifest_digest, ChainRole::Manifest),
@@ -2192,7 +2194,7 @@ mod tests {
         .unwrap();
         let resolved = ResolvedChain {
             pinned: pinned.clone(),
-            transport_pinned: ocx_oci::OciIdentifier::passthrough(pinned.as_identifier()).at_pin_of(&pinned),
+            transport_pinned: Ok(ocx_oci::OciIdentifier::passthrough(pinned.as_identifier()).at_pin_of(&pinned)),
             chain: vec![ChainBlob {
                 identifier: pinned,
                 role: ChainRole::Index,
@@ -2273,7 +2275,7 @@ mod tests {
         .unwrap();
         let resolved = ResolvedChain {
             pinned: pinned.clone(),
-            transport_pinned: ocx_oci::OciIdentifier::passthrough(pinned.as_identifier()).at_pin_of(&pinned),
+            transport_pinned: Ok(ocx_oci::OciIdentifier::passthrough(pinned.as_identifier()).at_pin_of(&pinned)),
             chain: vec![ChainBlob {
                 identifier: pinned.clone(),
                 role: ChainRole::Manifest,

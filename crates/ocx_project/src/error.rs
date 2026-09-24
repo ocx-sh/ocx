@@ -640,12 +640,13 @@ pub enum ProjectErrorKind {
     /// resolver does not retry. `policy` is the lowercase flag label
     /// (`"offline"` / `"frozen"`). Populate the local index (e.g.
     /// `ocx index update`) or loosen the flag.
-    #[error(
-        "{policy} mode refused to resolve unpinned reference '{identifier}'; run `ocx index update` or pin a digest"
-    )]
+    #[error("{}", .block.message(&.identifier.to_string(), .policy))]
     PolicyBlocked {
         identifier: Box<PackageRef>,
         policy: &'static str,
+        /// What the index could not look up, carried over from
+        /// [`ocx_index::error::Error::PolicyResolutionBlocked`].
+        block: ocx_index::error::PolicyBlock,
     },
 }
 

@@ -490,7 +490,11 @@ pub struct ResolvedChain {
     /// source it is the registry the root's `repository` pointer names, so
     /// layer blobs are pulled from there rather than the logical `ocx.sh` host.
     /// Transport-only (Decision C2) — never persisted or locked.
-    pub transport_pinned: ocx_oci::PinnedOciIdentifier,
+    ///
+    /// [`NoTransport`] when there is no location to read from; it says why,
+    /// and so what a layer missing from the store is refused with. Never a
+    /// dial of the name as typed (ocx#504).
+    pub transport_pinned: Result<ocx_oci::PinnedOciIdentifier, NoTransport>,
     /// Walk-order chain blobs the resolver touched, backed by on-disk blob
     /// files (config blob materialized later by the pull pipeline).
     pub chain: Vec<ChainBlob>,
@@ -502,6 +506,37 @@ pub struct ResolvedChain {
     /// multi-platform tag. Threaded into `InstallInfo` so the candidate-symlink
     /// gate can suppress foreign-platform installs (issue #179).
     pub platform: ocx_oci::Platform,
+}
+
+/// Why a [`ResolvedChain`] has no location to read layers from.
+#[derive(Debug, Clone)]
+pub enum NoTransport {
+    /// A local materialization (`pull_local`): nothing was resolved through
+    /// an index, and every layer was staged before the chain was built.
+    LocalMaterialization,
+    /// A no-resolve policy (`--offline`) found a name in a registry an index
+    /// owns with no locally recorded root, so nothing can say where its
+    /// content lives. Deferred from routing to the layer that would need the
+    /// dial: a chain the store already holds materializes without one.
+    UnrecordedLocation { identifier: String, policy: &'static str },
+}
+
+impl NoTransport {
+    /// The refusal for a layer of `pinned` absent from the layer store.
+    pub fn missing_layer(&self, pinned: &ocx_oci::PinnedPackageRef, layer_digest: &ocx_oci::Digest) -> crate::Error {
+        match self {
+            Self::LocalMaterialization => crate::Error::LayerNotStaged {
+                identifier: pinned.to_string(),
+                digest: layer_digest.to_string(),
+            },
+            Self::UnrecordedLocation { identifier, policy } => ocx_index::error::Error::PolicyResolutionBlocked {
+                identifier: identifier.clone(),
+                policy,
+                block: ocx_index::error::PolicyBlock::UnrecordedLocation,
+            }
+            .into(),
+        }
+    }
 }
 
 impl ResolvedChain {
@@ -543,15 +578,24 @@ pub struct AdmittedClaims {
 /// `verify`, `sign`, `attest`) must leave no trace, and gating the write by
 /// where it is called from is stronger than gating it by a policy each caller
 /// has to set — hence [`ocx_index::Index::route_to_materialize`], not [`ocx_index::Index::route`].
+///
+/// An offline refusal for an unrecorded location is carried as
+/// [`NoTransport::UnrecordedLocation`] rather than raised: a chain whose
+/// layers are all in the store needs no location, and one that is missing a
+/// layer raises the same refusal there.
 async fn resolve_transport_pinned(
     index: &ocx_index::Index,
     pinned: &ocx_oci::PinnedPackageRef,
-) -> Result<ocx_oci::PinnedOciIdentifier, PackageErrorKind> {
-    let routed = index
-        .route_to_materialize(pinned.as_identifier())
-        .await
-        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
-    Ok(routed.at_pin_of(pinned))
+) -> Result<Result<ocx_oci::PinnedOciIdentifier, NoTransport>, PackageErrorKind> {
+    match index.route_to_materialize(pinned.as_identifier()).await {
+        Ok(routed) => Ok(Ok(routed.at_pin_of(pinned))),
+        Err(ocx_index::error::Error::PolicyResolutionBlocked {
+            identifier,
+            policy,
+            block: ocx_index::error::PolicyBlock::UnrecordedLocation,
+        }) => Ok(Err(NoTransport::UnrecordedLocation { identifier, policy })),
+        Err(error) => Err(PackageErrorKind::Internal(error.into())),
+    }
 }
 
 impl PackageManager {

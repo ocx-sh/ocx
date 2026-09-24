@@ -519,6 +519,7 @@ impl ChainedIndex {
             return Err(super::error::Error::PolicyResolutionBlocked {
                 identifier: identifier.to_string(),
                 policy: self.mode.policy_label(),
+                block: super::error::PolicyBlock::UnpinnedTag,
             });
         }
         Ok(())
@@ -1607,6 +1608,21 @@ impl index_impl::IndexImpl for ChainedIndex {
         self.sources.iter().any(|source| source.serves_registry(registry))
     }
 
+    /// An index owns the registry by config, but no source for it is in the
+    /// chain — only under `--offline`, which builds none — so there is no one
+    /// to ask where the name lives: refused under the chain's policy, the way
+    /// an offline tag miss is. Never a pass-through to the host the name spells.
+    fn refuse_unrouted(&self, identifier: &ocx_oci::PackageRef) -> Option<super::error::Error> {
+        let registry = identifier.registry();
+        (self.local_index.is_index_namespace(registry) && !self.serves_registry(registry)).then(|| {
+            super::error::Error::PolicyResolutionBlocked {
+                identifier: identifier.without_digest().without_tag().to_string(),
+                policy: self.mode.policy_label(),
+                block: super::error::PolicyBlock::UnrecordedLocation,
+            }
+        })
+    }
+
     fn authoritative_index_base_url(&self, identifier: &ocx_oci::PackageRef) -> Option<&str> {
         self.sources
             .iter()
@@ -2265,7 +2281,7 @@ mod chain_refs_tests {
     /// the expected lowercase policy label.
     fn assert_policy_blocked(err: &crate::error::Error, expected_policy: &str) {
         match err {
-            super::super::error::Error::PolicyResolutionBlocked { policy, identifier } => {
+            super::super::error::Error::PolicyResolutionBlocked { policy, identifier, .. } => {
                 assert_eq!(
                     *policy, expected_policy,
                     "policy label mismatch (identifier={identifier})"

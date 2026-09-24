@@ -170,6 +170,14 @@ pub enum Error {
     /// or capacity exceeded).
     #[error("singleflight coordination failed")]
     Singleflight(#[from] ocx_util::singleflight::Error),
+    /// A local materialization (`pull_local`) found a layer absent from the
+    /// layer store. It has no transport by design — the package was never
+    /// resolved through an index, so there is no location it may be read
+    /// from, and dialling the name as typed is what ocx#504 forbids.
+    #[error(
+        "layer {digest} of '{identifier}' is not staged locally, and a local materialization has no registry to fetch it from"
+    )]
+    LayerNotStaged { identifier: String, digest: String },
     /// An OCI client operation failed.
     #[error(transparent)]
     OciClient(#[from] ocx_oci::client::error::ClientError),

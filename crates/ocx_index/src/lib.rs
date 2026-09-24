@@ -563,12 +563,15 @@ impl Index {
     /// there, so its miss is [`error::Error::NotInIndex`], never a read of the
     /// host the name happens to spell.
     fn unrouted(&self, identifier: &ocx_oci::PackageRef) -> Result<ocx_oci::OciIdentifier> {
-        match self.authoritative_index_base_url(identifier) {
-            Some(base_url) => Err(error::Error::NotInIndex {
+        if let Some(base_url) = self.authoritative_index_base_url(identifier) {
+            return Err(error::Error::NotInIndex {
                 identifier: identifier.to_string(),
                 namespace: identifier.registry().to_string(),
                 base_url: base_url.to_string(),
-            }),
+            });
+        }
+        match self.inner.refuse_unrouted(identifier) {
+            Some(refusal) => Err(refusal),
             None => Ok(ocx_oci::OciIdentifier::passthrough(identifier)),
         }
     }
@@ -2200,6 +2203,56 @@ mod tests {
             .await
             .expect("an unrewritten identifier routes to itself");
         assert_eq!(routed, ocx_oci::OciIdentifier::passthrough(&logical));
+    }
+
+    /// `--offline` builds no sources, so nothing in the chain can claim a
+    /// registry config names an index for. Ownership comes from config
+    /// instead: a digest-pinned name there with no committed root is refused
+    /// under the offline policy — never passed through to the host it spells
+    /// (`https://ocx.sh/v2`). A registry config names no index for passes
+    /// through exactly as before.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn offline_routing_refuses_an_index_owned_name_it_holds_no_root_for() {
+        let directory = tempfile::tempdir().unwrap();
+        let offline = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: crate::IndexStore::new(directory.path().join("index")),
+            })
+            .with_index_namespaces(std::collections::HashSet::from(["example.com".to_string()])),
+            vec![],
+            ChainMode::Offline,
+        )
+        .with_proxy_rules(ocx_oci::ssrf::ProxyRules::direct());
+
+        let error = offline
+            .route_for_dial(&versioned_logical_id())
+            .await
+            .expect_err("an index-owned name must not route to its logical host offline");
+        assert!(
+            matches!(
+                &error,
+                error::Error::PolicyResolutionBlocked {
+                    identifier,
+                    policy: "offline",
+                    block: error::PolicyBlock::UnrecordedLocation,
+                } if identifier == "example.com/kitware/cmake"
+            ),
+            "got: {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "'example.com/kitware/cmake' is served by an index and has no locally recorded location, \
+             which offline mode cannot look up; run `ocx index update example.com/kitware/cmake` once online",
+            "the refusal says what happened, not that a reference was unpinned"
+        );
+
+        let registry_backed = PackageRef::new_registry("kitware/cmake", "registry.example.com")
+            .clone_with_digest(Digest::Sha256("a".repeat(64)));
+        let routed = offline
+            .route_for_dial(&registry_backed)
+            .await
+            .expect("a registry no index owns routes to itself");
+        assert_eq!(routed, ocx_oci::OciIdentifier::passthrough(&registry_backed));
     }
 
     /// A name in a registry an index serves authoritatively, which that index

@@ -313,6 +313,7 @@ mod tests {
         let index = DependencyPinningError::Index(ocx_index::error::Error::PolicyResolutionBlocked {
             identifier: "pkg:1.0.0".to_string(),
             policy: "offline",
+            block: ocx_index::error::PolicyBlock::UnpinnedTag,
         });
         assert_eq!(
             index.classify(),
@@ -361,6 +362,7 @@ mod tests {
                 ocx_index::error::Error::PolicyResolutionBlocked {
                     identifier: "pkg:1.0.0".to_string(),
                     policy: "offline",
+                    block: ocx_index::error::PolicyBlock::UnpinnedTag,
                 }
             ))
             .classify(),

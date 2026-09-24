@@ -569,12 +569,13 @@ async fn fan_out_candidates(
 /// no-resolve policy refusal during the candidate fan-out is not laundered
 /// into a generic registry error.
 fn candidate_fetch_error(err: crate::Error, identifier: PackageRef) -> super::Error {
-    if let Some(policy) = policy_block_label(&err) {
+    if let Some((policy, block)) = policy_block_label(&err) {
         return ProjectError::new(
             PathBuf::new(),
             ProjectErrorKind::PolicyBlocked {
                 identifier: Box::new(identifier),
                 policy,
+                block,
             },
         )
         .into();
@@ -699,12 +700,13 @@ async fn retry_fetch(
                 // and routed to its own `ProjectErrorKind` so it classifies as
                 // PolicyBlocked (81) rather than falling through to
                 // `ClientFailure::Other` → RegistryUnreachable (69).
-                if let Some(policy) = policy_block_label(&err) {
+                if let Some((policy, block)) = policy_block_label(&err) {
                     return Err(ProjectError::new(
                         PathBuf::new(),
                         ProjectErrorKind::PolicyBlocked {
                             identifier: Box::new(identifier),
                             policy,
+                            block,
                         },
                     )
                     .into());
@@ -797,9 +799,9 @@ enum ClientFailure {
 /// immediately without consuming the retry budget.
 ///
 /// [`PolicyResolutionBlocked`]: ocx_index::error::Error::PolicyResolutionBlocked
-fn policy_block_label(err: &crate::Error) -> Option<&'static str> {
-    if let crate::Error::OciIndex(ocx_index::error::Error::PolicyResolutionBlocked { policy, .. }) = err {
-        return Some(policy);
+fn policy_block_label(err: &crate::Error) -> Option<(&'static str, ocx_index::error::PolicyBlock)> {
+    if let crate::Error::OciIndex(ocx_index::error::Error::PolicyResolutionBlocked { policy, block, .. }) = err {
+        return Some((policy, *block));
     }
     None
 }
@@ -1908,6 +1910,7 @@ mod tests {
             let index_err = ocx_index::error::Error::PolicyResolutionBlocked {
                 identifier: format!("{TEST_REGISTRY}/{TOOL_REPO}:{TOOL_TAG}"),
                 policy,
+                block: ocx_index::error::PolicyBlock::UnpinnedTag,
             };
             let mock = MockIndex::with_script(vec![Err(index_err)]);
             let (index, counter) = index_from_mock(&mock);

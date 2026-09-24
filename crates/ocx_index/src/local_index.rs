@@ -135,6 +135,12 @@ pub struct LocalIndex {
     /// Empty for constructions that thread no config (tests, `IndexSync`),
     /// which then treat every dial as HTTPS.
     insecure_hosts: Vec<String>,
+    /// The registries an index owns (`[registries."<ns>"] index`), read from
+    /// config rather than from the chain's sources: `--offline` builds no
+    /// sources, and a name in one of these registries still must never be
+    /// read at the host it spells. Empty for constructions that thread no
+    /// config (tests, `IndexSync`).
+    index_namespaces: HashSet<String>,
 }
 
 impl LocalIndex {
@@ -145,7 +151,21 @@ impl LocalIndex {
             gated_sources: Arc::new(RwLock::new(HashSet::new())),
             trusted_hosts: std::collections::HashMap::new(),
             insecure_hosts: Vec::new(),
+            index_namespaces: HashSet::new(),
         }
+    }
+
+    /// Sets the registries an index owns — see the field doc. Consuming
+    /// builder for the same reason as [`Self::with_trusted_hosts`].
+    pub fn with_index_namespaces(mut self, index_namespaces: HashSet<String>) -> Self {
+        self.index_namespaces = index_namespaces;
+        self
+    }
+
+    /// Whether config names an index as the owner of `registry`, whatever
+    /// the chain mode.
+    pub fn is_index_namespace(&self, registry: &str) -> bool {
+        self.index_namespaces.contains(registry)
     }
 
     /// Sets the yanked opt-in (`OCX_ALLOW_YANKED`) for offline status surfacing

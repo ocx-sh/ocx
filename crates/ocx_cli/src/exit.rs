@@ -1835,6 +1835,18 @@ mod tests {
             pattern: "PublishGateError::Routing { .. }",
             value: "None",
         },
+        // #504 — a local materialization carries no transport, so a layer
+        // missing from the store is refused rather than dialled at the name
+        // as typed. Unreachable while every layer is staged first: an internal
+        // failure, not a contract a wrapper branches on.
+        NewArm {
+            target: "PackageManagerError",
+            trait_name: "ClassifyExitCode",
+            func: "classify",
+            match_id: 0,
+            pattern: "Self::LayerNotStaged { .. }",
+            value: "Some(ExitCode::Failure)",
+        },
     ];
 
     /// A baseline arm whose **declaring type was deleted**, named with what
