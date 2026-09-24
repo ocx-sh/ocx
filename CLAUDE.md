@@ -170,7 +170,7 @@ On user feedback or corrections, evaluate if insight should persist as AI config
 
 Commits: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). No `Co-Authored-By` trailers. `chore:` for AI settings/CLAUDE.md/tooling (no changelog).
 
-Dev cycle: `task checkpoint` (amends single "Checkpoint" commit). Landing: `/hex-finalize` (clean → conventional commits → fast-forward onto main). Full → [workflow-git.md](./.claude/rules/workflow-git.md).
+Dev cycle: `task checkpoint` (amends single "Checkpoint" commit). **Before finalize, a conventional commit does not need the full `task verify`:** run the checks the change needs, then `task verify:mark` (the allowed escape hatch — name the deferral in the commit body). `verify:scoped` escalates to the full run on any taskfile, BUILD/bzl, `scripts/**` or workflow edit; that is the case the hatch is for. The full `task verify` runs once, at finalize. Landing: `/hex-finalize` (clean → conventional commits → fast-forward onto main). Full → [workflow-git.md](./.claude/rules/workflow-git.md).
 
 Planning flow: ADR → Design Spec → Plan → Implementation. Artifacts → `./.claude/artifacts/`; templates → `./.claude/templates/artifacts/`. Filename patterns: `adr_<topic>.md`, `system_design_<comp>.md`, `design_spec_<comp>.md`, `plan_<task>.md`, `security_audit_<date>.md`.
 
