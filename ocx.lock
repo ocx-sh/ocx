@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:4f41942db387352254dc8fcd446db5c6a8348c42a8f41da3b54b87e178319e29"
+declaration_hash = "sha256:8eac3cb932d7fa5e9bc2c07168ea5b1ebe0c7c4a93bd2271b882b013f49397e3"
 generated_by = "ocx 0.6.1"
-generated_at = "2026-09-22T01:50:30Z"
+generated_at = "2026-09-24T23:27:34Z"
 
 [[tool]]
 name = "actionlint"
@@ -118,6 +118,20 @@ repository = "ocx.sh/prek/prek"
 "linux/arm64" = "sha256:477b00791b064c90d91b6a5d34ab9e94247aebaa96086cdf1288ea266c40c230"
 "windows/amd64" = "sha256:660152984a2d4d0c53bf5a3329431984b44ad22152abf2ceacd1e57c7fd6309e"
 "windows/arm64" = "sha256:676055622702309a72c67bd03db868834f6d94077f5bf3752f45475b27647992"
+
+[[tool]]
+name = "python"
+group = "default"
+repository = "ocx.sh/astral-sh/python-build-standalone"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:7a552d5155f3d3ad80f25b787d5723adcfe5da738480c2256a4a5875df3c795c"
+"darwin/arm64" = "sha256:ad31f2c39d3ac50bc32aa8ddb8a45839bb3dd3c0b9ef0e74d442993dcab4db70"
+"linux/amd64+libc.glibc" = "sha256:d0109a4b533dcfb6bda2caf35802adbf89ee551cfe9df2dd39b350a54ae091c8"
+"linux/amd64+libc.musl" = "sha256:0df17706520034e8b2669b2d96c40cde88541f0561a86f6b4c24451f86e0b185"
+"linux/arm64+libc.glibc" = "sha256:dea497f4f41b377204c1af2e16ef620f8f50a7a9b2d67f1fe7f9450941de4cf3"
+"linux/arm64+libc.musl" = "sha256:1f225bbcdb96f34df776cb5eda92967be4492619329122d24964f6e38bad8cdb"
+"windows/amd64" = "sha256:e7e47fef79f5825a33b99cd61864c9675cb67e9ef533edc3da4a14eeb2f9af0d"
 
 [[tool]]
 name = "shellcheck"
