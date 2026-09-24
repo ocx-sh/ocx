@@ -980,6 +980,7 @@ def taskfile_lock_paths(home: Path, text: str | None = None) -> dict[str, str]:
 RUNNER_BINARIES = {
     "OCX_COMMAND": "_main/probe/ocx",
     "OCX_SHIM_BINARY": "_main/probe/ocx-shim",
+    "OCX_TEST_PYTHON": "_main/probe/python3",
 }
 """Stand-ins for the rlocationpaths `test/bazel.bzl`'s `_BINARY_ENV` expands
 to, which the runner resolves under `$TEST_SRCDIR`; the runner reads only the
@@ -1008,6 +1009,11 @@ def _run_runner(runner: str, scratch: Path, *, flock: bool, opt_in: bool) -> tup
         (srcdir / binary).parent.mkdir(parents=True, exist_ok=True)
         (srcdir / binary).write_text("#!/bin/sh\n", encoding="utf-8")
         (srcdir / binary).chmod(0o755)
+    # The python runfile is a launcher the runner asks for `sys.executable`,
+    # so its stand-in has to run: it execs this interpreter.
+    (srcdir / RUNNER_BINARIES["OCX_TEST_PYTHON"]).write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8"
+    )
     (srcdir / "tools").mkdir()
     uv = srcdir / "tools" / "uv"
     uv.write_text(_FAKE_UV, encoding="utf-8")

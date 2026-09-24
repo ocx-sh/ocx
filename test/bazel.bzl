@@ -295,9 +295,16 @@ UNCACHED_MODULES = [
 # edit that leaves its bytes unchanged re-runs nothing.
 _OCX = "//crates/ocx_cli:ocx"
 _OCX_SHIM = "//crates/ocx_shim:ocx_shim"
+
+# The interpreter the suite runs on: the toolchain's CPython, pinned in
+# `ocx.lock` like `uv` is, so this lane and `task test:parallel` run the same
+# build. Left to itself uv takes the first compatible `python3` on `PATH` or
+# downloads its own, and the host and the CI image carry different ones.
+_PYTHON = "@tools//:python3"
 _BINARY_ENV = {
     "OCX_COMMAND": "$(rlocationpath %s)" % _OCX,
     "OCX_SHIM_BINARY": "$(rlocationpath %s)" % _OCX_SHIM,
+    "OCX_TEST_PYTHON": "$(rlocationpath %s)" % _PYTHON,
 }
 
 # The runner's slot-lock list (§ Concurrency). Spelled once; the tag guard
@@ -440,6 +447,20 @@ OCX_COMMAND="$TEST_SRCDIR/$OCX_COMMAND"
 [ -n "${OCX_SHIM_BINARY:-}" ] || fail "OCX_SHIM_BINARY is unset - the target's env names no ocx-shim"
 OCX_SHIM_BINARY="$TEST_SRCDIR/$OCX_SHIM_BINARY"
 [ -x "$OCX_SHIM_BINARY" ] || fail "no executable ocx-shim runfile at $OCX_SHIM_BINARY"
+
+# `uv` runs every step below on `@tools//:python3` (`_PYTHON`), and may not
+# fall back to a download: an interpreter this target does not declare would
+# be one no cache key names.
+[ -n "${OCX_TEST_PYTHON:-}" ] || fail "OCX_TEST_PYTHON is unset - the target's env names no interpreter"
+python_launcher="$TEST_SRCDIR/$OCX_TEST_PYTHON"
+[ -x "$python_launcher" ] || fail "no executable python runfile at $python_launcher (@tools//:python3)"
+# The runfile is a launcher script, not the interpreter. Handed to uv as is, it
+# never equals the interpreter `test/.venv` records, so every `uv run` rebuilt
+# the shared venv - under concurrent targets, out from under each other.
+UV_PYTHON=$("$python_launcher" -c 'import sys; print(sys.executable)') ||
+    fail "the python launcher at $python_launcher did not run"
+UV_PYTHON_DOWNLOADS=never
+export UV_PYTHON UV_PYTHON_DOWNLOADS
 
 # The `ocx_schema` binary, on the targets whose `env` names it
 # (`test/BUILD.bazel` `module_env`): Bazel builds it and hands its
@@ -696,6 +717,7 @@ def acceptance_suite(
                 ":suite_inputs",
                 _OCX,
                 _OCX_SHIM,
+                _PYTHON,
             ] + module_data.get(module, []),
             env = _BINARY_ENV | module_env.get(module, {}) | (
                 {_SLOTS_ENV: " ".join(sorted(module_slots[module]))} if module in module_slots else {}

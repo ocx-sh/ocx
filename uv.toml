@@ -1,0 +1,6 @@
+# uv prefers the Python on PATH over one it manages: the toolchain's CPython
+# (`python` in ocx.toml, on PATH through the shell hook, `setup-ocx` in CI, or
+# `ocx exec`), so host and CI run the same build. Downloads stay allowed for
+# the workflows that set up uv without the ocx toolchain. The Bazel acceptance
+# runner is stricter: it pins `@tools//:python3` and forbids a download.
+python-preference = "system"
