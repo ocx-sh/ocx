@@ -1098,3 +1098,37 @@ def test_describe_from_reads_an_index_served_source_at_its_physical_registry(
     )
     assert result.returncode == 0, result.stderr
     assert _target_has_tag(target_registry, target_repo, "__ocx.desc")
+
+
+def test_copy_carries_the_indexs_version_after_the_physical_tag_moved(
+    ocx: OcxRunner,
+    target_registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """The index resolves the version; only its immutable leaves are read at
+    the physical registry. The physical tag is re-pushed with new content
+    after the index committed `1.0.0`, and the copy still delivers the leaf
+    the index names — a copy reading the physical tag would promote the new
+    content under the logical version."""
+    logical, physical, index_host = _serve_through_index(ocx, unique_repo, tmp_path, index_server, "# Routed\n")
+    committed = fetch_platform_manifest_digest(ocx.registry, physical.repo, physical.tag)
+    # Every command now reads the config naming the plain-HTTP index host.
+    ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{target_registry},{index_host}"
+    moved_root = tmp_path / "moved"
+    moved_root.mkdir()
+    make_package(ocx, physical.repo, physical.tag, moved_root, index=False)
+    assert fetch_platform_manifest_digest(ocx.registry, physical.repo, physical.tag) != committed, (
+        "the fixture only discriminates once the physical tag has moved"
+    )
+
+    result = ocx.run(
+        "package",
+        "copy",
+        "--to",
+        target_registry,
+        f"{logical}:1.0.0",
+    )
+    assert result.returncode == 0, result.stderr
+    assert fetch_platform_manifest_digest(target_registry, f"{unique_repo}/tool", "1.0.0") == committed

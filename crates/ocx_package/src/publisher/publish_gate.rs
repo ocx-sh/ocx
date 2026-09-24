@@ -97,7 +97,7 @@ pub async fn verify_dependency_pins(
                             source,
                         })?;
                 if is_any_target {
-                    verify_any_pin_provenance(&client, &dependency_identifier, &routed.without_digest(), &pin).await?;
+                    verify_any_pin_provenance(&client, index, &dependency_identifier, &routed, &pin).await?;
                 }
                 // `route_for_dial` carries the digest; re-stamping the pin's own
                 // version makes that local rather than a promise from another crate.
@@ -130,11 +130,14 @@ pub async fn verify_dependency_pins(
 /// platform-specific leaf in a bundle published as universal, and nothing in
 /// the metadata itself could detect the forgery.
 ///
-/// This re-derives the fact from the dependency's own image index: fetch
-/// the dependency's current manifest by its advisory tag — at `routed`, the
-/// location the index serves `dependency_identifier` from — and require
-/// an entry whose declared platform is `any` **and** whose digest equals
-/// `pin`'s. A flat (non-index) manifest is `any`-offered by construction —
+/// This re-derives the fact from the dependency's own image index — the
+/// dispatch its advisory tag names — and requires an entry whose declared
+/// platform is `any` **and** whose digest equals `pin`'s. For an index-served
+/// dependency that dispatch is the index's committed answer
+/// ([`Index::resolve_version`](ocx_index::Index::resolve_version)), never the
+/// physical tag, which may have moved since; the index serves the dispatch
+/// itself, digest-verified against its root, so nothing about it is read from
+/// the registry. A registry-backed dependency is read by tag at `routed`. A flat (non-index) manifest is `any`-offered by construction —
 /// the same convention
 /// [`Index::fetch_candidates`](ocx_oci::Index::fetch_candidates) uses for
 /// `Manifest::Image` — so it passes only when its own digest equals `pin`'s
@@ -150,22 +153,38 @@ pub async fn verify_dependency_pins(
 /// when there is no `latest` to fetch at all.
 async fn verify_any_pin_provenance(
     client: &Client,
+    index: &ocx_index::Index,
     dependency_identifier: &ocx_oci::PackageRef,
     routed: &ocx_oci::OciIdentifier,
     pin: &ocx_oci::PinnedPackageRef,
 ) -> Result<(), PublishGateError> {
-    // Canonical, never a mirror: this read gates a publish, and Invariant #5
-    // says a read that decides a write names the same host the write lands on.
-    // A mirror advertising a platform-specific leaf as `any` — stale, or
-    // hostile — would otherwise admit exactly the forged provenance claim this
-    // function exists to refuse, and the mirror never has to fail to do it.
-    let (digest, manifest) = client
-        .fetch_manifest_addressed(routed, ReadAddressing::Canonical)
+    let unavailable = |source| PublishGateError::AnyPinProvenanceUnavailable {
+        identifier: Box::new(dependency_identifier.clone()),
+        source,
+    };
+    let (digest, manifest) = match index
+        .resolve_version(dependency_identifier, routed)
         .await
-        .map_err(|source| PublishGateError::AnyPinProvenanceUnavailable {
-            identifier: Box::new(dependency_identifier.clone()),
+        .map_err(|source| PublishGateError::Routing {
+            identifier: Box::new(pin.clone()),
             source,
-        })?;
+        })? {
+        ocx_index::ResolvedVersion::Indexed { digest, manifest } => (digest, *manifest),
+        ocx_index::ResolvedVersion::Absent => {
+            return Err(unavailable(ClientError::ManifestNotFound(
+                dependency_identifier.to_string(),
+            )));
+        }
+        // Canonical, never a mirror: this read gates a publish, and Invariant #5
+        // says a read that decides a write names the same host the write lands on.
+        // A mirror advertising a platform-specific leaf as `any` — stale, or
+        // hostile — would otherwise admit exactly the forged provenance claim this
+        // function exists to refuse, and the mirror never has to fail to do it.
+        ocx_index::ResolvedVersion::Registry => client
+            .fetch_manifest_addressed(&routed.without_digest(), ReadAddressing::Canonical)
+            .await
+            .map_err(unavailable)?,
+    };
 
     let advertised_as_any = match manifest {
         ocx_oci::Manifest::Image(_) => digest == pin.digest(),
@@ -583,35 +602,101 @@ mod tests {
             .expect("the pin exists where the index routes it");
     }
 
-    /// The `any`-provenance read is a read BY TAG, so routing must carry the
-    /// pin's advisory tag onto the physical location: without it the read asks
-    /// the physical repository for `latest`, which is not the dependency's own
-    /// image index. Both keys are seeded only at the physical location, under
-    /// the tag.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn an_any_target_reads_provenance_at_the_physical_registry_under_the_pins_tag() {
-        let data = StubTransportData::new();
+    /// The dependency's dispatch as `example.com/dep`'s index commits `1.0`:
+    /// one entry, `leaf_digest_hex` under `platform_json`. The index serves it
+    /// itself — nothing is seeded at the registry for it.
+    fn index_committing(leaf_digest_hex: &str, platform_json: &str) -> ocx_index::Index {
+        let body = image_index_with_entry(leaf_digest_hex, platform_json);
+        let manifest: ocx_oci::Manifest = serde_json::from_str(&body).expect("dispatch parses");
+        let digest = ocx_oci::Algorithm::Sha256.hash(body.as_bytes());
+        RoutingSource::rewriting("example.com", "contrib/dep")
+            .with_tag("1.0", digest, manifest)
+            .into_index()
+    }
+
+    /// Seeds the physical `example.com/contrib/dep` with `1.0` naming a dispatch
+    /// of `leaf_digest_hex` under `platform_json`, and the pinned leaf itself.
+    fn seed_physical(data: &StubTransportData, leaf_digest_hex: &str, platform_json: &str) {
         data.write().manifests.insert(
             "example.com/contrib/dep:1.0".to_string(),
             (
-                image_index_with_entry(&hex('a'), ANY_ENTRY).into_bytes(),
+                image_index_with_entry(leaf_digest_hex, platform_json).into_bytes(),
                 format!("sha256:{}", hex('f')),
             ),
         );
         data.write().manifests.insert(
-            format!("example.com/contrib/dep:1.0@sha256:{}", hex('a')),
-            (IMAGE_MANIFEST_JSON.as_bytes().to_vec(), format!("sha256:{}", hex('a'))),
+            format!("example.com/contrib/dep:1.0@sha256:{leaf_digest_hex}"),
+            (
+                IMAGE_MANIFEST_JSON.as_bytes().to_vec(),
+                format!("sha256:{leaf_digest_hex}"),
+            ),
         );
+    }
+
+    /// For an index-served dependency the provenance verdict is the index's
+    /// committed dispatch, not the physical tag. The index advertises the pin as
+    /// `any`; the physical `1.0` has since moved to a dispatch that names the
+    /// leaf `linux/amd64` only. A gate reading the physical tag refuses a
+    /// genuine pin.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_any_target_takes_provenance_from_the_indexs_dispatch_not_the_moved_physical_tag() {
+        let data = StubTransportData::new();
+        seed_physical(&data, &hex('a'), LINUX_AMD64_ENTRY);
         let client = stub_client(data);
 
         verify_dependency_pins(
+            &client,
+            &index_committing(&hex('a'), ANY_ENTRY),
+            &metadata_with_any_pin(&hex('a')),
+            &Platform::any(),
+        )
+        .await
+        .expect("the index's own dispatch advertises the pin as `any`");
+    }
+
+    /// The reverse: the physical `1.0` advertises the pin as `any`, the index's
+    /// committed dispatch does not. The physical registry cannot forge the
+    /// provenance of a version the index owns.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_any_target_refuses_a_pin_the_indexs_dispatch_does_not_advertise_as_any() {
+        let data = StubTransportData::new();
+        seed_physical(&data, &hex('a'), ANY_ENTRY);
+        let client = stub_client(data);
+
+        let err = verify_dependency_pins(
+            &client,
+            &index_committing(&hex('a'), LINUX_AMD64_ENTRY),
+            &metadata_with_any_pin(&hex('a')),
+            &Platform::any(),
+        )
+        .await
+        .expect_err("the index's dispatch names the leaf `linux/amd64` only");
+        assert!(
+            matches!(err, PublishGateError::AnyPinNotAdvertisedAsAny { .. }),
+            "got: {err}"
+        );
+    }
+
+    /// A tag the index does not hold has no provenance to read, however the
+    /// physical tag answers: fail closed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_any_target_fails_closed_on_a_tag_the_index_does_not_hold() {
+        let data = StubTransportData::new();
+        seed_physical(&data, &hex('a'), ANY_ENTRY);
+        let client = stub_client(data);
+
+        let err = verify_dependency_pins(
             &client,
             &routed_index(),
             &metadata_with_any_pin(&hex('a')),
             &Platform::any(),
         )
         .await
-        .expect("the dependency's own index, read at the physical location under its tag, advertises the pin as `any`");
+        .expect_err("no committed dispatch, no provenance");
+        assert!(
+            matches!(err, PublishGateError::AnyPinProvenanceUnavailable { .. }),
+            "got: {err}"
+        );
     }
 
     /// A pin the physical registry does not hold is not found — even though a
