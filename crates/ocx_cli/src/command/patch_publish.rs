@@ -97,8 +97,8 @@ impl PatchPublishArgs {
 fn select_publish_target(
     patches: &ocx_config::patch::ResolvedPatchConfig,
     global: bool,
-    base_id: Option<&ocx_oci::Identifier>,
-) -> ocx_oci::Identifier {
+    base_id: Option<&ocx_oci::PackageRef>,
+) -> ocx_oci::PackageRef {
     match (global, base_id) {
         (false, Some(base)) => patch_descriptor_id(patches, base),
         // `--global`, or (defensively) no base supplied → the global descriptor.
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn select_publish_target_base_is_package_specific_sub_path() {
         let patches = patches();
-        let base = ocx_oci::Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base = ocx_oci::PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         let target = select_publish_target(&patches, false, Some(&base));
         assert_eq!(target.registry(), "patches.corp.com");
         assert!(

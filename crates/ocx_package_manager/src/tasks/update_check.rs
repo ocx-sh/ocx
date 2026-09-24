@@ -103,10 +103,10 @@ pub enum UpdateCheckResult {
     /// The check was skipped. The inner [`SkippedReason`] identifies why so
     /// programmatic consumers can distinguish causes without string parsing.
     Skipped(SkippedReason),
-    /// A newer version is available. The inner [`ocx_oci::Identifier`] identifies
+    /// A newer version is available. The inner [`ocx_oci::PackageRef`] identifies
     /// the latest release (with tag) so the caller can suggest an install
     /// command.
-    UpdateAvailable(ocx_oci::Identifier),
+    UpdateAvailable(ocx_oci::PackageRef),
 }
 
 /// Why the hand-off to the newly pulled binary's own `ocx self setup` did not
@@ -241,7 +241,7 @@ impl PackageManager {
     /// Returns `PackageErrorKind` on registry or I/O failure.
     pub async fn check_update(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         throttle: Option<Duration>,
         probe: TagProbe,
     ) -> Result<UpdateCheckResult, crate::error::PackageErrorKind> {
@@ -400,7 +400,7 @@ impl PackageManager {
     ///
     /// The `query_` prefix signals that calling this method may spawn a subprocess
     /// (non-trivial cost), mirroring the `query_installed_version` private helper.
-    pub async fn query_installed_self_version(&self, identifier: &ocx_oci::Identifier) -> Option<String> {
+    pub async fn query_installed_self_version(&self, identifier: &ocx_oci::PackageRef) -> Option<String> {
         query_installed_version(self, identifier).await
     }
 
@@ -572,7 +572,7 @@ const VERSION_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// network errors) falls through to `None`. `None` signals bootstrap mode to
 /// the caller; the update-check path skips the version comparison and returns
 /// `Skipped(Bootstrap)`.
-async fn query_installed_version(manager: &PackageManager, identifier: &ocx_oci::Identifier) -> Option<String> {
+async fn query_installed_version(manager: &PackageManager, identifier: &ocx_oci::PackageRef) -> Option<String> {
     // 1. Resolve via the `current` install symlink — the running ocx binary
     //    IS what `current` points at, so this is the semantically correct
     //    truth source for "what version am I". Avoids tag resolution
@@ -803,7 +803,7 @@ fn classify_handoff_status(status: std::process::ExitStatus) -> Option<HandoffFa
 /// that may not have happened.
 async fn current_names(
     file_structure: &ocx_store::file_structure::FileStructure,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     root: &std::path::Path,
 ) -> bool {
     let current = file_structure.symlinks.current(identifier);
@@ -941,7 +941,7 @@ mod tests {
     fn update_check_file_produces_dot_free_slug() {
         let tmp = tempfile::tempdir().unwrap();
         let fs = FileStructure::with_root(tmp.path().to_path_buf());
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
 
         let path = fs.state.update_check_file(&identifier);
 
@@ -970,7 +970,7 @@ mod tests {
     async fn check_update_throttle_short_circuit_does_not_touch() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
 
         // Write a fresh state file — within any reasonable interval.
         let state_path = manager.file_structure().state.update_check_file(&identifier);
@@ -1002,7 +1002,7 @@ mod tests {
     async fn check_update_bypass_with_zero_duration() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
 
         // Write a *very fresh* state file — would throttle under any positive interval.
         let state_path = manager.file_structure().state.update_check_file(&identifier);
@@ -1031,7 +1031,7 @@ mod tests {
     async fn check_update_touches_state_on_probe_error() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
         let state_path = manager.file_structure().state.update_check_file(&identifier);
         assert!(!state_path.exists(), "precondition: state file absent");
 
@@ -1092,7 +1092,7 @@ mod tests {
     async fn self_check_update_throttled_returns_skipped_without_subprocess() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
 
         // Write a fresh state file so the throttle fires.
         let state_path = manager.file_structure().state.update_check_file(&identifier);
@@ -1152,7 +1152,7 @@ mod tests {
     async fn tag_probe_index_consults_local_index_not_client() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
 
         // Remote probe: no client → Skipped(Offline) before touching the index.
         let remote = manager
@@ -1219,7 +1219,7 @@ mod tests {
         let index = Index::from_chained(local_index, vec![source], ChainMode::Default);
         let manager = PackageManager::new(fs, index, Some(client), "ocx.sh");
 
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
         let result = manager
             .check_update(&identifier, Some(Duration::ZERO), super::TagProbe::Remote)
             .await;
@@ -1343,7 +1343,7 @@ mod tests {
     async fn query_installed_version_returns_none_on_bootstrap() {
         let tmp = tempfile::tempdir().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
 
         let result = query_installed_version(&manager, &identifier).await;
 
@@ -1553,7 +1553,7 @@ mod tests {
     async fn current_names_answers_from_the_symlink() {
         let tmp = tempfile::tempdir().unwrap();
         let fs = FileStructure::with_root(tmp.path().to_path_buf());
-        let identifier = ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
+        let identifier = ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY);
 
         let new_root = tmp.path().join("packages/new");
         let old_root = tmp.path().join("packages/old");

@@ -164,7 +164,7 @@ impl PackageManager {
     /// mandatory, and it worked only because a flat manifest advertises `any()`
     /// back. `None` says it directly, and keeps saying it if the leaf ever
     /// stops advertising `any()`.
-    pub async fn maybe_auto_verify(&self, resolved: &ocx_oci::Identifier) -> Result<(), PackageErrorKind> {
+    pub async fn maybe_auto_verify(&self, resolved: &ocx_oci::PackageRef) -> Result<(), PackageErrorKind> {
         let Some(auto_verify) = self.auto_verify() else {
             return Ok(());
         };
@@ -281,7 +281,7 @@ impl PackageManager {
 
 /// Wrap a [`VerifyErrorKind`] as a package-manager error preserving the verify
 /// exit code (`Internal(crate::Error::Verify)` → `VerifyError::classify`).
-fn verify_kind(identifier: &ocx_oci::Identifier, kind: VerifyErrorKind) -> PackageErrorKind {
+fn verify_kind(identifier: &ocx_oci::PackageRef, kind: VerifyErrorKind) -> PackageErrorKind {
     PackageErrorKind::Internal(crate::Error::Verify(Box::new(VerifyError::new(
         identifier.clone(),
         kind,
@@ -372,7 +372,7 @@ mod tests {
         });
         let manager = PackageManager::new(file_structure, index, None, REGISTRY).with_auto_verify(Some(auto_verify));
 
-        let target = ocx_oci::Identifier::new_registry(REPO, REGISTRY).clone_with_tag("1.0");
+        let target = ocx_oci::PackageRef::new_registry(REPO, REGISTRY).clone_with_tag("1.0");
         let error = manager
             .maybe_auto_verify(&target)
             .await
@@ -430,12 +430,12 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> ocx_index::error::Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &ocx_oci::Identifier) -> ocx_index::error::Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
             Ok(None)
         }
         async fn fetch_manifest(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
             _: ocx_index::IndexOperation,
         ) -> ocx_index::error::Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
             Ok(Some((
@@ -445,12 +445,12 @@ mod tests {
         }
         async fn fetch_manifest_digest(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
             _: ocx_index::IndexOperation,
         ) -> ocx_index::error::Result<Option<ocx_oci::Digest>> {
             Ok(Some(self.digest.clone()))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> ocx_index::error::Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
             Ok(None)
         }
         fn box_clone(&self) -> Box<dyn ocx_index::IndexImpl> {
@@ -477,7 +477,7 @@ mod tests {
 
         let subject_bytes = GOLDEN_SUBJECT_MANIFEST.as_bytes();
         let subject = ocx_oci::Algorithm::Sha256.hash(subject_bytes);
-        let target = ocx_oci::Identifier::new_registry(REPO, REGISTRY).clone_with_digest(subject.clone());
+        let target = ocx_oci::PackageRef::new_registry(REPO, REGISTRY).clone_with_digest(subject.clone());
 
         let seed = || {
             let data = StubTransportData::new();

@@ -43,7 +43,7 @@ pub(crate) use generate::trampoline_ocx_binary;
 ///
 /// Returns an error if `identifier`'s rendering contains a character unsafe
 /// for the launcher template.
-pub(crate) fn shim_body(identifier: &ocx_oci::PinnedIdentifier) -> Result<String, crate::Error> {
+pub(crate) fn shim_body(identifier: &ocx_oci::PinnedPackageRef) -> Result<String, crate::Error> {
     let identifier = safety::LauncherSafeString::new(identifier.to_string())?;
     Ok(body::unix_shim_body(&identifier))
 }

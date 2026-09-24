@@ -496,7 +496,7 @@ mod tests {
     fn render_error_envelope_classifies_verify_not_found() {
         // A `VerifyError(NoSignaturesFound)` surfaces as `kind=not_found`,
         // exit 79 — matches the frozen contract test in `test_verify.py`.
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let inner = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::NoSignaturesFound);
         let err = anyhow::Error::from(inner);
         let json = render_error_envelope("verify", &err).expect("render ok");
@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn render_error_envelope_classifies_sign_auth_error() {
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let inner = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::OidcTokenRejected);
         let err = anyhow::Error::from(inner);
         let json = render_error_envelope("package sign", &err).expect("render ok");
@@ -533,7 +533,7 @@ mod tests {
         // envelope still says `"exit_code": 85` while `error.kind` silently
         // becomes `"internal"`. A code-only assertion passes through exactly
         // the failure the dedicated category exists to prevent.
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let rejected = ocx_trust::key_ref::KeyRef::parse("awskms://alias/release")
             .expect_err("awskms is recognised but unimplemented");
         let inner = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::from(rejected));
@@ -553,7 +553,7 @@ mod tests {
         // Verify parses `--key` on its own path, so the same reference must
         // reach the same envelope through `VerifyErrorKind`. One vocabulary,
         // two taxonomies: a script reads one word for one failure.
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let rejected = ocx_trust::key_ref::KeyRef::parse("awskms://alias/release")
             .expect_err("awskms is recognised but unimplemented");
         let inner = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::from(rejected));
@@ -574,7 +574,7 @@ mod tests {
         // discriminant of the inner `SignErrorKind`. Previously hard-coded to
         // `None`, which left scripts unable to distinguish e.g. an offline-refusal
         // from any other PermissionDenied without parsing stderr.
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let inner = ocx_sign::sign::SignError::new(id, ocx_sign::sign::SignErrorKind::OfflineSignRefused);
         let err = anyhow::Error::from(inner);
         let json = render_error_envelope("package sign", &err).expect("render ok");
@@ -588,7 +588,7 @@ mod tests {
     fn envelope_detail_populated_for_verify_identity_mismatch() {
         // Mirror coverage on the verify side: a reachable VerifyErrorKind variant
         // must surface its snake_case discriminant via `envelope.error.detail`.
-        let id = ocx_oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let id = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").unwrap();
         let inner = ocx_sign::verify::VerifyError::new(id, ocx_sign::verify::VerifyErrorKind::IdentityMismatch);
         let err = anyhow::Error::from(inner);
         let json = render_error_envelope("verify", &err).expect("render ok");

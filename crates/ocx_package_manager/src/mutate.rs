@@ -353,8 +353,8 @@ impl PackageManager {
 /// whole render over one would make an unavailable tool cost the user every
 /// other trampoline.
 #[must_use]
-pub fn default_group_roots(lock: &ProjectLock, platform: &ocx_oci::Platform) -> Vec<ocx_oci::Identifier> {
-    let mut roots: Vec<ocx_oci::Identifier> = Vec::new();
+pub fn default_group_roots(lock: &ProjectLock, platform: &ocx_oci::Platform) -> Vec<ocx_oci::PackageRef> {
+    let mut roots: Vec<ocx_oci::PackageRef> = Vec::new();
     for tool in lock.tools.iter().filter(|tool| tool.group == DEFAULT_GROUP) {
         match ocx_project::host_leaf_identifier(tool, platform) {
             Ok(identifier) => {
@@ -603,7 +603,7 @@ mod tests {
         LockedTool {
             name: name.to_owned(),
             group: group.to_owned(),
-            repository: ocx_oci::Identifier::new_registry(repository, REGISTRY),
+            repository: ocx_oci::PackageRef::new_registry(repository, REGISTRY),
             platforms: [(PLATFORM_KEY.to_owned(), ocx_oci::Digest::Sha256("a".repeat(64)))]
                 .into_iter()
                 .collect::<std::collections::BTreeMap<String, ocx_oci::Digest>>(),

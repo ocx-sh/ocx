@@ -9,8 +9,8 @@ pub struct Identifier {
 }
 
 impl Identifier {
-    pub fn with_domain(&self, domain: impl AsRef<str>) -> Result<ocx_oci::Identifier> {
-        Ok(ocx_oci::Identifier::parse_with_default_registry(
+    pub fn with_domain(&self, domain: impl AsRef<str>) -> Result<ocx_oci::PackageRef> {
+        Ok(ocx_oci::PackageRef::parse_with_default_registry(
             &self.raw,
             domain.as_ref(),
         )?)
@@ -26,7 +26,7 @@ impl Identifier {
     pub fn transform_all(
         identifiers: impl IntoIterator<Item = Self>,
         domain: impl AsRef<str>,
-    ) -> Result<Vec<ocx_oci::Identifier>> {
+    ) -> Result<Vec<ocx_oci::PackageRef>> {
         let domain = domain.as_ref();
         identifiers.into_iter().map(|id| id.with_domain(domain)).collect()
     }
@@ -34,7 +34,7 @@ impl Identifier {
     pub fn transform_optional(
         identifier: Option<Self>,
         domain: impl AsRef<str>,
-    ) -> Result<Option<ocx_oci::Identifier>> {
+    ) -> Result<Option<ocx_oci::PackageRef>> {
         match identifier {
             Some(id) => Ok(Some(id.with_domain(domain.as_ref())?)),
             None => Ok(None),
@@ -48,7 +48,7 @@ impl Identifier {
     /// would otherwise drop a result row (inspect collapses duplicates through
     /// `drain_package_tasks`) or emit a duplicate JSON key (info). Returns a
     /// usage error (exit 64) naming the first duplicate.
-    pub fn reject_duplicate_references(identifiers: &[ocx_oci::Identifier]) -> anyhow::Result<()> {
+    pub fn reject_duplicate_references(identifiers: &[ocx_oci::PackageRef]) -> anyhow::Result<()> {
         let mut seen = std::collections::HashSet::new();
         for identifier in identifiers {
             if !seen.insert(identifier.to_string()) {
@@ -73,7 +73,7 @@ impl std::str::FromStr for Identifier {
     type Err = ocx_oci::IdentifierError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        ocx_oci::Identifier::from_str(s)?;
+        ocx_oci::PackageRef::from_str(s)?;
         Ok(Self { raw: s.to_string() })
     }
 }

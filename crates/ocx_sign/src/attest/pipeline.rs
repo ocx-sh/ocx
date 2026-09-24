@@ -77,7 +77,7 @@ use ocx_oci::referrer::media_types::{
 };
 use ocx_oci::resolve_target::{ResolvedSubject, SignTarget};
 use ocx_oci::ssrf::DialPolicy;
-use ocx_oci::{Algorithm, Descriptor, Digest, Identifier, OCI_IMAGE_MEDIA_TYPE, Platform, native};
+use ocx_oci::{Algorithm, Descriptor, Digest, OCI_IMAGE_MEDIA_TYPE, PackageRef, Platform, native};
 
 /// Manifest media types accepted when fetching the per-platform target.
 const ACCEPTED_MANIFEST_TYPES: &[&str] = &[
@@ -111,7 +111,7 @@ pub enum AttestMode {
 /// Context passed into [`AttestPipeline::run`] — all external dependencies.
 pub struct AttestContext<'a> {
     /// Target identifier (`registry/repo:tag[@digest]`).
-    pub identifier: &'a Identifier,
+    pub identifier: &'a PackageRef,
     /// Narrowing selector, when one was requested — see
     /// [`SignContext::platform`](crate::sign::SignContext::platform).
     /// `None` acts on whatever the reference resolved to.
@@ -638,7 +638,7 @@ mod tests {
     /// An `IndexImpl` double stood here until inversion 1.9 took the index off
     /// the pipeline; the answer it produced is unchanged, and it now arrives
     /// through the seam the caller supplies.
-    fn indirecting_resolver<'a>(physical: Identifier) -> Box<SubjectResolver<'a>> {
+    fn indirecting_resolver<'a>(physical: PackageRef) -> Box<SubjectResolver<'a>> {
         Box::new(move |_identifier, platform| {
             let physical = ocx_oci::OciIdentifier::passthrough(&physical);
             Box::pin(async move {
@@ -860,11 +860,11 @@ mod tests {
         token_fails: bool,
         format: SignatureFormat,
     ) -> Run {
-        let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
+        let logical = PackageRef::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
         // A public IP literal, not a name: the pipeline resolves the physical
         // host before dialing it (dial-site SSRF guard), and a DNS name here
         // would make this unit test open a socket.
-        let physical = Identifier::parse("8.8.8.8/acme/tool:1.0").expect("physical identifier");
+        let physical = PackageRef::parse("8.8.8.8/acme/tool:1.0").expect("physical identifier");
 
         let client = Client::with_transport(Box::new(transport.clone()));
         let state_dir = tempfile::TempDir::new().expect("state dir");
@@ -885,7 +885,7 @@ mod tests {
         };
         let predicate: Box<RawValue> = serde_json::from_str(predicate).expect("predicate is JSON");
         // Declared last so they drop first: `AttestContext<'a>` is invariant in
-        // `'a` (the resolver takes `&'a Identifier`), so `'a` is pinned to the
+        // `'a` (the resolver takes `&'a PackageRef`), so `'a` is pinned to the
         // resolver's own region and must end before anything it borrows does.
         let dial = TestDial::new();
         let resolve = indirecting_resolver(physical);

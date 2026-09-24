@@ -80,7 +80,7 @@
         },
         "repository": {
           "description": "Bare registry/repo coordinates shared by every platform leaf.",
-          "$ref": "#/$defs/Identifier"
+          "$ref": "#/$defs/PackageRef"
         },
         "platforms": {
           "description": "Available-only per-platform leaf digests, keyed by the canonical\ngrammar [`Platform`] string. `BTreeMap` for byte-stable output\nwithout requiring `Ord` on `Platform`.",
@@ -98,7 +98,7 @@
         "platforms"
       ]
     },
-    "Identifier": {
+    "PackageRef": {
       "description": "OCI identifier in the format 'registry/repository[:tag][@digest]'.",
       "type": "string"
     },

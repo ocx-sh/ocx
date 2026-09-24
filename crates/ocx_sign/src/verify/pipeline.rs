@@ -66,7 +66,7 @@ use ocx_oci::referrer::media_types::{
 };
 use ocx_oci::resolve_target::{ResolveTargetError, ResolvedSubject, SignTarget};
 use ocx_oci::ssrf::DialPolicy;
-use ocx_oci::{Digest, Identifier, ImageManifest, Platform, native};
+use ocx_oci::{Digest, ImageManifest, PackageRef, Platform, native};
 use ocx_trust::PolicyBackend;
 use ocx_trust::key_ref::KeyBackendKind;
 use sigstore_protobuf_specs::dev::sigstore::bundle::v1::{Bundle, bundle, verification_material};
@@ -206,7 +206,7 @@ impl VerifyContentMode {
 /// verify taxonomy: same reason it is the caller's, same place it is invoked,
 /// and the same answer — except that verify reads `index_members` out of it.
 pub type VerifySubjectResolver<'a> = dyn Fn(
-        &'a Identifier,
+        &'a PackageRef,
         Option<&'a Platform>,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedSubject, VerifyErrorKind>> + Send + 'a>>
     + Send
@@ -216,7 +216,7 @@ pub type VerifySubjectResolver<'a> = dyn Fn(
 /// Context passed into [`VerifyPipeline::run`] — all external dependencies.
 pub struct VerifyContext<'a> {
     /// Target identifier (`registry/repo:tag[@digest]`).
-    pub identifier: &'a Identifier,
+    pub identifier: &'a PackageRef,
     /// Platform to narrow into, when one was requested (C-010).
     ///
     /// `None` acts on **whatever the reference resolved to**, index or bare
@@ -3574,8 +3574,8 @@ mod tests {
     };
     use sigstore_protobuf_specs::dev::sigstore::rekor::v1::{InclusionPromise, TransparencyLogEntry};
 
-    fn verify_id() -> Identifier {
-        Identifier::parse("registry.example/pkg:1.0").expect("parse test identifier")
+    fn verify_id() -> PackageRef {
+        PackageRef::parse("registry.example/pkg:1.0").expect("parse test identifier")
     }
 
     /// [`verify_id`], routed as the physical transport identifier — these
@@ -3930,7 +3930,7 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("state dir");
         let state = SigningStatePaths::new(temp.path());
         let dial = TestDial::new();
-        let identifier = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
+        let identifier = PackageRef::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
         let rekor_url = Url::parse("http://127.0.0.1:3000").expect("rekor url");
         let ctx = VerifyContext {
             identifier: &identifier,
@@ -3938,7 +3938,7 @@ mod tests {
             policies: &[],
             no_cache: true,
             dial: dial.policy(),
-            resolve: indirecting_resolver(Identifier::parse("registry.example/repo:1.0").expect("physical identifier")),
+            resolve: indirecting_resolver(PackageRef::parse("registry.example/repo:1.0").expect("physical identifier")),
             trust_root: &trust_root,
             rekor_url: &rekor_url,
             state: state.clone(),
@@ -4291,7 +4291,7 @@ mod tests {
     /// An `IndexImpl` double stood here until inversion 1.9 took the index off
     /// the pipeline; the answer it produced is unchanged, and it now arrives
     /// through the seam the caller supplies.
-    fn indirecting_resolver<'a>(physical: Identifier) -> Box<VerifySubjectResolver<'a>> {
+    fn indirecting_resolver<'a>(physical: PackageRef) -> Box<VerifySubjectResolver<'a>> {
         resolving_resolver(
             physical,
             Some((
@@ -4308,7 +4308,7 @@ mod tests {
     /// The taxonomy is applied by the same helper the real resolver calls, so a
     /// fixture cannot disagree with production about what a resolution means.
     fn resolving_resolver<'a>(
-        physical: Identifier,
+        physical: PackageRef,
         resolved: Option<(Digest, ocx_oci::Manifest)>,
     ) -> Box<VerifySubjectResolver<'a>> {
         Box::new(move |_identifier, platform| {
@@ -4409,8 +4409,8 @@ mod tests {
         mirrors: ocx_oci::client::MirrorMap,
         trust_root: TrustRoot,
     ) -> (Result<Vec<VerifyResult>, VerifyError>, Vec<String>, tempfile::TempDir) {
-        let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
-        let physical = Identifier::parse(physical).expect("physical identifier");
+        let logical = PackageRef::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
+        let physical = PackageRef::parse(physical).expect("physical identifier");
 
         let transport = recording_transport();
         let mut client = Client::with_transport(Box::new(transport.clone()));
@@ -4651,7 +4651,7 @@ mod tests {
     }
 
     fn attestation_ctx<'a>(
-        identifier: &'a Identifier,
+        identifier: &'a PackageRef,
         resolve: Box<VerifySubjectResolver<'a>>,
         dial: DialPolicy<'a>,
         trust_root: &'a TrustRoot,
@@ -6208,11 +6208,11 @@ mod tests {
         verification: VerificationMode,
         trust_root: TrustRoot,
     ) -> (Result<AttestationScan, VerifyError>, SbomTransport, tempfile::TempDir) {
-        let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
+        let logical = PackageRef::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
         // A public IP literal, not a name: the dial-site SSRF guard resolves the
         // physical host, and a DNS name here would make this unit test open a
         // socket.
-        let physical = Identifier::parse("8.8.8.8/acme/tool:1.0").expect("physical identifier");
+        let physical = PackageRef::parse("8.8.8.8/acme/tool:1.0").expect("physical identifier");
 
         let client = Client::with_transport(Box::new(transport.clone()));
         let dial = TestDial::new();
@@ -6256,7 +6256,7 @@ mod tests {
         resolved: Option<(Digest, ocx_oci::Manifest)>,
         platform: Option<&Platform>,
     ) -> (Result<AttestationScan, VerifyError>, SbomTransport, tempfile::TempDir) {
-        let identifier = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
+        let identifier = PackageRef::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
         let transport = sbom_transport(referrers);
         let client = Client::with_transport(Box::new(transport.clone()));
         // Physical == logical: not a rewrite, so the dial-site SSRF guard's
@@ -6395,8 +6395,8 @@ mod tests {
         let sbom = StubReferrer::sbom("application/vnd.cyclonedx+json", RAW_CYCLONEDX);
         let document_digest = sbom.document_digest().to_string();
 
-        let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
-        let physical = Identifier::parse("8.8.8.8/acme/tool:1.0").expect("physical identifier");
+        let logical = PackageRef::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
+        let physical = PackageRef::parse("8.8.8.8/acme/tool:1.0").expect("physical identifier");
         let transport = sbom_transport(vec![sbom]);
         let client = Client::with_transport(Box::new(transport.clone()));
         let dial = TestDial::new();

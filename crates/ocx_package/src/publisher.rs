@@ -401,7 +401,7 @@ impl Publisher {
     pub async fn pull_source_description(
         &self,
         index: &ocx_index::Index,
-        source: &ocx_oci::Identifier,
+        source: &ocx_oci::PackageRef,
         temp_dir: &Path,
     ) -> Result<Option<Description>> {
         let routed = index.route_for_dial(source).await?;
@@ -417,7 +417,7 @@ impl Publisher {
     pub async fn pull_description_mirrored(
         &self,
         index: &ocx_index::Index,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         temp_dir: &Path,
     ) -> Result<Option<Description>> {
         let routed = index.route_for_dial(identifier).await?;
@@ -1091,8 +1091,8 @@ mod tests {
         ocx_index::test_source::RoutingSource::rewriting("ghcr.io", "owner/tool").into_index()
     }
 
-    fn logical_identifier() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry("served/tool", "ghcr.io")
+    fn logical_identifier() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry("served/tool", "ghcr.io")
     }
 
     /// `(registry, repository)` the description manifest read was handed.

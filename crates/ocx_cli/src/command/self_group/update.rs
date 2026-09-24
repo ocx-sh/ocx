@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn check_update_available_is_success() {
         let identifier =
-            ocx_oci::Identifier::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY).clone_with_tag("1.2.3".to_string());
+            ocx_oci::PackageRef::new_registry("ocx/cli", ocx_oci::OCX_SH_REGISTRY).clone_with_tag("1.2.3".to_string());
         assert!(exit_code_equals(
             exit_code_for_check(&UpdateCheckResult::UpdateAvailable(identifier)),
             0

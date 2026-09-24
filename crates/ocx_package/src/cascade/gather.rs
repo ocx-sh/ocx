@@ -62,7 +62,7 @@ const CASCADE_GATHER_CONCURRENCY: usize = 64;
 pub async fn gather(
     client: &ocx_oci::Client,
     location: &ocx_oci::OciIdentifier,
-    package: &ocx_oci::Identifier,
+    package: &ocx_oci::PackageRef,
     index: Option<&OcxIndex>,
 ) -> Result<TagGraphObservation> {
     let listed = client
@@ -152,7 +152,7 @@ fn classify(listed: &[String]) -> (Vec<(String, AliasTag)>, Vec<String>) {
 /// private to `ocx_index`. Wrapping this one source is also the point: a
 /// chained index inherits the trait's inert `None` default, so routing the read
 /// through the chain would silently switch the whole staleness layer off.
-async fn fetch_index_root(source: &OcxIndex, name: &ocx_oci::Identifier) -> Result<Option<IndexRoot>> {
+async fn fetch_index_root(source: &OcxIndex, name: &ocx_oci::PackageRef) -> Result<Option<IndexRoot>> {
     Ok(Index::from_source(source.clone())
         .fetch_root_document(name)
         .await?
@@ -188,8 +188,8 @@ mod tests {
     }
 
     /// The package whose registry-backed location is [`identifier`].
-    fn package() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry(REPOSITORY, REGISTRY)
+    fn package() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry(REPOSITORY, REGISTRY)
     }
 
     /// The stub keys its manifest map on the transport reference's string form.
@@ -353,8 +353,8 @@ mod tests {
         format!("{INDEX_BASE}/p/{INDEX_REPOSITORY}.json")
     }
 
-    fn logical_identifier() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry(INDEX_REPOSITORY, INDEX_NAMESPACE)
+    fn logical_identifier() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry(INDEX_REPOSITORY, INDEX_NAMESPACE)
     }
 
     /// A live index source whose root document commits `latest` at `committed`.

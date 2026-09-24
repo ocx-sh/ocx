@@ -941,7 +941,7 @@ pub(crate) mod tests {
 
     fn request(target: ClaimTarget) -> ClaimRequest {
         ClaimRequest {
-            package: ocx_oci::Identifier::new_registry(PACKAGE, "ocx.sh"),
+            package: ocx_oci::PackageRef::new_registry(PACKAGE, "ocx.sh"),
             repository: PHYSICAL.to_string(),
             owners: vec![OwnerSpec::Resolved {
                 login: "alice".to_string(),
@@ -1368,7 +1368,7 @@ pub(crate) mod tests {
             assert!(
                 matches!(&error, ClaimError::RootNameMismatch { committed, expected }
                     if committed == expected_committed
-                        && *expected == root_name(&ocx_oci::Identifier::new_registry(PACKAGE, "ocx.sh"))),
+                        && *expected == root_name(&ocx_oci::PackageRef::new_registry(PACKAGE, "ocx.sh"))),
                 "{label}: {error:?}"
             );
         }
@@ -1817,7 +1817,7 @@ pub(crate) mod tests {
                 // The bytes the renderer will produce this run, placed on the
                 // branch head so the comparison finds them unchanged.
                 let rendered = ocx_index::serialize_root(&root::build_root(
-                    &root_name(&ocx_oci::Identifier::new_registry(PACKAGE, "ocx.sh")),
+                    &root_name(&ocx_oci::PackageRef::new_registry(PACKAGE, "ocx.sh")),
                     PHYSICAL,
                     &[ResolvedOwner {
                         login: "alice".to_string(),
@@ -1940,7 +1940,7 @@ pub(crate) mod tests {
     fn byte_identical_comparison_is_on_bytes_not_parsed_values() {
         let _clock = pinned_clock();
         let rendered = ocx_index::serialize_root(&root::build_root(
-            &root_name(&ocx_oci::Identifier::new_registry(PACKAGE, "ocx.sh")),
+            &root_name(&ocx_oci::PackageRef::new_registry(PACKAGE, "ocx.sh")),
             PHYSICAL,
             &[ResolvedOwner {
                 login: "alice".to_string(),

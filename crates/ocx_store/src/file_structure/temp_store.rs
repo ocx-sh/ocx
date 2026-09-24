@@ -81,7 +81,7 @@ impl TempStore {
     /// Returns the temp directory path for the given identifier.
     ///
     /// Requires the identifier to carry a digest; returns an error otherwise.
-    pub fn path(&self, identifier: &ocx_oci::Identifier) -> std::result::Result<PathBuf, super::error::Error> {
+    pub fn path(&self, identifier: &ocx_oci::PackageRef) -> std::result::Result<PathBuf, super::error::Error> {
         let digest = identifier
             .digest()
             .ok_or_else(|| super::error::Error::MissingDigest(identifier.to_string()))?;
@@ -225,7 +225,7 @@ impl TempStore {
     /// Two processes installing the same digest from different repositories
     /// must serialize on the same lock to avoid the late finisher clobbering
     /// the early finisher's `refs/` back-references via `move_dir`.
-    fn dir_name(identifier: &ocx_oci::Identifier, digest: &ocx_oci::Digest) -> String {
+    fn dir_name(identifier: &ocx_oci::PackageRef, digest: &ocx_oci::Digest) -> String {
         use sha2::{Digest as _, Sha256};
         let input = format!("{}\0{}", identifier.registry(), digest);
         let hash = hex::encode(Sha256::digest(input.as_bytes()));
@@ -245,12 +245,12 @@ mod tests {
         ocx_oci::Digest::Sha256(SHA256_HEX.to_string())
     }
 
-    fn id_with_digest() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry("cmake", "example.com").clone_with_digest(digest())
+    fn id_with_digest() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry("cmake", "example.com").clone_with_digest(digest())
     }
 
-    fn id_tag_only() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry("cmake", "example.com").clone_with_tag("3.28")
+    fn id_tag_only() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry("cmake", "example.com").clone_with_tag("3.28")
     }
 
     #[test]
@@ -274,8 +274,8 @@ mod tests {
     #[test]
     fn path_differs_for_different_registries() {
         let store = TempStore::new("/temp");
-        let id_a = ocx_oci::Identifier::new_registry("cmake", "a.com").clone_with_digest(digest());
-        let id_b = ocx_oci::Identifier::new_registry("cmake", "b.com").clone_with_digest(digest());
+        let id_a = ocx_oci::PackageRef::new_registry("cmake", "a.com").clone_with_digest(digest());
+        let id_b = ocx_oci::PackageRef::new_registry("cmake", "b.com").clone_with_digest(digest());
         assert_ne!(store.path(&id_a).unwrap(), store.path(&id_b).unwrap());
     }
 

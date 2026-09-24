@@ -116,7 +116,7 @@ impl Deps {
                     }
                     if seen.insert(dep.identifier.strip_advisory()) {
                         entries.push(api::data::deps::FlatDependency {
-                            identifier: ocx_oci::Identifier::from(dep.identifier.clone()),
+                            identifier: ocx_oci::PackageRef::from(dep.identifier.clone()),
                             visibility: dep.visibility,
                         });
                     }
@@ -124,7 +124,7 @@ impl Deps {
                 // Root packages are always public — they are the roots of env resolution.
                 if seen.insert(info.identifier().strip_advisory()) {
                     entries.push(api::data::deps::FlatDependency {
-                        identifier: ocx_oci::Identifier::from(info.identifier().clone()),
+                        identifier: ocx_oci::PackageRef::from(info.identifier().clone()),
                         visibility: Visibility::PUBLIC,
                     });
                 }
@@ -136,7 +136,7 @@ impl Deps {
             let mut all_paths = Vec::new();
 
             for info in &infos {
-                let mut current_path = vec![ocx_oci::Identifier::from(info.identifier().clone())];
+                let mut current_path = vec![ocx_oci::PackageRef::from(info.identifier().clone())];
                 find_paths_to(fs, info, &why_id, &mut current_path, &mut all_paths).await;
             }
 
@@ -214,9 +214,9 @@ fn build_tree_node<'a>(
 fn find_paths_to<'a>(
     fs: &'a FileStructure,
     info: &'a InstallInfo,
-    target: &'a ocx_oci::Identifier,
-    current_path: &'a mut Vec<ocx_oci::Identifier>,
-    all_paths: &'a mut Vec<Vec<ocx_oci::Identifier>>,
+    target: &'a ocx_oci::PackageRef,
+    current_path: &'a mut Vec<ocx_oci::PackageRef>,
+    all_paths: &'a mut Vec<Vec<ocx_oci::PackageRef>>,
 ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
     Box::pin(async move {
         // Resolve declared deps via resolve.json (not deps/ symlinks).
@@ -242,12 +242,12 @@ fn find_paths_to<'a>(
 // ── Shared resolution helpers ────────────────────────────────────────
 
 /// Builds a lookup from `(registry, repo)` to the platform-resolved
-/// [`PinnedIdentifier`] using the pre-computed resolve.json data.
+/// [`ocx_oci::PinnedPackageRef`] using the pre-computed resolve.json data.
 ///
 /// This replaces the previous `read_deps_symlinks` approach — resolve.json
 /// is the canonical source written at pull time, and digest-pinned metadata
 /// cannot form cycles by construction.
-fn resolved_dep_map(resolved: &ResolvedPackage) -> HashMap<ocx_oci::Repository, &ocx_oci::PinnedIdentifier> {
+fn resolved_dep_map(resolved: &ResolvedPackage) -> HashMap<ocx_oci::Repository, &ocx_oci::PinnedPackageRef> {
     resolved
         .dependencies
         .iter()
@@ -259,8 +259,8 @@ fn resolved_dep_map(resolved: &ResolvedPackage) -> HashMap<ocx_oci::Repository, 
 /// resolve.json map (not deps/ symlinks).
 async fn resolve_dep_via_metadata(
     fs: &FileStructure,
-    id: &ocx_oci::PinnedIdentifier,
-    resolved_map: &HashMap<ocx_oci::Repository, &ocx_oci::PinnedIdentifier>,
+    id: &ocx_oci::PinnedPackageRef,
+    resolved_map: &HashMap<ocx_oci::Repository, &ocx_oci::PinnedPackageRef>,
 ) -> Option<InstallInfo> {
     // Primary: direct digest lookup (single-platform manifests where
     // the declared digest matches the stored content digest).
@@ -284,7 +284,7 @@ fn is_unknown_env_modifier(error: &ocx_package::error::Error) -> bool {
     matches!(error, ocx_package::error::Error::UnknownEnvModifier { .. })
 }
 
-async fn load_install_info(identifier: ocx_oci::PinnedIdentifier, content: std::path::PathBuf) -> Option<InstallInfo> {
+async fn load_install_info(identifier: ocx_oci::PinnedPackageRef, content: std::path::PathBuf) -> Option<InstallInfo> {
     let (metadata, resolved) = tokio::join!(
         Metadata::read_json(content.with_file_name("metadata.json")),
         ResolvedPackage::read_json(content.with_file_name("resolve.json")),
@@ -373,10 +373,10 @@ mod tests {
             .await
             .expect("write resolve.json");
 
-        let identifier: ocx_oci::Identifier = format!("ocx.sh/cmake:1@sha256:{}", hex(1))
+        let identifier: ocx_oci::PackageRef = format!("ocx.sh/cmake:1@sha256:{}", hex(1))
             .parse()
             .expect("valid identifier");
-        let pinned = ocx_oci::PinnedIdentifier::try_from(identifier).expect("identifier has digest");
+        let pinned = ocx_oci::PinnedPackageRef::try_from(identifier).expect("identifier has digest");
 
         load_install_info(pinned, content).await
     }

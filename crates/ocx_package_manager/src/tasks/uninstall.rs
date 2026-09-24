@@ -36,7 +36,7 @@ impl PackageManager {
     /// was removed, or `None` when no candidate was present (no-op).
     pub async fn uninstall(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         deselect: bool,
         purge: bool,
     ) -> Result<Option<UninstallResult>, PackageErrorKind> {
@@ -74,7 +74,7 @@ impl PackageManager {
     /// packages.
     pub async fn uninstall_all(
         &self,
-        packages: &[ocx_oci::Identifier],
+        packages: &[ocx_oci::PackageRef],
         deselect: bool,
         purge: bool,
     ) -> Result<Vec<Option<UninstallResult>>, crate::error::Error> {
@@ -152,7 +152,7 @@ impl PackageManager {
 /// Returns `(candidate_path, content_path)` or `None` if no candidate existed.
 async fn uninstall_symlinks(
     fs: &ocx_store::file_structure::FileStructure,
-    package: &ocx_oci::Identifier,
+    package: &ocx_oci::PackageRef,
     deselect: bool,
 ) -> Result<Option<(PathBuf, Option<PathBuf>)>, PackageErrorKind> {
     log::debug!("Uninstalling package '{}'.", package);

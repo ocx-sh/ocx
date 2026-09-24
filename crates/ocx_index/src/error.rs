@@ -151,7 +151,7 @@ pub enum Error {
     /// A pinned identifier validation failed. Reconstructs as
     /// `ocx_lib::Error::PinnedIdentifier`.
     #[error(transparent)]
-    PinnedIdentifier(#[from] ocx_oci::pinned_identifier::PinnedIdentifierError),
+    PinnedIdentifier(#[from] ocx_oci::pinned_package_ref::PinnedIdentifierError),
 
     /// The index tier reached the store and the store refused.
     ///

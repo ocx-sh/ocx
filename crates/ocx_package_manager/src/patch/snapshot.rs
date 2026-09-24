@@ -72,7 +72,7 @@ impl SnapshotVersion {
 /// tier's own record, which is keyed by the same value inside
 /// `state/patch-companions/<registry>/<repository>.json`. Write and read both
 /// go through here; [`companion_key_identifier`] is the inverse.
-pub fn companion_key(companion_id: &ocx_oci::Identifier) -> String {
+pub fn companion_key(companion_id: &ocx_oci::PackageRef) -> String {
     format!(
         "{}/{}:{}",
         companion_id.registry(),
@@ -87,10 +87,10 @@ pub fn companion_key(companion_id: &ocx_oci::Identifier) -> String {
 /// The split is unambiguous in both directions. A registry is a bare host
 /// authority, so it ends at the first `/` even when it carries a port; a
 /// repository cannot contain `:`, so the tag begins at the last one.
-pub fn companion_key_identifier(key: &str) -> Option<ocx_oci::Identifier> {
+pub fn companion_key_identifier(key: &str) -> Option<ocx_oci::PackageRef> {
     let (registry, rest) = key.split_once('/')?;
     let (repository, tag) = rest.rsplit_once(':')?;
-    Some(ocx_oci::Identifier::new_registry(repository, registry).clone_with_tag(tag))
+    Some(ocx_oci::PackageRef::new_registry(repository, registry).clone_with_tag(tag))
 }
 
 /// Frozen view of the active site-patch tier for reproducible builds.
@@ -243,7 +243,7 @@ mod spec_tests {
         SitePatchRoots,
         patch::snapshot::{PatchSnapshot, SnapshotVersion, companion_key, companion_key_identifier},
     };
-    use ocx_oci::{Digest, Identifier, PinnedIdentifier};
+    use ocx_oci::{Digest, PackageRef, PinnedPackageRef};
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -251,16 +251,16 @@ mod spec_tests {
         Digest::Sha256(hex_char.to_string().repeat(64))
     }
 
-    fn pinned_id(registry: &str, repo: &str, hex_char: char) -> PinnedIdentifier {
-        let id = Identifier::new_registry(repo, registry).clone_with_digest(sha256(hex_char));
-        PinnedIdentifier::try_from(id).unwrap()
+    fn pinned_id(registry: &str, repo: &str, hex_char: char) -> PinnedPackageRef {
+        let id = PackageRef::new_registry(repo, registry).clone_with_digest(sha256(hex_char));
+        PinnedPackageRef::try_from(id).unwrap()
     }
 
-    fn pinned_id_tagged(registry: &str, repo: &str, tag: &str, hex_char: char) -> PinnedIdentifier {
-        let id = Identifier::new_registry(repo, registry)
+    fn pinned_id_tagged(registry: &str, repo: &str, tag: &str, hex_char: char) -> PinnedPackageRef {
+        let id = PackageRef::new_registry(repo, registry)
             .clone_with_tag(tag)
             .clone_with_digest(sha256(hex_char));
-        PinnedIdentifier::try_from(id).unwrap()
+        PinnedPackageRef::try_from(id).unwrap()
     }
 
     /// Build a minimal `PatchSnapshot` with one companion and one descriptor.
@@ -353,7 +353,7 @@ mod spec_tests {
     // ── Test 2 — PatchSnapshot::from_roots ───────────────────────────────────
 
     /// `PatchSnapshot::from_roots` must map each `SitePatchRoots::companions`
-    /// entry (a `PinnedIdentifier`) to the key `"registry/repository:tag"`
+    /// entry (a `PinnedPackageRef`) to the key `"registry/repository:tag"`
     /// ([`companion_key`], no `@digest` suffix) and the value = the pinned
     /// digest. A tagless pinned identifier keys under `latest`, mirroring the
     /// record's own `tag_or_latest()` slot.
@@ -494,7 +494,7 @@ mod spec_tests {
             ("localhost:5000", "acme/certs", "2026-01"),
             ("registry.example.com", "a/b/c", "latest"),
         ] {
-            let identifier = Identifier::new_registry(repository, registry).clone_with_tag(tag);
+            let identifier = PackageRef::new_registry(repository, registry).clone_with_tag(tag);
             let key = companion_key(&identifier);
             assert_eq!(key, format!("{registry}/{repository}:{tag}"));
 

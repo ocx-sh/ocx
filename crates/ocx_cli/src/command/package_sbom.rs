@@ -324,7 +324,7 @@ impl PackageSbom {
     async fn mode(
         &self,
         context: &crate::app::Context,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         key: Option<&ocx_trust::key_ref::KeyRef>,
     ) -> anyhow::Result<(VerificationMode, Vec<CompiledPolicy>)> {
         let requested = self.verification.requested();
@@ -578,7 +578,7 @@ impl Selected<'_> {
 /// actually resolve the ambiguity. `BTreeSet` both dedupes and sorts, so the
 /// message is stable across listing order (DATA-DET-01).
 fn single_document<'a>(
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     attestations: &'a [AttestationMatch],
     unverified: &'a [UnverifiedSbom],
     refused: Vec<RefusedCandidate>,
@@ -642,7 +642,7 @@ fn truncation_refusal(refused: Vec<RefusedCandidate>) -> Option<VerifyErrorKind>
 }
 
 /// The `MultipleAttestations` refusal over one trust class's colliding set.
-fn ambiguous(identifier: &ocx_oci::Identifier, candidates: Vec<(String, String)>) -> anyhow::Error {
+fn ambiguous(identifier: &ocx_oci::PackageRef, candidates: Vec<(String, String)>) -> anyhow::Error {
     VerifyError::new(
         identifier.clone(),
         VerifyErrorKind::MultipleAttestations {
@@ -705,8 +705,8 @@ mod tests {
     use crate::error_envelope::render_error_envelope;
     use ocx_package_manager::error::{PackageError, PackageErrorKind};
 
-    fn identifier() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("parse identifier")
+    fn identifier() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::parse("registry.example/pkg:1.0").expect("parse identifier")
     }
 
     fn envelope(err: &anyhow::Error) -> serde_json::Value {

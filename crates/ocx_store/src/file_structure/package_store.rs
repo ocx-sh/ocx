@@ -238,7 +238,7 @@ impl PackageStore {
     ///
     /// **Only uses registry + digest from the identifier.** The repository
     /// is intentionally ignored for content deduplication.
-    pub fn path(&self, identifier: &ocx_oci::PinnedIdentifier) -> PathBuf {
+    pub fn path(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.root
             .join(super::slugify(identifier.registry()))
             .join(super::cas_path::cas_shard_path(&identifier.digest()))
@@ -248,39 +248,39 @@ impl PackageStore {
     ///
     /// Equivalent to `PackageDir { dir: self.path(identifier) }` — prefer this
     /// over hand-rolled construction so call sites stay grep-able.
-    pub fn package_dir(&self, identifier: &ocx_oci::PinnedIdentifier) -> PackageDir {
+    pub fn package_dir(&self, identifier: &ocx_oci::PinnedPackageRef) -> PackageDir {
         PackageDir {
             dir: self.path(identifier),
         }
     }
 
     /// Returns the `content/` path for the given identifier.
-    pub fn content(&self, identifier: &ocx_oci::PinnedIdentifier) -> PathBuf {
+    pub fn content(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join("content")
     }
 
     /// Returns the `metadata.json` path for the given identifier.
-    pub fn metadata(&self, identifier: &ocx_oci::PinnedIdentifier) -> PathBuf {
+    pub fn metadata(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join("metadata.json")
     }
 
     /// Returns the `manifest.json` path for the given identifier.
-    pub fn manifest(&self, identifier: &ocx_oci::PinnedIdentifier) -> PathBuf {
+    pub fn manifest(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join("manifest.json")
     }
 
     /// Returns the `resolve.json` path for the given identifier.
-    pub fn resolve(&self, identifier: &ocx_oci::PinnedIdentifier) -> PathBuf {
+    pub fn resolve(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join("resolve.json")
     }
 
     /// Returns the `install.json` path for the given identifier.
-    pub fn install_status(&self, identifier: &ocx_oci::PinnedIdentifier) -> PathBuf {
+    pub fn install_status(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join("install.json")
     }
 
     /// Returns the `digest` file path for the given identifier.
-    pub fn digest_file(&self, identifier: &ocx_oci::PinnedIdentifier) -> PathBuf {
+    pub fn digest_file(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join(super::cas_path::DIGEST_FILENAME)
     }
 
@@ -335,7 +335,7 @@ impl PackageStore {
     /// Returns the `entrypoints/` path for the given identifier.
     ///
     /// `entrypoints/` is a sibling of `content/` and `refs/` inside the package root.
-    pub fn entrypoints(&self, identifier: &ocx_oci::PinnedIdentifier) -> PathBuf {
+    pub fn entrypoints(&self, identifier: &ocx_oci::PinnedPackageRef) -> PathBuf {
         self.path(identifier).join("entrypoints")
     }
 
@@ -397,7 +397,7 @@ fn package_dir_for_content(path: &Path) -> std::result::Result<PathBuf, PackageD
 /// ([`crate::project::consent::source_of`]), and a store that recorded only the
 /// truncated form could never answer a finer question later.
 #[must_use]
-fn origin_of(identifier: &ocx_oci::Identifier) -> String {
+fn origin_of(identifier: &ocx_oci::PackageRef) -> String {
     format!(
         "{}/{}",
         identifier.registry().to_ascii_lowercase(),
@@ -485,7 +485,7 @@ fn origin_marker_name(origin: &str) -> String {
 /// # Errors
 ///
 /// Propagates the directory-creation or file-write failure.
-pub async fn record_origin(pkg: &PackageDir, identifier: &ocx_oci::Identifier) -> Result<()> {
+pub async fn record_origin(pkg: &PackageDir, identifier: &ocx_oci::PackageRef) -> Result<()> {
     let origin = origin_of(identifier);
     let dir = pkg.refs_origins_dir();
     tokio::fs::create_dir_all(&dir)
@@ -538,9 +538,9 @@ mod tests {
         ocx_oci::Digest::Sha256(SHA256_HEX.to_string())
     }
 
-    fn pinned(registry: &str, repository: &str) -> ocx_oci::PinnedIdentifier {
-        let id = ocx_oci::Identifier::new_registry(repository, registry).clone_with_digest(digest());
-        ocx_oci::PinnedIdentifier::try_from(id).unwrap()
+    fn pinned(registry: &str, repository: &str) -> ocx_oci::PinnedPackageRef {
+        let id = ocx_oci::PackageRef::new_registry(repository, registry).clone_with_digest(digest());
+        ocx_oci::PinnedPackageRef::try_from(id).unwrap()
     }
 
     // ---- path construction ------------------------------------------------
@@ -634,9 +634,9 @@ mod tests {
 
     #[test]
     fn origin_of_lowercases_the_host_and_keeps_the_whole_repository_path() {
-        let id = ocx_oci::Identifier::new_registry("Acme/tools/cmake", "GHCR.IO");
+        let id = ocx_oci::PackageRef::new_registry("Acme/tools/cmake", "GHCR.IO");
         assert_eq!(origin_of(&id), "ghcr.io/Acme/tools/cmake");
-        let ported = ocx_oci::Identifier::new_registry("acme/tool", "localhost:5000");
+        let ported = ocx_oci::PackageRef::new_registry("acme/tool", "localhost:5000");
         assert_eq!(origin_of(&ported), "localhost:5000/acme/tool", "the port is preserved");
     }
 

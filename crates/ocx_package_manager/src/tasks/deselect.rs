@@ -12,7 +12,7 @@ impl PackageManager {
     ///
     /// Returns `Some(current_path)` when the current symlink existed and was
     /// removed, or `None` when no current symlink was present (no-op).
-    pub async fn deselect(&self, package: &ocx_oci::Identifier) -> Result<Option<PathBuf>, PackageErrorKind> {
+    pub async fn deselect(&self, package: &ocx_oci::PackageRef) -> Result<Option<PathBuf>, PackageErrorKind> {
         log::debug!("Deselecting package '{}'.", package);
 
         if package.digest().is_some() {
@@ -51,7 +51,7 @@ impl PackageManager {
 
     pub async fn deselect_all(
         &self,
-        packages: &[ocx_oci::Identifier],
+        packages: &[ocx_oci::PackageRef],
     ) -> Result<Vec<Option<PathBuf>>, crate::error::Error> {
         let mut results: Vec<Option<PathBuf>> = Vec::with_capacity(packages.len());
         let mut errors: Vec<PackageError> = Vec::new();

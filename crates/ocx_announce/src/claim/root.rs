@@ -34,10 +34,10 @@ use super::request::Upstream;
 ///
 /// The registry comes from the identifier the caller was handed — the
 /// `OCX_DEFAULT_REGISTRY` resolution lives at the CLI boundary, so a library-side
-/// read of that variable would measure nothing. `Identifier`'s own `Display`
+/// read of that variable would measure nothing. `PackageRef`'s own `Display`
 /// appends `:tag` and `@digest`, which is why this is not `format!("{package}")`.
 #[must_use]
-pub fn root_name(package: &ocx_oci::Identifier) -> String {
+pub fn root_name(package: &ocx_oci::PackageRef) -> String {
     format!("{}/{}", package.registry(), package.repository())
 }
 
@@ -45,7 +45,7 @@ pub fn root_name(package: &ocx_oci::Identifier) -> String {
 /// verbatim (C-047).
 ///
 /// The parse is `ocx_oci::OciIdentifier::parse_repository_pointer`'s, which demands an exact
-/// `Identifier` round-trip — so every accepted value reconstructs byte-identically
+/// `OciIdentifier` round-trip — so every accepted value reconstructs byte-identically
 /// and the "verbatim" half has no reachable red. The refusal is the half that
 /// does, and it is [`ClaimError::MalformedRepository`] at **exit 64**, never the
 /// index error's own 65.
@@ -609,21 +609,21 @@ mod tests {
     /// override happened to be `ocx.sh`.
     ///
     /// Reds on: `format!("{package}")` (the tag rides along, because
-    /// `Identifier`'s own `Display` appends `:tag` and `@digest`), or a hardcoded
+    /// `PackageRef`'s own `Display` appends `:tag` and `@digest`), or a hardcoded
     /// `ocx.sh` prefix (the non-default registry row).
     #[test]
     fn root_name_is_the_identifier_registry_and_repository() {
         assert_eq!(
-            root_name(&ocx_oci::Identifier::new_registry("acme/widget", "ocx.sh")),
+            root_name(&ocx_oci::PackageRef::new_registry("acme/widget", "ocx.sh")),
             NAME
         );
         assert_eq!(
-            root_name(&ocx_oci::Identifier::new_registry("acme/widget", "registry.example")),
+            root_name(&ocx_oci::PackageRef::new_registry("acme/widget", "registry.example")),
             "registry.example/acme/widget",
             "the registry comes from the identifier, never from a library-side default"
         );
 
-        let tagged = ocx_oci::Identifier::parse("ocx.sh/acme/widget:1.0").expect("a tagged identifier parses");
+        let tagged = ocx_oci::PackageRef::parse("ocx.sh/acme/widget:1.0").expect("a tagged identifier parses");
         assert_eq!(root_name(&tagged), NAME, "a tag never reaches the logical name");
     }
 
@@ -633,7 +633,7 @@ mod tests {
     /// Not from its source: `OciIndexError::MalformedPhysicalRef` classifies to
     /// `DataError` (65), and a malformed flag value is operator input, which is
     /// `EX_USAGE`. C-047's "verbatim" clause has **no reachable red** — the parse
-    /// demands an exact `Identifier` round-trip, so every accepted value
+    /// demands an exact `OciIdentifier` round-trip, so every accepted value
     /// reconstructs byte-identically from its `(host, path)` tuple — so the
     /// accepted row below is a positive control for the parse being reached at
     /// all, not a verbatim assertion.

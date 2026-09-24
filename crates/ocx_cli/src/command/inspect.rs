@@ -51,7 +51,7 @@ use crate::{conventions, options};
 /// Falls back to the lock's bare repository if the config has no such binding.
 /// A current lock (which this command requires) rules that out, so the arm is
 /// a total-match tail rather than a real state.
-fn declared_identifier(config: &ProjectConfig, tool: &SelectedTool) -> ocx_oci::Identifier {
+fn declared_identifier(config: &ProjectConfig, tool: &SelectedTool) -> ocx_oci::PackageRef {
     let declared = match &tool.origin {
         Origin::Group(group) if group == DEFAULT_GROUP => config.tools.get(&tool.binding),
         Origin::Group(group) => config
@@ -156,7 +156,7 @@ impl Inspect {
         let filtered = filter_by_names(selected, &self.names)?;
         check_duplicate_selection(&filtered)?;
 
-        let declared: Vec<ocx_oci::Identifier> = filtered
+        let declared: Vec<ocx_oci::PackageRef> = filtered
             .iter()
             .map(|tool| declared_identifier(&ctx.config, tool))
             .collect();
@@ -202,11 +202,11 @@ impl Inspect {
         &self,
         context: &crate::app::Context,
         selected: &[SelectedTool],
-        declared: &[ocx_oci::Identifier],
+        declared: &[ocx_oci::PackageRef],
         platform: &ocx_oci::Platform,
     ) -> anyhow::Result<Vec<PackageInspect>> {
         let resolved = resolve_selected_tools(selected, platform)?;
-        let identifiers: Vec<ocx_oci::Identifier> = resolved
+        let identifiers: Vec<ocx_oci::PackageRef> = resolved
             .iter()
             .zip(declared)
             .map(|(tool, declared)| match tool.identifier.digest() {
@@ -244,7 +244,7 @@ impl Inspect {
 ///
 /// Offline by construction: the lock's platform-to-leaf map *is* the candidate
 /// list, so nothing is fetched and no platform is chosen.
-fn locked_packages(selected: &[SelectedTool], declared: &[ocx_oci::Identifier]) -> Vec<PackageInspect> {
+fn locked_packages(selected: &[SelectedTool], declared: &[ocx_oci::PackageRef]) -> Vec<PackageInspect> {
     selected
         .iter()
         .zip(declared)

@@ -158,7 +158,7 @@ fn located_directory(mode: LazyMode, package_root: Option<PathBuf>, shim_root: O
 async fn locate(
     manager: &PackageManager,
     file_structure: &FileStructure,
-    package: &ocx_oci::Identifier,
+    package: &ocx_oci::PackageRef,
     platform: ocx_oci::Platform,
     mode: LazyMode,
 ) -> Result<Located, PackageErrorKind> {
@@ -202,7 +202,7 @@ async fn locate(
 async fn locate_all(
     manager: &PackageManager,
     file_structure: &FileStructure,
-    packages: &[ocx_oci::Identifier],
+    packages: &[ocx_oci::PackageRef],
     platform: &ocx_oci::Platform,
     mode: LazyMode,
 ) -> Result<Vec<Located>, ocx_package_manager::error::Error> {

@@ -117,7 +117,7 @@ impl PackageManager {
     ///   publication I/O failure.
     pub async fn prepare_lazy(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
     ) -> Result<PreparedLazy, PackageErrorKind> {
         let (fs, index) = (self.file_structure(), self.index());
@@ -259,7 +259,7 @@ async fn stage_shim_dir(file_structure: &FileStructure) -> Result<tempfile::Temp
 )]
 async fn write_shim_launchers(
     bin_dir: &Path,
-    package: &ocx_oci::PinnedIdentifier,
+    package: &ocx_oci::PinnedPackageRef,
     names: &BTreeSet<BinaryName>,
     shim_bin: &ocx_store::file_structure::ShimBinStore,
 ) -> Result<(), PackageErrorKind> {
@@ -347,7 +347,7 @@ async fn write_shim_launchers(
 async fn write_windows_shim_slot(
     bin_dir: &Path,
     name: &BinaryName,
-    package: &ocx_oci::PinnedIdentifier,
+    package: &ocx_oci::PinnedPackageRef,
     shim_bin: &ocx_store::file_structure::ShimBinStore,
 ) -> Result<(), PackageErrorKind> {
     let exe_path = bin_dir.join(format!("{}.exe", name.as_str()));
@@ -496,9 +496,9 @@ mod tests {
         ocx_oci::Digest::Sha256(seed.repeat(32))
     }
 
-    fn pinned(repository: &str, seed: &str) -> ocx_oci::PinnedIdentifier {
-        ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry(repository, "example.com").clone_with_digest(digest_from(seed)),
+    fn pinned(repository: &str, seed: &str) -> ocx_oci::PinnedPackageRef {
+        ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry(repository, "example.com").clone_with_digest(digest_from(seed)),
         )
         .expect("digest-bearing identifier is pinned")
     }
@@ -511,10 +511,10 @@ mod tests {
     /// repository, tag, or trailing-`1` digest without widening a helper every
     /// other test in this module also uses.
     #[cfg(windows)]
-    fn golden_pinned() -> ocx_oci::PinnedIdentifier {
+    fn golden_pinned() -> ocx_oci::PinnedPackageRef {
         let digest = ocx_oci::Digest::Sha256(format!("{}1", "0".repeat(63)));
-        ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry("tool/cmake", "ocx.sh")
+        ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry("tool/cmake", "ocx.sh")
                 .clone_with_tag("3.28")
                 .clone_with_digest(digest),
         )
@@ -533,7 +533,7 @@ mod tests {
     /// node's own identity digest, so a ref-link assertion cannot pass by
     /// accidentally addressing the manifest instead of the config blob.
     fn node_with_config_digest(
-        identifier: ocx_oci::PinnedIdentifier,
+        identifier: ocx_oci::PinnedPackageRef,
         config_digest: ocx_oci::Digest,
         is_root: bool,
     ) -> ClosureNode {
@@ -692,7 +692,7 @@ mod tests {
     /// paired golden, exactly as C-034 prescribes for the `launcher shim`
     /// wire token. See the report's E-36 gap.
     #[cfg(windows)]
-    fn assert_shimref_grammar(raw: &[u8], expected: &ocx_oci::PinnedIdentifier) {
+    fn assert_shimref_grammar(raw: &[u8], expected: &ocx_oci::PinnedPackageRef) {
         assert!(raw.len() <= 32 * 1024, "a .shimref must fit the reader's 32 KiB cap");
         let (line, terminator) = raw.split_at(raw.len() - 1);
         assert_eq!(
@@ -1102,7 +1102,7 @@ mod tests {
     fn prepare_lazy_returns_the_closure_and_advisories_alongside_the_shim_dir() {
         async fn signature_binding(
             manager: &PackageManager,
-            package: &ocx_oci::Identifier,
+            package: &ocx_oci::PackageRef,
             platform: ocx_oci::Platform,
         ) -> (Vec<ClosureNode>, Vec<LazyAdvisory>) {
             let PreparedLazy {

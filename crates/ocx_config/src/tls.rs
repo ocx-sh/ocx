@@ -427,7 +427,7 @@ pub fn resolve_extra_roots(
 /// Pure so the fold is unit-testable (`extra_ca_sigstore_view_follows_managed_pin`);
 /// the CLI's `Context::try_init` calls it once and installs the result via
 /// [`install_sigstore_roots`](ocx_util::tls::install_sigstore_roots) before any
-/// client is built. Takes a `bool` rather than `Option<&ocx_oci::Identifier>` —
+/// client is built. Takes a `bool` rather than `Option<&ocx_oci::PackageRef>` —
 /// this module has no other reason to know that type, and the caller already
 /// has the pin question answered.
 #[must_use]
@@ -1401,9 +1401,9 @@ mod tests {
         let merged_config = config_with_pem(EXTRA_CA_PEM);
         let merged = resolve_extra_roots(&merged_config, None, Some(ConfigTier::Managed)).expect("managed root parses");
         let local = ExtraRoots::default();
-        let unpinned = ocx_oci::Identifier::parse("registry.corp/managed-config:stable").unwrap();
+        let unpinned = ocx_oci::PackageRef::parse("registry.corp/managed-config:stable").unwrap();
         let pinned =
-            ocx_oci::Identifier::parse(&format!("registry.corp/managed-config@sha256:{}", "a".repeat(64))).unwrap();
+            ocx_oci::PackageRef::parse(&format!("registry.corp/managed-config@sha256:{}", "a".repeat(64))).unwrap();
         assert!(
             unpinned.digest().is_none() && pinned.digest().is_some(),
             "fixture pins must differ"

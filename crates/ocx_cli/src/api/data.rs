@@ -51,7 +51,7 @@ pub mod version;
 pub mod warmed_paths;
 
 use ocx_console::{Theme, VisibilityStyle};
-use ocx_oci::Identifier;
+use ocx_oci::PackageRef;
 use ocx_package::metadata::visibility::Visibility;
 
 /// Picks the palette entry an env-entry visibility renders in.
@@ -74,7 +74,7 @@ pub fn visibility_style(visibility: Visibility) -> VisibilityStyle {
 /// With colour off every paint method returns its input unchanged, so the
 /// result equals the identifier's `Display` byte for byte — the property
 /// `ink_plain_equals_display_for_all_part_combinations` pins.
-pub fn ink_identifier(theme: &Theme, identifier: &Identifier) -> String {
+pub fn ink_identifier(theme: &Theme, identifier: &PackageRef) -> String {
     let mut out = format!("{}/{}", identifier.registry(), identifier.repository());
     if let Some(tag) = identifier.tag() {
         out.push_str(&theme.tag(format!(":{tag}")));
@@ -250,8 +250,8 @@ pub(crate) fn is_zero_width(c: char) -> bool {
 mod tests {
     use super::*;
 
-    fn id(spec: &str) -> Identifier {
-        Identifier::parse_with_default_registry(spec, "ocx.sh").unwrap()
+    fn id(spec: &str) -> PackageRef {
+        PackageRef::parse_with_default_registry(spec, "ocx.sh").unwrap()
     }
 
     #[test]

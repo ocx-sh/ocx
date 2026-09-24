@@ -46,7 +46,7 @@ pub enum LazyAdvisory {
     /// path to a tool that may `stat` it immediately, which is not.
     InstallPathRootedNonPathVar {
         /// The deferred tool whose metadata declared the var.
-        package: ocx_oci::PinnedIdentifier,
+        package: ocx_oci::PinnedPackageRef,
         /// The declared env-var name.
         key: String,
     },
@@ -55,7 +55,7 @@ pub enum LazyAdvisory {
     /// enumerable.
     UndeclaredBinaries {
         /// The deferred tool with no `binaries` claim.
-        package: ocx_oci::PinnedIdentifier,
+        package: ocx_oci::PinnedPackageRef,
     },
     /// A `path`-modifier value concatenates a package-rooted
     /// `${installPath}` segment with something else — a literal
@@ -64,7 +64,7 @@ pub enum LazyAdvisory {
     /// shape substitutes cleanly.
     CombinedPathValue {
         /// The deferred tool whose metadata declared the var.
-        package: ocx_oci::PinnedIdentifier,
+        package: ocx_oci::PinnedPackageRef,
         /// The declared env-var name.
         key: String,
     },
@@ -107,7 +107,7 @@ impl std::fmt::Display for LazyAdvisory {
 /// are a package identifier and its already-loaded metadata — so it stays a
 /// plain free function taking explicit params, following the
 /// `tasks/common.rs` shared-helper convention.
-pub fn classify_lazy_advisories(package: &ocx_oci::PinnedIdentifier, metadata: &Metadata) -> Vec<LazyAdvisory> {
+pub fn classify_lazy_advisories(package: &ocx_oci::PinnedPackageRef, metadata: &Metadata) -> Vec<LazyAdvisory> {
     let mut advisories = Vec::new();
 
     // `None` is "the publisher declared nothing"; `Some([])` is "the publisher
@@ -190,7 +190,7 @@ mod tests {
     //! contract before the classifier body exists.
     //!
     //! **No fixture here touches the filesystem or the network.** Every input
-    //! is an in-memory [`Metadata`] and an in-memory [`ocx_oci::PinnedIdentifier`];
+    //! is an in-memory [`Metadata`] and an in-memory [`ocx_oci::PinnedPackageRef`];
     //! no `TempDir`, no `tokio`, no transport. That is the executable half of
     //! C-015's purity claim — the other half is
     //! [`classify_lazy_advisories_takes_only_an_identifier_and_metadata`],
@@ -199,7 +199,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use ocx_oci::{Digest, Identifier};
+    use ocx_oci::{Digest, PackageRef};
     use ocx_package::metadata::bundle::{Bundle, Version};
     use ocx_package::metadata::dependency::Dependencies;
     use ocx_package::metadata::env::list::List;
@@ -212,10 +212,10 @@ mod tests {
 
     // ── Fixtures ─────────────────────────────────────────────────────────────
 
-    fn pinned(repository: &str) -> ocx_oci::PinnedIdentifier {
+    fn pinned(repository: &str) -> ocx_oci::PinnedPackageRef {
         let identifier =
-            Identifier::new_registry(repository, REGISTRY).clone_with_digest(Digest::Sha256("a".repeat(64)));
-        ocx_oci::PinnedIdentifier::try_from(identifier).expect("fixture identifier carries a digest")
+            PackageRef::new_registry(repository, REGISTRY).clone_with_digest(Digest::Sha256("a".repeat(64)));
+        ocx_oci::PinnedPackageRef::try_from(identifier).expect("fixture identifier carries a digest")
     }
 
     fn path_var(key: &str, value: &str) -> Var {
@@ -621,7 +621,7 @@ mod tests {
     /// be threaded in without this reddening the build.
     #[test]
     fn classify_lazy_advisories_takes_only_an_identifier_and_metadata() {
-        let signature: fn(&ocx_oci::PinnedIdentifier, &Metadata) -> Vec<LazyAdvisory> = classify_lazy_advisories;
+        let signature: fn(&ocx_oci::PinnedPackageRef, &Metadata) -> Vec<LazyAdvisory> = classify_lazy_advisories;
         let _ = signature;
     }
 

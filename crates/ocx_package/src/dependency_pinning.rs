@@ -101,7 +101,7 @@ pub async fn pin_dependencies(
 /// subsumes the structural rule, so push accepts a bare digest the registry
 /// vouches for and rejects one it does not — which is the question this check
 /// can only approximate.
-fn reject_digest_pins_in_any_target(dependencies: &AuthoringDependencies) -> Option<Box<ocx_oci::Identifier>> {
+fn reject_digest_pins_in_any_target(dependencies: &AuthoringDependencies) -> Option<Box<ocx_oci::PackageRef>> {
     dependencies
         .iter()
         .find(|dep| dep.identifier.digest().is_some())
@@ -115,7 +115,7 @@ fn reject_digest_pins_in_any_target(dependencies: &AuthoringDependencies) -> Opt
 async fn fetch_dependency_candidates(
     index: &Index,
     dep: &AuthoringDependency,
-) -> Result<Vec<(ocx_oci::Identifier, Platform)>, DependencyPinningError> {
+) -> Result<Vec<(ocx_oci::PackageRef, Platform)>, DependencyPinningError> {
     let candidates = index
         .fetch_candidates(&dep.identifier, IndexOperation::Resolve)
         .await
@@ -134,7 +134,7 @@ async fn fetch_dependency_candidates(
 /// (authoring-vs-Index parity, D1).
 fn resolve_one(
     dep: &AuthoringDependency,
-    candidates: Vec<(ocx_oci::Identifier, Platform)>,
+    candidates: Vec<(ocx_oci::PackageRef, Platform)>,
     declared_platform: &Platform,
 ) -> Result<AuthoringDependency, DependencyPinningError> {
     let available: Vec<String> = candidates.iter().map(|(_, platform)| platform.to_string()).collect();
@@ -158,7 +158,7 @@ fn resolve_one(
 /// for the [`DependencyPinningError::AmbiguousPlatform`] diagnostic —
 /// `select_best`'s `Ambiguous` outcome carries only the tied leaves, not
 /// their platforms.
-fn winning_platforms(winners: &[ocx_oci::Identifier], candidates: &[(ocx_oci::Identifier, Platform)]) -> Vec<String> {
+fn winning_platforms(winners: &[ocx_oci::PackageRef], candidates: &[(ocx_oci::PackageRef, Platform)]) -> Vec<String> {
     winners
         .iter()
         .filter_map(|winner| {
@@ -178,7 +178,7 @@ fn winning_platforms(winners: &[ocx_oci::Identifier], candidates: &[(ocx_oci::Id
 /// winner is `any`-offered by [`select_best`]'s construction here, and push
 /// re-derives the same fact from the dependency's own image index rather than
 /// trusting anything this wrote.
-fn pin(dep: &AuthoringDependency, leaf: &ocx_oci::Identifier) -> Result<AuthoringDependency, DependencyPinningError> {
+fn pin(dep: &AuthoringDependency, leaf: &ocx_oci::PackageRef) -> Result<AuthoringDependency, DependencyPinningError> {
     let digest = require_leaf_digest(dep, leaf)?;
     let mut pinned = dep.clone();
     pinned.identifier = dep.identifier.clone_with_digest(digest);
@@ -192,7 +192,7 @@ fn pin(dep: &AuthoringDependency, leaf: &ocx_oci::Identifier) -> Result<Authorin
 /// response rather than a user error.
 fn require_leaf_digest(
     dep: &AuthoringDependency,
-    leaf: &ocx_oci::Identifier,
+    leaf: &ocx_oci::PackageRef,
 ) -> Result<ocx_oci::Digest, DependencyPinningError> {
     leaf.digest().ok_or_else(|| DependencyPinningError::DependencyNotFound {
         identifier: Box::new(dep.identifier.clone()),
@@ -204,7 +204,7 @@ fn require_leaf_digest(
 pub enum DependencyPinningError {
     /// The dependency tag does not resolve in the selected index.
     #[error("dependency '{identifier}' not found in the selected index")]
-    DependencyNotFound { identifier: Box<ocx_oci::Identifier> },
+    DependencyNotFound { identifier: Box<ocx_oci::PackageRef> },
     /// No advertised leaf is compatible with the declared platform. For a
     /// declared `any` platform this is D5's "the dependency offers no `any`
     /// manifest" case — the same variant, since the underlying cause
@@ -214,7 +214,7 @@ pub enum DependencyPinningError {
         available.join(", ")
     )]
     NoCompatiblePlatform {
-        identifier: Box<ocx_oci::Identifier>,
+        identifier: Box<ocx_oci::PackageRef>,
         platform: String,
         available: Vec<String>,
     },
@@ -224,7 +224,7 @@ pub enum DependencyPinningError {
         candidates.join(", ")
     )]
     AmbiguousPlatform {
-        identifier: Box<ocx_oci::Identifier>,
+        identifier: Box<ocx_oci::PackageRef>,
         platform: String,
         candidates: Vec<String>,
     },
@@ -236,7 +236,7 @@ pub enum DependencyPinningError {
     #[error(
         "dependency '{identifier}' carries a direct digest pin in an `any`-targeted bundle; `any` deps must resolve through `ocx package create --platform any` (unverifiable pin provenance)"
     )]
-    DirectDigestPinInAnyTarget { identifier: Box<ocx_oci::Identifier> },
+    DirectDigestPinInAnyTarget { identifier: Box<ocx_oci::PackageRef> },
     /// Index-layer failure (network, policy block, malformed manifest).
     ///
     /// Not `transparent`: the chain walker must reach the inner
@@ -357,12 +357,12 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
             Ok(None)
         }
         async fn fetch_manifest(
             &self,
-            identifier: &ocx_oci::Identifier,
+            identifier: &ocx_oci::PackageRef,
             _op: ocx_index::IndexOperation,
         ) -> Result<Option<(Digest, ocx_oci::Manifest)>> {
             if identifier.repository() != self.repo || identifier.tag_or_latest() != self.tag {
@@ -373,7 +373,7 @@ mod tests {
         }
         async fn fetch_manifest_digest(
             &self,
-            identifier: &ocx_oci::Identifier,
+            identifier: &ocx_oci::PackageRef,
             _op: ocx_index::IndexOperation,
         ) -> Result<Option<Digest>> {
             if identifier.repository() != self.repo || identifier.tag_or_latest() != self.tag {
@@ -381,12 +381,12 @@ mod tests {
             }
             Ok(Some(Algorithm::Sha256.hash(FLAT_MANIFEST_JSON.as_bytes())))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            identifier: &ocx_oci::Identifier,
+            identifier: &ocx_oci::PackageRef,
         ) -> Result<Option<(Vec<u8>, Digest, ocx_oci::Manifest)>> {
             Ok(self
                 .fetch_manifest(identifier, ocx_index::IndexOperation::Resolve)

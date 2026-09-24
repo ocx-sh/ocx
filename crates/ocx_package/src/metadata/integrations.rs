@@ -168,7 +168,7 @@ pub struct IntegrationEntry {
 /// [`crate::error::Error::IntegrationNamespaceInvalid`], naming the
 /// key with `{:?}` so an unprintable byte cannot forge a log line (CWE-117).
 // Both error types this file returns unboxed are large by construction — the
-// package `Error` carries a `TemplateError`, which carries `PinnedIdentifier`s.
+// package `Error` carries a `TemplateError`, which carries `PinnedPackageRef`s.
 // Error paths are cold, so boxing to satisfy `result_large_err` would only add
 // an allocation on the hot Ok return. Same call, same reason, as the hoisted
 // allow on `TemplateResolver`'s impl block (`template.rs`).
@@ -600,8 +600,8 @@ mod tests {
         let self_dir = TempDir::new().unwrap();
         let dep_dir = TempDir::new().unwrap();
         let hex = "a".repeat(64);
-        let id: ocx_oci::Identifier = format!("ocx.sh/dep1:1.0@sha256:{hex}").parse().unwrap();
-        let pinned = ocx_oci::PinnedIdentifier::try_from(id).unwrap();
+        let id: ocx_oci::PackageRef = format!("ocx.sh/dep1:1.0@sha256:{hex}").parse().unwrap();
+        let pinned = ocx_oci::PinnedPackageRef::try_from(id).unwrap();
 
         let mut contexts = HashMap::new();
         contexts.insert(
@@ -901,8 +901,8 @@ mod tests {
         let self_dir = TempDir::new().unwrap();
         let dep_dir = TempDir::new().unwrap();
         let hex = "a".repeat(64);
-        let id: ocx_oci::Identifier = format!("ocx.sh/dep1:1.0@sha256:{hex}").parse().unwrap();
-        let pinned = ocx_oci::PinnedIdentifier::try_from(id).unwrap();
+        let id: ocx_oci::PackageRef = format!("ocx.sh/dep1:1.0@sha256:{hex}").parse().unwrap();
+        let pinned = ocx_oci::PinnedPackageRef::try_from(id).unwrap();
 
         let mut contexts = HashMap::new();
         contexts.insert(

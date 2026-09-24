@@ -14,8 +14,8 @@ use super::env::ProjectEnv;
 use super::error::{ProjectError, ProjectErrorKind};
 use crate::activate::ActivateMode;
 use crate::lazy::{LazyMode, LazyModeLadder, LazyReport};
-use ocx_oci::Identifier;
-use ocx_oci::identifier::error::{IdentifierError, IdentifierErrorKind};
+use ocx_oci::PackageRef;
+use ocx_oci::package_ref::error::{IdentifierError, IdentifierErrorKind};
 use ocx_package::metadata::slug::SLUG_MAX_LEN;
 
 /// A named group's body: `[group.<name>.tools]` and `[group.<name>.env]`.
@@ -31,10 +31,10 @@ use ocx_package::metadata::slug::SLUG_MAX_LEN;
 #[serde(deny_unknown_fields)]
 pub struct Group {
     /// Tool bindings for this group. Values are fully-qualified
-    /// [`Identifier`]s, validated on the second parse pass exactly as
+    /// [`PackageRef`]s, validated on the second parse pass exactly as
     /// `[tools]` is.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub tools: BTreeMap<String, Identifier>,
+    pub tools: BTreeMap<String, PackageRef>,
 
     /// Environment variables applied when this group is selected.
     ///
@@ -101,7 +101,7 @@ pub struct PackageSettings {
 /// Schema follows ADR "Project-Level Toolchain Config" decision 1A:
 /// flat `[tools]` table as the implicit default group, plus additive
 /// `[group.<name>]` tables for optional named groups. Values are
-/// registry-qualified [`Identifier`] strings of the form
+/// registry-qualified [`PackageRef`] strings of the form
 /// `registry/repo[:tag][@digest]`. Bare-tag forms (no registry, e.g.
 /// `cmake = "3.28"`) are rejected with
 /// [`super::error::ProjectErrorKind::ToolValueMissingRegistry`].
@@ -126,9 +126,9 @@ pub struct PackageSettings {
 pub struct ProjectConfig {
     /// Tools in the reserved `default` group (the top-level `[tools]`
     /// table in `ocx.toml`). Values are fully-qualified
-    /// [`Identifier`]s.
+    /// [`PackageRef`]s.
     #[serde(default)]
-    pub tools: BTreeMap<String, Identifier>,
+    pub tools: BTreeMap<String, PackageRef>,
 
     /// Environment variables for the default group; `[env]` in TOML.
     ///
@@ -285,9 +285,9 @@ impl Eq for ProjectConfig {}
 
 /// Raw on-disk shape used as the first deserialization pass.
 ///
-/// Step 2 walks this and validates each value with [`Identifier::parse`]
+/// Step 2 walks this and validates each value with [`PackageRef::parse`]
 /// (strict — no `OCX_DEFAULT_REGISTRY` fallback), mapping
-/// [`ocx_oci::identifier::error::IdentifierErrorKind::MissingRegistry`]
+/// [`ocx_oci::package_ref::error::IdentifierErrorKind::MissingRegistry`]
 /// to [`super::error::ProjectErrorKind::ToolValueMissingRegistry`] and
 /// other identifier failures to
 /// [`super::error::ProjectErrorKind::ToolValueInvalid`]. Two-pass form
@@ -319,7 +319,7 @@ struct RawProjectConfig {
     groups: BTreeMap<String, toml::Table>,
 
     /// Per-package settings. `PackageSettings` deserializes directly — the
-    /// map KEY is validated as a strict [`Identifier`] in
+    /// map KEY is validated as a strict [`PackageRef`] in
     /// [`ProjectConfig::from_str_with_path`], not at the serde layer.
     #[serde(default, rename = "package")]
     package: BTreeMap<String, PackageSettings>,
@@ -349,7 +349,7 @@ struct RawProjectConfig {
 
     /// Trust policies (`[[trust.policy]]`). Parsed directly (no per-entry
     /// identifier validation — the scope is a prefix pattern, not an
-    /// [`Identifier`]).
+    /// [`PackageRef`]).
     #[serde(default)]
     trust: Option<ocx_trust::TrustConfig>,
 
@@ -377,8 +377,8 @@ impl ProjectConfig {
     /// — which is also what pins the frozen declaration-hash corpus.
     /// Fixtures needing group env parse TOML through [`Self::from_toml_str`].
     pub fn from_parts(
-        tools: BTreeMap<String, Identifier>,
-        groups: BTreeMap<String, BTreeMap<String, Identifier>>,
+        tools: BTreeMap<String, PackageRef>,
+        groups: BTreeMap<String, BTreeMap<String, PackageRef>>,
     ) -> Self {
         Self {
             tools,
@@ -454,7 +454,7 @@ impl ProjectConfig {
     ///
     /// Tag/digest are EXCLUDED: the opt-out is version-independent — opting a
     /// package out applies to every installed version. Keys were validated as
-    /// fully-qualified [`Identifier`]s at parse time, so `Identifier::parse`
+    /// fully-qualified [`PackageRef`]s at parse time, so `PackageRef::parse`
     /// here cannot fail for a well-formed config; a key that somehow fails to
     /// re-parse is silently skipped (it could not match a base anyway).
     ///
@@ -465,7 +465,7 @@ impl ProjectConfig {
         self.packages
             .iter()
             .filter(|(_, settings)| settings.no_patches)
-            .filter_map(|(key, _)| Identifier::parse(key).ok().map(|id| repository_key(&id)))
+            .filter_map(|(key, _)| PackageRef::parse(key).ok().map(|id| repository_key(&id)))
             .collect()
     }
 
@@ -479,13 +479,13 @@ impl ProjectConfig {
     ///
     /// Consumed by `ocx launcher shim` for the `lazy-report` ladder's package
     /// tier. A key that fails to re-parse is skipped; keys were validated as
-    /// fully-qualified [`Identifier`]s at parse time, and one that somehow
+    /// fully-qualified [`PackageRef`]s at parse time, and one that somehow
     /// fails here could not match a package anyway.
-    pub fn package_settings(&self, identifier: &Identifier) -> Option<&PackageSettings> {
+    pub fn package_settings(&self, identifier: &PackageRef) -> Option<&PackageSettings> {
         let wanted = repository_key(identifier);
         self.packages
             .iter()
-            .find(|(key, _)| Identifier::parse(key).is_ok_and(|parsed| repository_key(&parsed) == wanted))
+            .find(|(key, _)| PackageRef::parse(key).is_ok_and(|parsed| repository_key(&parsed) == wanted))
             .map(|(_, settings)| settings)
     }
 
@@ -570,7 +570,7 @@ impl ProjectConfig {
     /// Parse a [`ProjectConfig`] from a TOML string.
     ///
     /// Validates that `[group.default]` is not declared (reserved name).
-    /// Validates that every value parses as a fully-qualified [`Identifier`]
+    /// Validates that every value parses as a fully-qualified [`PackageRef`]
     /// — bare-tag forms are rejected with
     /// [`super::error::ProjectErrorKind::ToolValueMissingRegistry`].
     ///
@@ -663,7 +663,7 @@ impl ProjectConfig {
 
     fn from_str_with_path(s: &str, path: PathBuf) -> Result<Self, super::Error> {
         // First pass: deserialize the on-disk shape with raw string values.
-        // Second pass (below) walks every entry through `Identifier::parse`
+        // Second pass (below) walks every entry through `PackageRef::parse`
         // so the binding name (map key) and offending value (map value) can
         // both reach the diagnostic — a value-position visitor cannot see
         // the key.
@@ -734,7 +734,7 @@ impl ProjectConfig {
         }
 
         // Validate every `[package."<key>"]` key as a strict, fully-qualified
-        // [`Identifier`] (same path as `[tools]` values: no default-registry
+        // [`PackageRef`] (same path as `[tools]` values: no default-registry
         // fallback). A bare key without a registry is an error. The validated
         // map is keyed by the ORIGINAL author string so Serialize round-trips
         // byte-faithfully; validation here is for early, actionable errors only.
@@ -871,13 +871,13 @@ fn parse_project_env(scope: &str, raw: &toml::Table, path: &Path) -> Result<Proj
     ProjectEnv::from_table(scope, raw).map_err(|kind| ProjectError::new(path.to_path_buf(), kind).into())
 }
 
-/// Parse one `[tools]` value into the [`Identifier`] the schema boundary
+/// Parse one `[tools]` value into the [`PackageRef`] the schema boundary
 /// promises.
 ///
 /// Bare identifiers — registry + repository, no tag and no digest
 /// (e.g. `"ocx.sh/cmake"`) — get `:latest` injected here so resolution always
 /// has an advisory tag to look up. The default is applied at this boundary,
-/// not on [`Identifier`] itself, so CLI args without a tag still surface as
+/// not on [`PackageRef`] itself, so CLI args without a tag still surface as
 /// `tag = None`. Digest-pinned entries (`@sha256:...`) keep `tag = None`; the
 /// digest is the canonical pin.
 ///
@@ -889,10 +889,10 @@ fn parse_project_env(scope: &str, raw: &toml::Table, path: &Path) -> Result<Proj
 ///
 /// # Errors
 ///
-/// Propagates [`Identifier::parse`] verbatim — callers map the kinds onto
+/// Propagates [`PackageRef::parse`] verbatim — callers map the kinds onto
 /// their own diagnostics.
-pub(super) fn parse_tool_value(value: &str) -> Result<Identifier, IdentifierError> {
-    let identifier = Identifier::parse(value)?;
+pub(super) fn parse_tool_value(value: &str) -> Result<PackageRef, IdentifierError> {
+    let identifier = PackageRef::parse(value)?;
     if identifier.tag().is_none() && identifier.digest().is_none() {
         return Ok(identifier.clone_with_tag("latest"));
     }
@@ -900,7 +900,7 @@ pub(super) fn parse_tool_value(value: &str) -> Result<Identifier, IdentifierErro
 }
 
 /// Walk a raw `(name → value)` map and validate every value as a
-/// fully-qualified [`Identifier`] via [`parse_tool_value`]. Splits
+/// fully-qualified [`PackageRef`] via [`parse_tool_value`]. Splits
 /// [`IdentifierErrorKind::MissingRegistry`] from other identifier
 /// failures so the project-tier diagnostic can name the offending
 /// binding without losing the underlying [`IdentifierError`]
@@ -917,8 +917,8 @@ fn parse_tool_map(
     scope: &str,
     raw: &BTreeMap<String, String>,
     path: &Path,
-) -> Result<BTreeMap<String, Identifier>, super::Error> {
-    let mut out: BTreeMap<String, Identifier> = BTreeMap::new();
+) -> Result<BTreeMap<String, PackageRef>, super::Error> {
+    let mut out: BTreeMap<String, PackageRef> = BTreeMap::new();
     for (name, value) in raw {
         // Reject before identifier validation so the user sees the
         // actionable schema error first — same ordering rule the
@@ -1058,13 +1058,13 @@ pub(super) fn describe_toolchain_name_charset_violation(name: &str) -> &'static 
 }
 
 /// Validate every `[package."<key>"]` key as a strict, fully-qualified
-/// [`Identifier`], returning the map re-keyed by the ORIGINAL author string so
+/// [`PackageRef`], returning the map re-keyed by the ORIGINAL author string so
 /// Serialize round-trips byte-faithfully.
 ///
 /// Mirrors [`parse_tool_map`]'s error-mapping style: a key missing a registry
 /// maps to [`ProjectErrorKind::PackageKeyMissingRegistry`]; any other identifier
 /// failure maps to [`ProjectErrorKind::PackageKeyInvalid`] (carrying the
-/// underlying [`ocx_oci::identifier::error::IdentifierError`] via `#[source]`).
+/// underlying [`ocx_oci::package_ref::error::IdentifierError`] via `#[source]`).
 /// Validation is for early, actionable errors only — the parsed identifier is
 /// discarded; the original key string is retained as the map key.
 fn validate_package_keys(
@@ -1072,7 +1072,7 @@ fn validate_package_keys(
     path: &Path,
 ) -> Result<BTreeMap<String, PackageSettings>, super::Error> {
     for key in raw.keys() {
-        match Identifier::parse(key) {
+        match PackageRef::parse(key) {
             Ok(_) => {}
             Err(e) if matches!(e.kind, IdentifierErrorKind::MissingRegistry) => {
                 return Err(ProjectError::new(
@@ -1101,7 +1101,7 @@ fn validate_package_keys(
 ///
 /// One function rather than two `format!`s so the `no-patches` opt-out and the
 /// `lazy-report` package tier cannot drift into matching on different things.
-fn repository_key(identifier: &Identifier) -> String {
+fn repository_key(identifier: &PackageRef) -> String {
     format!("{}/{}", identifier.registry(), identifier.repository())
 }
 
@@ -1133,7 +1133,7 @@ fn repository_key(identifier: &Identifier) -> String {
 /// is split from [`LazyModeLadder::resolve_for_host`] one layer down.
 pub fn lazy_mode_ladder_for_tool(
     config: &ProjectConfig,
-    identifier: &Identifier,
+    identifier: &PackageRef,
     group: Option<&str>,
     cli: Option<LazyMode>,
 ) -> LazyModeLadder {
@@ -1162,7 +1162,7 @@ pub fn lazy_mode_ladder_for_tool(
 /// — reads no `ocx.toml` at any tier and therefore stays with its caller.
 pub fn lazy_mode_for_tool(
     config: &ProjectConfig,
-    identifier: &Identifier,
+    identifier: &PackageRef,
     group: Option<&str>,
     cli: Option<LazyMode>,
 ) -> LazyMode {
@@ -1550,7 +1550,7 @@ cmake = "ocx.sh/cmake:3.28"
         // `remove_binding_in_memory`).
         config.tools.insert(
             "ninja".to_string(),
-            Identifier::parse("ocx.sh/ninja:1.11").expect("valid"),
+            PackageRef::parse("ocx.sh/ninja:1.11").expect("valid"),
         );
         config.invalidate_declaration_hash_cache();
 
@@ -1572,7 +1572,7 @@ cmake = "ocx.sh/cmake:3.28"
         let mut cloned = config.clone();
         cloned.tools.insert(
             "ninja".to_string(),
-            Identifier::parse("ocx.sh/ninja:1.11").expect("valid"),
+            PackageRef::parse("ocx.sh/ninja:1.11").expect("valid"),
         );
         // No invalidate call — the clone's cache started empty so the next
         // `declaration_hash_cached` must see the mutated state.
@@ -1904,15 +1904,15 @@ shellcheck = "ocx.sh/shellcheck:0.10"
 
     #[test]
     fn parse_accepts_full_identifier_forms() {
-        // Cover all four canonical Identifier forms accepted by
-        // `Identifier::parse`. F1: the binding name (map key) is
+        // Cover all four canonical PackageRef forms accepted by
+        // `PackageRef::parse`. F1: the binding name (map key) is
         // independent of the repository path.
         //
         // Every value here carries an explicit tag, digest, or both, so
         // `parse_tool_map` does not inject the bare-identifier `:latest`
         // default — see `parse_defaults_bare_identifier_to_latest_tag`
         // for the bare-repo case. Each value round-trips through
-        // `Identifier::Display` verbatim.
+        // `PackageRef::Display` verbatim.
         let toml_str = r#"
 [tools]
 cmake = "ocx.sh/cmake:3.28"
@@ -1951,7 +1951,7 @@ digest_and_tag = "ghcr.io/acme/tool:v1@sha256:abcdef0123456789abcdef0123456789ab
         // Unit 3 contract: `[tools]` and `[group.*]` entries with a registry
         // and repository but no tag and no digest get `:latest` injected at
         // parse time. The default lives at the project-config boundary, not
-        // on `Identifier` — `Identifier::tag()` still returns `None` for
+        // on `PackageRef` — `PackageRef::tag()` still returns `None` for
         // CLI args without a tag.
         let toml_str = r#"
 [tools]
@@ -2094,7 +2094,7 @@ cmake = "3.28"
 
     #[test]
     fn parse_rejects_malformed_identifier_with_tool_value_invalid() {
-        // Invalid characters (uppercase repo) — `Identifier::parse`
+        // Invalid characters (uppercase repo) — `PackageRef::parse`
         // rejects with a non-MissingRegistry kind. The two-pass parser
         // must surface this as `ToolValueInvalid` so the underlying
         // `IdentifierError` reaches the diagnostic chain via `#[source]`.

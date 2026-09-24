@@ -160,7 +160,7 @@ pub struct ClaimRequest {
     /// The logical `<namespace>/<package>` identifier, already carrying its
     /// resolved registry domain — the `OCX_DEFAULT_REGISTRY` resolution lives at
     /// the CLI boundary, so claim renders the identifier it is handed.
-    pub package: ocx_oci::Identifier,
+    pub package: ocx_oci::PackageRef,
     /// `--repository`, the `oci://host/path` physical pointer, unparsed.
     pub repository: String,
     /// `--owner`, in the order given. Empty means "not given" — the ladder then

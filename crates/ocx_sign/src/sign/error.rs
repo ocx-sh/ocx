@@ -11,7 +11,7 @@
 //! the per-signing context (identifier) and delegates classification via
 //! `ClassifyExitCode`, which the binary carries (`ocx::exit`).
 
-use ocx_oci::Identifier;
+use ocx_oci::PackageRef;
 use ocx_oci::endpoint::UrlRejection;
 use ocx_trust::key_ref::KeyRefError;
 
@@ -27,8 +27,8 @@ use ocx_trust::key_ref::KeyRefError;
 #[derive(Debug, thiserror::Error)]
 #[error("{identifier}")]
 pub struct SignError {
-    /// Identifier being signed when the failure occurred.
-    pub identifier: Identifier,
+    /// PackageRef being signed when the failure occurred.
+    pub identifier: PackageRef,
     /// Discriminant kind of the failure.
     #[source]
     pub kind: SignErrorKind,
@@ -36,7 +36,7 @@ pub struct SignError {
 
 impl SignError {
     /// Build a [`SignError`] from an identifier + kind.
-    pub fn new(identifier: Identifier, kind: SignErrorKind) -> Self {
+    pub fn new(identifier: PackageRef, kind: SignErrorKind) -> Self {
         Self { identifier, kind }
     }
 }
@@ -422,8 +422,8 @@ mod tests {
     //! carefully.
     use super::*;
 
-    fn id() -> Identifier {
-        Identifier::parse("registry.example/pkg:1.0").expect("parse test identifier")
+    fn id() -> PackageRef {
+        PackageRef::parse("registry.example/pkg:1.0").expect("parse test identifier")
     }
 
     #[test]

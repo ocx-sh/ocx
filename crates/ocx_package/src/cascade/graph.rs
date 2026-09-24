@@ -135,7 +135,7 @@ pub struct TagGraphObservation {
     pub identifier: ocx_oci::OciIdentifier,
     /// The logical name the user asked for, when it differed from
     /// [`Self::identifier`]. `Some` is what turns the index layer on.
-    pub logical: Option<ocx_oci::Identifier>,
+    pub logical: Option<ocx_oci::PackageRef>,
     /// Every version-ish tag the registry holds, with the body behind it.
     pub tags: BTreeMap<AliasTag, ObservedTag>,
     /// Tags deliberately not part of the graph — keep tags
@@ -304,7 +304,7 @@ pub struct CascadeReport {
     /// The physical repository the graph was read from.
     pub identifier: ocx_oci::OciIdentifier,
     /// The logical name the user asked for, when it differed.
-    pub logical: Option<ocx_oci::Identifier>,
+    pub logical: Option<ocx_oci::PackageRef>,
     /// Per alias, what the registry holds as a whole.
     pub aliases: BTreeMap<AliasTag, AliasState>,
     /// Per-slot rows, sorted by (tag, platform). Includes `Ok` rows so a
@@ -818,7 +818,7 @@ pub fn plan_repairs(
 ///
 /// [`ScopeError::DigestReference`] for a digest-pinned identifier and
 /// [`ScopeError::NotAVersionTag`] for a tag that names no version.
-pub fn scope_request(identifier: &ocx_oci::Identifier) -> Result<Option<AliasTag>, ScopeError> {
+pub fn scope_request(identifier: &ocx_oci::PackageRef) -> Result<Option<AliasTag>, ScopeError> {
     if identifier.digest().is_some() {
         return Err(ScopeError::DigestReference);
     }

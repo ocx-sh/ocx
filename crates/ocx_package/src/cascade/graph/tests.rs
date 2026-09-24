@@ -94,8 +94,8 @@ fn tag_digest(tag: &str) -> ocx_oci::Digest {
     ocx_oci::Digest::Sha256(format!("tag-{tag}"))
 }
 
-fn identifier() -> ocx_oci::Identifier {
-    ocx_oci::Identifier::new_registry("test/pkg", "example.com")
+fn identifier() -> ocx_oci::PackageRef {
+    ocx_oci::PackageRef::new_registry("test/pkg", "example.com")
 }
 
 /// Builds observations. Tags are classified through [`AliasTag::parse`] at
@@ -179,7 +179,7 @@ impl Graph {
             logical: self
                 .root
                 .as_ref()
-                .map(|_| ocx_oci::Identifier::new_registry("test/pkg", "ocx.sh")),
+                .map(|_| ocx_oci::PackageRef::new_registry("test/pkg", "ocx.sh")),
             tags,
             ignored_tags,
             index_root: self.root.map(|commits| IndexRoot {

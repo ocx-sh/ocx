@@ -73,7 +73,7 @@ impl IndexCatalog {
         let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(CATALOG_TAG_CONCURRENCY));
         let mut join_set: tokio::task::JoinSet<IndexedTagResult> = tokio::task::JoinSet::new();
         for (index, repo) in repositories.iter().enumerate() {
-            let identifier = ocx_oci::Identifier::new_registry(repo.repository(), repo.registry());
+            let identifier = ocx_oci::PackageRef::new_registry(repo.repository(), repo.registry());
             let display_name = repo.to_string();
             let context = context.clone();
             // Acquired before the spawn, so a registry listing thousands of

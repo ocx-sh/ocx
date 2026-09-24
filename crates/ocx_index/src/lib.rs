@@ -190,10 +190,10 @@ pub enum IndexOperation {
 /// The result of a platform-aware package selection.
 pub enum SelectResult {
     /// Exactly one candidate matched.
-    Found(ocx_oci::Identifier),
+    Found(ocx_oci::PackageRef),
     /// Multiple candidates matched — the caller must decide how to handle the
     /// ambiguity (e.g. ask the user or report an error).
-    Ambiguous(Vec<ocx_oci::Identifier>),
+    Ambiguous(Vec<ocx_oci::PackageRef>),
     /// No candidates matched the requested platforms (or the package was not
     /// found in the index at all).
     NotFound,
@@ -353,7 +353,7 @@ impl Index {
     /// frozen legacy `sha256.<hex>` keep tags
     /// ([`is_reserved_tag`]) — are automatically filtered out. Returns `None`
     /// when the package is not known to this index.
-    pub async fn list_tags(&self, identifier: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+    pub async fn list_tags(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
         log::debug!("Listing tags for '{}'.", identifier);
         self.inner.list_tags(identifier).await.map(|opt| {
             opt.map(|tags| {
@@ -373,7 +373,7 @@ impl Index {
     /// available under the routing implied by `op` and the impl's mode.
     pub async fn fetch_manifest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         op: IndexOperation,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
         log::trace!("Fetching candidates for identifier '{}'.", identifier);
@@ -386,7 +386,7 @@ impl Index {
     /// Returns `None` when the identifier cannot be resolved.
     pub async fn fetch_manifest_digest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         op: IndexOperation,
     ) -> Result<Option<ocx_oci::Digest>> {
         self.inner.fetch_manifest_digest(identifier, op).await
@@ -398,7 +398,7 @@ impl Index {
     /// the blob's own digest for content addressing. `Ok(None)` = unrecoverable
     /// miss under the active routing policy (e.g. `ChainMode::Offline` + local
     /// cache miss).
-    pub async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+    pub async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
         log::trace!("Fetching blob '{blob_ref}'.");
         self.inner.fetch_blob(blob_ref).await
     }
@@ -426,7 +426,7 @@ impl Index {
     /// Whatever the index raises while looking the pointer up — the local
     /// copy's SSRF floor included; [`error::Error::NotInIndex`] when the index
     /// authoritative for the name does not hold it.
-    pub async fn route(&self, identifier: &ocx_oci::Identifier) -> Result<ocx_oci::OciIdentifier> {
+    pub async fn route(&self, identifier: &ocx_oci::PackageRef) -> Result<ocx_oci::OciIdentifier> {
         match self.physical_reference(identifier).await? {
             Some(physical) => Ok(physical),
             None => self.unrouted(identifier),
@@ -448,7 +448,7 @@ impl Index {
     /// Whatever [`Self::route`] raises; [`error::Error::NotInIndex`] when the
     /// index authoritative for the name does not hold it;
     /// [`error::Error::Ssrf`] when the floor refuses the rewritten target.
-    pub async fn route_for_dial(&self, identifier: &ocx_oci::Identifier) -> Result<ocx_oci::OciIdentifier> {
+    pub async fn route_for_dial(&self, identifier: &ocx_oci::PackageRef) -> Result<ocx_oci::OciIdentifier> {
         let Some(routed) = self.physical_reference(identifier).await? else {
             return self.unrouted(identifier);
         };
@@ -466,7 +466,7 @@ impl Index {
     /// # Errors
     ///
     /// The local copy's SSRF floor refusing the committed pointer.
-    pub async fn route_local(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+    pub async fn route_local(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
         Ok(self
             .inner
             .physical_reference_local(identifier)
@@ -487,7 +487,7 @@ impl Index {
     ///
     /// Whatever [`Self::route`] raises, [`error::Error::NotInIndex`] included.
     /// The record itself is best-effort.
-    pub async fn route_to_materialize(&self, identifier: &ocx_oci::Identifier) -> Result<ocx_oci::OciIdentifier> {
+    pub async fn route_to_materialize(&self, identifier: &ocx_oci::PackageRef) -> Result<ocx_oci::OciIdentifier> {
         match self.physical_reference(identifier).await? {
             Some(physical) => {
                 self.inner.record_routing_pointer(identifier).await;
@@ -501,7 +501,7 @@ impl Index {
     /// index is authoritative for its registry. That index owns every name
     /// there, so its miss is [`error::Error::NotInIndex`], never a read of the
     /// host the name happens to spell.
-    fn unrouted(&self, identifier: &ocx_oci::Identifier) -> Result<ocx_oci::OciIdentifier> {
+    fn unrouted(&self, identifier: &ocx_oci::PackageRef) -> Result<ocx_oci::OciIdentifier> {
         match self.authoritative_index_base_url(identifier) {
             Some(base_url) => Err(error::Error::NotInIndex {
                 identifier: identifier.to_string(),
@@ -594,7 +594,7 @@ impl Index {
     /// cannot be resolved at all.
     pub async fn guard_physical_dial(
         &self,
-        logical: &ocx_oci::Identifier,
+        logical: &ocx_oci::PackageRef,
         physical: &ocx_oci::OciIdentifier,
     ) -> Result<()> {
         if physical.registry() == logical.registry() {
@@ -613,7 +613,7 @@ impl Index {
     /// [`index_impl::IndexImpl::fetch_root_document`].
     pub async fn fetch_root_document(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(Vec<u8>, wire::IndexRoot)>> {
         self.inner.fetch_root_document(identifier).await
     }
@@ -626,7 +626,7 @@ impl Index {
     /// The answer is re-addressed at `identifier`'s version, so a source that
     /// dropped the tag (or the digest) cannot hand a caller a location at the
     /// wrong version.
-    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+    async fn physical_reference(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
         Ok(self
             .inner
             .physical_reference(identifier)
@@ -640,7 +640,7 @@ impl Index {
     /// `oci::index`-internal (no `pub`), like [`Self::source_kind`] — the chain
     /// is the only consumer, and `OcxIndex`'s inherent `pub` method serves the
     /// one caller outside this module.
-    fn jurisdiction(&self, identifier: &ocx_oci::Identifier) -> Jurisdiction {
+    fn jurisdiction(&self, identifier: &ocx_oci::PackageRef) -> Jurisdiction {
         self.inner.jurisdiction(identifier)
     }
 
@@ -666,7 +666,7 @@ impl Index {
 
     /// The base URL of the index authoritative for `identifier`, if any. See
     /// [`index_impl::IndexImpl::authoritative_index_base_url`].
-    fn authoritative_index_base_url(&self, identifier: &ocx_oci::Identifier) -> Option<&str> {
+    fn authoritative_index_base_url(&self, identifier: &ocx_oci::PackageRef) -> Option<&str> {
         self.inner.authoritative_index_base_url(identifier)
     }
 
@@ -690,7 +690,7 @@ impl Index {
     /// Returns `Ok(None)` when the tag/manifest is absent.
     pub async fn fetch_manifest_raw_bytes(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
         log::trace!("Fetching raw manifest bytes for identifier '{}'.", identifier);
         self.inner.fetch_manifest_raw_bytes(identifier).await
@@ -698,9 +698,9 @@ impl Index {
 
     pub async fn fetch_candidates(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         op: IndexOperation,
-    ) -> Result<Option<Vec<(ocx_oci::Identifier, ocx_oci::Platform)>>> {
+    ) -> Result<Option<Vec<(ocx_oci::PackageRef, ocx_oci::Platform)>>> {
         let Some((digest, manifest)) = self.fetch_manifest(identifier, op).await? else {
             return Ok(None);
         };
@@ -745,7 +745,7 @@ impl Index {
 
     pub async fn select(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         platform: &ocx_oci::Platform,
         op: IndexOperation,
     ) -> Result<SelectResult> {
@@ -857,7 +857,7 @@ fn parse_repository_pointer(value: &str) -> Result<ocx_oci::OciIdentifier> {
 /// display string for deterministic error output.
 fn candidates_sharing_host_os_arch(
     platform: &ocx_oci::Platform,
-    candidates: &[(ocx_oci::Identifier, ocx_oci::Platform)],
+    candidates: &[(ocx_oci::PackageRef, ocx_oci::Platform)],
 ) -> Vec<ocx_oci::Platform> {
     let ocx_oci::Platform::Specific {
         os: host_os,
@@ -893,7 +893,7 @@ pub mod test_source {
     use async_trait::async_trait;
 
     use super::{Index, IndexOperation, index_impl};
-    use ocx_oci::{self, Digest, Identifier, Manifest};
+    use ocx_oci::{self, Digest, Manifest, PackageRef};
 
     /// A source that owns a namespace and carries its `trusted_hosts` exemption —
     /// the `OcxIndex` shape the chain keys on, with nothing else wired up.
@@ -932,16 +932,16 @@ pub mod test_source {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(vec![])
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(None)
         }
-        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         fn serves_registry(&self, registry: &str) -> bool {
@@ -1008,19 +1008,19 @@ pub mod test_source {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(vec![])
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(None)
         }
-        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        async fn physical_reference(&self, identifier: &Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+        async fn physical_reference(&self, identifier: &PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
             Ok(self.physical.as_ref().map(|(registry, repository)| {
                 let physical = ocx_oci::OciIdentifier::from_parts(repository.clone(), registry.clone());
                 match identifier.digest() {
@@ -1029,7 +1029,7 @@ pub mod test_source {
                 }
             }))
         }
-        fn jurisdiction(&self, _: &Identifier) -> super::Jurisdiction {
+        fn jurisdiction(&self, _: &PackageRef) -> super::Jurisdiction {
             match self.authoritative_base_url {
                 Some(_) => super::Jurisdiction::Authoritative,
                 None => super::Jurisdiction::FallThrough,
@@ -1050,7 +1050,7 @@ pub mod test_source {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use ocx_oci::{self, Digest, Identifier, Manifest, Platform};
+    use ocx_oci::{self, Digest, Manifest, PackageRef, Platform};
 
     // ── Minimal mock IndexImpl returning a fixed ImageIndex ──────────
 
@@ -1125,24 +1125,24 @@ mod tests {
             Ok(vec![])
         }
 
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(vec!["1.0".to_string()]))
         }
 
         async fn fetch_manifest(
             &self,
-            _identifier: &Identifier,
+            _identifier: &PackageRef,
             _op: IndexOperation,
         ) -> Result<Option<(Digest, Manifest)>> {
             let digest = Digest::Sha256("0".repeat(64));
             Ok(Some((digest, Manifest::ImageIndex(self.manifest.clone()))))
         }
 
-        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
             Ok(Some(Digest::Sha256("0".repeat(64))))
         }
 
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
 
@@ -1153,8 +1153,8 @@ mod tests {
         }
     }
 
-    fn test_id() -> Identifier {
-        Identifier::new_registry("test/tool", "example.com").clone_with_tag("1.0")
+    fn test_id() -> PackageRef {
+        PackageRef::new_registry("test/tool", "example.com").clone_with_tag("1.0")
     }
 
     fn glibc_host_platform() -> Platform {
@@ -1398,17 +1398,17 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(vec![])
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(vec!["1.0".to_string()]))
         }
-        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             let digest = Digest::Sha256("0".repeat(64));
             Ok(Some((digest, Manifest::ImageIndex(self.manifest.clone()))))
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
             Ok(Some(Digest::Sha256("0".repeat(64))))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -1468,17 +1468,17 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(vec![])
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(vec!["1.0".to_string()]))
         }
-        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             let digest = Digest::Sha256("0".repeat(64));
             Ok(Some((digest, Manifest::ImageIndex(self.manifest.clone()))))
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
             Ok(Some(Digest::Sha256("0".repeat(64))))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -1715,17 +1715,17 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(vec![])
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(vec!["1.0".to_string()]))
         }
-        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             let digest = Digest::Sha256("0".repeat(64));
             Ok(Some((digest, Manifest::ImageIndex(self.manifest.clone()))))
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
             Ok(Some(Digest::Sha256("0".repeat(64))))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -1849,7 +1849,7 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(vec![])
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(vec![
                 "3.28".to_string(),
                 "latest".to_string(),
@@ -1858,13 +1858,13 @@ mod tests {
                 format!("__ocx.keep.sha256-{}", "a".repeat(64)),
             ]))
         }
-        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -1909,8 +1909,8 @@ mod tests {
         .with_proxy_rules(ocx_oci::ssrf::ProxyRules::direct())
     }
 
-    fn logical_id() -> Identifier {
-        Identifier::new_registry("kitware/cmake", "example.com")
+    fn logical_id() -> PackageRef {
+        PackageRef::new_registry("kitware/cmake", "example.com")
     }
 
     fn physical_id(registry: &str) -> ocx_oci::OciIdentifier {
@@ -2020,7 +2020,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn guard_physical_dial_does_not_judge_a_target_that_is_not_a_rewrite() {
         let directory = tempfile::tempdir().unwrap();
-        let logical = Identifier::new_registry("kitware/cmake", LOOPBACK);
+        let logical = PackageRef::new_registry("kitware/cmake", LOOPBACK);
         chained_with(&directory, vec![])
             .guard_physical_dial(&logical, &physical_id(LOOPBACK))
             .await
@@ -2043,19 +2043,19 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(vec![])
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(None)
         }
-        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        fn jurisdiction(&self, _: &Identifier) -> Jurisdiction {
+        fn jurisdiction(&self, _: &PackageRef) -> Jurisdiction {
             self.jurisdiction
         }
         fn index_base_url(&self) -> Option<&str> {
@@ -2066,7 +2066,7 @@ mod tests {
         }
     }
 
-    fn versioned_logical_id() -> Identifier {
+    fn versioned_logical_id() -> PackageRef {
         logical_id()
             .clone_with_tag("3.28")
             .clone_with_digest(Digest::Sha256("a".repeat(64)))

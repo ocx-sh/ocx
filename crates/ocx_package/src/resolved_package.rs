@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::metadata::visibility::Visibility;
-use ocx_oci::PinnedIdentifier;
+use ocx_oci::PinnedPackageRef;
 
 /// A dependency in the transitive closure with its pre-computed visibility.
 ///
@@ -14,7 +14,7 @@ use ocx_oci::PinnedIdentifier;
 /// each axis) — if ANY path makes a dep visible, it stays visible.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResolvedDependency {
-    pub identifier: PinnedIdentifier,
+    pub identifier: PinnedPackageRef,
     pub visibility: Visibility,
 }
 
@@ -59,10 +59,10 @@ impl ResolvedPackage {
     /// by identity (advisory tags stripped).
     pub fn with_dependencies(
         mut self,
-        deps: impl IntoIterator<Item = (PinnedIdentifier, ResolvedPackage, Visibility)>,
+        deps: impl IntoIterator<Item = (PinnedPackageRef, ResolvedPackage, Visibility)>,
     ) -> Self {
         // Maps stripped identity → index in self.dependencies for OR dedup.
-        let mut seen: std::collections::HashMap<PinnedIdentifier, usize> = std::collections::HashMap::new();
+        let mut seen: std::collections::HashMap<PinnedPackageRef, usize> = std::collections::HashMap::new();
 
         for (dep_id, dep, edge) in deps {
             // Bubble up transitive deps first (preserves topological order).
@@ -102,26 +102,26 @@ impl ResolvedPackage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_oci::{Digest, Identifier};
+    use ocx_oci::{Digest, PackageRef};
 
     fn sha256_hex() -> String {
         "a".repeat(64)
     }
 
-    fn make_pinned() -> PinnedIdentifier {
-        let id = Identifier::new_registry("cmake", "example.com").clone_with_digest(Digest::Sha256(sha256_hex()));
-        PinnedIdentifier::try_from(id).unwrap()
+    fn make_pinned() -> PinnedPackageRef {
+        let id = PackageRef::new_registry("cmake", "example.com").clone_with_digest(Digest::Sha256(sha256_hex()));
+        PinnedPackageRef::try_from(id).unwrap()
     }
 
-    fn make_dep_pinned() -> PinnedIdentifier {
-        let id = Identifier::new_registry("zlib", "example.com").clone_with_digest(Digest::Sha256("b".repeat(64)));
-        PinnedIdentifier::try_from(id).unwrap()
+    fn make_dep_pinned() -> PinnedPackageRef {
+        let id = PackageRef::new_registry("zlib", "example.com").clone_with_digest(Digest::Sha256("b".repeat(64)));
+        PinnedPackageRef::try_from(id).unwrap()
     }
 
-    fn make_pinned_repo(repo: &str, hex_char: char) -> PinnedIdentifier {
+    fn make_pinned_repo(repo: &str, hex_char: char) -> PinnedPackageRef {
         let id =
-            Identifier::new_registry(repo, "ocx.sh").clone_with_digest(Digest::Sha256(hex_char.to_string().repeat(64)));
-        PinnedIdentifier::try_from(id).unwrap()
+            PackageRef::new_registry(repo, "ocx.sh").clone_with_digest(Digest::Sha256(hex_char.to_string().repeat(64)));
+        PinnedPackageRef::try_from(id).unwrap()
     }
 
     /// Test wrapper pairing an identifier with its resolved closure.
@@ -131,7 +131,7 @@ mod tests {
     /// the (id, resolved) tuple together while tests build graphs.
     #[derive(Clone)]
     struct TestPkg {
-        id: PinnedIdentifier,
+        id: PinnedPackageRef,
         resolved: ResolvedPackage,
     }
 

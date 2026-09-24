@@ -451,7 +451,7 @@ impl PackageCreate {
     }
 
     /// Infers a filename for the package bundle based on the identifier and platform, or the input path if no identifier is provided.
-    fn infer_filename(&self, identifier: Option<&ocx_oci::Identifier>) -> String {
+    fn infer_filename(&self, identifier: Option<&ocx_oci::PackageRef>) -> String {
         let mut name = match identifier {
             Some(identifier) => format!("{}-{}", identifier.name(), identifier.tag_or_latest()),
             None => self.inferred_stem(),

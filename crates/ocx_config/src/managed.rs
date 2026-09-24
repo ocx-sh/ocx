@@ -173,7 +173,7 @@ pub struct ManagedConfigSnapshot {
 ///
 /// 1. **Repository identity** — the snapshot's source and the effective
 ///    source name the same `registry/repository`
-///    ([`Identifier::without_specifiers`](ocx_oci::Identifier::without_specifiers)
+///    ([`OciIdentifier::without_specifiers`](ocx_oci::OciIdentifier::without_specifiers)
 ///    equality). Tags float: a snapshot fetched at `:user-1.4.2` still
 ///    satisfies a seed tracking `:user` (version pins via `ocx config update
 ///    <VERSION>` and cascade tags both move within one repository).
@@ -194,7 +194,7 @@ pub fn snapshot_matches_source(snapshot: &ManagedConfigSnapshot, source: &ocx_oc
     })
 }
 
-/// Canonical [`ocx_oci::Identifier`](ocx_oci::Identifier) equality between two
+/// Canonical [`ocx_oci::PackageRef`](ocx_oci::PackageRef) equality between two
 /// raw managed-config source strings (both parsed with the default registry; a
 /// parse failure on either side is a non-match).
 ///
@@ -205,8 +205,8 @@ pub fn snapshot_matches_source(snapshot: &ManagedConfigSnapshot, source: &ocx_oc
 fn sources_canonically_eq(left: &str, right: &str) -> bool {
     matches!(
         (
-            ocx_oci::Identifier::parse_with_default_registry(left, ocx_oci::DEFAULT_REGISTRY),
-            ocx_oci::Identifier::parse_with_default_registry(right, ocx_oci::DEFAULT_REGISTRY),
+            ocx_oci::PackageRef::parse_with_default_registry(left, ocx_oci::DEFAULT_REGISTRY),
+            ocx_oci::PackageRef::parse_with_default_registry(right, ocx_oci::DEFAULT_REGISTRY),
         ),
         (Ok(left_id), Ok(right_id)) if left_id == right_id
     )
@@ -235,7 +235,7 @@ pub enum ManagedConfigError {
         value: String,
         /// The underlying identifier parse failure.
         #[source]
-        source: ocx_oci::identifier::error::IdentifierError,
+        source: ocx_oci::package_ref::error::IdentifierError,
     },
 
     /// The `interval` field is not a valid `\d+[smhd]?` duration.
@@ -253,7 +253,7 @@ pub enum ManagedConfigError {
         ///
         /// Named `effective_source`, not `source`, so `thiserror` does not
         /// treat this field as the variant's `#[source]` error (it is an
-        /// `ocx_oci::Identifier`, not an error type).
+        /// `ocx_oci::PackageRef`, not an error type).
         effective_source: ocx_oci::OciIdentifier,
     },
 

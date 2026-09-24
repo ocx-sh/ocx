@@ -7,7 +7,7 @@
 //! to a distinct exit code via `ClassifyErrorKind`, which the binary carries
 //! (`ocx::exit`).
 
-use ocx_oci::Identifier;
+use ocx_oci::PackageRef;
 use ocx_oci::endpoint::UrlRejection;
 use ocx_trust::key_ref::KeyRefError;
 
@@ -19,8 +19,8 @@ use ocx_trust::key_ref::KeyRefError;
 #[derive(Debug, thiserror::Error)]
 #[error("{identifier}")]
 pub struct VerifyError {
-    /// Identifier being verified when the failure occurred.
-    pub identifier: Identifier,
+    /// PackageRef being verified when the failure occurred.
+    pub identifier: PackageRef,
     /// Discriminant kind of the failure.
     #[source]
     pub kind: VerifyErrorKind,
@@ -28,7 +28,7 @@ pub struct VerifyError {
 
 impl VerifyError {
     /// Build a [`VerifyError`] from an identifier + kind.
-    pub fn new(identifier: Identifier, kind: VerifyErrorKind) -> Self {
+    pub fn new(identifier: PackageRef, kind: VerifyErrorKind) -> Self {
         Self { identifier, kind }
     }
 }
@@ -710,8 +710,8 @@ mod tests {
     //! change.
     use super::*;
 
-    fn id() -> Identifier {
-        Identifier::parse("registry.example/pkg:1.0").expect("parse test identifier")
+    fn id() -> PackageRef {
+        PackageRef::parse("registry.example/pkg:1.0").expect("parse test identifier")
     }
 
     #[test]

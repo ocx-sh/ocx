@@ -854,9 +854,9 @@ pub mod tests {
         ocx_oci::Digest::Sha256(nibble.to_string().repeat(64))
     }
 
-    fn pin(registry: &str, repository: &str, nibble: char) -> ocx_oci::PinnedIdentifier {
-        ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry(repository, registry).clone_with_digest(digest_of(nibble)),
+    fn pin(registry: &str, repository: &str, nibble: char) -> ocx_oci::PinnedPackageRef {
+        ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry(repository, registry).clone_with_digest(digest_of(nibble)),
         )
         .expect("an identifier carrying a digest is a valid PinnedIdentifier")
     }
@@ -883,7 +883,7 @@ pub mod tests {
     /// forward-ref per closure config blob — and returns its canonical path.
     async fn seed_shim(
         file_structure: &FileStructure,
-        pinned: &ocx_oci::PinnedIdentifier,
+        pinned: &ocx_oci::PinnedPackageRef,
         config_blobs: &[ocx_oci::Digest],
     ) -> PathBuf {
         let shim = file_structure.shims.shim_dir(pinned);
@@ -906,7 +906,7 @@ pub mod tests {
 
     /// Creates the package directory for `pinned` — `content/` is what the
     /// package walk classifies on — and returns its canonical path.
-    async fn seed_package(file_structure: &FileStructure, pinned: &ocx_oci::PinnedIdentifier) -> PathBuf {
+    async fn seed_package(file_structure: &FileStructure, pinned: &ocx_oci::PinnedPackageRef) -> PathBuf {
         let dir = file_structure.packages.path(pinned);
         tokio::fs::create_dir_all(dir.join("content")).await.unwrap();
         super::canonicalize_or_keep(&dir)
@@ -914,7 +914,7 @@ pub mod tests {
 
     /// One `ocx.lock` pinning `digests`, in the shape `collect_project_roots`
     /// hands to the graph builder.
-    fn lock_pinning(lock_path: &Path, digests: &[ocx_oci::PinnedIdentifier]) -> Vec<ProjectRootDigests> {
+    fn lock_pinning(lock_path: &Path, digests: &[ocx_oci::PinnedPackageRef]) -> Vec<ProjectRootDigests> {
         vec![ProjectRootDigests {
             ocx_lock_path: lock_path.to_path_buf(),
             digests: digests.to_vec(),

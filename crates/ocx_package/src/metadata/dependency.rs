@@ -79,7 +79,7 @@ impl schemars::JsonSchema for DependencyName {
 }
 
 /// Derives a dependency's default interpolation name from an OCI repository
-/// basename (the last path segment, [`ocx_oci::Identifier::name`]).
+/// basename (the last path segment, [`ocx_oci::PackageRef::name`]).
 ///
 /// OCI repository grammar is a strict superset of the slug grammar
 /// (`^[a-z0-9][a-z0-9_-]*$`, see [`SLUG_PATTERN`]): it also permits `.`
@@ -120,7 +120,7 @@ pub struct Dependency {
     /// Fully qualified pinned OCX identifier with required explicit registry
     /// and digest. The tag portion is advisory (for update tooling) — only
     /// the digest is used for resolution.
-    pub identifier: ocx_oci::PinnedIdentifier,
+    pub identifier: ocx_oci::PinnedPackageRef,
 
     /// Controls how this dependency's environment variables propagate.
     /// Default: `Sealed` — no env contribution. See [`Visibility`] for the
@@ -259,7 +259,7 @@ impl<'de> Deserialize<'de> for Dependencies {
 pub enum DependencyError {
     /// A dependency identifier appears more than once.
     #[error("duplicate dependency identifier: '{identifier}'")]
-    DuplicateIdentifier { identifier: ocx_oci::PinnedIdentifier },
+    DuplicateIdentifier { identifier: ocx_oci::PinnedPackageRef },
     /// A name is not a valid slug (`^[a-z0-9][a-z0-9_-]*$`, max 64 chars).
     #[error("invalid dependency name '{name}': must match ^[a-z0-9][a-z0-9_-]*$ (max 64 chars)")]
     InvalidName { name: String },
@@ -270,7 +270,7 @@ pub enum DependencyError {
     ///
     /// Authoring-form counterpart of [`DependencyError::DuplicateIdentifier`]:
     /// an authoring duplicate may be digest-less, so it cannot carry a
-    /// [`ocx_oci::PinnedIdentifier`].
+    /// [`ocx_oci::PinnedPackageRef`].
     #[error("duplicate dependency repository '{repository}'")]
     DuplicateRepository { repository: String },
     /// The dependency count exceeds the maximum allowed.

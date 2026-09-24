@@ -58,7 +58,7 @@ impl Add {
         // appears in a valid OCI identifier, so splitting on the FIRST `=` is
         // unambiguous. The name itself is validated by the library
         // (`InvalidBindingName`), so an empty `=foo` fails there, not here.
-        let bindings: Vec<(Option<String>, ocx_oci::Identifier)> = self
+        let bindings: Vec<(Option<String>, ocx_oci::PackageRef)> = self
             .identifiers
             .iter()
             .map(|raw| {
@@ -66,7 +66,7 @@ impl Add {
                     Some((name, reference)) => (Some(name.to_owned()), reference),
                     None => (None, raw.as_str()),
                 };
-                let id = ocx_oci::Identifier::parse_with_default_registry(reference, context.default_registry())?;
+                let id = ocx_oci::PackageRef::parse_with_default_registry(reference, context.default_registry())?;
                 let id = if id.tag().is_none() && id.digest().is_none() {
                     id.clone_with_tag("latest")
                 } else {
@@ -343,7 +343,7 @@ struct AddPlan {
     /// Bindings the staging closure still runs: the genuinely new keys, and
     /// the ones whose key is taken by a different identifier — those are left
     /// for `add_binding_in_memory` to refuse, so the refusal keeps one owner.
-    stage: Vec<(Option<String>, ocx_oci::Identifier)>,
+    stage: Vec<(Option<String>, ocx_oci::PackageRef)>,
     /// `(group, key)` pairs to re-resolve: every new binding, plus an
     /// already-declared one the predecessor lock holds no pin for.
     touched: Vec<(String, String)>,
@@ -358,7 +358,7 @@ struct AddPlan {
 /// Keyed on what the mutation would write — the explicit `NAME=` key when
 /// given, else [`ocx_project::binding_key`] — and scoped to the target group,
 /// exactly as `add_binding_in_memory`'s own duplicate check is. Equality is
-/// `Identifier` equality; both sides carry the `:latest` default, so
+/// `PackageRef` equality; both sides carry the `:latest` default, so
 /// `ocx add cmake` twice compares equal.
 ///
 /// A key repeated inside one batch is decided against the identifier the
@@ -370,7 +370,7 @@ fn plan_bindings(
     config: &ocx_project::ProjectConfig,
     locked: &[ocx_project::LockedTool],
     group: Option<&str>,
-    bindings: &[(Option<String>, ocx_oci::Identifier)],
+    bindings: &[(Option<String>, ocx_oci::PackageRef)],
 ) -> AddPlan {
     let lock_group = group.unwrap_or(ocx_project::DEFAULT_GROUP);
     let declared = match group {
@@ -381,7 +381,7 @@ fn plan_bindings(
     let mut plan = AddPlan::default();
     // ponytail: linear scans over a hand-typed argument list. A map would cost
     // more to build than the whole walk.
-    let mut batch: Vec<(String, ocx_oci::Identifier)> = Vec::new();
+    let mut batch: Vec<(String, ocx_oci::PackageRef)> = Vec::new();
     for (name, identifier) in bindings {
         let key = name.clone().unwrap_or_else(|| ocx_project::binding_key(identifier));
         let in_manifest = declared.and_then(|tools| tools.get(&key));
@@ -435,8 +435,8 @@ mod tests {
     /// Parse the way `execute` does: default registry applied, `:latest`
     /// injected for a bare identifier. Both sides of the equality test in
     /// `plan_bindings` reach it through this same normalization.
-    fn identifier(text: &str) -> ocx_oci::Identifier {
-        let parsed = ocx_oci::Identifier::parse_with_default_registry(text, "ocx.sh").unwrap();
+    fn identifier(text: &str) -> ocx_oci::PackageRef {
+        let parsed = ocx_oci::PackageRef::parse_with_default_registry(text, "ocx.sh").unwrap();
         if parsed.tag().is_none() && parsed.digest().is_none() {
             parsed.clone_with_tag("latest")
         } else {
@@ -445,7 +445,7 @@ mod tests {
     }
 
     /// `ocx add`'s parsed-binding shape: optional `NAME=` key plus identifier.
-    fn binding(name: Option<&str>, text: &str) -> (Option<String>, ocx_oci::Identifier) {
+    fn binding(name: Option<&str>, text: &str) -> (Option<String>, ocx_oci::PackageRef) {
         (name.map(str::to_owned), identifier(text))
     }
 
@@ -469,7 +469,7 @@ mod tests {
         }
     }
 
-    fn keys(staged: &[(Option<String>, ocx_oci::Identifier)]) -> Vec<String> {
+    fn keys(staged: &[(Option<String>, ocx_oci::PackageRef)]) -> Vec<String> {
         staged
             .iter()
             .map(|(name, id)| name.clone().unwrap_or_else(|| ocx_project::binding_key(id)))

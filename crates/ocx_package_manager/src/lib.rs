@@ -637,8 +637,8 @@ impl PackageManager {
         let digest_path = objects.digest_file_for_content(pkg_root)?;
         let digest = read_digest_file(&digest_path).await?;
         let repo_name = format!("file-url-mode/{}", digest.hex());
-        let base_id = ocx_oci::Identifier::new_registry(repo_name, &self.default_registry).clone_with_digest(digest);
-        let pinned = ocx_oci::PinnedIdentifier::try_from(base_id)?;
+        let base_id = ocx_oci::PackageRef::new_registry(repo_name, &self.default_registry).clone_with_digest(digest);
+        let pinned = ocx_oci::PinnedPackageRef::try_from(base_id)?;
 
         Ok(InstallInfo::new(
             pinned,

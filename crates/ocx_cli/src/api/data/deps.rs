@@ -10,7 +10,7 @@ use crate::api::Printable;
 
 /// `registry/repo[:tag]` with the tag coloured by the theme and the
 /// digest deliberately omitted (it has its own column / annotation).
-fn name_tag(id: &ocx_oci::Identifier, theme: &Theme) -> String {
+fn name_tag(id: &ocx_oci::PackageRef, theme: &Theme) -> String {
     let mut out = format!("{}/{}", id.registry(), id.repository());
     if let Some(tag) = id.tag() {
         out.push_str(&theme.tag(format!(":{tag}")));
@@ -25,7 +25,7 @@ fn name_tag(id: &ocx_oci::Identifier, theme: &Theme) -> String {
 /// by the parent — not the propagated result.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Dependency {
-    pub identifier: ocx_oci::Identifier,
+    pub identifier: ocx_oci::PackageRef,
     pub repeated: bool,
     pub visibility: Option<Visibility>,
     pub dependencies: Vec<Dependency>,
@@ -90,7 +90,7 @@ pub struct FlatDependencies {
 
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct FlatDependency {
-    pub identifier: ocx_oci::Identifier,
+    pub identifier: ocx_oci::PackageRef,
     pub visibility: Visibility,
 }
 
@@ -127,14 +127,14 @@ impl Printable for FlatDependencies {
 /// Why view — all paths from roots to a target dependency.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct DependenciesTrace {
-    pub paths: Vec<Vec<ocx_oci::Identifier>>,
+    pub paths: Vec<Vec<ocx_oci::PackageRef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub message: Option<String>,
 }
 
 impl DependenciesTrace {
-    pub fn new(paths: Vec<Vec<ocx_oci::Identifier>>) -> Self {
+    pub fn new(paths: Vec<Vec<ocx_oci::PackageRef>>) -> Self {
         Self { paths, message: None }
     }
 }
@@ -170,8 +170,8 @@ mod tests {
         ocx_oci::Digest::Sha256(hex_char.to_string().repeat(64))
     }
 
-    fn make_identifier(s: &str) -> ocx_oci::Identifier {
-        ocx_oci::Identifier::parse_with_default_registry(s, "ocx.sh").unwrap()
+    fn make_identifier(s: &str) -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::parse_with_default_registry(s, "ocx.sh").unwrap()
     }
 
     fn make_node(identifier: &str, digest: ocx_oci::Digest, repeated: bool, deps: Vec<Dependency>) -> Dependency {

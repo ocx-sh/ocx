@@ -658,7 +658,7 @@ impl PackageManager {
     /// partial surface renders a quietly incomplete `bin/`.
     pub async fn toolchain_surface(
         &self,
-        roots: &[ocx_oci::Identifier],
+        roots: &[ocx_oci::PackageRef],
         platform: &ocx_oci::Platform,
     ) -> Result<Vec<ClosureNode>, PackageErrorKind> {
         let (file_structure, index) = (self.file_structure(), self.index());
@@ -1860,7 +1860,7 @@ pub(crate) fn link_target(
     // map. An ambiguous lock is skipped for the same reason a missing one is:
     // one unavailable tool must not fail the whole render.
     let identifier = ocx_project::compose::host_leaf_identifier(tool, platform).ok()?;
-    let pinned = ocx_oci::PinnedIdentifier::try_from(identifier).ok()?;
+    let pinned = ocx_oci::PinnedPackageRef::try_from(identifier).ok()?;
     Some(file_structure.packages.path(&pinned))
 }
 
@@ -3586,9 +3586,9 @@ mod tests {
         ocx_oci::Digest::Sha256(seed.to_string().repeat(64))
     }
 
-    fn pinned(repository: &str, seed: char) -> ocx_oci::PinnedIdentifier {
-        ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry(repository, REGISTRY).clone_with_digest(digest_of(seed)),
+    fn pinned(repository: &str, seed: char) -> ocx_oci::PinnedPackageRef {
+        ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry(repository, REGISTRY).clone_with_digest(digest_of(seed)),
         )
         .expect("a digest-bearing identifier is pinned")
     }
@@ -3611,7 +3611,7 @@ mod tests {
 
     /// A **root** closure node carrying only the two claim axes the name set is
     /// derived from; every other field is this axis's inert value.
-    fn node(identifier: ocx_oci::PinnedIdentifier, claimed: Option<&[&str]>, entries: &[&str]) -> ClosureNode {
+    fn node(identifier: ocx_oci::PinnedPackageRef, claimed: Option<&[&str]>, entries: &[&str]) -> ClosureNode {
         ClosureNode {
             config_digest: identifier.digest(),
             identifier,
@@ -3628,7 +3628,7 @@ mod tests {
     /// A **dependency** node carrying an explicit effective visibility — the
     /// field `admitted_on_surface` gates on (C-023).
     fn dependency(
-        identifier: ocx_oci::PinnedIdentifier,
+        identifier: ocx_oci::PinnedPackageRef,
         claimed: Option<&[&str]>,
         effective: Visibility,
     ) -> ClosureNode {
@@ -3647,7 +3647,7 @@ mod tests {
         LockedTool {
             name: name.to_string(),
             group: group.to_string(),
-            repository: ocx_oci::Identifier::new_registry(repository, REGISTRY),
+            repository: ocx_oci::PackageRef::new_registry(repository, REGISTRY),
             platforms: platforms
                 .iter()
                 .map(|(key, seed)| ((*key).to_string(), digest_of(*seed)))
@@ -3678,7 +3678,7 @@ mod tests {
     fn expected_link_target(file_structure: &FileStructure, tool: &LockedTool) -> PathBuf {
         let identifier = ocx_project::compose::host_leaf_identifier(tool, &platform())
             .expect("the fixture lock ships a leaf compatible with the fixture platform");
-        let pinned = ocx_oci::PinnedIdentifier::try_from(identifier).expect("a resolved host leaf is digest-bearing");
+        let pinned = ocx_oci::PinnedPackageRef::try_from(identifier).expect("a resolved host leaf is digest-bearing");
         file_structure.packages.path(&pinned)
     }
 
@@ -7590,14 +7590,14 @@ mod tests {
             let identifier = ocx_project::compose::host_leaf_identifier(&exact, &host).expect("exact resolves");
             tree.file_structure
                 .packages
-                .path(&ocx_oci::PinnedIdentifier::try_from(identifier).expect("digest-bearing"))
+                .path(&ocx_oci::PinnedPackageRef::try_from(identifier).expect("digest-bearing"))
         };
         let expected_compatible = {
             let identifier =
                 ocx_project::compose::host_leaf_identifier(&compatible, &host).expect("compatible resolves");
             tree.file_structure
                 .packages
-                .path(&ocx_oci::PinnedIdentifier::try_from(identifier).expect("digest-bearing"))
+                .path(&ocx_oci::PinnedPackageRef::try_from(identifier).expect("digest-bearing"))
         };
         let lock = lock_of(vec![exact, compatible, incompatible]);
         let scope = tree.scope();

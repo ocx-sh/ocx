@@ -43,7 +43,7 @@ pub enum ClaimError {
     /// **Not** `#[error(transparent)]` over the index error: that type classifies
     /// to `DataError` (65), and a malformed *flag value* is operator input, which
     /// is `EX_USAGE` (64). C-047's "verbatim" half has no reachable red — the
-    /// parse demands an exact `Identifier` round-trip, so every accepted value
+    /// parse demands an exact `OciIdentifier` round-trip, so every accepted value
     /// reconstructs byte-identically — and this refusal is the half that does.
     #[error("malformed --repository {value}: expected oci://host/path")]
     MalformedRepository { value: String },

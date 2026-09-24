@@ -45,7 +45,7 @@ use ocx_oci::referrer::media_types::{
 };
 use ocx_oci::resolve_target::{ResolveTargetError, ResolvedSubject, SignTarget};
 use ocx_oci::ssrf::DialPolicy;
-use ocx_oci::{Descriptor, Digest, Identifier, OCI_IMAGE_MEDIA_TYPE, Platform, native};
+use ocx_oci::{Descriptor, Digest, OCI_IMAGE_MEDIA_TYPE, PackageRef, Platform, native};
 
 /// Manifest media types accepted when fetching the per-platform target.
 const ACCEPTED_MANIFEST_TYPES: &[&str] = &[
@@ -68,7 +68,7 @@ const ACCEPTED_MANIFEST_TYPES: &[&str] = &[
 /// chain what a tag names closes over that answer instead of paying for a
 /// second fetch (#373).
 pub type SubjectResolver<'a> = dyn Fn(
-        &'a Identifier,
+        &'a PackageRef,
         Option<&'a Platform>,
     ) -> Pin<Box<dyn Future<Output = Result<ResolvedSubject, SignErrorKind>> + Send + 'a>>
     + Send
@@ -78,7 +78,7 @@ pub type SubjectResolver<'a> = dyn Fn(
 /// Context passed into [`SignPipeline::run`] — all external dependencies.
 pub struct SignContext<'a> {
     /// Target identifier (`registry/repo:tag[@digest]`).
-    pub identifier: &'a Identifier,
+    pub identifier: &'a PackageRef,
     /// Narrowing selector, when one was requested.
     ///
     /// `None` acts on whatever the reference resolved to — an index is then
@@ -966,7 +966,7 @@ mod tests {
     /// An `IndexImpl` double stood here until inversion 1.9 took the index off
     /// the pipeline; the answer it produced is unchanged, and it now arrives
     /// through the seam the caller supplies.
-    fn indirecting_resolver<'a>(physical: Identifier) -> Box<SubjectResolver<'a>> {
+    fn indirecting_resolver<'a>(physical: PackageRef) -> Box<SubjectResolver<'a>> {
         Box::new(move |_identifier, platform| {
             let physical = ocx_oci::OciIdentifier::passthrough(&physical);
             Box::pin(async move {
@@ -1158,8 +1158,8 @@ mod tests {
         tempfile::TempDir,
         FixedSigner,
     ) {
-        let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
-        let physical = Identifier::parse(physical).expect("physical identifier");
+        let logical = PackageRef::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
+        let physical = PackageRef::parse(physical).expect("physical identifier");
 
         let mut client = Client::with_transport(Box::new(transport.clone()));
         client.set_mirrors(mirrors);
@@ -1178,7 +1178,7 @@ mod tests {
         let signer = FixedSigner::default();
         let token_provider = FixedTokenProvider;
         // Declared last so they drop first: `SignContext<'a>` is invariant in
-        // `'a` (the resolver takes `&'a Identifier`), so `'a` is pinned to the
+        // `'a` (the resolver takes `&'a PackageRef`), so `'a` is pinned to the
         // resolver's own region and must end before anything it borrows does.
         let dial = TestDial::new();
         let resolve = indirecting_resolver(physical);

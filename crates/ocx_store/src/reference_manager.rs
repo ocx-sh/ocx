@@ -345,9 +345,9 @@ impl ReferenceManager {
     pub async fn link_blobs<'a>(
         &self,
         content_path: &Path,
-        chain: impl IntoIterator<Item = &'a ocx_oci::PinnedIdentifier>,
+        chain: impl IntoIterator<Item = &'a ocx_oci::PinnedPackageRef>,
     ) -> std::result::Result<(), crate::file_structure::PackageDirError> {
-        let chain: Vec<&ocx_oci::PinnedIdentifier> = chain.into_iter().collect();
+        let chain: Vec<&ocx_oci::PinnedPackageRef> = chain.into_iter().collect();
         if chain.is_empty() {
             return Ok(());
         }
@@ -776,11 +776,11 @@ mod tests {
         data_path
     }
 
-    /// Helper: build a `PinnedIdentifier` from a registry + digest pair using
+    /// Helper: build a `PinnedPackageRef` from a registry + digest pair using
     /// a synthetic repository (irrelevant for `link_blobs` semantics).
-    fn make_pinned(registry: &str, digest: &ocx_oci::Digest) -> ocx_oci::PinnedIdentifier {
-        let id = ocx_oci::Identifier::new_registry("repo", registry).clone_with_digest(digest.clone());
-        ocx_oci::PinnedIdentifier::try_from(id).unwrap()
+    fn make_pinned(registry: &str, digest: &ocx_oci::Digest) -> ocx_oci::PinnedPackageRef {
+        let id = ocx_oci::PackageRef::new_registry("repo", registry).clone_with_digest(digest.clone());
+        ocx_oci::PinnedPackageRef::try_from(id).unwrap()
     }
 
     /// Test 39: link_blobs creates a symlink in refs/blobs/ for each

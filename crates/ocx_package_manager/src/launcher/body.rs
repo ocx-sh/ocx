@@ -107,7 +107,7 @@ pub(super) fn unix_launcher_body(pkg_root: &LauncherSafeString) -> String {
 /// a generated shim answer for a setting the user changed since.
 ///
 /// `identifier` is the pre-validated rendering of an
-/// [`ocx_oci::PinnedIdentifier`]. Taking a [`LauncherSafeString`] rather
+/// [`ocx_oci::PinnedPackageRef`]. Taking a [`LauncherSafeString`] rather
 /// than the identifier itself keeps the unsafe-character check at the
 /// generator's entry boundary — one validator for every generated body — and
 /// keeps this function total, exactly as [`unix_launcher_body`] is.

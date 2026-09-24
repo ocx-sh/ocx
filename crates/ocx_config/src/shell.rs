@@ -427,7 +427,7 @@ pub enum ConsentPatternError {
     Empty,
 
     /// An ASCII uppercase byte anywhere. An uppercase repository is refused
-    /// outright by `Identifier` parsing, so such a pattern is unmatchable.
+    /// outright by `PackageRef` parsing, so such a pattern is unmatchable.
     #[error(
         "consent namespace '{0}' contains an uppercase byte; no source can ever be uppercase, so it matches nothing"
     )]
@@ -561,7 +561,7 @@ pub fn validate_consent_pattern(pattern: &str) -> Result<(), ConsentPatternError
         // rather than a second charset — that is also what rejects a `:` after
         // the first `/`, since `:` is not a legal repository byte.
         [_host, org] => {
-            ocx_oci::Identifier::validate_repository(org).map_err(|source| ConsentPatternError::Organisation {
+            ocx_oci::PackageRef::validate_repository(org).map_err(|source| ConsentPatternError::Organisation {
                 pattern: pattern.to_string(),
                 source,
             })

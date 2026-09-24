@@ -52,7 +52,7 @@ use crate::{
     patch::persist_patch_descriptor,
 };
 use ocx_config::patch::{PatchConfig, ResolvedPatchConfig, expand_patch_path};
-use ocx_oci::{self, Identifier, tag::InternalTag};
+use ocx_oci::{self, PackageRef, tag::InternalTag};
 use ocx_package::install_info::InstallInfo;
 
 use ocx_util::fs::LockedJsonFile;
@@ -327,7 +327,7 @@ impl PackageManager {
     /// offline, or no companion matched.
     pub async fn discover_and_install_patches(
         &self,
-        base_id: &Identifier,
+        base_id: &PackageRef,
         platform: &ocx_oci::Platform,
     ) -> Result<usize, PackageErrorKind> {
         self.discover_and_install_patches_with_mode(
@@ -352,7 +352,7 @@ impl PackageManager {
     /// populate `PatchSyncReport::companions_installed`.
     pub(super) async fn discover_and_install_patches_with_mode(
         &self,
-        base_id: &Identifier,
+        base_id: &PackageRef,
         platform: &ocx_oci::Platform,
         mode: PatchDiscoveryMode,
         scope: PatchDescriptorScope,
@@ -388,7 +388,7 @@ impl PackageManager {
         // `GlobalOnly` the package-specific id is NEVER computed, so a synthetic
         // `base_id` cannot probe an extra source outside the known set.
         let global_id = global_descriptor_id(patches);
-        let descriptor_ids: Vec<Identifier> = match scope {
+        let descriptor_ids: Vec<PackageRef> = match scope {
             // Global first (lower precedence for dedup); package-specific second
             // (higher precedence — its companions override on the same identifier).
             PatchDescriptorScope::Both => vec![global_id, patch_descriptor_id(patches, base_id)],
@@ -590,8 +590,8 @@ impl PackageManager {
         //
         // Insertion order is preserved in `companion_order` (Vec of identifiers
         // in first-seen order); `companion_map` holds the current winning entry.
-        let mut companion_order: Vec<ocx_oci::Identifier> = Vec::new();
-        let mut companion_map: HashMap<ocx_oci::Identifier, crate::patch::CompanionEntry> = HashMap::new();
+        let mut companion_order: Vec<ocx_oci::PackageRef> = Vec::new();
+        let mut companion_map: HashMap<ocx_oci::PackageRef, crate::patch::CompanionEntry> = HashMap::new();
         for descriptor in &descriptors {
             let entries = descriptor.collect_companions(base_id, patches.required);
             for entry in entries {
@@ -764,7 +764,7 @@ impl PackageManager {
     /// that verifies a companion install does NOT invoke discovery.
     pub async fn install_companion(
         &self,
-        companion_id: &Identifier,
+        companion_id: &PackageRef,
         platform: ocx_oci::Platform,
         mode: PatchDiscoveryMode,
     ) -> Result<InstallInfo, PackageErrorKind> {
@@ -870,7 +870,7 @@ impl PackageManager {
     /// construction, so there is nothing to fill in and no lock to take.
     async fn backfill_companion_pin(
         &self,
-        companion_id: &Identifier,
+        companion_id: &PackageRef,
         digest: &ocx_oci::Digest,
     ) -> Result<(), PackageErrorKind> {
         if self.patch_snapshot().is_none() {
@@ -895,10 +895,10 @@ impl PackageManager {
 
 // ── Free functions (discovery helpers) ───────────────────────────────────────
 
-/// Compute the patch-registry `Identifier` for the package-specific descriptor.
+/// Compute the patch-registry `PackageRef` for the package-specific descriptor.
 ///
 /// Applies `expand_patch_path` to the base identifier's registry host and
-/// repository, then constructs an `Identifier` rooted at `patches.registry`
+/// repository, then constructs an `PackageRef` rooted at `patches.registry`
 /// tagged with [`InternalTag::PATCH_TAG`].
 ///
 /// The global descriptor identifier uses the reserved single-segment
@@ -909,7 +909,7 @@ impl PackageManager {
 /// guard below detects such a collapse and falls back to the default
 /// two-segment form so a per-package descriptor can never address — and thus
 /// overwrite or shadow — the reserved global slot.
-pub fn patch_descriptor_id(patches: &ResolvedPatchConfig, base_id: &Identifier) -> Identifier {
+pub fn patch_descriptor_id(patches: &ResolvedPatchConfig, base_id: &PackageRef) -> PackageRef {
     let sub_path = expand_patch_path(&patches.path_template, base_id.registry(), base_id.repository());
     // Reservation guard: a custom `path` template must never collapse a
     // per-package descriptor onto the reserved single-segment `global` slot.
@@ -927,19 +927,19 @@ pub fn patch_descriptor_id(patches: &ResolvedPatchConfig, base_id: &Identifier) 
     patch_registry_identifier(patches, &sub_path)
 }
 
-/// Build the patch-registry `Identifier` for a descriptor repository, keeping the
+/// Build the patch-registry `PackageRef` for a descriptor repository, keeping the
 /// identifier's registry field a *bare host authority*.
 ///
 /// The configured patch registry (`patches.registry`) MAY carry a path prefix
 /// after the host authority — e.g. `registry.corp.example/ocx-patches`. An
-/// [`Identifier`]'s registry field, however, must be a bare `host[:port]`: the
+/// [`PackageRef`]'s registry field, however, must be a bare `host[:port]`: the
 /// OCI transport builds request URLs as `https://<registry>/v2/<repository>/…`,
 /// so any path prefix left in the registry field produces the malformed
 /// `https://host/ocx-patches/v2/<repo>/…` (which 404s) instead of the correct
 /// `https://host/v2/ocx-patches/<repo>/…`. Split the configured registry at the
 /// first `/` and fold the prefix in front of `repository` so the transport URL,
 /// the CAS blob namespace, and the tag-store path are all well-formed.
-fn patch_registry_identifier(patches: &ResolvedPatchConfig, repository: &str) -> Identifier {
+fn patch_registry_identifier(patches: &ResolvedPatchConfig, repository: &str) -> PackageRef {
     let (registry, repository) = match patches.registry.split_once('/') {
         // `host/prefix…` → registry is the bare host; the prefix precedes the repo.
         Some((host, prefix)) => {
@@ -954,7 +954,7 @@ fn patch_registry_identifier(patches: &ResolvedPatchConfig, repository: &str) ->
         // Bare host, no path prefix — the repository stands alone.
         None => (patches.registry.clone(), repository.to_string()),
     };
-    Identifier::new_registry(repository, registry).clone_with_tag(InternalTag::PATCH_TAG)
+    PackageRef::new_registry(repository, registry).clone_with_tag(InternalTag::PATCH_TAG)
 }
 
 /// The bare host authority of the configured patch registry — the portion
@@ -984,13 +984,13 @@ fn patch_registry_host(patches: &ResolvedPatchConfig) -> &str {
 /// `registry:2`.
 pub const GLOBAL_PATCH_REPOSITORY: &str = "global";
 
-/// Compute the global patch-registry `Identifier`.
+/// Compute the global patch-registry `PackageRef`.
 ///
 /// The global descriptor lives at the reserved [`GLOBAL_PATCH_REPOSITORY`]
 /// repository under the patch registry, tagged with `__ocx.patch`. It is
 /// structurally distinct from any package-specific sub-path (which always has
 /// two or more segments), so the two identifiers never collide.
-pub fn global_descriptor_id(patches: &ResolvedPatchConfig) -> Identifier {
+pub fn global_descriptor_id(patches: &ResolvedPatchConfig) -> PackageRef {
     patch_registry_identifier(patches, GLOBAL_PATCH_REPOSITORY)
 }
 
@@ -1076,7 +1076,7 @@ enum DescriptorCommit {
 ///   eagerly (there are no companions to fail, so the state is safe to record).
 async fn fetch_and_persist_descriptor(
     manager: &PackageManager,
-    descriptor_id: &Identifier,
+    descriptor_id: &PackageRef,
     tags_path: &std::path::Path,
     commit: DescriptorCommit,
     pending: &mut Vec<PendingDescriptorCommit>,
@@ -1249,7 +1249,7 @@ mod tests {
 
     use ocx_config::patch::ResolvedPatchConfig;
     use ocx_index::{ChainMode, Index, LocalConfig, LocalIndex};
-    use ocx_oci::Identifier;
+    use ocx_oci::PackageRef;
     use ocx_store::file_structure::FileStructure;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1318,7 +1318,7 @@ mod tests {
         // network error to construct).
         let fetch_error = PackageErrorKind::PatchDiscovery(PatchError::UnsupportedVersion { version: 999 });
         let required_companion = PackageErrorKind::RequiredCompanionFailed {
-            companion: Identifier::parse("patches.corp.com/corp-ca:1.0").expect("valid identifier"),
+            companion: PackageRef::parse("patches.corp.com/corp-ca:1.0").expect("valid identifier"),
             source: Box::new(PackageErrorKind::NotFound),
         };
 
@@ -1665,7 +1665,7 @@ mod tests {
         );
     }
 
-    // ── Patch-repo Identifier derivation ─────────────────────────────────────
+    // ── Patch-repo PackageRef derivation ─────────────────────────────────────
 
     /// `patch_descriptor_id` produces a non-empty repository sub-path tagged
     /// with `PATCH_TAG` and rooted at the patch registry — not the base id's
@@ -1679,11 +1679,11 @@ mod tests {
     /// - have tag = `__ocx.patch`,
     /// - have registry = `patches.corp.com` (the patch registry, NOT `ocx.sh`).
     ///
-    /// Traces: TESTABILITY §patch-repo Identifier derivation.
+    /// Traces: TESTABILITY §patch-repo PackageRef derivation.
     #[test]
     fn patch_descriptor_id_is_non_empty_sub_path() {
         let patches = test_patch_config();
-        let base_id = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base_id = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         let patch_id = patch_descriptor_id(&patches, &base_id);
 
         // Repository sub-path must be non-empty.
@@ -1721,13 +1721,13 @@ mod tests {
     /// A normal repository name (not an empty path) is a valid OCI path
     /// component accepted by every registry, including Docker `registry:2`.
     ///
-    /// Traces: TESTABILITY §patch-repo Identifier derivation (global root is
+    /// Traces: TESTABILITY §patch-repo PackageRef derivation (global root is
     /// DISTINCT from any sub-path); DELIVERABLES 2c.
     #[test]
     fn global_descriptor_id_is_distinct_from_package_specific() {
         let patches = test_patch_config();
         let global_id = global_descriptor_id(&patches);
-        let base_id = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base_id = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         let pkg_specific_id = patch_descriptor_id(&patches, &base_id);
 
         // Both must be rooted at the patch registry.
@@ -1785,7 +1785,7 @@ mod tests {
         );
 
         // Package-specific descriptor: same host, prefix in front of the sub-path.
-        let base_id = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base_id = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         let pkg_id = patch_descriptor_id(&patches, &base_id);
         assert_eq!(pkg_id.registry(), "registry.corp.example");
         assert!(
@@ -1811,7 +1811,7 @@ mod tests {
     fn patch_descriptor_id_literal_global_template_does_not_collide() {
         let mut patches = test_patch_config();
         patches.path_template = "global".to_string();
-        let base_id = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base_id = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
 
         let pkg_id = patch_descriptor_id(&patches, &base_id);
         let global_id = global_descriptor_id(&patches);
@@ -1844,7 +1844,7 @@ mod tests {
     fn patch_descriptor_id_repository_named_global_does_not_collide() {
         let mut patches = test_patch_config();
         patches.path_template = "{repository}".to_string();
-        let base_id = Identifier::parse("ocx.sh/global:1.0").expect("valid identifier");
+        let base_id = PackageRef::parse("ocx.sh/global:1.0").expect("valid identifier");
 
         let pkg_id = patch_descriptor_id(&patches, &base_id);
         let global_id = global_descriptor_id(&patches);
@@ -1955,7 +1955,7 @@ mod tests {
         let manager = make_offline_manager(tmp.path());
         assert!(manager.patches().is_none(), "setup: patches must be None");
 
-        let base_id = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base_id = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         // Must short-circuit to Ok(()) without panicking or hitting unimplemented!.
         let result = manager
             .discover_and_install_patches(&base_id, &ocx_oci::Platform::any())
@@ -1984,7 +1984,7 @@ mod tests {
             "setup: patch config must be Some to prove offline wins"
         );
 
-        let base_id = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base_id = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         // Must short-circuit to Ok(()) without any network call.
         let result = manager
             .discover_and_install_patches(&base_id, &ocx_oci::Platform::any())
@@ -2005,7 +2005,7 @@ mod tests {
     fn required_companion_failed_display_includes_companion() {
         use crate::error::PackageErrorKind;
 
-        let companion = Identifier::parse("patches.corp.com/certs/ca-bundle:latest").expect("valid identifier");
+        let companion = PackageRef::parse("patches.corp.com/certs/ca-bundle:latest").expect("valid identifier");
         let source = Box::new(PackageErrorKind::NotFound);
         let kind = PackageErrorKind::RequiredCompanionFailed {
             companion: companion.clone(),
@@ -2044,7 +2044,7 @@ mod tests {
         // `fn(_, _, _) -> _` is the coercion point — if the method does not exist
         // or has a different argument count the cast fails at compile time.
         let _ = PackageManager::discover_and_install_patches as fn(_, _, _) -> _;
-        // `install_companion` takes `self`, `&Identifier`, `Platform`, `PatchDiscoveryMode`.
+        // `install_companion` takes `self`, `&PackageRef`, `Platform`, `PatchDiscoveryMode`.
         let _ = PackageManager::install_companion as fn(_, _, _, _) -> _;
         // If both casts compile, the two methods exist as distinct items.
     }
@@ -2074,7 +2074,7 @@ mod tests {
     async fn lazy_discovery_reuses_the_recorded_pin_without_resolving_the_tag() {
         let tmp = TempDir::new().unwrap();
         let manager = make_offline_manager(tmp.path()).with_patches(Some(test_patch_config()));
-        let companion_id = Identifier::parse("patches.corp.com/certs/ca-bundle:1.0").expect("valid identifier");
+        let companion_id = PackageRef::parse("patches.corp.com/certs/ca-bundle:1.0").expect("valid identifier");
         let digest = format!("sha256:{}", "a".repeat(64));
 
         // No pin yet: the install must go looking, which offline refuses.
@@ -2117,7 +2117,7 @@ mod tests {
     async fn companion_install_pins_into_patch_state_not_the_local_index() {
         let tmp = TempDir::new().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let companion_id = Identifier::parse("patches.corp.com/certs/ca-bundle:1.0").expect("valid identifier");
+        let companion_id = PackageRef::parse("patches.corp.com/certs/ca-bundle:1.0").expect("valid identifier");
         let pin_path = manager.file_structure().patch_companion_path(&companion_id);
 
         assert!(
@@ -2169,7 +2169,7 @@ mod tests {
         );
         let manager = super::super::super::PackageManager::new(file_structure.clone(), index, None, "localhost:5000");
 
-        let companion_id = Identifier::parse("patches.corp.com/certs/ca-bundle:1.0").expect("valid identifier");
+        let companion_id = PackageRef::parse("patches.corp.com/certs/ca-bundle:1.0").expect("valid identifier");
         let child_digest = format!("sha256:{}", "b".repeat(64));
         let image_index = format!(
             r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"{child_digest}","size":2,"platform":{{"os":"linux","architecture":"amd64"}}}}]}}"#
@@ -2227,7 +2227,7 @@ mod tests {
     async fn an_offline_companion_refusal_names_a_command_that_can_pin_it() {
         let tmp = TempDir::new().unwrap();
         let manager = make_offline_manager(tmp.path()).with_patches(Some(test_patch_config()));
-        let companion_id = Identifier::parse("patches.corp.com/certs/ca-bundle:1.0").expect("valid identifier");
+        let companion_id = PackageRef::parse("patches.corp.com/certs/ca-bundle:1.0").expect("valid identifier");
 
         let error = manager
             .install_companion(&companion_id, ocx_oci::Platform::any(), PatchDiscoveryMode::Lazy)
@@ -2279,12 +2279,12 @@ mod tests {
         assert!(manager.patches().is_some(), "setup: patches must be Some");
 
         // The companion identifier to install.
-        let companion_id = Identifier::parse("patches.corp.com/certs/ca-bundle:latest").expect("valid identifier");
+        let companion_id = PackageRef::parse("patches.corp.com/certs/ca-bundle:latest").expect("valid identifier");
 
         // Compute the tag-store path that `discover_and_install_patches` WOULD write
         // for this companion's patch repo, using the same logic as the discovery code.
         // If discovery were invoked for the companion, it would compute:
-        //   patch_descriptor_id(&patches, &companion_id) → Identifier at patches.corp.com
+        //   patch_descriptor_id(&patches, &companion_id) → PackageRef at patches.corp.com
         // and then write the three-state record at tag_store.patch_descriptor_path(descriptor_id).
         //
         // We need to know the tag-store path for the companion's patch descriptor.
@@ -2380,7 +2380,7 @@ mod tests {
         assert!(!manager.is_offline(), "setup: manager must NOT be offline");
         assert!(manager.patches().is_some(), "setup: patches must be Some");
 
-        let companion_id = Identifier::parse("patches.corp.com/certs/ca-bundle:latest").expect("valid identifier");
+        let companion_id = PackageRef::parse("patches.corp.com/certs/ca-bundle:latest").expect("valid identifier");
 
         // Compute the tag-store paths for the companion's patch repos.
         let pkg_specific_descriptor_id = patch_descriptor_id(&patches, &companion_id);
@@ -2656,7 +2656,7 @@ mod tests {
         // not a block — this confirms the design decision.
         let tmp = TempDir::new().unwrap();
         let manager = make_offline_manager(tmp.path()).with_patches(Some(test_patch_config()));
-        let base_id = Identifier::parse("ocx.sh/cmake:3.28").expect("valid identifier");
+        let base_id = PackageRef::parse("ocx.sh/cmake:3.28").expect("valid identifier");
         let result = manager
             .discover_and_install_patches(&base_id, &ocx_oci::Platform::any())
             .await;

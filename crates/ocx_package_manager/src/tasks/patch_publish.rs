@@ -23,7 +23,7 @@
 
 use crate::patch::PatchDescriptor;
 use ocx_oci::{
-    self, Algorithm, Identifier, ManifestBuilder, client::error::ClientError, media_type::MEDIA_TYPE_OCI_EMPTY_CONFIG,
+    self, Algorithm, ManifestBuilder, PackageRef, client::error::ClientError, media_type::MEDIA_TYPE_OCI_EMPTY_CONFIG,
     media_type::MEDIA_TYPE_OCI_IMAGE_MANIFEST, tag::InternalTag,
 };
 
@@ -57,7 +57,7 @@ use super::super::{PackageManager, error::PackageErrorKind};
 ///   blob/manifest push failed.
 async fn push_patch_descriptor(
     client: &ocx_oci::Client,
-    patch_repo_id: &Identifier,
+    patch_repo_id: &PackageRef,
     descriptor_bytes: &[u8],
 ) -> crate::Result<ocx_oci::Digest> {
     // Validate the descriptor parses before pushing — reject malformed input.
@@ -165,7 +165,7 @@ impl PackageManager {
     /// - `PackageErrorKind::Internal` — offline mode, or a registry push error.
     pub async fn publish_patch_descriptor(
         &self,
-        patch_repo_id: &Identifier,
+        patch_repo_id: &PackageRef,
         descriptor_bytes: &[u8],
     ) -> Result<PatchPublishReport, PackageErrorKind> {
         // Step 1: Validate the descriptor parses; capture the rule count for the report.
@@ -227,7 +227,7 @@ mod tests {
     async fn publish_offline_returns_error() {
         let tmp = TempDir::new().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let patch_repo = Identifier::new_registry("global", "patches.example.com");
+        let patch_repo = PackageRef::new_registry("global", "patches.example.com");
 
         let result = manager
             .publish_patch_descriptor(&patch_repo, &valid_descriptor_bytes())
@@ -245,7 +245,7 @@ mod tests {
     async fn publish_rejects_malformed_descriptor() {
         let tmp = TempDir::new().unwrap();
         let manager = make_offline_manager(tmp.path());
-        let patch_repo = Identifier::new_registry("global", "patches.example.com");
+        let patch_repo = PackageRef::new_registry("global", "patches.example.com");
 
         let result = manager.publish_patch_descriptor(&patch_repo, b"not json {{{").await;
         assert!(
@@ -271,7 +271,7 @@ mod tests {
         let descriptor_bytes = valid_descriptor_bytes();
 
         // Global patch repo identifier (reserved `global` repository at the patch registry).
-        let patch_repo = Identifier::new_registry("global", "patches.example.com");
+        let patch_repo = PackageRef::new_registry("global", "patches.example.com");
 
         let digest = push_patch_descriptor(&client, &patch_repo, &descriptor_bytes)
             .await
@@ -326,7 +326,7 @@ mod tests {
     async fn push_patch_descriptor_rejects_malformed_descriptor() {
         let data = StubTransportData::new();
         let client = stub_client(&data);
-        let patch_repo = Identifier::new_registry("global", "patches.example.com");
+        let patch_repo = PackageRef::new_registry("global", "patches.example.com");
 
         let result = push_patch_descriptor(&client, &patch_repo, b"not valid json {{{").await;
         assert!(
@@ -348,7 +348,7 @@ mod tests {
         let data = StubTransportData::new();
         data.write().capture_pushes = true;
         let client = stub_client(&data);
-        let patch_repo = Identifier::new_registry("global", "patches.example.com");
+        let patch_repo = PackageRef::new_registry("global", "patches.example.com");
 
         let _ = push_patch_descriptor(&client, &patch_repo, &valid_descriptor_bytes()).await;
 

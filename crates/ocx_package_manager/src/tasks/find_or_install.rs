@@ -51,7 +51,7 @@ impl PackageManager {
     /// `OfflineMode` error and the caller sees a clear failure.
     async fn find_or_install(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
     ) -> Result<FoundPackage, PackageErrorKind> {
         match self.find(package, platform.clone()).await {
@@ -95,7 +95,7 @@ impl PackageManager {
     /// caller previously cloned the whole vector just to keep it alive.
     pub async fn find_or_install_all(
         &self,
-        packages: &[ocx_oci::Identifier],
+        packages: &[ocx_oci::PackageRef],
         platform: ocx_oci::Platform,
         concurrency: Concurrency,
     ) -> Result<Vec<FoundPackage>, crate::error::Error> {
@@ -111,7 +111,7 @@ impl PackageManager {
         }
 
         let semaphore = concurrency.semaphore();
-        let mut tasks: JoinSet<(ocx_oci::Identifier, Result<FoundPackage, PackageErrorKind>)> = JoinSet::new();
+        let mut tasks: JoinSet<(ocx_oci::PackageRef, Result<FoundPackage, PackageErrorKind>)> = JoinSet::new();
 
         for package in packages {
             let mgr = self.clone();

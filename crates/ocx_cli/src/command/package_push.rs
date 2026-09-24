@@ -653,7 +653,7 @@ impl PackagePush {
     async fn resolve_signing(
         &self,
         context: &crate::app::Context,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> anyhow::Result<ocx_package_manager::SignOptions> {
         let (fulcio_url, rekor_url) = package_sign_common::resolve_sigstore_pair(
             context.config_trust_sigstore(),
@@ -710,7 +710,7 @@ impl PackagePush {
     /// keeps its `context.identifier`.
     async fn attest_sbom(
         context: &crate::app::Context,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         platform: &ocx_oci::Platform,
         options: ocx_package_manager::SignOptions,
         predicate: Vec<u8>,
@@ -1143,7 +1143,7 @@ mod signing_flag_tests {
             rekor_url: Some("https://fleet-rekor.example".to_string()),
             ..ocx_trust::SigstoreTrust::default()
         };
-        let identifier = ocx_oci::Identifier::parse("registry.example/pkg:1.0").expect("static parse");
+        let identifier = ocx_oci::PackageRef::parse("registry.example/pkg:1.0").expect("static parse");
 
         let push = parse(&[
             "--sign",

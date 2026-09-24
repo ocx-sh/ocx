@@ -12,7 +12,7 @@
 //! the same `<package>` repo as distinct tags, and byte-identical wheels
 //! dedupe onto one tag (the property the cross-repo blob mount reuses). The
 //! reference is **repo-relative** — it carries no registry host; the consumer
-//! prepends the registry when building the final [`ocx_oci::Identifier`].
+//! prepends the registry when building the final [`ocx_oci::PackageRef`].
 
 use crate::select::WheelRef;
 

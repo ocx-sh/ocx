@@ -32,7 +32,7 @@ pub enum DependencyContext {
     Full(Arc<InstallInfo>),
     /// Identifier and resolved content path only — no metadata, no resolved deps.
     PathOnly {
-        id: ocx_oci::PinnedIdentifier,
+        id: ocx_oci::PinnedPackageRef,
         path: PathBuf,
     },
 }
@@ -50,7 +50,7 @@ impl DependencyContext {
     /// composer (runtime, where only `${...installPath}` resolution is
     /// required). Metadata-dependent template fields are
     /// unresolvable on this variant and return `None`.
-    pub fn path_only(id: ocx_oci::PinnedIdentifier, path: PathBuf) -> Self {
+    pub fn path_only(id: ocx_oci::PinnedPackageRef, path: PathBuf) -> Self {
         Self::PathOnly { id, path }
     }
 
@@ -73,7 +73,7 @@ impl DependencyContext {
     }
 
     /// Returns the full pinned OCI identifier for this dependency.
-    pub fn identifier(&self) -> &ocx_oci::PinnedIdentifier {
+    pub fn identifier(&self) -> &ocx_oci::PinnedPackageRef {
         match self {
             Self::Full(info) => info.identifier(),
             Self::PathOnly { id, .. } => id,
@@ -86,10 +86,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn pinned(repo: &str) -> ocx_oci::PinnedIdentifier {
+    fn pinned(repo: &str) -> ocx_oci::PinnedPackageRef {
         let hex = "a".repeat(64);
-        let id: ocx_oci::Identifier = format!("ocx.sh/{repo}:1.0@sha256:{hex}").parse().unwrap();
-        ocx_oci::PinnedIdentifier::try_from(id).unwrap()
+        let id: ocx_oci::PackageRef = format!("ocx.sh/{repo}:1.0@sha256:{hex}").parse().unwrap();
+        ocx_oci::PinnedPackageRef::try_from(id).unwrap()
     }
 
     /// `DependencyContext::path_only` — `install_path()` returns the supplied path.

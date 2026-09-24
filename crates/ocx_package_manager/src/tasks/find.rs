@@ -18,7 +18,7 @@ impl PackageManager {
     /// see [`PackageManager::pull`] for details.
     pub async fn find_plain(
         &self,
-        identifier: &ocx_oci::PinnedIdentifier,
+        identifier: &ocx_oci::PinnedPackageRef,
     ) -> Result<Option<InstallInfo>, PackageErrorKind> {
         super::common::find_in_store(&self.file_structure().packages, identifier).await
     }
@@ -71,12 +71,12 @@ impl PackageManager {
     /// store without it.
     pub async fn find(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
     ) -> Result<InstallInfo, PackageErrorKind> {
         log::debug!("Finding package: {}", package);
 
-        if let Ok(pinned) = ocx_oci::PinnedIdentifier::try_from(package.clone())
+        if let Ok(pinned) = ocx_oci::PinnedPackageRef::try_from(package.clone())
             && let Some(info) = self.find_plain(&pinned).await?
         {
             log::debug!("Found package in store without resolving: {}", pinned);
@@ -127,7 +127,7 @@ impl PackageManager {
 
     pub async fn find_all(
         &self,
-        packages: Vec<ocx_oci::Identifier>,
+        packages: Vec<ocx_oci::PackageRef>,
         platform: ocx_oci::Platform,
     ) -> Result<Vec<InstallInfo>, crate::error::Error> {
         if packages.is_empty() {
@@ -169,10 +169,10 @@ mod tests {
         r#"{"dependencies":[]}"#.to_string()
     }
 
-    fn test_pinned() -> ocx_oci::PinnedIdentifier {
-        let id = ocx_oci::Identifier::new_registry("test/pkg", "example.com")
+    fn test_pinned() -> ocx_oci::PinnedPackageRef {
+        let id = ocx_oci::PackageRef::new_registry("test/pkg", "example.com")
             .clone_with_digest(ocx_oci::Digest::Sha256(SHA256_HEX.to_string()));
-        ocx_oci::PinnedIdentifier::try_from(id).unwrap()
+        ocx_oci::PinnedPackageRef::try_from(id).unwrap()
     }
 
     /// Creates a `PackageManager` backed by a temp directory.

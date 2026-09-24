@@ -176,7 +176,7 @@ pub enum AuthoringError {
     #[error(
         "dependency '{identifier}' is not pinned to a manifest digest; run `ocx package create --platform <PLATFORM>` to resolve it"
     )]
-    UnpinnedDependency { identifier: Box<ocx_oci::Identifier> },
+    UnpinnedDependency { identifier: Box<ocx_oci::PackageRef> },
     /// Projected dependencies violate the published-form invariants.
     #[error(transparent)]
     Dependency(#[from] DependencyError),

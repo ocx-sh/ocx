@@ -4,7 +4,7 @@
 //! Version specification for `ocx self setup [VERSION]`.
 //!
 //! A [`VersionSpec`] is an identifier *suffix* — a tag, a digest, or both —
-//! applied to a base [`ocx_oci::Identifier`] via [`VersionSpec::apply`]. The base
+//! applied to a base [`ocx_oci::PackageRef`] via [`VersionSpec::apply`]. The base
 //! identifier supplies the registry and repository; the spec supplies the
 //! version constraint.
 //!
@@ -25,7 +25,7 @@
 //! # Application order (invariant)
 //!
 //! [`apply`](VersionSpec::apply) sets the tag first, then the digest. This is
-//! mandatory because [`Identifier::clone_with_tag`] drops any prior digest — if
+//! mandatory because [`ocx_oci::PackageRef::clone_with_tag`] drops any prior digest — if
 //! the digest were applied first it would be silently erased on the subsequent
 //! tag call.
 
@@ -60,11 +60,11 @@ impl VersionSpec {
     ///
     /// # Application order (mandatory)
     ///
-    /// Tag is applied first via [`Identifier::clone_with_tag`] (which drops
+    /// Tag is applied first via [`ocx_oci::PackageRef::clone_with_tag`] (which drops
     /// any prior digest on the base), then the digest is applied via
-    /// [`Identifier::clone_with_digest`]. This order is required: reversing it
+    /// [`ocx_oci::PackageRef::clone_with_digest`]. This order is required: reversing it
     /// would silently drop the digest.
-    pub fn apply(&self, base: ocx_oci::Identifier) -> ocx_oci::Identifier {
+    pub fn apply(&self, base: ocx_oci::PackageRef) -> ocx_oci::PackageRef {
         // ORDER INVARIANT: tag first (clone_with_tag drops any prior digest),
         // then digest. Reversing would silently erase the digest.
         match self {
@@ -170,7 +170,7 @@ fn parse_digest(digest_str: &str) -> Result<Digest, String> {
 }
 
 /// Validates a tag against the OCI tag charset and normalizes `+` to `_`
-/// (mirroring [`ocx_oci::Identifier`] tag handling).
+/// (mirroring [`ocx_oci::PackageRef`] tag handling).
 ///
 /// OCI tags match `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`. A `+` in the input is
 /// normalized to `_` before validation, matching the identifier parser's

@@ -33,7 +33,7 @@ pub struct PurgeUnrooted {
     /// each one -- an install symlink, a project or global lock pin, a
     /// site-patch companion. Under [`RootSet::Indeterminate`] it is every seed
     /// that was passed in, held or not.
-    pub retained: Vec<ocx_oci::PinnedIdentifier>,
+    pub retained: Vec<ocx_oci::PinnedPackageRef>,
     /// Which of those two the `retained` list means.
     pub root_set: RootSet,
 }
@@ -43,7 +43,7 @@ impl PackageManager {
     ///
     /// Returns the list of actually deleted object directories (may be empty
     /// if the object is still reachable from another root).
-    pub async fn purge(&self, identifier: &ocx_oci::PinnedIdentifier) -> crate::Result<Vec<PathBuf>> {
+    pub async fn purge(&self, identifier: &ocx_oci::PinnedPackageRef) -> crate::Result<Vec<PathBuf>> {
         let obj_dir = self.file_structure().packages.path(identifier);
         let gc = GarbageCollector::build(self.file_structure(), &[], &SitePatchRoots::default()).await?;
         gc.purge(&[obj_dir]).await
@@ -53,7 +53,7 @@ impl PackageManager {
     ///
     /// More efficient than calling [`purge`] in a loop because the
     /// reachability graph is built once.
-    pub async fn purge_all(&self, identifiers: &[ocx_oci::PinnedIdentifier]) -> crate::Result<Vec<PathBuf>> {
+    pub async fn purge_all(&self, identifiers: &[ocx_oci::PinnedPackageRef]) -> crate::Result<Vec<PathBuf>> {
         let obj_dirs: Vec<PathBuf> = identifiers
             .iter()
             .map(|id| self.file_structure().packages.path(id))
@@ -79,7 +79,7 @@ impl PackageManager {
     /// removes nothing, the same fail-closed direction `PackageManager::clean`
     /// takes. Over-retention is recoverable; a deleted package a lock pins is
     /// not.
-    pub async fn purge_unrooted(&self, identifiers: &[ocx_oci::PinnedIdentifier]) -> crate::Result<PurgeUnrooted> {
+    pub async fn purge_unrooted(&self, identifiers: &[ocx_oci::PinnedPackageRef]) -> crate::Result<PurgeUnrooted> {
         let ocx_home = self.file_structure().root().to_path_buf();
         let project_roots = match collect_project_roots(&ocx_home, self.file_structure()).await? {
             CollectedRoots::Roots(roots) => roots,
@@ -103,7 +103,7 @@ impl PackageManager {
         let reachable = gc.reachable();
 
         let mut seeds: Vec<PathBuf> = Vec::new();
-        let mut retained: Vec<ocx_oci::PinnedIdentifier> = Vec::new();
+        let mut retained: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
         for identifier in identifiers {
             let raw_path = self.file_structure().packages.path(identifier);
             // Canonicalize BEFORE the membership test: the graph is keyed by
@@ -185,9 +185,9 @@ repository = "localhost:5000/cmake"
         PackageManager::new(file_structure, index, None, REGISTRY)
     }
 
-    fn pinned_leaf(repository: &str, digest_hex: &str) -> ocx_oci::PinnedIdentifier {
-        ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry(repository, REGISTRY)
+    fn pinned_leaf(repository: &str, digest_hex: &str) -> ocx_oci::PinnedPackageRef {
+        ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry(repository, REGISTRY)
                 .clone_with_digest(ocx_oci::Digest::Sha256(digest_hex.to_string())),
         )
         .expect("a digest-addressed identifier is pinned by construction")
@@ -196,7 +196,7 @@ repository = "localhost:5000/cmake"
     /// Materialize the package-store directory for `pinned`, with the
     /// `content/` child every real package carries, and return its canonical
     /// path (the key the reachability graph uses).
-    async fn seed_package_dir(file_structure: &FileStructure, pinned: &ocx_oci::PinnedIdentifier) -> PathBuf {
+    async fn seed_package_dir(file_structure: &FileStructure, pinned: &ocx_oci::PinnedPackageRef) -> PathBuf {
         let package_dir = file_structure.packages.path(pinned);
         tokio::fs::create_dir_all(package_dir.join("content"))
             .await
@@ -209,7 +209,7 @@ repository = "localhost:5000/cmake"
     /// the fixture is the shape production writes rather than a hand-rolled
     /// symlink pair.
     fn seed_candidate_symlink(file_structure: &FileStructure, repository: &str, tag: &str, package_dir: &Path) {
-        let tagged = ocx_oci::Identifier::new_registry(repository, REGISTRY).clone_with_tag(tag);
+        let tagged = ocx_oci::PackageRef::new_registry(repository, REGISTRY).clone_with_tag(tag);
         let candidate = file_structure.symlinks.candidate(&tagged);
         std::fs::create_dir_all(
             candidate

@@ -133,7 +133,7 @@ fn digest_matches(bytes: &[u8], digest: &ocx_oci::Digest) -> bool {
 /// caller did not already name, so the silence principle is untouched. A
 /// tag-addressed walk carries no requested digest and passes through.
 fn verify_walked_digest(
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     head: Option<(ocx_oci::Digest, ocx_oci::Manifest)>,
 ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
     let (Some(requested), Some((answered, _))) = (identifier.digest(), head.as_ref()) else {
@@ -338,7 +338,7 @@ impl ChainedIndex {
     /// [`Self::kind_for_registry`] for an identifier — provenance is per
     /// registry, so this is a pure delegation with no placeholder identifier
     /// anywhere in the path.
-    fn kind_for(&self, identifier: &ocx_oci::Identifier) -> SourceKind {
+    fn kind_for(&self, identifier: &ocx_oci::PackageRef) -> SourceKind {
         self.kind_for_registry(identifier.registry())
     }
 
@@ -349,7 +349,7 @@ impl ChainedIndex {
     /// One place asks the jurisdiction question, so a source that declined a
     /// name is never fetched from — the declaration is honoured before any
     /// request, not after a 404 has already been read as a terminal stop.
-    async fn candidate_sources(&self, identifier: &ocx_oci::Identifier) -> Vec<(&Index, bool)> {
+    async fn candidate_sources(&self, identifier: &ocx_oci::PackageRef) -> Vec<(&Index, bool)> {
         let mut candidates = Vec::with_capacity(self.sources.len());
         for source in &self.sources {
             match source.jurisdiction(identifier) {
@@ -418,7 +418,7 @@ impl ChainedIndex {
     /// ([`is_plain_dns_name`]).
     async fn guard_local_physical(
         &self,
-        logical: &ocx_oci::Identifier,
+        logical: &ocx_oci::PackageRef,
         physical: &ocx_oci::OciIdentifier,
     ) -> Result<()> {
         if physical.registry() == logical.registry() {
@@ -482,7 +482,7 @@ impl ChainedIndex {
     /// # Errors
     ///
     /// [`Error::Ssrf`](super::error::Error::Ssrf) from [`Self::guard_local_physical`].
-    async fn local_physical_answer(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+    async fn local_physical_answer(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
         match self
             .local_index
             .physical_reference(identifier, self.kind_for(identifier))
@@ -512,7 +512,7 @@ impl ChainedIndex {
     /// required — [`DispatchResolution::AbsentDispatch`] still names a known
     /// digest, so it counts as locally resolvable too; only a genuinely
     /// unknown root/tag (`Ok(None)`) is a policy block.
-    async fn ensure_locally_resolvable(&self, identifier: &ocx_oci::Identifier) -> Result<()> {
+    async fn ensure_locally_resolvable(&self, identifier: &ocx_oci::PackageRef) -> Result<()> {
         let kind = self.kind_for(identifier);
         let locally_resolvable = self.local_index.resolve_dispatch(identifier, kind).await?.is_some();
         if !locally_resolvable {
@@ -554,7 +554,7 @@ impl ChainedIndex {
     /// lock-scoped update index) or the content is not cached locally.
     async fn recover_absent_dispatch(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         content: &ocx_oci::Digest,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
         let Some(content_store) = &self.content_store else {
@@ -636,7 +636,7 @@ impl ChainedIndex {
     /// (cache retry → `None`) and "registry outage".
     async fn walk_chain(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         grow_root: bool,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
         // No-resolve policies (offline, frozen) refuse to resolve an unpinned
@@ -762,7 +762,7 @@ impl ChainedIndex {
     /// disproving an earlier failure.
     async fn fetch_and_persist_chain(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         grow_root: bool,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
         let mut last_error: Option<super::error::Error> = None;
@@ -933,7 +933,7 @@ impl ChainedIndex {
     /// H: exactly one remote per namespace). See `adr_index_routing_semantics.md`.
     async fn query_sources_manifest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
         let mut last_error: Option<super::error::Error> = None;
         for (source, authoritative) in self.candidate_sources(identifier).await {
@@ -955,7 +955,7 @@ impl ChainedIndex {
 
     /// Digest counterpart to [`Self::query_sources_manifest`] — same Remote-mode
     /// read-through-without-persist contract.
-    async fn query_sources_manifest_digest(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::Digest>> {
+    async fn query_sources_manifest_digest(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::Digest>> {
         let mut last_error: Option<super::error::Error> = None;
         for (source, authoritative) in self.candidate_sources(identifier).await {
             match source.fetch_manifest_digest(identifier, IndexOperation::Query).await {
@@ -1003,7 +1003,7 @@ impl index_impl::IndexImpl for ChainedIndex {
             .await
     }
 
-    async fn list_tags(&self, identifier: &ocx_oci::Identifier) -> Result<Option<Vec<String>>> {
+    async fn list_tags(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
         // Tag listings route by mode. Default and Offline read the local
         // index only; Remote queries sources directly without write-through.
         // A pure query must never mutate local state — write paths live on
@@ -1056,7 +1056,7 @@ impl index_impl::IndexImpl for ChainedIndex {
 
     async fn fetch_manifest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         op: IndexOperation,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
         // Digest-addressed reads are local-first in every mode — immutable
@@ -1164,7 +1164,7 @@ impl index_impl::IndexImpl for ChainedIndex {
 
     async fn fetch_manifest_digest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         op: IndexOperation,
     ) -> Result<Option<ocx_oci::Digest>> {
         let is_digest_addressed = identifier.digest().is_some();
@@ -1271,7 +1271,7 @@ impl index_impl::IndexImpl for ChainedIndex {
     ///   it ends the walk as `Ok(None)`, discarding any earlier
     ///   non-authoritative source's error (Decision H: exactly one remote per
     ///   namespace).
-    async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+    async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
         let digest = blob_ref.digest();
         // Set when the cache-first read found a present-but-corrupt entry —
         // the write-through below must heal it via an unconditional atomic
@@ -1364,7 +1364,7 @@ impl index_impl::IndexImpl for ChainedIndex {
     /// namespace).
     async fn fetch_manifest_raw_bytes(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
         if self.mode == ChainMode::Offline {
             return Ok(None);
@@ -1469,7 +1469,7 @@ impl index_impl::IndexImpl for ChainedIndex {
     /// answer — an unpinned resolve without the local root is already refused
     /// upstream ([`Self::ensure_locally_resolvable`] → `PolicyResolutionBlocked`,
     /// exit 81), and a source outage re-raises above.
-    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+    async fn physical_reference(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
         // `Remote` is the one mode that wants the live pointer; every other mode
         // answers from the committed root when it has one.
         let source_first = self.mode == ChainMode::Remote;
@@ -1505,7 +1505,7 @@ impl index_impl::IndexImpl for ChainedIndex {
     /// an unreadable local index is a miss, an SSRF refusal propagates.
     async fn physical_reference_local(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<ocx_oci::OciIdentifier>> {
         self.local_physical_answer(identifier).await
     }
@@ -1553,7 +1553,7 @@ impl index_impl::IndexImpl for ChainedIndex {
     ///
     /// [`RootScope::Routing`] carries the rest: package-level fields only, no
     /// tags, and nothing at all when a root is already committed.
-    async fn record_routing_pointer(&self, identifier: &ocx_oci::Identifier) {
+    async fn record_routing_pointer(&self, identifier: &ocx_oci::PackageRef) {
         if self.write_policy != LocalWritePolicy::Full || self.mode == ChainMode::Frozen {
             return;
         }
@@ -1586,7 +1586,7 @@ impl index_impl::IndexImpl for ChainedIndex {
         }
     }
 
-    fn jurisdiction(&self, identifier: &ocx_oci::Identifier) -> Jurisdiction {
+    fn jurisdiction(&self, identifier: &ocx_oci::PackageRef) -> Jurisdiction {
         // Fold the chain: one authoritative source makes the whole chain
         // authoritative; otherwise any source that would still be asked makes it
         // a fall-through. `Outside` needs EVERY source to have declined — in
@@ -1607,7 +1607,7 @@ impl index_impl::IndexImpl for ChainedIndex {
         self.sources.iter().any(|source| source.serves_registry(registry))
     }
 
-    fn authoritative_index_base_url(&self, identifier: &ocx_oci::Identifier) -> Option<&str> {
+    fn authoritative_index_base_url(&self, identifier: &ocx_oci::PackageRef) -> Option<&str> {
         self.sources
             .iter()
             .find_map(|source| source.authoritative_index_base_url(identifier))
@@ -1703,18 +1703,18 @@ mod chain_refs_tests {
         LocalIndex, OcxIndex, OcxIndexConfig, index_impl,
     };
     use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
-    use ocx_oci::{Algorithm, Digest, Identifier, ImageManifest, Manifest};
+    use ocx_oci::{Algorithm, Digest, ImageManifest, Manifest, PackageRef};
     use ocx_store::file_structure::BlobStore;
 
     const REGISTRY: &str = "example.com";
     const REPO: &str = "cmake";
     const TAG: &str = "3.28";
 
-    fn tagged_id() -> Identifier {
-        Identifier::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
+    fn tagged_id() -> PackageRef {
+        PackageRef::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
     }
-    fn digest_only_id() -> Identifier {
-        Identifier::new_registry(REPO, REGISTRY).clone_with_digest(digest_a())
+    fn digest_only_id() -> PackageRef {
+        PackageRef::new_registry(REPO, REGISTRY).clone_with_digest(digest_a())
     }
     // Two distinct single-child image INDEXES — distinct bytes so their
     // digests differ, and (A3) the bytes genuinely hash to the digest the
@@ -1801,13 +1801,13 @@ mod chain_refs_tests {
             *self.call_count.lock().unwrap() += 1;
             Ok(self.repos.clone())
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             *self.call_count.lock().unwrap() += 1;
             Ok(Some(self.known_tags.keys().cloned().collect()))
         }
         async fn fetch_manifest(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
             _op: super::super::IndexOperation,
         ) -> Result<Option<(Digest, Manifest)>> {
             let tag = identifier.tag_or_latest();
@@ -1816,20 +1816,20 @@ mod chain_refs_tests {
         }
         async fn fetch_manifest_digest(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
             _op: super::super::IndexOperation,
         ) -> Result<Option<Digest>> {
             let tag = identifier.tag_or_latest();
             *self.call_count.lock().unwrap() += 1;
             Ok(self.known_tags.get(tag).cloned())
         }
-        async fn fetch_blob(&self, _blob_ref: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _blob_ref: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             *self.call_count.lock().unwrap() += 1;
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
         ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
             let tag = identifier.tag_or_latest();
             *self.call_count.lock().unwrap() += 1;
@@ -1859,7 +1859,7 @@ mod chain_refs_tests {
     /// dispatch object) so subsequent cache-only reads succeed. Equivalent to
     /// what a successful `ChainedIndex` walk would leave behind
     /// (`adr_index_indirection.md` A3 — `persist_dispatch` + `commit_root_tag`).
-    async fn seed_full(cache: &LocalIndex, identifier: &Identifier, _d: Digest, source: &Index) {
+    async fn seed_full(cache: &LocalIndex, identifier: &PackageRef, _d: Digest, source: &Index) {
         let (_bytes, digest, _manifest) = cache
             .persist_dispatch(source, identifier)
             .await
@@ -2488,12 +2488,12 @@ mod chain_refs_tests {
             async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
                 Ok(Vec::new())
             }
-            async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
                 Ok(None)
             }
             async fn fetch_manifest(
                 &self,
-                _: &Identifier,
+                _: &PackageRef,
                 _op: super::super::IndexOperation,
             ) -> Result<Option<(Digest, Manifest)>> {
                 Err(super::super::error::Error::RemoteManifestNotFound(
@@ -2502,14 +2502,14 @@ mod chain_refs_tests {
             }
             async fn fetch_manifest_digest(
                 &self,
-                _: &Identifier,
+                _: &PackageRef,
                 _op: super::super::IndexOperation,
             ) -> Result<Option<Digest>> {
                 Err(super::super::error::Error::RemoteManifestNotFound(
                     "test error".to_string(),
                 ))
             }
-            async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
                 Err(super::super::error::Error::RemoteManifestNotFound(
                     "test error".to_string(),
                 ))
@@ -2677,7 +2677,7 @@ mod chain_refs_tests {
         let chained = Index::from_chained(cache, vec![src_idx], ChainMode::Default);
 
         // tag+digest identifier — what `command/pull.rs` produces from a
-        // `PinnedIdentifier` via `clone_with_digest` after `lock` resolved
+        // `PinnedPackageRef` via `clone_with_digest` after `lock` resolved
         // the tag.
         let pinned_id = tagged_id().clone_with_digest(digest_a());
         assert!(pinned_id.tag().is_some() && pinned_id.digest().is_some());
@@ -2776,24 +2776,24 @@ mod chain_refs_tests {
             async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
                 Err(super::super::error::Error::RemoteManifestNotFound("boom".to_string()))
             }
-            async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
                 Ok(None)
             }
             async fn fetch_manifest(
                 &self,
-                _: &Identifier,
+                _: &PackageRef,
                 _op: super::super::IndexOperation,
             ) -> Result<Option<(Digest, Manifest)>> {
                 Ok(None)
             }
             async fn fetch_manifest_digest(
                 &self,
-                _: &Identifier,
+                _: &PackageRef,
                 _op: super::super::IndexOperation,
             ) -> Result<Option<Digest>> {
                 Ok(None)
             }
-            async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
                 Ok(None)
             }
             fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -2826,24 +2826,24 @@ mod chain_refs_tests {
             async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
                 Ok(Vec::new())
             }
-            async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
                 Err(super::super::error::Error::RemoteManifestNotFound("boom".to_string()))
             }
             async fn fetch_manifest(
                 &self,
-                _: &Identifier,
+                _: &PackageRef,
                 _op: super::super::IndexOperation,
             ) -> Result<Option<(Digest, Manifest)>> {
                 Ok(None)
             }
             async fn fetch_manifest_digest(
                 &self,
-                _: &Identifier,
+                _: &PackageRef,
                 _op: super::super::IndexOperation,
             ) -> Result<Option<Digest>> {
                 Err(super::super::error::Error::RemoteManifestNotFound("boom".to_string()))
             }
-            async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
                 Err(super::super::error::Error::RemoteManifestNotFound("boom".to_string()))
             }
             fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
@@ -2947,16 +2947,16 @@ mod chain_refs_tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(None)
         }
-        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
             Ok(None)
         }
-        async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             *self.call_count.lock().unwrap() += 1;
             if blob_ref.digest() == self.digest {
                 Ok(Some(self.bytes.clone()))
@@ -2969,8 +2969,8 @@ mod chain_refs_tests {
         }
     }
 
-    fn pinned_for_test() -> ocx_oci::PinnedIdentifier {
-        ocx_oci::PinnedIdentifier::try_from(digest_only_id()).unwrap()
+    fn pinned_for_test() -> ocx_oci::PinnedPackageRef {
+        ocx_oci::PinnedPackageRef::try_from(digest_only_id()).unwrap()
     }
 
     /// Cache hit: blob already in the machine-global blob store (`fs.blobs`)
@@ -3277,12 +3277,12 @@ mod chain_refs_tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(vec![TAG.to_string()]))
         }
         async fn fetch_manifest(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
             _op: IndexOperation,
         ) -> Result<Option<(Digest, Manifest)>> {
             Ok(self
@@ -3290,18 +3290,18 @@ mod chain_refs_tests {
                 .await?
                 .map(|(_, digest, manifest)| (digest, manifest)))
         }
-        async fn fetch_manifest_digest(&self, identifier: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, identifier: &PackageRef, _op: IndexOperation) -> Result<Option<Digest>> {
             Ok(self
                 .fetch_manifest_raw_bytes(identifier)
                 .await?
                 .map(|(_, digest, _)| digest))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
         ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
             // Digest-honest, as a registry is: answering one fixed document for
             // every digest lets a test green on a resolve that asked for
@@ -3317,12 +3317,12 @@ mod chain_refs_tests {
         }
         async fn fetch_root_document(
             &self,
-            _identifier: &Identifier,
+            _identifier: &PackageRef,
         ) -> Result<Option<(Vec<u8>, super::super::IndexRoot)>> {
             *self.fetch_root_document_calls.lock().unwrap() += 1;
             Ok(None)
         }
-        fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
+        fn jurisdiction(&self, identifier: &PackageRef) -> Jurisdiction {
             if identifier.registry() == REGISTRY {
                 Jurisdiction::Authoritative
             } else {
@@ -3360,13 +3360,13 @@ mod chain_refs_tests {
 
         for repository in ["cmake", "kitware/cmake", "deeply/nested/name"] {
             assert_eq!(
-                chained.kind_for(&Identifier::new_registry(repository, REGISTRY)),
+                chained.kind_for(&PackageRef::new_registry(repository, REGISTRY)),
                 super::SourceKind::Published,
                 "'{repository}' lives under a published registry whatever its shape"
             );
         }
         assert_eq!(
-            chained.kind_for(&Identifier::new_registry("cmake", "other.io")),
+            chained.kind_for(&PackageRef::new_registry("cmake", "other.io")),
             super::SourceKind::Derived,
             "a registry nobody configured falls back to the uncatalogued read"
         );
@@ -3522,27 +3522,27 @@ mod chain_refs_tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(vec![TAG.to_string()]))
         }
         async fn fetch_manifest(
             &self,
-            _identifier: &Identifier,
+            _identifier: &PackageRef,
             _op: IndexOperation,
         ) -> Result<Option<(Digest, Manifest)>> {
             *self.calls.lock().unwrap() += 1;
             Ok(Some((self.digest(), serde_json::from_slice(self.bytes).unwrap())))
         }
-        async fn fetch_manifest_digest(&self, _identifier: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _identifier: &PackageRef, _op: IndexOperation) -> Result<Option<Digest>> {
             *self.calls.lock().unwrap() += 1;
             Ok(Some(self.digest()))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
         ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
             // Digest-honest, as a registry is — see `PublishedSource`'s note.
             if identifier.digest().is_some_and(|requested| requested != self.digest()) {
@@ -3698,7 +3698,7 @@ mod chain_refs_tests {
         let cache = make_local_index(&dir);
         let (leaf_bytes, leaf_digest) = leaf_manifest_bytes();
         let blobs = seeded_blob_store(&dir, &leaf_digest, &leaf_bytes).await;
-        let id = Identifier::new_registry(REPO, REGISTRY).clone_with_digest(leaf_digest.clone());
+        let id = PackageRef::new_registry(REPO, REGISTRY).clone_with_digest(leaf_digest.clone());
         let chained = Index::from_chained_with_content_store(cache, vec![], ChainMode::Offline, blobs);
 
         let (digest, _manifest) = chained
@@ -3807,7 +3807,7 @@ mod chain_refs_tests {
         fn tag_fetches(&self) -> usize {
             *self.tag_fetches.lock().unwrap()
         }
-        fn served(&self, identifier: &Identifier) -> Option<&'static [u8]> {
+        fn served(&self, identifier: &PackageRef) -> Option<&'static [u8]> {
             match identifier.digest() {
                 Some(digest) if digest == pinned_leaf_digest() => Some(PINNED_LEAF_JSON),
                 Some(digest) if digest == current_leaf_digest() => Some(CURRENT_LEAF_JSON),
@@ -3825,12 +3825,12 @@ mod chain_refs_tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(vec![TAG.to_string()]))
         }
         async fn fetch_manifest(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
             _op: IndexOperation,
         ) -> Result<Option<(Digest, Manifest)>> {
             Ok(self
@@ -3838,18 +3838,18 @@ mod chain_refs_tests {
                 .await?
                 .map(|(_, digest, manifest)| (digest, manifest)))
         }
-        async fn fetch_manifest_digest(&self, identifier: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, identifier: &PackageRef, _op: IndexOperation) -> Result<Option<Digest>> {
             Ok(self
                 .fetch_manifest_raw_bytes(identifier)
                 .await?
                 .map(|(_, digest, _)| digest))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
         ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
             Ok(self.served(identifier).map(|bytes| {
                 (
@@ -3935,12 +3935,12 @@ mod chain_refs_tests {
             async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
                 Ok(Vec::new())
             }
-            async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
                 Ok(Some(vec![TAG.to_string()]))
             }
             async fn fetch_manifest(
                 &self,
-                identifier: &Identifier,
+                identifier: &PackageRef,
                 _op: IndexOperation,
             ) -> Result<Option<(Digest, Manifest)>> {
                 Ok(self
@@ -3948,13 +3948,13 @@ mod chain_refs_tests {
                     .await?
                     .map(|(_, digest, manifest)| (digest, manifest)))
             }
-            async fn fetch_manifest_digest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+            async fn fetch_manifest_digest(&self, _: &PackageRef, _op: IndexOperation) -> Result<Option<Digest>> {
                 Ok(Some(current_leaf_digest()))
             }
-            async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
                 Ok(None)
             }
-            async fn fetch_manifest_raw_bytes(&self, _: &Identifier) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+            async fn fetch_manifest_raw_bytes(&self, _: &PackageRef) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
                 Ok(Some((
                     CURRENT_LEAF_JSON.to_vec(),
                     current_leaf_digest(),
@@ -4079,12 +4079,12 @@ mod chain_refs_tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(vec![TAG.to_string(), SIBLING_TAG.to_string()]))
         }
         async fn fetch_manifest(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
             _op: IndexOperation,
         ) -> Result<Option<(Digest, Manifest)>> {
             Ok(self
@@ -4092,18 +4092,18 @@ mod chain_refs_tests {
                 .await?
                 .map(|(_, digest, manifest)| (digest, manifest)))
         }
-        async fn fetch_manifest_digest(&self, identifier: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, identifier: &PackageRef, _op: IndexOperation) -> Result<Option<Digest>> {
             Ok(self
                 .fetch_manifest_raw_bytes(identifier)
                 .await?
                 .map(|(_, digest, _)| digest))
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
         ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
             // Whatever is asked for, the source now serves `digest_b` — the
             // moved-on state. Addressed by digest, it answers with the bytes
@@ -4116,12 +4116,12 @@ mod chain_refs_tests {
             };
             Ok(Some((bytes_for(&digest), digest.clone(), manifest_for(&digest))))
         }
-        async fn fetch_root_document(&self, _: &Identifier) -> Result<Option<(Vec<u8>, super::super::IndexRoot)>> {
+        async fn fetch_root_document(&self, _: &PackageRef) -> Result<Option<(Vec<u8>, super::super::IndexRoot)>> {
             let bytes = fetched_root_bytes();
             let root = serde_json::from_slice(&bytes).unwrap();
             Ok(Some((bytes, root)))
         }
-        fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
+        fn jurisdiction(&self, identifier: &PackageRef) -> Jurisdiction {
             if identifier.registry() == REGISTRY {
                 Jurisdiction::Authoritative
             } else {
@@ -4153,7 +4153,7 @@ mod chain_refs_tests {
             .unwrap();
 
         let chained = Index::from_chained(cache, vec![Index::from_impl(MovedPublishedSource)], ChainMode::Default);
-        let sibling = Identifier::new_registry(REPO, REGISTRY).clone_with_tag(SIBLING_TAG);
+        let sibling = PackageRef::new_registry(REPO, REGISTRY).clone_with_tag(SIBLING_TAG);
         let (digest, _) = chained
             .fetch_manifest(&sibling, IndexOperation::Resolve)
             .await
@@ -4223,19 +4223,19 @@ mod chain_refs_tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(None)
         }
-        async fn fetch_manifest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _op: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _op: IndexOperation) -> Result<Option<Digest>> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
+        fn jurisdiction(&self, identifier: &PackageRef) -> Jurisdiction {
             if identifier.registry() == REGISTRY {
                 Jurisdiction::Authoritative
             } else {
@@ -4314,21 +4314,21 @@ mod chain_refs_tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Err(super::super::error::Error::RemoteManifestNotFound(
                 "index outage".to_string(),
             ))
         }
-        async fn fetch_manifest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _op: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _op: IndexOperation) -> Result<Option<Digest>> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
+        fn jurisdiction(&self, identifier: &PackageRef) -> Jurisdiction {
             if identifier.registry() == REGISTRY {
                 Jurisdiction::Authoritative
             } else {
@@ -4409,22 +4409,22 @@ mod chain_refs_tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(None)
         }
-        async fn fetch_manifest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _op: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _op: IndexOperation) -> Result<Option<Digest>> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             *self.calls.lock().unwrap() += 1;
             Err(super::super::error::Error::RemoteManifestNotFound(
                 "registry unreachable".to_string(),
             ))
         }
-        async fn fetch_manifest_raw_bytes(&self, _: &Identifier) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+        async fn fetch_manifest_raw_bytes(&self, _: &PackageRef) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
             *self.calls.lock().unwrap() += 1;
             Err(super::super::error::Error::RemoteManifestNotFound(
                 "registry unreachable".to_string(),
@@ -4553,7 +4553,7 @@ mod chain_refs_tests {
     async fn seed_indirected_root(cache: &LocalIndex) {
         let bytes = format!(r#"{{"repository":"oci://{PHYSICAL_REGISTRY}/{PHYSICAL_REPO}","tags":{{}}}}"#);
         cache
-            .seed_root_document(&Identifier::new_registry(REPO, REGISTRY), bytes.as_bytes())
+            .seed_root_document(&PackageRef::new_registry(REPO, REGISTRY), bytes.as_bytes())
             .await
             .unwrap();
     }
@@ -4589,19 +4589,19 @@ mod chain_refs_tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(None)
         }
-        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        async fn physical_reference(&self, _: &Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+        async fn physical_reference(&self, _: &PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
             Err(super::super::error::Error::IndexHttpFailed {
                 url: "https://index.example.com/config.json".to_string(),
                 status: None,
@@ -4626,19 +4626,19 @@ mod chain_refs_tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(None)
         }
-        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        async fn physical_reference(&self, _: &Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+        async fn physical_reference(&self, _: &PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
             Err(super::super::error::Error::Ssrf {
                 source: ocx_oci::ssrf::PhysicalDialRefused {
                     namespace: "ocx.sh".to_string(),
@@ -4678,19 +4678,19 @@ mod chain_refs_tests {
         async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(None)
         }
-        async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+        async fn fetch_manifest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
             Ok(None)
         }
-        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> Result<Option<Digest>> {
+        async fn fetch_manifest_digest(&self, _: &PackageRef, _: IndexOperation) -> Result<Option<Digest>> {
             Ok(None)
         }
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        async fn physical_reference(&self, identifier: &Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+        async fn physical_reference(&self, identifier: &PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
             *self.calls.lock().unwrap() += 1;
             let mut physical =
                 ocx_oci::OciIdentifier::from_parts("mirror.example.com/from-source", "mirror.example.com");
@@ -4699,7 +4699,7 @@ mod chain_refs_tests {
             }
             Ok(Some(physical))
         }
-        fn jurisdiction(&self, _: &Identifier) -> Jurisdiction {
+        fn jurisdiction(&self, _: &PackageRef) -> Jurisdiction {
             *self.calls.lock().unwrap() += 1;
             Jurisdiction::FallThrough
         }
@@ -4904,7 +4904,7 @@ mod chain_refs_tests {
     async fn seed_root_pointing_at(cache: &LocalIndex, logical_registry: &str, physical: &str) {
         let bytes = format!(r#"{{"repository":"oci://{physical}","tags":{{}}}}"#);
         cache
-            .seed_root_document(&Identifier::new_registry(REPO, logical_registry), bytes.as_bytes())
+            .seed_root_document(&PackageRef::new_registry(REPO, logical_registry), bytes.as_bytes())
             .await
             .unwrap();
     }
@@ -5016,7 +5016,7 @@ mod chain_refs_tests {
         let cache = make_local_index(&dir);
         seed_root_pointing_at(&cache, &private, &format!("{private}/{REPO}")).await;
 
-        let logical = Identifier::new_registry(REPO, &private).clone_with_digest(digest_a());
+        let logical = PackageRef::new_registry(REPO, &private).clone_with_digest(digest_a());
         let chained = Index::from_chained(cache, vec![], ChainMode::Default)
             .with_proxy_rules(ocx_oci::ssrf::ProxyRules::direct());
         let physical = chained
@@ -5526,7 +5526,7 @@ mod chain_refs_tests {
 //   cache_miss_source_*   → "Tag not cached, source has it → update_tag persists it"
 //   cache_miss_source_no  → "Tag not cached, source doesn't have it → warn, NotFound"
 //   cache_miss_network_*  → "Tag not cached, network failure → warn, NotFound"
-//   digest_only_*         → "Identifier with digest but no tag → no fallback"
+//   digest_only_*         → "PackageRef with digest but no tag → no fallback"
 //   box_clone_*           → "`box_clone` shares caches across cloned chain"
 //   list_tags_*           → "`list_tags` delegates to cache only"
 //   list_repos_*          → "`list_repositories` delegates to cache only"
@@ -5542,7 +5542,7 @@ mod tests {
 
     use crate::error::Result;
     use crate::{Index, IndexStore, LocalConfig, LocalIndex, index_impl};
-    use ocx_oci::{Algorithm, Digest, Identifier, Manifest};
+    use ocx_oci::{Algorithm, Digest, Manifest, PackageRef};
 
     // ── Test helpers ──────────────────────────────────────────────────────
 
@@ -5550,12 +5550,12 @@ mod tests {
     const REPO: &str = "cmake";
     const TAG: &str = "3.28";
 
-    fn tagged_id() -> Identifier {
-        Identifier::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
+    fn tagged_id() -> PackageRef {
+        PackageRef::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
     }
 
-    fn digest_only_id() -> Identifier {
-        Identifier::new_registry(REPO, REGISTRY).clone_with_digest(digest_a())
+    fn digest_only_id() -> PackageRef {
+        PackageRef::new_registry(REPO, REGISTRY).clone_with_digest(digest_a())
     }
 
     // Two distinct single-child image INDEXES — distinct bytes so digests
@@ -5654,13 +5654,13 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn list_tags(&self, _identifier: &Identifier) -> Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _identifier: &PackageRef) -> Result<Option<Vec<String>>> {
             Ok(Some(self.known_tags.keys().cloned().collect()))
         }
 
         async fn fetch_manifest(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
             _op: super::super::IndexOperation,
         ) -> Result<Option<(Digest, Manifest)>> {
             if let Some(msg) = &self.force_error {
@@ -5680,7 +5680,7 @@ mod tests {
 
         async fn fetch_manifest_digest(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
             _op: super::super::IndexOperation,
         ) -> Result<Option<Digest>> {
             if let Some(msg) = &self.force_error {
@@ -5691,7 +5691,7 @@ mod tests {
             Ok(self.known_tags.get(tag).cloned())
         }
 
-        async fn fetch_blob(&self, _blob_ref: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _blob_ref: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
             if let Some(msg) = &self.force_error {
                 return Err(super::super::error::Error::RemoteManifestNotFound(msg.clone()));
             }
@@ -5700,7 +5700,7 @@ mod tests {
 
         async fn fetch_manifest_raw_bytes(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
         ) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
             if let Some(msg) = &self.force_error {
                 return Err(super::super::error::Error::RemoteManifestNotFound(msg.clone()));
@@ -5758,7 +5758,7 @@ mod tests {
 
     /// Seed the cache with the full dispatch chain (root tag pointer +
     /// dispatch object) so subsequent cache-only reads succeed.
-    async fn seed_full(cache: &LocalIndex, identifier: &Identifier, _d: Digest, source: &Index) {
+    async fn seed_full(cache: &LocalIndex, identifier: &PackageRef, _d: Digest, source: &Index) {
         let (_bytes, digest, _manifest) = cache
             .persist_dispatch(source, identifier)
             .await
@@ -5973,7 +5973,7 @@ mod tests {
         let source = make_source(TestIndex::with_tag("latest", digest_a()));
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
-        let bare = Identifier::new_registry(REPO, REGISTRY);
+        let bare = PackageRef::new_registry(REPO, REGISTRY);
         let result = chained
             .fetch_manifest(&bare, super::IndexOperation::Resolve)
             .await
@@ -5994,7 +5994,7 @@ mod tests {
         let source = make_source(TestIndex::with_tag(TAG, digest_a()));
         let chained = super::super::Index::from_chained(cache, vec![source], super::super::ChainMode::Default);
 
-        let bare = Identifier::new_registry(REPO, REGISTRY);
+        let bare = PackageRef::new_registry(REPO, REGISTRY);
         let result = chained
             .fetch_manifest(&bare, super::IndexOperation::Resolve)
             .await

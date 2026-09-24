@@ -1053,7 +1053,7 @@ mod tests {
 
     fn request(curated: TagSelection) -> AnnounceRequest {
         AnnounceRequest {
-            package: ocx_oci::Identifier::new_registry("acme/widget", "ocx.sh"),
+            package: ocx_oci::PackageRef::new_registry("acme/widget", "ocx.sh"),
             curated,
             target: AnnounceTarget::Out(std::path::PathBuf::from("unused")),
             index_repo: index_repo(),

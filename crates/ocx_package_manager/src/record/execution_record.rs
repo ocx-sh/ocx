@@ -45,7 +45,7 @@ use crate::tasks::resolve::{AdmittedClaims, PatchProvenance};
 use ocx_config::env::OcxConfigView;
 use ocx_config::mirror::MirrorConfig;
 use ocx_oci::ssrf::allows_plain_http;
-use ocx_oci::{Architecture, Digest, Identifier, OperatingSystem, PinnedIdentifier, Platform};
+use ocx_oci::{Architecture, Digest, OperatingSystem, PackageRef, PinnedPackageRef, Platform};
 use ocx_package::install_info::InstallInfo;
 use ocx_package::metadata::visibility::Visibility;
 
@@ -672,7 +672,7 @@ pub struct RecordInputs<'a> {
     pub clean_env: bool,
 
     /// Packages materialized during this invocation.
-    pub auto_installed: &'a [Identifier],
+    pub auto_installed: &'a [PackageRef],
 
     /// The only frame-divergent input.
     pub scope: Scope,
@@ -711,7 +711,7 @@ pub enum Scope {
     /// `ocx package exec` — identifiers named on the command line.
     Package {
         /// Identifiers as requested.
-        requested: Vec<Identifier>,
+        requested: Vec<PackageRef>,
     },
 
     /// `ocx launcher exec` — a generated entrypoint re-entry, which has no
@@ -727,7 +727,7 @@ pub enum Scope {
     /// ocx itself baked into the shim rather than one a user typed.
     LauncherShim {
         /// The tool the shim named, exactly as baked.
-        requested: PinnedIdentifier,
+        requested: PinnedPackageRef,
     },
 }
 
@@ -744,7 +744,7 @@ pub struct PackageBinding {
     /// The group the binding was selected from.
     pub group: String,
     /// The root package the binding resolved to.
-    pub package: PinnedIdentifier,
+    pub package: PinnedPackageRef,
 }
 
 impl ExecutionRecord {
@@ -1116,7 +1116,7 @@ fn owning_root<'a>(inputs: &'a RecordInputs<'_>) -> Option<&'a Arc<InstallInfo>>
 /// invocation asked for, and a reader scanning `packages[]` top-down should
 /// reach everything the caller requested before anything the site added.
 fn descriptors(inputs: &RecordInputs<'_>) -> Vec<ResourceDescriptor> {
-    let mut seen: HashSet<PinnedIdentifier> = HashSet::new();
+    let mut seen: HashSet<PinnedPackageRef> = HashSet::new();
     let mut descriptors = Vec::new();
     let admitted = AdmittedIndex::build(inputs.admitted);
 
@@ -1217,11 +1217,11 @@ struct Placement<'a> {
 
 /// Build one descriptor, or `None` when this package was already emitted.
 fn project(
-    identifier: &PinnedIdentifier,
+    identifier: &PinnedPackageRef,
     placement: Placement<'_>,
     inputs: &RecordInputs<'_>,
     admitted: &AdmittedIndex,
-    seen: &mut HashSet<PinnedIdentifier>,
+    seen: &mut HashSet<PinnedPackageRef>,
 ) -> Option<ResourceDescriptor> {
     if !seen.insert(identifier.strip_advisory()) {
         return None;
@@ -1277,7 +1277,7 @@ fn project(
 }
 
 /// The binding a project-tier package was selected under, if the frame has any.
-fn binding_for<'a>(identifier: &PinnedIdentifier, scope: &'a Scope) -> Option<&'a PackageBinding> {
+fn binding_for<'a>(identifier: &PinnedPackageRef, scope: &'a Scope) -> Option<&'a PackageBinding> {
     match scope {
         Scope::Project { bindings, .. } => bindings.iter().find(|binding| binding.package.eq_content(identifier)),
         Scope::Package { .. } | Scope::Launcher | Scope::LauncherShim { .. } => None,
@@ -1291,8 +1291,8 @@ fn binding_for<'a>(identifier: &PinnedIdentifier, scope: &'a Scope) -> Option<&'
 /// hold every name of every package in the closure, and the naive form scanned
 /// both of them twice for each descriptor.
 struct AdmittedIndex {
-    binaries: HashMap<PinnedIdentifier, Vec<Value>>,
-    entrypoints: HashMap<PinnedIdentifier, Vec<Value>>,
+    binaries: HashMap<PinnedPackageRef, Vec<Value>>,
+    entrypoints: HashMap<PinnedPackageRef, Vec<Value>>,
 }
 
 impl AdmittedIndex {
@@ -1306,12 +1306,12 @@ impl AdmittedIndex {
 
 /// Group one claim list by owner.
 ///
-/// Keyed on [`PinnedIdentifier::strip_advisory`] because attribution is content
+/// Keyed on [`PinnedPackageRef::strip_advisory`] because attribution is content
 /// identity: the advisory tag must not split a package's claims from the
 /// package. That is the hash-lookup form of the `eq_content` comparison this
 /// replaces.
-fn claims_by_owner<T: std::fmt::Display>(claims: &[(PinnedIdentifier, T)]) -> HashMap<PinnedIdentifier, Vec<Value>> {
-    let mut index: HashMap<PinnedIdentifier, Vec<Value>> = HashMap::new();
+fn claims_by_owner<T: std::fmt::Display>(claims: &[(PinnedPackageRef, T)]) -> HashMap<PinnedPackageRef, Vec<Value>> {
+    let mut index: HashMap<PinnedPackageRef, Vec<Value>> = HashMap::new();
     for (owner, name) in claims {
         index
             .entry(owner.strip_advisory())
@@ -1365,12 +1365,12 @@ mod tests {
     const COMPANION_HEX: &str = "7e5a1c3f9b2d4e6a8c0f1b3d5e7a9c1f3b5d7e9a1c3f5b7d9e1a3c5f7b9d1e3a";
     const SNAPSHOT_HEX: &str = "2b4d6f8a0c2e4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4a6c8e0b2d4f6a8c0e2b4d";
 
-    fn pinned(repository: &str, registry: &str, tag: Option<&str>, hex: &str) -> PinnedIdentifier {
-        let mut identifier = Identifier::new_registry(repository, registry);
+    fn pinned(repository: &str, registry: &str, tag: Option<&str>, hex: &str) -> PinnedPackageRef {
+        let mut identifier = PackageRef::new_registry(repository, registry);
         if let Some(tag) = tag {
             identifier = identifier.clone_with_tag(tag);
         }
-        PinnedIdentifier::try_from(identifier.clone_with_digest(Digest::Sha256(hex.to_string())))
+        PinnedPackageRef::try_from(identifier.clone_with_digest(Digest::Sha256(hex.to_string())))
             .expect("digest present")
     }
 
@@ -1392,7 +1392,7 @@ mod tests {
     /// the registry-backed case, where that host and the identifier's own
     /// registry coincide — [`registries_name_the_content_host_not_the_logical_namespace`]
     /// is where they are made to diverge.
-    fn install(identifier: PinnedIdentifier, dir: &str, dependencies: Vec<ResolvedDependency>) -> Arc<InstallInfo> {
+    fn install(identifier: PinnedPackageRef, dir: &str, dependencies: Vec<ResolvedDependency>) -> Arc<InstallInfo> {
         let registry = identifier.registry().to_string();
         Arc::new(
             InstallInfo::new(
@@ -1418,7 +1418,7 @@ mod tests {
         config: OcxConfigView,
         insecure_registries: Vec<String>,
         platform: Option<Platform>,
-        auto_installed: Vec<Identifier>,
+        auto_installed: Vec<PackageRef>,
         managed_config_digest: Option<Digest>,
         patch_snapshot_digest: Option<Digest>,
         clean_env: bool,
@@ -1547,7 +1547,7 @@ mod tests {
     fn companion_provenance() -> PatchProvenance {
         PatchProvenance {
             rule_match: "*".to_string(),
-            companion: Identifier::parse("internal.corp.example/corp-ca:2024").expect("identifier"),
+            companion: PackageRef::parse("internal.corp.example/corp-ca:2024").expect("identifier"),
             pinned: pinned("corp-ca", "internal.corp.example", Some("2024"), COMPANION_HEX),
         }
     }
@@ -1831,7 +1831,7 @@ mod tests {
             Vec::new(),
         );
         let descriptors = descriptors(&tagged.inputs(Scope::Package {
-            requested: vec![Identifier::parse("index.ocx.sh/ocx/cmake:3.28").expect("identifier")],
+            requested: vec![PackageRef::parse("index.ocx.sh/ocx/cmake:3.28").expect("identifier")],
         }));
         assert_eq!(
             annotations_of(&descriptors, "cmake")
@@ -2209,7 +2209,7 @@ mod tests {
     #[test]
     fn auto_installed_packages_are_named_when_any_were_materialised() {
         let mut frame = Frame::project();
-        frame.auto_installed = vec![Identifier::parse("internal.corp.example/solver").expect("identifier")];
+        frame.auto_installed = vec![PackageRef::parse("internal.corp.example/solver").expect("identifier")];
         let resolution = resolution_block(&frame.inputs(project_scope()));
         assert_eq!(
             resolution.auto_installed.as_deref(),
@@ -2361,7 +2361,7 @@ mod tests {
         let mut frame = Frame::project();
         frame.patch_companions = vec![PatchProvenance {
             rule_match: "*".to_string(),
-            companion: Identifier::parse("index.ocx.sh/ocx/ninja").expect("identifier"),
+            companion: PackageRef::parse("index.ocx.sh/ocx/ninja").expect("identifier"),
             pinned: pinned("ocx/ninja", "index.ocx.sh", None, NINJA_HEX),
         }];
 
@@ -2445,7 +2445,7 @@ mod tests {
             other => panic!("expected a project block, got {other:?}"),
         }
 
-        let requested = Identifier::parse("internal.corp.example/solver:2024.3").expect("identifier");
+        let requested = PackageRef::parse("internal.corp.example/solver:2024.3").expect("identifier");
         match scope_block(&frame.inputs(Scope::Package {
             requested: vec![requested],
         })) {

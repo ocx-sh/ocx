@@ -140,13 +140,13 @@ impl IndexSync {
         // No second dedup here: the registry list was deduplicated above, and
         // two DIFFERENT registries serving the same repository name are two
         // packages, correctly — the registry is part of the identity.
-        let packages: Vec<ocx_oci::Identifier> = enumerated
+        let packages: Vec<ocx_oci::PackageRef> = enumerated
             .iter()
             .flat_map(|entry| {
                 entry
                     .packages
                     .iter()
-                    .map(|repository| ocx_oci::Identifier::new_registry(repository, &entry.registry))
+                    .map(|repository| ocx_oci::PackageRef::new_registry(repository, &entry.registry))
             })
             .collect();
 
@@ -218,7 +218,7 @@ async fn enumerate_catalog(
         }
     };
     // Every key is foreign-authored, and above they become identifiers via
-    // `Identifier::new_registry`, which does no validation — so the grammar
+    // `PackageRef::new_registry`, which does no validation — so the grammar
     // every argv identifier passes is applied here instead. Without it a key of
     // `../../..` survives into the request URL, where RFC 3986 normalization
     // resolves it outside the index's declared base path. Checked before the
@@ -232,7 +232,7 @@ async fn enumerate_catalog(
     // parse-and-discard form and reached both a log line and a request URL
     // intact.
     for key in &packages {
-        ocx_oci::Identifier::validate_repository(key).map_err(|error| {
+        ocx_oci::PackageRef::validate_repository(key).map_err(|error| {
             ocx_index::error::Error::MalformedCatalogKey {
                 index_source: registry.to_string(),
                 key: key.clone(),
@@ -313,7 +313,7 @@ mod tests {
         // `Some(tag) => RootScope::Tag`, `None => RootScope::Package`. C-014
         // wants `Package`, so what this command builds per catalog key must
         // carry no tag — the whole contract turns on this one `None`.
-        let identifier = ocx_oci::Identifier::new_registry("kitware/cmake", "ocx.sh");
+        let identifier = ocx_oci::PackageRef::new_registry("kitware/cmake", "ocx.sh");
         assert!(
             identifier.tag().is_none(),
             "a tagged identifier would narrow the refresh to one tag (RootScope::Tag)"
@@ -327,7 +327,7 @@ mod tests {
         // package-scoped merge silently became a per-tag one.
         let body = module_code();
         assert!(
-            body.contains("ocx_oci::Identifier::new_registry(repository, &entry.registry)"),
+            body.contains("ocx_oci::PackageRef::new_registry(repository, &entry.registry)"),
             "the flatten must build the bare form; the behavioural half is S-004"
         );
         for narrowing in ["clone_with_tag", "tag_or_latest", "clone_with_digest"] {
@@ -653,14 +653,14 @@ mod tests {
         // The defect: `parse_with_default_registry(key, registry)` with the
         // result DISCARDED validated a decomposition — the tag and digest are
         // split off before the character-class, uppercase and length guards run
-        // — while `Identifier::new_registry` then adopted the raw key. A key of
+        // — while `PackageRef::new_registry` then adopted the raw key. A key of
         // `ns/pkg:\u{202e}gnp.exe` passed and reached a log line and a request
-        // URL intact. `Identifier::validate_repository` applies every guard to
+        // URL intact. `PackageRef::validate_repository` applies every guard to
         // the string as given; its own behavioural tests live beside it in
         // ocx_lib.
         let body = module_code();
         assert!(
-            body.contains("ocx_oci::Identifier::validate_repository(key)"),
+            body.contains("ocx_oci::PackageRef::validate_repository(key)"),
             "the key must be validated as the repository it becomes"
         );
         assert!(

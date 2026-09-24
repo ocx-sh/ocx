@@ -318,7 +318,7 @@ impl From<&PackageSettings> for PackageSettingsOut {
     }
 }
 
-fn declared_tools(tools: &BTreeMap<String, ocx_oci::Identifier>) -> BTreeMap<String, ToolStatus> {
+fn declared_tools(tools: &BTreeMap<String, ocx_oci::PackageRef>) -> BTreeMap<String, ToolStatus> {
     tools
         .iter()
         .map(|(binding, identifier)| {

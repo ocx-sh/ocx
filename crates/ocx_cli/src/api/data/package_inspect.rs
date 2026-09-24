@@ -77,13 +77,13 @@ impl SemanticAnnotation {
 /// render human-readable (binary units); JSON keeps the raw integer `size`.
 pub struct PackageInspect {
     name: String,
-    identifier: ocx_oci::Identifier,
+    identifier: ocx_oci::PackageRef,
     body: Body,
 }
 
 enum Body {
     Candidates {
-        pinned: ocx_oci::PinnedIdentifier,
+        pinned: ocx_oci::PinnedPackageRef,
         candidates: Vec<CandidateOut>,
     },
     /// A toolchain binding projected straight from `ocx.lock` — the locked
@@ -94,13 +94,13 @@ enum Body {
     /// name until `--resolve` picks a platform.
     Locked { candidates: Vec<CandidateOut> },
     Manifest {
-        pinned: ocx_oci::PinnedIdentifier,
+        pinned: ocx_oci::PinnedPackageRef,
         metadata: Metadata,
         layers: Vec<Layer>,
         closure: Option<ClosureOut>,
     },
     Resolved {
-        pinned: ocx_oci::PinnedIdentifier,
+        pinned: ocx_oci::PinnedPackageRef,
         platform: ocx_oci::Platform,
         metadata: Metadata,
         layers: Vec<Layer>,
@@ -215,7 +215,7 @@ struct EnvVarAttribution {
 impl EnvVarAttribution {
     /// Projects admitted `(identifier, ClosureEnvVar)` pairs into the wire
     /// shape — the env sibling of [`BinaryAttribution::from_pairs`].
-    fn from_pairs(pairs: &[(ocx_oci::PinnedIdentifier, ClosureEnvVar)]) -> Vec<Self> {
+    fn from_pairs(pairs: &[(ocx_oci::PinnedPackageRef, ClosureEnvVar)]) -> Vec<Self> {
         pairs
             .iter()
             .map(|(identifier, var)| Self {
@@ -248,7 +248,7 @@ impl NamespaceAttribution {
     /// Projects admitted `(identifier, namespace key)` pairs into the wire
     /// shape — the payload-free sibling of
     /// [`IntegrationAttribution::from_pairs`](crate::api::data::env::IntegrationAttribution::from_pairs).
-    fn from_pairs(pairs: &[(ocx_oci::PinnedIdentifier, String)]) -> Vec<Self> {
+    fn from_pairs(pairs: &[(ocx_oci::PinnedPackageRef, String)]) -> Vec<Self> {
         pairs
             .iter()
             .map(|(identifier, namespace)| Self {
@@ -452,7 +452,7 @@ impl PackageInspect {
     /// selected against (only meaningful in `--resolve` mode).
     pub fn new(
         name: String,
-        identifier: ocx_oci::Identifier,
+        identifier: ocx_oci::PackageRef,
         platform: ocx_oci::Platform,
         result: InspectResult,
     ) -> Self {
@@ -518,7 +518,7 @@ impl PackageInspect {
     /// naming the leaf it would resolve to.
     pub fn locked(
         name: String,
-        identifier: ocx_oci::Identifier,
+        identifier: ocx_oci::PackageRef,
         platforms: &std::collections::BTreeMap<String, ocx_oci::Digest>,
     ) -> Self {
         let candidates = platforms
@@ -566,7 +566,7 @@ impl PackageInspect {
     /// right) to name the exact artifact. `None` for a lock projection, which
     /// selects nothing: there the per-candidate `pinned_identifier` is the
     /// pullable reference.
-    fn pinned_identifier(&self) -> Option<&ocx_oci::PinnedIdentifier> {
+    fn pinned_identifier(&self) -> Option<&ocx_oci::PinnedPackageRef> {
         match &self.body {
             Body::Candidates { pinned, .. } | Body::Manifest { pinned, .. } | Body::Resolved { pinned, .. } => {
                 Some(pinned)
@@ -582,9 +582,9 @@ impl PackageInspect {
     /// stores the bare repository shared by every platform leaf, so rooting at
     /// anything lock-derived would silently drop the `:tag` every other
     /// inspect view shows.
-    fn root_identifier(&self) -> &ocx_oci::Identifier {
+    fn root_identifier(&self) -> &ocx_oci::PackageRef {
         self.pinned_identifier()
-            .map_or(&self.identifier, ocx_oci::PinnedIdentifier::as_identifier)
+            .map_or(&self.identifier, ocx_oci::PinnedPackageRef::as_identifier)
     }
 
     /// The whole plain-format tree for this entry: the root identifier with
@@ -692,7 +692,7 @@ struct Node {
     /// When set, the label is an identifier inked with the active theme at
     /// render time (so the root reads like every other identifier). Takes
     /// precedence over `label`.
-    identifier: Option<ocx_oci::Identifier>,
+    identifier: Option<ocx_oci::PackageRef>,
     annotations: Vec<SemanticAnnotation>,
     children: Vec<Node>,
 }
@@ -719,7 +719,7 @@ impl Node {
     /// A branch whose label is an identifier — inked with the active theme
     /// at render time so it matches digest/identifier colouring everywhere
     /// else in the tree.
-    fn identifier_branch(identifier: ocx_oci::Identifier, children: Vec<Node>) -> Self {
+    fn identifier_branch(identifier: ocx_oci::PackageRef, children: Vec<Node>) -> Self {
         Self {
             label: String::new(),
             identifier: Some(identifier),
@@ -974,7 +974,7 @@ fn closure_dep_leaf(dep: &ClosureDepOut) -> Node {
 /// answer, and repository conflicts report digests in their own branch. Falls
 /// back to the verbatim string if the wire value does not parse.
 fn without_digest(identifier: &str) -> String {
-    ocx_oci::Identifier::parse(identifier)
+    ocx_oci::PackageRef::parse(identifier)
         .map_or_else(|_| identifier.to_string(), |parsed| parsed.without_digest().to_string())
 }
 
@@ -989,7 +989,7 @@ fn short_digest(digest: &str) -> String {
 /// branch reads as the legend for every surface attribution. Falls back to the
 /// verbatim string if the wire value does not parse.
 fn attribution_name(identifier: &str) -> String {
-    ocx_oci::Identifier::parse(identifier).map_or_else(|_| identifier.to_string(), |parsed| parsed.name().to_string())
+    ocx_oci::PackageRef::parse(identifier).map_or_else(|_| identifier.to_string(), |parsed| parsed.name().to_string())
 }
 
 /// Parses a wire `effective_visibility` string back into the palette-typed
@@ -1213,7 +1213,7 @@ impl schemars::JsonSchema for PackageInspect {
         resolved package). `closure` rides along with the last two under `--closure`.",
             "properties": {
                 "name": {"type": "string"},
-                "identifier": generator.subschema_for::<ocx_oci::Identifier>(),
+                "identifier": generator.subschema_for::<ocx_oci::PackageRef>(),
                 "pinned_identifier": {"type": "string"},
                 "pinned_digest": {"type": "string"},
                 "candidates": generator.subschema_for::<Vec<CandidateOut>>(),
@@ -1307,18 +1307,18 @@ mod tests {
     // `ocx_package_manager::tasks::inspect`); these tests pin the WIRE shape and
     // the plain render.
 
-    fn test_identifier() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry("toolchain", "example.com").clone_with_tag("1.0")
+    fn test_identifier() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry("toolchain", "example.com").clone_with_tag("1.0")
     }
 
     fn test_platform() -> ocx_oci::Platform {
         ocx_oci::Platform::any()
     }
 
-    fn pinned(repo: &str, hex_char: char) -> ocx_oci::PinnedIdentifier {
-        let id = ocx_oci::Identifier::new_registry(repo, "example.com")
+    fn pinned(repo: &str, hex_char: char) -> ocx_oci::PinnedPackageRef {
+        let id = ocx_oci::PackageRef::new_registry(repo, "example.com")
             .clone_with_digest(ocx_oci::Digest::Sha256(hex_char.to_string().repeat(64)));
-        ocx_oci::PinnedIdentifier::try_from(id).expect("digest-bearing identifier is always pinnable")
+        ocx_oci::PinnedPackageRef::try_from(id).expect("digest-bearing identifier is always pinnable")
     }
 
     fn fake_digest(hex_char: char) -> String {
@@ -1355,7 +1355,7 @@ mod tests {
 
     /// Builds a minimal `Manifest`-mode `InspectResult` carrying `closure`
     /// (or `None`, the no-`--closure` case).
-    fn manifest_result(root: ocx_oci::PinnedIdentifier, closure: Option<InspectClosure>) -> InspectResult {
+    fn manifest_result(root: ocx_oci::PinnedPackageRef, closure: Option<InspectClosure>) -> InspectResult {
         InspectResult::Manifest {
             pinned: root,
             metadata: ValidMetadata::try_from(bundle_metadata(None)).expect("bare bundle metadata is always valid"),
@@ -1365,7 +1365,7 @@ mod tests {
     }
 
     /// A non-root closure node with the given composed-from-root visibility.
-    fn dep_node(identifier: ocx_oci::PinnedIdentifier, effective_visibility: Visibility) -> ClosureNode {
+    fn dep_node(identifier: ocx_oci::PinnedPackageRef, effective_visibility: Visibility) -> ClosureNode {
         ClosureNode {
             identifier,
             config_digest: ocx_oci::Digest::Sha256("e".repeat(64)),
@@ -1380,7 +1380,7 @@ mod tests {
     }
 
     /// The root closure node — no composed-from-root visibility.
-    fn root_node(identifier: ocx_oci::PinnedIdentifier) -> ClosureNode {
+    fn root_node(identifier: ocx_oci::PinnedPackageRef) -> ClosureNode {
         ClosureNode {
             identifier,
             config_digest: ocx_oci::Digest::Sha256("e".repeat(64)),
@@ -1396,7 +1396,7 @@ mod tests {
 
     /// A lib-level [`Surface`] with only env entries (binaries/entrypoints
     /// empty), the common shape the wire tests need.
-    fn surface_with_env(env: Vec<(ocx_oci::PinnedIdentifier, ClosureEnvVar)>, binaries_complete: bool) -> Surface {
+    fn surface_with_env(env: Vec<(ocx_oci::PinnedPackageRef, ClosureEnvVar)>, binaries_complete: bool) -> Surface {
         Surface {
             binaries: vec![],
             entrypoints: vec![],

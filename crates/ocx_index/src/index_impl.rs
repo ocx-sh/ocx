@@ -18,7 +18,7 @@ pub trait IndexImpl: Send + Sync {
     /// `__ocx` namespace, which carries the keep tag, plus the frozen legacy
     /// `sha256.<hex>` keep tags) are filtered
     /// once, in [`Index::list_tags`](super::Index::list_tags).
-    async fn list_tags(&self, identifier: &ocx_oci::Identifier) -> Result<Option<Vec<String>>>;
+    async fn list_tags(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>>;
 
     /// Fetch the manifest for the given identifier.
     ///
@@ -29,7 +29,7 @@ pub trait IndexImpl: Send + Sync {
     /// call site.
     async fn fetch_manifest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         op: IndexOperation,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>>;
     /// Fetch the manifest digest for the given identifier.
@@ -37,7 +37,7 @@ pub trait IndexImpl: Send + Sync {
     /// `op` carries the same contract as on [`Self::fetch_manifest`].
     async fn fetch_manifest_digest(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
         op: IndexOperation,
     ) -> Result<Option<ocx_oci::Digest>>;
 
@@ -46,7 +46,7 @@ pub trait IndexImpl: Send + Sync {
     /// `blob_ref` carries `(registry, repo)` for the OCI blob endpoint and
     /// the blob's own digest for content addressing. `Ok(None)` = unrecoverable
     /// miss (e.g. local-only mode + absent).
-    async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>>;
+    async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>>;
 
     /// Fetch the verbatim manifest bytes alongside the parsed manifest and its
     /// digest.
@@ -68,7 +68,7 @@ pub trait IndexImpl: Send + Sync {
     /// re-serialising default never reaches a verifying write.
     async fn fetch_manifest_raw_bytes(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
         match self.fetch_manifest(identifier, IndexOperation::Resolve).await? {
             Some((digest, manifest)) => {
@@ -98,7 +98,7 @@ pub trait IndexImpl: Send + Sync {
     /// derived-source switch on this return value cannot misread it.
     async fn fetch_root_document(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(Vec<u8>, super::IndexRoot)>> {
         let _ = identifier;
         Ok(None)
@@ -114,7 +114,7 @@ pub trait IndexImpl: Send + Sync {
     /// never round-tripped into a storage path or lock. The default returns
     /// `None`; only [`super::OcxIndex`] (and `ChainedIndex`, which delegates)
     /// override it.
-    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+    async fn physical_reference(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
         let _ = identifier;
         Ok(None)
     }
@@ -134,7 +134,7 @@ pub trait IndexImpl: Send + Sync {
     /// is the only implementor that holds a local copy to answer from.
     async fn physical_reference_local(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<ocx_oci::OciIdentifier>> {
         let _ = identifier;
         Ok(None)
@@ -158,7 +158,7 @@ pub trait IndexImpl: Send + Sync {
     /// index home is logged, not surfaced. The default does nothing; only
     /// `ChainedIndex` overrides it, being the only implementor with a local
     /// copy to record into.
-    async fn record_routing_pointer(&self, identifier: &ocx_oci::Identifier) {
+    async fn record_routing_pointer(&self, identifier: &ocx_oci::PackageRef) {
         let _ = identifier;
     }
 
@@ -183,7 +183,7 @@ pub trait IndexImpl: Send + Sync {
     /// The default is [`FallThrough`](super::Jurisdiction::FallThrough) (a
     /// plain registry claims nothing); only [`super::OcxIndex`] and
     /// [`ChainedIndex`](super::chained_index::ChainedIndex) override it.
-    fn jurisdiction(&self, identifier: &ocx_oci::Identifier) -> super::Jurisdiction {
+    fn jurisdiction(&self, identifier: &ocx_oci::PackageRef) -> super::Jurisdiction {
         let _ = identifier;
         super::Jurisdiction::FallThrough
     }
@@ -292,7 +292,7 @@ pub trait IndexImpl: Send + Sync {
     /// The default answers for this source alone;
     /// [`ChainedIndex`](super::chained_index::ChainedIndex) asks each of its
     /// sources, since its own [`Self::index_base_url`] has no single answer.
-    fn authoritative_index_base_url(&self, identifier: &ocx_oci::Identifier) -> Option<&str> {
+    fn authoritative_index_base_url(&self, identifier: &ocx_oci::PackageRef) -> Option<&str> {
         match self.jurisdiction(identifier) {
             super::Jurisdiction::Authoritative => self.index_base_url(),
             super::Jurisdiction::FallThrough | super::Jurisdiction::Outside => None,

@@ -109,7 +109,7 @@ impl PackageManager {
     /// [`ocx_sign::verify::VerifyErrorKind`].
     pub async fn verify_one(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         platform: Option<&ocx_oci::Platform>,
         opts: VerifyOptions<'_>,
     ) -> Result<VerifyReport, PackageError> {
@@ -153,7 +153,7 @@ impl PackageManager {
 
 /// Wrap a [`VerifyError`] in a [`PackageError`] tagged with `identifier`,
 /// preserving the verify exit code through `PackageErrorKind::Internal`.
-pub(super) fn map_verify_error(identifier: ocx_oci::Identifier, err: VerifyError) -> PackageError {
+pub(super) fn map_verify_error(identifier: ocx_oci::PackageRef, err: VerifyError) -> PackageError {
     PackageError::new(
         identifier,
         PackageErrorKind::Internal(crate::Error::Verify(Box::new(err))),
@@ -179,8 +179,8 @@ pub(crate) mod tests {
     pub(crate) const REPO: &str = "widget";
     const TAG: &str = "1.0";
 
-    pub(crate) fn tagged_id() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
+    pub(crate) fn tagged_id() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
     }
 
     // Single-child image index — dispatch-shaped (never a bare leaf manifest),
@@ -207,29 +207,29 @@ pub(crate) mod tests {
         async fn list_repositories(&self, _registry: &str) -> ocx_index::error::Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _identifier: &ocx_oci::Identifier) -> ocx_index::error::Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _identifier: &ocx_oci::PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
             Ok(Some(vec![TAG.to_string()]))
         }
         async fn fetch_manifest(
             &self,
-            identifier: &ocx_oci::Identifier,
+            identifier: &ocx_oci::PackageRef,
             _op: IndexOperation,
         ) -> ocx_index::error::Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
             Ok((identifier.tag_or_latest() == TAG).then(|| (index_digest(), index_manifest())))
         }
         async fn fetch_manifest_digest(
             &self,
-            identifier: &ocx_oci::Identifier,
+            identifier: &ocx_oci::PackageRef,
             _op: IndexOperation,
         ) -> ocx_index::error::Result<Option<ocx_oci::Digest>> {
             Ok((identifier.tag_or_latest() == TAG).then(index_digest))
         }
-        async fn fetch_blob(&self, _blob_ref: &ocx_oci::PinnedIdentifier) -> ocx_index::error::Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _blob_ref: &ocx_oci::PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
             Ok(None)
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            identifier: &ocx_oci::Identifier,
+            identifier: &ocx_oci::PackageRef,
         ) -> ocx_index::error::Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
             Ok((identifier.tag_or_latest() == TAG).then(|| (index_bytes().to_vec(), index_digest(), index_manifest())))
         }

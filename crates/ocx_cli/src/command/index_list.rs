@@ -31,7 +31,7 @@ pub struct IndexList {
     packages: Vec<options::Identifier>,
 }
 
-type ResolvedTags = Vec<(String, ocx_oci::Identifier, Vec<String>)>;
+type ResolvedTags = Vec<(String, ocx_oci::PackageRef, Vec<String>)>;
 
 impl IndexList {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
@@ -66,7 +66,7 @@ impl IndexList {
     async fn resolve_tags(
         &self,
         context: &crate::app::Context,
-        identifiers: Vec<ocx_oci::Identifier>,
+        identifiers: Vec<ocx_oci::PackageRef>,
     ) -> anyhow::Result<ResolvedTags> {
         let futures = self.packages.iter().zip(identifiers).map(|(package, identifier)| {
             let context = context.clone();

@@ -136,7 +136,7 @@ pub(super) async fn refresh_packages(
     local_index: &ocx_index::LocalIndex,
     index_sources: &[ocx_index::OcxIndex],
     oci_index: &ocx_index::Index,
-    packages: &[ocx_oci::Identifier],
+    packages: &[ocx_oci::PackageRef],
 ) -> Option<anyhow::Error> {
     // The stream combinator does not spawn, so a panic in a refresh unwinds this
     // caller directly and the borrow of `local_index` and `packages` is fine

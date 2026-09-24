@@ -51,7 +51,7 @@
 //!
 //! # A package identifier cannot be dialled
 //!
-//! [`Identifier`] names a package; [`OciIdentifier`] names the registry
+//! [`PackageRef`] names a package; [`OciIdentifier`] names the registry
 //! location a request goes to. An index may serve the first from somewhere
 //! else entirely, so dialling it as-is reaches whatever host shares its
 //! spelling (ocx#504). Every [`Client`] read and write takes the second, and
@@ -66,13 +66,13 @@
 //! A package identifier handed to the client is a type mismatch:
 //!
 //! ```compile_fail,E0308
-//! async fn read(client: ocx_oci::Client, location: ocx_oci::OciIdentifier, identifier: ocx_oci::Identifier) {
+//! async fn read(client: ocx_oci::Client, location: ocx_oci::OciIdentifier, identifier: ocx_oci::PackageRef) {
 //!     let _ = client.fetch_manifest(&identifier).await;
 //! }
 //! ```
 //!
 //! ```
-//! async fn read(client: ocx_oci::Client, location: ocx_oci::OciIdentifier, identifier: ocx_oci::Identifier) {
+//! async fn read(client: ocx_oci::Client, location: ocx_oci::OciIdentifier, identifier: ocx_oci::PackageRef) {
 //!     let _ = client.fetch_manifest(&location).await;
 //! }
 //! ```
@@ -80,14 +80,14 @@
 //! A location does not turn back into a package identifier:
 //!
 //! ```compile_fail,E0277
-//! fn relabel(location: ocx_oci::OciIdentifier, identifier: ocx_oci::Identifier) {
-//!     let _: ocx_oci::Identifier = location.into();
+//! fn relabel(location: ocx_oci::OciIdentifier, identifier: ocx_oci::PackageRef) {
+//!     let _: ocx_oci::PackageRef = location.into();
 //! }
 //! ```
 //!
 //! ```
-//! fn relabel(location: ocx_oci::OciIdentifier, identifier: ocx_oci::Identifier) {
-//!     let _: ocx_oci::Identifier = identifier.into();
+//! fn relabel(location: ocx_oci::OciIdentifier, identifier: ocx_oci::PackageRef) {
+//!     let _: ocx_oci::PackageRef = identifier.into();
 //! }
 //! ```
 //!
@@ -95,25 +95,25 @@
 //! neither by `into` nor by `from`:
 //!
 //! ```compile_fail,E0277
-//! fn unroute(location: ocx_oci::OciIdentifier, identifier: ocx_oci::Identifier) {
+//! fn unroute(location: ocx_oci::OciIdentifier, identifier: ocx_oci::PackageRef) {
 //!     let _: ocx_oci::OciIdentifier = identifier.into();
 //! }
 //! ```
 //!
 //! ```
-//! fn unroute(location: ocx_oci::OciIdentifier, identifier: ocx_oci::Identifier) {
+//! fn unroute(location: ocx_oci::OciIdentifier, identifier: ocx_oci::PackageRef) {
 //!     let _: ocx_oci::OciIdentifier = location.into();
 //! }
 //! ```
 //!
 //! ```compile_fail,E0277
-//! fn unroute(identifier: ocx_oci::Identifier) {
+//! fn unroute(identifier: ocx_oci::PackageRef) {
 //!     let _ = ocx_oci::OciIdentifier::from(&identifier);
 //! }
 //! ```
 //!
 //! ```
-//! fn unroute(identifier: ocx_oci::Identifier) {
+//! fn unroute(identifier: ocx_oci::PackageRef) {
 //!     let _ = ocx_oci::OciIdentifier::passthrough(&identifier);
 //! }
 //! ```
@@ -227,12 +227,12 @@ pub mod resolve_target;
 // primitive both use (ADR `adr_oci_referrers_signing_v1.md` Amendment 2).
 pub mod endpoint;
 
-pub mod identifier;
-pub use identifier::DEFAULT_REGISTRY;
-pub use identifier::Identifier;
-pub use identifier::OCX_SH_REGISTRY;
-pub use identifier::error::{IdentifierError, IdentifierErrorKind};
-pub use identifier::ocx_cli_identifier;
+pub mod package_ref;
+pub use package_ref::DEFAULT_REGISTRY;
+pub use package_ref::OCX_SH_REGISTRY;
+pub use package_ref::PackageRef;
+pub use package_ref::error::{IdentifierError, IdentifierErrorKind};
+pub use package_ref::ocx_cli_identifier;
 
 pub mod host_capabilities;
 pub use host_capabilities::{Feature, HostCapabilities, LibcFlavor, cached_libc_labels};
@@ -247,8 +247,8 @@ pub mod digest;
 pub use digest::Algorithm;
 pub use digest::Digest;
 
-pub mod pinned_identifier;
-pub use pinned_identifier::PinnedIdentifier;
+pub mod pinned_package_ref;
+pub use pinned_package_ref::PinnedPackageRef;
 
 // The physical side of the identifier split (ocx#504): what `Client` dials.
 pub mod oci_identifier;

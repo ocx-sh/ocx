@@ -111,7 +111,7 @@ impl PackageManager {
     /// [`ocx_sign::sign::SignErrorKind`].
     pub async fn sign_one(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         platform: Option<&ocx_oci::Platform>,
         opts: SignOptions,
         resolved: Option<&(ocx_oci::Digest, ocx_oci::Manifest)>,
@@ -221,7 +221,7 @@ impl PackageManager {
     /// row's [`SweptOutcome`].
     pub async fn sign_tags(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         tags: &[String],
         opts: &SignOptions,
     ) -> Vec<SweptTag<SignReport>> {
@@ -297,7 +297,7 @@ impl PackageManager {
     /// [`SignErrorKind::TargetNotFound`]: ocx_sign::sign::SignErrorKind::TargetNotFound
     pub(super) async fn resolve_swept_index(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::PackageRef,
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>, PackageError> {
         let resolved = self
             .index()
@@ -342,7 +342,7 @@ impl PackageManager {
     /// caller learns which ones landed. The caller decides the exit code.
     pub async fn sign_platforms(
         &self,
-        package: &ocx_oci::Identifier,
+        package: &ocx_oci::PackageRef,
         platforms: &[(ocx_oci::Platform, ocx_oci::Digest)],
         opts: &SignOptions,
     ) -> Vec<(ocx_oci::Platform, Result<SignReport, PackageError>)> {
@@ -399,7 +399,7 @@ pub(super) fn build_signer(
 
 /// Wrap a [`SignError`] in a [`PackageError`] tagged with `identifier`,
 /// preserving the sign exit code through `PackageErrorKind::Internal`.
-fn map_sign_error(identifier: ocx_oci::Identifier, err: SignError) -> PackageError {
+fn map_sign_error(identifier: ocx_oci::PackageRef, err: SignError) -> PackageError {
     PackageError::new(
         identifier,
         PackageErrorKind::Internal(crate::Error::Sign(Box::new(err))),
@@ -420,7 +420,7 @@ pub(super) mod sweep_test_support {
     use ocx_index::{Index, IndexOperation};
     use ocx_oci::client::Client;
     use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
-    use ocx_oci::{self, Digest, Identifier, Manifest};
+    use ocx_oci::{self, Digest, Manifest, PackageRef};
     use ocx_store::file_structure::FileStructure;
 
     /// The tags every sweep test runs. Three, not one: the defect is a *per
@@ -439,8 +439,8 @@ pub(super) mod sweep_test_support {
     /// pipeline resolves the physical host before dialling it, and a DNS name
     /// would make this unit test depend on a resolver while a private range
     /// would be refused by the SSRF floor.
-    pub(crate) fn sweep_identifier() -> Identifier {
-        Identifier::parse("8.8.8.8/acme/tool:1.0").expect("sweep identifier")
+    pub(crate) fn sweep_identifier() -> PackageRef {
+        PackageRef::parse("8.8.8.8/acme/tool:1.0").expect("sweep identifier")
     }
 
     /// An index that answers every reference with the same image index and
@@ -471,13 +471,13 @@ pub(super) mod sweep_test_support {
             Ok(Vec::new())
         }
 
-        async fn list_tags(&self, _: &Identifier) -> ocx_index::error::Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
             Ok(None)
         }
 
         async fn fetch_manifest(
             &self,
-            identifier: &Identifier,
+            identifier: &PackageRef,
             _: IndexOperation,
         ) -> ocx_index::error::Result<Option<(Digest, Manifest)>> {
             self.asked.lock().expect("asked lock").push(identifier.to_string());
@@ -495,13 +495,13 @@ pub(super) mod sweep_test_support {
 
         async fn fetch_manifest_digest(
             &self,
-            _: &Identifier,
+            _: &PackageRef,
             _: IndexOperation,
         ) -> ocx_index::error::Result<Option<Digest>> {
             Ok(Some(swept_digest()))
         }
 
-        async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> ocx_index::error::Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, _: &ocx_oci::PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
             Ok(None)
         }
 

@@ -109,7 +109,7 @@ impl std::fmt::Debug for ForgeToken {
 ///
 /// `host` is `None` for the forge's canonical host, `Some` for a self-hosted
 /// instance. Whether a leading segment is a host is decided by the same rule
-/// OCI identifiers use ([`ocx_oci::identifier::segment_is_host`]) — one
+/// OCI identifiers use ([`ocx_oci::package_ref::segment_is_host`]) — one
 /// spelling of "that looks like a host", not a second one that can drift.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoCoordinate {
@@ -150,7 +150,7 @@ impl RepoCoordinate {
 
 /// Whether a coordinate segment is a well-formed `host` or `host:port`.
 ///
-/// Deliberately narrower than [`ocx_oci::identifier::segment_is_host`], which
+/// Deliberately narrower than [`ocx_oci::package_ref::segment_is_host`], which
 /// only answers "does this look like a host" for the *shape* of an identifier.
 /// This one guards a different thing: the value ends up in the API base URL the
 /// credential is sent to, so anything that could shift the URL's authority —
@@ -213,7 +213,7 @@ impl std::str::FromStr for RepoCoordinate {
         // A leading host is only recognised when something is left to be a
         // `namespace/project` after it — `acme/index` is a two-segment path, never
         // a host with a bare project.
-        let host = if segments.len() >= 3 && ocx_oci::identifier::segment_is_host(segments[0]) {
+        let host = if segments.len() >= 3 && ocx_oci::package_ref::segment_is_host(segments[0]) {
             // A segment that looks like a host but is not a well-formed one is
             // REFUSED, never demoted to a namespace segment: the host is
             // interpolated straight into the API base URL that carries the

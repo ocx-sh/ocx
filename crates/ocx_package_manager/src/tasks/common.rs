@@ -41,7 +41,7 @@ use ocx_util::prelude::SerdeExt;
 /// or tampered on-disk metadata that predates current validation rules.
 pub async fn find_in_store(
     objects: &PackageStore,
-    identifier: &ocx_oci::PinnedIdentifier,
+    identifier: &ocx_oci::PinnedPackageRef,
 ) -> Result<Option<InstallInfo>, PackageErrorKind> {
     let pkg = objects.package_dir(identifier);
     let content = pkg.content();
@@ -69,10 +69,10 @@ pub async fn find_in_store(
     }
 }
 
-/// Reconstructs the [`PinnedIdentifier`](ocx_oci::PinnedIdentifier) for a package
+/// Reconstructs the [`PinnedPackageRef`](ocx_oci::PinnedPackageRef) for a package
 /// loaded through an install symlink (candidate or current).
 ///
-/// Registry and repository come from the caller-supplied [`ocx_oci::Identifier`].
+/// Registry and repository come from the caller-supplied [`ocx_oci::PackageRef`].
 /// The digest is read from the shared package directory's `digest` file so the
 /// result is the truly installed content digest, not whatever first installer
 /// happened to win a cross-repo dedup race.
@@ -88,16 +88,16 @@ pub async fn find_in_store(
 pub async fn identifier_for_symlink(
     objects: &PackageStore,
     symlink_path: &Path,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::PackageRef,
     kind: file_structure::SymlinkKind,
-) -> Result<ocx_oci::PinnedIdentifier, crate::Error> {
+) -> Result<ocx_oci::PinnedPackageRef, crate::Error> {
     let digest_path = objects.digest_file_for_content(symlink_path)?;
     let digest = file_structure::read_digest_file(&digest_path).await?;
     let base = match kind {
         file_structure::SymlinkKind::Candidate => identifier.clone(),
         file_structure::SymlinkKind::Current => identifier.without_tag(),
     };
-    Ok(ocx_oci::PinnedIdentifier::try_from(base.clone_with_digest(digest))?)
+    Ok(ocx_oci::PinnedPackageRef::try_from(base.clone_with_digest(digest))?)
 }
 
 /// Loads metadata.json and resolve.json for an existing content path.
@@ -149,7 +149,7 @@ pub(super) const MAX_METADATA_BLOB_BYTES: usize = 4 * 1024 * 1024;
 /// write-through on hit, `Ok(None)` when offline and absent locally.
 pub async fn load_config_metadata(
     index: &ocx_index::Index,
-    pinned: &ocx_oci::PinnedIdentifier,
+    pinned: &ocx_oci::PinnedPackageRef,
     manifest: &ocx_oci::ImageManifest,
 ) -> Result<metadata::ValidMetadata, PackageErrorKind> {
     // Config blob media-type check before any fetch — refuse to stage a
@@ -231,15 +231,15 @@ pub async fn load_config_metadata(
 /// [`PackageErrorKind::TaskPanicked`]. If any errors accumulated, they are
 /// wrapped with `error_ctor` and returned as a single batch error.
 pub async fn drain_package_tasks<T: 'static>(
-    packages: &[ocx_oci::Identifier],
-    mut tasks: JoinSet<(ocx_oci::Identifier, Result<T, PackageErrorKind>)>,
+    packages: &[ocx_oci::PackageRef],
+    mut tasks: JoinSet<(ocx_oci::PackageRef, Result<T, PackageErrorKind>)>,
     error_ctor: fn(Vec<PackageError>) -> crate::error::Error,
 ) -> Result<Vec<T>, crate::error::Error> {
     // Build a reverse index: identifier → slot position in `results`.
-    let index_map: HashMap<ocx_oci::Identifier, usize> =
+    let index_map: HashMap<ocx_oci::PackageRef, usize> =
         packages.iter().cloned().enumerate().map(|(i, id)| (id, i)).collect();
 
-    let mut pending: HashSet<ocx_oci::Identifier> = packages.iter().cloned().collect();
+    let mut pending: HashSet<ocx_oci::PackageRef> = packages.iter().cloned().collect();
     let mut results: Vec<Option<T>> = std::iter::repeat_with(|| None).take(packages.len()).collect();
     // Errors carry their input slot index so the batch can be sorted back into
     // input order before it is surfaced. `join_next` yields in completion
@@ -291,7 +291,7 @@ pub async fn drain_package_tasks<T: 'static>(
 /// known but manifest blob missing offline".
 ///
 /// When `package` carries no digest the tag is taken from
-/// [`ocx_oci::Identifier::tag_or_latest`], so a bare repository identifier falls
+/// [`ocx_oci::PackageRef::tag_or_latest`], so a bare repository identifier falls
 /// back to the `latest` tag — the same default the `resolve` pipeline uses.
 ///
 /// # Errors
@@ -311,9 +311,9 @@ pub async fn drain_package_tasks<T: 'static>(
 // proposing `Query` was rejected: default-mode inspect is a Resolve-class read).
 pub async fn resolve_top_manifest(
     index: &ocx_index::Index,
-    package: &ocx_oci::Identifier,
+    package: &ocx_oci::PackageRef,
     op: ocx_index::IndexOperation,
-) -> Result<(ocx_oci::PinnedIdentifier, ocx_oci::Manifest), PackageErrorKind> {
+) -> Result<(ocx_oci::PinnedPackageRef, ocx_oci::Manifest), PackageErrorKind> {
     let top_id = if package.digest().is_some() {
         package.clone()
     } else {
@@ -348,7 +348,7 @@ pub async fn resolve_top_manifest(
         }
     };
 
-    let top_pinned = ocx_oci::PinnedIdentifier::try_from(top_id.clone_with_digest(top_digest))
+    let top_pinned = ocx_oci::PinnedPackageRef::try_from(top_id.clone_with_digest(top_digest))
         .map_err(|_| PackageErrorKind::DigestMissing)?;
     Ok((top_pinned, top_manifest))
 }
@@ -375,7 +375,7 @@ pub fn reference_manager(fs: &file_structure::FileStructure) -> ReferenceManager
 /// it, same as any other cache-warming write.
 pub async fn blob_needs_fetch(
     fs: &file_structure::FileStructure,
-    identifier: &ocx_oci::PinnedIdentifier,
+    identifier: &ocx_oci::PinnedPackageRef,
 ) -> Result<bool, PackageErrorKind> {
     let digest = identifier.digest();
     match fs
@@ -414,7 +414,7 @@ pub async fn blob_needs_fetch(
 /// (`stage_leaf_manifest`, [`stage_chain_blobs`]'s `Index`/`Manifest` roles)
 /// must call this first.
 pub(super) fn verify_requested_digest(
-    identifier: &ocx_oci::PinnedIdentifier,
+    identifier: &ocx_oci::PinnedPackageRef,
     bytes: &[u8],
 ) -> Result<(), PackageErrorKind> {
     let claimed = identifier.digest();
@@ -539,7 +539,7 @@ pub async fn stage_and_link_chain_blobs(
 /// [`LockedFile`] guard releases the lock on drop.
 pub async fn acquire_select_lock(
     fs: &file_structure::FileStructure,
-    package: &ocx_oci::Identifier,
+    package: &ocx_oci::PackageRef,
 ) -> Result<LockedFile, PackageErrorKind> {
     let lock_path = fs.symlinks.select_lock(package);
     LockedFile::open_exclusive(lock_path)
@@ -586,7 +586,7 @@ pub struct WireSelectionOutcome {
 #[allow(clippy::result_large_err)]
 pub async fn wire_selection(
     fs: &file_structure::FileStructure,
-    package: &ocx_oci::Identifier,
+    package: &ocx_oci::PackageRef,
     info: &InstallInfo,
     candidate: bool,
     select: bool,
@@ -692,7 +692,7 @@ pub struct SelectionLocks {
 #[allow(clippy::result_large_err)]
 pub async fn acquire_selection_locks(
     fs: &file_structure::FileStructure,
-    package: &ocx_oci::Identifier,
+    package: &ocx_oci::PackageRef,
 ) -> Result<SelectionLocks, PackageErrorKind> {
     let select = acquire_select_lock(fs, package).await?;
     Ok(SelectionLocks { _select: select })
@@ -745,7 +745,7 @@ pub(super) const CLOSURE_FETCH_CONCURRENCY: usize = 8;
 #[derive(Debug)]
 pub struct ClosureNode {
     /// Digest-addressed; advisory tag preserved for display.
-    pub identifier: ocx_oci::PinnedIdentifier,
+    pub identifier: ocx_oci::PinnedPackageRef,
     /// Digest of the node's OCX metadata config blob, in the same registry as
     /// [`identifier`](Self::identifier) — pair the two to address it
     /// (`BlobStore::data(node.identifier.registry(), &node.config_digest)`).
@@ -798,7 +798,7 @@ pub struct ClosureEnvVar {
 /// A declared dependency edge (as authored), carrying its declared visibility.
 #[derive(Debug, Clone)]
 pub struct ClosureEdge {
-    pub identifier: ocx_oci::PinnedIdentifier,
+    pub identifier: ocx_oci::PinnedPackageRef,
     /// The DECLARED edge visibility (goal #2 — "dependencies state their
     /// linkage visibility"), as distinct from [`ClosureNode::effective_visibility`]
     /// (the composed-from-root visibility).
@@ -813,7 +813,7 @@ pub struct ClosureEdge {
 /// its config-blob digest, its validated metadata, and its own declared
 /// dependency edges. [`gather_closure_nodes`]'s output element type.
 type GatheredClosureNode = (
-    ocx_oci::PinnedIdentifier,
+    ocx_oci::PinnedPackageRef,
     ocx_oci::Digest,
     metadata::ValidMetadata,
     Vec<ClosureEdge>,
@@ -827,8 +827,8 @@ type GatheredClosureNode = (
 /// [`gather_closure_nodes`]'s declared→resolved alias can be built.
 type SlottedClosureNode = (
     usize,
-    ocx_oci::PinnedIdentifier,
-    ocx_oci::PinnedIdentifier,
+    ocx_oci::PinnedPackageRef,
+    ocx_oci::PinnedPackageRef,
     ocx_oci::Digest,
     metadata::ValidMetadata,
     Vec<ClosureEdge>,
@@ -851,7 +851,7 @@ type SlottedClosureNode = (
 pub async fn stage_leaf_manifest(
     fs: &file_structure::FileStructure,
     index: &ocx_index::Index,
-    pinned: &ocx_oci::PinnedIdentifier,
+    pinned: &ocx_oci::PinnedPackageRef,
 ) -> Result<(), PackageErrorKind> {
     if blob_needs_fetch(fs, pinned).await?
         && let Some((bytes, _, _)) = index
@@ -901,7 +901,7 @@ pub async fn walk_closure_nodes(
     fs: &file_structure::FileStructure,
     index: &ocx_index::Index,
     offline: bool,
-    root_pinned: &ocx_oci::PinnedIdentifier,
+    root_pinned: &ocx_oci::PinnedPackageRef,
     root_metadata: &metadata::ValidMetadata,
     root_config_digest: ocx_oci::Digest,
     platform: &ocx_oci::Platform,
@@ -959,7 +959,7 @@ async fn gather_closure_nodes(
 ) -> Result<
     (
         Vec<GatheredClosureNode>,
-        HashMap<ocx_oci::PinnedIdentifier, ocx_oci::PinnedIdentifier>,
+        HashMap<ocx_oci::PinnedPackageRef, ocx_oci::PinnedPackageRef>,
     ),
     PackageErrorKind,
 > {
@@ -969,7 +969,7 @@ async fn gather_closure_nodes(
         offline,
         platform,
     };
-    let mut visited: HashSet<ocx_oci::PinnedIdentifier> = HashSet::new();
+    let mut visited: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
     let mut tasks: JoinSet<Result<SlottedClosureNode, PackageErrorKind>> = JoinSet::new();
     let mut next_slot = 0usize;
     // Discovered edges not yet admitted into `tasks` — `admit` drains this
@@ -1033,7 +1033,7 @@ async fn gather_closure_nodes(
     // fetch completes. `fold_effective_visibility` needs this because a
     // `ClosureEdge` always names the DECLARED identity, which for an
     // image-index-pinned dep differs from the node it resolved to.
-    let mut resolved_identity: HashMap<ocx_oci::PinnedIdentifier, ocx_oci::PinnedIdentifier> = HashMap::new();
+    let mut resolved_identity: HashMap<ocx_oci::PinnedPackageRef, ocx_oci::PinnedPackageRef> = HashMap::new();
     // RESOLVED identities already gathered (Codex C1/C2 post-selection
     // dedup). The `visited` check above dedups by DECLARED edge identity,
     // which cannot see that two different declared edges (e.g. a direct edge
@@ -1041,7 +1041,7 @@ async fn gather_closure_nodes(
     // digest — this second, post-fetch check catches that and drops the
     // duplicate fetch's node instead of inserting a second one (double
     // counting its claims / manufacturing a false repo conflict downstream).
-    let mut resolved_seen: HashSet<ocx_oci::PinnedIdentifier> = HashSet::new();
+    let mut resolved_seen: HashSet<ocx_oci::PinnedPackageRef> = HashSet::new();
     while let Some(joined) = tasks.join_next().await {
         // Fail-closed: the `?`s below return early on the first node error,
         // dropping `tasks` — `JoinSet::drop` aborts every task still
@@ -1097,11 +1097,11 @@ async fn fetch_closure_node(
     fs: &file_structure::FileStructure,
     index: &ocx_index::Index,
     offline: bool,
-    dep_pinned: &ocx_oci::PinnedIdentifier,
+    dep_pinned: &ocx_oci::PinnedPackageRef,
     platform: &ocx_oci::Platform,
 ) -> Result<
     (
-        ocx_oci::PinnedIdentifier,
+        ocx_oci::PinnedPackageRef,
         ocx_oci::Digest,
         metadata::ValidMetadata,
         Vec<ClosureEdge>,
@@ -1142,7 +1142,7 @@ async fn fetch_closure_node(
                 }
             };
             let child_pinned =
-                ocx_oci::PinnedIdentifier::try_from(selected.clone()).map_err(|_| PackageErrorKind::DigestMissing)?;
+                ocx_oci::PinnedPackageRef::try_from(selected.clone()).map_err(|_| PackageErrorKind::DigestMissing)?;
             let image = match index
                 .fetch_manifest(&selected, ocx_index::IndexOperation::Resolve)
                 .await
@@ -1220,13 +1220,13 @@ fn closure_edges_from_metadata(metadata: &metadata::ValidMetadata) -> Vec<Closur
 /// `effective_visibility: None` and `is_root: true` (the composed-from-root
 /// axis is undefined for the root itself).
 fn fold_effective_visibility(
-    root_pinned: &ocx_oci::PinnedIdentifier,
+    root_pinned: &ocx_oci::PinnedPackageRef,
     root_metadata: &metadata::ValidMetadata,
     root_config_digest: ocx_oci::Digest,
     gathered: Vec<GatheredClosureNode>,
-    resolved_identity: &HashMap<ocx_oci::PinnedIdentifier, ocx_oci::PinnedIdentifier>,
+    resolved_identity: &HashMap<ocx_oci::PinnedPackageRef, ocx_oci::PinnedPackageRef>,
 ) -> Vec<ClosureNode> {
-    let by_identity: HashMap<ocx_oci::PinnedIdentifier, GatheredClosureNode> = gathered
+    let by_identity: HashMap<ocx_oci::PinnedPackageRef, GatheredClosureNode> = gathered
         .into_iter()
         .map(|entry| (entry.0.strip_advisory(), entry))
         .collect();
@@ -1236,8 +1236,8 @@ fn fold_effective_visibility(
     // install pipeline computes `resolve.json` while recursively pulling
     // deps (`pull.rs`). `order` collects the post-order visitation sequence
     // — deps before dependents, by construction.
-    let mut resolved: HashMap<ocx_oci::PinnedIdentifier, ResolvedPackage> = HashMap::new();
-    let mut order: Vec<ocx_oci::PinnedIdentifier> = Vec::new();
+    let mut resolved: HashMap<ocx_oci::PinnedPackageRef, ResolvedPackage> = HashMap::new();
+    let mut order: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
     let root_edges = closure_edges_from_metadata(root_metadata);
     for edge in &root_edges {
         let resolved_key = resolved_edge_identity(resolved_identity, edge);
@@ -1259,7 +1259,7 @@ fn fold_effective_visibility(
     // fragment a single package into two entries whenever a dep is pinned to
     // an image index.
     let root_children: Vec<(
-        ocx_oci::PinnedIdentifier,
+        ocx_oci::PinnedPackageRef,
         ResolvedPackage,
         metadata::visibility::Visibility,
     )> = root_edges
@@ -1270,7 +1270,7 @@ fn fold_effective_visibility(
             (resolved_key, child_resolved, edge.visibility)
         })
         .collect();
-    let effective: HashMap<ocx_oci::PinnedIdentifier, metadata::visibility::Visibility> = ResolvedPackage::new()
+    let effective: HashMap<ocx_oci::PinnedPackageRef, metadata::visibility::Visibility> = ResolvedPackage::new()
         .with_dependencies(root_children)
         .dependencies
         .into_iter()
@@ -1373,9 +1373,9 @@ fn closure_integrations(metadata: &metadata::ValidMetadata) -> Vec<String> {
 /// construction (`gather_closure_nodes` populates one per fetch it completes,
 /// and it completes a fetch for every edge the BFS discovers).
 fn resolved_edge_identity(
-    resolved_identity: &HashMap<ocx_oci::PinnedIdentifier, ocx_oci::PinnedIdentifier>,
+    resolved_identity: &HashMap<ocx_oci::PinnedPackageRef, ocx_oci::PinnedPackageRef>,
     edge: &ClosureEdge,
-) -> ocx_oci::PinnedIdentifier {
+) -> ocx_oci::PinnedPackageRef {
     resolved_identity
         .get(&edge.identifier.strip_advisory())
         .cloned()
@@ -1393,11 +1393,11 @@ fn resolved_edge_identity(
 /// (a direct edge and an image-index edge selecting it) memoize to the SAME
 /// entry instead of computing the fold twice.
 fn visit_closure_node(
-    key: &ocx_oci::PinnedIdentifier,
-    by_identity: &HashMap<ocx_oci::PinnedIdentifier, GatheredClosureNode>,
-    resolved_identity: &HashMap<ocx_oci::PinnedIdentifier, ocx_oci::PinnedIdentifier>,
-    resolved: &mut HashMap<ocx_oci::PinnedIdentifier, ResolvedPackage>,
-    order: &mut Vec<ocx_oci::PinnedIdentifier>,
+    key: &ocx_oci::PinnedPackageRef,
+    by_identity: &HashMap<ocx_oci::PinnedPackageRef, GatheredClosureNode>,
+    resolved_identity: &HashMap<ocx_oci::PinnedPackageRef, ocx_oci::PinnedPackageRef>,
+    resolved: &mut HashMap<ocx_oci::PinnedPackageRef, ResolvedPackage>,
+    order: &mut Vec<ocx_oci::PinnedPackageRef>,
 ) {
     if resolved.contains_key(key) {
         return;
@@ -1406,7 +1406,7 @@ fn visit_closure_node(
         .get(key)
         .expect("gather_closure_nodes populates by_identity for every edge reachable from root");
     let children: Vec<(
-        ocx_oci::PinnedIdentifier,
+        ocx_oci::PinnedPackageRef,
         ResolvedPackage,
         metadata::visibility::Visibility,
     )> = edges
@@ -1444,11 +1444,11 @@ mod tests {
         use std::time::Duration;
         use tokio::task::JoinSet;
 
-        let pkg0 = ocx_oci::Identifier::new_registry("alpha", "example.com");
-        let pkg1 = ocx_oci::Identifier::new_registry("bravo", "example.com");
+        let pkg0 = ocx_oci::PackageRef::new_registry("alpha", "example.com");
+        let pkg1 = ocx_oci::PackageRef::new_registry("bravo", "example.com");
         let packages = vec![pkg0.clone(), pkg1.clone()];
 
-        let mut tasks: JoinSet<(ocx_oci::Identifier, Result<(), PackageErrorKind>)> = JoinSet::new();
+        let mut tasks: JoinSet<(ocx_oci::PackageRef, Result<(), PackageErrorKind>)> = JoinSet::new();
         // Later-input task (index 1) completes first with a distinct kind.
         let pkg1_task = pkg1.clone();
         tasks.spawn(async move { (pkg1_task, Err(PackageErrorKind::SymlinkRequiresTag)) });
@@ -1489,9 +1489,9 @@ mod tests {
         std::fs::create_dir_all(&store_root).unwrap();
         let store = PackageStore::new(&store_root);
 
-        let id = ocx_oci::Identifier::new_registry("foo/bar", "example.com")
+        let id = ocx_oci::PackageRef::new_registry("foo/bar", "example.com")
             .clone_with_digest(ocx_oci::Digest::Sha256(digest_byte.repeat(32)));
-        let pinned = ocx_oci::PinnedIdentifier::try_from(id).unwrap();
+        let pinned = ocx_oci::PinnedPackageRef::try_from(id).unwrap();
 
         let pkg_dir = store.path(&pinned);
         let content_dir = pkg_dir.join("content");
@@ -1541,12 +1541,12 @@ mod tests {
     /// Builds a valid, installed `InstallInfo` under `fs` for `foo/bar:1.0` and
     /// returns it paired with the tagged identifier whose `candidates/{tag}`
     /// slot `wire_selection` targets.
-    async fn install_info_fixture(fs: &FileStructure) -> (ocx_oci::Identifier, ocx_package::install_info::InstallInfo) {
+    async fn install_info_fixture(fs: &FileStructure) -> (ocx_oci::PackageRef, ocx_package::install_info::InstallInfo) {
         let digest_hex: String = "cd".repeat(32);
-        let tagged = ocx_oci::Identifier::new_registry("foo/bar", "example.com")
+        let tagged = ocx_oci::PackageRef::new_registry("foo/bar", "example.com")
             .clone_with_tag("1.0")
             .clone_with_digest(ocx_oci::Digest::Sha256(digest_hex));
-        let pinned = ocx_oci::PinnedIdentifier::try_from(tagged.clone()).unwrap();
+        let pinned = ocx_oci::PinnedPackageRef::try_from(tagged.clone()).unwrap();
 
         let pkg_dir = fs.packages.path(&pinned);
         let content_dir = pkg_dir.join("content");
@@ -1671,7 +1671,7 @@ mod tests {
     async fn acquire_select_lock_creates_lock_file_at_expected_path() {
         let tempdir = tempfile::tempdir().unwrap();
         let fs = FileStructure::with_root(tempdir.path().to_path_buf());
-        let id = ocx_oci::Identifier::new_registry("cmake", "example.com");
+        let id = ocx_oci::PackageRef::new_registry("cmake", "example.com");
 
         let _guard = super::acquire_select_lock(&fs, &id).await.expect("acquire lock");
 
@@ -1697,7 +1697,7 @@ mod tests {
 
         let tempdir = tempfile::tempdir().unwrap();
         let fs = FileStructure::with_root(tempdir.path().to_path_buf());
-        let id = ocx_oci::Identifier::new_registry("cmake", "example.com");
+        let id = ocx_oci::PackageRef::new_registry("cmake", "example.com");
 
         let first = super::acquire_select_lock(&fs, &id).await.expect("first acquire");
 
@@ -1740,24 +1740,24 @@ mod tests {
         async fn list_repositories(&self, _: &str) -> ocx_index::error::Result<Vec<String>> {
             Ok(Vec::new())
         }
-        async fn list_tags(&self, _: &ocx_oci::Identifier) -> ocx_index::error::Result<Option<Vec<String>>> {
+        async fn list_tags(&self, _: &ocx_oci::PackageRef) -> ocx_index::error::Result<Option<Vec<String>>> {
             Ok(None)
         }
         async fn fetch_manifest(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
             _: ocx_index::IndexOperation,
         ) -> ocx_index::error::Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
             Ok(None)
         }
         async fn fetch_manifest_digest(
             &self,
-            _: &ocx_oci::Identifier,
+            _: &ocx_oci::PackageRef,
             _: ocx_index::IndexOperation,
         ) -> ocx_index::error::Result<Option<ocx_oci::Digest>> {
             Ok(None)
         }
-        async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedIdentifier) -> ocx_index::error::Result<Option<Vec<u8>>> {
+        async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedPackageRef) -> ocx_index::error::Result<Option<Vec<u8>>> {
             let digest = blob_ref.digest();
             self.blob_calls.lock().unwrap().push(digest.clone());
             Ok(self
@@ -1768,7 +1768,7 @@ mod tests {
         }
         async fn fetch_manifest_raw_bytes(
             &self,
-            identifier: &ocx_oci::Identifier,
+            identifier: &ocx_oci::PackageRef,
         ) -> ocx_index::error::Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
             let Some(digest) = identifier.digest() else {
                 return Ok(None);
@@ -1782,7 +1782,7 @@ mod tests {
         }
         async fn physical_reference(
             &self,
-            identifier: &ocx_oci::Identifier,
+            identifier: &ocx_oci::PackageRef,
         ) -> ocx_index::error::Result<Option<ocx_oci::OciIdentifier>> {
             if self.published && identifier.registry() == self.namespace {
                 Ok(Some(ocx_oci::OciIdentifier::passthrough(identifier)))
@@ -1839,8 +1839,8 @@ mod tests {
         );
 
         let pin = |digest: &ocx_oci::Digest| {
-            ocx_oci::PinnedIdentifier::try_from(
-                ocx_oci::Identifier::new_registry(repository, registry).clone_with_digest(digest.clone()),
+            ocx_oci::PinnedPackageRef::try_from(
+                ocx_oci::PackageRef::new_registry(repository, registry).clone_with_digest(digest.clone()),
             )
             .unwrap()
         };
@@ -1985,8 +1985,8 @@ mod tests {
         );
 
         let pin = |digest: &ocx_oci::Digest| {
-            ocx_oci::PinnedIdentifier::try_from(
-                ocx_oci::Identifier::new_registry(repository, registry).clone_with_digest(digest.clone()),
+            ocx_oci::PinnedPackageRef::try_from(
+                ocx_oci::PackageRef::new_registry(repository, registry).clone_with_digest(digest.clone()),
             )
             .unwrap()
         };
@@ -2186,8 +2186,8 @@ mod tests {
             ChainMode::Default,
         );
 
-        let pinned = ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry(repository, registry).clone_with_digest(dispatch_digest.clone()),
+        let pinned = ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry(repository, registry).clone_with_digest(dispatch_digest.clone()),
         )
         .unwrap();
         let resolved = ResolvedChain {
@@ -2267,8 +2267,8 @@ mod tests {
             ChainMode::Offline,
         );
 
-        let pinned = ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry(repository, registry).clone_with_digest(manifest_digest.clone()),
+        let pinned = ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry(repository, registry).clone_with_digest(manifest_digest.clone()),
         )
         .unwrap();
         let resolved = ResolvedChain {
@@ -2327,8 +2327,8 @@ mod tests {
             panic!("fixture must parse as an image manifest");
         };
 
-        let pinned = ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry("cmake", "example.com")
+        let pinned = ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry("cmake", "example.com")
                 .clone_with_tag("3.28")
                 .clone_with_digest(ocx_oci::Algorithm::Sha256.hash(b"manifest-bytes")),
         )
@@ -2358,8 +2358,8 @@ mod tests {
     async fn acquire_select_lock_is_per_repo() {
         let tempdir = tempfile::tempdir().unwrap();
         let fs = FileStructure::with_root(tempdir.path().to_path_buf());
-        let id_a = ocx_oci::Identifier::new_registry("cmake", "example.com");
-        let id_b = ocx_oci::Identifier::new_registry("ninja", "example.com");
+        let id_a = ocx_oci::PackageRef::new_registry("cmake", "example.com");
+        let id_b = ocx_oci::PackageRef::new_registry("ninja", "example.com");
 
         let _guard_a = super::acquire_select_lock(&fs, &id_a).await.expect("acquire a");
         // Distinct repo: must succeed immediately, no contention.

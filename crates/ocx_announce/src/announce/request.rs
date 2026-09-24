@@ -60,7 +60,7 @@ pub enum AnnounceTarget {
 #[derive(Debug, Clone)]
 pub struct AnnounceRequest {
     /// The logical `<namespace>/<package>` identifier.
-    pub package: ocx_oci::Identifier,
+    pub package: ocx_oci::PackageRef,
     /// The curated tag selection.
     pub curated: TagSelection,
     /// The write target.

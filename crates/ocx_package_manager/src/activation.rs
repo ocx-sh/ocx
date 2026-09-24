@@ -562,7 +562,7 @@ pub async fn evaluate_consent(
 ///
 /// `lock` travels **in and back out** rather than being cloned. `ProjectLock`
 /// derives `Clone` with no `Arc`, so a clone deep-copies every [`LockedTool`] —
-/// two `String`s, an `Identifier` and a platform `BTreeMap` apiece — on every
+/// two `String`s, a `PackageRef` and a platform `BTreeMap` apiece — on every
 /// prompt, and the caller needs the original afterwards for `project_entries`.
 ///
 /// # The clause-2 gate
@@ -713,7 +713,7 @@ async fn project_entries(
     config: &ocx_project::ProjectConfig,
     // Taken **by value** so it can be moved into `ToolchainLinks` below instead
     // of cloned there. `ProjectLock` derives `Clone` with no `Arc`, so a clone
-    // deep-copies every `LockedTool` — two `String`s, an `Identifier` and a
+    // deep-copies every `LockedTool` — two `String`s, a `PackageRef` and a
     // platform `BTreeMap` apiece — on every prompt. That is the same cost
     // `consent_evidence` travels in-and-back-out to avoid (see its doc), and
     // this was the one site still paying it. `ActivateMode::Env` is the last
@@ -1985,8 +1985,8 @@ mod consent_evidence_tests {
         ocx_oci::Digest::Sha256(LEAF_HEX.to_owned())
     }
 
-    fn identifier(registry: &str, repository: &str) -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry(repository, registry)
+    fn identifier(registry: &str, repository: &str) -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry(repository, registry)
     }
 
     /// A one-tool lock claiming `repository` at [`leaf_digest`] for the host.
@@ -2019,7 +2019,7 @@ mod consent_evidence_tests {
             .split_once('/')
             .expect("fixture repository carries a registry");
         let pinned =
-            ocx_oci::PinnedIdentifier::try_from(identifier(registry, "any/repo").clone_with_digest(leaf_digest()))
+            ocx_oci::PinnedPackageRef::try_from(identifier(registry, "any/repo").clone_with_digest(leaf_digest()))
                 .expect("a digest-bearing identifier is pinned");
         let package = store.package_dir(&pinned);
         std::fs::create_dir_all(package.content()).expect("materialize content/");
@@ -3350,12 +3350,12 @@ mod bin_mode_entry_tests {
         "linux/amd64".parse().expect("a valid host platform")
     }
 
-    fn identifier() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry("acme/cmake", REGISTRY)
+    fn identifier() -> ocx_oci::PackageRef {
+        ocx_oci::PackageRef::new_registry("acme/cmake", REGISTRY)
     }
 
-    fn pinned(hex: &str) -> ocx_oci::PinnedIdentifier {
-        ocx_oci::PinnedIdentifier::try_from(identifier().clone_with_digest(ocx_oci::Digest::Sha256(hex.to_owned())))
+    fn pinned(hex: &str) -> ocx_oci::PinnedPackageRef {
+        ocx_oci::PinnedPackageRef::try_from(identifier().clone_with_digest(ocx_oci::Digest::Sha256(hex.to_owned())))
             .expect("a digest-bearing identifier is pinned")
     }
 
@@ -4449,8 +4449,8 @@ mod session_composition_tests {
             let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(body.as_bytes()));
             let stamp_entry = BinEntryStamp::from_metadata(&path, &metadata, hash);
 
-            let identifier = ocx_oci::Identifier::new_registry("acme/cmake", REGISTRY);
-            let pinned = ocx_oci::PinnedIdentifier::try_from(
+            let identifier = ocx_oci::PackageRef::new_registry("acme/cmake", REGISTRY);
+            let pinned = ocx_oci::PinnedPackageRef::try_from(
                 identifier.clone_with_digest(ocx_oci::Digest::Sha256(DIGEST.to_owned())),
             )
             .expect("a digest-bearing identifier is pinned");

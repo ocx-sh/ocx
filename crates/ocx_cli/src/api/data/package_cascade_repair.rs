@@ -61,7 +61,7 @@ pub struct PackageCascadeRepair {
     /// Not serialized. The JSON key set is what a `--format json` consumer
     /// parses and stays pinned; this is a note, not a finding.
     #[serde(skip)]
-    pub index_layer_skipped: Vec<ocx_oci::Identifier>,
+    pub index_layer_skipped: Vec<ocx_oci::PackageRef>,
 }
 
 impl PackageCascadeRepair {
@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn the_skipped_index_layer_note_never_reaches_the_json() {
         let mut repair = PackageCascadeRepair::from_reports(vec![report()], false);
-        repair.index_layer_skipped = vec![ocx_oci::Identifier::parse("registry.test/acme/cmake").unwrap()];
+        repair.index_layer_skipped = vec![ocx_oci::PackageRef::parse("registry.test/acme/cmake").unwrap()];
 
         let value = serde_json::to_value(&repair).unwrap();
         let keys: Vec<&str> = value

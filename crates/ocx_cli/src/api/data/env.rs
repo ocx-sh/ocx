@@ -110,7 +110,7 @@ impl BinaryAttribution {
     /// Shared by `binaries` and `entrypoints` — both are `(PinnedIdentifier, T:
     /// Display)` pairs from `AdmittedClaims`, differing only in the claim
     /// type. See `adr_declared_binaries_metadata.md` §4 Decision A.
-    pub fn from_pairs<T: fmt::Display>(pairs: &[(ocx_oci::PinnedIdentifier, T)]) -> Vec<Self> {
+    pub fn from_pairs<T: fmt::Display>(pairs: &[(ocx_oci::PinnedPackageRef, T)]) -> Vec<Self> {
         pairs
             .iter()
             .map(|(identifier, name)| Self {
@@ -150,7 +150,7 @@ impl IntegrationAttribution {
     /// One row per input pair, in the admitted-set visit order compose
     /// established — never grouped by namespace, never collapsed for a single
     /// root (`adr_package_integrations.md` D2/D18).
-    pub fn from_pairs(pairs: &[(ocx_oci::PinnedIdentifier, IntegrationEntry)]) -> Vec<Self> {
+    pub fn from_pairs(pairs: &[(ocx_oci::PinnedPackageRef, IntegrationEntry)]) -> Vec<Self> {
         pairs
             .iter()
             .map(|(identifier, entry)| Self {
@@ -635,10 +635,10 @@ mod tests {
 
     /// A pinned identifier for the `from_pairs` fixtures below — the `env.rs`
     /// sibling of `package_inspect::tests::pinned`.
-    fn pinned(repo: &str, hex_char: char) -> ocx_oci::PinnedIdentifier {
-        let id = ocx_oci::Identifier::new_registry(repo, "ocx.sh")
+    fn pinned(repo: &str, hex_char: char) -> ocx_oci::PinnedPackageRef {
+        let id = ocx_oci::PackageRef::new_registry(repo, "ocx.sh")
             .clone_with_digest(ocx_oci::Digest::Sha256(hex_char.to_string().repeat(64)));
-        ocx_oci::PinnedIdentifier::try_from(id).expect("digest-bearing identifier is always pinnable")
+        ocx_oci::PinnedPackageRef::try_from(id).expect("digest-bearing identifier is always pinnable")
     }
 
     #[test]

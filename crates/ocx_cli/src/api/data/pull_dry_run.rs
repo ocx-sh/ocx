@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use ocx_console::Cell;
-use ocx_oci::PinnedIdentifier;
+use ocx_oci::PinnedPackageRef;
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -31,7 +31,7 @@ impl fmt::Display for PullStatus {
 /// A single dry-run preview row.
 ///
 /// `package` is held typed rather than pre-formatted so plain and JSON can
-/// render it differently: `PinnedIdentifier`'s `Serialize` is its `Display`,
+/// render it differently: `PinnedPackageRef`'s `Serialize` is its `Display`,
 /// so JSON keeps the pinned `…@sha256:<64hex>` form, while the plain table
 /// drops the digest.
 ///
@@ -43,13 +43,13 @@ impl fmt::Display for PullStatus {
 /// `<path>/entrypoints/` for generated launchers.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct DryRunEntry {
-    pub package: PinnedIdentifier,
+    pub package: PinnedPackageRef,
     pub status: PullStatus,
     pub path: Option<PathBuf>,
 }
 
 impl DryRunEntry {
-    pub fn new(package: PinnedIdentifier, status: PullStatus, path: Option<PathBuf>) -> Self {
+    pub fn new(package: PinnedPackageRef, status: PullStatus, path: Option<PathBuf>) -> Self {
         Self { package, status, path }
     }
 }

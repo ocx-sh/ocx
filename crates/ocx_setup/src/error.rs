@@ -77,7 +77,7 @@ pub enum Error {
         value: String,
         /// The underlying identifier parse failure.
         #[source]
-        source: ocx_oci::identifier::error::IdentifierError,
+        source: ocx_oci::package_ref::error::IdentifierError,
     },
     /// The synchronous fetch+persist step during `--managed-config` adoption
     /// failed. Per ADR "Setup ordering", no fence is written on failure — the

@@ -92,7 +92,7 @@ impl PackageManager {
     /// is not valid UTF-8, or does not satisfy the [`BinaryName`] grammar, is
     /// skipped with a debug log — it cannot be the name any shim was invoked
     /// under, since `argv0` clears the same grammar first.
-    pub async fn claimed_shim_names(&self, package: &ocx_oci::PinnedIdentifier) -> crate::Result<BTreeSet<BinaryName>> {
+    pub async fn claimed_shim_names(&self, package: &ocx_oci::PinnedPackageRef) -> crate::Result<BTreeSet<BinaryName>> {
         let bin = self.file_structure().shims.shim_dir(package).bin();
         let mut entries = match tokio::fs::read_dir(&bin).await {
             Ok(entries) => entries,
@@ -176,7 +176,7 @@ impl PackageManager {
     /// C-011.
     pub async fn materialize_deferred(
         &self,
-        package: &ocx_oci::PinnedIdentifier,
+        package: &ocx_oci::PinnedPackageRef,
         platform: ocx_oci::Platform,
         report: LazyReport,
     ) -> Result<FoundPackage, Error> {
@@ -218,7 +218,7 @@ mod tests {
     use tempfile::TempDir;
 
     use ocx_index::{ChainMode, Index, LocalConfig, LocalIndex};
-    use ocx_oci::Identifier;
+    use ocx_oci::PackageRef;
     use ocx_store::file_structure::FileStructure;
 
     use super::*;
@@ -226,9 +226,9 @@ mod tests {
     /// A pinned identifier over `top_digest`, tag included — C-011 keeps the
     /// advisory tag, and `tag@digest` is precisely the shape that reaches
     /// `persist_dispatch`.
-    fn pinned(top_digest: &ocx_oci::Digest) -> ocx_oci::PinnedIdentifier {
-        let identifier = Identifier::parse(&format!("ocx.sh/tool/cmake:3.28@{top_digest}")).expect("fixture parses");
-        ocx_oci::PinnedIdentifier::try_from(identifier).expect("fixture is digest-bearing")
+    fn pinned(top_digest: &ocx_oci::Digest) -> ocx_oci::PinnedPackageRef {
+        let identifier = PackageRef::parse(&format!("ocx.sh/tool/cmake:3.28@{top_digest}")).expect("fixture parses");
+        ocx_oci::PinnedPackageRef::try_from(identifier).expect("fixture is digest-bearing")
     }
 
     /// Production's wiring (`context.rs`) minus any source: the blob store is

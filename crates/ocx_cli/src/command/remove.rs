@@ -64,11 +64,11 @@ impl Remove {
         // `install_identifiers` collects only the bindings that were live so
         // the post-commit uninstall targets exactly those.
         let mut remove_keys: Vec<String> = Vec::with_capacity(self.identifiers.len());
-        let mut install_identifiers: Vec<ocx_oci::Identifier> = Vec::new();
+        let mut install_identifiers: Vec<ocx_oci::PackageRef> = Vec::new();
 
         for raw in &self.identifiers {
             let binding_key = if raw.contains('/') {
-                match ocx_oci::Identifier::parse_with_default_registry(raw, context.default_registry()) {
+                match ocx_oci::PackageRef::parse_with_default_registry(raw, context.default_registry()) {
                     Ok(id) => ocx_project::binding_key(&id),
                     Err(_) => raw.rsplit('/').next().unwrap_or(raw).to_owned(),
                 }

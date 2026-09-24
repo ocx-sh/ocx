@@ -159,7 +159,7 @@
       "properties": {
         "identifier": {
           "description": "OCX identifier with a required explicit registry. The digest is\noptional in the authoring form: absent means \"pin me at\n`ocx package create` time\". The tag is advisory once a digest is\npresent.",
-          "$ref": "#/$defs/Identifier"
+          "$ref": "#/$defs/PackageRef"
         },
         "visibility": {
           "description": "Controls how this dependency's environment variables propagate.\nDefault: `sealed` — no env contribution.",
@@ -182,7 +182,7 @@
         "identifier"
       ]
     },
-    "Identifier": {
+    "PackageRef": {
       "description": "OCI identifier in the format 'registry/repository[:tag][@digest]'.",
       "type": "string"
     },

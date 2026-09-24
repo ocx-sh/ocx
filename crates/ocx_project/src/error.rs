@@ -3,8 +3,8 @@
 
 use std::path::PathBuf;
 
-use ocx_oci::Identifier;
-use ocx_oci::identifier::error::IdentifierError;
+use ocx_oci::PackageRef;
+use ocx_oci::package_ref::error::IdentifierError;
 
 /// Project-tier errors (parse, schema, canonicalization, lock I/O).
 ///
@@ -418,7 +418,7 @@ pub enum ProjectErrorKind {
     )]
     ToolValueMissingRegistry { name: String, value: String },
 
-    /// A `[tools]` or `[group.*]` value failed to parse as an [`ocx_oci::Identifier`]
+    /// A `[tools]` or `[group.*]` value failed to parse as an [`ocx_oci::PackageRef`]
     /// for a reason other than missing registry (invalid characters,
     /// malformed digest, uppercase repo, etc.). Carries the underlying
     /// [`IdentifierError`] for diagnostic context.
@@ -439,7 +439,7 @@ pub enum ProjectErrorKind {
     PackageKeyMissingRegistry { key: String },
 
     /// A `[package."<key>"]` table key failed to parse as an
-    /// [`ocx_oci::Identifier`] for a reason other than missing registry
+    /// [`ocx_oci::PackageRef`] for a reason other than missing registry
     /// (invalid characters, malformed digest, uppercase repo, etc.). Carries
     /// the underlying [`IdentifierError`] for diagnostic context.
     #[error("package key '{key}' is not a valid identifier")]
@@ -461,7 +461,7 @@ pub enum ProjectErrorKind {
     /// effective tag tells the user which value the resolver actually
     /// asked the registry for.
     ///
-    /// The [`Identifier`] is boxed to keep `ProjectErrorKind` small —
+    /// The [`PackageRef`] is boxed to keep `ProjectErrorKind` small —
     /// mirrors the `OfflineManifestMissing`
     /// precedent, avoiding a workspace-wide `clippy::result_large_err`
     /// suppression.
@@ -471,14 +471,14 @@ pub enum ProjectErrorKind {
         registry = .identifier.registry(),
         repository = .identifier.repository(),
     )]
-    TagNotFound { identifier: Box<Identifier> },
+    TagNotFound { identifier: Box<PackageRef> },
 
     /// Resolution failed because the registry rejected the request for
     /// authentication reasons (401, 403, or an equivalent policy
     /// denial). Terminal — the resolver does not retry.
     #[error("authentication failed for '{identifier}'")]
     AuthFailure {
-        identifier: Box<Identifier>,
+        identifier: Box<PackageRef>,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -488,7 +488,7 @@ pub enum ProjectErrorKind {
     /// variants (network, 5xx) are wrapped here.
     #[error("registry unreachable for '{identifier}'")]
     RegistryUnreachable {
-        identifier: Box<Identifier>,
+        identifier: Box<PackageRef>,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -501,7 +501,7 @@ pub enum ProjectErrorKind {
     /// interaction leaves the request unanswered rather than answered badly,
     /// so a rerun can genuinely succeed.
     #[error("resolve timed out for '{identifier}'")]
-    ResolveTimeout { identifier: Box<Identifier> },
+    ResolveTimeout { identifier: Box<PackageRef> },
 
     /// The same binding name appears in two selected groups with
     /// non-equivalent identifiers — the composer cannot decide which to
@@ -555,8 +555,8 @@ pub enum ProjectErrorKind {
     BindingAlreadyExists {
         group: String,
         name: String,
-        existing: Box<Identifier>,
-        requested: Box<Identifier>,
+        existing: Box<PackageRef>,
+        requested: Box<PackageRef>,
     },
 
     /// An explicit binding name from the `NAME=IDENTIFIER` form of `ocx add`
@@ -644,7 +644,7 @@ pub enum ProjectErrorKind {
         "{policy} mode refused to resolve unpinned reference '{identifier}'; run `ocx index update` or pin a digest"
     )]
     PolicyBlocked {
-        identifier: Box<Identifier>,
+        identifier: Box<PackageRef>,
         policy: &'static str,
     },
 }
@@ -652,7 +652,7 @@ pub enum ProjectErrorKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_oci::identifier::error::{IdentifierError, IdentifierErrorKind};
+    use ocx_oci::package_ref::error::{IdentifierError, IdentifierErrorKind};
 
     /// Block #2 regression: `ToolValueInvalid` must NOT embed `: {source}` in its
     /// `Display` string. The `#[source]` attribute already exposes the inner error

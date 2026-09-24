@@ -156,7 +156,7 @@ mod tests {
 
     /// The metadata schema is the published wire form plus exactly one
     /// relaxation: dependency identifiers are digest-optional (plain
-    /// `Identifier`, not `PinnedIdentifier`). Nothing build-time appears —
+    /// `PackageRef`, not `PinnedPackageRef`). Nothing build-time appears —
     /// notably no bundle `platform`, which lives in the build receipt.
     #[test]
     fn metadata_schema_is_published_plus_optional_digest() {
@@ -175,18 +175,18 @@ mod tests {
             dependency.pointer("/properties/platforms").is_none(),
             "the per-platform pin map is gone; a dependency carries one digest"
         );
-        // Digest-optional identifier: the plain Identifier type, and required
-        // fields do not force a digest-bearing PinnedIdentifier.
+        // Digest-optional identifier: the plain PackageRef type, and required
+        // fields do not force a digest-bearing PinnedPackageRef.
         assert_eq!(
             dependency
                 .pointer("/properties/identifier/$ref")
                 .and_then(|v| v.as_str()),
-            Some("#/$defs/Identifier"),
-            "authoring dependency identifier must be the digest-optional Identifier"
+            Some("#/$defs/PackageRef"),
+            "authoring dependency identifier must be the digest-optional PackageRef"
         );
         assert!(
-            defs.get("PinnedIdentifier").is_none(),
-            "authoring schema must not define the digest-required PinnedIdentifier"
+            defs.get("PinnedPackageRef").is_none(),
+            "authoring schema must not define the digest-required PinnedPackageRef"
         );
     }
 

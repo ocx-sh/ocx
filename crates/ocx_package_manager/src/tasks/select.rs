@@ -23,7 +23,7 @@ impl PackageManager {
     #[allow(clippy::result_large_err)]
     pub async fn select_all(
         &self,
-        packages: Vec<ocx_oci::Identifier>,
+        packages: Vec<ocx_oci::PackageRef>,
         platform: ocx_oci::Platform,
     ) -> Result<Vec<(InstallInfo, WireSelectionOutcome)>, crate::error::Error> {
         let infos = self.find_all(packages.clone(), platform).await?;
