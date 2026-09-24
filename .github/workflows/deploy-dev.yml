@@ -166,9 +166,22 @@ jobs:
           compression-level: 0
           retention-days: 1
 
+  # Every built binary is scanned for test provenance before anything is
+  # pushed; `publish` needs this job, so a marker in any target skips it.
+  scan:
+    name: Scan binaries
+    needs: [build-linux, build-darwin, build-windows]
+    uses: ./.github/workflows/scan-binaries.yml
+    with:
+      artifact-pattern: ocx-*
+      # One per target in `publish`'s `targets` below — pinned by
+      # .claude/tests/test_workflows.py.
+      min-files: 6
+      extract: false
+
   publish:
     name: Publish to dev.ocx.sh
-    needs: [compute-version, build-linux, build-darwin, build-windows]
+    needs: [compute-version, build-linux, build-darwin, build-windows, scan]
     uses: ./.github/workflows/oci-publish.yml
     with:
       registry: dev.ocx.sh

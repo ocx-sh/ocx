@@ -24,11 +24,19 @@ pr-run-mode = "skip"
 source-tarball = false
 # Plan jobs to run in CI
 plan-jobs = ["./verify-version"]
+# Refuse a binary carrying test provenance before anything is published
+# (scan-binaries.yml). `global`, not `local`: rendered both ways with dist
+# 0.31.0, a `local-artifacts-jobs` entry needs only `plan` and
+# `custom-verify-version`, so it runs beside the build and sees no binary; a
+# `global-artifacts-jobs` entry needs `build-local-artifacts`, and `host` —
+# the GitHub Release, and through `announce` every post-announce publish —
+# needs it. .claude/tests/test_workflows.py pins both edges.
+global-artifacts-jobs = ["./scan-binaries"]
 # Post-announce jobs to run in CI
 post-announce-jobs = ["./post-release-oci-publish", "./deploy-website-release", "./docker-publish"]
 # Extra permissions for custom jobs. The override REPLACES the defaults, so
 # every scope the called workflow needs must be listed.
-github-custom-job-permissions = { docker-publish = { contents = "read", packages = "write", id-token = "write", attestations = "write" }, post-release-oci-publish = { contents = "read", packages = "write" } }
+github-custom-job-permissions = { scan-binaries = { contents = "read" }, docker-publish = { contents = "read", packages = "write", id-token = "write", attestations = "write" }, post-release-oci-publish = { contents = "read", packages = "write" } }
 # No `include` for LICENSE-THIRD-PARTY.md: dist's auto-include glob is a
 # prefix match on `LICENSE*`, so it already lands in every archive. Listing
 # it explicitly puts it in twice (verified with `dist plan`).

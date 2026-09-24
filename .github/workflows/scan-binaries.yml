@@ -1,0 +1,120 @@
+name: Scan Binaries
+
+# Refuse to publish an `ocx` binary built with test provenance (ADR
+# adr_test_speed_tiers.md C-PROV). Test builds (`--features ocx/__testing`)
+# bake fixed placeholder provenance into the binary; this job downloads the
+# binaries a run is about to publish and runs
+# `scripts/release_provenance_check.py` over them:
+#
+#   --scan --min-files <n>  every binary, every target — a byte scan for the
+#                           three placeholder markers, floored on the number
+#                           of binaries read, so a download that fetched
+#                           nothing cannot pass;
+#   --exec                  the one binary native to this runner — its
+#                           `version` report must carry release provenance.
+#
+# Callers:
+#   release.yml     `global-artifacts-jobs` in dist-workspace.toml renders the
+#                   `custom-scan-binaries` job after `build-local-artifacts`,
+#                   and `host` (GitHub Release, then the OCI publish) needs it.
+#                   cargo-dist passes `plan` only, so the defaults below are the
+#                   release's: every `artifacts-build-local-*` archive, one per
+#                   dist target. The default `min-files` is pinned to the
+#                   target count by .claude/tests/test_workflows.py.
+#   deploy-dev.yml  raw `ocx-<target>` binaries from its build jobs; `publish`
+#                   needs this job.
+#
+# No job-level `if:` and no `continue-on-error`, on purpose: `host` treats a
+# `skipped` scan as a pass (cargo-dist renders `result == 'skipped' ||
+# result == 'success'`), so a scan that could skip itself would be a bypass.
+# An empty download fails through the floor instead.
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: The cargo-dist plan manifest. cargo-dist passes it to every custom job; unused here.
+        required: false
+        type: string
+        default: ""
+      artifact-pattern:
+        description: Pattern of the run's artifacts that carry the binaries to publish.
+        required: false
+        type: string
+        default: artifacts-build-local-*
+      min-files:
+        description: Reader floor — the number of binaries the scan must read (one per published target).
+        required: false
+        type: number
+        default: 8
+      extract:
+        description: true = the artifacts are cargo-dist archives (`.tar.gz` / `.zip`) holding `ocx` / `ocx.exe`; false = they are the raw binaries.
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan for test provenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download the binaries to publish
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ${{ inputs.artifact-pattern }}
+          path: ${{ runner.temp }}/scan-download
+          merge-multiple: true
+
+      - name: Scan every binary, exec the native one
+        shell: bash
+        env:
+          DOWNLOAD: ${{ runner.temp }}/scan-download
+          STAGE: ${{ runner.temp }}/scan-stage
+          MIN_FILES: ${{ inputs.min-files }}
+          EXTRACT: ${{ inputs.extract }}
+          NATIVE_TARGET: x86_64-unknown-linux-musl
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOWNLOAD" "$STAGE"
+          native=""
+          if [[ "$EXTRACT" == "true" ]]; then
+            shopt -s nullglob
+            for archive in "$DOWNLOAD"/ocx-*.tar.gz "$DOWNLOAD"/ocx-*.zip; do
+              name="$(basename "$archive")"
+              name="${name%.tar.gz}"
+              name="${name%.zip}"
+              mkdir -p "$STAGE/$name"
+              case "$archive" in
+                *.zip) unzip -q "$archive" -d "$STAGE/$name" ;;
+                *) tar -xzf "$archive" -C "$STAGE/$name" ;;
+              esac
+            done
+            shopt -u nullglob
+            mapfile -t binaries < <(find "$STAGE" -type f \( -name ocx -o -name ocx.exe \) | sort)
+            native="$(find "$STAGE/ocx-$NATIVE_TARGET" -type f -name ocx 2>/dev/null | head -1 || true)"
+          else
+            mapfile -t binaries < <(find "$DOWNLOAD" -type f | sort)
+            [[ -f "$DOWNLOAD/ocx-$NATIVE_TARGET" ]] && native="$DOWNLOAD/ocx-$NATIVE_TARGET"
+          fi
+          echo "binaries to scan (${#binaries[@]}):"
+          printf '  %s\n' "${binaries[@]}"
+          if (( ${#binaries[@]} == 0 )); then
+            echo "::error::no binary downloaded — the scan has nothing to read"
+            exit 1
+          fi
+          python3 scripts/release_provenance_check.py --scan "${binaries[@]}" --min-files "$MIN_FILES"
+          if [[ -z "$native" ]]; then
+            echo "::error::no $NATIVE_TARGET binary among the downloads; --exec has nothing native to run"
+            exit 1
+          fi
+          chmod +x "$native"
+          python3 scripts/release_provenance_check.py --exec "$native"

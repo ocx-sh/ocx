@@ -274,6 +274,14 @@ jobs:
       - name: Prepare Binaries
         run: |
           cp target/${{ matrix.job.target }}/release/ocx.exe ocx-${{ matrix.job.target }}.exe
+      # A real `--release` build without `__testing`, on every push to main:
+      # the release provenance scan's green on real bytes, so a dependency
+      # that starts carrying one of the markers reds here, before a release
+      # tag does (ADR adr_test_speed_tiers.md, Amendment AM-2).
+      - name: Scan for test provenance
+        env:
+          TARGET: ${{ matrix.job.target }}
+        run: python3 scripts/release_provenance_check.py --scan "ocx-${TARGET}.exe"
       - name: Upload ocx Binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

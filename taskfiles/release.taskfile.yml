@@ -47,6 +47,34 @@ tasks:
     cmds:
       - git-cliff --unreleased
 
+  # The release provenance guard, on real bytes and both ways (ADR
+  # adr_test_speed_tiers.md C-PROV, Amendment AM-2). `scripts:self-test` only
+  # shows the guard red on synthetic fixtures; whether a real release build's
+  # dependency bytes stay clear of the markers can only be answered by
+  # scanning one. So: a release build of `ocx` without `__testing`, in its own
+  # target dir (target/test-bin/ocx is the `__testing` build the suite runs)
+  # must scan GREEN, and the `__testing` acceptance binary must scan RED — exit
+  # 1 with a marker line, not merely non-zero: a crash or a usage error is not
+  # the red this proves.
+  provenance:proof:
+    desc: Prove the release provenance scan on real bytes — green on a release build, red on the __testing build
+    dir: '{{.ROOT_DIR}}'
+    vars:
+      PROOF_TARGET_DIR: '{{.ROOT_DIR}}/target/provenance-proof'
+    cmds:
+      - task: :test:.build-binaries
+      - cargo build --release -p ocx --locked --target-dir "{{.PROOF_TARGET_DIR}}"
+      - python3 scripts/release_provenance_check.py --scan "{{.PROOF_TARGET_DIR}}/release/ocx{{exeExt}}"
+      - |
+        status=0
+        out=$(python3 scripts/release_provenance_check.py --scan "test/bin/ocx{{exeExt}}" 2>&1) || status=$?
+        printf '%s\n' "$out"
+        if [ "$status" -ne 1 ] || ! printf '%s\n' "$out" | grep -q "marker 'placeholder-g00000000'"; then
+          echo "release:provenance:proof: the __testing build scanned exit $status without a marker line — the scan cannot tell a test build from a release" >&2
+          exit 1
+        fi
+        echo "release:provenance:proof: release build green, __testing build red"
+
   # Full release preparation: compute next version, update Cargo.toml + CHANGELOG, run verify.
   # After this task succeeds, the human reviews and commits.
   #
@@ -84,6 +112,9 @@ tasks:
       # two cannot drift. `task verify:mark` writes a scoped mark and does not
       # satisfy it; `task verify` does.
       - python3 {{.ROOT_DIR}}/scripts/commit_gate.py --require-full-mark {{.ROOT_DIR}}
+      # Before any file is touched: a release whose build would carry test
+      # provenance stops here, not after the version bump.
+      - task: provenance:proof
       - echo "Next version:{{.NEXT_VERSION}}"
       - cargo set-version "{{.NEXT_VERSION | trimPrefix "v"}}"
       - git-cliff --tag "{{.NEXT_VERSION}}" -o CHANGELOG.md
