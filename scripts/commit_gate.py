@@ -378,9 +378,10 @@ def build_deny_reason(mark: dict, state_path: str, why_full: str | None) -> str:
     else:
         how = (
             f"Found {found} at {state_path}.\n"
-            "Run `task verify` (format, clippy, lint, license, build, tests) or"
-            " `task verify:scoped`; both write the mark. After a passing verify where"
-            " only merge context changed: `task verify:mark`.\n"
+            "Run `task verify:scoped --force` or `task verify`; both write the mark.\n"
+            "Not finalizing yet? `task verify:mark` is the allowed escape hatch: run the"
+            " checks your change actually needs, mark, and name what you deferred in the"
+            " commit body. The full `task verify` runs once, before the branch lands.\n"
         )
     return "BLOCKED: Cannot commit without passing verification.\n\n" + how + "\nThen retry."
 
