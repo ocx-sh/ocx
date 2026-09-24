@@ -216,10 +216,6 @@ tasks:
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
       - task: .suite-floor
-      # Before the suite, not after: the ceilings below are read from a parser
-      # whose own red state is a fixture case, and a gate proves its tooling
-      # in the run that depends on it.
-      - task: ceilings:self-test
       # `set -o pipefail` so pytest's own exit status survives the `tee`; the
       # tee is what lets `.suite-ceilings` read the summary line of the run
       # that just happened rather than of some earlier one.
@@ -320,9 +316,6 @@ tasks:
       # copies there — so the pytest env block is not needed here.
       OCX_TESTS_NO_REGISTRY: "1"
 
-  # Not `internal:`, unlike `.suite-floor`: `ceilings:self-test` below drives
-  # this task from the CLI with TEST_RUN_LOG pointed at a fixture log, which
-  # is the only way both polarities of the parser below get re-proved.
   .suite-ceilings:
     desc: >-
       Fail when the run's summary line reports more `skipped` than
@@ -334,108 +327,12 @@ tasks:
     vars:
       SKIP_CEILING_FILE: '{{.SKIP_CEILING_FILE | default "SKIP_CEILING"}}'
       XFAIL_CEILING_FILE: '{{.XFAIL_CEILING_FILE | default "XFAIL_CEILING"}}'
-    cmds:
-      # The log is what the terminal saw, escape codes included when a caller
-      # exported FORCE_COLOR, so they are stripped before the summary is
-      # looked for; and the `=` bars are absent under `-q`, so the line is
-      # recognised by its counts alone — the last such line is the summary.
-      # `printf '\033'` rather than `\x1b` in the pattern: BSD sed has no
-      # hex escapes, GNU and BSD both take the literal byte. The count may
-      # open the line (`256 skipped in 1.00s`, the `-q` shape when every test
-      # skipped), so the non-digit before it is `(^|…)`, never required.
-      - >-
-        esc=$(printf '\033');
-        summary=$(sed -E "s/$esc\[[0-9;]*m//g" {{.TEST_RUN_LOG}}
-        | grep -E '(passed|failed|skipped|xfailed|error).* in [0-9.]+s' | tail -n 1);
-        [ -n "$summary" ] || { echo "suite ceilings: no pytest summary line in {{.TEST_RUN_LOG}}" >&2; exit 1; };
-        skipped=$(printf '%s' "$summary" | sed -nE 's/(^|.*[^0-9])([0-9]+) skipped.*/\2/p');
-        xfailed=$(printf '%s' "$summary" | sed -nE 's/(^|.*[^0-9])([0-9]+) xfailed.*/\2/p');
-        skip_ceiling=$(cat {{.SKIP_CEILING_FILE}}); xfail_ceiling=$(cat {{.XFAIL_CEILING_FILE}});
-        [ "${skipped:-0}" -le "$skip_ceiling" ] || {
-          echo "suite ceilings: $skipped skipped exceeds test/{{.SKIP_CEILING_FILE}} ($skip_ceiling): $summary" >&2; exit 1; };
-        [ "${xfailed:-0}" -le "$xfail_ceiling" ] || {
-          echo "suite ceilings: $xfailed xfailed exceeds test/{{.XFAIL_CEILING_FILE}} ($xfail_ceiling): $summary" >&2; exit 1; };
-        echo "suite ceilings: ${skipped:-0} skipped (ceiling $skip_ceiling), ${xfailed:-0} xfailed (ceiling $xfail_ceiling)"
-
-  ceilings:self-test:
-    desc: Show the suite-ceilings parser red on an over-ceiling pytest summary and green on a clean one
-    summary: |
-      `.suite-ceilings` above is a shell parser, and its red state lived in a
-      commit message — nothing in the tree re-proved it. These two fixture
-      lines are that proof, run by `default` before the suite it gates.
-
-      The red one carries a skipped count no ceiling will ever permit, so the
-      case cannot go vacuous when test/SKIP_CEILING moves. The green one
-      carries `1 skipped, 1 xfailed`, never zeroes, and the case asserts the
-      parser SAYS both counts: `${skipped:-0}` means a sed that stopped
-      matching reports zero, so a zero-count fixture is green whether or not
-      the extraction still works.
-
-      The red half reads the message, not the exit status. `if <task>; then
-      fail` is satisfied by a renamed task, an unreadable log or an argument
-      typo exactly as well as by the ceiling gating, so a parser that never
-      reaches the comparison is green — the assertion below names the
-      comparison's own wording, and says so when the run failed for some
-      other reason.
-
-      The nested call names this taskfile explicitly: entered through the root
-      `test:` include the task is `test:.suite-ceilings`, entered directly it
-      is `.suite-ceilings`, and `-t` is what makes the case indifferent.
-    dir: '{{.TASKFILE_DIR}}'
-    vars:
-      RED_SKIPPED: '999999'
-      RED_SUMMARY: '1 passed, {{.RED_SKIPPED}} skipped in 1.00s'
-      GREEN_SUMMARY: '10 passed, 1 skipped, 1 xfailed in 1.00s'
-      # `-s`: without it go-task echoes the task body to STDERR, and the body
-      # contains the very phrase the red half looks for — the assertion would
-      # then match the script quoting itself and pass for any failure at all.
-      CEILINGS: task -s -t {{.TASKFILE_DIR}}/taskfile.yml .suite-ceilings
-      # Carries the runtime count for the same reason: `$skipped skipped
-      # exceeds …` is in the body, `999999 skipped exceeds …` can only be output.
-      RED_REASON: '{{.RED_SKIPPED}} skipped exceeds test/SKIP_CEILING'
-      # The lint tier's own pair, passed the same way `test:lint:structure`
-      # passes them to `.suite-ceilings`. `LINT_SKIP_CEILING` is committed at
-      # 0, so the red case reuses RED_SUMMARY and the green case needs a
-      # summary with nothing to report — a bare `passed … in Ns` line, which
-      # the sed extractors default to 0 for via `${skipped:-0}`.
-      LINT_RED_REASON: '{{.RED_SKIPPED}} skipped exceeds test/LINT_SKIP_CEILING'
-      LINT_GREEN_SUMMARY: '10 passed in 1.00s'
-    cmds:
-      - >-
-        log=$(mktemp); trap 'rm -f "$log"' EXIT;
-        printf '%s\n' '{{.RED_SUMMARY}}' > "$log";
-        status=0;
-        red=$({{.CEILINGS}} TEST_RUN_LOG="$log" 2>&1 >/dev/null) || status=$?;
-        [ "$status" -ne 0 ] || {
-          echo "ceilings self-test: the parser accepted 999999 skipped — it is not gating" >&2; exit 1; };
-        case "$red" in *'{{.RED_REASON}}'*) ;; *)
-          echo "ceilings self-test: the red run exited $status without reaching the ceiling — it failed for another reason: $red" >&2; exit 1;;
-        esac;
-        printf '%s\n' '{{.GREEN_SUMMARY}}' > "$log";
-        green=$({{.CEILINGS}} TEST_RUN_LOG="$log" 2>/dev/null | tail -n 1);
-        case "$green" in *'suite ceilings: 1 skipped'*'1 xfailed'*) ;; *)
-          echo "ceilings self-test: the parser read no counts from a 1-skipped 1-xfailed summary: $green" >&2; exit 1;;
-        esac;
-        echo "ceilings self-test: parser red on 999999 skipped, green reading 1 skipped and 1 xfailed"
-      # `test:lint:structure` passes SKIP_CEILING_FILE/XFAIL_CEILING_FILE, not
-      # the default files — the pair above never proves that wiring, so a
-      # regression that silently ignored the override would still show green.
-      - >-
-        log=$(mktemp); trap 'rm -f "$log"' EXIT;
-        printf '%s\n' '{{.RED_SUMMARY}}' > "$log";
-        status=0;
-        red=$({{.CEILINGS}} TEST_RUN_LOG="$log" SKIP_CEILING_FILE=LINT_SKIP_CEILING XFAIL_CEILING_FILE=LINT_XFAIL_CEILING 2>&1 >/dev/null) || status=$?;
-        [ "$status" -ne 0 ] || {
-          echo "ceilings self-test: the lint-ceiling parser accepted 999999 skipped — it is not gating" >&2; exit 1; };
-        case "$red" in *'{{.LINT_RED_REASON}}'*) ;; *)
-          echo "ceilings self-test: the lint-ceiling red run exited $status without reaching the ceiling — it failed for another reason: $red" >&2; exit 1;;
-        esac;
-        printf '%s\n' '{{.LINT_GREEN_SUMMARY}}' > "$log";
-        green=$({{.CEILINGS}} TEST_RUN_LOG="$log" SKIP_CEILING_FILE=LINT_SKIP_CEILING XFAIL_CEILING_FILE=LINT_XFAIL_CEILING 2>/dev/null | tail -n 1);
-        case "$green" in *'suite ceilings: 0 skipped'*'0 xfailed'*) ;; *)
-          echo "ceilings self-test: the lint-ceiling parser read no counts from a 0-skipped 0-xfailed summary: $green" >&2; exit 1;;
-        esac;
-        echo "ceilings self-test: lint-ceiling parser red on 999999 skipped (test/LINT_SKIP_CEILING), green reading 0 skipped and 0 xfailed"
+    # The parser, and why it reads the summary the way it does, is
+    # scripts/suite_ceilings.py; scripts/tests/test_suite_ceilings.py is its
+    # red/green proof.
+    cmd: >-
+      python3 {{.TASKFILE_DIR}}/../scripts/suite_ceilings.py --log {{.TEST_RUN_LOG}}
+      --skip-ceiling-file {{.SKIP_CEILING_FILE}} --xfail-ceiling-file {{.XFAIL_CEILING_FILE}}
 
   smoke:
     desc: >-
@@ -717,7 +614,7 @@ tasks:
       - >-
         start=$(date +%s);
         set -o pipefail;
-        OCX_LINT_BUDGET_SECONDS=30 uv run pytest lint/ --basetemp={{.TEST_BASETEMP}}-lint
+        OCX_LINT_BUDGET_SECONDS=30 uv run pytest lint/ -n auto --basetemp={{.TEST_BASETEMP}}-lint
         {{.CLI_ARGS | default "-q"}} 2>&1 | tee {{.TEST_BASETEMP}}-lint.log;
         status=$?;
         echo "test:lint:structure: $(( $(date +%s) - start ))s wall clock for the run (budget 30 s)";

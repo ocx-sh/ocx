@@ -99,8 +99,8 @@ tasks:
       Public rather than `internal:`, for the reason `git:hooks` is: it is
       called by every gate that needs it *and* it is the one thing a fresh
       clone may want to run on purpose, so `task --list` should name it.
-      `scripts:self-test` calls it too — `bazel_tag_guard.py --self-test`
-      queries the live graph by design.
+      `scripts:self-test` calls it too — the tag guard's tests
+      (`scripts/tests/test_bazel_tag_guard.py`) query the live graph by design.
     dir: '{{.ROOT_DIR}}'
     cmds:
       # Before the repin, because the repin is what creates the files this
@@ -327,7 +327,7 @@ tasks:
       a test action (WP-35), `no-remote-cache` for a build action (WP-33 —
       no tag makes a build action re-execute, so what a tag buys there is the
       machine boundary). The script's docstring carries both measurements and
-      `--self-test` reds each kind against the other's tag.
+      its tests red each kind against the other's tag.
     dir: '{{.ROOT_DIR}}'
     cmds:
       - task: bootstrap
@@ -429,10 +429,10 @@ tasks:
       same `defer:` armed before anything can fail, and the same 0700 directory
       and 0600 stream as that task — for its measurements too. The
       filename differs (`test-bep.json`) so that
-      `scripts/bep_to_otlp.py --self-test`'s in-workspace mutation still lands
+      `scripts/tests/test_bep_to_otlp.py`'s in-workspace mutation still lands
       on exactly one path and its finding count stays readable.
 
-      `--self-test` runs first rather than beside this task, and never as a
+      The floor parser's tests run first rather than beside this task, and never as a
       `preconditions:` entry: `--force` skips preconditions, and a floor
       proved nowhere is a green that cannot be told from a reader that stopped
       matching. It costs 0.4 s and needs no graph.
@@ -498,7 +498,8 @@ tasks:
       - defer: rm -rf '{{.BEP_DIR}}'
       - task: bep:mode
         vars: {DIR: '{{.BEP_DIR}}'}
-      - python3 {{.ROOT_DIR}}/scripts/bazel_test_floor.py --self-test
+      # The floor parser's proof, in the same recipe as the parser it proves.
+      - uv run --project {{.ROOT_DIR}}/test pytest {{.ROOT_DIR}}/scripts/tests/test_bazel_test_floor.py -q
       - task: bootstrap
       - cmd: |
           set -o pipefail
@@ -644,15 +645,6 @@ tasks:
       # are not built here — `bazel test //test:all` builds `//crates/ocx_cli:ocx`
       # and the other `data` it runs, and `test/bin/` is no input of any target.
       - task: :website:schema:default
-      # Inherited from the step this task replaces in `task verify` phase 2.
-      # `test:parallel` -> `test:default` reached `ceilings:self-test`, the
-      # red/green fixtures for the shell parser that reads a pytest summary
-      # line; this lane reads per-case XML instead and does not use that
-      # parser, but `task test:parallel` is still what a developer and
-      # `verify:scoped` run, and a parser whose fixtures run nowhere is how it
-      # stopped matching before. Same reason `rust:test:ceiling:self-test`
-      # outlived the nextest bracket. It costs 0.2 s and starts no registry.
-      - task: :test:ceilings:self-test
       - cmd: |
           set -o pipefail
           status=0

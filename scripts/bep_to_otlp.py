@@ -3,8 +3,9 @@
 # Copyright 2026 The OCX Authors
 """Bazel BEP -> OTLP traces, so S-013 can be asked of a real build.
 
-    scripts/bep_to_otlp.py --self-test
     scripts/bep_to_otlp.py --bep bep.json --min-targets 58
+
+Proofs: scripts/tests/test_bep_to_otlp.py
 
 Emits, per Bazel invocation found in the BEP, one `summary` span carrying the
 target count this reader actually read, plus one `target` span per
@@ -165,8 +166,8 @@ distinguishably from a clean build. Three floors, all loud:
   A *failed build* still exits 0: this is telemetry, not a verdict.
 * **1** — any floor, any rejected span, any transport failure. Loud on stderr.
 
-Not wired into `taskfiles/scripts.taskfile.yml` — WP-17 owns that file. The one
-line it owes the `self-test:` list is named in `--self-test`'s closing output.
+Not wired into `taskfiles/scripts.taskfile.yml` — WP-17 owns that file; pytest
+discovery (`scripts/tests/test_bep_to_otlp.py`) replaces the `self-test:` list.
 """
 
 from __future__ import annotations
@@ -1730,50 +1731,11 @@ def prove_counts() -> int:
     return 1
 
 
-def self_test() -> int:
-    """Every pair, on fixtures this repository owns."""
-    scratch = REPO_ROOT / ".tmp"
-    scratch.mkdir(exist_ok=True)
-    checks = 0
-    import tempfile
-
-    with tempfile.TemporaryDirectory(dir=scratch) as directory:
-        work = Path(directory)
-        checks += prove_failed_build()
-        checks += prove_cache_state()
-        checks += prove_no_secret()
-        checks += prove_dropped_span(work)
-        checks += prove_reader_floor(work)
-        checks += prove_two_invocations(work)
-        checks += prove_schema()
-        checks += prove_provenance()
-        checks += prove_silent_exit(work)
-        checks += prove_live_transport(work)
-        checks += prove_bep_not_persisted()
-        checks += prove_counts()
-    print(
-        f"bep_to_otlp self-test: {checks} checks passed — a failing build parsed, a dropped "
-        "span caught, no span carrying the planted credential, the stream itself held outside "
-        "the checkout and deleted from a `defer:`, the reader floor red on an "
-        "empty and on a target-poor BEP, two appended streams read whole, WP-27's panel "
-        "schema asserted field by field, a CI build separable from a workstation one by "
-        "ocx.source and ci.run_url, and four real cache states separated by "
-        "executionInfo.strategy where cachedRemotely cannot tell two of them apart"
-    )
-    print(
-        "  wired into taskfiles/scripts.taskfile.yml `self-test:` (WP-17): "
-        "`- python3 scripts/bep_to_otlp.py --self-test`"
-    )
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--self-test", action="store_true", help="prove every pair red and green")
-    mode.add_argument("--bep", type=Path, help="the --build_event_json_file to read")
+    parser.add_argument("--bep", type=Path, required=True, help="the --build_event_json_file to read")
     parser.add_argument(
         "--min-targets",
         type=int,
@@ -1789,8 +1751,6 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.self_test:
-        return self_test()
     return run(args.bep, args.min_targets, args.batch, dict(os.environ), post_otlp)
 
 

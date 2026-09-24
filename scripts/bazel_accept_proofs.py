@@ -3,7 +3,6 @@
 # Copyright 2026 The OCX Authors
 """Stage-4 Bazel edge cases — S-015 and S-004, the red states WP-36 and WP-39 owe.
 
-    scripts/bazel_accept_proofs.py --self-test
     scripts/bazel_accept_proofs.py --prove-s015 [--probe-root DIR]
     scripts/bazel_accept_proofs.py --check-s015 --warm BEP --mutated BEP --tags TAGS.json \
         [--built-binary FILE --binary-under-test FILE]
@@ -16,7 +15,8 @@ run. A harness that could only red after WP-36 landed would be a harness nobody
 can red today, so — as WP-13 did for stage 1 — everything here is split:
 
 * **Comparators** — pure functions over already-read inputs. These are the
-  gates' actual logic and the thing red-proven in `--self-test`. WP-36 owns the
+  gates' actual logic and the thing red-proven in `scripts/tests/test_bazel_accept_proofs.py`.
+  WP-36 owns the
   `bazel query` that produces the tag table and the target sets, WP-39 owns the
   two CI entry points; both call in here for the verdict, so the check their
   implementation is written against is one already watched go red.
@@ -123,26 +123,23 @@ file reads no environment variable at all. The single exception is `HOME`, via
 a credential, and `BAZEL_CACHE_READ_AUTH`/`BAZEL_CACHE_WRITE_AUTH` are
 unreachable from here by construction.
 
-Every mutation in `--self-test` is proven to have landed before its result is
-trusted; until then a surviving green is *unexplained*, not excused. Fixtures
-are synthetic, live under this repository's own `.tmp/` (never `/tmp`, which is
-a reaped tmpfs on the development host), and nothing is ever restored with
+Every mutation in the proofs below is proven to have landed before its result
+is trusted; until then a surviving green is *unexplained*, not excused. Fixtures
+are synthetic, live under `tmp_path`, and nothing is ever restored with
 `git checkout --`, which restores from the index and would make the run vacuous.
 
 **`--check-s015` and `--check-s004` are invoked by NO lane and no task, and
-that is deliberate rather than an oversight to be read past.** Only
-`--self-test` runs on its own, from `taskfiles/scripts.taskfile.yml`. The two
-`--check-*` modes each need inputs a gate cannot synthesise — a rebuilt binary
-and a warm run for S-015, a docs-only and a crate-touching BEP for S-004 — so
-they are commands a person runs. The graph-side half of the same contract *is*
-live and is a different file: `scripts/bazel_tag_guard.py` runs in `task verify`
-and in `verify-basic.yml`, and it reds an acceptance target that loses its input
-declaration, acquires a cache-suppressing tag, or stops declaring the sibling
-modules its own source sweeps — plus a `//test:suite_inputs` whose glob has been
-narrowed. Nothing in this file should be read as claiming more than that.
-
-Not wired into `taskfiles/scripts.taskfile.yml` — WP-17 owns that file. The one
-line it owes the `self-test:` list is named in `--self-test`'s closing output.
+that is deliberate rather than an oversight to be read past.** Only the proofs
+below run on their own, as pytest (`scripts/tests/test_bazel_accept_proofs.py`).
+The two `--check-*` modes each need inputs a gate cannot synthesise — a
+rebuilt binary and a warm run for S-015, a docs-only and a crate-touching BEP
+for S-004 — so they are commands a person runs. The graph-side half of the
+same contract *is* live and is a different file: `scripts/bazel_tag_guard.py`
+runs in `task verify` and in `verify-basic.yml`, and it reds an acceptance
+target that loses its input declaration, acquires a cache-suppressing tag, or
+stops declaring the sibling modules its own source sweeps — plus a
+`//test:suite_inputs` whose glob has been narrowed. Nothing in this file
+should be read as claiming more than that.
 """
 
 from __future__ import annotations
@@ -2852,42 +2849,6 @@ def prove_counts() -> int:
     return 1
 
 
-def self_test() -> int:
-    """All three proofs, both halves, on inputs this file builds."""
-    scratch = REPO_ROOT / ".tmp"
-    scratch.mkdir(exist_ok=True)
-    checks = 0
-    with tempfile.TemporaryDirectory(dir=scratch) as directory:
-        work = Path(directory)
-        checks += prove_caching_on(work)
-        checks += prove_binary_digest(work)
-        checks += prove_selection(work)
-        checks += prove_live_table()
-        checks += prove_entry_points()
-        checks += prove_c029(work)
-        checks += prove_uncached_list()
-        checks += prove_runner_locks(work)
-        checks += prove_counts()
-    print(
-        f"bazel accept proofs self-test: {checks} checks passed — S-015 (results CACHED on an "
-        "unchanged tree, every cache-suppressing tag refused, the declaration required, and the "
-        "binary-swap control that makes the green mean anything) and S-004 (selection, and the "
-        "CI entry point) each shown red and green, plus C-029, the live table floors and the "
-        "runner's host locks (turnstile, suite shared at the taskfile's path, stack barrier run "
-        "against stub modules, sorted slots, arena lock, -o and wait probes, no-flock refusal)"
-    )
-    print(
-        "  The tag semantics all of S-015 rests on are measured, not assumed: run "
-        "`python3 scripts/bazel_accept_proofs.py --prove-s015` (~40 s, --disk_cache only, "
-        "no acceptance suite and no registry)."
-    )
-    print(
-        "  wired into taskfiles/scripts.taskfile.yml `self-test:` (WP-17): "
-        "`- python3 scripts/bazel_accept_proofs.py --self-test`"
-    )
-    return 0
-
-
 # ---------------------------------------------------------------------------
 # Live check modes. The I/O WP-36 and WP-39 own, wired to the comparators above.
 # ---------------------------------------------------------------------------
@@ -3039,7 +3000,6 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--self-test", action="store_true", help="prove all three pairs red and green")
     mode.add_argument("--prove-s015", action="store_true", help="measure the tag semantics live")
     mode.add_argument(
         "--check-s015", action="store_true", help="judge a warm acceptance run and its control"
@@ -3067,8 +3027,6 @@ def main() -> int:
     parser.add_argument("--entry-taskfile", type=Path, help="--check-s004: WP-39's taskfile")
     args = parser.parse_args()
 
-    if args.self_test:
-        return self_test()
     if args.prove_s015:
         return run_prove_s015(args.probe_root)
     if args.check_s015:

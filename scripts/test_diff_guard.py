@@ -4,7 +4,8 @@
 """Refuse a diff that changes what the acceptance suite asserts.
 
     scripts/test_diff_guard.py <base>..<head> [--allow test/tests/<file>.py:<line>]... [--tiered-shapes]
-    scripts/test_diff_guard.py --self-test
+
+Proofs: scripts/tests/test_test_diff_guard.py
 
 The crate split (plan_crate_split_workspace.md DEC-10, C-077, S-012) moves
 code, never behaviour, and the acceptance suite is the proof: it must pass
@@ -150,10 +151,10 @@ HEAD (AM-7). A `test/SUITE_FLOOR` decrease may then not exceed the collected
 count of the (a)/(e) removals, and `test/LINT_FLOOR` may not decrease at all. In a config file, a `cargo` line's `--release`
 counts as the `--profile` it abbreviates (C-021's `--profile test-bin`).
 
-Stdlib only; driven by `git diff`. `--self-test` builds one throwaway git
-repository per shape under `<repo>/.tmp/` and shows the guard red on every
-forbidden shape and green on every allowed one — a guard that was never seen
-red is a habit, not a check.
+Stdlib only; driven by `git diff`. Its proofs (`scripts/tests/test_test_diff_guard.py`)
+build one throwaway git repository per shape under pytest's own `tmp_path` and
+show the guard red on every forbidden shape and green on every allowed one —
+a guard that was never seen red is a habit, not a check.
 """
 from __future__ import annotations
 
@@ -3003,7 +3004,7 @@ def check_range(
 
 
 # ---------------------------------------------------------------------------
-# --self-test: one throwaway repository per shape
+# Proof cases (scripts/tests/test_test_diff_guard.py): one throwaway repository per shape
 # ---------------------------------------------------------------------------
 
 _PYTEST_HEADER = "import pytest\n\n"
@@ -4895,33 +4896,6 @@ def _live_lint_conftest_probe() -> tuple[str, bool, str]:
     return "live_lint_conftest", not problems, "; ".join(problems)
 
 
-def self_test() -> int:
-    scratch_root = REPO_ROOT / ".tmp"
-    scratch_root.mkdir(exist_ok=True)
-    failures = 0
-    with tempfile.TemporaryDirectory(prefix="diff-guard-", dir=scratch_root) as tmp:
-        for case in SELF_TEST_CASES:
-            red, problems = _run_case(case, Path(tmp))
-            ok = red == case.expect_red
-            failures += not ok
-            verdict = "red  " if red else "green"
-            status = "ok  " if ok else "FAIL"
-            print(f"{status} {verdict} {case.name}")
-            if not ok:
-                print(f"       expected {'red' if case.expect_red else 'green'}")
-            for p in problems:
-                print(f"       {p}")
-        probes = _floor_probes(Path(tmp)) + _collect_probes(Path(tmp)) + [_live_lint_conftest_probe()]
-        for name, ok, detail in probes:
-            failures += not ok
-            print(f"{'ok  ' if ok else 'FAIL'} probe {name}")
-            if not ok:
-                print(f"       {detail}")
-    total = len(SELF_TEST_CASES) + len(probes)
-    print(f"self-test: {total - failures}/{total} shapes behave ({failures} wrong)")
-    return 1 if failures else 0
-
-
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -4950,12 +4924,9 @@ def main(argv: list[str]) -> int:
         help="also admit plan_test_speed_tiers C-007's shapes: moves to test/lint/, lint files, "
         "command marker lines, scoped_rows.toml/LINT_FLOOR, ported-from deletions",
     )
-    parser.add_argument("--self-test", action="store_true", help="show every shape red/green")
     ns = parser.parse_args(argv)
-    if ns.self_test:
-        return self_test()
     if not ns.range:
-        parser.error("a <base>..<head> range or --self-test is required")
+        parser.error("a <base>..<head> range is required")
     base, head = split_range(ns.range)
     if "..." in ns.range:
         base = git(REPO_ROOT, "merge-base", base, head).strip()

@@ -4,7 +4,6 @@
 """The unit-test floor and skip ceiling, re-derived from Bazel's build event stream.
 
     scripts/bazel_test_floor.py --bep <build_event_json_file>
-    scripts/bazel_test_floor.py --self-test
 
 `cargo nextest list --workspace --release --locked` is what `rust:test:floor`
 reads, and on `verify-basic.yml`'s `smoke` job that listing cost a measured
@@ -103,7 +102,6 @@ import dataclasses
 import json
 import re
 import sys
-import tempfile
 import tomllib
 import urllib.parse
 import urllib.request
@@ -1012,47 +1010,17 @@ def prove_counts(rows: list[Row]) -> int:
     return 1
 
 
-def self_test() -> int:
-    rows = read_rows(TEST_TARGET_MAP)
-    expect(rows, f"{TEST_TARGET_MAP} has no `[[target]]` rows — the fixture would be empty")
-    scratch = REPO_ROOT / ".tmp"
-    scratch.mkdir(exist_ok=True)
-    checks = 0
-    with tempfile.TemporaryDirectory(dir=scratch) as directory:
-        work = Path(directory)
-        checks += prove_counts(rows)
-        checks += prove_synthesised_xml_is_not_the_count()
-        checks += prove_floor(work, rows)
-        checks += prove_ceiling(work, rows)
-        checks += prove_junit(work, rows)
-    print(
-        f"bazel test floor self-test: {checks} checks passed — the floor shown red on a "
-        f"deleted target, on three tests deleted inside a surviving target, on a stopped "
-        f"reader, on a mute log and on an empty stream, and green on the live universe; "
-        f"--junit shown red on a mangled per-case parser (one target and all of them), on "
-        f"an unreadable log and on a target Bazel failed while its cases passed, and green "
-        f"at exactly the recorded case count with a failure named and its panic attached"
-    )
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--self-test", action="store_true", help="show every finding red and green")
-    mode.add_argument("--bep", type=Path, help="the --build_event_json_file to judge")
+    parser.add_argument("--bep", type=Path, required=True, help="the --build_event_json_file to judge")
     parser.add_argument(
         "--junit",
         type=Path,
         help="also write a per-case JUnit XML report here (needs --bep); parent dirs created",
     )
     args = parser.parse_args()
-    if args.self_test:
-        if args.junit is not None:
-            parser.error("--junit reports on a run; there is no run under --self-test")
-        return self_test()
     return run_check(args.bep, args.junit)
 
 

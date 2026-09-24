@@ -1,28 +1,18 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
 #
 # The gate tooling under scripts/ (plan DEC-8): stdlib-only Python scripts,
-# each with a `--self-test` that shows the tool red on every shape it forbids
-# and green on every shape it allows. A self-test that runs on no gate is a
-# check nobody runs, so `verify` here is part of `.verify:lint` and
-# `scripts/scoped_gate.py` routes `scripts/**` to it.
-#
-# One script under scripts/ deliberately carries no `--self-test`:
-# `unit_test_duration_gate.py` reads a nextest run log, so its fixtures are
-# logs rather than function arguments, and its red/red/green proof lives where
-# the log does — `task rust:test:duration:self-test`, run by the same gate leg
-# as the `rust:test:duration` it judges. The rule is "a proof on a gate", not
-# "a `--self-test` flag"; adding a second one here would prove it twice.
-#
-# `dead_path_sweep.py` spent three batches proving that rule on itself: it was
-# written by DEC-52 to catch a check nobody runs, had no `--self-test`, and was
-# named by no task — `git grep` found it only in the plan and in its own
-# docstring. Adding a script here without both is how that happens.
+# proven by pytest in scripts/tests/ — one `test_<script>.py` per gate script,
+# red on every shape it forbids and green on every shape it allows. pytest's
+# discovery is the list: `scripts/tests/test_completeness.py` reds a gate script
+# without a test module, so a proof nobody runs cannot be added by forgetting a
+# line here. `verify` is part of `.verify:lint`, and `scripts/scoped_gate.py`
+# routes `scripts/**` to it.
 
 version: '3'
 
 tasks:
   verify:
-    desc: Gate-tooling quality gate (ruff over scripts/, then every self-test under scripts/)
+    desc: Gate-tooling quality gate (ruff over scripts/, then the scripts/tests pytest suite)
     cmds:
       - task: lint
       - task: self-test
@@ -42,117 +32,20 @@ tasks:
     cmd: uv run --project test ruff check --config test/pyproject.toml scripts
 
   self-test:
-    desc: Run the --self-test of every gate script under scripts/ (the crate-split gates, then the Bazel adoption gates)
+    desc: Run the gate scripts' tests (scripts/tests, pytest, in parallel; budgeted at 20 s)
     # No `sources:` cache, for the reason `ci:actionlint` and `test:lint` have
-    # none: a fingerprint-cached self-test reports the last run's verdict, and
-    # a cached green cannot be told from one that never ran. Seconds each.
+    # none: a fingerprint-cached run reports the last run's verdict, and a
+    # cached green cannot be told from one that never ran.
+    #
+    # Through `ocx exec bazel prek --`: the tests that read the live graph need
+    # a `bazel` on PATH, the commit-gate tests drive real git hooks through
+    # `prek`, and `ocx exec` puts only the packages it names on PATH. The
+    # bootstrap gives the graph tests crate_universe's gitignored lockfile. They share one xdist group, so one worker queries the graph
+    # while the rest run beside it.
     dir: '{{.ROOT_DIR}}'
     cmds:
-      # First, and instant: an incomplete list makes every line below it a
-      # report on a subset, and a subset green is read as the whole set's.
-      - task: self-test:complete
-      - python3 scripts/lint_ratchet.py --self-test
-      - python3 scripts/scoped_gate.py --self-test
-      - python3 scripts/test_diff_guard.py --self-test
-      - python3 scripts/suite_census.py --self-test
-      - python3 scripts/dead_path_sweep.py --self-test
-      # The release provenance guard (plan_test_speed_tiers.md C-004): its
-      # synthetic reds only. The real-bytes green and red are
-      # `task release:provenance:proof` — this phase runs before any build.
-      - python3 scripts/release_provenance_check.py --self-test
-      # Drives real git against throwaway repositories under .tmp/, each armed
-      # the way `task git:hooks` arms a clone — the defect class it replaces
-      # lived in "does the gate ever get invoked", which a direct function
-      # call cannot see. Needs `prek` on PATH, as the project toolchain gives.
-      - python3 scripts/commit_gate.py --self-test
-      # The Bazel adoption gates (plan_bazel_build_adoption.md C-014). Six work
-      # packages each shipped a gate script carrying a `--self-test` and none
-      # could wire itself in, this file being WP-17's alone (DX-11) — so until
-      # these seven lines existed, seven proofs ran on no gate at all. That is
-      # the state `dead_path_sweep.py` was written to catch, and the
-      # completeness step above is what stops an eighth from joining them.
-      #
-      # `bazel_tag_guard.py --self-test` is the one that queries the live graph
-      # — deliberately, its subject *being* the live graph, so a green without
-      # reading it would be the vacuous green this plan exists to prevent. It
-      # therefore needs crate_universe's gitignored lockfile and a `bazel` on
-      # PATH, neither of which a fresh checkout or a plain shell has. Hence the
-      # bootstrap, and the one wrapped line below: the other six are green bare
-      # (measured), and wrapping them would claim a need they do not have.
       - task: :bazel:bootstrap
-      - python3 scripts/bazel_adoption_files_check.py --self-test
-      - ocx exec bazel -- python3 scripts/bazel_ignore_check.py --self-test
-      - python3 scripts/bazel_gate_proofs.py --self-test
-      - python3 scripts/bazel_pin_check.py --self-test
-      # WP-40's host doctor (`task bazel:doctor`). Bare, and deliberately: its
-      # subject is the machine, not the graph, so it needs no `@crates` and no
-      # server. Its cache probe runs against an `http.server` this file's
-      # `--self-test` starts on 127.0.0.1 — a proof that reached the real
-      # bazel-cache.ocx.sh would be green or red for reasons this repository
-      # does not control.
-      - python3 scripts/bazel_doctor.py --self-test
-      - python3 scripts/bazel_floor_proofs.py --self-test
-      - python3 scripts/bazel_test_floor.py --self-test
-      - python3 scripts/bazel_accept_proofs.py --self-test
-      - python3 scripts/bazel_build_drift.py --self-test
-      - python3 scripts/bep_to_otlp.py --self-test
-      - python3 scripts/bazel_hermeticity_proofs.py --self-test
-      - ocx exec bazel -- python3 scripts/bazel_tag_guard.py --self-test
-      # WP-22's red/green proof for the cache-rc composite action. It lives
-      # under `.github/actions/` rather than `scripts/`, which is exactly how it
-      # escaped this list for five waves: `shell:verify` shellchecks and shfmts
-      # it, and a self-test that is *linted* is not a self-test that ran. Bare
-      # `bash`, no network, no real credential, ~1 s (measured).
-      - bash .github/actions/bazel-cache-rc/selftest.sh
-
-  self-test:complete:
-    desc: Assert the self-test list above names every self-test in the tree — scripts/*.py and .github/actions/*/selftest.sh
-    summary: |
-      C-014's exit criterion is that the list is asserted *complete*, not that
-      it was appended to. A `--self-test` nobody invokes is the defect this
-      whole gate family exists to prevent, and the list is exactly where one is
-      born: the script and its proof land in one work package, the line that
-      runs them lands in another.
-
-      **Two corpora, because one directory was never the property.** The first
-      version of this check globbed `scripts/*.py` alone, and
-      `.github/actions/bazel-cache-rc/selftest.sh` — WP-22's entire red/green
-      proof, five mutations — sat one directory over, invoked by nothing, for
-      five waves. `shell:verify` shellchecks and shfmts it, which is a
-      *neighbouring* property: a self-test that is linted is not a self-test
-      that ran. So the reader walks both shapes, and a self-test outside
-      `scripts/` can no longer hide behind the glob.
-
-      Floored on the reader, not only on its subject. A glob that matched
-      nothing walks no script, finds nothing missing and exits 0 — a green
-      indistinguishable from a complete list. The floor is a count of what was
-      actually read, which is also why it is a count and not an exit code, and
-      it is one shell variable read by both the test and the message: the two
-      disagreed (`-ge 15` printing "expected >= 13") for exactly as long as
-      they were two literals.
-
-      Matched against this file's text rather than its parsed `cmds:`, so a
-      `- python3 … --self-test` line anywhere in it would satisfy the check.
-      There is one such list and this is the file that holds it; a YAML parse
-      would buy exactness at the cost of a dependency a stdlib `python3` on a
-      fresh checkout does not have.
-    dir: '{{.ROOT_DIR}}'
-    cmd: >-
-      floor=20; found=0; missing='';
-      for f in scripts/*.py; do
-      [ -f "$f" ] || continue;
-      grep -q -- '--self-test' "$f" || continue;
-      found=$((found + 1));
-      grep -qE "^ +- (ocx exec bazel -- )?python3 $f --self-test$" taskfiles/scripts.taskfile.yml || missing="$missing $f";
-      done;
-      for f in .github/actions/*/selftest.sh; do
-      [ -f "$f" ] || continue;
-      found=$((found + 1));
-      grep -qE "^ +- bash $f$" taskfiles/scripts.taskfile.yml || missing="$missing $f";
-      done;
-      [ -z "$missing" ] || { echo "scripts:self-test never runs:$missing — a self-test that no gate invokes is a check nobody runs (C-014). Add a '- python3 <script> --self-test' or '- bash <script>' line to the self-test list in taskfiles/scripts.taskfile.yml" >&2; exit 1; };
-      [ "$found" -ge "$floor" ] || { echo "scripts:self-test:complete read $found of an expected >= $floor self-tests (scripts/*.py carrying --self-test, plus .github/actions/*/selftest.sh) — the reader stopped early, and a green over nothing read is not a complete list" >&2; exit 1; };
-      echo "scripts:self-test:complete: $found self-tests read (scripts/*.py --self-test, .github/actions/*/selftest.sh), all of them named in the list"
+      - ocx exec bazel prek -- uv run --project test pytest scripts/tests -q -n auto --dist loadgroup {{.CLI_ARGS}}
 
   dead-path-sweep:
     desc: Every `crates/ocx_*/src/...` literal on a live surface that names nothing on disk (DEC-52)

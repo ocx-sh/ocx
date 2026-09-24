@@ -4,7 +4,6 @@
 """`bazel:build:drift` — C-010. Every package's Bazel edge set vs its Cargo one.
 
     scripts/bazel_build_drift.py            # gate the live tree
-    scripts/bazel_build_drift.py --self-test
     scripts/bazel_build_drift.py --update   # regenerate scripts/bazel_label_map.toml
 
 `bazel_gate_proofs.py` (WP-13) already proved the comparator (`build_drift`)
@@ -67,15 +66,12 @@ own exit 1 (C-010). `--update` regenerates that table from the same two
 readings, which is what makes 82 rows maintainable; the diff it produces is
 the review.
 
-`--self-test` runs no subprocess and reads no built graph: WP-17 wires it into
-`scripts:verify`, which must stay runnable on a tree where Bazel has never
-been invoked. Every mutation in it is proven to have landed before its result
-is trusted, fixtures live under this repo's own `.tmp/` (never `/tmp`), and
-nothing is ever restored with `git checkout --`, which restores from the index
-and would make the whole run vacuous.
-
-Not wired into `taskfiles/scripts.taskfile.yml` — WP-17 owns that file. The
-line it owes the `self-test:` list is named in `--self-test`'s closing output.
+The proofs (`prove_*`) run as pytest, from `scripts/tests/test_bazel_build_drift.py`.
+They run no subprocess and read no built graph, so they stay runnable on a
+tree where Bazel has never been invoked. Every mutation in them is proven to
+have landed before its result is trusted, fixtures live under pytest's own
+`tmp_path`, and nothing is ever restored with `git checkout --`, which
+restores from the index and would make the whole run vacuous.
 """
 
 from __future__ import annotations
@@ -85,7 +81,6 @@ import dataclasses
 import json
 import re
 import subprocess
-import tempfile
 import tomllib
 from pathlib import Path
 
@@ -148,7 +143,7 @@ UPDATE_UNDERIVABLE_MSG = (
 
 # ---------------------------------------------------------------------------
 # The `--output=build` grammar, as this binary prints it (measured on bazel
-# 9.2.0). Three facts the parser rests on, each checked by `--self-test`:
+# 9.2.0). Three facts the parser rests on, each checked by its tests:
 #
 #   1. Every rule is preceded by a `# <abs path>:<line>:<col>` header naming
 #      the BUILD file it was instantiated from. That is the only place the
@@ -374,7 +369,7 @@ def check_drift(
 
 
 # ---------------------------------------------------------------------------
-# The subprocesses. `--self-test` reaches none of them.
+# The subprocesses. Its tests reach none of them.
 # ---------------------------------------------------------------------------
 
 
@@ -755,7 +750,7 @@ def sample_tree() -> tuple[str, dict]:
 
 
 def _first_party_only_gate(text: str, metadata: dict) -> list[Finding]:
-    """WRONG, and kept as a named control called from `--self-test` and nowhere else.
+    """WRONG, and kept as a named control called from its tests and nowhere else.
 
     The scope C-010 had to be widened away from: compare only the workspace's
     own crates, on BOTH sides. Silent on a tree where a third-party edge has
@@ -1169,36 +1164,11 @@ def _drop_in_package(text: str, package: str, needle: str) -> str:
     )
 
 
-def self_test() -> int:
-    """C-010 red and green, on fixtures this file builds, with no subprocess."""
-    scratch = REPO_ROOT / ".tmp"
-    scratch.mkdir(exist_ok=True)
-    text, metadata = sample_tree()
-    checks = 0
-    checks += prove_readers(text, metadata)
-    checks += prove_drift_gate(text, metadata)
-    checks += prove_floors(text, metadata)
-    with tempfile.TemporaryDirectory(dir=scratch) as directory:
-        checks += prove_map_reader(Path(directory))
-    checks += prove_shipped_map()
-    print(
-        f"bazel build drift self-test: {checks} checks passed — C-010 shown red and green on all "
-        "three failure modes (a dropped first-party edge, a dropped @crates// edge, an unmapped "
-        "label), on both directions, and on every reader floor"
-    )
-    print(
-        "  wired into taskfiles/scripts.taskfile.yml `self-test:` (WP-17): "
-        "`- python3 scripts/bazel_build_drift.py --self-test`"
-    )
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--self-test", action="store_true", help="prove the gate red and green")
     mode.add_argument(
         "--update",
         action="store_true",
@@ -1220,8 +1190,6 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.self_test:
-        return self_test()
     if args.update:
         return run_update(
             bazel_bin=args.bazel, query_output=args.query_output, metadata_path=args.metadata

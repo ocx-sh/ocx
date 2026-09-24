@@ -15,4 +15,8 @@ tmp_path_retention_count = 1
 tmp_path_retention_policy = "failed"
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pyyaml>=6.0.3"]
+dev = [
+    "pytest>=8.0",
+    "pytest-xdist>=3.5",
+    "pyyaml>=6.0.3",
+]

@@ -411,8 +411,7 @@ jobs:
       # Summary line that no longer exists in this job, and its bazel arm runs
       # `cargo nextest list`, which is the 536.5 s this swap exists to delete.
       #
-      # `Ceiling self-test` below stays: it is a `.verify:build-test` member
-      # and a pair of fixture logs, and the parser it proves is still the
+      # `Ceiling self-test` below stays: the parser it proves is still the
       # answer on a machine `bazel:test:unit` does not cover.
       #
       # `--test_env` twice, and neither is decoration. Bazel does not inherit
@@ -482,7 +481,7 @@ jobs:
           junit: target/bazel/junit.xml
           suite: unit
       - name: Ceiling self-test
-        run: task rust:test:ceiling:self-test
+        run: uv run --project test pytest scripts/tests/test_nextest_ceiling.py -q
       # `task rust:test:duration` is NOT a step here. Its own comment named
       # the condition it needs — "inside the floor -> unit -> ceiling bracket,
       # after both halves of it: `Unit-test floor` deletes
@@ -498,11 +497,10 @@ jobs:
       # different property and its own work package.
       #
       # The fixtures stay, as `Ceiling self-test` does with no live ceiling:
-      # three logs that show the parser red over budget, red on a short log,
-      # and green on an allowlisted one. Same position as in
-      # `.verify:build-test`.
+      # logs that show the parser red over budget, red on a short log, and
+      # green on an allowlisted one.
       - name: Duration self-test
-        run: task rust:test:duration:self-test
+        run: uv run --project test pytest scripts/tests/test_unit_test_duration_gate.py -q
       # nextest runs no doctest, so nothing above this line executes one, and
       # until B5R-4 no workflow in this repository did either — in any
       # spelling. `.verify:build-test` has run it locally since DX-58; a gate

@@ -256,7 +256,7 @@ class TestPreToolUseValidator:
 # ---------------------------------------------------------------------------
 # The gate call sites. The gate itself is `scripts/commit_gate.py`, run by
 # git through the hooks `task git:hooks` installs, and shown red and green by
-# its own `--self-test`.
+# its own tests (`scripts/tests/test_commit_gate.py`).
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -267,7 +267,7 @@ class TestReleasePrepareGuard:
     """`task release:prepare` runs the commit gate predicate first (C-021).
 
     The predicate itself is shown red and green by
-    `scripts/commit_gate.py --self-test`; what this catches is the *call site*
+    `scripts/tests/test_commit_gate.py`; what this catches is the *call site*
     drifting away from it — a `prepare` that touches a file before asking for
     the full mark, or one that stopped asking at all.
     """

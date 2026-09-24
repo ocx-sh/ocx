@@ -66,7 +66,7 @@ advisory — a log this reader cannot judge, and an unbounded allowlist pattern,
 fail in both modes, being wiring faults rather than slow tests.
 
 Stdlib only; `task rust:test:duration` is the caller, and
-`task rust:test:duration:self-test` is the pair of fixture logs that shows
+`scripts/tests/test_unit_test_duration_gate.py` holds the fixture logs that show
 this script red on an over-budget test, red on a short log, and green.
 """
 

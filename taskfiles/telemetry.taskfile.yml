@@ -155,7 +155,7 @@ tasks:
       this file.
     summary: |
       C-019 / S-013. The reader is `scripts/bep_to_otlp.py`, whose
-      `--self-test` (run by `scripts:verify`) is where its red states are
+      tests (`scripts/tests/test_bep_to_otlp.py`, run by `scripts:verify`) are where its red states are
       proved; this task is the wiring and nothing else. No check count is
       quoted: it moves with every proof added, and nothing here re-measures it.
 

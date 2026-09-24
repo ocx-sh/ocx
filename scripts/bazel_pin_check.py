@@ -4,7 +4,6 @@
 """`bazel:pin:check` — C-003 (pin drift) and C-026 (the Rust toolchain twin).
 
     scripts/bazel_pin_check.py --check
-    scripts/bazel_pin_check.py --self-test
 
 **C-003.** `bazel_gate_proofs.py` (WP-13) already proved the comparator
 (`pin_drift`) red and green on inputs it built by hand; this file supplies the
@@ -23,14 +22,12 @@ that would catch it drifting. Two independent reader floors, one per file:
 absent, malformed, or missing the field all count as "could not read a
 version from this source" rather than as agreement between two `None`s.
 
-Every mutation in `--self-test` is proven to have landed before its result is
-trusted. Mutations run on scratch copies under this repo's own `.tmp/`, never
-on the real `.bazelversion`, `rust-toolchain.toml` or `MODULE.bazel`, and
-nothing is ever restored with `git checkout --`, which restores from the
-index and would make the whole run vacuous.
-
-Not wired into `taskfiles/scripts.taskfile.yml` — WP-17 owns that file. The
-line it owes the `self-test:` list is named in `--self-test`'s closing output.
+Every mutation in the proofs (`scripts/tests/test_bazel_pin_check.py`, run as
+pytest) is proven to have landed before its result is trusted. Mutations run
+on scratch copies under pytest's own `tmp_path`, never on the real
+`.bazelversion`, `rust-toolchain.toml` or `MODULE.bazel`, and nothing is ever
+restored with `git checkout --`, which restores from the index and would make
+the whole run vacuous.
 """
 
 from __future__ import annotations
@@ -38,7 +35,6 @@ from __future__ import annotations
 import argparse
 import re
 import subprocess
-import tempfile
 import tomllib
 from pathlib import Path
 
@@ -444,36 +440,14 @@ def prove_entry_point(scratch: Path) -> int:
     return checks
 
 
-def self_test() -> int:
-    """Both gates, red and green, on fixtures this file builds."""
-    scratch = REPO_ROOT / ".tmp"
-    scratch.mkdir(exist_ok=True)
-    checks = 0
-    with tempfile.TemporaryDirectory(dir=scratch) as directory:
-        work = Path(directory)
-        checks += prove_pin_gate(work)
-        checks += prove_toolchain_gate(work)
-        checks += prove_entry_point(work)
-    print(
-        f"bazel pin check self-test: {checks} checks passed — C-003 (pin drift) and "
-        "C-026 (rust toolchain twin) each shown red and green, plus the shipped --check entry point"
-    )
-    print(
-        "  wired into taskfiles/scripts.taskfile.yml `self-test:` (WP-17): "
-        "`- python3 scripts/bazel_pin_check.py --self-test`"
-    )
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument(
-        "--check", action="store_true", help="gate the live tree: C-003 pin drift, C-026 toolchain twin"
+    parser.add_argument(
+        "--check", action="store_true", required=True,
+        help="gate the live tree: C-003 pin drift, C-026 toolchain twin",
     )
-    mode.add_argument("--self-test", action="store_true", help="prove both gates red and green")
     parser.add_argument(
         "--bazel",
         default="bazel",
@@ -484,9 +458,6 @@ def main() -> int:
     parser.add_argument("--rust-toolchain", type=Path, default=REPO_ROOT / "rust-toolchain.toml")
     parser.add_argument("--module-bazel", type=Path, default=REPO_ROOT / "MODULE.bazel")
     args = parser.parse_args()
-
-    if args.self_test:
-        return self_test()
 
     findings = run_check(
         bazelversion_path=args.bazelversion,

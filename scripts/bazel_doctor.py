@@ -7,7 +7,6 @@
     scripts/bazel_doctor.py --print-host-block       # the ~/.bazelrc stanza, stdout
     scripts/bazel_doctor.py --write-host-block       # write it, idempotent markers
     scripts/bazel_doctor.py --set-reader-credential  # password on STDIN, never argv
-    scripts/bazel_doctor.py --self-test
 
 `.bazelrc` and `MODULE.bazel` are committed, so a checkout arrives with the
 workspace half of a working build already correct. Everything that is *not*
@@ -89,7 +88,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Iterable, Sequence
@@ -99,9 +97,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bazel_gate_proofs import REPO_ROOT, expect, pin_drift, read_bazelversion
 
-#: The reader realm's URL base. Overridable so `--self-test` can point the probe
-#: at a local server whose status code it chose — the alternative is a proof that
-#: needs the public internet, which is a green that says nothing about the code.
+#: The reader realm's URL base. Overridable so the pytest proof
+#: (`scripts/tests/test_bazel_doctor.py`) can point the probe at a local server
+#: whose status code it chose — the alternative is a proof that needs the
+#: public internet, which is a green that says nothing about the code.
 CACHE_URL_ENV = "OCX_BAZEL_DOCTOR_CACHE_URL"
 DEFAULT_CACHE_URL = "https://bazel-cache.ocx.sh/v1"
 
@@ -138,7 +137,7 @@ _STATUS_COLOUR = {OK: "\033[32m", WARN: "\033[33m", FAIL: "\033[31m"}
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class Check:
-    """One doctor line. `code` is what the self-test and the skill assert on;
+    """One doctor line. `code` is what the pytest proof and the skill assert on;
     `detail` and `fix` are the English a human reads.
 
     Separate for the reason `bazel_gate_proofs.Finding` separates them: asserting
@@ -737,7 +736,7 @@ def set_reader_credential(text: str, user: str, password: str) -> str:
 
 
 def leaks(secret: str, *texts: str) -> bool:
-    """True when `secret` appears in any of `texts`. The self-test's leak
+    """True when `secret` appears in any of `texts`. The pytest proof's leak
     detector, and proven on a control that does contain it."""
     return any(secret and secret in text for text in texts)
 
@@ -1248,7 +1247,7 @@ def render(checks: Sequence[Check], stream=sys.stdout) -> int:
 
 
 # ---------------------------------------------------------------------------
-# --self-test
+# The proofs, run as pytest from scripts/tests/test_bazel_doctor.py
 # ---------------------------------------------------------------------------
 
 
@@ -1657,26 +1656,6 @@ def prove_bep_modes(scratch: Path) -> int:
     return 22
 
 
-def self_test() -> int:
-    scratch = REPO_ROOT / ".tmp"
-    scratch.mkdir(exist_ok=True)
-    checks = 0
-    with tempfile.TemporaryDirectory(dir=scratch) as directory:
-        work = Path(directory)
-        checks += prove_rc_reading()
-        checks += prove_host_block(work)
-        checks += prove_probe(work)
-        checks += prove_secret(work)
-        checks += prove_bep_modes(work)
-        checks += prove_pure_checks()
-    print(
-        f"bazel doctor self-test: {checks} checks passed — every doctor check shown red and "
-        "green on fixtures built here, the probe against a local server whose status code this "
-        "test chose, and the password proven absent from every stream the tool writes"
-    )
-    return 0
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1691,7 +1670,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="run every check, red/green")
-    mode.add_argument("--self-test", action="store_true", help="prove every check red and green")
     mode.add_argument("--print-host-block", action="store_true", help="the ~/.bazelrc stanza")
     mode.add_argument("--write-host-block", action="store_true", help="write it, idempotently")
     mode.add_argument(
@@ -1709,9 +1687,6 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     home = Path.home()
     rc_path = args.rc or (home / ".bazelrc")
-
-    if args.self_test:
-        return self_test()
 
     if args.print_host_block:
         print(host_block(home, jobs=args.jobs, heap_gb=args.heap_gb), end="")

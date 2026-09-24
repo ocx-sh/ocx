@@ -3,7 +3,6 @@
 # Copyright 2026 The OCX Authors
 """Stage-2 floor, ceiling and target parity — C-012, C-013, C-013a, S-011.
 
-    scripts/bazel_floor_proofs.py --self-test
     scripts/bazel_floor_proofs.py --check
     scripts/bazel_floor_proofs.py --derive --listing <nextest-list.json>
     scripts/bazel_floor_proofs.py --prove-s011
@@ -97,9 +96,9 @@ which is the only deletion count that discriminates today.
 
 Stdlib only (plan DEC-8), so the taskfile recipe is sliced by indentation
 rather than parsed — the assertions themselves run over shell command items,
-which is the grammar the property lives in. Not wired into
-`taskfiles/scripts.taskfile.yml`; WP-17 owns that file and the line it owes is
-named at the end of `--self-test`.
+which is the grammar the property lives in.
+
+The proofs (`prove_*`) run as pytest, from `scripts/tests/test_bazel_floor_proofs.py`.
 """
 
 from __future__ import annotations
@@ -109,7 +108,6 @@ import ast
 import json
 import re
 import subprocess
-import tempfile
 from pathlib import Path
 
 from bazel_gate_proofs import (
@@ -954,30 +952,6 @@ def prove_counts() -> int:
     return 1
 
 
-def self_test() -> int:
-    checks = 0
-    scratch = REPO_ROOT / ".tmp"
-    scratch.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=scratch) as directory:
-        work = Path(directory)
-        checks += prove_floor_recipe()
-        checks += prove_floor_count()
-        checks += prove_ceiling()
-        checks += prove_cache_neutrality(work)
-        checks += prove_parity()
-        checks += prove_counts()
-    print(
-        f"bazel floor proofs self-test: {checks} checks passed — C-012 (the floor reads no run), "
-        "C-013 (the ceiling from the listing, and a cache hit that is not a skip), C-013a "
-        "(target parity) and S-011 each shown red and green"
-    )
-    print(
-        "  wired into taskfiles/scripts.taskfile.yml `self-test:` (WP-17): "
-        "`- python3 scripts/bazel_floor_proofs.py --self-test`"
-    )
-    return 0
-
-
 # ---------------------------------------------------------------------------
 # Live modes.
 # ---------------------------------------------------------------------------
@@ -1161,15 +1135,12 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--self-test", action="store_true", help="prove every pair red and green")
     mode.add_argument("--check", action="store_true", help="gate the live tree: C-012, and C-013 with --listing")
     mode.add_argument("--derive", action="store_true", help="the exclusion set and counts WP-12 must reconcile")
     mode.add_argument("--prove-s011", action="store_true", help="S-011 against the live workspace (builds)")
     parser.add_argument("--listing", type=Path, help="a `cargo nextest list --message-format json` capture")
     args = parser.parse_args()
 
-    if args.self_test:
-        return self_test()
     if args.check:
         return run_check(args.listing)
     if args.derive:

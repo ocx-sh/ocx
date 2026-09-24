@@ -45,7 +45,6 @@ import collections
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,7 +102,7 @@ EXEMPT_PATTERNS = (
     # `crates/ocx_{cli,shim,util}` literals in the same 1000-line gate script,
     # in a tree mid-crate-split. The fixture prefix is `pkgNN` now; the dead
     # literal is gone rather than tolerated.
-    re.compile(r"scripts/(lint_ratchet|test_diff_guard|dead_path_sweep)\.py$"),
+    re.compile(r"scripts/(tests/test_)?(lint_ratchet|test_diff_guard|dead_path_sweep)\.py$"),
     re.compile(r"crates/ocx_test_support/tests/workspace_structure\.rs$"),
     re.compile(r"\.claude/tests/test_hooks\.py$"),
     #: Vendored verbatim from ocx-sh/indexbot, byte-for-byte, and checked
@@ -229,151 +228,6 @@ def sweep(root: Path = ROOT) -> tuple[dict[str, set[str]], int]:
     return dead, read
 
 
-def self_test() -> int:
-    """Every shape this sweep decides, shown red and green on a tree we build.
-
-    Without this the script had no way to fail on purpose, which is the same
-    defect it exists to catch one level down: a green here was indistinguishable
-    from a sweep that read nothing. It was also wired to no taskfile at all, so
-    the only thing running it was a human remembering to.
-    """
-    checks = 0
-    with tempfile.TemporaryDirectory() as td:
-        root = Path(td)
-        (root / "crates/ocx_util/src").mkdir(parents=True)
-        (root / "crates/ocx_util/src/live.rs").write_text("pub fn x() {}\n", encoding="utf-8")
-        (root / "crates/ocx_util/src/subdir").mkdir()
-        (root / "crates/ocx_util/src/subdir/k.rs").write_text("\n", encoding="utf-8")
-        (root / "crates/ocx_util/Cargo.toml").write_text("[package]\n", encoding="utf-8")
-        (root / ".claude/rules").mkdir(parents=True)
-        (root / "scripts").mkdir()
-        (root / ".gitignore").write_text("*.cdx.json\n", encoding="utf-8")
-
-        def write(rel: str, text: str) -> None:
-            (root / rel).write_text(text, encoding="utf-8")
-
-        # A live file literal, a live DIRECTORY literal (the DEC-52 blind spot),
-        # a dead file literal, a dead directory literal, and the crate root,
-        # which is judged like anything else and happens to be live.
-        write(".claude/rules/subsystem-x.md",
-              "see `crates/ocx_util/src/live.rs` and `crates/ocx_util/src/subdir/**`\n"
-              "and `crates/ocx_util/src/gone.rs` and `crates/ocx_util/src/nodir/**`\n"
-              "and `crates/ocx_util/src` which is the crate root\n")
-        # An INTERIOR glob, live and dead. `exists()` answers False for both, so
-        # only matching the pattern tells them apart — the hole that made every
-        # `paths:` and `sources:` entry in the repository unreadable.
-        write(".claude/rules/subsystem-glob.md",
-              "paths: `crates/ocx_util/src/**/*.rs` and `crates/ocx_util/src/**/*.toml`\n")
-        # OUTSIDE `src/`, live and dead. A manifest and a `tests/` tree move in
-        # an extraction exactly as often as a source file does.
-        write(".claude/rules/subsystem-manifest.md",
-              "see `crates/ocx_util/Cargo.toml` and `crates/ocx_gone/Cargo.toml`\n")
-        # A path `.gitignore` declares a build output: absent by design, so
-        # asking whether it exists is a category error.
-        write("scripts/emit.sh", "# writes crates/ocx_util/ocx.cdx.json\n")
-        # SEGMENTED: the same path as adjacent literals joined by `/`, live and
-        # dead — no token here resembles a repo path, which is why `LITERAL`
-        # could not see the `shell_latency.py` open that CI raised on. The third
-        # line derives the crate from a variable and must stay invisible: a
-        # derived path cannot go stale, and claiming it would report every
-        # glob-driven walk in the tree.
-        write("scripts/bench.py",
-              'SRC = base / "crates" / "ocx_util" / "src" / "live.rs"\n'
-              'GONE = base / "crates" / "ocx_util" / "src" / "vanished.rs"\n'
-              'ANY = base / "crates" / name / "src"\n')
-        # Off a live prefix entirely: an artifact records what was true when
-        # written, so its dead literal must NOT be reported.
-        (root / ".claude/artifacts").mkdir()
-        write(".claude/artifacts/old_plan.md", "`crates/ocx_util/src/ancient.rs`\n")
-        # Exempt by what the file IS, not by naming a path.
-        write("scripts/lint_ratchet.py", "# crates/ocx_util/src/fixture_only.rs\n")
-
-        subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
-        subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
-
-        dead, read = sweep(root)
-        expect(read >= 3, f"the reader saw {read} live file(s), so nothing below it means anything")
-        checks += 1
-        expect(
-            sorted(dead) == [
-                "crates/ocx_gone/Cargo.toml",
-                "crates/ocx_util/src/**/*.toml",
-                "crates/ocx_util/src/gone.rs",
-                "crates/ocx_util/src/nodir",
-                "crates/ocx_util/src/vanished.rs",
-            ],
-            f"RED shapes wrong — a dead file, DIRECTORY, GLOB, MANIFEST and SEGMENTED join, "
-            f"nothing else: {sorted(dead)}",
-        )
-        checks += 1
-        for green in (
-            "crates/ocx_util/src/live.rs",          # live file
-            "crates/ocx_util/src/subdir",           # live directory
-            "crates/ocx_util/src",                  # crate root
-            "crates/ocx_util/src/**/*.rs",          # live interior glob
-            "crates/ocx_util/Cargo.toml",           # live, outside src/
-            "crates/ocx_util/ocx.cdx.json",         # declared build output
-            "crates/ocx_util/src/ancient.rs",       # off a live prefix
-            "crates/ocx_util/src/fixture_only.rs",  # exempt by what the file is
-        ):
-            expect(green not in dead, f"GREEN shape reported as dead: {green}")
-        checks += 1
-        # The join reader, on its own terms: it claims a literal crate segment
-        # and nothing else. A derived one cannot go stale, and claiming it would
-        # report every glob-driven walk in the tree as a path.
-        expect(
-            _segmented_candidates('base / "crates" / "ocx_util" / "src" / "x.rs"')
-            == {"crates/ocx_util/src/x.rs"},
-            "the join reader does not rebuild a literal crate segment",
-        )
-        expect(
-            _segmented_candidates('base / "crates" / name / "src"') == set(),
-            "the join reader claimed a path whose crate comes from a variable",
-        )
-        checks += 1
-
-    # The reader floor, shown reachable: an empty repository must refuse rather
-    # than report a clean tree.
-    with tempfile.TemporaryDirectory() as td:
-        empty = Path(td)
-        subprocess.run(["git", "-C", str(empty), "init", "-q"], check=True)
-        _, read = sweep(empty)
-        expect(read == 0, f"the empty tree read {read} files")
-        expect(read < MIN_FILES_READ, "the floor cannot fire on an empty tree")
-    checks += 1
-
-    # The verdict, on a swap a count cannot see. One tolerated survivor fixed,
-    # one new literal arrived: the total is unchanged, and that was the whole
-    # defect — so the case is built at exactly equal cardinality.
-    one_out = next(iter(sorted(BASELINE_DEAD)))
-    swapped = (set(BASELINE_DEAD) - {one_out}) | {"crates/ocx_util/src/arrived.rs"}
-    expect(len(swapped) == len(BASELINE_DEAD), "the swap case must not change the count")
-    lines = verdict(swapped)
-    expect(len(lines) == 2, f"a swap must red on BOTH directions, got {len(lines)}: {lines}")
-    expect(
-        any("crates/ocx_util/src/arrived.rs" in line for line in lines),
-        "the arrival is not named in the verdict",
-    )
-    expect(any(one_out in line for line in lines), "the departure is not named in the verdict")
-    checks += 1
-
-    expect(verdict(set(BASELINE_DEAD)) == [], "the baseline itself must be green")
-    expect(
-        len(verdict(set(BASELINE_DEAD) | {"crates/ocx_x/src/new.rs"})) == 1,
-        "an arrival alone must red exactly once",
-    )
-    expect(len(verdict(set(BASELINE_DEAD) - {one_out})) == 1, "a departure alone must red once")
-    checks += 1
-
-    print(f"dead-path sweep self-test: {checks} checks passed")
-    return 0
-
-
-def expect(condition: bool, message: str) -> None:
-    if not condition:
-        raise SystemExit(f"dead-path sweep self-test: {message}")
-
-
 def verdict(dead: set[str]) -> list[str]:
     """Both directions the baseline can be wrong, as lines to print on stderr.
 
@@ -400,11 +254,7 @@ def verdict(dead: set[str]) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--count", action="store_true", help="print only the count")
-    parser.add_argument("--self-test", action="store_true", help="show the sweep red and green")
     args = parser.parse_args()
-
-    if args.self_test:
-        return self_test()
 
     dead, read = sweep()
 

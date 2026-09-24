@@ -5,7 +5,6 @@
 
     scripts/bazel_ignore_check.py [--bazel bazel]
     scripts/bazel_ignore_check.py --buildfiles FILE   # judge a captured query
-    scripts/bazel_ignore_check.py --self-test
 
 **Why this exists as its own gate.** C-006 declares the check in as many words —
 *"`bazel query 'buildfiles(//...)'` must not list any ignored directory"* — and
@@ -44,8 +43,9 @@ workspace and `.bazelignore` says nothing about them.
 so `.bazelrc`'s `build --remote_cache=` line does not apply to it. No action is
 executed and no result is fetched or uploaded.
 
-Every mutation in `--self-test` is proven to have landed before its result is
-trusted. Fixtures are the live query's own bytes, mutated in memory; the tracked
+Its proofs run as pytest, from `scripts/tests/test_bazel_ignore_check.py`. Every
+mutation in them is proven to have landed before its result is trusted.
+Fixtures are the live query's own bytes, mutated in memory; the tracked
 `.bazelignore` is never written to, and nothing is restored with
 `git checkout --`, which restores from the index.
 """
@@ -56,7 +56,7 @@ import argparse
 import subprocess
 from pathlib import Path
 
-from bazel_gate_proofs import CRATE_PACKAGES, REPO_ROOT, Finding, codes, report
+from bazel_gate_proofs import CRATE_PACKAGES, REPO_ROOT, Finding, report
 
 BAZELIGNORE = REPO_ROOT / ".bazelignore"
 
@@ -226,131 +226,10 @@ def run_check(*, bazel: str, buildfiles: Path | None = None) -> tuple[list[Findi
     return findings, len(paths), len(entries)
 
 
-# ---------------------------------------------------------------------------
-# Self-test.
-# ---------------------------------------------------------------------------
-
-
-def expect(condition: bool, problem: str) -> None:
-    """A loud exit — a bare `assert` vanishes under `python3 -O`."""
-    if not condition:
-        raise SystemExit(f"bazel ignore check self-test: {problem}")
-
-
-def self_test(bazel: str) -> int:
-    """Every finding red and green, on the live query's own bytes."""
-    checks = 0
-
-    entries = read_entries(BAZELIGNORE.read_text(encoding="utf-8"))
-    expect(
-        len(entries) >= IGNORE_ENTRY_FLOOR,
-        f"{BAZELIGNORE} lists {len(entries)} directories, below the declared floor "
-        f"{IGNORE_ENTRY_FLOOR}",
-    )
-    expect(
-        all(not entry.startswith("/") and "*" not in entry for entry in entries),
-        f"an entry is absolute or a glob — `.bazelignore` takes workspace-relative "
-        f"directory paths only: {entries}",
-    )
-
-    stdout, rc, stderr = run_query(bazel)
-    expect(
-        rc == 0,
-        f"`bazel query 'buildfiles(//...)'` exited {rc}. This gate's subject is the live "
-        "graph, so a self-test that greened without reading it would be the vacuous green "
-        "this plan exists to prevent. stderr: "
-        + " | ".join(stderr.strip().splitlines()[-4:]),
-    )
-    live = workspace_paths(stdout)
-    expect(len(live) >= BUILDFILES_FLOOR, f"the live query read {len(live)} buildfiles")
-
-    green = ignore_findings(paths=live, entries=entries)
-    expect(green == [], f"the live graph must be silent, got {[f.message for f in green]}")
-    print(
-        f"C-006 GREEN: {len(live)} buildfiles in //..., none under any of the {len(entries)} "
-        f"directories {BAZELIGNORE.name} lists"
-    )
-    checks += 1
-
-    # --- red 1: a package appears under an ignored directory.
-    planted = f"{entries[0]}/probe/BUILD.bazel"
-    mutated = [*live, planted]
-    expect(planted not in live, "the planted path is already in the live answer")
-    findings = ignore_findings(paths=mutated, entries=entries)
-    expect(codes(findings) == ["ignore-violated"], f"got {codes(findings)}")
-    expect(planted in findings[0].message, "the finding does not name the path")
-    print(f"C-006 RED  : {findings[0].message}")
-    checks += 1
-
-    # --- red 2: the directory ITSELF, with no package under it.
-    findings = ignore_findings(paths=[*live, f"{entries[0]}/BUILD.bazel"], entries=entries)
-    expect(codes(findings) == ["ignore-violated"], f"got {codes(findings)}")
-    checks += 1
-
-    # --- the control: a prefix that is not a path boundary must NOT fire.
-    sibling = f"{entries[0]}s/probe/BUILD.bazel"
-    findings = ignore_findings(paths=[*live, sibling], entries=entries)
-    expect(
-        findings == [],
-        f"{sibling!r} shares a string prefix with {entries[0]!r} and is a different "
-        f"directory — a substring test would call it a violation, got {codes(findings)}",
-    )
-    print(
-        f"C-006 CONTROL: {sibling} is silent — the match is on a path boundary, so a "
-        f"substring reader's false positive is refused"
-    )
-    checks += 1
-
-    # --- red 3: the reader stopped. A zero-match query exits 0.
-    findings = ignore_findings(paths=[], entries=entries)
-    expect(codes(findings) == ["ignore-reader-floor"], f"got {codes(findings)}")
-    print(f"C-006 RED  : {findings[0].message}")
-    checks += 1
-
-    # --- red 4: an emptied ignore list — the sweep has nothing to sweep for.
-    findings = ignore_findings(paths=live, entries=[])
-    expect(codes(findings) == ["ignore-entries-floor"], f"got {codes(findings)}")
-    print(f"C-006 RED  : {findings[0].message}")
-    checks += 1
-
-    # --- red 5: the entry that `bazel build --nobuild //...` does not catch.
-    #     `.bazelignore`'s own comment measures it: forty non-fatal ERROR lines.
-    manual = "test/manual/.ocx-home"
-    expect(manual in entries, f"{manual} is no longer in {BAZELIGNORE.name}")
-    findings = ignore_findings(paths=[*live, f"{manual}/BUILD.bazel"], entries=entries)
-    expect(codes(findings) == ["ignore-violated"], f"got {codes(findings)}")
-    print(f"C-006 RED  : {findings[0].message}")
-    checks += 1
-
-    # And dropping the entry does not escape the gate the other way: the entry
-    # floor is what catches a deletion, which is the regression `.bazelignore`'s
-    # own comment says `bazel build --nobuild //...` reports as non-fatal noise.
-    thinned = [entry for entry in entries if entry != manual]
-    findings = ignore_findings(paths=[*live, f"{manual}/BUILD.bazel"], entries=thinned)
-    expect(
-        codes(findings) == ["ignore-entries-floor"],
-        f"deleting an entry must red on the entry floor, got {codes(findings)}",
-    )
-    print(f"C-006 RED  : dropping {manual!r} from the list — {findings[0].message}")
-    checks += 1
-
-    expect(
-        read_entries(BAZELIGNORE.read_text(encoding="utf-8")) == entries,
-        "the self-test modified .bazelignore in place — every mutation here is in memory",
-    )
-    print(
-        f"bazel ignore check self-test: {checks} checks passed — C-006's declared red state "
-        "(a buildfile under an ignored directory), both reader floors, and the path-boundary "
-        "control, all against the live `buildfiles(//...)` answer"
-    )
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--self-test", action="store_true", help="every finding red and green")
     parser.add_argument(
         "--bazel",
         default="bazel",
@@ -364,9 +243,6 @@ def main() -> int:
         help="judge a captured `bazel query 'buildfiles(//...)'` instead of running one",
     )
     args = parser.parse_args()
-
-    if args.self_test:
-        return self_test(args.bazel)
 
     findings, read, entries = run_check(bazel=args.bazel, buildfiles=args.buildfiles)
     # Said out loud on every run: a green is only as wide as what ran.

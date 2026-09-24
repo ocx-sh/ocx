@@ -7,7 +7,6 @@
     scripts/scoped_gate.py --mark full|scoped [--crates <crate>...]
     scripts/scoped_gate.py --mark-precheck                 # task verify's first step (C-017)
     scripts/scoped_gate.py --record-escapes --junit-dir <dir>  # bazel:test:accept, failed, merging
-    scripts/scoped_gate.py --self-test
 
 The gate (plan_crate_split_workspace.md C-019, C-020, C-021):
 
@@ -64,11 +63,12 @@ lives is `mark_file()`, and it is the reader's `.claude/`, not this script's —
 see there for why an agent worktree made C-021 void without anything looking
 wrong, and see `worktree_id` for why one shared home needs the writer named.
 
-Stdlib only. `--self-test` drives the path→crate map, the routing table and
+Stdlib only. Its proofs (`_self_test_cases`) run as pytest, from
+`scripts/tests/test_scoped_gate.py`: the path→crate map, the routing table and
 the hub predicate over a fixture metadata document, the mark round-trip over a
 throwaway repository, `--mark`'s choice of file from a real linked worktree of
-a throwaway project, and shows that a failing `cargo metadata` is a loud exit
-— never an empty crate set.
+a throwaway project, and a failing `cargo metadata` is a loud exit — never an
+empty crate set.
 """
 
 from __future__ import annotations
@@ -171,7 +171,7 @@ HUB_RDEPS = 4
 # The `[crates]` rows of test/scoped_rows.toml that read `escalate`: their
 # acceptance subset is the whole suite, so the gate escalates before spending
 # the per-crate steps. Restated here for the `verify:scoped` summary's reader;
-# `--self-test` and `--check-coverage` both hold it equal to the table. `ocx`
+# Its tests and `--check-coverage` both hold it equal to the table. `ocx`
 # left at WP-06 (C-014): its command files route by `command` markers now.
 # `ocx_python` has no acceptance subset: `ocx` does not link it.
 TABLE_ESCALATES = frozenset({"ocx_test_support", "ocx_python"})
@@ -1294,7 +1294,7 @@ def check_coverage(root: Path) -> int:
 
 
 # ---------------------------------------------------------------------------
-# --self-test
+# Proof cases, driven by scripts/tests/test_scoped_gate.py
 # ---------------------------------------------------------------------------
 
 
@@ -2849,26 +2849,6 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
     ]
 
 
-def self_test() -> int:
-    scratch_root = REPO_ROOT / ".tmp"
-    scratch_root.mkdir(exist_ok=True)
-    failures = 0
-    with tempfile.TemporaryDirectory(prefix="scoped-gate-", dir=scratch_root) as tmp:
-        cases = _self_test_cases(Path(tmp))
-        for name, thunk in cases:
-            try:
-                problem = thunk()
-            except (SystemExit, NotImplementedError) as stop:
-                problem = f"{type(stop).__name__}: {stop}"
-            status = "ok  " if problem is None else "FAIL"
-            failures += problem is not None
-            print(f"{status} {name}")
-            if problem is not None:
-                print(f"       {problem}")
-    print(f"self-test: {len(cases) - failures}/{len(cases)} rules hold ({failures} wrong)")
-    return 1 if failures else 0
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -2881,7 +2861,6 @@ def main(argv: list[str]) -> int:
     mode.add_argument(
         "--mark", choices=("full", "scoped"), help="write the verify mark at this scope"
     )
-    mode.add_argument("--self-test", action="store_true", help="show every rule red/green")
     mode.add_argument(
         "--check-coverage",
         action="store_true",
@@ -2911,8 +2890,6 @@ def main(argv: list[str]) -> int:
         help="--mark scoped: append this run to the scoped-run log (verify:scoped only)",
     )
     ns = parser.parse_args(argv)
-    if ns.self_test:
-        return self_test()
     if ns.check_coverage:
         return check_coverage(REPO_ROOT)
     if ns.mark_precheck:
