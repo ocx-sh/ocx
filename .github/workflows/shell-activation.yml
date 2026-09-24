@@ -125,8 +125,13 @@ jobs:
           path: ocx-bin
       - name: Make binaries executable
         run: chmod +x ocx-bin/*
-      - name: Setup Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Toolchain from ocx.toml + ocx.lock (uv, go-task, CPython), as in
+          # verify-basic.yml; the object store stays uncached, as there.
+          cache: false
       - name: Run all-shell activation matrix
         run: |
           task test:shells \
@@ -137,9 +142,6 @@ jobs:
       # Debian leg only: one measurement per platform is the contract, and both
       # legs are the same x86_64 runner running the same musl build of the same
       # commit, so a second run would buy noise rather than coverage.
-      - name: Install uv
-        if: matrix.image == 'debian-shells'
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: NFR latency gate (C-044)
         if: matrix.image == 'debian-shells'
         run: |

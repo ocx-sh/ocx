@@ -48,8 +48,13 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Setup Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Toolchain from ocx.toml + ocx.lock (uv, go-task, CPython), as in
+          # verify-basic.yml; the object store stays uncached, as there.
+          cache: false
       - name: Build ocx binary
         run: cargo build --release -p ocx --locked
       # `task schema` generates every published schema (metadata, config,
@@ -91,10 +96,13 @@ jobs:
           path: test/bin
       - name: Make Binary Executable
         run: chmod +x test/bin/ocx
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - name: Setup Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Toolchain from ocx.toml + ocx.lock (uv, go-task, CPython), as in
+          # verify-basic.yml; the object store stays uncached, as there.
+          cache: false
       - name: Generate recordings
         run: task recordings:build
       - name: Upload Recordings
@@ -114,8 +122,13 @@ jobs:
           submodules: true
       - name: Install Rust Toolchain
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Toolchain from ocx.toml + ocx.lock (uv, go-task, CPython), as in
+          # verify-basic.yml; the object store stays uncached, as there.
+          cache: false
       - name: Generate SBOM and dependencies page
         run: |
           cargo install cargo-cyclonedx --locked
@@ -158,10 +171,13 @@ jobs:
           path: test/bin
       - name: Make Binary Executable
         run: chmod +x test/bin/ocx
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - name: Setup Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Toolchain from ocx.toml + ocx.lock (uv, go-task, CPython), as in
+          # verify-basic.yml; the object store stays uncached, as there.
+          cache: false
       # Registry-backed drift gate for ALL `# doc:` scripts (not just
       # cast:true).  Deploy-CI only — the ADR cost-lever keeps this out of
       # the per-commit `task verify`; gating publish on it here closes the
@@ -181,10 +197,13 @@ jobs:
         with:
           fetch-depth: 0
           submodules: true
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - name: Setup Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Toolchain from ocx.toml + ocx.lock (uv, go-task, CPython), as in
+          # verify-basic.yml; the object store stays uncached, as there.
+          cache: false
       - name: Generate Doc Scripts
         run: task website:scripts:publish
       - name: Upload Doc Scripts

@@ -66,11 +66,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: true
-      - name: Install Task
-        uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2.0.0
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
-          version: 3.x
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '0.6.2'
+          # Toolchain from ocx.toml + ocx.lock (uv, go-task, CPython), as in
+          # verify-basic.yml; the object store stays uncached, as there.
+          cache: false
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
@@ -116,11 +118,13 @@ jobs:
           submodules: true
           # The drift check below walks `git log` per path.
           fetch-depth: 0
-      - name: Install Task
-        uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2.0.0
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
-          version: 3.x
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          version: '0.6.2'
+          # Toolchain from ocx.toml + ocx.lock (uv, go-task, CPython), as in
+          # verify-basic.yml; the object store stays uncached, as there.
+          cache: false
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
@@ -322,8 +326,13 @@ jobs:
           submodules: true
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Toolchain from ocx.toml + ocx.lock (uv, go-task, CPython), as in
+          # verify-basic.yml; the object store stays uncached, as there.
+          cache: false
 
       # Native windows-latest build (debug — acceptance, not a published
       # binary; subsystem-ci.md "no --release for tests"). This is the shim
