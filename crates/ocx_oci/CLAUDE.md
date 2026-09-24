@@ -8,16 +8,32 @@ what this crate owns; this file states only what a change here must not break.
 `adr_crate_split_workspace.md`'s AI-config layout ruling names this crate as
 one of four needing a `CLAUDE.md`, for exactly one reason: "the OCX-specific
 knowledge that remains here is the default-registry constant and the
-`ocx.sh/ocx/cli` self-image in `identifier`; add no *other* OCX domain type."
+`ocx.sh/ocx/cli` self-image in `package_ref`; add no *other* OCX domain type."
 An earlier draft's blanket "no OCX domain type here" was contradicted by
-`identifier` itself — `DEFAULT_REGISTRY`/`OCX_SH_REGISTRY` and
+`package_ref` itself — `DEFAULT_REGISTRY`/`OCX_SH_REGISTRY` and
 `ocx_cli_identifier()` (the `ocx.sh/ocx/cli` self-image, overridable only
 through the `__OCX_SELF_IMAGE` test seam, loopback-only, defense-in-depth
 asserted) are a deliberate, narrow exception to this crate's otherwise
 distribution-spec-generic surface. Do not widen it: no other module here may
 hardcode an OCX-specific registry, repository, or package name. If a second
 one shows up, that is a design question for the next ADR, not a quiet second
-constant beside `identifier`'s.
+constant beside `package_ref`'s.
+
+## `package_ref` vs `oci_identifier`: two types, no conversion (ocx#504)
+
+`ocx_oci::PackageRef` (`package_ref.rs`) is the logical package identity a
+user, lock, or package metadata spells; it is never dialled. `ocx_oci::
+OciIdentifier` (`oci_identifier.rs`) is the physical, dial-able reference
+`Client` accepts. There is no `From`/`Into` between them in either direction —
+an `OciIdentifier` is minted only by `ocx_index::Index::route`/
+`route_for_dial`/`route_local`/`route_to_materialize`, or by
+`OciIdentifier::parse_repository_pointer`/`parse_target`/`as_target`/
+`passthrough`/`from_parts` within this crate. `oci_identifier_mint_ratchet`
+(`crates/ocx_test_support/tests/fixtures/oci_identifier_mint_allowlist.txt`)
+enumerates every permitted mint site structurally, and five `compile_fail`
+doctests in `lib.rs` prove the refusal at compile time. Do not add a
+conversion between the two types, and do not add a new `OciIdentifier`
+constructor without adding it to the allowlist in the same change.
 
 ## `OciTransport` is sealed — do not "fix" the compile error
 

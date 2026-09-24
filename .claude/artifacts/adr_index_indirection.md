@@ -430,6 +430,40 @@ relitigate**.
 sanctioned path if a plain-HTTP *registry* ever needs first-class config support beyond today's
 `OCX_INSECURE_REGISTRIES` allowlist — not a scheme change on `repository`.
 
+### C2 addendum (2026-09-24) — Layer 2 is a type, not a convention
+
+C2 confined the physical rewrite to one seam by discipline (`transport_reference` never round-trips into
+storage). `ocx_oci` now enforces the same boundary at the type level: `ocx_oci::OciIdentifier` is the
+**only** type `oci::Client` accepts, and it is minted **only** by
+
+- `Index::route` / `route_for_dial` / `route_local` / `route_to_materialize` (`ocx_index::Index`, each
+  taking a `&PackageRef` and returning `OciIdentifier`),
+- `OciIdentifier::parse_repository_pointer` (parses a root document's `repository` field — the transport
+  string this ADR's C2 already named as the one legitimate physical-rewrite input), and
+- `OciIdentifier::parse_target` / `as_target` / `passthrough` / `from_parts` (the plain-OCI-registry path,
+  where no index sits between the caller and the wire reference).
+
+`ocx_oci::PackageRef` — the logical identity this whole ADR is about (registry/repository[:tag][@digest]
+as a user, lock, or package metadata spells it) — has **no conversion to `OciIdentifier` in either
+direction** (ocx#504). A caller cannot construct a dial-able reference from a `PackageRef` by any route
+that bypasses `Index::route*` or the two parse entry points above; the compiler refuses it. This is
+enforced two ways:
+
+- `oci_identifier_mint_ratchet` (`crates/ocx_test_support/tests/fixtures/oci_identifier_mint_allowlist.txt`) —
+  a structural test enumerating every function permitted to construct an `OciIdentifier`; a new mint site
+  outside the allowlist fails the ratchet.
+- Five `compile_fail` doctests in `crates/ocx_oci/src/lib.rs` (E0277/E0308) proving the refusal at
+  compile time — not merely that no code path happens to do it today, but that no code path *can*.
+
+**Consequence for routing.** A routing call (`Index::route*`) never falls back to a logical host for a
+namespace the index owns — a miss is `NotInIndex`, not a silent physical-identity guess. The index is the
+only bridge between the two types; there is no side door.
+
+**Follow-up, explicitly out of scope here.** `oci://` package references (a user spelling a physical
+location directly, bypassing the index) are not designed by this ADR. If they land, they mint an
+`OciIdentifier` through a new, explicitly-allowlisted entry point — never by relaxing the `PackageRef`↔
+`OciIdentifier` boundary this addendum states.
+
 ---
 
 ## Decision D — Lock unit doctrine + snapshot exemption (D-A)
