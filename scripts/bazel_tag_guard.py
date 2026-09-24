@@ -194,13 +194,16 @@ from __future__ import annotations
 
 import argparse
 import ast
+import collections
 import dataclasses
 import fnmatch
 import functools
 import json
 import posixpath
 import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 
 from bazel_accept_proofs import (
@@ -688,19 +691,49 @@ def input_closure(records: list[RuleRecord]) -> dict[str, frozenset[str]]:
     """
     by_label = {record.label: record for record in records}
     closure: dict[str, frozenset[str]] = {}
-    for record in records:
-        seen: set[str] = set()
-        queue = list(record.inputs)
-        while queue:
-            label = queue.pop()
-            if label in seen:
-                continue
-            seen.add(label)
-            nested = by_label.get(label)
-            if nested is not None:
-                queue.extend(nested.inputs)
-        closure[record.label] = frozenset(seen)
+    visiting: set[str] = set()
+
+    def reach(label: str) -> frozenset[str]:
+        # A rule's closure is its inputs plus each input rule's closure, so a
+        # shared group (`:suite_inputs`, 400-odd files) is expanded once, not
+        # once per target that names it.
+        if label in closure:
+            return closure[label]
+        if label in visiting:
+            raise _Cycle
+        visiting.add(label)
+        seen = set(by_label[label].inputs)
+        for dep in by_label[label].inputs:
+            if dep in by_label:
+                seen |= reach(dep)
+        visiting.discard(label)
+        closure[label] = frozenset(seen)
+        return closure[label]
+
+    try:
+        for record in records:
+            reach(record.label)
+    except _Cycle:
+        # Bazel refuses a cycle, so this is a hand-built capture. Fall back to
+        # one breadth-first walk per record, which a cycle cannot hang.
+        closure = {}
+        for record in records:
+            seen_bfs: set[str] = set()
+            queue = list(record.inputs)
+            while queue:
+                label = queue.pop()
+                if label in seen_bfs:
+                    continue
+                seen_bfs.add(label)
+                nested = by_label.get(label)
+                if nested is not None:
+                    queue.extend(nested.inputs)
+            closure[record.label] = frozenset(seen_bfs)
     return closure
+
+
+class _Cycle(Exception):
+    """`input_closure` met a cycle and must take the breadth-first path."""
 
 
 # ---------------------------------------------------------------------------
@@ -745,6 +778,11 @@ def module_shaped(pattern: str) -> bool:
 
 
 def sweeping_globs(source: str) -> list[str]:
+    return list(_sweeping_globs(source))
+
+
+@functools.cache
+def _sweeping_globs(source: str) -> tuple[str, ...]:
     """Every module-shaped `glob`/`rglob` pattern literal in one module's source.
 
     `ast`, not a regex: the subject is a call with a string literal argument,
@@ -753,7 +791,7 @@ def sweeping_globs(source: str) -> list[str]:
     every sibling module as inputs it never reads.
     """
     patterns: list[str] = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(_parse(source)):
         if not isinstance(node, ast.Call):
             continue
         function = node.func
@@ -766,7 +804,7 @@ def sweeping_globs(source: str) -> list[str]:
             continue
         if module_shaped(first.value):
             patterns.append(first.value)
-    return sorted(set(patterns))
+    return tuple(sorted(set(patterns)))
 
 
 def sweep_requirements(sources: dict[str, str]) -> dict[str, frozenset[str]]:
@@ -861,6 +899,14 @@ virtualenv, bytecode, the lint tier (run uncached by its own task) and bench
 output."""
 
 
+@functools.cache
+def _parse(source: str) -> ast.Module:
+    """One parse per distinct source text for the whole run. Every per-file
+    analysis below reads the same tree, and none mutates it. A planted source is
+    a different text, so it is parsed afresh; nothing outlives the process."""
+    return ast.parse(source)
+
+
 def _normal(path: str) -> str:
     """Repo-relative POSIX form; the root is `""`, above it starts with `..`."""
     if not path:
@@ -903,33 +949,48 @@ class _PathEvaluator:
         # the root in one function is not the `candidate` another binds onto
         # `tmp_path`. Comprehensions share their function's scope — a
         # conservative merge, never a leak across functions.
-        self.parent_of = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
         self.names: dict[tuple[int, str], str] = {(0, _ROOT_NAME): ""}
         self.functions: dict[str, str] = {}
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom):
+        # One pass over the tree yields everything the fixpoint below and
+        # `named_repo_paths` need: each node's parent, each node's enclosing
+        # scope chain (innermost first, the module last), and the nodes that
+        # can bind. Walking the parent chain per lookup and re-walking the
+        # whole tree per fixpoint round made this quadratic in file size.
+        self.parent_of: dict[int, ast.AST] = {}
+        self.scope_of: dict[int, tuple[int, ...]] = {}
+        self.binders: list[ast.AST] = []
+        # BFS, so `binders` keeps `ast.walk`'s order: the first binding of a
+        # name wins, and which one is first must not change.
+        queue: collections.deque[tuple[ast.AST, tuple[int, ...]]] = collections.deque([(tree, (0,))])
+        while queue:
+            node, chain = queue.popleft()
+            self.scope_of[id(node)] = chain
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.For, ast.comprehension, ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.binders.append(node)
+            elif isinstance(node, ast.ImportFrom):
                 for alias in node.names:
                     if alias.name == _ROOT_NAME:
-                        self.names[(self._scopes(node)[0], alias.asname or alias.name)] = ""
+                        self.names[(chain[0], alias.asname or alias.name)] = ""
+            inner = (id(node), *chain) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) else chain
+            for child in ast.iter_child_nodes(node):
+                self.parent_of[id(child)] = node
+                queue.append((child, inner))
+        self._memo: dict[int, str | None] | None = None
         # Bindings can chain (`R = parents[2]`, then `D = R / "test"`), so the
         # scan repeats until nothing new binds. Bounded by the binding count.
         for _ in range(64):
-            if not self._bind(tree):
+            if not self._bind():
                 break
+        # Bindings are final from here on, so an expression's value is too.
+        self._memo = {}
 
-    def _scopes(self, node: ast.AST) -> list[int]:
+    def _scopes(self, node: ast.AST) -> tuple[int, ...]:
         """The enclosing scopes of `node`, innermost first, the module last."""
-        scopes: list[int] = []
-        current = self.parent_of.get(id(node))
-        while current is not None:
-            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                scopes.append(id(current))
-            current = self.parent_of.get(id(current))
-        return [*scopes, 0]
+        return self.scope_of.get(id(node), (0,))
 
-    def _bind(self, tree: ast.Module) -> bool:
+    def _bind(self) -> bool:
         grew = False
-        for node in ast.walk(tree):
+        for node in self.binders:
             targets: list[ast.expr] = []
             value: str | None = None
             if isinstance(node, ast.Assign):
@@ -961,6 +1022,14 @@ class _PathEvaluator:
         return grew
 
     def eval(self, node: ast.expr) -> str | None:
+        if self._memo is None:
+            return self._eval(node)
+        key = id(node)
+        if key not in self._memo:
+            self._memo[key] = self._eval(node)
+        return self._memo[key]
+
+    def _eval(self, node: ast.expr) -> str | None:
         match node:
             case ast.Name(id="__file__"):
                 return self.file
@@ -1033,6 +1102,11 @@ class _PathEvaluator:
 
 
 def named_repo_paths(source: str, path: str) -> list[str]:
+    return list(_named_repo_paths(source, path))
+
+
+@functools.cache
+def _named_repo_paths(source: str, path: str) -> tuple[str, ...]:
     """Every repo-relative path one file names through a traceable base (plan
     C-019's predicate, by AST).
 
@@ -1049,9 +1123,9 @@ def named_repo_paths(source: str, path: str) -> list[str]:
     Whether a named path is *undeclared* is the graph's question, not this
     function's: `uncached_findings` asks the target's input closure.
     """
-    tree = ast.parse(source)
+    tree = _parse(source)
     paths = _PathEvaluator(tree, path)
-    parent_of = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    parent_of = paths.parent_of
     named: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.expr) or getattr(node, "ctx", ast.Load()).__class__ is not ast.Load:
@@ -1082,10 +1156,15 @@ def named_repo_paths(source: str, path: str) -> list[str]:
         ):
             continue
         named.add(value)
-    return sorted(named)
+    return tuple(sorted(named))
 
 
 def read_helper_sources() -> dict[str, str]:
+    return dict(_read_helper_sources())
+
+
+@functools.cache
+def _read_helper_sources() -> tuple[tuple[str, str], ...]:
     """Every non-module Python file under `test/` an acceptance module can
     import, as `{repo-relative path: text}` — `src/**`, `tests/fixtures/**`,
     `bench/**`, the `conftest.py` files. Read so a helper's reads are charged to
@@ -1100,7 +1179,7 @@ def read_helper_sources() -> dict[str, str]:
         if relative.parts[0] == "tests" and len(relative.parts) == 2 and file.name.startswith("test_"):
             continue
         helpers[f"test/{relative.as_posix()}"] = file.read_text(encoding="utf-8")
-    return helpers
+    return tuple(helpers.items())
 
 
 def _dotted_names(path: str) -> set[str]:
@@ -1135,6 +1214,11 @@ def _imports(tree: ast.Module, path: str) -> set[str]:
     return names | prefixes
 
 
+@functools.cache
+def _imports_of(text: str, path: str) -> frozenset[str]:
+    return frozenset(_imports(_parse(text), path))
+
+
 def named_paths_by_module(
     sources: dict[str, str], helpers: dict[str, str] | None = None
 ) -> dict[str, list[str]]:
@@ -1155,7 +1239,6 @@ def named_paths_by_module(
     siblings = {f"test/tests/{name}": text for name, text in sources.items()}
     graph = {**helpers, **siblings}
     by_name = {name: path for path in graph for name in _dotted_names(path)}
-    trees = {path: ast.parse(text) for path, text in graph.items()}
     # The bare root is dropped for helpers, and only for helpers: the live one
     # (`tests/git_shim.py`'s `DENIED_SHIM_ROOTS`) is a containment check, and
     # a helper cannot know which of its importers ever calls the code that
@@ -1166,16 +1249,15 @@ def named_paths_by_module(
         for path, text in graph.items()
     }
     helper_edges = {
-        path: {by_name[name] for name in _imports(tree, path) if name in by_name} - {path}
-        for path, tree in trees.items()
+        path: {by_name[name] for name in _imports_of(graph[path], path) if name in by_name} - {path}
+        for path in graph
     }
     conftests = {path for path in helpers if path.endswith("conftest.py")}
     result: dict[str, list[str]] = {}
     for name, text in sorted(sources.items()):
         path = f"test/tests/{name}"
-        tree = trees[path]
         seen: set[str] = {path}
-        queue = [by_name[i] for i in _imports(tree, path) if i in by_name] + sorted(
+        queue = [by_name[i] for i in _imports_of(text, path) if i in by_name] + sorted(
             c for c in conftests if path.startswith(posixpath.dirname(c) + "/")
         )
         while queue:
@@ -1198,8 +1280,9 @@ def named_paths_by_module(
 @functools.cache
 def _named_paths_of(sources: tuple[tuple[str, str], ...]) -> dict[str, list[str]]:
     """`named_paths_by_module` over the live helpers, memoised on the module
-    texts: ~6 s a derivation, and the self-test judges the same sources dozens
-    of times. A planted source is a different key, so it is derived afresh."""
+    texts: the self-test judges the same sources dozens of times. A planted
+    source is a different key, so it is derived afresh — and then only the
+    planted file costs anything, since every per-file analysis is memoised."""
     return named_paths_by_module(dict(sources))
 
 
@@ -1221,7 +1304,17 @@ def label_path(label: str) -> str | None:
     return f"{package}/{name}" if package else name
 
 
-def declared(path: str, members: set[str], tracked: frozenset[str]) -> bool:
+@functools.cache
+def _tracked_under(path: str, tracked: frozenset[str]) -> tuple[str, ...]:
+    return tuple(file for file in tracked if file == path or file.startswith(path + "/"))
+
+
+@functools.cache
+def _closure_paths(members: frozenset[str]) -> frozenset[str]:
+    return frozenset(path for member in members if (path := label_path(member)))
+
+
+def declared(path: str, members: set[str] | frozenset[str], tracked: frozenset[str]) -> bool:
     """Is `path` — a file, or a directory the module walks — in the closure?
 
     A file is declared when it is a closure member. A directory is declared only when EVERY tracked file under it is a
@@ -1234,7 +1327,7 @@ def declared(path: str, members: set[str], tracked: frozenset[str]) -> bool:
         return False
     if path in members:
         return True
-    under = [file for file in tracked if file == path or file.startswith(path + "/")]
+    under = _tracked_under(path, tracked)
     if not under and path.startswith(AMBIENT_DIR + "/"):
         # Nothing tracked there: generated output inside the test package
         # (`bench/results/`, `.out/`, a container-only mount point). The
@@ -1268,7 +1361,7 @@ def uncached_findings(
         if name not in undeclared:
             findings.append(Finding("tag-uncached-unread", TAG_UNCACHED_UNREAD_MSG.format(label=label)))
             continue
-        members = {path for member in closure.get(label, frozenset()) if (path := label_path(member))}
+        members = _closure_paths(closure.get(label, frozenset()))
         reads = [path for path in undeclared[name] if not declared(path, members, tracked)]
         listed = name in uncached
         if reads and not listed:
@@ -1356,18 +1449,28 @@ def foreign_group_spellings(helpers: dict[str, str]) -> dict[str, list[str]]:
     group no target's slot list can carry."""
     found: dict[str, list[str]] = {}
     for path, text in sorted(helpers.items()):
-        tree = ast.parse(text)
-        spellings = [
-            ast.unparse(node)
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and _call_name(node.func) == "xdist_group"
-        ] + _stray_group_spellings(tree, set())
+        spellings = list(_group_spellings(text))
         if spellings:
             found[path] = spellings
     return found
 
 
+@functools.cache
+def _group_spellings(text: str) -> tuple[str, ...]:
+    tree = _parse(text)
+    return tuple(
+        [ast.unparse(node) for node in ast.walk(tree) if isinstance(node, ast.Call) and _call_name(node.func) == "xdist_group"]
+        + _stray_group_spellings(tree, set())
+    )
+
+
 def xdist_groups(source: str) -> tuple[set[str], list[str]]:
+    groups, unresolved = _xdist_groups(source)
+    return set(groups), list(unresolved)
+
+
+@functools.cache
+def _xdist_groups(source: str) -> tuple[frozenset[str], tuple[str, ...]]:
     """`(group names, unresolvable spellings)` one module's source names.
 
     A name is resolved when the `xdist_group(...)` argument is a string literal,
@@ -1376,7 +1479,7 @@ def xdist_groups(source: str) -> tuple[set[str], list[str]]:
     is not). Anything else is returned as unresolved and reds, and so is any
     spelling of the mark that is not a call (`_stray_group_spellings`).
     """
-    tree = ast.parse(source)
+    tree = _parse(source)
     dicts: dict[str, set[str]] = {}
     for node in tree.body:
         value = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None
@@ -1403,7 +1506,7 @@ def xdist_groups(source: str) -> tuple[set[str], list[str]]:
                 groups |= dicts[name]
             case _:
                 unresolved.append(ast.unparse(node))
-    return groups, unresolved + _stray_group_spellings(tree, calls)
+    return frozenset(groups), tuple(unresolved + _stray_group_spellings(tree, calls))
 
 
 def slot_findings(
@@ -1450,18 +1553,18 @@ def slot_findings(
     return findings
 
 
-def invisible_read_hints(text: str, moved_out: set[str]) -> list[str]:
+def invisible_read_hints(text: str, moved_out: set[str] | frozenset[str]) -> list[str]:
+    return list(_invisible_read_hints(text, frozenset(moved_out)))
+
+
+@functools.cache
+def _invisible_read_hints(text: str, moved_out: frozenset[str]) -> tuple[str, ...]:
     """What in one file's source the path derivation cannot follow: a `task`
     launch (the recipe's reads are go-task's), or a string literal naming a path
     under one of `moved_out`, the `test/` directories `:suite_inputs` does not
     carry. Docstrings are prose, not reads, and are skipped."""
-    tree = ast.parse(text)
-    docs = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Expr)}
     hints: list[str] = []
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)) or id(node) in docs:
-            continue
-        value = node.value
+    for value in _string_literals(text):
         segments = [part for part in value.split("/") if part not in ("", ".", "..")]
         if segments[:1] == [AMBIENT_DIR]:
             segments = segments[1:]
@@ -1469,7 +1572,19 @@ def invisible_read_hints(text: str, moved_out: set[str]) -> list[str]:
             hints.append(f"launches `task` ({value!r})")
         elif len(segments) >= 2 and segments[0] in moved_out:
             hints.append(f"names {value!r}")
-    return hints
+    return tuple(hints)
+
+
+@functools.cache
+def _string_literals(text: str) -> tuple[str, ...]:
+    """Every string literal in one file's source, docstrings skipped, in walk order."""
+    tree = _parse(text)
+    docs = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Expr)}
+    return tuple(
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs
+    )
 
 
 def hand_read_findings(
@@ -3403,8 +3518,15 @@ def prove_counts() -> int:
     return 1
 
 
+SELF_TEST_BUDGET_S = 20.0
+"""Wall-clock ceiling for `--self-test`. It ran past 300 s once, because every
+scenario re-derived the whole tree; each file is now parsed and analysed once per
+run, and this red is what keeps it that way."""
+
+
 def self_test(bazel: str) -> int:
     """All three modes, red and green, on the bytes the live graph produced."""
+    started = time.monotonic()
     scratch = REPO_ROOT / ".tmp"
     scratch.mkdir(exist_ok=True)
     checks = 0
@@ -3445,6 +3567,15 @@ def self_test(bazel: str) -> int:
         "  wired into taskfiles/scripts.taskfile.yml `self-test:` (WP-17): "
         "`- python3 scripts/bazel_tag_guard.py --self-test`"
     )
+    elapsed = time.monotonic() - started
+    if elapsed > SELF_TEST_BUDGET_S:
+        print(
+            f"bazel tag guard self-test: took {elapsed:.1f} s, over its {SELF_TEST_BUDGET_S:.0f} s budget —"
+            " a scenario is re-deriving what one pass already computed (profile it:"
+            " `python3 -m cProfile -s cumulative scripts/bazel_tag_guard.py --self-test`)",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
