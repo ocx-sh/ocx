@@ -93,7 +93,7 @@ pub struct Physical {
     pub port: u16,
     /// The physical `<registry>/<repository>` identifier the observe loop fetches
     /// tags against.
-    pub identifier: ocx_oci::Identifier,
+    pub identifier: ocx_oci::OciIdentifier,
     /// The verbatim `oci://…` pointer, echoed in observe error messages.
     pub display: String,
 }
@@ -294,15 +294,16 @@ fn dedup_in_order(tags: &[String]) -> Vec<String> {
 /// it out of, so lifting the field is the caller's one line (announce raises
 /// [`AnnounceError::RootMissingField`] there).
 pub fn extract_physical(pointer: &str) -> Result<Physical, AnnounceError> {
-    let (registry, path) =
-        ocx_index::parse_physical_repository(pointer).map_err(|_| AnnounceError::MalformedPhysicalRepository {
+    let identifier = ocx_oci::OciIdentifier::parse_repository_pointer(pointer).map_err(|_| {
+        AnnounceError::MalformedPhysicalRepository {
             value: pointer.to_string(),
-        })?;
-    let (host, port) = ocx_oci::ssrf::split_host_port(&registry);
+        }
+    })?;
+    let (host, port) = ocx_oci::ssrf::split_host_port(identifier.registry());
     Ok(Physical {
         host: host.to_string(),
         port,
-        identifier: ocx_oci::Identifier::new_registry(path, registry.clone()),
+        identifier,
         display: pointer.to_string(),
     })
 }

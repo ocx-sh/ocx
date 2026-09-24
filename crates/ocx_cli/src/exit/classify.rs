@@ -893,7 +893,7 @@ mod tests {
     /// (78) — a required snapshot that never synced, identical online/offline.
     #[test]
     fn managed_config_snapshot_required_maps_to_config_error() {
-        let identifier = ocx_oci::Identifier::new_registry("ocx-config", "corp.example.com");
+        let identifier = ocx_oci::OciIdentifier::from_parts("ocx-config", "corp.example.com");
         let err = ocx_config::managed::ManagedConfigError::SnapshotRequired {
             effective_source: identifier,
         };
@@ -970,7 +970,7 @@ mod tests {
     /// 2026-07-05: this used to be a silent `NotConfigured` success.
     #[test]
     fn managed_config_update_error_source_not_found_maps_to_not_found() {
-        let identifier = ocx_oci::Identifier::new_registry("ocx-config", "corp.example.com");
+        let identifier = ocx_oci::OciIdentifier::from_parts("ocx-config", "corp.example.com");
         let err = ocx_config::managed_config::ManagedConfigUpdateError::SourceNotFound {
             effective_source: identifier,
         };

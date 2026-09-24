@@ -513,3 +513,30 @@ def test_j14_the_removed_announce_tags_flag_is_a_usage_error(
     accepted = _repair(ocx, "--tags-file", str(tags_path), published_package.repo)
     assert accepted.returncode == 0
     assert tags_path.read_text() == "", "a healthy package has no tag to hand the announce hop"
+
+
+def test_j15_a_logical_name_the_index_does_not_hold_is_not_in_index(ocx: OcxRunner, unique_repo: str) -> None:
+    """`check` and `repair` route a logical name through the index before
+    dialling it. When the authoritative index holds no root for the name,
+    both stop with `NotInIndex` (exit 79) naming that index. They never fall
+    through to the literal `ocx.sh/...` repository, a different host that
+    only shares the spelling (ocx#504).
+
+    The message is what tells the two outcomes apart: a fall-through read of
+    the literal host can also end in 79, but only `NotInIndex` names the
+    index base URL.
+    """
+    with _index_server() as server:
+        _configure_index_source(ocx, server)
+        static_index.write_config(server.root)
+        logical_id = f"ocx.sh/{unique_repo}/unannounced:latest"
+
+        for run in (_check, _repair):
+            refused = run(ocx, logical_id, check=False)
+            assert refused.returncode == 79, (
+                f"{run.__name__}: expected NotInIndex (79), got {refused.returncode}\nstderr:\n{refused.stderr}"
+            )
+            for expected in ("is not in the index at", server.base_url):
+                assert expected in refused.stderr, (
+                    f"{run.__name__}: the refusal must name the authoritative index:\n{refused.stderr}"
+                )

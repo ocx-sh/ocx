@@ -25,7 +25,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use super::client::error::{ClientError, TraversalLimit};
 use super::client::hashing_reader::HashingAsyncReader;
 use super::client::{ReadAddressing, no_progress};
-use super::{Client, Digest, Identifier};
+use super::{Client, Digest, OciIdentifier};
 
 /// Concurrent blob transfers per leaf.
 ///
@@ -176,8 +176,8 @@ pub struct SidecarCopy {
 /// error from the underlying registry calls.
 pub async fn copy_leaf(
     client: &Client,
-    source: &Identifier,
-    target: &Identifier,
+    source: &OciIdentifier,
+    target: &OciIdentifier,
     leaf_digest: &Digest,
     include_referrers: bool,
     scratch_root: &Path,
@@ -299,8 +299,8 @@ pub async fn copy_leaf(
 /// that knows which is which, makes the transposition unrepresentable.
 struct Transfer<'a> {
     client: &'a Client,
-    source: &'a Identifier,
-    target: &'a Identifier,
+    source: &'a OciIdentifier,
+    target: &'a OciIdentifier,
     scratch: &'a Path,
 }
 
@@ -708,7 +708,7 @@ fn parse_descriptor_digest(digest: &str) -> Result<Digest, ClientError> {
 /// empty config reused as a layer is the common shape), and every entry spools
 /// to `scratch/<hex>`: two concurrent tasks for one digest write and delete the
 /// same path, so one truncates the file the other is still uploading.
-fn blob_set(image: &super::ImageManifest, subject: &Identifier) -> Result<Vec<BlobRef>, ClientError> {
+fn blob_set(image: &super::ImageManifest, subject: &OciIdentifier) -> Result<Vec<BlobRef>, ClientError> {
     let declared = image.layers.len().saturating_add(1);
     if declared > MAX_BLOBS_PER_MANIFEST {
         return Err(ClientError::TraversalLimitExceeded {
@@ -762,15 +762,15 @@ mod tests {
         Client::with_transport(Box::new(StubTransport::new(data.clone())))
     }
 
-    fn identifier(registry: &str, repository: &str) -> Identifier {
-        Identifier::new_registry(repository, registry)
+    fn identifier(registry: &str, repository: &str) -> OciIdentifier {
+        OciIdentifier::from_parts(repository, registry)
     }
 
     /// The same seam production reads and writes through. Building the reference
-    /// off `Identifier` directly is allow-listed away from this file (T-arch-A1),
+    /// off `OciIdentifier` directly is allow-listed away from this file (T-arch-A1),
     /// and going through the client is also what keeps these keys equal to the
     /// ones the engine builds.
-    fn canonical(identifier: &Identifier) -> crate::native::Reference {
+    fn canonical(identifier: &OciIdentifier) -> crate::native::Reference {
         Client::with_transport(Box::new(StubTransport::new(StubTransportData::new())))
             .read_reference(identifier, ReadAddressing::Canonical)
     }
@@ -813,7 +813,7 @@ mod tests {
     /// this whole module exists to move.
     fn seed(
         data: &StubTransportData,
-        repository: &Identifier,
+        repository: &OciIdentifier,
         manifest: &super::super::Manifest,
         blobs: &[&'static [u8]],
     ) -> Digest {
@@ -830,7 +830,7 @@ mod tests {
     /// Exists because a fixture serde produced is exactly the fixture a
     /// re-serialising copy reproduces byte for byte — so seeding through
     /// [`seed`] leaves the verbatim-copy assertion unable to fail.
-    fn seed_raw(data: &StubTransportData, repository: &Identifier, bytes: &[u8], blobs: &[&'static [u8]]) -> Digest {
+    fn seed_raw(data: &StubTransportData, repository: &OciIdentifier, bytes: &[u8], blobs: &[&'static [u8]]) -> Digest {
         let digest = Algorithm::Sha256.hash(bytes);
         let key = canonical(&repository.without_tag().clone_with_digest(digest.clone())).to_string();
         let location = crate::client::test_transport::blob_location_key(&canonical(repository));
@@ -855,11 +855,11 @@ mod tests {
         digest
     }
 
-    fn seed_source(data: &StubTransportData, source: &Identifier, manifest: &super::super::Manifest) -> Digest {
+    fn seed_source(data: &StubTransportData, source: &OciIdentifier, manifest: &super::super::Manifest) -> Digest {
         seed(data, source, manifest, &[CONFIG_BLOB, LAYER_BLOB])
     }
 
-    fn pushed_manifest(data: &StubTransportData, identifier: &Identifier, digest: &Digest) -> Option<Vec<u8>> {
+    fn pushed_manifest(data: &StubTransportData, identifier: &OciIdentifier, digest: &Digest) -> Option<Vec<u8>> {
         let key = canonical(&identifier.without_tag().clone_with_digest(digest.clone())).to_string();
         data.read().manifests.get(&key).map(|(bytes, _)| bytes.clone())
     }
@@ -901,7 +901,7 @@ mod tests {
         })
     }
 
-    fn sidecar_reference(identifier: &Identifier, subject: &Digest, suffix: &str) -> crate::native::Reference {
+    fn sidecar_reference(identifier: &OciIdentifier, subject: &Digest, suffix: &str) -> crate::native::Reference {
         crate::client::sibling_tag_reference(&canonical(identifier), crate::tag::sidecar_tag(subject, suffix))
     }
 
@@ -914,7 +914,7 @@ mod tests {
     /// deliberately.
     fn seed_sidecar_raw(
         data: &StubTransportData,
-        repository: &Identifier,
+        repository: &OciIdentifier,
         subject: &Digest,
         suffix: &str,
         bytes: &[u8],
@@ -936,7 +936,7 @@ mod tests {
     /// same reason `leaf_manifest_bytes_survive_the_copy_verbatim` seeds pretty.
     fn seed_sidecar(
         data: &StubTransportData,
-        repository: &Identifier,
+        repository: &OciIdentifier,
         subject: &Digest,
         suffix: &str,
         payload: &'static [u8],
@@ -948,7 +948,7 @@ mod tests {
 
     fn sidecar_at(
         data: &StubTransportData,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
         subject: &Digest,
         suffix: &str,
     ) -> Option<Vec<u8>> {

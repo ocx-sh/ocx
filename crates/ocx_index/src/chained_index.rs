@@ -416,7 +416,11 @@ impl ChainedIndex {
     /// into a forbidden range without a `trusted_hosts` entry, or — on a direct
     /// dial only — when a lookup failure cannot be tolerated
     /// ([`is_plain_dns_name`]).
-    async fn guard_local_physical(&self, logical: &ocx_oci::Identifier, physical: &ocx_oci::Identifier) -> Result<()> {
+    async fn guard_local_physical(
+        &self,
+        logical: &ocx_oci::Identifier,
+        physical: &ocx_oci::OciIdentifier,
+    ) -> Result<()> {
         if physical.registry() == logical.registry() {
             return Ok(());
         }
@@ -478,7 +482,7 @@ impl ChainedIndex {
     /// # Errors
     ///
     /// [`Error::Ssrf`](super::error::Error::Ssrf) from [`Self::guard_local_physical`].
-    async fn local_physical_answer(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::Identifier>> {
+    async fn local_physical_answer(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
         match self
             .local_index
             .physical_reference(identifier, self.kind_for(identifier))
@@ -1465,7 +1469,7 @@ impl index_impl::IndexImpl for ChainedIndex {
     /// answer — an unpinned resolve without the local root is already refused
     /// upstream ([`Self::ensure_locally_resolvable`] → `PolicyResolutionBlocked`,
     /// exit 81), and a source outage re-raises above.
-    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::Identifier>> {
+    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
         // `Remote` is the one mode that wants the live pointer; every other mode
         // answers from the committed root when it has one.
         let source_first = self.mode == ChainMode::Remote;
@@ -1499,7 +1503,10 @@ impl index_impl::IndexImpl for ChainedIndex {
     ///
     /// Same guard, same refusal semantics as the local half of that method:
     /// an unreadable local index is a miss, an SSRF refusal propagates.
-    async fn physical_reference_local(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::Identifier>> {
+    async fn physical_reference_local(
+        &self,
+        identifier: &ocx_oci::Identifier,
+    ) -> Result<Option<ocx_oci::OciIdentifier>> {
         self.local_physical_answer(identifier).await
     }
 
@@ -4556,7 +4563,7 @@ mod chain_refs_tests {
     /// `physical_reference` makes `resolve_transport_pinned` report the LOGICAL
     /// identifier as its own transport, which succeeds just as loudly as a
     /// correct answer.
-    fn assert_is_physical(physical: &Identifier) {
+    fn assert_is_physical(physical: &ocx_oci::OciIdentifier) {
         assert_eq!(physical.registry(), PHYSICAL_REGISTRY);
         assert_eq!(physical.repository(), PHYSICAL_REPO);
         assert_eq!(
@@ -4594,7 +4601,7 @@ mod chain_refs_tests {
         async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        async fn physical_reference(&self, _: &Identifier) -> Result<Option<Identifier>> {
+        async fn physical_reference(&self, _: &Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
             Err(super::super::error::Error::IndexHttpFailed {
                 url: "https://index.example.com/config.json".to_string(),
                 status: None,
@@ -4631,7 +4638,7 @@ mod chain_refs_tests {
         async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        async fn physical_reference(&self, _: &Identifier) -> Result<Option<Identifier>> {
+        async fn physical_reference(&self, _: &Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
             Err(super::super::error::Error::Ssrf {
                 source: ocx_oci::ssrf::PhysicalDialRefused {
                     namespace: "ocx.sh".to_string(),
@@ -4683,9 +4690,10 @@ mod chain_refs_tests {
         async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        async fn physical_reference(&self, identifier: &Identifier) -> Result<Option<Identifier>> {
+        async fn physical_reference(&self, identifier: &Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
             *self.calls.lock().unwrap() += 1;
-            let mut physical = Identifier::new_registry("mirror.example.com/from-source", "mirror.example.com");
+            let mut physical =
+                ocx_oci::OciIdentifier::from_parts("mirror.example.com/from-source", "mirror.example.com");
             if let Some(digest) = identifier.digest() {
                 physical = physical.clone_with_digest(digest);
             }

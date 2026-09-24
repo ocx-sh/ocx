@@ -206,7 +206,7 @@ pub fn cascade(version: &Version, others: impl IntoIterator<Item = Version>) -> 
 /// should not abort the entire push.
 pub async fn resolve_cascade_tags(
     client: &ocx_oci::Client,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::OciIdentifier,
     version: &Version,
     other_versions: &BTreeSet<Version>,
     platform: &ocx_oci::Platform,
@@ -296,10 +296,11 @@ pub struct CascadePushOutcome {
 /// that carries no variant.
 #[expect(
     clippy::too_many_arguments,
-    reason = "one push: what to publish, which tracks it moves, and what to stamp on every index it writes"
+    reason = "one push: where it lands, what to publish, which tracks it moves, and what to stamp on every index it writes"
 )]
 pub async fn push_with_cascade(
     client: &ocx_oci::Client,
+    target: &ocx_oci::OciIdentifier,
     package_info: crate::info::Info,
     layers: &[ocx_oci::layer_ref::LayerRef],
     other_versions: BTreeSet<Version>,
@@ -308,18 +309,12 @@ pub async fn push_with_cascade(
     default: bool,
     annotations: &BTreeMap<String, String>,
 ) -> Result<CascadePushOutcome> {
-    let (cascade_tags, _) = resolve_cascade_tags(
-        client,
-        &package_info.identifier,
-        version,
-        &other_versions,
-        &package_info.platform,
-    )
-    .await?;
+    let (cascade_tags, _) =
+        resolve_cascade_tags(client, target, version, &other_versions, &package_info.platform).await?;
 
     let (manifest_digest, index, layer_counts) = client
         .push_manifest_and_merge_tags(
-            &package_info.identifier,
+            target,
             &package_info.platform,
             layers,
             &cascade_tags,
@@ -335,7 +330,7 @@ pub async fn push_with_cascade(
 
     let aliases = write_default_variant_aliases(
         client,
-        &package_info.identifier,
+        target,
         &package_info.platform,
         &merged,
         version,
@@ -346,9 +341,7 @@ pub async fn push_with_cascade(
     .await?;
 
     let keep_tag_written = if keep_tag {
-        client
-            .push_keep_tag(&package_info.identifier, &merged, &package_info.platform)
-            .await?
+        client.push_keep_tag(target, &merged, &package_info.platform).await?
     } else {
         None
     };
@@ -405,7 +398,7 @@ pub async fn push_with_cascade(
 )]
 pub(crate) async fn write_default_variant_aliases(
     client: &ocx_oci::Client,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::OciIdentifier,
     platform: &ocx_oci::Platform,
     merged: &ocx_oci::Manifest,
     version: &Version,
@@ -468,7 +461,7 @@ pub(crate) async fn write_default_variant_aliases(
 /// blocked (CWE-345/367).
 async fn has_blocking_platform(
     client: &ocx_oci::Client,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::OciIdentifier,
     blockers: &[Version],
     platform: &ocx_oci::Platform,
 ) -> Result<bool> {
@@ -876,8 +869,8 @@ mod tests {
             ocx_oci::Client::with_transport(Box::new(StubTransport::new(data.clone())))
         }
 
-        fn test_identifier() -> ocx_oci::Identifier {
-            ocx_oci::Identifier::new_registry("test/pkg", "example.com")
+        fn test_identifier() -> ocx_oci::OciIdentifier {
+            ocx_oci::OciIdentifier::from_parts("test/pkg", "example.com")
         }
 
         fn platform(s: &str) -> ocx_oci::Platform {
@@ -1283,7 +1276,7 @@ mod tests {
 
         // ── push_with_cascade keep-tag gating ────────────────
 
-        fn test_info(tag: &str, platform_str: &str) -> crate::info::Info {
+        fn test_info(tag: &str, platform_str: &str) -> (ocx_oci::OciIdentifier, crate::info::Info) {
             use crate::metadata::{
                 Entrypoints, Metadata,
                 bundle::{self, Bundle},
@@ -1298,11 +1291,13 @@ mod tests {
                 binaries: None,
                 integrations: Default::default(),
             });
-            crate::info::Info {
-                identifier: test_identifier().clone_with_tag(tag),
-                metadata,
-                platform: platform(platform_str),
-            }
+            (
+                test_identifier().clone_with_tag(tag),
+                crate::info::Info {
+                    metadata,
+                    platform: platform(platform_str),
+                },
+            )
         }
 
         #[tokio::test]
@@ -1315,11 +1310,12 @@ mod tests {
             // get retro-tagged by this push (only linux/amd64 was pushed).
             seed_index(&data, "3", &["linux/arm64"]);
 
-            let info = test_info("3.28.1", "linux/amd64");
+            let (target, info) = test_info("3.28.1", "linux/amd64");
             let version = Version::new_patch(3, 28, 1);
 
             let outcome = push_with_cascade(
                 &client,
+                &target,
                 info,
                 &[],
                 BTreeSet::new(),
@@ -1356,11 +1352,12 @@ mod tests {
             data.write().capture_pushes = true;
             let client = test_client(&data);
 
-            let info = test_info("3.28.1", "linux/amd64");
+            let (target, info) = test_info("3.28.1", "linux/amd64");
             let version = Version::new_patch(3, 28, 1);
 
             let outcome = push_with_cascade(
                 &client,
+                &target,
                 info,
                 &[],
                 BTreeSet::new(),
@@ -1422,7 +1419,8 @@ mod tests {
 
             let outcome = push_with_cascade(
                 &client,
-                test_info("full-1.2.3", "linux/amd64"),
+                &test_identifier().clone_with_tag("full-1.2.3"),
+                test_info("full-1.2.3", "linux/amd64").1,
                 &[],
                 BTreeSet::new(),
                 &v("full-1.2.3"),
@@ -1481,7 +1479,8 @@ mod tests {
             // variant has no default track to alias onto.
             let outcome = push_with_cascade(
                 &client,
-                test_info("1.2.3", "linux/amd64"),
+                &test_identifier().clone_with_tag("1.2.3"),
+                test_info("1.2.3", "linux/amd64").1,
                 &[],
                 BTreeSet::new(),
                 &v("1.2.3"),
@@ -1528,7 +1527,8 @@ mod tests {
 
             let outcome = push_with_cascade(
                 &client,
-                test_info("full-1.2.3", "linux/amd64"),
+                &test_identifier().clone_with_tag("full-1.2.3"),
+                test_info("full-1.2.3", "linux/amd64").1,
                 &[],
                 BTreeSet::new(),
                 &v("full-1.2.3"),
@@ -1558,7 +1558,8 @@ mod tests {
             // before the variant is ever inspected.
             let outcome = push_with_cascade(
                 &client,
-                test_info("1.2.3", "linux/amd64"),
+                &test_identifier().clone_with_tag("1.2.3"),
+                test_info("1.2.3", "linux/amd64").1,
                 &[],
                 BTreeSet::new(),
                 &v("1.2.3"),
@@ -1585,7 +1586,8 @@ mod tests {
 
             let outcome = push_with_cascade(
                 &client,
-                test_info("full-1.2.3", "linux/amd64"),
+                &test_identifier().clone_with_tag("full-1.2.3"),
+                test_info("full-1.2.3", "linux/amd64").1,
                 &[],
                 BTreeSet::from([v("2.0.0")]),
                 &v("full-1.2.3"),
@@ -1617,7 +1619,8 @@ mod tests {
 
             let outcome = push_with_cascade(
                 &client,
-                test_info("full-1.2.3", "linux/amd64"),
+                &test_identifier().clone_with_tag("full-1.2.3"),
+                test_info("full-1.2.3", "linux/amd64").1,
                 &[],
                 BTreeSet::from([v("slim-2.0.0")]),
                 &v("full-1.2.3"),

@@ -994,7 +994,8 @@ mod tests {
 
         fn report() -> CascadeReport {
             CascadeReport {
-                identifier: ocx_oci::Identifier::parse("registry.test/acme/cmake").expect("fixture parses"),
+                identifier: ocx_oci::OciIdentifier::parse_target("registry.test/acme/cmake", ocx_oci::DEFAULT_REGISTRY)
+                    .expect("fixture parses"),
                 logical: None,
                 aliases: [(tag("3.28"), AliasState::Present)].into_iter().collect(),
                 rows: Vec::new(),

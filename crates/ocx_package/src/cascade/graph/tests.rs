@@ -175,7 +175,7 @@ impl Graph {
         }
 
         TagGraphObservation {
-            identifier: identifier(),
+            identifier: ocx_oci::OciIdentifier::passthrough(&identifier()),
             logical: self
                 .root
                 .as_ref()

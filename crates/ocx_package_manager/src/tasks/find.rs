@@ -57,7 +57,10 @@ impl PackageManager {
     ///   flat image manifest, and [`resolve`](Self::resolve)'s flat arm stamps
     ///   `any()` unconditionally;
     /// - the transport registry comes from the locally committed index root
-    ///   when there is one, and is left unset when there is not — the state
+    ///   whenever there is one — a derived root naming the package's own
+    ///   registry included, since that is still where the content came from,
+    ///   and the resolve path stamps it too — and is left unset when there is
+    ///   not: the state
     ///   [`InstallInfo::transport_registry`] already documents for a path that
     ///   resolved nothing through the index. Naming the *logical* host instead
     ///   would report a registry nothing was ever fetched from.
@@ -82,11 +85,11 @@ impl PackageManager {
             return Ok(
                 match self
                     .index()
-                    .physical_reference_local(pinned.as_identifier())
+                    .route_local(pinned.as_identifier())
                     .await
                     .map_err(|error| PackageErrorKind::Internal(error.into()))?
                 {
-                    Some(physical) => info.with_transport_registry(physical.registry()),
+                    Some(routed) => info.with_transport_registry(routed.registry()),
                     None => info,
                 },
             );

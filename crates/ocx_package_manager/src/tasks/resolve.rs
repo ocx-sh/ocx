@@ -490,7 +490,7 @@ pub struct ResolvedChain {
     /// source it is the registry the root's `repository` pointer names, so
     /// layer blobs are pulled from there rather than the logical `ocx.sh` host.
     /// Transport-only (Decision C2) — never persisted or locked.
-    pub transport_pinned: ocx_oci::PinnedIdentifier,
+    pub transport_pinned: ocx_oci::PinnedOciIdentifier,
     /// Walk-order chain blobs the resolver touched, backed by on-disk blob
     /// files (config blob materialized later by the pull pipeline).
     pub chain: Vec<ChainBlob>,
@@ -531,33 +531,27 @@ pub struct AdmittedClaims {
 ///
 /// Returns the registry the index points at (`index.ocx.sh`'s `repository`
 /// pointer, with the logical tag and leaf digest carried over) when a source
-/// rewrites it, else
-/// `pinned` unchanged (registry-backed packages). Transport-only (C2).
+/// rewrites it, else `pinned`'s own coordinates (registry-backed packages).
+/// Transport-only (C2).
 ///
 /// This is the one resolve that exists in order to *materialize*, so it is
 /// also where the routing pointer gets recorded locally (#424): a
 /// digest-addressed resolve grows no root, so without the record a machine
 /// running only `pull`/`exec` against a committed lock re-asks the index site
 /// for the same pointer on every invocation, forever. Deliberately not done
-/// inside [`Index::physical_reference`] — the readers that call it (`cascade
-/// check`, `verify`, `sign`, `attest`) must leave no trace, and gating the
-/// write by where it is called from is stronger than gating it by a policy
-/// each caller has to set.
+/// inside [`ocx_index::Index::route`] — the readers that call it (`cascade check`,
+/// `verify`, `sign`, `attest`) must leave no trace, and gating the write by
+/// where it is called from is stronger than gating it by a policy each caller
+/// has to set — hence [`ocx_index::Index::route_to_materialize`], not [`ocx_index::Index::route`].
 async fn resolve_transport_pinned(
     index: &ocx_index::Index,
     pinned: &ocx_oci::PinnedIdentifier,
-) -> Result<ocx_oci::PinnedIdentifier, PackageErrorKind> {
-    match index
-        .physical_reference(pinned.as_identifier())
+) -> Result<ocx_oci::PinnedOciIdentifier, PackageErrorKind> {
+    let routed = index
+        .route_to_materialize(pinned.as_identifier())
         .await
-        .map_err(|error| PackageErrorKind::Internal(error.into()))?
-    {
-        Some(physical) => {
-            index.record_routing_pointer(pinned.as_identifier()).await;
-            ocx_oci::PinnedIdentifier::try_from(physical).map_err(|_| PackageErrorKind::DigestMissing)
-        }
-        None => Ok(pinned.clone()),
-    }
+        .map_err(|error| PackageErrorKind::Internal(error.into()))?;
+    Ok(routed.at_pin_of(pinned))
 }
 
 impl PackageManager {
@@ -2094,7 +2088,7 @@ fn merge_companions(
 /// written at refresh/resolve time, records the canonical physical location
 /// in its `repository` field as an `oci://<registry>/<repository>` pointer;
 /// reading it back and stripping the C3 `oci://` scheme
-/// (`parse_physical_repository`) recovers the exact hostname so descriptor
+/// (`OciIdentifier::parse_repository_pointer`) recovers the exact hostname so descriptor
 /// rule matching globs against the real identifier string.
 ///
 /// The recovered host is accepted only when its store slug
@@ -2124,7 +2118,7 @@ pub(super) async fn recover_base_with_real_registry(
 ) -> ocx_oci::Identifier {
     // The wire-grammar root document carries a `"repository"` field
     // (`oci://<registry>/<repo>`, A2), so the slug-recovery parse below reads
-    // it and strips the C3 `oci://` scheme via `parse_physical_repository`.
+    // it and strips the C3 `oci://` scheme via `OciIdentifier::parse_repository_pointer`.
     let real_registry = match snapshot
         .read_root_document_bytes(slug_base_id.registry(), slug_base_id.repository())
         .await
@@ -2132,8 +2126,8 @@ pub(super) async fn recover_base_with_real_registry(
         Ok(Some(bytes)) => serde_json::from_slice::<serde_json::Value>(&bytes)
             .ok()
             .and_then(|value| value.get("repository").and_then(|r| r.as_str()).map(str::to_owned))
-            .and_then(|repository| ocx_index::parse_physical_repository(&repository).ok())
-            .map(|(host, _path)| host),
+            .and_then(|repository| ocx_oci::OciIdentifier::parse_repository_pointer(&repository).ok())
+            .map(|location| location.registry().to_string()),
         Ok(None) | Err(_) => None,
     };
     // Only accept a host that un-slugs this directory name. An index-routed

@@ -9,7 +9,7 @@
 //! place.
 
 use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
-use ocx_oci::{Algorithm, Client, Identifier};
+use ocx_oci::{Algorithm, Client, OciIdentifier};
 
 /// Builds a gzip'd tar archive from `(name, bytes)` entries.
 pub fn gzip_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -30,7 +30,7 @@ pub fn gzip_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
 /// gzip'd tar layer. Returns the index digest (the drift identity).
 pub fn seed_package(
     stub_data: &StubTransportData,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
     layer: Vec<u8>,
     platform_os_arch: (&str, &str),
     declared_size_override: Option<i64>,
@@ -118,7 +118,7 @@ fn build_child_manifest(stub_data: &StubTransportData, layer: Vec<u8>) -> Vec<u8
 /// index. Returns the index digest.
 pub fn seed_package_multi_platform(
     stub_data: &StubTransportData,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
     entries: &[((&str, &str), Vec<u8>)],
 ) -> String {
     let mut index_entries = Vec::with_capacity(entries.len());
@@ -162,7 +162,7 @@ pub fn seed_package_multi_platform(
 
 /// Seeds a well-formed package with `config.toml` = `config_toml` under an
 /// `any/any` index entry; returns `(client, index_digest)`.
-pub fn stub_client_with_package(identifier: &Identifier, config_toml: &str) -> (Client, String) {
+pub fn stub_client_with_package(identifier: &OciIdentifier, config_toml: &str) -> (Client, String) {
     let stub_data = StubTransportData::new();
     let layer = gzip_tar(&[("config.toml", config_toml.as_bytes())]);
     let digest = seed_package(

@@ -124,7 +124,9 @@ pub async fn fetch_patch_descriptor_blobs(
     patch_identifier: &Identifier,
 ) -> Result<Option<FetchedDescriptorBlobs>, PatchError> {
     // Build the tag identifier: clone with the `__ocx.patch` well-known tag.
-    let tag_identifier = patch_identifier.clone_with_tag(InternalTag::PATCH_TAG);
+    // The patch registry is the one `[patches]` names, dialled as named: a
+    // descriptor is not a package, and no index serves one.
+    let tag_identifier = ocx_oci::OciIdentifier::passthrough(patch_identifier).clone_with_tag(InternalTag::PATCH_TAG);
 
     // Steps 1-8 (auth, manifest fetch, shape/artifact-type/layer-count/
     // media-type/size validation, capped layer blob fetch) all live in the

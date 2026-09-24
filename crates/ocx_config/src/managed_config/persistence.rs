@@ -33,7 +33,7 @@
 use crate::managed::ManagedConfigSnapshot;
 use crate::managed_config::ManagedConfigPaths;
 use ocx_oci::client::ReadAddressing;
-use ocx_oci::{Digest, Identifier};
+use ocx_oci::{Digest, OciIdentifier};
 
 // ── Fetched payload (intermediate transfer object) ────────────────────────────
 
@@ -187,7 +187,7 @@ pub enum ManagedConfigUpdateError {
     #[error("managed config source '{effective_source}' not found in registry")]
     SourceNotFound {
         /// The resolved source that produced no manifest.
-        effective_source: ocx_oci::Identifier,
+        effective_source: ocx_oci::OciIdentifier,
     },
     /// A `tag@digest` version pin was specified but the tag resolved to a
     /// different digest (fail-closed immutability assertion — mirrors `ocx
@@ -228,7 +228,7 @@ pub enum ManagedConfigUpdateError {
 /// See [`ManagedConfigFetchError`] variants.
 pub async fn fetch_managed_config(
     client: &ocx_oci::client::Client,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
 ) -> Result<Option<FetchedManagedConfig>, ManagedConfigFetchError> {
     let maximum = crate::managed_config::MAX_MANAGED_CONFIG_BYTES;
 
@@ -403,7 +403,7 @@ fn extract_config_toml(compressed: &[u8], maximum: u64) -> Result<String, Manage
 /// See [`ManagedConfigFetchError::FetchFailed`].
 pub async fn probe_managed_config_digest(
     client: &ocx_oci::client::Client,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
 ) -> Result<Option<Digest>, ManagedConfigFetchError> {
     client
         .probe_manifest_digest_addressed(identifier, ReadAddressing::Mirrored)
@@ -434,7 +434,7 @@ pub async fn probe_managed_config_digest(
 /// See [`ManagedConfigPersistError`] variants.
 pub async fn persist_managed_config(
     paths: &ManagedConfigPaths,
-    source: &Identifier,
+    source: &OciIdentifier,
     fetched: FetchedManagedConfig,
 ) -> Result<ManagedConfigSnapshot, ManagedConfigPersistError> {
     let text = fetched.config_text;
@@ -561,8 +561,8 @@ mod tests {
     use ocx_oci::client::Client;
     use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
 
-    fn identifier() -> Identifier {
-        Identifier::parse("corp.example.com/ocx-config:user").unwrap()
+    fn identifier() -> OciIdentifier {
+        OciIdentifier::parse_target("corp.example.com/ocx-config:user", ocx_oci::DEFAULT_REGISTRY).unwrap()
     }
 
     fn fetched(config_text: &str) -> FetchedManagedConfig {

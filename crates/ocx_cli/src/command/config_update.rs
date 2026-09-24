@@ -150,7 +150,8 @@ impl ConfigUpdateArgs {
             Some(VersionSpec::TagAndDigest { tag, digest }) => {
                 (resolved.source.clone_with_tag(tag.as_str()), Some(digest.clone()))
             }
-            Some(spec) => (spec.apply(resolved.source.clone()), None),
+            Some(VersionSpec::Tag(tag)) => (resolved.source.clone_with_tag(tag.as_str()), None),
+            Some(VersionSpec::Digest(digest)) => (resolved.source.clone_with_digest(digest.clone()), None),
         };
         let target = ocx_config::managed::ResolvedManagedConfig {
             source: fetch_source,

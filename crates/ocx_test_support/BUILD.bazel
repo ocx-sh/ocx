@@ -148,6 +148,7 @@ rust_test(
         "--skip=no_classification_in_libraries",
         "--skip=no_log_shim",
         "--skip=no_module_path_in_output",
+        "--skip=oci_identifier_mint_ratchet",
         "--skip=readme_may_depend_on_rows_match_the_crate_map",
         "--skip=release_feature_set_excludes_testing_seams",
         "--skip=resolver_resolves_aliases_that_name_unlike_error_types",

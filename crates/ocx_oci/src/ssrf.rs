@@ -673,7 +673,7 @@ pub struct PhysicalDialRefused {
 pub async fn guard_physical_dial(
     policy: &DialPolicy<'_>,
     logical: &crate::Identifier,
-    physical: &crate::Identifier,
+    physical: &crate::OciIdentifier,
 ) -> Result<(), PhysicalDialRefused> {
     if physical.registry() == logical.registry() {
         return Ok(());

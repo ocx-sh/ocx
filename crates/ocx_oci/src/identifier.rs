@@ -7,14 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use error::{IdentifierError, IdentifierErrorKind};
 
-use super::{Digest, native};
+use super::Digest;
 
 pub const OCX_SH_REGISTRY: &str = "ocx.sh";
 pub const DEFAULT_REGISTRY: &str = OCX_SH_REGISTRY;
 
 const MAX_REPOSITORY_LENGTH: usize = 255;
-
-const DOCKER_HUB_DOMAINS: &[&str] = &["docker.io", "index.docker.io"];
 
 /// A parsed OCI identifier with registry, repository, optional tag, and optional digest.
 ///
@@ -22,8 +20,11 @@ const DOCKER_HUB_DOMAINS: &[&str] = &["docker.io", "index.docker.io"];
 /// is present, does not default to `docker.io`, and provides structured parse errors
 /// via [`IdentifierError`].
 ///
-/// Conversion to `native::Reference` (for OCI transport calls) is available via
-/// the `pub(crate)` [`Identifier::canonical_reference`] constructor.
+/// This is the **package** identifier — the name a user, a lock or package
+/// metadata spells. It is never dialled: a registry request takes a
+/// [`crate::OciIdentifier`], and the only way from one to the other is routing
+/// it through the index (`ocx_index::Index::route`). The two types have no
+/// conversion either way (ocx#504).
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct Identifier {
     registry: String,
@@ -221,51 +222,16 @@ impl Identifier {
         self.digest.clone()
     }
 
-    /// Builds the **canonical** transport reference for this identifier — host,
-    /// repository, tag and digest exactly as stored, with no mirror rewrite.
+    /// Whether `location` names this identifier's registry and repository.
     ///
-    /// This is the push seam. The push path calls it directly because
-    /// remote/proxy mirrors are read-only. The read path must **not** call it:
-    /// read-path reference construction goes through
-    /// [`Client::transport_reference`](crate::Client) /
-    /// `transport_registry`, which apply the mirror map.
-    ///
-    /// There is no PUBLIC bypass — the `From<&Identifier> for native::Reference`
-    /// impl is removed, so no external read site has a canonical conversion
-    /// symbol to reach for. This method is `pub(crate)`, so it is still callable
-    /// in-crate; the discipline that in-crate read paths route through
-    /// `Client::transport_reference` / `transport_registry` rather than calling
-    /// this directly is enforced by the structural test plus the behavioural
-    /// backstop, **not** by the compiler.
-    pub fn canonical_reference(&self) -> native::Reference {
-        let registry = self.registry.clone();
-        let repository = self.repository.clone();
-        match (&self.tag, &self.digest) {
-            (Some(tag), Some(digest)) => {
-                native::Reference::with_tag_and_digest(registry, repository, tag.clone(), digest.to_string())
-            }
-            (Some(tag), None) => native::Reference::with_tag(registry, repository, tag.clone()),
-            (None, Some(digest)) => native::Reference::with_digest(registry, repository, digest.to_string()),
-            (None, None) => native::Reference::with_tag(registry, repository, "latest".into()),
-        }
+    /// The one comparison between a package identifier and a physical OCI
+    /// location, and deliberately a comparison of coordinates rather than a
+    /// conversion: the two types never turn into each other. Tag and digest are
+    /// ignored — routing carries them over, so they cannot tell a rewrite from
+    /// a passthrough.
+    pub fn is_located_at(&self, location: &crate::OciIdentifier) -> bool {
+        self.registry == location.registry() && self.repository == location.repository()
     }
-}
-
-/// Builds the synthetic source reference a cross-repository blob mount needs.
-///
-/// A mount names its source repository in the `from=` query parameter of an
-/// upload POST addressed at the *target* repository, and `oci_client`'s
-/// `mount_blob` reads only `repository()` off this value — the registry and tag
-/// are never sent. `"latest"` is therefore an inert placeholder, and the
-/// registry is carried solely to keep the reference well-formed.
-///
-/// It lives beside [`Identifier::canonical_reference`] because it is push-path
-/// construction: mounting happens during a push, and the push path is
-/// mirror-free by design (remote/proxy mirrors are read-only). Building it here
-/// rather than in the transport keeps `native::Reference` construction inside
-/// the two seam files the mirror-invariant gate allows.
-pub(crate) fn mount_source_reference(registry: &str, source_repository: &str) -> native::Reference {
-    native::Reference::with_tag(registry.to_string(), source_repository.to_string(), "latest".into())
 }
 
 /// Returns the canonical, untagged OCX CLI identifier (`ocx.sh/ocx/cli`).
@@ -363,60 +329,6 @@ impl<'de> Deserialize<'de> for Identifier {
     {
         let s = String::deserialize(deserializer)?;
         Identifier::parse(&s).map_err(serde::de::Error::custom)
-    }
-}
-
-// ── Conversion to native::Reference ──────────────────────────────────
-//
-// There is deliberately NO `impl From<&Identifier> for native::Reference`.
-// ADR `adr_oci_registry_mirror.md` Axis B1: the canonical
-// `Identifier → native::Reference` conversion is the `pub(crate)`
-// `Identifier::canonical_reference` method (push path, mirror-free); the read
-// path builds references through `Client::transport_reference` /
-// `transport_registry`, which apply the mirror map.
-//
-// Removing the blanket `From` impl closes the PUBLIC bypass: no external caller
-// has a canonical conversion symbol to reach for. It does NOT make an in-crate
-// read-path leak a compile error — `canonical_reference` stays `pub(crate)` and
-// callable in-crate. The "read paths route through the transport seams"
-// invariant is enforced by the structural test plus the behavioural backstop,
-// not by the compiler.
-
-// ── Conversion from native::Reference ────────────────────────────────
-
-impl TryFrom<native::Reference> for Identifier {
-    type Error = IdentifierError;
-
-    fn try_from(reference: native::Reference) -> Result<Self, IdentifierError> {
-        let registry = reference.registry().to_string();
-        let input = reference.to_string();
-
-        if DOCKER_HUB_DOMAINS.iter().any(|d| registry == *d) {
-            return Err(IdentifierError {
-                input,
-                kind: IdentifierErrorKind::DockerHubDefault,
-            });
-        }
-
-        let repository = reference.repository().to_string();
-        let tag = reference.tag().map(|t| normalize_tag(t.to_string()));
-        let digest = match reference.digest() {
-            Some(d) => {
-                let d_str = d.to_string();
-                Some(Digest::try_from(d_str).map_err(|_| IdentifierError {
-                    input: input.clone(),
-                    kind: IdentifierErrorKind::DigestInvalidFormat,
-                })?)
-            }
-            None => None,
-        };
-
-        Ok(Self {
-            registry,
-            repository,
-            tag,
-            digest,
-        })
     }
 }
 
@@ -907,40 +819,6 @@ mod tests {
         let json = serde_json::to_string(&id).unwrap();
         let deserialized: Identifier = serde_json::from_str(&json).unwrap();
         assert_eq!(id, deserialized);
-    }
-
-    // ── From/TryFrom Reference ───────────────────────────────────────────
-
-    #[test]
-    fn identifier_to_reference_roundtrip() {
-        let id: Identifier = "test.com/repo:tag".parse().unwrap();
-        let reference = id.canonical_reference();
-        assert_eq!(reference.registry(), "test.com");
-        assert_eq!(reference.repository(), "repo");
-        assert_eq!(reference.tag(), Some("tag"));
-    }
-
-    #[test]
-    fn identifier_without_tag_becomes_latest_in_reference() {
-        let id: Identifier = "test.com/repo".parse().unwrap();
-        let reference = id.canonical_reference();
-        assert_eq!(reference.tag(), Some("latest"));
-    }
-
-    #[test]
-    fn try_from_reference_rejects_docker_hub() {
-        let reference = native::Reference::with_tag("docker.io".into(), "library/ubuntu".into(), "latest".into());
-        let err = Identifier::try_from(reference).unwrap_err();
-        assert!(matches!(err.kind, IdentifierErrorKind::DockerHubDefault));
-    }
-
-    #[test]
-    fn try_from_reference_accepts_custom_registry() {
-        let reference = native::Reference::with_tag("test.com".into(), "repo".into(), "1.0".into());
-        let id = Identifier::try_from(reference).unwrap();
-        assert_eq!(id.registry(), "test.com");
-        assert_eq!(id.repository(), "repo");
-        assert_eq!(id.tag(), Some("1.0"));
     }
 
     // ── new_registry ─────────────────────────────────────────────────────

@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use futures::stream::{self, StreamExt, TryStreamExt};
 
-use super::{Algorithm, Digest, Identifier, native};
+use super::{Algorithm, Digest, OciIdentifier, native};
 
 /// Maximum number of layer push/verify operations to run concurrently.
 ///
@@ -443,18 +443,17 @@ impl Client {
     /// to `<path-prefix>/<repository>` (tag and digest copied verbatim). When
     /// no mirror is configured, the result is identical to the canonical
     /// reference. The returned reference is transport-only and is never
-    /// converted back into an [`Identifier`] for storage.
+    /// converted back into a storage key.
     ///
     /// This is one of the two read seams — every read site builds references
     /// through here (or `Self::transport_registry`). There
-    /// is no PUBLIC bypass: the `From<&Identifier> for native::Reference` impl is
-    /// removed, so no read site can reach for a canonical conversion without
-    /// naming an in-crate seam. In-crate read paths must still route through
-    /// these seams rather than the `pub(crate)`
-    /// [`Identifier::canonical_reference`] (which stays callable in-crate) — that
+    /// is no `From<&OciIdentifier> for native::Reference` impl, so no read site
+    /// reaches for a canonical conversion by accident. Read paths must still
+    /// route through these seams rather than
+    /// [`OciIdentifier::canonical_reference`] (the push seam) — that
     /// discipline is enforced by the structural test plus the behavioural
     /// backstop, not by the compiler.
-    pub fn transport_reference(&self, identifier: &Identifier) -> native::Reference {
+    pub fn transport_reference(&self, identifier: &OciIdentifier) -> native::Reference {
         let Some((host, repository)) = self
             .mirrors
             .rewrite_repository(identifier.registry(), identifier.repository())
@@ -518,7 +517,7 @@ impl Client {
     /// The not-found sentinels are control flow: callers match on them to
     /// produce `Ok(None)`, so burying one behind [`ClientError::Mirrored`]
     /// would turn a missing tag into a hard failure.
-    fn via_mirror(&self, logical: &Identifier, physical: &native::Reference, error: ClientError) -> ClientError {
+    fn via_mirror(&self, logical: &OciIdentifier, physical: &native::Reference, error: ClientError) -> ClientError {
         if !matches!(
             error,
             ClientError::Registry(_)
@@ -553,7 +552,7 @@ impl Client {
     ///
     /// The mirrored arm is [`transport_reference`](Self::transport_reference)
     /// verbatim — this is a routing switch, not a second seam.
-    pub fn read_reference(&self, identifier: &Identifier, addressing: ReadAddressing) -> native::Reference {
+    pub fn read_reference(&self, identifier: &OciIdentifier, addressing: ReadAddressing) -> native::Reference {
         match addressing {
             ReadAddressing::Mirrored => self.transport_reference(identifier),
             // Push stays canonical (remote/proxy mirrors are read-only), so a
@@ -579,10 +578,10 @@ impl Client {
     /// this same host.
     ///
     /// Lives here rather than at the call sites because
-    /// [`Identifier::canonical_reference`] is allow-listed to this file
+    /// [`OciIdentifier::canonical_reference`] is allow-listed to this file
     /// (`canonical_reference_only_used_in_allowed_files`) and direct
     /// construction is gated by T-arch-G1.
-    pub fn transport_write_reference(&self, identifier: &Identifier) -> native::Reference {
+    pub fn transport_write_reference(&self, identifier: &OciIdentifier) -> native::Reference {
         identifier.canonical_reference()
     }
 
@@ -598,10 +597,10 @@ impl Client {
     /// `ensure_auth` is shared by the read path and the push path. A `Push`
     /// scope authenticates against the **canonical** host (remote/proxy mirrors
     /// are read-only, ADR Q5), so it builds the reference via
-    /// [`Identifier::canonical_reference`]; every other scope is a read and
+    /// [`OciIdentifier::canonical_reference`]; every other scope is a read and
     /// keys auth off the mirror host via
     /// [`transport_reference`](Self::transport_reference).
-    pub async fn ensure_auth(&self, identifier: &Identifier, operation: crate::RegistryOperation) -> Result<()> {
+    pub async fn ensure_auth(&self, identifier: &OciIdentifier, operation: crate::RegistryOperation) -> Result<()> {
         // Exhaustive over `RegistryOperation` so a future upstream variant is a
         // compile error here, forcing an explicit routing decision rather than
         // silently inheriting the read (mirror-aware) path. `Push` authenticates
@@ -624,7 +623,7 @@ impl Client {
     ///
     /// A listing served by a mirror is [`list_tags_addressed`](Self::list_tags_addressed)
     /// with [`ReadAddressing::Mirrored`], asked for by name.
-    pub async fn list_tags(&self, identifier: Identifier) -> Result<Vec<String>> {
+    pub async fn list_tags(&self, identifier: OciIdentifier) -> Result<Vec<String>> {
         self.list_tags_addressed(identifier, ReadAddressing::Canonical).await
     }
 
@@ -632,7 +631,11 @@ impl Client {
     ///
     /// `ReadAddressing::Mirrored` is for a listing no write is planned from —
     /// see [`ReadAddressing`].
-    pub async fn list_tags_addressed(&self, identifier: Identifier, addressing: ReadAddressing) -> Result<Vec<String>> {
+    pub async fn list_tags_addressed(
+        &self,
+        identifier: OciIdentifier,
+        addressing: ReadAddressing,
+    ) -> Result<Vec<String>> {
         let image = self.read_reference(&identifier, addressing);
         self.transport()
             .ensure_auth(&image, crate::RegistryOperation::Pull)
@@ -653,7 +656,7 @@ impl Client {
     /// an empty tag list and cascade against a listing nobody read (#157).
     pub async fn list_tags_or_empty_addressed(
         &self,
-        identifier: Identifier,
+        identifier: OciIdentifier,
         addressing: ReadAddressing,
     ) -> Result<Vec<String>> {
         match self.list_tags_addressed(identifier, addressing).await {
@@ -687,7 +690,7 @@ impl Client {
     /// it inherit the index's mirror without saying so. Do not add one.
     pub async fn fetch_manifest_digest_addressed(
         &self,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
         addressing: ReadAddressing,
     ) -> Result<crate::Digest> {
         let ref_ = self.read_reference(identifier, addressing);
@@ -710,7 +713,7 @@ impl Client {
     /// A manifest served by a mirror is
     /// [`fetch_manifest_addressed`](Self::fetch_manifest_addressed) with
     /// [`ReadAddressing::Mirrored`], asked for by name.
-    pub async fn fetch_manifest(&self, identifier: &Identifier) -> Result<(Digest, crate::Manifest)> {
+    pub async fn fetch_manifest(&self, identifier: &OciIdentifier) -> Result<(Digest, crate::Manifest)> {
         self.fetch_manifest_addressed(identifier, ReadAddressing::Canonical)
             .await
     }
@@ -721,7 +724,7 @@ impl Client {
     /// see [`ReadAddressing`].
     pub async fn fetch_manifest_addressed(
         &self,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
         addressing: ReadAddressing,
     ) -> Result<(Digest, crate::Manifest)> {
         let ref_ = self.read_reference(identifier, addressing);
@@ -756,7 +759,7 @@ impl Client {
     /// Returns the digest and data of the pushed index.
     pub async fn merge_platform_into_index(
         &self,
-        source_identifier: &Identifier,
+        source_identifier: &OciIdentifier,
         target_tag: impl Into<String>,
         platform: &crate::Platform,
         manifest_sha256: &str,
@@ -872,7 +875,7 @@ impl Client {
     ///
     /// Push authentication failure, index serialization failure, or a registry
     /// that rejects the manifest.
-    pub async fn push_index(&self, identifier: &Identifier, index: &crate::ImageIndex) -> Result<Digest> {
+    pub async fn push_index(&self, identifier: &OciIdentifier, index: &crate::ImageIndex) -> Result<Digest> {
         // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
         let ref_ = identifier.canonical_reference();
         self.transport()
@@ -924,7 +927,7 @@ impl Client {
     /// GC protection, which is strictly worse than no tag at all.
     pub async fn push_keep_tag(
         &self,
-        source_identifier: &Identifier,
+        source_identifier: &OciIdentifier,
         merged_manifest: &crate::Manifest,
         platform: &crate::Platform,
     ) -> Result<Option<String>> {
@@ -983,7 +986,7 @@ impl Client {
     /// `LayerRef::Digest` layer before pulling it, so the synthesized
     /// OCI descriptor has the same size as the manifest produced by
     /// `package push`.
-    pub async fn head_blob(&self, identifier: &Identifier, digest: &Digest) -> Result<u64> {
+    pub async fn head_blob(&self, identifier: &OciIdentifier, digest: &Digest) -> Result<u64> {
         let image = self.transport_reference(identifier);
         self.transport()
             .ensure_auth(&image, crate::RegistryOperation::Pull)
@@ -1009,7 +1012,7 @@ impl Client {
     /// Returns the [`ImageManifest`](crate::ImageManifest) without asserting media types.
     pub async fn pull_manifest(
         &self,
-        identifier: &crate::PinnedIdentifier,
+        identifier: &crate::PinnedOciIdentifier,
     ) -> std::result::Result<crate::ImageManifest, ClientError> {
         let expected_digest = identifier.digest().to_string();
         let image = self.transport_reference(identifier);
@@ -1047,7 +1050,7 @@ impl Client {
     /// the blob's own digest for content addressing. Generic OCI blob fetch
     /// — no media-type validation, no parsing. Caller is responsible for
     /// content interpretation.
-    pub async fn pull_blob(&self, blob_ref: &crate::PinnedIdentifier) -> std::result::Result<Vec<u8>, ClientError> {
+    pub async fn pull_blob(&self, blob_ref: &crate::PinnedOciIdentifier) -> std::result::Result<Vec<u8>, ClientError> {
         let image = self.transport_reference(blob_ref);
         self.transport()
             .ensure_auth(&image, crate::RegistryOperation::Pull)
@@ -1095,7 +1098,7 @@ impl Client {
     /// digest marker file.
     pub async fn pull_layer(
         &self,
-        identifier: &crate::PinnedIdentifier,
+        identifier: &crate::PinnedOciIdentifier,
         layer: &crate::Descriptor,
         output_dir: &std::path::Path,
     ) -> std::result::Result<(), ClientError> {
@@ -1142,7 +1145,7 @@ impl Client {
     /// compressed byte count used for the compressed-side `.take()` cap.
     async fn pull_layer_with_caps(
         &self,
-        identifier: &crate::PinnedIdentifier,
+        identifier: &crate::PinnedOciIdentifier,
         layer: &crate::Descriptor,
         output_dir: &std::path::Path,
         blob_total_size: u64,
@@ -1517,7 +1520,7 @@ impl Client {
     /// layer-push counts for the one manifest push.
     pub async fn push_manifest_and_merge_tags(
         &self,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
         platform: &crate::Platform,
         layers: &[LayerRef],
         extra_tags: &[String],
@@ -1593,7 +1596,7 @@ impl Client {
     /// and the aggregate [`LayerCounts`] for the layers pushed.
     pub async fn push_multi_layer_manifest(
         &self,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
         layers: &[LayerRef],
         manifest: ManifestBuilder,
     ) -> std::result::Result<(crate::ImageManifest, Vec<u8>, String, LayerCounts), ClientError> {
@@ -1855,7 +1858,7 @@ impl Client {
     /// change that sequence.
     pub async fn push_blob(
         &self,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
         data: Vec<u8>,
         digest: &Digest,
     ) -> std::result::Result<(), ClientError> {
@@ -1873,7 +1876,7 @@ impl Client {
     /// Authentication is the caller's, as for [`push_blob`](Self::push_blob).
     pub async fn push_manifest_raw(
         &self,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
         data: Vec<u8>,
         media_type: &str,
     ) -> std::result::Result<String, ClientError> {
@@ -1891,7 +1894,7 @@ impl Client {
     /// than as a failure.
     pub async fn fetch_artifact_manifest(
         &self,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
         addressing: ReadAddressing,
     ) -> std::result::Result<(crate::Manifest, String), ClientError> {
         let image = self.read_reference(identifier, addressing);
@@ -1905,7 +1908,7 @@ impl Client {
     /// `addressing` names. Authentication is the caller's, once per artifact.
     pub async fn pull_blob_to_file(
         &self,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
         addressing: ReadAddressing,
         digest: &Digest,
         path: &std::path::Path,
@@ -1961,7 +1964,7 @@ impl Client {
     /// - Any network/auth error from the underlying manifest or blob fetch.
     pub async fn fetch_single_layer_artifact(
         &self,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
         artifact_type: &str,
         layer_media_type: &str,
         max_bytes: u64,
@@ -2068,7 +2071,7 @@ impl Client {
     /// Any network/auth error from the underlying digest fetch.
     pub async fn probe_manifest_digest_addressed(
         &self,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
         addressing: ReadAddressing,
     ) -> std::result::Result<Option<Digest>, ClientError> {
         let image = self.read_reference(identifier, addressing);
@@ -2120,7 +2123,7 @@ impl Client {
     /// incremental per-chunk cap). Tracked as FU-3.
     pub async fn fetch_manifest_raw_bytes(
         &self,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
     ) -> std::result::Result<Option<(Vec<u8>, Digest, crate::Manifest)>, ClientError> {
         self.fetch_manifest_raw_bytes_capped(identifier, MAX_INDEX_DOCUMENT_BYTES, ReadAddressing::Canonical)
             .await
@@ -2133,7 +2136,7 @@ impl Client {
     /// [`ReadAddressing`].
     pub async fn fetch_manifest_raw_bytes_addressed(
         &self,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
         addressing: ReadAddressing,
     ) -> std::result::Result<Option<(Vec<u8>, Digest, crate::Manifest)>, ClientError> {
         self.fetch_manifest_raw_bytes_capped(identifier, MAX_INDEX_DOCUMENT_BYTES, addressing)
@@ -2145,7 +2148,7 @@ impl Client {
     /// seam as [`Self::pull_layer`] / `pull_layer_with_caps`.
     async fn fetch_manifest_raw_bytes_capped(
         &self,
-        identifier: &Identifier,
+        identifier: &OciIdentifier,
         max_bytes: usize,
         addressing: ReadAddressing,
     ) -> std::result::Result<Option<(Vec<u8>, Digest, crate::Manifest)>, ClientError> {
@@ -2222,7 +2225,7 @@ impl Client {
     /// and streams more bytes than it declared.
     pub async fn fetch_layer_blob_capped(
         &self,
-        identifier_for_auth: &Identifier,
+        identifier_for_auth: &OciIdentifier,
         layer_digest: &Digest,
         max_bytes: u64,
     ) -> std::result::Result<Vec<u8>, ClientError> {
@@ -2381,17 +2384,17 @@ mod tests {
         Client::with_transport(Box::new(StubTransport::new(data.clone())))
     }
 
-    fn test_identifier(tag: &str) -> Identifier {
-        Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+    fn test_identifier(tag: &str) -> OciIdentifier {
+        OciIdentifier::from_parts("test/pkg", "example.com").clone_with_tag(tag)
     }
 
-    fn test_identifier_with_digest(digest_hex: &str) -> Identifier {
+    fn test_identifier_with_digest(digest_hex: &str) -> OciIdentifier {
         let digest = crate::Digest::Sha256(digest_hex.to_string());
-        Identifier::new_registry("test/pkg", "example.com").clone_with_digest(digest)
+        OciIdentifier::from_parts("test/pkg", "example.com").clone_with_digest(digest)
     }
 
-    fn test_pinned(digest_hex: &str) -> crate::PinnedIdentifier {
-        crate::PinnedIdentifier::try_from(test_identifier_with_digest(digest_hex)).unwrap()
+    fn test_pinned(digest_hex: &str) -> crate::PinnedOciIdentifier {
+        crate::PinnedOciIdentifier::try_from(test_identifier_with_digest(digest_hex)).unwrap()
     }
 
     /// Build a valid image manifest with the given config and layer digests.
@@ -2601,7 +2604,7 @@ mod tests {
 
     /// Registers a valid manifest under a tag and returns the byte length the
     /// registry serves, so a test can put the cap exactly on that boundary.
-    fn stub_manifest_of_known_length(id: &Identifier, data: &StubTransportData) -> usize {
+    fn stub_manifest_of_known_length(id: &OciIdentifier, data: &StubTransportData) -> usize {
         let manifest = crate::Manifest::Image(crate::ImageManifest::default());
         let (manifest_data, digest_str) = serialize_manifest(&manifest);
         let length = manifest_data.len();
@@ -2665,7 +2668,7 @@ mod tests {
     /// cannot be produced by serialising an `crate::ImageIndex` (every write site
     /// sets `crate::INDEX_SCHEMA_VERSION`), so a fixture built by the code under
     /// test could never contradict it.
-    fn stub_raw_manifest(id: &Identifier, data: &StubTransportData, bytes: &[u8]) {
+    fn stub_raw_manifest(id: &OciIdentifier, data: &StubTransportData, bytes: &[u8]) {
         let digest = Algorithm::Sha256.hash(bytes).to_string();
         data.write().manifests.insert(id.to_string(), (bytes.to_vec(), digest));
     }
@@ -2888,7 +2891,7 @@ mod tests {
         data: &StubTransportData,
         manifest: crate::ImageManifest,
         config_blob: &[u8],
-    ) -> crate::PinnedIdentifier {
+    ) -> crate::PinnedOciIdentifier {
         let config_digest = &manifest.config.digest;
         data.write()
             .blobs
@@ -4441,8 +4444,8 @@ mod tests {
     mod merge_platform {
         use super::*;
 
-        fn test_identifier(tag: &str) -> Identifier {
-            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        fn test_identifier(tag: &str) -> OciIdentifier {
+            OciIdentifier::from_parts("test/pkg", "example.com").clone_with_tag(tag)
         }
 
         fn stub_with_capture(data: &StubTransportData) -> Client {
@@ -4670,7 +4673,7 @@ mod tests {
 
         /// Seeds an existing index carrying `artifact_type` and returns its
         /// identifier, so the two stamping tests differ only in that value.
-        fn seed_existing_index(data: &StubTransportData, artifact_type: Option<&str>) -> Identifier {
+        fn seed_existing_index(data: &StubTransportData, artifact_type: Option<&str>) -> OciIdentifier {
             let id = test_identifier("3.28");
             let existing = crate::ImageIndex {
                 schema_version: 2,
@@ -4999,8 +5002,8 @@ mod tests {
     mod push_keep_tag_tests {
         use super::*;
 
-        fn test_identifier(tag: &str) -> Identifier {
-            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        fn test_identifier(tag: &str) -> OciIdentifier {
+            OciIdentifier::from_parts("test/pkg", "example.com").clone_with_tag(tag)
         }
 
         fn stub_with_capture(data: &StubTransportData) -> Client {
@@ -5199,8 +5202,8 @@ mod tests {
         use super::*;
         use crate::RegistryOperation;
 
-        fn test_identifier(tag: &str) -> Identifier {
-            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        fn test_identifier(tag: &str) -> OciIdentifier {
+            OciIdentifier::from_parts("test/pkg", "example.com").clone_with_tag(tag)
         }
 
         fn stub_with_capture(data: &StubTransportData) -> Client {
@@ -5430,8 +5433,8 @@ mod tests {
     mod multi_layer_digest_resolve {
         use super::*;
 
-        fn test_identifier(tag: &str) -> Identifier {
-            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        fn test_identifier(tag: &str) -> OciIdentifier {
+            OciIdentifier::from_parts("test/pkg", "example.com").clone_with_tag(tag)
         }
 
         fn stub_with_capture(data: &StubTransportData) -> Client {
@@ -5567,8 +5570,8 @@ mod tests {
     mod mount_reuse {
         use super::*;
 
-        fn test_identifier(tag: &str) -> Identifier {
-            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        fn test_identifier(tag: &str) -> OciIdentifier {
+            OciIdentifier::from_parts("test/pkg", "example.com").clone_with_tag(tag)
         }
 
         fn stub_with_capture(data: &StubTransportData) -> Client {
@@ -5816,8 +5819,8 @@ mod tests {
     mod cascade_order {
         use super::*;
 
-        fn test_identifier(tag: &str) -> Identifier {
-            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        fn test_identifier(tag: &str) -> OciIdentifier {
+            OciIdentifier::from_parts("test/pkg", "example.com").clone_with_tag(tag)
         }
 
         fn stub_with_capture(data: &StubTransportData) -> Client {
@@ -5932,7 +5935,7 @@ mod tests {
     // ── construction-gating backstop + Step 3.1 specification tests ──────────
     //
     // The PRIMARY guarantee is the compile-time construction-gating from
-    // Step 1.3: the read-path `Identifier → native::Reference` conversion has
+    // Step 1.3: the read-path `OciIdentifier → native::Reference` conversion has
     // no public `From` impl, so a bypassing read site fails to compile. This
     // behavioural module is defence-in-depth only — it pins
     // `transport_reference` identity-when-empty / rewrite-when-set and the
@@ -5942,8 +5945,8 @@ mod tests {
         use crate::client::MirrorMap;
         use crate::client::mirror_map::ParsedMirror;
 
-        fn make_id_with_tag(registry: &str, repo: &str, tag: &str) -> Identifier {
-            Identifier::new_registry(repo, registry).clone_with_tag(tag)
+        fn make_id_with_tag(registry: &str, repo: &str, tag: &str) -> OciIdentifier {
+            OciIdentifier::from_parts(repo, registry).clone_with_tag(tag)
         }
 
         /// A 64-hex SHA-256 digest for the pinned-install path tests.
@@ -5951,12 +5954,12 @@ mod tests {
             crate::Digest::Sha256(std::iter::repeat_n(hex_seed, 64).collect())
         }
 
-        fn make_id_with_digest(registry: &str, repo: &str, digest: crate::Digest) -> Identifier {
-            Identifier::new_registry(repo, registry).clone_with_digest(digest)
+        fn make_id_with_digest(registry: &str, repo: &str, digest: crate::Digest) -> OciIdentifier {
+            OciIdentifier::from_parts(repo, registry).clone_with_digest(digest)
         }
 
-        fn make_id_with_tag_and_digest(registry: &str, repo: &str, tag: &str, digest: crate::Digest) -> Identifier {
-            Identifier::new_registry(repo, registry)
+        fn make_id_with_tag_and_digest(registry: &str, repo: &str, tag: &str, digest: crate::Digest) -> OciIdentifier {
+            OciIdentifier::from_parts(repo, registry)
                 .clone_with_tag(tag)
                 .clone_with_digest(digest)
         }
@@ -6247,7 +6250,7 @@ mod tests {
             client.mirrors = make_mirror_map("ghcr.io", "company.jfrog.io", "ghcr-remote");
 
             // Bare identifier: no tag, no digest.
-            let bare_id = Identifier::new_registry("owner/tool", "ghcr.io");
+            let bare_id = OciIdentifier::from_parts("owner/tool", "ghcr.io");
             assert!(bare_id.tag().is_none(), "pre-condition: bare id has no tag");
             assert!(bare_id.digest().is_none(), "pre-condition: bare id has no digest");
 
@@ -6616,18 +6619,18 @@ mod tests {
             (client, data)
         }
 
-        fn identifier_with_tag(tag: &str) -> Identifier {
-            Identifier::new_registry(REPOSITORY, UPSTREAM_REGISTRY).clone_with_tag(tag)
+        fn identifier_with_tag(tag: &str) -> OciIdentifier {
+            OciIdentifier::from_parts(REPOSITORY, UPSTREAM_REGISTRY).clone_with_tag(tag)
         }
 
         fn digest_hex(seed: char) -> String {
             std::iter::repeat_n(seed, 64).collect()
         }
 
-        fn pinned_identifier(seed: char) -> crate::PinnedIdentifier {
+        fn pinned_identifier(seed: char) -> crate::PinnedOciIdentifier {
             let digest = crate::Digest::Sha256(digest_hex(seed));
-            let id = Identifier::new_registry(REPOSITORY, UPSTREAM_REGISTRY).clone_with_digest(digest);
-            crate::PinnedIdentifier::try_from(id).unwrap()
+            let id = OciIdentifier::from_parts(REPOSITORY, UPSTREAM_REGISTRY).clone_with_digest(digest);
+            crate::PinnedOciIdentifier::try_from(id).unwrap()
         }
 
         /// The repository every identifier-based call below must observe:
@@ -6994,7 +6997,7 @@ mod tests {
             let (client, _) = mirrored_client_with(ManifestAnswer::HardFailure);
             // MIRROR_HOST is UPSTREAM_REGISTRY's mirror, but this identifier
             // names it directly — no rewrite happens.
-            let direct = Identifier::new_registry("internal/tool", MIRROR_HOST).clone_with_tag("1.0");
+            let direct = OciIdentifier::from_parts("internal/tool", MIRROR_HOST).clone_with_tag("1.0");
 
             let error = client
                 .fetch_manifest_raw_bytes(&direct)
@@ -7042,7 +7045,7 @@ mod tests {
     // Allow-list rationale (only files that ACTUALLY reference the symbol —
     // adding a file that does not use it would create a latent hole, silently
     // permitting a future read-path call there):
-    // - `oci/identifier.rs`  — definition + test helpers (canonical home).
+    // - `oci/oci_identifier.rs` — definition + test helpers (canonical home).
     // - `oci/client.rs`      — the two gated seams + `ensure_auth` push path +
     //                          the manifest-cache keys (cache keyed off the
     //                          canonical identity, mirror-independent by design)
@@ -7062,7 +7065,7 @@ mod tests {
         // Allow-list: file paths (relative to the ocx_lib src root) that are
         // permitted to reference `canonical_reference`.
         const ALLOWED_SUFFIXES: &[&str] = &[
-            "ocx_oci/src/identifier.rs",
+            "ocx_oci/src/oci_identifier.rs",
             "ocx_oci/src/client.rs",
             "ocx_package/src/cascade.rs",
             "ocx_package/src/cascade/gather.rs",
@@ -7119,7 +7122,7 @@ mod tests {
     // - `oci/client.rs`     — the two read seams this gate exists to protect
     //                          (`transport_reference`, `transport_registry`, lines
     //                          ~116-159).
-    // - `oci/identifier.rs` — `canonical_reference`'s own definition (the push
+    // - `oci/oci_identifier.rs` — `canonical_reference`'s own definition (the push
     //                          seam). Callers of *that* symbol are separately
     //                          gated by `canonical_reference_only_used_in_allowed_files`
     //                          above, so a direct construction here is not an
@@ -7129,13 +7132,13 @@ mod tests {
     // not the bare `Reference::with_`: `auth/login.rs` constructs a raw
     // `oci_client::Reference` (imported directly, with no `native::` qualifier)
     // for a registry-probe path (`OciClientPing::ping`) that never goes through
-    // an `Identifier` at all — including the bare spelling would false-positive
+    // an `OciIdentifier` at all — including the bare spelling would false-positive
     // there for no safety gain.
     #[test]
     fn native_reference_direct_construction_restricted_to_seams() {
         use std::fs;
 
-        const ALLOWED_SUFFIXES: &[&str] = &["ocx_oci/src/client.rs", "ocx_oci/src/identifier.rs"];
+        const ALLOWED_SUFFIXES: &[&str] = &["ocx_oci/src/client.rs", "ocx_oci/src/oci_identifier.rs"];
         const PATTERN: &str = "native::Reference::with_";
 
         // One walk for both gates, floored on what it READ. They were two
@@ -7162,8 +7165,8 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "T-arch-G1: `{PATTERN}` found in file(s) outside the allow-list (a native::Reference \
-             must be built only via the mirror seams in client.rs, or via Identifier::canonical_reference \
-             in identifier.rs):\n  {}",
+             must be built only via the mirror seams in client.rs, or via OciIdentifier::canonical_reference \
+             in oci_identifier.rs):\n  {}",
             offenders.join("\n  ")
         );
 
@@ -7388,8 +7391,8 @@ mod tests {
             Client::with_transport(Box::new(StubTransport::new(data.clone())))
         }
 
-        fn test_id(tag: &str) -> Identifier {
-            Identifier::new_registry("test/pkg", "example.com").clone_with_tag(tag)
+        fn test_id(tag: &str) -> OciIdentifier {
+            OciIdentifier::from_parts("test/pkg", "example.com").clone_with_tag(tag)
         }
 
         fn read_pushed_index(data: &StubTransportData, tag: &str) -> crate::ImageIndex {
@@ -7627,8 +7630,8 @@ mod tests {
                     .build()
             }
 
-            fn identifier(&self, repository: &str) -> Identifier {
-                Identifier::new_registry(repository, &self.address).clone_with_tag("1.0")
+            fn identifier(&self, repository: &str) -> OciIdentifier {
+                OciIdentifier::from_parts(repository, &self.address).clone_with_tag("1.0")
             }
         }
 

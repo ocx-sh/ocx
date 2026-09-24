@@ -753,13 +753,12 @@ pub async fn apply_managed_config(
         return clear_managed_config(&config_path, file_structure).await;
     }
 
-    let identifier =
-        ocx_oci::Identifier::parse_with_default_registry(flag_value, ocx_oci::DEFAULT_REGISTRY).map_err(|source| {
-            error::Error::InvalidManagedConfigSource {
-                value: flag_value.to_string(),
-                source,
-            }
-        })?;
+    let identifier = ocx_oci::OciIdentifier::parse_target(flag_value, ocx_oci::DEFAULT_REGISTRY).map_err(|source| {
+        error::Error::InvalidManagedConfigSource {
+            value: flag_value.to_string(),
+            source,
+        }
+    })?;
 
     let managed = ManagedConfig {
         source: Some(identifier.to_string()),
@@ -930,7 +929,7 @@ pub async fn apply_managed_config(
 /// gates the background tick only, and `--offline` is the no-network lever for
 /// setup. `--frozen` is absent for a different reason: it scopes to the
 /// package tier, so the managed tier behaves identically with and without it.
-fn refresh_skip_reason(identifier: &ocx_oci::Identifier, can_fetch: bool, paused: bool) -> Option<&'static str> {
+fn refresh_skip_reason(identifier: &ocx_oci::OciIdentifier, can_fetch: bool, paused: bool) -> Option<&'static str> {
     if identifier.digest().is_some() {
         return Some("digest-pinned");
     }
@@ -1364,7 +1363,8 @@ mod tests {
     /// Builds a manager whose managed-config client serves the v2 package
     /// shape for `identifier` (stub transport, no network).
     fn manager_with_stub(root: &Path, identifier: &ocx_oci::Identifier, config_toml: &str) -> PackageManager {
-        let (client, _) = ocx_config::managed_config::test_support::stub_client_with_package(identifier, config_toml);
+        let physical = ocx_oci::OciIdentifier::passthrough(identifier);
+        let (client, _) = ocx_config::managed_config::test_support::stub_client_with_package(&physical, config_toml);
         let fs = FileStructure::with_root(root.to_path_buf());
         let local_index = ocx_index::LocalIndex::new(ocx_index::LocalConfig {
             index_store: ocx_index::IndexStore::machine_local(&fs),
@@ -1959,7 +1959,8 @@ mod tests {
         // The stub's index digest does not depend on the identifier, so it can
         // be computed first and then baked into the pinned reference.
         let (_, index_digest) = ocx_config::managed_config::test_support::stub_client_with_package(
-            &ocx_oci::Identifier::parse("corp.example.com/ocx-config:user").unwrap(),
+            &ocx_oci::OciIdentifier::parse_target("corp.example.com/ocx-config:user", ocx_oci::DEFAULT_REGISTRY)
+                .unwrap(),
             payload,
         );
         let reference = format!("corp.example.com/ocx-config:user@{index_digest}");
@@ -2082,9 +2083,14 @@ mod tests {
     /// a digest pin outranks a missing client, which outranks a pause.
     #[test]
     fn refresh_skip_reason_matrix() {
-        let floating = ocx_oci::Identifier::parse("corp.example.com/ocx-config:user").unwrap();
-        let pinned =
-            ocx_oci::Identifier::parse(&format!("corp.example.com/ocx-config:user@sha256:{}", "a".repeat(64))).unwrap();
+        let floating =
+            ocx_oci::OciIdentifier::parse_target("corp.example.com/ocx-config:user", ocx_oci::DEFAULT_REGISTRY)
+                .unwrap();
+        let pinned = ocx_oci::OciIdentifier::parse_target(
+            &format!("corp.example.com/ocx-config:user@sha256:{}", "a".repeat(64)),
+            ocx_oci::DEFAULT_REGISTRY,
+        )
+        .unwrap();
 
         // Not pinned.
         assert_eq!(refresh_skip_reason(&floating, true, false), None, "the refresh runs");

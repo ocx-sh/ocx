@@ -655,7 +655,7 @@ impl OciTransport for NativeTransport {
         source_repository: &str,
         digest: &crate::Digest,
     ) -> Result<MountOutcome> {
-        let source = crate::identifier::mount_source_reference(image.registry(), source_repository);
+        let source = crate::oci_identifier::mount_source_reference(image.registry(), source_repository);
         let digest_str = digest.to_string();
         log::debug!(
             "Attempting to mount blob {} from {} into {}",

@@ -782,7 +782,7 @@ mod tests {
     /// This is the test that pins C-007 step 2's `repository_check` closure as
     /// `|_| Ok(())`. `read_root_uncatalogued` takes one and propagates its
     /// failure as a hard error (`index_store.rs:613`); its only existing caller
-    /// passes `parse_physical_repository` (`local_index.rs:582`), and copying
+    /// passes `parse_repository_pointer`, and copying
     /// that neighbouring call site — the easy, silently wrong move — hard-fails
     /// exactly the foreign trees these preconditions promise to accept.
     #[tokio::test(flavor = "multi_thread")]
@@ -792,7 +792,7 @@ mod tests {
         let store = store_at(home.path(), locks.path());
         let foreign = root_bytes("https://example.invalid/kitware/cmake");
         assert!(
-            crate::parse_physical_repository("https://example.invalid/kitware/cmake").is_err(),
+            crate::parse_repository_pointer("https://example.invalid/kitware/cmake").is_err(),
             "fixture: this repository value must be one LocalIndex's oci:// validator rejects, \
              or the test does not pin the |_| Ok(()) decision"
         );

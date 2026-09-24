@@ -55,7 +55,10 @@ impl PackageCascadeCheck {
     fn table_rows(&self) -> Vec<[String; 5]> {
         let mut rows = Vec::new();
         for report in &self.reports {
-            let package = report.logical.as_ref().unwrap_or(&report.identifier).to_string();
+            let package = report
+                .logical
+                .as_ref()
+                .map_or_else(|| report.identifier.to_string(), ToString::to_string);
             for row in &report.rows {
                 rows.push([
                     package.clone(),
@@ -145,8 +148,11 @@ impl Printable for PackageCascadeCheck {
             if report.index_findings.is_empty() {
                 continue;
             }
-            let package = report.logical.as_ref().unwrap_or(&report.identifier).without_digest();
-            data.print_hint(&stale_index_hint(&package.to_string()));
+            let package = report.logical.as_ref().map_or_else(
+                || report.identifier.without_digest().to_string(),
+                |logical| logical.without_digest().to_string(),
+            );
+            data.print_hint(&stale_index_hint(&package));
             data.print_hint(&format!(
                 "then refresh the local copy - run: ocx index update {package}"
             ));
@@ -229,7 +235,8 @@ mod tests {
 
     fn report_with(rows: Vec<SlotRow>, index_findings: Vec<IndexFinding>) -> CascadeReport {
         CascadeReport {
-            identifier: ocx_oci::Identifier::parse("registry.test/acme/cmake").unwrap(),
+            identifier: ocx_oci::OciIdentifier::parse_target("registry.test/acme/cmake", ocx_oci::DEFAULT_REGISTRY)
+                .unwrap(),
             logical: None,
             aliases: Default::default(),
             rows,

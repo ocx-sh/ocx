@@ -64,7 +64,9 @@ async fn push_patch_descriptor(
     PatchDescriptor::from_json_bytes(descriptor_bytes)
         .map_err(|e| ClientError::InvalidManifest(format!("invalid patch descriptor: {e}")))?;
 
-    let patch_identifier = patch_repo_id.clone_with_tag(InternalTag::PATCH_TAG);
+    // The patch registry is the one `[patches]` names, written as named: a
+    // descriptor is not a package, and no index serves one.
+    let patch_identifier = ocx_oci::OciIdentifier::passthrough(patch_repo_id).clone_with_tag(InternalTag::PATCH_TAG);
     // Push stays canonical (mirror-free): remote/proxy mirrors are read-only —
     // `ensure_auth` routes a `Push` scope to the canonical host for that reason.
     client

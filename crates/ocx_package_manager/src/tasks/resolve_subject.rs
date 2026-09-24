@@ -35,16 +35,13 @@ use ocx_sign::verify::pipeline::{VerifySubjectResolver, verify_target_from_resol
 
 /// Follow the index-indirection pointer for `subject`.
 ///
-/// `Ok(None)` from the index means "no rewrite", the same contract the pull
-/// path's `resolve_transport_pinned` reads; the SSRF floor on whatever comes
+/// [`Index::route`]: the location a rewrite names, or `subject`'s own
+/// coordinates when nothing rewrites it. The SSRF floor on whatever comes
 /// back is enforced upstream in the shared index choke point
 /// (`ChainedIndex::guard_local_physical`) and again at the dial site, by the
 /// pipeline, through its `DialPolicy`.
-async fn physical_of(index: &Index, subject: &Identifier) -> ocx_index::error::Result<Identifier> {
-    Ok(index
-        .physical_reference(subject)
-        .await?
-        .unwrap_or_else(|| subject.clone()))
+async fn physical_of(index: &Index, subject: &Identifier) -> ocx_index::error::Result<ocx_oci::OciIdentifier> {
+    index.route(subject).await
 }
 
 /// The resolution the sign and attest pipelines take.

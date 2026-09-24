@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use ocx_config::ConfigTier;
 use ocx_config::tls::{ExtraRootsSource, TlsError, parse_pem, read_path};
 use ocx_oci::layer_ref::LayerRef;
-use ocx_oci::{Identifier, Platform};
+use ocx_oci::{OciIdentifier, Platform};
 use ocx_package::info::Info;
 use ocx_package::metadata::{Metadata, bundle};
 use ocx_package::publisher::{Publisher, PushOutcome};
@@ -248,7 +248,7 @@ pub enum ManagedConfigPublishError {
     #[error("failed to list existing tags for '{identifier}'")]
     ListTagsFailed {
         /// The identifier whose tags could not be listed.
-        identifier: Box<Identifier>,
+        identifier: Box<OciIdentifier>,
         /// The underlying registry failure (boxed: `crate::Error` is large).
         #[source]
         source: Box<crate::Error>,
@@ -605,7 +605,7 @@ pub async fn read_candidate_payload(path: &Path) -> Result<Vec<u8>, ManagedConfi
 /// See [`ManagedConfigPublishError`] variants.
 pub async fn publish_managed_config(
     publisher: &Publisher,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
     config_path: &Path,
     options: ManagedConfigPublishOptions,
 ) -> Result<PushOutcome, ManagedConfigPublishError> {
@@ -700,7 +700,6 @@ pub async fn publish_managed_config(
         })?;
 
     let info = Info {
-        identifier: identifier.clone(),
         metadata: Metadata::Bundle(bundle::Bundle {
             version: bundle::Version::V1,
             strip_components: None,
@@ -735,6 +734,7 @@ pub async fn publish_managed_config(
         // contract: a managed config publishes no variants.
         publisher
             .push_cascade(
+                identifier,
                 vec![info],
                 &layers,
                 existing_versions,
@@ -749,7 +749,7 @@ pub async fn publish_managed_config(
             })?
     } else {
         publisher
-            .push(vec![info], &layers, None, false, false, &BTreeMap::new())
+            .push(identifier, vec![info], &layers, None, false, false, &BTreeMap::new())
             .await
             .map_err(|source| ManagedConfigPublishError::PushFailed {
                 source: Box::new(source.into()),
@@ -1142,7 +1142,8 @@ trusted_root_json = "{}"
     /// this path used to be unbounded, and a red here is "it hung", which
     /// the timeout turns into a failure instead.
     async fn publish_path(config_path: &Path) -> Result<PushOutcome, ManagedConfigPublishError> {
-        let identifier: Identifier = "registry.test/acme/config:v1".parse().expect("identifier parses");
+        let identifier = OciIdentifier::parse_target("registry.test/acme/config:v1", ocx_oci::DEFAULT_REGISTRY)
+            .expect("identifier parses");
         let publisher = stub_publisher();
         let publish = publish_managed_config(
             &publisher,

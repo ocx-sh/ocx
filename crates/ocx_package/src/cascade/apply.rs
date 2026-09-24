@@ -95,7 +95,7 @@ pub enum WriteOutcome {
 /// Per-alias failures are reported in the returned outcomes instead.
 pub async fn apply(
     client: &ocx_oci::Client,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::OciIdentifier,
     writes: &[PlannedWrite],
 ) -> Result<Vec<RepairOutcome>> {
     if writes.is_empty() {
@@ -175,7 +175,7 @@ enum ChildState {
 /// orphan half would silently delete the folded half.
 async fn preflight(
     client: &ocx_oci::Client,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::OciIdentifier,
     writes: &[PlannedWrite],
 ) -> Result<Vec<Preflight>> {
     let probes = writes.iter().enumerate().flat_map(|(position, write)| {
@@ -311,7 +311,7 @@ fn backs_orphans_only(write: &PlannedWrite, digest: &str) -> bool {
 /// rest of the plan is unaffected by it.
 async fn write_alias(
     client: &ocx_oci::Client,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::OciIdentifier,
     write: &PlannedWrite,
     verdict: Preflight,
 ) -> WriteOutcome {
@@ -399,7 +399,7 @@ async fn write_alias(
 /// in the transport that could have prevented it. A read that fails only means
 /// the check could not be made — neither is worth failing a completed write
 /// over.
-async fn verify_write(client: &ocx_oci::Client, target: &ocx_oci::Identifier, written: &ocx_oci::Digest) -> bool {
+async fn verify_write(client: &ocx_oci::Client, target: &ocx_oci::OciIdentifier, written: &ocx_oci::Digest) -> bool {
     match client
         .probe_manifest_digest_addressed(target, ReadAddressing::Canonical)
         .await
@@ -433,8 +433,8 @@ mod tests {
         ocx_oci::Client::with_transport(Box::new(StubTransport::new(data.clone())))
     }
 
-    fn test_identifier() -> ocx_oci::Identifier {
-        ocx_oci::Identifier::new_registry("test/pkg", "example.com")
+    fn test_identifier() -> ocx_oci::OciIdentifier {
+        ocx_oci::OciIdentifier::from_parts("test/pkg", "example.com")
     }
 
     /// A well-formed, distinguishable child manifest digest.

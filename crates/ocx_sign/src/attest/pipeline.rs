@@ -640,7 +640,7 @@ mod tests {
     /// through the seam the caller supplies.
     fn indirecting_resolver<'a>(physical: Identifier) -> Box<SubjectResolver<'a>> {
         Box::new(move |_identifier, platform| {
-            let physical = physical.clone();
+            let physical = ocx_oci::OciIdentifier::passthrough(&physical);
             Box::pin(async move {
                 let resolved = (
                     subject_digest(),

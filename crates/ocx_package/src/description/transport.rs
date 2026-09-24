@@ -15,8 +15,8 @@ use std::path::Path;
 use super::{Description, Logo};
 use ocx_oci::Algorithm;
 use ocx_oci::Digest;
-use ocx_oci::Identifier;
 use ocx_oci::ManifestBuilder;
+use ocx_oci::OciIdentifier;
 use ocx_oci::client::ReadAddressing;
 use ocx_oci::client::error::ClientError;
 use ocx_oci::tag::InternalTag;
@@ -33,7 +33,7 @@ use ocx_oci::{
 /// annotations for catalog metadata (title, description, keywords).
 pub async fn push_description(
     client: &ocx_oci::Client,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
     description: &Description,
 ) -> Result<(), PackageError> {
     let desc_identifier = identifier.clone_with_tag(InternalTag::DESCRIPTION_TAG);
@@ -127,7 +127,7 @@ pub async fn push_description(
 /// names them as text rather than as links that would not resolve).
 pub async fn pull_description(
     client: &ocx_oci::Client,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
     temp_dir: &Path,
 ) -> std::result::Result<Option<Description>, ClientError> {
     pull_description_addressed(client, identifier, temp_dir, ReadAddressing::Canonical).await
@@ -140,7 +140,7 @@ pub async fn pull_description(
 /// [`ReadAddressing`].
 pub async fn pull_description_addressed(
     client: &ocx_oci::Client,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
     temp_dir: &Path,
     addressing: ReadAddressing,
 ) -> std::result::Result<Option<Description>, ClientError> {
@@ -234,8 +234,8 @@ mod tests {
     const MIRROR_PREFIX: &str = "ghcr-proxy";
     const REPOSITORY: &str = "owner/tool";
 
-    fn test_identifier(tag: &str) -> Identifier {
-        Identifier::new_registry(REPOSITORY, UPSTREAM_REGISTRY).clone_with_tag(tag)
+    fn test_identifier(tag: &str) -> OciIdentifier {
+        OciIdentifier::from_parts(REPOSITORY, UPSTREAM_REGISTRY).clone_with_tag(tag)
     }
 
     fn description() -> Description {

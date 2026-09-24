@@ -396,12 +396,12 @@ mod tests {
     use super::*;
     use ocx_config::managed_config::test_support::{gzip_tar, seed_package, stub_client_with_package};
     use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
-    use ocx_oci::{Client, Identifier};
+    use ocx_oci::{Client, OciIdentifier};
     use ocx_store::file_structure::FileStructure;
 
     /// Seeds a `StubTransport`-backed client with one managed-config package
     /// (v2 wire shape) at `identifier`.
-    fn stub_client_with_artifact(identifier: &Identifier, config_toml: &str) -> Client {
+    fn stub_client_with_artifact(identifier: &OciIdentifier, config_toml: &str) -> Client {
         stub_client_with_package(identifier, config_toml).0
     }
 
@@ -417,7 +417,7 @@ mod tests {
         PackageManager::new(fs, index, None, "localhost:5000").with_managed_config_client(Some(client))
     }
 
-    fn resolved(source: Identifier, refresh: RefreshPolicy, interval: Duration) -> ResolvedManagedConfig {
+    fn resolved(source: OciIdentifier, refresh: RefreshPolicy, interval: Duration) -> ResolvedManagedConfig {
         ResolvedManagedConfig {
             source,
             required: true,
@@ -465,7 +465,8 @@ mod tests {
     #[tokio::test]
     async fn update_managed_config_first_fetch_is_updated() {
         let home = TempDir::new().unwrap();
-        let identifier = Identifier::parse("corp.example.com/ocx-config:v1").unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
         let client = stub_client_with_artifact(&identifier, "[registry]\ndefault = \"corp\"\n");
         let manager = manager_with_client(home.path(), client);
         let resolved = resolved(identifier, RefreshPolicy::Notify, Duration::from_secs(86_400));
@@ -480,7 +481,8 @@ mod tests {
     #[tokio::test]
     async fn update_managed_config_second_call_same_content_is_already_current() {
         let home = TempDir::new().unwrap();
-        let identifier = Identifier::parse("corp.example.com/ocx-config:v1").unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
         let client = stub_client_with_artifact(&identifier, "[registry]\ndefault = \"corp\"\n");
         let manager = manager_with_client(home.path(), client);
         let resolved = resolved(identifier, RefreshPolicy::Notify, Duration::from_secs(86_400));
@@ -499,7 +501,8 @@ mod tests {
         });
         let index = ocx_index::Index::from_chained(local_index, vec![], ocx_index::ChainMode::Offline);
         let manager = PackageManager::new(fs, index, None, "localhost:5000"); // no managed_config_client
-        let identifier = Identifier::parse("corp.example.com/ocx-config:v1").unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
         let resolved = resolved(identifier, RefreshPolicy::Notify, Duration::from_secs(86_400));
 
         let result = manager.update_managed_config(&resolved, None).await;
@@ -516,7 +519,8 @@ mod tests {
     #[tokio::test]
     async fn update_managed_config_absent_source_errors_source_not_found() {
         let home = TempDir::new().unwrap();
-        let identifier = Identifier::parse("corp.example.com/ocx-config:v1").unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
         // Stub client with NO artifact registered for `identifier` — the
         // manifest fetch resolves to `Ok(None)` (mirrors a registry 404).
         let client = Client::with_transport(Box::new(StubTransport::new(StubTransportData::new())));
@@ -539,7 +543,8 @@ mod tests {
     #[tokio::test]
     async fn check_managed_config_refresh_notify_on_drift_reports_without_persisting() {
         let home = TempDir::new().unwrap();
-        let identifier = Identifier::parse("corp.example.com/ocx-config:v1").unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
         let client = stub_client_with_artifact(&identifier, "[registry]\ndefault = \"corp\"\n");
         let manager = manager_with_client(home.path(), client);
         let resolved = resolved(identifier, RefreshPolicy::Notify, Duration::ZERO);
@@ -563,7 +568,8 @@ mod tests {
     #[tokio::test]
     async fn check_managed_config_refresh_notify_probe_does_not_pull_layer_blob() {
         let home = TempDir::new().unwrap();
-        let identifier = Identifier::parse("corp.example.com/ocx-config:v1").unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
         // Retain the stub-data handle so recorded transport calls can be inspected.
         let stub_data = StubTransportData::new();
         let layer = gzip_tar(&[("config.toml", b"[registry]\ndefault = \"corp\"\n")]);
@@ -594,7 +600,8 @@ mod tests {
     #[tokio::test]
     async fn check_managed_config_refresh_apply_on_drift_persists_silently() {
         let home = TempDir::new().unwrap();
-        let identifier = Identifier::parse("corp.example.com/ocx-config:v1").unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
         let client = stub_client_with_artifact(&identifier, "[registry]\ndefault = \"applied\"\n");
         let manager = manager_with_client(home.path(), client);
         let resolved = resolved(identifier, RefreshPolicy::Apply, Duration::ZERO);
@@ -610,7 +617,8 @@ mod tests {
     #[tokio::test]
     async fn check_managed_config_refresh_no_drift_is_up_to_date() {
         let home = TempDir::new().unwrap();
-        let identifier = Identifier::parse("corp.example.com/ocx-config:v1").unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
         let client = stub_client_with_artifact(&identifier, "[registry]\ndefault = \"corp\"\n");
         let manager = manager_with_client(home.path(), client);
         let resolved = resolved(identifier, RefreshPolicy::Apply, Duration::ZERO);
@@ -626,7 +634,8 @@ mod tests {
     #[tokio::test]
     async fn check_managed_config_refresh_pause_short_circuits_with_zero_transport_calls() {
         let home = TempDir::new().unwrap();
-        let identifier = Identifier::parse("corp.example.com/ocx-config:v1").unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
         let stub_data = StubTransportData::new();
         let layer = gzip_tar(&[("config.toml", b"[registry]\ndefault = \"corp\"\n")]);
         seed_package(
@@ -665,7 +674,8 @@ mod tests {
     #[tokio::test]
     async fn check_managed_config_refresh_resumes_after_pause_expiry() {
         let home = TempDir::new().unwrap();
-        let identifier = Identifier::parse("corp.example.com/ocx-config:v1").unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
         let client = stub_client_with_artifact(&identifier, "[registry]\ndefault = \"corp\"\n");
         let manager = manager_with_client(home.path(), client);
         let resolved = resolved(identifier, RefreshPolicy::Notify, Duration::ZERO);
@@ -691,7 +701,8 @@ mod tests {
     #[tokio::test]
     async fn check_managed_config_refresh_respects_throttle() {
         let home = TempDir::new().unwrap();
-        let identifier = Identifier::parse("corp.example.com/ocx-config:v1").unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
         let client = stub_client_with_artifact(&identifier, "[registry]\ndefault = \"corp\"\n");
         let manager = manager_with_client(home.path(), client);
         let resolved = resolved(identifier, RefreshPolicy::Notify, Duration::from_secs(86_400));
@@ -713,7 +724,8 @@ mod tests {
     #[tokio::test]
     async fn check_managed_config_refresh_apply_fetch_failure_does_not_throttle() {
         let home = TempDir::new().unwrap();
-        let identifier = Identifier::parse("corp.example.com/ocx-config:v1").unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
 
         // Probe succeeds (HEAD reads the `digest` override) but the full fetch
         // fails: `manifests` is empty, so `pull_manifest_raw` hits the error
@@ -760,7 +772,8 @@ mod tests {
     #[tokio::test]
     async fn check_managed_config_refresh_drift_via_identity_at_matching_digest() {
         let home = TempDir::new().unwrap();
-        let identifier = Identifier::parse("corp.example.com/ocx-config:v1").unwrap();
+        let identifier =
+            OciIdentifier::parse_target("corp.example.com/ocx-config:v1", ocx_oci::DEFAULT_REGISTRY).unwrap();
         let (client, index_digest) = stub_client_with_package(&identifier, "[registry]\ndefault = \"corp\"\n");
         let manager = manager_with_client(home.path(), client);
 

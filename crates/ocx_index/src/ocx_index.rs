@@ -569,42 +569,6 @@ impl IndexTransport for ReqwestIndexTransport {
     }
 }
 
-// ── Physical reference parsing (C3, one-way door) ────────────────────────────
-
-/// Parses a root's `repository` pointer (`oci://host/path`) into its physical
-/// `(registry, repository)`.
-///
-/// Strict (C3): the `oci://` scheme is a wire contract — a missing or unknown
-/// scheme, or an empty host/path, is a hard [`Error::MalformedPhysicalRef`].
-/// The parsed value is transport-only routing input, never a storage key (C2).
-pub fn parse_physical_repository(value: &str) -> Result<(String, String)> {
-    let malformed = || super::error::Error::MalformedPhysicalRef {
-        value: value.to_string(),
-    };
-    let rest = value.strip_prefix("oci://").ok_or_else(malformed)?;
-    let (host, path) = rest.split_once('/').ok_or_else(malformed)?;
-    if host.is_empty() || path.is_empty() {
-        return Err(malformed());
-    }
-    // `repository` is a wire-contract pointer OCX did not mint (C3, one-way
-    // door). Re-parse `host/path` through the Identifier registry grammar and
-    // require an EXACT round-trip: the same lowercase / character-class /
-    // traversal / length checks every logical reference passes now guard this
-    // physical ref too, and demanding `registry()`/`repository()` equal the
-    // split `host`/`path` — with no tag and no digest — rejects a smuggled tag
-    // (`repo:x`), digest (`repo@sha256:…`), whitespace, control character,
-    // uppercase segment, or stray colon that the bare prefix + first-slash split
-    // above would otherwise wave through. Host *allowlisting* (which hosts may
-    // appear in roots at all) stays index-side governance (X4); the private-IP /
-    // SSRF floor is enforced at deref time by [`OcxIndex::physical_identifier`]
-    // via [`ocx_oci::ssrf::resolve_and_validate`] (ocx#218).
-    let parsed = ocx_oci::Identifier::parse_with_default_registry(rest, host).map_err(|_| malformed())?;
-    if parsed.registry() != host || parsed.repository() != path || parsed.tag().is_some() || parsed.digest().is_some() {
-        return Err(malformed());
-    }
-    Ok((host.to_string(), path.to_string()))
-}
-
 // ── Source ───────────────────────────────────────────────────────────────────
 
 /// A resolved index base: the URL every fetch is minted from, paired with the
@@ -1374,14 +1338,15 @@ impl OcxIndex {
         Ok(Some((content, index)))
     }
 
-    /// Builds the physical [`ocx_oci::Identifier`] for `identifier` by dereferencing
+    /// Builds the physical [`ocx_oci::OciIdentifier`] for `identifier` by dereferencing
     /// the root's `repository` pointer. The logical tag/digest are copied onto
     /// the physical location; the physical value is transport-only routing (C2).
-    async fn physical_identifier(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::Identifier>> {
+    async fn physical_identifier(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
         let Some(root) = self.resolve_root(identifier.repository()).await? else {
             return Ok(None);
         };
-        let (registry, repository) = parse_physical_repository(&root.repository)?;
+        let physical = super::parse_repository_pointer(&root.repository)?;
+        let registry = physical.registry();
         // SSRF floor (X1-X3, ocx#218): `registry` is a host from remote-controlled
         // index data, so validate it BEFORE the first physical registry request
         // (`self.client.*` in every caller). `trusted_hosts` is the explicit
@@ -1396,9 +1361,9 @@ impl OcxIndex {
         // and performs no lookup. `insecure_hosts` picks the scheme, because
         // which proxy setting applies (`HTTP_PROXY` vs `HTTPS_PROXY`) depends on
         // it.
-        let (host, port) = ocx_oci::ssrf::split_host_port(&registry);
+        let (host, port) = ocx_oci::ssrf::split_host_port(registry);
         ocx_oci::ssrf::guard_destination(
-            ocx_oci::ssrf::DialScheme::for_registry(self.insecure_hosts(), &registry),
+            ocx_oci::ssrf::DialScheme::for_registry(self.insecure_hosts(), registry),
             host,
             port,
             &self.trusted_hosts,
@@ -1411,7 +1376,7 @@ impl OcxIndex {
                 source,
             },
         })?;
-        Ok(Some(super::at_version_of(registry, repository, identifier)))
+        Ok(Some(physical.at_version_of(identifier)))
     }
 
     // ── catalog sync (F2) ────────────────────────────────────────────────────
@@ -1603,8 +1568,7 @@ impl index_impl::IndexImpl for OcxIndex {
         let Some(physical) = self.physical_identifier(blob_ref.as_identifier()).await? else {
             return Ok(None);
         };
-        let physical_pinned = ocx_oci::PinnedIdentifier::try_from(physical)?;
-        Ok(Some(self.client.pull_blob(&physical_pinned).await?))
+        Ok(Some(self.client.pull_blob(&physical.at_pin_of(blob_ref)).await?))
     }
 
     async fn fetch_manifest_raw_bytes(
@@ -1698,7 +1662,7 @@ impl index_impl::IndexImpl for OcxIndex {
         }
     }
 
-    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::Identifier>> {
+    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
         if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
@@ -5017,7 +4981,7 @@ mod diagnostic_surface_tests {
             .find("impl ReqwestIndexTransport {")
             .expect("the transport's inherent impl anchors the region");
         let end = source
-            .find("// ── Physical reference parsing")
+            .find("// ── Source ──")
             .expect("the next section divider closes the region");
         assert!(end > start, "the region anchors must be in source order");
         strip_comments(&source[start..end])

@@ -250,17 +250,17 @@ impl PackageManager {
     /// pin write.
     pub async fn materialize_test_companion(
         &self,
+        companion_tag_id: &ocx_oci::Identifier,
         info: ocx_package::info::Info,
         layers: &[ocx_oci::layer_ref::LayerRef],
     ) -> Result<String, PackageErrorKind> {
-        let companion_tag_id = info.identifier.clone();
-        let installed = self.pull_local(info, layers, None).await?;
+        let installed = self.pull_local(companion_tag_id, info, layers, None).await?;
         let digest = installed.identifier().digest();
         // `pull_local` materializes the platform manifest directly, so the pin
         // names it — compose's manifest-absent fallback then finds the package
         // at that digest without a platform-selection hop.
         super::patch_discovery::PatchTagMap::write_tag(
-            &self.file_structure().patch_companion_path(&companion_tag_id),
+            &self.file_structure().patch_companion_path(companion_tag_id),
             companion_tag_id.tag_or_latest(),
             &digest.to_string(),
         )

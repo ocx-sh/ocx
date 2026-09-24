@@ -16,6 +16,13 @@ impl Identifier {
         )?)
     }
 
+    /// This argument as a **write target**: the registry location a publish
+    /// writes to, exactly as named. A write is never routed through an index —
+    /// only a read of a package name is (ocx#504).
+    pub fn as_target(&self, domain: impl AsRef<str>) -> Result<ocx_oci::OciIdentifier> {
+        Ok(ocx_oci::OciIdentifier::parse_target(&self.raw, domain.as_ref())?)
+    }
+
     pub fn transform_all(
         identifiers: impl IntoIterator<Item = Self>,
         domain: impl AsRef<str>,

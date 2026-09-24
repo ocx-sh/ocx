@@ -988,11 +988,12 @@ mod classify_tests {
 
     #[test]
     fn blob_not_found_is_not_found() {
-        use ocx_oci::{Digest, Identifier, PinnedIdentifier};
+        use ocx_oci::{Digest, Identifier, OciIdentifier, PinnedIdentifier};
         let id = Identifier::parse("registry.test/repo:tag").expect("valid");
         let pinned =
             PinnedIdentifier::try_from(id.clone_with_digest(Digest::Sha256("a".repeat(64)))).expect("valid pinned");
-        assert_not_found(ClientError::BlobNotFound(pinned));
+        let pinned = OciIdentifier::passthrough(pinned.as_identifier()).at_pin_of(&pinned);
+        assert_not_found(ClientError::BlobNotFound(Box::new(pinned)));
     }
 
     /// A destination the transport refused must never enter the retry budget.
