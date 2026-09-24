@@ -87,6 +87,14 @@ from src import OcxRunner, static_index
 from src.helpers import make_package
 from src.registry import fetch_platform_manifest_digest
 
+pytestmark = pytest.mark.command(
+    "index_update",
+    "index_list",
+    "index_sync",
+    "index_regenerate",
+    "index_catalog",
+)
+
 NAMESPACE = "ocx.sh"
 
 # The shared refresh loop fans out over at most `INDEX_REFRESH_CONCURRENCY`

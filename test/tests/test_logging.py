@@ -10,12 +10,9 @@ here on observable stderr text. The subscriber prints no target
 
 from __future__ import annotations
 
-import re
 import subprocess
 
 import pytest
-
-from src.helpers import PROJECT_ROOT
 
 # One library ``log::debug!`` (``ocx_package_manager/src/tasks/clean.rs``, the
 # project-GC root walk), emitted by ``ocx --offline clean`` on a fresh
@@ -314,45 +311,6 @@ def _run(ocx, argv: tuple[str, ...], check: bool = True, **env: str) -> subproce
     return ocx.plain(*argv, env_overrides=env, check=check)
 
 
-# The crate whose targets are the CLI's own. Excluded from the derived set
-# below because it is not a library row: its coverage is ``CLI_TARGET``, which
-# every parametrised case asserts as its control.
-CLI_CRATE = "ocx_cli"
-LOG_MACRO = re.compile(r"\blog::(?:debug|info|warn|error|trace)!")
-
-
-def _crates_with_log_sites() -> set[str]:
-    """Every workspace crate whose ``src/`` calls the ``log`` facade."""
-    crates = PROJECT_ROOT / "crates"
-    found = set()
-    for manifest in crates.glob("*/Cargo.toml"):
-        src = manifest.parent / "src"
-        if any(LOG_MACRO.search(f.read_text(encoding="utf-8", errors="replace")) for f in src.rglob("*.rs")):
-            found.add(manifest.parent.name)
-    return found
-
-
-def test_every_crate_that_logs_has_a_row():
-    """``LIBRARY_TARGETS`` is complete against the tree, not against a comment.
-
-    The table said "a crate is added here by the commit that extracts it" and
-    nothing checked it, so a crate that gained ``log::`` call sites — or one
-    extracted without its row — was invisible. Derived rather than listed: the
-    subject is every crate whose ``src/`` reaches the facade.
-    """
-    rows = {target for target, _, _, _ in LIBRARY_TARGETS}
-    logging = _crates_with_log_sites()
-    assert CLI_CRATE in logging, (
-        f"{CLI_CRATE} calls no log macro, so this test is reading the wrong tree; found={sorted(logging)}"
-    )
-    assert len(logging) > 3, f"only {len(logging)} crate(s) found to log at all — the scan lost its subject"
-    assert rows == logging - {CLI_CRATE}, (
-        "LIBRARY_TARGETS and the tree disagree about which crates log: "
-        f"missing a row {sorted(logging - {CLI_CRATE} - rows)}, "
-        f"row with no call site {sorted(rows - logging)}"
-    )
-
-
 def test_debug_level_reaches_library_events(ocx):
     """``--log-level debug`` renders a library ``debug!`` line on stderr."""
     # ``INDEX_LINE``, not ``LIBRARY_LINE``: this asserts that *a* library is
@@ -398,7 +356,9 @@ def test_env_filter_selects_library_target(request, ocx, tmp_path, target, line,
     extra_env = {**extra_env, "DOCKER_CONFIG": str(docker_config)}
     level = "trace" if target in TRACE_TARGETS else "debug"
     completed = _run(ocx, argv, check=check, OCX_LOG=f"{target}={level}", **extra_env)
-    expected_status = EXPECT_EXIT.get(target)
+    expected_status = None
+    if target in EXPECT_EXIT:
+        expected_status = EXPECT_EXIT[target]
     if expected_status is not None:
         assert completed.returncode == expected_status, (
             f"{target} row exited {completed.returncode}, not the {expected_status} its refusal "

@@ -106,26 +106,32 @@ def registry_accepts_writes(registry: str) -> bool:
     return accepted
 
 
-def _recycle_registry() -> None:
+def _recycle_registry(registry: str) -> None:
     """Recreate the primary registry container, discarding its tmpfs.
 
     A restart is not enough on some daemons -- the volume is recreated with
     the container, not with the process. Serialized on the same host-wide lock
     compose bring-up uses, because a sibling worktree shares this container.
+
+    The caller decided on a probe taken WITHOUT that lock, so each step re-asks
+    under it: a sibling may have recycled already. A write-accepting registry is
+    left alone, and after its own `up -d` this holds the lock until the registry
+    accepts writes (30 s): `up -d` returns before it listens, and the next sibling
+    would read "starting" as "full" (`lint/test_registry_recycle.py`).
     """
     import fcntl  # POSIX-only, imported where used like the bring-up lock below
 
     _COMPOSE_LOCK.parent.mkdir(parents=True, exist_ok=True)
     with _COMPOSE_LOCK.open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        subprocess.run(
+        registry_accepts_writes(registry) or subprocess.run(
             ["docker", "compose", "-f", str(COMPOSE_FILE), "rm", "-sf", "registry"],
             capture_output=True, check=False,
         )
-        subprocess.run(
+        registry_accepts_writes(registry) or subprocess.run(
             ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "registry"],
             capture_output=True, check=False,
-        )
+        ) and any(registry_accepts_writes(registry) or time.sleep(0.5) for _ in range(60))
 
 
 def start_registry(registry: str) -> None:
@@ -143,7 +149,7 @@ def start_registry(registry: str) -> None:
             f"registry at {registry} is reachable but refuses writes (storage full?) — recreating it",
             file=sys.stderr,
         )
-        _recycle_registry()
+        _recycle_registry(registry)
     else:
         compose_up()
 

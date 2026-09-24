@@ -50,6 +50,32 @@ from recordings.setups import SETUPS
 from src.runner import OcxRunner
 from src.scenarios import SCENARIOS, Scenario
 
+pytestmark = pytest.mark.command(
+    "install",
+    "exec",
+    "which",
+    "env",
+    "select",
+    "deselect",
+    "uninstall",
+    "deps",
+    "package_create",
+    "package_push",
+    "package_pull",
+    "package_test",
+    "toolchain_env",
+    "toolchain_exec",
+    "add",
+    "init",
+    "pull",
+    "lock",
+    "shell_state",
+    "patch_test",
+    "index_list",
+    "index_update",
+    "self_group/activate",
+)
+
 # ---------------------------------------------------------------------------
 # Registry completeness — static, no fixtures needed
 # ---------------------------------------------------------------------------

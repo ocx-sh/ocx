@@ -13,6 +13,8 @@ from src import (
     registry_dir,
 )
 
+pytestmark = pytest.mark.command("install")
+
 _AMD64 = "linux/amd64"
 _ARM64 = "linux/arm64"
 

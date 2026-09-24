@@ -11,12 +11,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src import OcxRunner, make_package
 from src.registry import (
     fetch_manifest_from_registry,
     index_platforms,
     index_platforms_with_features,
 )
+
+pytestmark = pytest.mark.command("package_cascade*")
 
 
 def test_cascade_preserves_platforms(

@@ -5,6 +5,8 @@ import pytest
 from src import OcxRunner, PackageInfo, assert_dir_exists, assert_not_exists
 from src.helpers import make_package
 
+pytestmark = pytest.mark.command("clean")
+
 
 @pytest.mark.smoke
 def test_clean_removes_unreferenced_objects(

@@ -73,10 +73,12 @@ tasks:
     desc: Rust-only developer gate for review-fix loops — NOT part of `task verify`, which reaches these checks through `.verify:lint` / `.verify:build-test` instead
     summary: |
       A convenience entry point, not a gate: nothing in `taskfile.yml`, in
-      `.github/workflows/**` or in `scripts/scoped_gate.py` calls this task.
-      Four subsystem rules and `workflow-feature.md` tell a developer to run
-      it during a review-fix loop when only Rust changed, which is what it is
-      for and the reason it stays. Anything it runs that must also gate a
+      `.github/workflows/**` or in `scripts/scoped_gate.py` calls this task,
+      and no rule prescribes it as *the* per-task gate any more (that used to
+      contradict CLAUDE.md's `verify:scoped` model — plan_test_speed_tiers.md
+      C-022 swept the wording). It stays as a Rust-only convenience for a
+      manual review-fix loop when only Rust changed. Anything it runs that
+      must also gate a
       merge is wired into `.verify:build-test` or a workflow job in its own
       right — never left to this list, which no CI run and no commit hook
       evaluates. `check:windows-cfg` below is reachable only from here; the
@@ -216,9 +218,11 @@ tasks:
     cmd: cargo clippy --workspace --locked --all-targets --fix --allow-dirty
 
   build:
-    desc: Build release binary
+    desc: Build the acceptance binary (target/test-bin/ocx)
     summary: |
-      Builds the `ocx` release binary with the `__testing` feature enabled.
+      Builds `ocx` under the `test-bin` profile (release, incremental; root
+      Cargo.toml) with the `__testing` feature enabled — the same profile
+      as `test/taskfile.yml` `.build-binaries`, so a verify compiles it once.
       The feature compile-gates internal-only test seams (currently the
       `__OCX_SELF_IMAGE` env var override that acceptance tests use to
       redirect the canonical `ocx.sh/ocx/cli` identifier to a localhost
@@ -231,7 +235,7 @@ tasks:
     # it owns. A hand-written key here once skipped the build forever once the
     # binary existed, and acceptance tests reported phantom regressions against
     # code that was never compiled.
-    cmd: cargo build --release -p ocx --features ocx/__testing --locked
+    cmd: cargo build --profile test-bin -p ocx --features ocx/__testing --locked
 
   install:nextest:
     internal: true

@@ -62,12 +62,12 @@ gif_targets(name = "gifs")
 # editing one must rebuild the site, and a cache hit there would mean the rule
 # is unsound (S-014). A filegroup rather than exports_files, because that
 # consumer is coarse by contract and the glob is the one cast_targets already
-# takes -- so a new script joins both sets at once.
+# takes, widened to every file here for the acceptance modules that walk it.
 filegroup(
     name = "doc_script_sources",
     srcs = glob(
-        ["*.sh"],
+        ["**"],
         allow_empty = False,
     ),
-    visibility = ["//website:__pkg__"],
+    visibility = ["//test:__pkg__"] + ["//website:__pkg__"],
 )

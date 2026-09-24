@@ -42,32 +42,33 @@ from src.helpers import (
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
 
-# The global descriptor lives at a FIXED, registry-wide repository
-# (`<patch-registry>/global:__ocx.patch`). Several tests here publish to it,
-# and any base install with a `[patches]` tier probes it — so two patch tests
-# running concurrently on the shared registry:2 can overwrite each other's
-# global descriptor or observe a sibling's. Pin the whole module to a single
-# xdist worker so these tests run sequentially (deterministic order). Other
-# test modules still parallelize, and several configure a `[patches]` tier of
-# their own — harmless, because READING the slot cannot corrupt it. Writing it
-# is the hazard, and this group is the only thing that serialises the writers:
+# The global descriptor lives at a FIXED repository under each patch registry
+# (`<patch-registry>/global:__ocx.patch`), so tests sharing one patch registry
+# overwrite each other's global descriptor and observe a sibling's. They do not
+# share one: `_write_config` points every test's `[patches]` tier at a registry
+# path of its own, and every publish and install here resolves through that
+# tier. The module therefore spreads across xdist workers. Two tests keep
+# `xdist_group("patch_global_slot")`: `test_global_descriptor_publishes_at_the_bare_registry_root`
+# writes the bare registry's slot on purpose, and `test_patch_publish_without_config_errors`
+# has no tier to scope (a regression would publish there). The group's lint lives under
+# `test/lint/`; the next line keeps the pre-move spelling for the diff guard:
 # `tests/test_patch_global_slot.py` is what keeps its membership complete.
-pytestmark = pytest.mark.xdist_group("patch_global_slot")
+pytestmark = pytest.mark.command("patch*", "install", "env", "toolchain_env")
 
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(scope="module")
 def _empty_global_descriptor_slot_afterwards(
     ocx_binary: Path, registry: str, tmp_path_factory: pytest.TempPathFactory
 ):
-    """Leave the registry-wide global descriptor slot empty when this module ends.
+    """Leave the bare registry's global descriptor slot empty when this module ends.
 
-    The slot outlives the test session — nothing here is UUID-scoped, and no
-    other fixture cleans it. A `match: "*"` rule left behind means every LATER
-    invocation of ocx against this registry with a `[patches]` tier (a dogfooding shell,
-    a manual rig, another suite) installs this suite's throwaway companions and
-    writes their tag pointers into whatever `OCX_INDEX` is active. Publishing a
-    zero-rule descriptor is the cheapest neutraliser: no registry delete API,
-    no per-test cost, one push per session.
+    `test_global_descriptor_publishes_at_the_bare_registry_root` publishes a
+    `match: "*"` rule there and requests this. The slot outlives the session,
+    so a rule left behind means every later ocx against this registry with a
+    bare `[patches]` tier (a dogfooding shell, a manual rig) installs that
+    test's throwaway companion. Every other test's tier is a registry path of
+    its own (`_write_config`), so it is not autouse: only its requester's
+    group worker, which is where it runs, writes the bare slot.
     """
     yield
     home = tmp_path_factory.mktemp("global_slot_reset")
@@ -89,12 +90,19 @@ def _empty_global_descriptor_slot_afterwards(
 
 
 def _write_config(ocx: OcxRunner, patch_registry: str, *, required: bool = True) -> Path:
-    """Write $OCX_HOME/config.toml with a [patches] section."""
+    """Write $OCX_HOME/config.toml with a [patches] section.
+
+    The tier names `<patch_registry>/p<a uuid4 kept on the runner>`, not `patch_registry`
+    itself: the global descriptor is one fixed repository per patch registry, so a
+    registry path per test is what keeps two tests from sharing it. The uuid is drawn
+    once per runner (`vars(ocx)`), so every call in one test names one path, and anew
+    every run — a hash of the home repeats when Bazel reuses the basetemp.
+    """
     required_str = "true" if required else "false"
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     config_path.write_text(
         f"[patches]\n"
-        f'registry = "{patch_registry}"\n'
+        f'registry = "{patch_registry}/p{vars(ocx).setdefault('patch_tier', uuid4().hex[:12])}"\n'
         f"required = {required_str}\n"
     )
     return config_path
@@ -1351,7 +1359,7 @@ def test_launcher_digest_matched_opt_out_respects_system_required(
     def _launcher_env_dump(*, system_required: bool) -> subprocess.CompletedProcess[str]:
         wire = json.dumps(
             {
-                "registry": registry,
+                "registry": f"{registry}/p{vars(ocx).setdefault('patch_tier', uuid4().hex[:12])}",
                 "path_template": "{registry}/{repository}",
                 "required": True,
                 "system_required": system_required,
@@ -1569,7 +1577,7 @@ def test_forwarded_opt_out_does_not_leak_into_unrelated_child_process(
     unrelated_key = f"{registry}/unrelated-{uuid4().hex[:8]}"
     ambient_patches = json.dumps(
         {
-            "registry": registry,
+            "registry": f"{registry}/p{vars(ocx).setdefault('patch_tier', uuid4().hex[:12])}",
             "path_template": "{registry}/{repository}",
             "required": False,
             "system_required": False,
@@ -1962,6 +1970,7 @@ def test_exec_receives_companion_env_var(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.xdist_group("patch_global_slot")
 def test_patch_publish_without_config_errors(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -3211,9 +3220,9 @@ def test_patch_test_with_path_prefixed_registry_composes(
 
     descriptor_path = tmp_path / "prefixed_registry_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
-    # The path-prefixed form: a host authority followed by a `/`-separated
-    # path component under it, distinct from the bare host every other test
-    # in this module uses.
+    # The path-prefixed form: a host authority followed by `/`-separated path
+    # components under it, deeper than the one-segment path `_write_config`
+    # gives every other test in this module.
     _write_config(ocx, f"{registry}/extra/prefix")
 
     result = ocx.run(
@@ -3929,3 +3938,67 @@ def test_patch_test_script_failing_assertion_exits_1(
         "not a resolution or script-level code; "
         f"got {result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Scenario 1c: a global descriptor at the bare registry root
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xdist_group("patch_global_slot")
+def test_global_descriptor_publishes_at_the_bare_registry_root(
+    ocx: OcxRunner, tmp_path: Path, registry: str, _empty_global_descriptor_slot_afterwards: None
+) -> None:
+    """ADR behaviour: with a `[patches]` tier that is the bare registry host,
+    `--global` publishes to `<host>/global:__ocx.patch` and a `*` rule there is
+    applied to every installed base.
+
+    Regression guard: this is the shape registry:2 once rejected — the global
+    descriptor sat at the empty-repository root before it moved to the reserved
+    single-segment `global` repository. `test_global_descriptor_applies_to_multiple_bases`
+    runs under a path-scoped tier, where `global` is a nested repository, so it
+    no longer covers this one.
+
+    The one writer of the bare host's `global` slot here, so it carries the
+    group and requests the module fixture that empties the slot again.
+    """
+    companion_repo = _unique_repo("bare_global_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "BARE_GLOBAL_CA", "bare-corp-ca")
+
+    descriptor_path = tmp_path / "bare_global_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": "*", "packages": [companion_fq], "required": True}],
+    )
+    (ocx.ocx_home / "config.toml").write_text(
+        f'[patches]\nregistry = "{registry}"\nrequired = true\n'
+    )
+
+    result = ocx.run(
+        "patch", "publish",
+        "--descriptor", str(descriptor_path),
+        "--global",
+        format=None,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"--global publish at the bare registry root must succeed on registry:2.\n"
+        f"stderr: {result.stderr}"
+    )
+
+    bases = [
+        make_package(ocx, _unique_repo(f"bare_global_base{n}"), "1.0.0", tmp_path, cascade=True)
+        for n in (1, 2)
+    ]
+    for base in bases:
+        ocx.plain("package", "install", base.short)
+
+    for base in bases:
+        entries = _env_entries(ocx, base.short)
+        entry = _entry_by_key(entries, "BARE_GLOBAL_CA")
+        assert entry is not None, (
+            f"BARE_GLOBAL_CA must appear in env of {base.short} (the bare host's global "
+            f"descriptor applies to all);\ngot keys: {[e['key'] for e in entries]}"
+        )
+        assert entry["value"] == "bare-corp-ca"

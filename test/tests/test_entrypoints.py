@@ -20,6 +20,8 @@ from src.helpers import make_package, make_package_with_entrypoints
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, current_platform
 
+pytestmark = pytest.mark.command("launcher/exec", "install", "env")
+
 # ---------------------------------------------------------------------------
 # Helpers shared by new suites
 # ---------------------------------------------------------------------------

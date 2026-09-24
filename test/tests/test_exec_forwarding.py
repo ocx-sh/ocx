@@ -24,6 +24,7 @@ pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="OCX configuration forwarding is exercised via POSIX shell helpers (`sh`, `cat`); Windows has the same Rust surface covered by unit tests",
 )
+pytestmark = [pytestmark, pytest.mark.command("exec")]
 
 
 def _exec_capture(

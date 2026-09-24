@@ -36,6 +36,34 @@ pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="Doc-script drift gate targets Linux/macOS; Windows behaviour covered by the pytest suite.",
 )
+pytestmark = [
+    pytestmark,
+    pytest.mark.command(
+        "install",
+        "exec",
+        "which",
+        "env",
+        "select",
+        "deselect",
+        "uninstall",
+        "deps",
+        "package_create",
+        "package_push",
+        "package_pull",
+        "package_test",
+        "toolchain_env",
+        "toolchain_exec",
+        "add",
+        "init",
+        "pull",
+        "lock",
+        "shell_state",
+        "patch_test",
+        "index_list",
+        "index_update",
+        "self_group/activate",
+    ),
+]
 
 DOC_SCRIPTS_DIR: Path = PROJECT_ROOT / "test" / "doc_scripts"
 
@@ -44,7 +72,7 @@ SHARED_SLOT_GROUPS: dict[str, str] = {
     # `ocx patch sync` with no `--platform` also probes the registry-wide
     # reserved `global` patch-descriptor repository — the same shared slot
     # `tests/test_patches.py` serializes itself against.
-    "patches__consumer.sh": "patch_global_slot",
+    # — no longer: its provider now gives each provision a patch registry path.
     # Fixed, non-`unique_repo` identifier `corp/ocx-config` (the on-screen
     # example in the docs).
     "user-guide__managed-config-rollout.sh": "managed_config_corp_slot",

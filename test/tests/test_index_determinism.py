@@ -27,6 +27,8 @@ from src.helpers import make_package
 from src.registry import fetch_platform_manifest_digest
 from src.runner import registry_dir
 
+pytestmark = pytest.mark.command("index_update")
+
 NAMESPACE = "ocx.sh"
 
 

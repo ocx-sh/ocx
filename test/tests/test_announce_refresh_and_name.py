@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from announce_helpers import (
     INDEX_FULL,
     INDEX_OWNER,
@@ -42,6 +43,8 @@ from announce_helpers import (
 from fake_forge import FakeForge
 
 from src.runner import OcxRunner
+
+pytestmark = pytest.mark.command("package_announce")
 
 #: `--fork` plus the index coordinate, the argv prefix every writing row shares.
 FORK_ARGS = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]

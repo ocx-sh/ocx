@@ -38,6 +38,8 @@ from src import (
 )
 from src.registry import fetch_platform_manifest_digest
 
+pytestmark = pytest.mark.command("version", "status")
+
 # ---------------------------------------------------------------------------
 # `ocx version` JSON contract
 # ---------------------------------------------------------------------------

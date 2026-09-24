@@ -1790,6 +1790,10 @@ impl ConfigLoader {
     /// User config: `$XDG_CONFIG_HOME/ocx/config.toml` or
     /// `~/.config/ocx/config.toml` (via `dirs::config_dir`).
     pub fn user_path() -> Option<PathBuf> {
+        #[cfg(any(test, feature = "__testing"))]
+        if ocx_util::env::overrides::is_hermetic() {
+            return hermetic_config_dir().map(|d| d.join("ocx").join("config.toml"));
+        }
         dirs::config_dir().map(|d| d.join("ocx").join("config.toml"))
     }
 
@@ -1822,6 +1826,24 @@ impl ConfigLoader {
     pub fn home_sigstore_trusted_root_path() -> Option<PathBuf> {
         crate::home::default_ocx_root().map(|d| d.join("sigstore").join("trusted-root.json"))
     }
+}
+
+/// [`dirs::config_dir`]'s answer, read from the hermetic override table
+/// instead of the process environment — `dirs` reads `HOME`/`XDG_CONFIG_HOME`
+/// itself, past `ocx_util::env`, so under the in-process CLI seam it would
+/// load the developer's own user tier.
+#[cfg(any(test, feature = "__testing"))]
+fn hermetic_config_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return ocx_util::env::var("APPDATA").map(PathBuf::from);
+    }
+    if cfg!(target_os = "macos") {
+        return ocx_util::env::home_dir().map(|home| home.join("Library").join("Application Support"));
+    }
+    ocx_util::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .or_else(|| ocx_util::env::home_dir().map(|home| home.join(".config")))
 }
 
 #[cfg(test)]

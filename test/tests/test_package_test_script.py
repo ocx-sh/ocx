@@ -47,6 +47,7 @@ pytestmark = pytest.mark.skipif(
     reason="scripted-test leg is linux/macOS only while the approach is validated "
     "(ADR Testbed & CI); symlink-escape scenarios need POSIX `ln -s`",
 )
+pytestmark = [pytestmark, pytest.mark.command("package_test")]
 
 _PLATFORM = current_platform()
 

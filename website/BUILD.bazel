@@ -74,3 +74,44 @@ site_target(
     # removing `no-remote-cache` from this rule.
     doc_scripts = [],
 )
+
+# Website files acceptance modules read, declared on exactly the `//test`
+# targets that read them (plan_test_speed_tiers.md C-020, `test/BUILD.bazel`
+# `module_data`).
+#
+# `src/public/schemas/metadata/v1.json` is GENERATED (`task schema`,
+# gitignored) and exported by name anyway: `test/tests/test_schema.py` reads
+# that very file in the source tree, so its bytes are the input and naming it
+# keys the target on them. On a tree where `task schema` never ran the target
+# fails with Bazel's `missing input file`, which is the same refusal the
+# module's own "Run `task schema:generate`" assertion makes, one step earlier.
+exports_files(
+    [
+        "recordings.taskfile.yml",
+        "src/docs/reference/command-line.md",
+        "src/public/schemas/metadata/v1.json",
+    ],
+    visibility = ["//test:__pkg__"],
+)
+
+# Every taskfile in this package — the half of the root `task` include graph
+# that lives here (`//:taskfiles` is the other half).
+filegroup(
+    name = "taskfiles",
+    srcs = ["taskfile.yml"] + glob(
+        ["*.taskfile.yml"],
+        allow_empty = False,
+    ),
+    visibility = ["//test:__pkg__"],
+)
+
+# `scripts/publish_doc_scripts.py`, which `task website:scripts:publish` runs.
+filegroup(
+    name = "publish_scripts",
+    srcs = glob(
+        ["scripts/**"],
+        allow_empty = False,
+        exclude = ["**/__pycache__/**"],
+    ),
+    visibility = ["//test:__pkg__"],
+)

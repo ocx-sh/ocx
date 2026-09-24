@@ -79,6 +79,8 @@ from git_shim import GitInvocation, GitShim, install_git_shim
 from src.helpers import make_package
 from src.runner import OcxRunner
 
+pytestmark = pytest.mark.command("package_claim", "package_announce")
+
 # ── shared constants ──────────────────────────────────────────────────────
 
 #: The API credential every row exports unless it is exercising its absence.

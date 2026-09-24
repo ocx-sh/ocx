@@ -91,6 +91,7 @@ from pathlib import Path
 
 from bazel_gate_proofs import (
     CRATE_PACKAGES,
+    CRATES_BINARY_TARGETS,
     CRATES_FILEGROUP_TARGETS,
     CRATES_LIB_TARGETS,
     CRATES_TEST_TARGETS,
@@ -170,6 +171,11 @@ RULE_CLOSE = re.compile(r"^\)$")
 DEP_ATTR = re.compile(r"^  (?:deps|proc_macro_deps) = (?P<value>.*)$")
 STRING_LITERAL = re.compile(r'"([^"]*)"')
 DEP_LABEL_PREFIX = ("@crates//", "//crates/")
+# Every kind that is a `crates/TEST_TARGET_MAP.toml` row. `sh_test` is the one
+# `ocx_cli:ocx_cli_seam_test`: it runs `ocx_cli_test`'s own binary under a
+# poisoned environment rather than compiling the crate a second time, and it
+# still carries a row (and a floored case count) of its own.
+TEST_RULE_KINDS = frozenset({"rust_test", "sh_test"})
 
 
 @dataclasses.dataclass
@@ -217,7 +223,7 @@ def read_build_output(text: str) -> BuildRead:
         opener = RULE_OPEN.match(line)
         if opener is not None:
             read.targets += 1
-            if opener.group("kind") == "rust_test":
+            if opener.group("kind") in TEST_RULE_KINDS:
                 read.rust_tests += 1
             if package is None:
                 read.orphan_rules += 1
@@ -285,7 +291,7 @@ def read_test_map_rows(path: Path) -> int:
     """`crates/TEST_TARGET_MAP.toml`'s `[[target]]` row count, 0 if unreadable.
 
     0 is the honest answer for "could not read it": `build_drift` compares it
-    against the `rust_test` targets the query found, so an unreadable map is a
+    against the test targets (`TEST_RULE_KINDS`) the query found, so an unreadable map is a
     `drift-map-parity` red rather than an exception nobody sees.
     """
     try:
@@ -489,8 +495,8 @@ MAP_PREAMBLE = """\
 #
 #   `//crates/<dir>:<dir>` -> the member's Cargo package name, listed ONLY
 #       where the two differ. `bazel_gate_proofs.resolve_label` falls through
-#       to `//crates/<x>:<x>` -> `<x>` for the other 19, so listing them would
-#       be 19 rows saying nothing. One member differs: `crates/ocx_cli` is the
+#       to `//crates/<x>:<x>` -> `<x>` for the other 20, so listing them would
+#       be 20 rows saying nothing. One member differs: `crates/ocx_cli` is the
 #       package `ocx`.
 #
 # The Cargo-rename trap the plan recorded does NOT appear here. This workspace
@@ -647,6 +653,7 @@ def sample_tree() -> tuple[str, dict]:
 
     libs = 0
     tests = 0
+    binaries = 0
     filegroups = 0
     integration_budget = CRATES_TEST_TARGETS - CRATE_PACKAGES
     for index, directory in enumerate(directories):
@@ -697,6 +704,14 @@ def sample_tree() -> tuple[str, dict]:
         if index < CRATES_FILEGROUP_TARGETS:
             records.append(_rule(package, "filegroup", f"{directory}_data", deps=[], proc_macro=[]))
             filegroups += 1
+        if binaries < CRATES_BINARY_TARGETS and directory != "ocx_shim":
+            # The `rust_binary` over a package's own `src/main.rs`
+            # (`ocx_schema:ocx_schema_bin`, plan_test_speed_tiers.md C-020): its
+            # one edge is its own lib, which the self-edge rule drops.
+            records.append(
+                _rule(package, "rust_binary", f"{directory}_bin", deps=[f"//crates/{directory}:{directory}"], proc_macro=[])
+            )
+            binaries += 1
 
         member_id = f"member::{name}"
         members.append(member_id)
@@ -728,9 +743,12 @@ def sample_tree() -> tuple[str, dict]:
     )
 
     expect(
-        libs == CRATES_LIB_TARGETS and tests == CRATES_TEST_TARGETS and filegroups == CRATES_FILEGROUP_TARGETS,
-        f"fixture shape is {libs}/{tests}/{filegroups}, expected "
-        f"{CRATES_LIB_TARGETS}/{CRATES_TEST_TARGETS}/{CRATES_FILEGROUP_TARGETS}",
+        libs == CRATES_LIB_TARGETS
+        and tests == CRATES_TEST_TARGETS
+        and binaries == CRATES_BINARY_TARGETS
+        and filegroups == CRATES_FILEGROUP_TARGETS,
+        f"fixture shape is {libs}/{tests}/{binaries}/{filegroups}, expected "
+        f"{CRATES_LIB_TARGETS}/{CRATES_TEST_TARGETS}/{CRATES_BINARY_TARGETS}/{CRATES_FILEGROUP_TARGETS}",
     )
     metadata = {"packages": packages, "workspace_members": members, "resolve": {"nodes": nodes}}
     return "\n".join(records) + "\n", metadata

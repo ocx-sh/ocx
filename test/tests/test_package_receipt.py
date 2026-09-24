@@ -10,8 +10,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src.helpers import resolved_receipt_path
 from src.runner import OcxRunner, current_platform
+
+pytestmark = pytest.mark.command("package_receipt")
 
 EXIT_DATA_ERR = 65
 EXIT_NOT_FOUND = 79

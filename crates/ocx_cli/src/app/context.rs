@@ -168,17 +168,25 @@ impl Context {
         // package manager. Disabled when stderr is not a TTY so
         // non-interactive runs pay no cost, and under `--quiet`, which is the
         // one switch a wrapper has to silence a bar on a terminal stderr.
-        let progress = if ocx_console::ProgressMode::detect().stderr && !options.quiet {
+        //
+        // The in-process seam skips each process-global below — the terminal
+        // probes, the global subscriber, the host libc detection (it spawns a
+        // loader and fills a process cache) — and brings its own subscriber,
+        // scoped to the call.
+        let in_seam = super::in_seam();
+        let progress = if !in_seam && ocx_console::ProgressMode::detect().stderr && !options.quiet {
             ocx_console::progress::ProgressManager::stderr()
         } else {
             ocx_console::progress::ProgressManager::disabled()
         };
 
-        crate::tracing_init::LogSettings::default()
-            .with_console_level(options.log_level)
-            .with_stderr_color(color_config.stderr)
-            .init_with_progress(&progress)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if !in_seam {
+            crate::tracing_init::LogSettings::default()
+                .with_console_level(options.log_level)
+                .with_stderr_color(color_config.stderr)
+                .init_with_progress(&progress)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
 
         log::debug!("Creating context with options: {:?}", options);
 
@@ -195,12 +203,14 @@ impl Context {
         // network work and offline has nothing to say about it. See the
         // `host_capabilities` module's "Cache lifecycle" note for what
         // invalidates the record.
-        ocx_oci::HostCapabilities::detect_and_cache(
-            ocx_config::home::default_ocx_root()
-                .map(|root| ocx_store::file_structure::StateStore::new(root.join("state")).host_capabilities_file())
-                .as_deref(),
-        )
-        .await;
+        if !in_seam {
+            ocx_oci::HostCapabilities::detect_and_cache(
+                ocx_config::home::default_ocx_root()
+                    .map(|root| ocx_store::file_structure::StateStore::new(root.join("state")).host_capabilities_file())
+                    .as_deref(),
+            )
+            .await;
+        }
 
         if options.offline && options.remote {
             // `--offline --remote` = pinned-only mode. Both flags accepted
@@ -272,7 +282,7 @@ impl Context {
         let mirror_map = ocx_oci::MirrorMap::new(resolved_mirrors.registry.clone());
 
         let printer = Printer::new(color_config.stdout, color_config.stderr);
-        let ui = UserInterface::new(printer, console::Term::stderr().is_term(), options.quiet);
+        let ui = UserInterface::new(printer, !in_seam && console::Term::stderr().is_term(), options.quiet);
         // `ContextOptions::build_api` owns the printer + format-default +
         // quiet wiring. Shared with the Context-free static-command bypass
         // (`ocx version`) so both paths honour `--color` and the

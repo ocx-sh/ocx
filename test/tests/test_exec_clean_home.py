@@ -25,6 +25,8 @@ import pytest
 from src.helpers import make_package_with_entrypoints, push_managed_config
 from src.runner import OcxRunner, PackageInfo
 
+pytestmark = pytest.mark.command("exec")
+
 _POSIX_ONLY = "the `--clean` home contract is exercised through POSIX shell helpers; the Rust surface is covered by unit tests on Windows"
 
 

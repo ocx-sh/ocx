@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
+import pytest
 from announce_helpers import (
     FIXED_CLOCK,
     INDEX_FULL,
@@ -42,6 +43,8 @@ from fake_forge import FakeForge
 from src.helpers import make_package
 from src.registry import fetch_manifest_raw, fetch_platform_manifest_digest
 from src.runner import OcxRunner
+
+pytestmark = pytest.mark.command("package_announce")
 
 #: A GitLab job token distinct from `TOKEN`, so a run carrying both is
 #: unambiguous about which of the two answered C-063's ladder. Local rather than

@@ -71,6 +71,13 @@ tasks:
       branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown);
       sha=$(git rev-parse HEAD 2>/dev/null || echo unknown);
       host=$(uname -n 2>/dev/null || echo unknown);
+      tree=$(env -u GIT_INDEX_FILE git write-tree 2>/dev/null || echo unknown);
+      case "${OCX_GATE:-}" in
+        lint|inner|full|deep) gate=",ocx.gate=$OCX_GATE";;
+        '') gate='';;
+        *) gate=''; echo "telemetry: OCX_GATE is not lint/inner/full/deep, not sent" >&2;;
+      esac;
+      marker="$(git rev-parse --show-toplevel 2>/dev/null)/target/bazel/accept/gate_escape";
       case "$(uname -s)" in
         Linux) os=linux;; Darwin) os=macos;; *) os=windows;;
       esac;
@@ -80,13 +87,14 @@ tasks:
       trap 'rm -rf "$norepo" "$log" "$pretty"' EXIT;
       cases=$("$interpreter" -c 'import sys, xml.dom.minidom; d = xml.dom.minidom.parse(sys.argv[1]); open(sys.argv[2], "wb").write(d.toprettyxml(encoding="utf-8")); print(len(d.getElementsByTagName("testcase")))' "{{.JUNIT}}" "$pretty")
       || { echo "telemetry: could not re-emit {{.JUNIT}}" >&2; exit 0; };
+      escape=$("$interpreter" -c 'import sys, os, datetime, xml.dom.minidom as m; d = m.parse(sys.argv[1]); s = [datetime.datetime.fromisoformat(e.getAttribute("timestamp")).timestamp() for n in ("testsuites", "testsuite") for e in d.getElementsByTagName(n) if e.getAttribute("timestamp")]; print(",ocx.gate.escape=true" if s and os.path.getmtime(sys.argv[2]) > min(s) else "")' "{{.JUNIT}}" "$marker" 2>/dev/null || true);
       export OTEL_BSP_MAX_QUEUE_SIZE=$((cases + 1024));
       junit2otlp
       --service-name ocx-tests
       --trace-name "ocx-{{.SUITE}}"
       --repository-path "$norepo"
       --batch-size 512
-      --additional-attributes "ocx.suite={{.SUITE}},ocx.source=local,ocx.os=$os,ocx.git.sha=$sha,ocx.git.branch=$branch,host.name=$host"
+      --additional-attributes "ocx.suite={{.SUITE}},ocx.source=local,ocx.os=$os,ocx.git.sha=$sha,ocx.git.branch=$branch,host.name=$host,ocx.git.tree=$tree$gate$escape"
       < "$pretty" > "$log" 2>&1
       || { echo "telemetry: junit2otlp failed: $(tail -n 3 "$log")" >&2; exit 0; };
       if grep -q 'traces export:' "$log"; then
@@ -95,6 +103,50 @@ tasks:
       echo "telemetry: pushed {{.SUITE}} timings from {{.JUNIT}}"
     requires:
       vars: [JUNIT, SUITE]
+    # Through the environment, never templated into the script: a caller's var
+    # and the process environment both land here, and no value can break the
+    # shell line it is read on.
+    env:
+      OCX_GATE: '{{.OCX_GATE}}'
+    # Three span attributes are C-018's (plan_test_speed_tiers.md):
+    #   ocx.gate         the tier, from OCX_GATE (a var a caller passes, or the
+    #                    environment): `inner` from verify:scoped; omitted when
+    #                    unset. `lint`/`deep` are admitted for the follow-up.
+    #   ocx.git.tree     `git write-tree` of the real index — the verify mark's
+    #                    `tree` definition, so a span and a mark can be joined.
+    #   ocx.gate.escape  `true` when target/bazel/accept/gate_escape (written by
+    #                    `scoped_gate.py --record-escapes`) is newer than the
+    #                    pushed run's start, read off the report's own testsuite
+    #                    `timestamp`; a report with none never carries it.
+
+  accept:
+    desc: >-
+      Push T2's acceptance run (REPORTS=<per-module JUnit dir> SINCE=<run start
+      epoch>) as one report with ocx.gate=full. A no-op, silently, unless the
+      machine is configured for it — see the header of this file.
+    summary: |
+      C-018 / S-018. `task verify` reaches no other push, so without this the
+      full tier's spans — and `ocx.gate.escape`, which only a failed T2 during
+      a merge can set — never leave the host. `bazel:test:accept` calls it on
+      a green and a red run alike and ignores its status.
+
+      Only reports modified at or after SINCE are merged: bazel serves a cached
+      target's report from an earlier run, and re-pushing it would count its
+      cases again as if they ran now. A run that executed nothing pushes
+      nothing. The merged file lives beside the reports' directory, never in
+      it, so no `*/junit.xml` reader counts it.
+    silent: true
+    vars:
+      OUT: '{{.REPORTS}}.telemetry.xml'
+    cmds:
+      - cmd: >-
+          rm -f '{{.OUT}}';
+          python3 -c 'import sys, os, glob, xml.etree.ElementTree as ET; since = float(sys.argv[2]); root = ET.Element("testsuites"); [root.extend(ET.parse(p).getroot().iter("testsuite")) for p in sorted(glob.glob(os.path.join(sys.argv[1], "*", "junit.xml"))) if os.path.getmtime(p) >= since]; len(root) and ET.ElementTree(root).write(sys.argv[3], encoding="utf-8", xml_declaration=True)' '{{.REPORTS}}' '{{.SINCE}}' '{{.OUT}}'
+          || echo "telemetry: could not merge the acceptance reports under {{.REPORTS}}" >&2
+      - task: push
+        vars: { JUNIT: '{{.OUT}}', SUITE: acceptance, OCX_GATE: full }
+    requires:
+      vars: [REPORTS, SINCE]
 
   bazel:
     desc: >-
@@ -111,17 +163,17 @@ tasks:
       neither creates nor removes it. `bazel:build:nobuild` is the only
       caller and its `defer:` is what guarantees the removal.
 
-      **The floor is the script's own default** — `CRATES_RULE_TARGETS`, 55,
+      **The floor is the script's own default** — `CRATES_RULE_TARGETS`, 56,
       imported from `scripts/bazel_gate_proofs.py` — and no `--min-targets` is
       passed here. The one lane that writes a BEP analyses `//...`, which is
-      280 targets today, so 55 is a floor it clears by a wide margin. That is
+      280 targets today, so 56 is a floor it clears by a wide margin. That is
       the point of it: the floor exists to tell "the reader read nothing" from
-      "the build was clean", and 55 is the only number for this that has a
+      "the build was clean", and 56 is the only number for this that has a
       home. Spelling 280 here would mint the `//...` constant
       `bazel_gate_proofs.prove_counts` refuses to declare ("stage-4 stays
       undeclared … a number here would be a guess"), in a taskfile, where
       nothing re-measures it. The tighter reads of the same graph are two
-      steps away and do block: `build:drift` floors at 56 and `tag:guard` at
+      steps away and do block: `build:drift` floors at 58 and `tag:guard` at
       101.
 
       Failure is loud and non-fatal, the contract `push` above already has:

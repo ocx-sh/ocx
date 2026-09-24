@@ -12,8 +12,9 @@ publish = false
 # `edit`'s lock-hold delay) and `managed_config::test_support`, whose package
 # fixtures `ocx_lib`'s own tests build on. Forwarding `ocx_oci/__testing` is
 # what makes that module compile: it is written against `StubTransport`, which
-# `ocx_oci` gates the same way.
-__testing = ["ocx_oci/__testing"]
+# `ocx_oci` gates the same way. `ocx_util/__testing` carries the hermetic flag
+# `loader::hermetic_config_dir` answers the user tier from.
+__testing = ["ocx_oci/__testing", "ocx_util/__testing"]
 # Test scaffolding `ocx_lib`'s unit tests inherited when `config` was a sibling
 # module rather than a crate: `ToolchainRoot::from_validated` and the
 # containment-anchor sandbox.

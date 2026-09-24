@@ -88,7 +88,10 @@ tasks:
       - cargo set-version "{{.NEXT_VERSION | trimPrefix "v"}}"
       - git-cliff --tag "{{.NEXT_VERSION}}" -o CHANGELOG.md
       - task: changelog:validate
-      - task verify
+      # NOCACHE=1 reaches `bazel:test:accept` (CLI vars are global), which runs
+      # every acceptance module with `--nocache_test_results`: a release
+      # re-executes the suite instead of trusting cached verdicts.
+      - task verify NOCACHE=1
       - |
         echo ""
         echo "Release prepared ({{.NEXT_VERSION}}). Review changes, then:"

@@ -36,6 +36,8 @@ from src import OcxRunner, current_platform
 from src.helpers import make_package, resolved_metadata_path
 from src.runner import PackageInfo
 
+pytestmark = pytest.mark.command("package_test")
+
 # ---------------------------------------------------------------------------
 # Helpers (DAMP per quality-core.md — keep tests self-contained)
 # ---------------------------------------------------------------------------

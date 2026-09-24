@@ -13,7 +13,11 @@ import stat
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 from src import OcxRunner, assert_dir_exists, current_platform
+
+pytestmark = pytest.mark.command("package_push", "package_pull")
 
 _INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 _MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"

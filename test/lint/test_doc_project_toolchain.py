@@ -35,7 +35,7 @@ from pathlib import Path
 import pytest
 
 # Project root is two directories above this test file:
-# test/tests/test_doc_project_toolchain.py → repo root.
+# test/lint/test_doc_project_toolchain.py → repo root.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 USER_GUIDE = PROJECT_ROOT / "website" / "src" / "docs" / "user-guide.md"
 IN_DEPTH = PROJECT_ROOT / "website" / "src" / "docs" / "in-depth" / "project.md"

@@ -17,10 +17,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src import OcxRunner
 from src.helpers import make_package
 from src.registry import fetch_platform_manifest_digest
 from src.runner import PackageInfo
+
+pytestmark = pytest.mark.command("package_inspect")
 
 
 def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, visibility: str) -> dict:

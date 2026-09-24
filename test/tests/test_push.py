@@ -37,6 +37,8 @@ from src.registry import get_blob, list_referrers, referrers_fallback_tag
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures import attestations
 
+pytestmark = pytest.mark.command("package_push")
+
 #: A cosign-format private key and its password. The same pair
 #: ``test_sign.py`` signs with, so a key-mode push and a key-mode ``sign``
 #: exercise one backend.

@@ -6,6 +6,8 @@ import re
 
 import pytest
 
+pytestmark = pytest.mark.command("about", "version")
+
 ANSI_ESCAPE = re.compile(r"\x1b\[")
 
 

@@ -36,6 +36,8 @@ from src.helpers import (
 )
 from src.shell_eval import run_after_sourcing
 
+pytestmark = pytest.mark.command("direnv*")
+
 EXIT_SUCCESS = 0
 
 PUBLIC_BIN_PATH = [

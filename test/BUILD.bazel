@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
 #
-# The acceptance suite, as one `sh_test` per `tests/test_*.py` (C-024) — 181
+# The acceptance suite, as one `sh_test` per `tests/test_*.py` (C-024) — 172
 # today, and the number is the filesystem's rather than this comment's: the
 # `glob` below is the enumeration and `scripts/bazel_accept_proofs.py`'s
 # `prove_counts` reds when its own constant drifts from `test/tests/`. The tag
@@ -87,64 +87,54 @@ filegroup(
     ),
 )
 
-# Everything an acceptance module reads that is NOT the module, in one group.
+# Everything (nearly) every acceptance module reads that is NOT the module.
 #
 # The cache unit C-024 asks for is "one file, one target", and with result
 # caching on (`bazel.bzl` § "Result caching is ON") the inputs have to carry
-# that: a module changes, one target re-runs; a shared file changes, all 181 do.
-# Per-module attribution was measured and refused — 160 of the 181 modules
-# import the one shared `src` package, so a per-module set would be this set
-# plus a rounding error for almost every target.
+# that: a module changes, one target re-runs; a shared file changes, all of them
+# do. So this group is kept to what is genuinely shared, and a file only a few
+# modules read is declared on exactly those modules below (`module_data`) —
+# before that split, an edit to `taskfile.yml`, `SUITE_FLOOR` or `bench/`
+# re-ran all 172 targets on an unchanged binary.
+#
+# What stays here, and why each is shared rather than per-module:
+#
+#   * `conftest.py` (via `:suite_anchor`), `pyproject.toml`, `uv.lock`,
+#     `src/**/*.py`, `tests/**` — the session hooks, the venv, and the helper
+#     package 160-odd modules import; `tests/conftest.py` imports
+#     `tests.fixtures.sigstore_stack`, so every module reads `tests/fixtures/`.
+#   * `sigstore/**` — read by that conftest-imported fixture, so by all 172
+#     (`scripts/bazel_tag_guard.py`'s derivation says so), and mounted into the
+#     Fulcio/Rekor/CT containers.
+#   * `docker-compose.yml`, `zot-config.json` — the stack every module runs
+#     against; the second is mounted into the primary registry.
+#   * `ocx.toml`, `ocx.lock` — `OcxRunner` exposes no `cwd=`, so every `ocx`
+#     it starts runs in `test/` and its project walk finds these. An implicit
+#     read the AST cannot see, so it stays on everyone.
+#
+# Not declared anywhere: `SUITE_FLOOR`, `SKIP_CEILING`, `XFAIL_CEILING` (read by
+# the task gates over the JUnit reports, never by a module) and `docker/**`
+# (the shell-matrix image build context, a `test/taskfile.yml` recipe).
 #
 # **The exclusions are the load-bearing half, and they were measured rather than
 # guessed.** `glob` walks the filesystem and knows nothing about `.gitignore`, so
-# a generated file inside a globbed directory would re-key all 181 targets on
-# every run and "second run fully cached" would be unreachable.
+# a generated file inside a globbed directory would re-key every target on
+# every run and "second run fully cached" would be unreachable. Measured by
+# snapshotting every path under `test/` around a `task test:parallel --force`:
+# `__pycache__/`, `.pytest_cache/`, `bin/ocx*` and `results/junit.xml` moved and
+# nothing else — so `**/__pycache__/**` and `**/*.pyc` are the only exclusions a
+# globbed directory needs, and `bench/results/` (gitignored `task test:bench`
+# output) the one generated path under a globbed directory.
 #
-# How the set was derived: every path under `test/` snapshotted by mtime and
-# size, `task test:parallel --force` run, then re-snapshotted. 243 paths moved,
-# and they fall into exactly four groups —
-#
-#     236  __pycache__/  (188 under tests/, 16 under src/, 8 under
-#                         tests/fixtures/, 7 under src/scenarios/, 6 under
-#                         bench/, 5 under recordings/, 2 under src/announce_e2e/,
-#                         2 at the top level)
-#       4  .pytest_cache/
-#       2  bin/ocx, bin/ocx-shim
-#       1  results/junit.xml
-#
-# — so `**/__pycache__/**` and `**/*.pyc` are the only exclusions a globbed
-# directory needs. `.pytest_cache/`, `results/` and `.venv/` sit at `test/`'s top
-# level and no glob below names them; `bin/` is reached only through
-# `:suite_anchor`'s `bin/ocx*`, which is the input this whole design exists to
-# declare. `manual/` is not globbed at all — it carries a generated
-# `.ocx-home/`, `build/`, `out/` and `metadata.json` beside its committed
-# `ocx.toml`/`metadata.in.json` fixtures, and no acceptance module reads it.
-#
-# `docker-compose.yml` is here for its own sake: it carries every service image
-# reference and every host port, so a bumped registry or Rekor image, or a moved
-# port, re-keys the suite. It is also one
-# of the two labels `scripts/bazel_tag_guard.py` requires in an acceptance
-# target's input closure before it will credit the `no-sandbox` exemption — the
-# compensating control that makes that exemption defensible.
 # **What this group contains is itself floored**, by
-# `scripts/bazel_tag_guard.py`'s `SUITE_INPUTS_*` clause: every directory
-# globbed below and every top-level file listed below is named there, and so is
-# a member count. Narrowing a glob *inside* this group leaves both labels the
-# per-target clause requires in place, so it would otherwise stay green — which
-# is exactly how `bench/**` and `taskfile.yml` stayed undeclared for a whole
-# wave. Adding a directory here means adding it there.
-#
-# `taskfile.yml` is an input because `tests/test_doc_scripts_publish.py` reads
-# it: the module asserts on what the publish task's own recipe does, so an edit
-# to the task changes what that test should say.
-#
-# `bench/**` is an input because `tests/test_bench_smoke.py` imports
-# `bench.scenarios`, `bench.compare`, `bench.report` and `bench.baseline` and
-# asserts on that package's `SCENARIOS` matrix, `SCALING_GROUP_ANCHORS` and
-# `SUITE_BUDGET_SECONDS`. `bench/results/` is the one generated path under it
-# (`test/.gitignore` names it, and nothing else under `bench/` is ignored);
-# `bench/dashboard/**` is committed input, not output.
+# `scripts/bazel_tag_guard.py`'s `SUITE_INPUTS_*` clause, and what each module
+# reads is derived there too: a per-module read the AST can see and the target
+# does not declare reds `tag-uncached-unlisted`. Moving a file out of this
+# group without declaring it on its readers reds only for such a read; a read
+# the AST cannot see (a `task` recipe, an implied lock file) reds through the
+# guard's hand-kept `HAND_DECLARED_READS` / `IMPLIED_READS`; a module that
+# launches `task` or names a path under a directory outside this group by
+# string reds `tag-hand-read-unreviewed` until it has an entry there.
 filegroup(
     name = "suite_inputs",
     srcs = [
@@ -152,38 +142,46 @@ filegroup(
         # than re-globbed so the runner's anchor and the cache key name one
         # group. It is the second label the tag guard requires.
         ":suite_anchor",
-        "SKIP_CEILING",
-        "SUITE_FLOOR",
-        "XFAIL_CEILING",
         "docker-compose.yml",
         "ocx.lock",
         "ocx.toml",
         "pyproject.toml",
-        "taskfile.yml",
         "uv.lock",
         "zot-config.json",
     ] + glob(
         [
-            "bench/**",
-            "docker/**",
-            "recordings/**/*.py",
-            "scenarios/**",
-            "scripts/**",
             "sigstore/**",
-            "specs/**",
             "src/**/*.py",
             "tests/**",
         ],
         allow_empty = False,
         exclude = [
             # Each module is its own target's input. Including them here would
-            # make every module's edit re-run all 181, which is the selection
-            # C-024 exists to buy. The five modules that genuinely READ the set
-            # get it back through `extra_data`, below.
+            # make every module's edit re-run every target, which is the
+            # selection C-024 exists to buy. A module that genuinely READS its
+            # siblings is a sweep, and sweeps live in the lint tier
+            # (`test/lint/`, outside this glob) — `scripts/bazel_tag_guard.py`
+            # reds one found here. A module that IMPORTS a sibling declares
+            # that one file in `module_data` below; the guard reds it if not.
             "tests/test_*.py",
-            # `task test:bench` writes here and `test/.gitignore` ignores it. A
-            # generated file inside a globbed directory re-keys every target on
-            # every run, which is the one thing this exclusion list is for.
+            "**/__pycache__/**",
+            "**/*.pyc",
+        ],
+    ),
+)
+
+# The per-module groups: each is declared on the modules that read it and no
+# others (`module_data` below).
+
+# `tests/test_bench_smoke.py` imports `bench.scenarios`, `bench.compare`,
+# `bench.report`, `bench.baseline` and `bench.harness`, and `report` renders
+# `dashboard/template.html`. `bench/results/` is `task test:bench` output.
+filegroup(
+    name = "bench_inputs",
+    srcs = glob(
+        ["bench/**"],
+        allow_empty = False,
+        exclude = [
             "bench/results/**",
             "**/__pycache__/**",
             "**/*.pyc",
@@ -191,34 +189,49 @@ filegroup(
     ),
 )
 
-# ---------------------------------------------------------------------------
-# The sweep groups: the acceptance modules, as data for the acceptance modules
-# that READ them.
-#
-# Excluding `tests/test_*.py` from `:suite_inputs` is what buys the selection
-# C-024 asks for — one module edited, one target re-run. Five modules break
-# that assumption by reading their siblings' source, and with only their own
-# module declared they were served a cached PASS over a tree they had never
-# seen: deleting a `@pytest.mark.smoke` marker re-ran `//test:test_install` and
-# left `//test:test_smoke_coverage` CACHED, so the gate could not observe the
-# thing it gates.
-#
-# **Which modules those are is DERIVED, not asserted here.**
-# `scripts/bazel_tag_guard.py` parses every `tests/test_*.py` for a
-# `glob`/`rglob` pattern that can only be matching sibling modules, and reds an
-# acceptance target whose input closure does not carry the siblings its own
-# source reads. A sixth sweeping module therefore reds that gate rather than
-# quietly joining the set of targets served a stale green.
-# ---------------------------------------------------------------------------
-_SWEEP_ALL = glob(
-    ["tests/test_*.py"],
-    allow_empty = False,
+# `recordings.setups` (the doc-script setup registry, imported by
+# `src/state_providers.py` inside a function) and the cast layer.
+filegroup(
+    name = "recording_sources",
+    srcs = glob(
+        ["recordings/**/*.py"],
+        allow_empty = False,
+        exclude = ["**/__pycache__/**"],
+    ),
 )
 
-_SWEEP_SHELL = glob(
-    ["tests/test_shell*.py"],
-    allow_empty = False,
+filegroup(
+    name = "scenario_scripts",
+    srcs = glob(
+        ["scenarios/**"],
+        allow_empty = False,
+    ),
 )
+
+filegroup(
+    name = "suite_scripts",
+    srcs = glob(
+        ["scripts/**"],
+        allow_empty = False,
+        exclude = ["**/__pycache__/**"],
+    ),
+)
+
+filegroup(
+    name = "vendored_specs",
+    srcs = glob(
+        ["specs/**"],
+        allow_empty = False,
+    ),
+)
+
+# The project toolchain definition `ocx --project` reads (see `module_data`).
+_PROJECT_TOOLCHAIN = [
+    "//:ocx.lock",
+    "//:ocx.toml",
+]
+
+_SCHEMA_BINARY_ENV = {"OCX_SCHEMA_BINARY": "$(rlocationpath //crates/ocx_schema:ocx_schema_bin)"}
 
 # One target per module, named `//test:<module stem>`.
 #
@@ -228,26 +241,102 @@ _SWEEP_SHELL = glob(
 # `allow_empty = False` is the floor — a glob that matched nothing would
 # otherwise declare an empty package that `bazel build //test:all` reports
 # success over.
+#
+# `module_data` is the per-module half of the declaration (C-020): what one
+# module reads OUTSIDE this package, declared on that module's target only, so
+# the edit re-runs the modules that read it and no others. Most entries are
+# what `scripts/bazel_tag_guard.py`'s undeclared-read predicate derives from
+# the module's AST (its own reads, its helpers', its conftests'), and the guard
+# reds a module that reads such a path without declaring it. The rest —
+# `:suite_scripts`, the root `ocx.lock` beside `ocx.toml`, the schema binary —
+# are reads no AST sees, held by the guard's hand-kept `HAND_DECLARED_READS` /
+# `IMPLIED_READS`. Either way an entry is removed by removing the read, never
+# on its own.
 acceptance_suite(
     name = "acceptance_runner",
-    # Keyed by target name, and `acceptance_suite` fails on a key that names no
-    # module: a typo here would otherwise declare nothing and read exactly like
-    # a module that does not sweep. The comment on each row is the call the tag
-    # guard's parser finds in that module.
-    extra_data = {
-        # `test_dir.rglob("*.py")` over the whole of `test/`.
-        "test_doc_scripts_publish": _SWEEP_ALL,
-        # `TESTS_DIR.glob("*.py")`.
-        "test_no_crate_path_assertions": _SWEEP_ALL,
-        # `SUITE.rglob("*.py")` over the whole of `test/`.
-        "test_patch_global_slot": _SWEEP_ALL,
-        # `(root / "test" / "tests").glob("test_shell*.py")` — the shell subset
-        # only, so an unrelated module's edit does not re-run this target.
-        "test_shell_reconcile_edge_cases": _SWEEP_SHELL,
-        # `TESTS_DIR.glob("test_*.py")`.
-        "test_smoke_coverage": _SWEEP_ALL,
-    },
     extra_pytest_args = ["-v"],
+    module_data = {
+        "tests/test_announce_e2e_evidence.py": ["//:.claude/artifacts/e2e_results_announce.md"],
+        # An imported SIBLING module is a read too: `//test:suite_inputs`
+        # excludes `tests/test_*.py`, so without this entry an edit to
+        # `attest()` would leave this target's verdict cached (the tag guard
+        # charges an importer with the sibling file and everything it reads).
+        "tests/test_auto_verify.py": ["tests/test_attest.py"],
+        "tests/test_bench_smoke.py": [":bench_inputs"],
+        "tests/test_catalog_readme.py": ["//:packaging/ocx/CATALOG.md"],
+        # `test/tests/fixtures/cosign.py` runs `ocx --project <root>/ocx.toml`,
+        # which reads the lock beside it too.
+        "tests/test_cosign_interop.py": _PROJECT_TOOLCHAIN,
+        "tests/test_cosign_matrix_attest.py": _PROJECT_TOOLCHAIN,
+        "tests/test_cosign_matrix_cosign_signs.py": _PROJECT_TOOLCHAIN,
+        "tests/test_cosign_matrix_extras.py": _PROJECT_TOOLCHAIN,
+        "tests/test_cosign_matrix_ocx_signs.py": _PROJECT_TOOLCHAIN,
+        "tests/test_doc_scripts.py": _PROJECT_TOOLCHAIN + [
+            ":recording_sources",
+            "//test/doc_scripts:doc_script_sources",
+        ],
+        "tests/test_doc_scripts_cast.py": _PROJECT_TOOLCHAIN + [":recording_sources"],
+        "tests/test_doc_scripts_executor.py": _PROJECT_TOOLCHAIN + [":recording_sources"],
+        "tests/test_doc_scripts_one_tree.py": _PROJECT_TOOLCHAIN + [
+            ":recording_sources",
+            "//test/doc_scripts:doc_script_sources",
+            "//website:recordings.taskfile.yml",
+        ],
+        # Runs `task website:scripts:publish` and `task test:doc-scripts:list`:
+        # go-task parses the whole include graph (`test/taskfile.yml` among
+        # it), the list task runs `test/scripts/doc_scripts_list.py`, and the
+        # publish task runs `website/scripts/publish_doc_scripts.py` over
+        # `test/doc_scripts/`. The list script is a recipe read no AST sees, so
+        # `:suite_scripts` is declared by hand and held there by
+        # `scripts/bazel_tag_guard.py` `HAND_DECLARED_READS`.
+        "tests/test_doc_scripts_publish.py": [
+            "taskfile.yml",
+            ":suite_scripts",
+            "//:taskfiles",
+            "//test/doc_scripts:doc_script_sources",
+            "//website:publish_scripts",
+            "//website:taskfiles",
+        ],
+        "tests/test_execution_record_standards.py": [
+            ":vendored_specs",
+            "tests/test_execution_records.py",
+        ],
+        "tests/test_execution_records.py": ["//crates/ocx_schema:ocx_schema_bin"],
+        "tests/test_lazy_loading.py": ["tests/test_patches.py"],
+        "tests/test_project_env.py": ["//crates/ocx_schema:ocx_schema_bin"],
+        "tests/test_purge.py": ["tests/test_assembly.py"],
+        "tests/test_scenarios_smoke.py": [":scenario_scripts"],
+        "tests/test_schema.py": ["//website:src/public/schemas/metadata/v1.json"],
+        "tests/test_shell_reconcile.py": ["//website:src/docs/reference/command-line.md"],
+        "tests/test_state_providers.py": _PROJECT_TOOLCHAIN + [":recording_sources"],
+        "tests/test_state_registry_characterization.py": _PROJECT_TOOLCHAIN + [":recording_sources"],
+        "tests/test_taplo_project_toolchain.py": ["//:taplo.toml"],
+        "tests/test_trampoline_exec.py": ["//crates/ocx_store:shim_blobs"],
+    },
+    # The schema binary as the two modules that run it read it: an
+    # rlocationpath the runner resolves (`bazel.bzl` `_RUNNER`).
+    module_env = {
+        "tests/test_execution_records.py": _SCHEMA_BINARY_ENV,
+        "tests/test_project_env.py": _SCHEMA_BINARY_ENV,
+    },
+    # Every xdist group a module names (`bazel.bzl` § Concurrency): the module
+    # holds the group's host lock for its whole run, because every target is
+    # its own process — and so is the same target run from a sibling
+    # checkout — where xdist would have put the group on one worker. A group
+    # only one module names (`test_doc_scripts`' two fixed-identifier slots)
+    # needs it as much as a shared one. `patch_global_slot` is the bare
+    # registry's one reserved `global` patch repository, which
+    # `test_patches.py` writes on purpose (`lint/test_patch_global_slot.py`
+    # keeps every other patch tier on a path of its own).
+    # `scripts/bazel_tag_guard.py` derives this map from source and reds a
+    # mismatch in either direction.
+    module_slots = {
+        "tests/test_doc_scripts.py": [
+            "managed_config_corp_slot",
+            "mytool_repo_slot",
+        ],
+        "tests/test_patches.py": ["patch_global_slot"],
+    },
     modules = glob(
         ["tests/test_*.py"],
         allow_empty = False,

@@ -56,7 +56,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: F401 -- unused since the xdist group left; DEC-10 keeps the line
 
 from src.helpers import make_package, push_managed_config
 from src.registry import push_raw_config_package
@@ -253,14 +253,14 @@ def test_resetup_refreshes_to_newer_payload_via_self_setup(
     )
 
 
-# The `--global` publish below writes `<registry>/global:__ocx.patch`, the
-# registry-wide reserved slot `tests/test_patches.py` pins its whole module to
-# this group for. `unique_repo` isolates every other name this test touches,
-# but not that one: a concurrent worker in `test_patches.py` had its own
-# `match: "*"` rule overwritten between its publish and its install, and
-# composed THIS companion instead — observed as `integrations: []` on
+# The `--global` publish below writes `<patch-registry>/global:__ocx.patch`, one
+# fixed repository per patch registry. Against the bare registry that slot was
+# shared, and `unique_repo` did not reach it: a concurrent worker in
+# `test_patches.py` had its own `match: "*"` rule overwritten between its
+# publish and its install, and composed THIS companion instead — observed as
+# `integrations: []` on
 # `test_patch_companion_integrations_appear_once_across_several_bases`.
-@pytest.mark.xdist_group("patch_global_slot")
+# The patch registry is `<registry>/<unique_repo>_patches`, so no group is needed.
 def test_setup_refresh_syncs_patch_descriptors(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
@@ -315,7 +315,7 @@ def test_setup_refresh_syncs_patch_descriptors(
         json.dumps({"version": 1, "rules": [{"match": "*", "packages": [companion_fq], "required": False}]})
     )
     publish = ocx.run(
-        "patch", "publish", "--descriptor", str(descriptor_path), "--global", "--registry", registry,
+        "patch", "publish", "--descriptor", str(descriptor_path), "--global", "--registry", f"{registry}/{unique_repo}_patches",
         format=None, check=False,
     )
     assert publish.returncode == 0, f"global descriptor publish must succeed: {publish.stderr}"
@@ -328,7 +328,7 @@ def test_setup_refresh_syncs_patch_descriptors(
         "v1",
         (
             '[registry]\ndefault = "managed-patch-v2.example"\n'
-            f'[patches]\nregistry = "{registry}"\nrequired = false\n'
+            f'[patches]\nregistry = "{registry}/{unique_repo}_patches"\nrequired = false\n'
         ).encode(),
     )
 

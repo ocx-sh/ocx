@@ -53,3 +53,15 @@ rust_test(
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_store"},
     deps = all_crate_deps(normal_dev = True),
 )
+
+# The committed Windows launcher blobs `include_bytes!` embeds, for
+# `test/tests/test_trampoline_exec.py`, which reads them from the source tree
+# to compare against what `ocx` materialises (plan_test_speed_tiers.md C-020).
+filegroup(
+    name = "shim_blobs",
+    srcs = glob(
+        ["src/shims/**"],
+        allow_empty = False,
+    ),
+    visibility = ["//test:__pkg__"],
+)

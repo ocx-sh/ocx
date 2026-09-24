@@ -67,13 +67,17 @@ buys the execroot working directory the suite needs with none of that, and the
 last row is the measurement that says so. `CACHE_SUPPRESSING_TAGS` is the set of
 all three plus `no-remote-cache`, and `caching_on_findings` reds on any of them.
 
-**Serialisation is the tag, and that is measured too** (C-024). Same probe,
-three 0.7 s tests tagged `exclusive` and three not, one invocation, no
-`--local_test_jobs`: the `exclusive` trio's windows are disjoint (0 overlaps,
-run after everything else) and the untagged trio's three windows overlap
-pairwise. A global `--local_test_jobs=1` would buy the same serialisation and
-also serialise the 34 Rust test targets, which is stage 2's whole win — so an
-rc file naming that flag is its own finding.
+**The acceptance targets are NOT serialised any more, and `exclusive` is the
+tag that would do it** (C-024 as amended). Same probe, three 0.7 s tests tagged
+`exclusive` and three not, one invocation, no `--local_test_jobs`: the
+`exclusive` trio's windows are disjoint (0 overlaps) and the untagged trio's
+overlap pairwise. That is exactly why the tag is now refused on an acceptance
+target: it would put the suite back to one target at a time (WP-12 A3: 1734 s
+cold). What makes concurrency safe is the runner's host locks (`test/bazel.bzl`
+§ Concurrency), at parity with `task test:parallel`'s xdist run. A global
+`--local_test_jobs` in an rc file would also throttle the 35 Rust test targets,
+so an rc file naming that flag is its own finding; `task bazel:test:accept`
+passes it on its own command line.
 
 **S-015's second half — the binary under test.** A green suite against last
 week's `ocx` is silent, and this repository has shipped one. With results cached
@@ -84,7 +88,7 @@ tag table as well as requiring the binary-swap run to re-execute everything.
 The proof is a content digest on both sides: what the build produced, and what
 the suite executed, resolved through symlinks. Path and mtime both answer "fine" on a
 freshly-*copied* stale binary — `test/bin/ocx` is a `cp` of
-`target/release/ocx` (`test/taskfile.yml:125`), so the stale file's mtime is
+`target/test-bin/ocx` (`test/taskfile.yml` `.build-binaries`), so the stale file's mtime is
 the copy's, not the build's — and `_mtime_reader` and `_existence_reader` are
 kept as named controls answering exactly that on the same fixture the digest
 comparator reds.
@@ -101,11 +105,12 @@ would not have. The Rust half stays a re-run set and is floored, never used as
 the discriminator: Rust tests have always cached, so a docs-only build re-running
 zero of them is true whether or not selection works.
 
-`SCOPED_ROWS` (`test/taskfile.yml`, 21 rows, three of them `escalate`) is read
-unchanged as the crate→target selection query; `escalate` maps to `//test:all`.
-It is a YAML mapping and this file is stdlib-only (plan DEC-8), so it is read
-the way `scoped_gate.py` reads the same table — a regex over the block — and
-the two readers' `escalate` sets are cross-checked against each other.
+The `[crates]` rows of `test/scoped_rows.toml` (20 rows, two of them
+`escalate`) are read as the crate→target selection query; `escalate` maps to
+`//test:all`, and so does the CLI crate `ocx`, which has no row — its command
+files route by `command` markers, a finer answer than this query gives. The
+table is read through `scoped_gate.load_rows`, its only reader (C-012), and the
+`escalate` set is still cross-checked against `scoped_gate.TABLE_ESCALATES`.
 
 **C-029.** No red or green here reaches the owner-gated remote realm. Asserted
 twice rather than promised: every Bazel argv this file builds is passed through
@@ -150,6 +155,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -182,13 +188,15 @@ number at once (`181` here, `172` in `test/BUILD.bazel`'s comment, `188` in a
 work order); `bazel_gate_proofs` is now the only place it is written down, and
 `prove_counts` below reads `test/tests/` to check even that."""
 
-SCOPED_ROWS = 21
-"""Rows of `test/taskfile.yml`'s `SCOPED_ROWS` map — one per workspace member."""
+SCOPED_ROWS = 20
+"""`[crates]` rows of `test/scoped_rows.toml` — one per workspace member but `ocx`."""
 
-SCOPED_ESCALATE_ROWS = 3
-"""`ocx_test_support`, `ocx` and `ocx_python`: rows whose subset is the whole suite."""
+SCOPED_ESCALATE_ROWS = 2
+"""`ocx_test_support` and `ocx_python`: the rows whose subset is the whole suite."""
 
 ACCEPTANCE_PACKAGE = "//test"
+CLI_PACKAGE = "ocx"
+"""The CLI crate: routed by `command` markers, so it has no `[crates]` row."""
 ALL_TARGET = f"{ACCEPTANCE_PACKAGE}:all"
 
 # ---------------------------------------------------------------------------
@@ -199,9 +207,10 @@ ALL_TARGET = f"{ACCEPTANCE_PACKAGE}:all"
 CACHE_DEFEATING_TAG = "external"
 """The only tag measured to stop a test result being reused (both caches).
 
-**Under the amended stage-4 ruling this tag is the defect, not the fix.** The
-acceptance suite runs with its results cached, so `external` on an acceptance
-target turns that off; `caching_on_findings` reds on its presence. It keeps its
+**Under the amended stage-4 ruling this tag is the defect, not the fix** — on
+every acceptance target but the ones `test/bazel.bzl` `UNCACHED_MODULES` lists
+(plan C-019), which read a path their key does not cover and carry it on
+purpose. `caching_on_findings` reds on its presence anywhere else. It keeps its
 name and its meaning because `bazel_tag_guard.py` imports it for the *blanket*
 clause, where it is still the credited tag for every other `no-sandbox` test
 action in the graph."""
@@ -216,7 +225,9 @@ every CI runner is in). None of them may appear on an acceptance target now that
 the suite's results are meant to be reused."""
 
 SERIALISING_TAG = "exclusive"
-"""C-024's serialisation, measured disjoint without `--local_test_jobs`."""
+"""The tag measured to serialise test targets (disjoint windows without
+`--local_test_jobs`) — and therefore refused on an acceptance target, which
+runs concurrently behind the runner's host locks."""
 
 SANDBOX_TAG = "no-sandbox"
 """What replaced `local`: the execroot working directory the suite needs, with
@@ -244,7 +255,7 @@ never decides whether one does."""
 
 GLOBAL_SERIALISATION = re.compile(r"--?local_test_jobs\b")
 """C-024's forbidden mechanism. An rc line is per-command, never per-target
-pattern, so this would also serialise the 34 Rust test targets."""
+pattern, so this would also serialise the 35 Rust test targets."""
 
 # ---------------------------------------------------------------------------
 # C-029 — the realm this corpus must not reach.
@@ -299,6 +310,12 @@ ACCEPT_TAG_SUPPRESSING_MSG = (
     "the disk/remote tier, which is the state every CI runner is in). The acceptance stage runs "
     "CACHED now, so these tags are the defect rather than the contract"
 )
+ACCEPT_UNCACHED_CACHED_MSG = (
+    "C-019: {count} target(s) listed in test/bazel.bzl `UNCACHED_MODULES` reported cached on "
+    "run 2 of an unchanged tree, first {sample}. A listed module reads a path its key does not "
+    "cover, so it must carry `external` and re-execute every run — a cached verdict here is the "
+    "stale green the list exists to prevent"
+)
 ACCEPT_SANDBOX_MSG = (
     "S-015: {label} carries no `{tag}` tag — the suite drives docker compose, a uv-managed "
     "virtualenv and a cargo-built binary, none of which survive a sandboxed working directory. "
@@ -306,8 +323,10 @@ ACCEPT_SANDBOX_MSG = (
     "disk-cache hit"
 )
 ACCEPT_SERIAL_MSG = (
-    "S-015/C-024: {label} carries no `{tag}` tag — one compose stack, so two acceptance "
-    "targets running at once share it"
+    "S-015/C-024: {label} carries `{tag}` — acceptance targets run concurrently (the runner's "
+    "stack barrier, per-target basetemp and per-group slot locks give them xdist parity; "
+    "test/bazel.bzl § Concurrency), and `{tag}` serialises them back to one at a time "
+    "(1734 s cold, WP-12 A3)"
 )
 ACCEPT_INPUTS_MSG = (
     "S-015: {label} does not declare {missing} among its inputs. With results cached, the "
@@ -315,10 +334,10 @@ ACCEPT_INPUTS_MSG = (
     "compose definition and a green that is about neither"
 )
 SERIAL_GLOBAL_MSG = (
-    "C-024: {source} names {flag!r} — serialisation is the `{tag}` tag on the targets. An rc "
-    "line is per-command and never per-target-pattern, so this also serialises the Rust test "
-    "targets and deletes stage 2's entire win. `task bazel:test:accept` passes it on the "
-    "command line, where it is scoped to that one invocation"
+    "C-024: {source} names {flag!r}. An rc line is per-command and never per-target-pattern, "
+    "so this also throttles the Rust test targets, not only the acceptance suite. `task "
+    "bazel:test:accept` passes it on the command line, where it is scoped to that one "
+    "invocation (and `{tag}` is refused on the targets themselves)"
 )
 
 BINARY_UNREADABLE_MSG = "S-015: no digest could be read for the {side} binary ({source}): {reason}"
@@ -338,15 +357,15 @@ BINARY_UNDECLARED_MSG = (
 )
 
 SELECT_ROW_MSG = (
-    "S-004: changed crate {crate!r} has no SCOPED_ROWS row — the selection query cannot "
+    "S-004: changed crate {crate!r} has no [crates] row — the selection query cannot "
     "answer for it, which is not the same as it selecting nothing"
 )
 SELECT_GLOB_MSG = (
-    "S-004: SCOPED_ROWS row {crate!r} glob {glob!r} matches no test/tests/ module — a stale "
+    "S-004: [crates] row {crate!r} glob {glob!r} matches no test/tests/ module — a stale "
     "glob narrows every selection taken from this table and nothing else reds"
 )
 SELECT_ROWS_FLOOR_MSG = (
-    "S-004: read {read} SCOPED_ROWS row(s) / {escalate} escalate row(s), expected {rows} / "
+    "S-004: read {read} [crates] row(s) / {escalate} escalate row(s), expected {rows} / "
     "{expected_escalate} — the table reader stopped early, and a short table selects less"
 )
 SELECT_MODULES_FLOOR_MSG = (
@@ -459,6 +478,7 @@ def caching_on_findings(
     acceptance: set[str],
     tags: dict[str, set[str]],
     inputs: dict[str, set[str]],
+    uncached: frozenset[str],
     minimum: int = ACCEPTANCE_MODULES,
 ) -> list[Finding]:
     """S-015, inverted. Empty list == the property holds.
@@ -479,7 +499,7 @@ def caching_on_findings(
       opposite expected answers, one reader.
 
     The tag and input clauses are the graph half of the same contract: no
-    cache-suppressing tag, `exclusive` and `no-sandbox` present, and the binary
+    cache-suppressing tag, `no-sandbox` present and `exclusive` absent, and the binary
     and the compose definition among the declared inputs.
 
     Ordered so the control and the two reader floors are settled before the
@@ -530,7 +550,19 @@ def caching_on_findings(
                 )
             )
 
-    ran = sorted(label for label in acceptance if label in warm and not warm[label])
+    # C-019: a listed target carries `external` and must re-execute on every
+    # run, so on the warm half its expected answer is the opposite one.
+    ran = sorted(
+        label for label in acceptance - uncached if label in warm and not warm[label]
+    )
+    stale = sorted(label for label in acceptance & uncached if warm.get(label))
+    if stale:
+        findings.append(
+            Finding(
+                "accept-uncached-cached",
+                ACCEPT_UNCACHED_CACHED_MSG.format(count=len(stale), sample=stale[0]),
+            )
+        )
     if ran:
         findings.append(
             Finding(
@@ -541,7 +573,10 @@ def caching_on_findings(
 
     for label in sorted(acceptance):
         carried = tags.get(label, set())
-        suppressing = sorted(carried & CACHE_SUPPRESSING_TAGS)
+        refused = CACHE_SUPPRESSING_TAGS - (
+            {CACHE_DEFEATING_TAG} if label in uncached else set()
+        )
+        suppressing = sorted(carried & refused)
         if suppressing:
             findings.append(
                 Finding(
@@ -556,10 +591,10 @@ def caching_on_findings(
                     ACCEPT_SANDBOX_MSG.format(label=label, tag=SANDBOX_TAG),
                 )
             )
-        if SERIALISING_TAG not in carried:
+        if SERIALISING_TAG in carried:
             findings.append(
                 Finding(
-                    "accept-serial-tag-missing",
+                    "accept-serial-tag-present",
                     ACCEPT_SERIAL_MSG.format(label=label, tag=SERIALISING_TAG),
                 )
             )
@@ -579,7 +614,7 @@ def global_serialisation_findings(sources: dict[str, str]) -> list[Finding]:
 
     `sources` maps a name a human can act on (a path) to that file's text. A
     comment mentioning the flag counts: the check is over the file, and a
-    commented-out flag one uncomment away from serialising 34 Rust targets is
+    commented-out flag one uncomment away from serialising 35 Rust targets is
     worth a line of stderr.
     """
     findings: list[Finding] = []
@@ -595,6 +630,17 @@ def global_serialisation_findings(sources: dict[str, str]) -> list[Finding]:
                 )
             )
     return findings
+
+
+def rc_serialisation_findings(root: Path = REPO_ROOT) -> list[Finding]:
+    """`global_serialisation_findings` over the checkout's rc files — the tracked
+    `.bazelrc` and a per-checkout `.bazelrc.user` — as `bazel:tag:guard` runs it."""
+    rc_files = {
+        str(path): path.read_text(encoding="utf-8")
+        for path in (root / ".bazelrc", root / ".bazelrc.user")
+        if path.is_file()
+    }
+    return global_serialisation_findings(rc_files)
 
 
 # ---------------------------------------------------------------------------
@@ -742,35 +788,26 @@ def binary_digest_findings(
 
 
 # ---------------------------------------------------------------------------
-# S-004 — selection. The SCOPED_ROWS reader, then the two verdicts.
+# S-004 — selection. The [crates] reader, then the two verdicts.
 # ---------------------------------------------------------------------------
 
 
-def read_scoped_rows(taskfile_text: str) -> dict[str, str]:
-    """`test/taskfile.yml`'s `SCOPED_ROWS` map, as `{crate: glob-string}`.
+def read_scoped_rows() -> dict[str, str]:
+    """`test/scoped_rows.toml`'s `[crates]` rows, as `{crate: glob-string}`.
 
-    Stdlib only (plan DEC-8), so the block is sliced by indentation and its rows
-    matched the way `scoped_gate.py` matches the same table's `escalate` rows —
-    one grammar, two readers, and `selection_table_findings` makes them agree.
+    Through `scoped_gate.load_rows`, the table's only reader (C-012): a second
+    parser here would be a second grammar to keep in step. A list row is
+    space-joined into the string shape the selection functions below take.
     """
-    rows: dict[str, str] = {}
-    lines = taskfile_text.splitlines()
-    inside = False
-    header_indent = 0
-    for line in lines:
-        stripped = line.strip()
-        indent = len(line) - len(line.lstrip())
-        if not inside:
-            if stripped == "SCOPED_ROWS:":
-                inside = True
-                header_indent = indent
-            continue
-        if stripped and indent <= header_indent:
-            break
-        match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*):\s+(\S.*?)\s*$", stripped)
-        if match and stripped != "map:":
-            rows[match.group(1)] = match.group(2)
-    return rows
+    # Imported here rather than at module scope, like the other `scoped_gate`
+    # uses: it is a sibling gate, not a dependency of the proofs that do not
+    # read the table.
+    from scoped_gate import load_rows
+
+    return {
+        crate: row if row == "escalate" else " ".join(row)
+        for crate, row in load_rows(REPO_ROOT / "test" / "scoped_rows.toml").crates.items()
+    }
 
 
 def acceptance_modules(test_dir: Path) -> set[str]:
@@ -781,6 +818,346 @@ def acceptance_modules(test_dir: Path) -> set[str]:
 def module_target(module: str) -> str:
     """`tests/test_install.py` -> `//test:test_install`."""
     return f"{ACCEPTANCE_PACKAGE}:{Path(module).stem}"
+
+
+ACCEPTANCE_BZL = REPO_ROOT / "test" / "bazel.bzl"
+UNCACHED_LIST_NAME = "UNCACHED_MODULES"
+
+
+def read_uncached_modules(text: str | None = None) -> frozenset[str]:
+    """`test/bazel.bzl`'s `UNCACHED_MODULES`, as package-relative `tests/test_*.py` paths.
+
+    Plan C-019: the acceptance targets that carry `external` by decision.
+
+    Read with Python's `ast` — the file is Starlark, whose top-level assignment
+    grammar is Python's. Anything but one literal list of `tests/test_*.py`
+    strings is refused (`SystemExit`), never read as empty: an empty list is a
+    real, meaningful value here, so a reader that fell back to it would turn a
+    misread into every listed module silently losing its exemption.
+    """
+    if text is None:
+        text = ACCEPTANCE_BZL.read_text(encoding="utf-8")
+    where = f"{ACCEPTANCE_BZL.relative_to(REPO_ROOT)} `{UNCACHED_LIST_NAME}`"
+    values = [
+        node.value
+        for node in ast.parse(text).body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == UNCACHED_LIST_NAME for t in node.targets)
+    ]
+    if len(values) != 1:
+        raise SystemExit(f"C-019: {where} is assigned {len(values)} time(s), expected exactly 1")
+    value = values[0]
+    if not isinstance(value, ast.List) or not all(
+        isinstance(e, ast.Constant) and isinstance(e.value, str) for e in value.elts
+    ):
+        raise SystemExit(f"C-019: {where} is not a literal list of strings")
+    modules = frozenset(e.value for e in value.elts)
+    malformed = sorted(m for m in modules if not (m.startswith("tests/test_") and m.endswith(".py")))
+    if malformed:
+        raise SystemExit(f"C-019: {where} carries non-module entries {malformed}")
+    return modules
+
+
+# ---------------------------------------------------------------------------
+# The runner's host locks (`test/bazel.bzl` § Concurrency). Judged by RUNNING
+# the generated script against a fake `flock` and a fake `uv` that log what
+# they were handed, not by grepping its text: a text check passes a script
+# whose loop never runs, and this one cannot.
+# ---------------------------------------------------------------------------
+
+RUNNER_NAME = "_RUNNER"
+UNSERIALISED_ENV = "OCX_ACCEPTANCE_UNSERIALISED"
+RUNNER_PROBE_SLOTS = ("b_slot", "a_slot")
+"""Handed to the runner out of order and must come back sorted, one lock each."""
+RUNNER_PORT = "5317"
+"""Not the default 5000, so a runner that hard-codes the default is told apart."""
+RUNNER_TOOLS = ("basename", "cksum", "cut", "dirname", "ln", "mkdir", "readlink", "sort", "tr", "true")
+"""The external commands the runner and the two fakes call — the whole PATH."""
+TEST_TASKFILE = REPO_ROOT / "test" / "taskfile.yml"
+TASKFILE_LOCKED = 'LOCKED="flock -o {{.ACCEPTANCE_TURNSTILE}} flock -o {{.ACCEPTANCE_LOCK}}";'
+"""The taskfile pytest step's lock prefix: the turnstile held, then the suite
+lock exclusive, each with `-o`."""
+
+# Logs every lock as `flock <mode> <-o|hold> <full path> <command>`, and a `-n`
+# probe as `probe <mode> <full path>` without running anything.
+_FAKE_FLOCK = r"""#!/bin/sh
+mode=exclusive close=hold probe=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o) close=-o; shift ;;
+        -s) mode=shared; shift ;;
+        -x) mode=exclusive; shift ;;
+        -n) probe=1; shift ;;
+        -*) echo "fake flock: unexpected option $1" >&2; exit 97 ;;
+        *) break ;;
+    esac
+done
+if [ -n "$probe" ]; then
+    printf 'probe %s %s\n' "$mode" "$1" >> "$RUNNER_PROBE_LOG"
+    exit 0
+fi
+printf 'flock %s %s %s %s\n' "$mode" "$close" "$1" "${2##*/}" >> "$RUNNER_PROBE_LOG"
+shift
+exec "$@"
+"""
+
+# Logs the call; runs a `python -c` for real, so the barrier's Python executes
+# against the stub suite below instead of being judged by its text.
+_FAKE_UV = r"""#!/bin/sh
+{ printf 'uv'; printf ' %s' "$@"; } | tr '\n' ' ' >> "$RUNNER_PROBE_LOG"
+echo >> "$RUNNER_PROBE_LOG"
+if [ "$1 $2 $3" = "run python -c" ]; then exec "$RUNNER_PYTHON" -c "$4"; fi
+"""
+
+# The stub `src.helpers` and `conftest` the barrier imports. `pytest_sessionstart`
+# records whether the real compose lock is held during the call, and whether
+# the lock the helpers now name can be taken — the hook's own recycle path takes
+# it, so a `0` there is the self-deadlock the redirect exists to avoid.
+_STUB_HELPERS = 'import os, pathlib\n_COMPOSE_LOCK = pathlib.Path(os.environ["RUNNER_COMPOSE_LOCK"])\n'
+_STUB_CONFTEST = """import fcntl, os
+import src.helpers as helpers
+
+def _free(path):
+    with open(path, "a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        return 1
+
+def pytest_sessionstart(session):
+    held = 1 - _free(os.environ["RUNNER_COMPOSE_LOCK"])
+    takeable = _free(helpers._COMPOSE_LOCK)
+    with open(os.environ["RUNNER_PROBE_LOG"], "a") as log:
+        log.write(f"barrier-probe held={held} takeable={takeable}\\n")
+"""
+
+RUNNER_MSG = "runner locks: {problem} (test/bazel.bzl `_RUNNER`, § Concurrency)"
+
+
+def read_runner(text: str | None = None) -> str:
+    """`test/bazel.bzl`'s `_RUNNER`, as the bytes `ctx.actions.write` emits.
+
+    Starlark's string-literal escapes are Python's, so `ast` reads the literal
+    exactly as Bazel does. Anything but one literal string is refused."""
+    if text is None:
+        text = ACCEPTANCE_BZL.read_text(encoding="utf-8")
+    values = [
+        node.value
+        for node in ast.parse(text).body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == RUNNER_NAME for t in node.targets)
+    ]
+    if len(values) != 1 or not (isinstance(values[0], ast.Constant) and isinstance(values[0].value, str)):
+        raise SystemExit(f"runner locks: {ACCEPTANCE_BZL.name} `{RUNNER_NAME}` is not one literal string")
+    return values[0].value
+
+
+def taskfile_lock_paths(home: Path, text: str | None = None) -> dict[str, str]:
+    """`test/taskfile.yml`'s `ACCEPTANCE_LOCK` / `ACCEPTANCE_TURNSTILE`, evaluated
+    the way go-task does (the folded `sh:` scalar run by a shell) for `home` and
+    `RUNNER_PORT`. Refused rather than guessed when either is not that shape."""
+    if text is None:
+        text = TEST_TASKFILE.read_text(encoding="utf-8")
+    paths: dict[str, str] = {}
+    for name in ("ACCEPTANCE_LOCK", "ACCEPTANCE_TURNSTILE"):
+        found = re.search(rf"^  {name}:\n    sh: >-\n((?:      \S.*\n)+)", text, re.MULTILINE)
+        if found is None:
+            raise SystemExit(f"runner locks: test/taskfile.yml `{name}` is not a folded `sh:` scalar")
+        script = " ".join(line.strip() for line in found.group(1).splitlines())
+        # `mkdir` is the one external command the scalar runs; no ambient
+        # environment is read (C-029 holds this file to that).
+        mkdir = shutil.which("mkdir")
+        if mkdir is None:
+            raise SystemExit("runner locks: `mkdir` is not on PATH")
+        env = {"HOME": str(home), "OCX_TEST_REGISTRY_PORT": RUNNER_PORT, "PATH": str(Path(mkdir).parent)}
+        paths[name] = subprocess.run(
+            ["/bin/sh", "-c", script], env=env, capture_output=True, encoding="utf-8", check=True
+        ).stdout
+    return paths
+
+
+def _run_runner(runner: str, scratch: Path, *, flock: bool, opt_in: bool) -> tuple[int, str, list[str]]:
+    """Run `runner` once in a fake runfiles tree: `(rc, stderr, probe log lines)`."""
+    root = Path(tempfile.mkdtemp(dir=scratch))
+    suite = root / "checkout" / "test"
+    (suite / "tests").mkdir(parents=True)
+    (suite / "bin").mkdir()
+    (suite / "src").mkdir()
+    for name, text in (
+        ("pyproject.toml", ""),
+        ("tests/test_probe.py", ""),
+        ("conftest.py", _STUB_CONFTEST),
+        ("src/helpers.py", _STUB_HELPERS),
+    ):
+        (suite / name).write_text(text, encoding="utf-8")
+    ocx = suite / "bin" / "ocx"
+    ocx.write_text("#!/bin/sh\n", encoding="utf-8")
+    ocx.chmod(0o755)
+    srcdir = root / "srcdir"
+    (srcdir / "_main" / "test").mkdir(parents=True)
+    (srcdir / "_main" / "test" / "conftest.py").symlink_to(suite / "conftest.py")
+    (srcdir / "tools").mkdir()
+    uv = srcdir / "tools" / "uv"
+    uv.write_text(_FAKE_UV, encoding="utf-8")
+    uv.chmod(0o755)
+    tools = root / "tools"
+    tools.mkdir()
+    for tool in RUNNER_TOOLS:
+        found = shutil.which(tool)
+        if found is None:
+            raise SystemExit(f"runner locks: `{tool}` is not on PATH, so the runner cannot be exercised")
+        (tools / tool).symlink_to(found)
+    path = str(tools)
+    if flock:
+        (root / "flockbin").mkdir()
+        fake = root / "flockbin" / "flock"
+        fake.write_text(_FAKE_FLOCK, encoding="utf-8")
+        fake.chmod(0o755)
+        path = f"{root / 'flockbin'}:{path}"
+    script = root / "runner.sh"
+    script.write_text(runner, encoding="utf-8")
+    log = root / "probe.log"
+    log.touch()
+    env = {
+        "PATH": path,
+        # One HOME for every run in `scratch`, so two runs differ only in the
+        # suite path — the arena check below compares exactly that.
+        "HOME": str(scratch / "home"),
+        "TEST_SRCDIR": str(srcdir),
+        "TEST_WORKSPACE": "_main",
+        "TEST_TMPDIR": str(root / "tmp"),
+        "RUNNER_PROBE_LOG": str(log),
+        "RUNNER_PYTHON": sys.executable,
+        "RUNNER_COMPOSE_LOCK": str(root / "compose.lock"),
+        "OCX_TEST_REGISTRY_PORT": RUNNER_PORT,
+        "OCX_ACCEPTANCE_SLOTS": " ".join(RUNNER_PROBE_SLOTS),
+    }
+    if opt_in:
+        env[UNSERIALISED_ENV] = "1"
+    done = subprocess.run(
+        ["/bin/sh", str(script), "tools/uv", "tests/test_probe.py"],
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        timeout=60,
+        check=False,
+    )
+    return done.returncode, done.stderr, log.read_text(encoding="utf-8").splitlines()
+
+
+def _chains(lines: list[str]) -> list[tuple[list[str], str]]:
+    """The log as `[(locks taken, in order, for one uv call), that uv call)]`.
+
+    A lock whose command is `true` is a pass-through (taken and released at
+    once) and reads `pass <path>`; the rest read `<mode> <-o|hold> <path>`.
+    Probe lines are not locks and are left to the caller."""
+    chains: list[tuple[list[str], str]] = []
+    locks: list[str] = []
+    for line in lines:
+        if line.startswith("flock "):
+            mode, close, path, command = line.removeprefix("flock ").split(" ")
+            locks.append(f"pass {path}" if command == "true" else f"{mode} {close} {path}")
+        elif line.startswith("uv"):
+            chains.append((locks, line))
+            locks = []
+    if locks:
+        chains.append((locks, ""))
+    return chains
+
+
+def runner_lock_findings(
+    runner: str | None = None, scratch: Path | None = None, taskfile: str | None = None
+) -> list[Finding]:
+    """The runner passes the turnstile and takes the suite lock SHARED around every
+    uv call, at the paths `test/taskfile.yml` computes; runs the stack barrier
+    under the stack lock with the real `_COMPOSE_LOCK` held and the helpers
+    pointed elsewhere; holds one slot lock per `OCX_ACCEPTANCE_SLOTS` name in
+    sorted order and the arena's lock around pytest; takes every lock with `-o`
+    and probes each blocking one first; and refuses a host with no flock(1)
+    unless `OCX_ACCEPTANCE_UNSERIALISED=1`. The taskfile's own step holds the
+    turnstile and the suite lock, both with `-o`."""
+    if runner is None:
+        runner = read_runner()
+    if taskfile is None:
+        taskfile = TEST_TASKFILE.read_text(encoding="utf-8")
+    if scratch is None:
+        scratch = REPO_ROOT / ".tmp"
+        scratch.mkdir(exist_ok=True)
+    findings: list[Finding] = []
+
+    def red(code: str, problem: str) -> None:
+        findings.append(Finding(code, RUNNER_MSG.format(problem=problem)))
+
+    if TASKFILE_LOCKED not in taskfile:
+        red("runner-taskfile", f"test/taskfile.yml's pytest step does not lock as `{TASKFILE_LOCKED}`")
+    with tempfile.TemporaryDirectory(dir=scratch) as directory:
+        work = Path(directory)
+        expected = taskfile_lock_paths(work / "home", taskfile)
+        lock_dir = work / "home" / ".cache" / "ocx"
+        suite = f"shared -o {expected['ACCEPTANCE_LOCK']}"
+        turnstile = f"pass {expected['ACCEPTANCE_TURNSTILE']}"
+        stack = f"exclusive -o {lock_dir}/acceptance-stack-{RUNNER_PORT}.lock"
+        slots = [f"exclusive -o {lock_dir}/acceptance-slot-{RUNNER_PORT}-{g}.lock" for g in sorted(RUNNER_PROBE_SLOTS)]
+        rc, stderr, lines = _run_runner(runner, work, flock=True, opt_in=False)
+        chains = _chains(lines)
+        if rc != 0:
+            red("runner-exit", f"exited {rc} with flock(1) present: {stderr.strip()[-300:]}")
+        if not chains:
+            red("runner-silent", "made no uv call at all, so nothing below was judged")
+        for locks, call in chains:
+            if locks[:2] != [turnstile, suite]:
+                red("runner-suite-lock", f"`{call[:60]}` ran under {locks}, not first under {[turnstile, suite]}")
+        taken = [lock for locks, _ in chains for lock in locks]
+        if any(" -o " not in lock for lock in taken if not lock.startswith("pass ")):
+            red("runner-close", f"a lock was taken without -o, so a leftover process keeps it: {taken}")
+        probed = {line.split(" ", 2)[2] for line in lines if line.startswith("probe ")}
+        quiet = sorted({lock.rsplit(" ", 1)[1] for lock in taken} - probed)
+        if quiet:
+            red("runner-quiet", f"blocks on {quiet} without a `flock -n` probe saying so first")
+        barrier = [i for i, (_, call) in enumerate(chains) if "pytest_sessionstart" in call]
+        tests = [i for i, (_, call) in enumerate(chains) if call.startswith("uv run pytest")]
+        if len(barrier) != 1:
+            red("runner-barrier", f"{len(barrier)} stack-barrier call(s), expected 1: {lines}")
+        else:
+            locks, call = chains[barrier[0]]
+            if locks != [turnstile, suite, stack]:
+                red("runner-barrier", f"the barrier ran under {locks}, expected {[turnstile, suite, stack]}")
+            ran = [line for line in lines if line.startswith("barrier-probe ")]
+            if ran != ["barrier-probe held=1 takeable=1"]:
+                red(
+                    "runner-barrier",
+                    f"the barrier's Python reported {ran}: it must hold the real _COMPOSE_LOCK through "
+                    "pytest_sessionstart (held=1) and point the helpers at a lock the hook can take (takeable=1)",
+                )
+            if tests and barrier[0] > tests[0]:
+                red("runner-barrier", "pytest started before the stack barrier")
+        if len(tests) != 1:
+            red("runner-slots", f"{len(tests)} pytest call(s), expected 1: {lines}")
+        else:
+            locks, call = chains[tests[0]]
+            arena = next((w.removeprefix("--basetemp=") for w in call.split() if w.startswith("--basetemp=")), "")
+            want = [turnstile, suite, *slots, f"exclusive -o {arena}.lock"]
+            if not arena or locks != want:
+                red("runner-slots", f"pytest ran under {locks}, expected {want}")
+
+        # Two checkouts with one folder name (the fake tree is always
+        # `checkout/test`) must not share an arena: pytest wipes `--basetemp`.
+        _, _, again = _run_runner(runner, work, flock=True, opt_in=False)
+        arenas = [
+            {word for word in lines_ if word.startswith("--basetemp=")}
+            for lines_ in (" ".join(lines).split(), " ".join(again).split())
+        ]
+        if not arenas[0] or arenas[0] == arenas[1]:
+            red("runner-arena", f"two checkouts named alike got the arenas {arenas}")
+
+        rc, _, lines = _run_runner(runner, work, flock=False, opt_in=False)
+        if rc == 0 or lines:
+            red("runner-no-flock", f"with no flock(1) and no {UNSERIALISED_ENV} it exited {rc} and called {lines}")
+        rc, _, lines = _run_runner(runner, work, flock=False, opt_in=True)
+        if rc != 0 or [call for _, call in _chains(lines) if call.startswith("uv run pytest")] == []:
+            red("runner-no-flock", f"{UNSERIALISED_ENV}=1 with no flock(1) exited {rc} and called {lines}")
+    return findings
 
 
 def selection_table_findings(
@@ -845,7 +1222,7 @@ def select_targets(
     modules: set[str],
     crate_of_dir: dict[str, str],
 ) -> tuple[set[str], list[Finding]]:
-    """The crate→target selection query, unchanged from SCOPED_ROWS.
+    """The crate→target selection query, over the [crates] rows.
 
     A path that routes to no crate and to no acceptance module selects nothing:
     that is S-004's whole subject, and it is why a docs-only change has an empty
@@ -854,7 +1231,7 @@ def select_targets(
     can move coverage anywhere and `scoped_gate.py` escalates on the same input.
 
     **Both halves of a crate path's answer are here**: its Rust package
-    (`//crates/<dir>:all`) and the acceptance targets its `SCOPED_ROWS` row
+    (`//crates/<dir>:all`) and the acceptance targets its `[crates]` row
     names. `bazel:test:scoped` spelled the Rust half in its own heredoc until
     R-2 of the end-of-run review, which made that heredoc a third reader of the
     same mapping and — because it skipped the `crate_of_dir` membership check
@@ -874,6 +1251,11 @@ def select_targets(
             # Bazel targets to build whatever its acceptance row says, and an
             # `escalate` row is about acceptance coverage, not about this.
             selected.add(f"//crates/{parts[1]}:all")
+            if crate == CLI_PACKAGE:
+                # No row by design: markers route its command files, and the
+                # crate-level answer for them is the whole suite.
+                selected.add(ALL_TARGET)
+                continue
             row = rows.get(crate)
             if row is None:
                 findings.append(Finding("select-row-missing", SELECT_ROW_MSG.format(crate=crate)))
@@ -1371,7 +1753,7 @@ def fixture_modules(count: int = ACCEPTANCE_MODULES) -> set[str]:
 
 
 def fixture_rows(modules: set[str]) -> dict[str, str]:
-    """A `SCOPED_ROWS`-shaped table: 21 rows, three of them `escalate`.
+    """A `[crates]`-shaped table: 20 rows, two of them `escalate`.
 
     Globs are two-digit prefixes over the fixture's own three-digit module
     names, so each of the 18 non-`escalate` rows owns a live decade and every
@@ -1379,11 +1761,7 @@ def fixture_rows(modules: set[str]) -> dict[str, str]:
     than this table's normal state, which is the only way `select-glob-dead`
     can be shown red on purpose.
     """
-    rows: dict[str, str] = {
-        "ocx_test_support": "escalate",
-        "ocx": "escalate",
-        "ocx_python": "escalate",
-    }
+    rows: dict[str, str] = {"ocx_test_support": "escalate", "ocx_python": "escalate"}
     glob_rows = SCOPED_ROWS - SCOPED_ESCALATE_ROWS
     # Decades are derived from the modules present, not from the row count: the
     # fixture's size follows the live acceptance suite, so hard-coding one decade
@@ -1419,8 +1797,8 @@ def fixture_crate_of_dir() -> dict[str, str]:
 
     `crates/ocx_cli` holds the package named `ocx`; every other member's
     directory is its package name. A selector keyed on the directory would
-    miss exactly that row, `ocx` — one of the three `escalate` rows, beside
-    `ocx_test_support` and `ocx_python`.
+    miss `ocx`, which has no row and selects `//test:all` like the two
+    `escalate` rows, `ocx_test_support` and `ocx_python`.
     """
     mapping = {f"crates/crate{index:02d}": f"crate{index:02d}" for index in range(18)}
     mapping["crates/ocx_cli"] = "ocx"
@@ -1456,7 +1834,7 @@ label the reader floors are shown to ignore."""
 
 def fixture_tags(labels: list[str]) -> dict[str, set[str]]:
     """The tag set `test/bazel.bzl` ships, as `bazel:tags` would report it."""
-    return {label: {SANDBOX_TAG, SERIALISING_TAG} for label in labels}
+    return {label: {SANDBOX_TAG} for label in labels}
 
 
 def fixture_inputs(labels: list[str]) -> dict[str, set[str]]:
@@ -1508,7 +1886,7 @@ def _no_prefix_reader(tags: set[str]) -> bool:
 def _mtime_reader(built: Path, under_test: Path) -> bool:
     """The wrong freshness reader: "the binary under test is not older".
 
-    `test/bin/ocx` is a `cp` of `target/release/ocx` (`test/taskfile.yml:125`),
+    `test/bin/ocx` is a `cp` of `target/test-bin/ocx` (`test/taskfile.yml` `.build-binaries`),
     so a stale copy carries the *copy's* mtime, not the build's — this reader
     calls it fresh on exactly the bytes the digest comparator reds.
     """
@@ -1548,6 +1926,7 @@ def prove_caching_on(scratch: Path) -> int:
             "acceptance": acceptance,
             "tags": tags,
             "inputs": inputs,
+            "uncached": frozenset(),
         }
         kwargs.update(overrides)
         return caching_on_findings(**kwargs)
@@ -1642,21 +2021,54 @@ def prove_caching_on(scratch: Path) -> int:
     )
     checks += len(CACHE_SUPPRESSING_TAGS)
 
+    # --- C-019: a listed module carries `external` and re-executes every run.
+    listed = labels[11]
+    uncached = frozenset({listed})
+    ext_tags = dict(tags)
+    ext_tags[listed] = set(tags[listed]) | {CACHE_DEFEATING_TAG}
+    reran = dict(warm_outcomes)
+    reran[listed] = False
+    write_accept_bep(warm_path, reran)
+    reran_read, _ = read_test_results(warm_path)
+    expect(reran_read[listed] is False, "the re-ran mutation did not land")
+    findings = judge(warm=reran_read, tags=ext_tags, uncached=uncached)
+    expect(findings == [], f"C-019: listed + external + re-ran must be silent, got {codes(findings)}")
+    print(f"C-019 GREEN: {listed} listed, tagged `{CACHE_DEFEATING_TAG}`, re-executed on run 2")
+    checks += 1
+
+    # Listed, tagged, and reported cached anyway: the tag did not do its job.
+    findings = judge(tags=ext_tags, uncached=uncached)
+    expect(codes(findings) == ["accept-uncached-cached"], f"got {codes(findings)}")
+    expect(listed in findings[0].message, "the finding does not name the target")
+    print(f"C-019 RED  : {findings[0].message}")
+    checks += 1
+
+    # Listed, but `no-cache` in place of `external`: still refused.
+    nocache_tags = dict(tags)
+    nocache_tags[listed] = set(tags[listed]) | {"no-cache"}
+    findings = judge(warm=reran_read, tags=nocache_tags, uncached=uncached)
+    expect(codes(findings) == ["accept-tag-suppressing"], f"got {codes(findings)}")
+    expect("'no-cache'" in findings[0].message, "the finding does not name no-cache")
+    print(f"C-019 RED  : {findings[0].message}")
+    checks += 1
+    write_accept_bep(warm_path, warm_outcomes)
+    warm, _ = read_test_results(warm_path)
+
     # --- the sandbox tag dropped: the suite cannot run in a sandbox at all.
     unsandboxed = dict(tags)
-    unsandboxed[labels[5]] = {SERIALISING_TAG}
+    unsandboxed[labels[5]] = set()
     expect(SANDBOX_TAG not in unsandboxed[labels[5]], "the no-sandbox drop did not land")
     findings = judge(tags=unsandboxed)
     expect(codes(findings) == ["accept-sandbox-tag-missing"], f"got {codes(findings)}")
     print(f"S-015 RED  : {findings[0].message}")
     checks += 1
 
-    # --- no serialising tag: 181 targets, one compose stack.
-    unserialised = dict(tags)
-    unserialised[labels[9]] = {SANDBOX_TAG}
-    expect(SERIALISING_TAG not in unserialised[labels[9]], "the exclusive-drop did not land")
-    findings = judge(tags=unserialised)
-    expect(codes(findings) == ["accept-serial-tag-missing"], f"got {codes(findings)}")
+    # --- the serialising tag is back: the suite would run one target at a time.
+    serialised_tags = dict(tags)
+    serialised_tags[labels[9]] = {SANDBOX_TAG, SERIALISING_TAG}
+    expect(SERIALISING_TAG in serialised_tags[labels[9]], "the exclusive-add did not land")
+    findings = judge(tags=serialised_tags)
+    expect(codes(findings) == ["accept-serial-tag-present"], f"got {codes(findings)}")
     print(f"S-015 RED  : {findings[0].message}")
     checks += 1
 
@@ -1770,7 +2182,7 @@ def prove_binary_digest(scratch: Path) -> int:
     checks += 1
 
     # --- the stale copy. Same size, same path, *newer* mtime: the shape
-    #     `cp target/release/ocx test/bin/ocx` leaves when the build it copied
+    #     `cp target/test-bin/ocx test/bin/ocx` leaves when the build it copied
     #     from was not the build that just ran.
     test_path.write_bytes(stale)
     time.sleep(0.01)
@@ -1890,7 +2302,7 @@ def prove_selection(scratch: Path) -> int:
     table = selection_table_findings(rows, modules)
     expect(table == [], f"the fixture table must be silent, got {[f.message for f in table]}")
     print(
-        f"S-004 GREEN: {len(rows)} SCOPED_ROWS rows ({SCOPED_ESCALATE_ROWS} escalate) over "
+        f"S-004 GREEN: {len(rows)} [crates] rows ({SCOPED_ESCALATE_ROWS} escalate) over "
         f"{len(modules)} acceptance modules, every glob live"
     )
     checks += 1
@@ -1916,8 +2328,8 @@ def prove_selection(scratch: Path) -> int:
     )
     checks += 1
 
-    # --- the escalate row still maps to the whole acceptance package, beside
-    #     the crate's own Rust label.
+    # --- the CLI crate, which has no row (its command files route by
+    #     markers), maps to the whole acceptance package beside its Rust label.
     escalated, _ = select_targets(
         ["crates/ocx_cli/src/command/install.rs"],
         rows=rows,
@@ -1926,10 +2338,10 @@ def prove_selection(scratch: Path) -> int:
     )
     expect(
         escalated == {ALL_TARGET, "//crates/ocx_cli:all"},
-        f"the escalate row must map to {ALL_TARGET} plus the crate label, got {escalated}",
+        f"the row-less CLI crate must map to {ALL_TARGET} plus the crate label, got {escalated}",
     )
     print(
-        f"S-004 GREEN: the `ocx` escalate row (package of crates/ocx_cli) maps to {ALL_TARGET}, "
+        f"S-004 GREEN: the row-less CLI crate `ocx` (package of crates/ocx_cli) maps to {ALL_TARGET}, "
         f"and the path maps to //crates/ocx_cli:all beside it"
     )
     checks += 1
@@ -2073,8 +2485,9 @@ def prove_selection(scratch: Path) -> int:
     print(f"S-004 RED  : {dead[0].message}")
     checks += 1
 
+    # A peer that still reads the pre-WP-06 table, where `ocx` escalated too.
     parity = selection_table_findings(
-        rows, modules, peer_escalates=frozenset({"ocx_test_support"})
+        rows, modules, peer_escalates=frozenset({"ocx_test_support", "ocx"})
     )
     expect(codes(parity) == ["select-escalate-parity"], f"got {codes(parity)}")
     print(f"S-004 RED  : {parity[0].message}")
@@ -2087,8 +2500,8 @@ def prove_live_table() -> int:
 
     Everything above runs on fixtures this file builds, which proves the
     comparators and says nothing about the tree. These four lines are the other
-    half: the `SCOPED_ROWS` reader and the module reader are run against the
-    live `test/taskfile.yml` and `test/tests/`, and their answers are floored
+    half: the `[crates]` reader and the module reader are run against the
+    live `test/scoped_rows.toml` and `test/tests/`, and their answers are floored
     against this file's constants and cross-checked against `scoped_gate.py`'s
     independent reading of the same table.
     """
@@ -2096,7 +2509,7 @@ def prove_live_table() -> int:
     # only use, and `scoped_gate` is a sibling gate rather than a dependency.
     from scoped_gate import TABLE_ESCALATES
 
-    rows = read_scoped_rows((REPO_ROOT / "test" / "taskfile.yml").read_text(encoding="utf-8"))
+    rows = read_scoped_rows()
     modules = acceptance_modules(REPO_ROOT / "test")
     findings = selection_table_findings(rows, modules, peer_escalates=TABLE_ESCALATES)
     expect(
@@ -2105,7 +2518,7 @@ def prove_live_table() -> int:
         f"{[f.message for f in findings]}",
     )
     print(
-        f"S-004 GREEN: live read — {len(rows)} SCOPED_ROWS rows in test/taskfile.yml, "
+        f"S-004 GREEN: live read — {len(rows)} [crates] rows in test/scoped_rows.toml, "
         f"{len(modules)} modules in test/tests/, escalate rows agree with "
         f"scoped_gate.TABLE_ESCALATES ({sorted(TABLE_ESCALATES)})"
     )
@@ -2284,16 +2697,131 @@ def prove_c029(scratch: Path) -> int:
     return checks
 
 
+def prove_uncached_list() -> int:
+    """C-019: the list reader reads the live file, and refuses what it cannot read."""
+    checks = 0
+    live = read_uncached_modules()
+    modules = acceptance_modules(REPO_ROOT / "test")
+    expect(live <= modules, f"UNCACHED_MODULES names non-modules {sorted(live - modules)}")
+    print(f"C-019 list GREEN: {ACCEPTANCE_BZL.name} lists {len(live)} module(s), all of them real")
+    checks += 1
+    good = 'UNCACHED_MODULES = [\n    "tests/test_a.py",\n]\n'
+    expect(read_uncached_modules(good) == {"tests/test_a.py"}, "a literal list must read back")
+    for case, text in {
+        "absent": "ACCEPTANCE_TAGS = []\n",
+        "computed": "UNCACHED_MODULES = [x for x in LIST]\n",
+        "not a module path": 'UNCACHED_MODULES = ["test_a.py"]\n',
+        "twice": 'UNCACHED_MODULES = []\nUNCACHED_MODULES = ["tests/test_a.py"]\n',
+    }.items():
+        try:
+            read_uncached_modules(text)
+        except SystemExit as refused:
+            print(f"C-019 list RED  : {case}: {refused}")
+            checks += 1
+            continue
+        raise SystemExit(f"bazel accept proofs self-test: the {case} list was read, not refused")
+    return checks
+
+
+RUNNER_MUTATIONS = {
+    # name: (text in the live runner, replacement, the code that must red)
+    "slot loop emptied": (
+        '    set -- flock -o "$lock_dir/acceptance-slot-$port-$slot.lock" "$@"\n',
+        "    :\n",
+        "runner-slots",
+    ),
+    "suite lock exclusive": ('exec flock -o -s "$suite_lock" "$@"', 'exec flock -o "$suite_lock" "$@"', "runner-suite-lock"),
+    "suite lock absent": ('exec flock -o -s "$suite_lock" "$@"', 'exec "$@"', "runner-suite-lock"),
+    "barrier dropped": ('"$uv" run python -c "$barrier" ||', '"$uv" run python -c pass ||', "runner-barrier"),
+    "barrier outside the suite lock": (
+        'flock -o -s "$suite_lock" flock -o "$stack_lock"',
+        'flock -o "$stack_lock"',
+        "runner-suite-lock",
+    ),
+    "barrier without _COMPOSE_LOCK": ("    fcntl.flock(held, fcntl.LOCK_EX)\n", "    pass\n", "runner-barrier"),
+    "barrier redirect dropped (self-deadlock)": (
+        '    helpers._COMPOSE_LOCK = lock.with_name(lock.name + ".barrier")\n',
+        "",
+        "runner-barrier",
+    ),
+    "sessionstart outside the held lock": (
+        "\n    conftest.pytest_sessionstart(None)'",
+        "\nconftest.pytest_sessionstart(None)'",
+        "runner-barrier",
+    ),
+    "arena keyed on the folder name": (
+        """suite_key=$(printf '%s' "$suite" | cksum | cut -d ' ' -f 1)""",
+        "suite_key=x",
+        "runner-arena",
+    ),
+    "arena lock dropped (--runs_per_test)": (
+        'set -- flock -o "$basetemp.lock" "$uv" run pytest "$@"',
+        'set -- "$uv" run pytest "$@"',
+        "runner-slots",
+    ),
+    "no-flock refusal dropped": (
+        f'    [ "${{{UNSERIALISED_ENV}:-}}" = 1 ] ||\n        fail ',
+        "    true ||\n        fail ",
+        "runner-no-flock",
+    ),
+    "lock dir inside the checkout": ('lock_dir="$HOME/.cache/ocx"', 'lock_dir="$suite/.locks"', "runner-suite-lock"),
+    "default port hard-coded": ('port="${OCX_TEST_REGISTRY_PORT:-5000}"', "port=5000", "runner-suite-lock"),
+    "-o dropped from the stack lock": (
+        'flock -o -s "$suite_lock" flock -o "$stack_lock"',
+        'flock -o -s "$suite_lock" flock "$stack_lock"',
+        "runner-close",
+    ),
+    "turnstile skipped": ('    flock -o "$turnstile" true\n', "", "runner-suite-lock"),
+    "wait probe dropped": ('waits -x "$stack_lock"\n', "", "runner-quiet"),
+}
+
+TASKFILE_MUTATIONS = {
+    # name: (text in test/taskfile.yml, replacement, the code that must red)
+    "taskfile suite lock path drifts": ("acceptance-suite-%s.lock", "acceptance-suites-%s.lock", "runner-suite-lock"),
+    "taskfile turnstile path drifts": ("acceptance-turnstile-%s.lock", "acceptance-gate-%s.lock", "runner-suite-lock"),
+    "taskfile suite lock without -o": (TASKFILE_LOCKED, TASKFILE_LOCKED.replace("flock -o {{.ACCEPTANCE_LOCK}}", "flock {{.ACCEPTANCE_LOCK}}"), "runner-taskfile"),
+    "taskfile turnstile not held": (TASKFILE_LOCKED, 'LOCKED="flock -o {{.ACCEPTANCE_LOCK}}";', "runner-taskfile"),
+}
+
+
+def prove_runner_locks(scratch: Path) -> int:
+    """The runner's host locks, green on the live `_RUNNER` and `test/taskfile.yml`
+    and red per mutation of either."""
+    checks = 0
+    runner = read_runner()
+    taskfile = TEST_TASKFILE.read_text(encoding="utf-8")
+    rc, _, lines = _run_runner(runner, scratch, flock=True, opt_in=False)
+    expect(rc == 0 and len(_chains(lines)) == 2, f"the live runner made {len(_chains(lines))} uv call(s), rc {rc}")
+    green = runner_lock_findings(runner, scratch, taskfile)
+    expect(green == [], f"the live runner must be silent, got {[f.message for f in green]}")
+    print(f"runner GREEN: live `_RUNNER` took {lines}")
+    checks += 1
+    for target, mutations in (("runner", RUNNER_MUTATIONS), ("taskfile", TASKFILE_MUTATIONS)):
+        for name, (old, new, code) in mutations.items():
+            subject = runner if target == "runner" else taskfile
+            mutated = subject.replace(old, new)
+            expect(subject.count(old) == 1 and mutated != subject, f"the {name!r} mutation did not land")
+            found = (
+                runner_lock_findings(mutated, scratch, taskfile)
+                if target == "runner"
+                else runner_lock_findings(runner, scratch, mutated)
+            )
+            expect(code in codes(found), f"{name}: expected {code}, got {codes(found)}")
+            print(f"runner RED  : {name}: {next(f.message for f in found if f.code == code)[:300]}")
+            checks += 1
+    return checks
+
+
 def prove_counts() -> int:
     """The constants, against the live tree rather than against themselves."""
     modules = acceptance_modules(REPO_ROOT / "test")
-    rows = read_scoped_rows((REPO_ROOT / "test" / "taskfile.yml").read_text(encoding="utf-8"))
+    rows = read_scoped_rows()
     escalates = {crate for crate, row in rows.items() if row == "escalate"}
     expect(
         len(modules) == ACCEPTANCE_MODULES,
         f"test/tests/ holds {len(modules)} modules, this file's floor says {ACCEPTANCE_MODULES}",
     )
-    expect(len(rows) == SCOPED_ROWS, f"SCOPED_ROWS has {len(rows)} rows, floor says {SCOPED_ROWS}")
+    expect(len(rows) == SCOPED_ROWS, f"[crates] has {len(rows)} rows, floor says {SCOPED_ROWS}")
     expect(
         len(escalates) == SCOPED_ESCALATE_ROWS,
         f"{len(escalates)} escalate rows, floor says {SCOPED_ESCALATE_ROWS}",
@@ -2303,7 +2831,7 @@ def prove_counts() -> int:
         "the tag this file credits must not also be in the set it refuses to credit",
     )
     print(
-        f"counts  OK : {ACCEPTANCE_MODULES} acceptance modules and {SCOPED_ROWS} SCOPED_ROWS rows "
+        f"counts  OK : {ACCEPTANCE_MODULES} acceptance modules and {SCOPED_ROWS} [crates] rows "
         f"({SCOPED_ESCALATE_ROWS} escalate) read off the live tree, not asserted against themselves"
     )
     return 1
@@ -2322,12 +2850,16 @@ def self_test() -> int:
         checks += prove_live_table()
         checks += prove_entry_points()
         checks += prove_c029(work)
+        checks += prove_uncached_list()
+        checks += prove_runner_locks(work)
         checks += prove_counts()
     print(
         f"bazel accept proofs self-test: {checks} checks passed — S-015 (results CACHED on an "
         "unchanged tree, every cache-suppressing tag refused, the declaration required, and the "
         "binary-swap control that makes the green mean anything) and S-004 (selection, and the "
-        "CI entry point) each shown red and green, plus C-029 and the live table floors"
+        "CI entry point) each shown red and green, plus C-029, the live table floors and the "
+        "runner's host locks (turnstile, suite shared at the taskfile's path, stack barrier run "
+        "against stub modules, sorted slots, arena lock, -o and wait probes, no-flock refusal)"
     )
     print(
         "  The tag semantics all of S-015 rests on are measured, not assumed: run "
@@ -2409,14 +2941,10 @@ def run_check_s015(
             acceptance=acceptance,
             tags=tags,
             inputs=inputs,
+            uncached=frozenset(module_target(m) for m in read_uncached_modules()),
         )
     )
-    rc_files = {
-        str(path): path.read_text(encoding="utf-8")
-        for path in (REPO_ROOT / ".bazelrc", REPO_ROOT / ".bazelrc.user")
-        if path.is_file()
-    }
-    findings.extend(global_serialisation_findings(rc_files))
+    findings.extend(rc_serialisation_findings())
 
     if built is not None and under_test is not None:
         findings.extend(
@@ -2439,7 +2967,7 @@ def run_check_s004(*, docs_bep: Path, crate_bep: Path, entry_taskfile: Path | No
     from scoped_gate import TABLE_ESCALATES, cargo_metadata, parse_workspace
 
     findings: list[Finding] = []
-    rows = read_scoped_rows((REPO_ROOT / "test" / "taskfile.yml").read_text(encoding="utf-8"))
+    rows = read_scoped_rows()
     modules = acceptance_modules(REPO_ROOT / "test")
     findings.extend(selection_table_findings(rows, modules, peer_escalates=TABLE_ESCALATES))
 

@@ -517,8 +517,8 @@ tasks:
   test:accept:
     desc: The acceptance suite as Bazel test targets — `bazel test //test:all`, one stack, results cached
     summary: |
-      Stage 4's lane (C-024), and the first thing that has ever run the 181
-      `sh_test` targets: `task verify` and `verify-deep.yml` both called
+      Stage 4's lane (C-024), and the first thing that has ever run the
+      acceptance `sh_test` targets (one per `test/tests/test_*.py`): `task verify` and `verify-deep.yml` both called
       `task test:parallel`, i.e. pytest directly, so the targets existed and
       nothing executed, cached or reported them.
 
@@ -531,8 +531,8 @@ tasks:
       runner is in. `no-sandbox` buys the execroot the runner needs with none of
       that. The compensating control is A4's own red half 3: `bin/ocx*` is a
       declared input through `//test:suite_anchor`, so a rebuilt binary re-keys
-      every target. `bazel:tag:guard` enforces that declaration on every one of
-      the 181 targets from the graph side, on every `task verify` and every
+      every target. `bazel:tag:guard` enforces that declaration on every
+      acceptance target from the graph side, on every `task verify` and every
       pull request — along with the tag set, the sibling-sweep declarations and
       `//test:suite_inputs`' own contents.
 
@@ -546,7 +546,7 @@ tasks:
           python3 scripts/bazel_accept_proofs.py --check-s015 \
               --warm <unchanged-tree BEP> --mutated <binary-swap BEP> \
               --tags test/results/bazel-acceptance-tags.json \
-              --built-binary target/release/ocx --binary-under-test test/bin/ocx
+              --built-binary target/test-bin/ocx --binary-under-test test/bin/ocx
 
       **`//test:all`, not `//test/...`, and that is a deviation with a measured
       reason.** `bazel test` over a target pattern builds the non-test targets
@@ -555,17 +555,24 @@ tasks:
       deps are all 39 renders. That chain is stage 3's subject and its own
       lane's cost; dragging it into the acceptance lane would make this step's
       wall clock a statement about cast recording. `//test:all` is exactly the
-      acceptance package: 181 `sh_test` targets, the runner and three
-      filegroups.
+      acceptance package: one `sh_test` target per module (`ACCEPTANCE_MODULE_TARGETS`), the runner and the
+      package's filegroups.
 
-      **`--local_test_jobs=1` on the command line, never in an rc file** (ADR
-      ruling 12). One compose stack on one set of ports, so the targets must
-      serialise — `exclusive` already does that, and the runner's own host-wide
-      `flock` serialises against a `task test:parallel` in a sibling worktree
-      that `exclusive` knows nothing about. What the flag adds is that Bazel
-      does not *queue* 12 tests it will then run one at a time. An rc line is
+      **The targets run concurrently, `--local_test_jobs=$ACCEPT_JOBS` on the
+      command line, never in an rc file** (ADR ruling 12). They share one
+      compose stack the way `task test:parallel`'s xdist workers do, and the
+      runner supplies what xdist gave that separate processes lack — one stack
+      bring-up, a basetemp per target, a host lock per xdist group, and the
+      host suite lock taken SHARED so `task test:parallel`'s pytest step
+      (which takes it exclusive) never overlaps the run; a sibling checkout's
+      bazel run does overlap it, at xdist parity (`test/bazel.bzl` §
+      Concurrency, which also names what precedes that pytest step unlocked).
+      The flag bounds how many pytest sessions run at once. The default is
+      `min(8, nproc)` — 8 measured on the 32-core development host, fewer on
+      CI's 4-core runner or any smaller machine — and `ACCEPT_JOBS=<n>`
+      overrides it. An rc line is
       per-command and never per-target-pattern, so a global one would also
-      serialise the 34 Rust test targets and delete stage 2's entire win;
+      throttle the 35 Rust test targets;
       `bazel_accept_proofs.py::global_serialisation_findings` reds one, which is
       why this is the flag's only home.
 
@@ -577,9 +584,10 @@ tasks:
       `--nocache_test_results` and the caching this lane exists for would have
       been unreachable from the one command that runs it. Measured on this tree:
       1421 s serial against `task test:parallel`'s 160 s, on every run, for a
-      cache nothing would ever hit. So:
+      cache nothing would ever hit (the serial lane that measured it is gone,
+      but the argument is not). So:
 
-          task bazel:test:accept NOCACHE=1     # run all 181 regardless
+          task bazel:test:accept NOCACHE=1     # run every target regardless
 
       `task verify` trusts the declared inputs, which is the whole point of
       having declared them, and `bazel:tag:guard` is what keeps that
@@ -612,6 +620,13 @@ tasks:
     dir: '{{.ROOT_DIR}}'
     vars:
       REPORTS: '{{.ROOT_DIR}}/target/bazel/accept'
+      # How many acceptance targets run at once: `min(8, nproc)`. 8 was
+      # measured on the 32-core / 31 GB development host; `nproc` caps it on a
+      # smaller one (CI's runner has 4 cores), and honours a CPU affinity mask.
+      # `ACCEPT_JOBS=<n>` on the command line overrides it.
+      ACCEPT_JOBS_DEFAULT:
+        sh: n=$(nproc 2>/dev/null || echo 8); if [ "$n" -gt 8 ]; then n=8; fi; printf '%s' "$n"
+      ACCEPT_JOBS: '{{.ACCEPT_JOBS | default .ACCEPT_JOBS_DEFAULT}}'
       # Identical in shape and reason to `test:unit`'s: `--bazelrc` on a missing
       # path is a hard error, a fork PR is given no secrets so the action writes
       # nothing, and a developer shell has no $RUNNER_TEMP — so the flag is
@@ -640,9 +655,12 @@ tasks:
       - cmd: |
           set -o pipefail
           status=0
+          started=$(date +%s)
           ocx exec bazel -- bazel {{.CACHE_RC}} test //test:all \
-            --local_test_jobs=1 {{if .NOCACHE}}--nocache_test_results{{end}} {{.CLI_ARGS}} || status=$?
-          python3 - '{{.ROOT_DIR}}' '{{.REPORTS}}' <<'PY' || exit $?
+            --local_test_jobs={{.ACCEPT_JOBS}} {{if .NOCACHE}}--nocache_test_results{{end}} {{.CLI_ARGS}} || status=$?
+          reader=0
+          python3 - '{{.ROOT_DIR}}' '{{.REPORTS}}' <<'PY' || reader=$?
+          import os
           import pathlib
           import shutil
           import sys
@@ -679,6 +697,10 @@ tasks:
               target = out / module / "junit.xml"
               target.parent.mkdir(parents=True, exist_ok=True)
               shutil.copyfile(report, target)
+              # The report's own mtime, not the copy's: the escape recorder's
+              # `--since` tells this run's reports from ones bazel left behind.
+              stat = report.stat()
+              os.utime(target, (stat.st_atime, stat.st_mtime))
               copied.append(target)
 
           # A missing report is refused BY NAME: a `bazel test` that ran nothing
@@ -745,6 +767,23 @@ tasks:
               f"{limit('SKIP_CEILING')}), {xfailed} xfailed (ceiling {limit('XFAIL_CEILING')})"
           )
           PY
+          # C-018 escape records: a failed run during a work-package merge
+          # names each failing module that the scoped runs of the merged tip
+          # never selected. Observation only — it runs after the reader
+          # (whatever that decided) and can never change this step's status;
+          # its own failure is a warning. `--since`: a report bazel left from
+          # an earlier invocation is not this run's failure.
+          if [ "$status" -ne 0 ] && [ -f "$(git rev-parse --absolute-git-dir)/MERGE_HEAD" ]; then
+            python3 '{{.ROOT_DIR}}/scripts/scoped_gate.py' --record-escapes \
+              --junit-dir '{{.REPORTS}}' --since "$started" ||
+              echo "bazel accept: warning: the escape recorder failed (above); this run's status is unchanged" >&2
+          fi
+          # T2's telemetry (C-018): ocx.gate=full and, after the recorder above,
+          # ocx.gate.escape. A silent no-op unless this machine is configured
+          # for it; its status is never this step's.
+          "{{.TASK_EXE}}" -d '{{.ROOT_DIR}}' telemetry:accept REPORTS='{{.REPORTS}}' SINCE="$started" ||
+            echo "bazel accept: warning: the telemetry push failed (above); this run's status is unchanged" >&2
+          [ "$reader" -eq 0 ] || exit "$reader"
           exit "$status"
 
   test:
@@ -793,7 +832,7 @@ tasks:
       Two readers, no third — and the recipe below keeps that literally. The
       change set comes from `scripts/scoped_gate.py`, the same plan
       `task verify:scoped` reads. The crate -> acceptance-target query is
-      `SCOPED_ROWS` in `test/taskfile.yml` (C-024), reached through
+      the `[crates]` rows of `test/scoped_rows.toml` (C-024, C-012), reached through
       `scripts/bazel_accept_proofs.py::select_targets`, which is already that
       table's reader and the function `--check-s004` judges a selection with.
       Re-spelling the table in YAML would make this the third reader of it, and
@@ -809,8 +848,10 @@ tasks:
       Three inputs, three answers, all of them `select_targets`':
 
         a crate path   `//crates/<dir>:all`, plus every acceptance target that
-                       crate's `SCOPED_ROWS` row names — or `//test:all` where
-                       the row itself reads `escalate` (C-024's mapping)
+                       crate's `[crates]` row names — or `//test:all` where
+                       the row itself reads `escalate`, or the crate is the
+                       CLI crate `ocx`, whose command files route by markers
+                       (C-024's mapping)
         a test module  that module's own `//test:` target
         a docs path    nothing at all; the task says so and exits 0
 
@@ -864,7 +905,7 @@ tasks:
           changed = make_plan(REPO_ROOT, mark_file()).changed
           targets, notes = select_targets(
               changed,
-              rows=read_scoped_rows((REPO_ROOT / "test" / "taskfile.yml").read_text(encoding="utf-8")),
+              rows=read_scoped_rows(),
               modules=acceptance_modules(REPO_ROOT / "test"),
               crate_of_dir=parse_workspace(cargo_metadata(REPO_ROOT)).crate_of_dir,
           )

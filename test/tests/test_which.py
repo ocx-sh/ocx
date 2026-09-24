@@ -1,6 +1,10 @@
 from pathlib import Path
 
+import pytest
+
 from src import OcxRunner, PackageInfo, registry_dir
+
+pytestmark = pytest.mark.command("which")
 
 EXIT_USAGE = 64  # UsageError (sysexits EX_USAGE); ocx maps clap errors here
 

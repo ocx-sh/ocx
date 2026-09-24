@@ -106,11 +106,11 @@ def test_taplo_check_accepts_valid_ocx_toml(
     )
 
     # `taplo check` discovers the workspace's taplo.toml by walking up
-    # from the file under check; we run with cwd = PROJECT_ROOT so the
-    # project taplo.toml is found.
+    # from its working directory; we run with cwd = test/, below the root, so the
+    # project taplo.toml is found without starting a process at the root.
     result = subprocess.run(
         [taplo_binary, "check", str(fixture)],
-        cwd=PROJECT_ROOT,
+        cwd=PROJECT_ROOT / "test",
         capture_output=True,
         text=True, check=False,
     )
@@ -135,7 +135,7 @@ def test_taplo_check_rejects_integer_tool_value(
 
     result = subprocess.run(
         [taplo_binary, "check", str(fixture)],
-        cwd=PROJECT_ROOT,
+        cwd=PROJECT_ROOT / "test",
         capture_output=True,
         text=True, check=False,
     )

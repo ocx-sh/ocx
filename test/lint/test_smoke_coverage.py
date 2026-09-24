@@ -32,7 +32,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-TESTS_DIR = Path(__file__).resolve().parent
+# The acceptance modules this sweep reads; it lives in the lint tier beside them.
+TESTS_DIR = Path(__file__).resolve().parents[1] / "tests"
 REPO_ROOT = TESTS_DIR.parents[1]
 COMMAND_RS = REPO_ROOT / "crates" / "ocx_cli" / "src" / "command.rs"
 COMMAND_MODULES = COMMAND_RS.parent / "command"

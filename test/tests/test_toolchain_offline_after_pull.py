@@ -72,6 +72,8 @@ from src.registry import fetch_manifest_raw
 from src.runner import OcxRunner, current_platform
 from src.toolchain_fixtures import resolved_toolchain_home, run_in, shell_bin
 
+pytestmark = pytest.mark.command("pull")
+
 EXIT_SUCCESS = 0
 
 #: The ``[tools]`` key, the exposed binary name and the repository are three

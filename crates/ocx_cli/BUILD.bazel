@@ -3,6 +3,7 @@
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//crates:__subpackages__"])
 
@@ -76,6 +77,9 @@ rust_test(
     args = [
         "--test-threads=1",
         "--exact",
+        # Asserts no global tracing subscriber exists after a seam run; this
+        # process's other tests install one, so it runs in `ocx_cli_seam_test`.
+        "--skip=app::seam::tests::seam_installs_no_global_subscriber_and_logs_to_err",
         "--skip=app::context::tests::extra_ca_try_init_installs_a_home_tier_root_for_sigstore",
         "--skip=app::context::tests::extra_ca_try_init_keeps_an_unpinned_managed_root_out_of_the_local_and_sigstore_views",
         "--skip=command::self_group::activate::global_activate_tests::d3_bin_mode_gates_the_prompt_and_leaves_the_explicit_request_alone",
@@ -98,6 +102,70 @@ rust_test(
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_cli"},
     deps = all_crate_deps(normal_dev = True),
+)
+
+# The in-process CLI seam's tests (`app::seam::run`, ADR C-SEAM) and every port
+# that drives it, re-run under a POISONED environment. `run` installs the
+# caller's environment hermetically through `ocx_util::env`; a third-party
+# crate reading the process environment past that layer (`dirs`, `reqwest`'s
+# proxy discovery, `docker_credential`, the TLS root loaders) sees these values
+# instead, and the read fails the case rather than picking up the host's:
+# `HOME`, `XDG_CONFIG_HOME` and `OCX_HOME` name `testdata/poisoned_home`,
+# where each config tier's `config.toml` is a DIRECTORY: the loader keeps a
+# candidate that exists and is not a symlink, and reading a directory is an
+# error, so an ambient read fails the case. (A regular file would reach the
+# sandbox as a symlink, which the loader skips; a path under `/dev/null` reads
+# as unreadable and is skipped too — both neutralise the read instead of
+# failing it.) `DOCKER_CONFIG` holds an invalid `config.json`. The paths are
+# absolute through `/proc/self/cwd` (Linux): libtest runs from the runfiles
+# root, the seam never changes the process cwd, and Bazel's test-setup
+# replaces a relative `HOME` with `$TEST_TMPDIR`. The presence test below
+# checks each fixture's shape, so a path that does not resolve reds.
+# proxies an unresolvable host. `app::seam::tests::seam_
+# poisoned_environment_is_present_under_its_bazel_target` reds if this dict is
+# dropped. The positional `seam::` filter selects every test in a module named
+# `seam`; `ocx_cli_test` above runs the same tests unpoisoned.
+#
+# An `sh_test` over `ocx_cli_test`'s own binary, not a second `rust_test`: a
+# `rust_test(crate = ":ocx_cli")` is a second full test-mode compile of the
+# crate (aquery: 6 `Rustc` actions under this package with it, 5 without), for
+# the same bytes. `sh_test` symlinks its one `srcs` file as the executable and
+# collects that target's runfiles, so this runs the very binary `ocx_cli_test`
+# built, in a process of its own, with only the `seam::` cases selected —
+# which is also why the global-subscriber test skipped above can run here.
+sh_test(
+    name = "ocx_cli_seam_test",
+    srcs = [":ocx_cli_test"],
+    # `--test-threads=1`: the seam serialises on a process-global lock, and a
+    # seam test sets a process variable to prove it is not read.
+    args = [
+        "--test-threads=1",
+        "seam::",
+    ],
+    data = [
+        "testdata/poisoned_home/.config/ocx/config.toml/POISONED",
+        "testdata/poisoned_home/docker/config.json",
+        "testdata/poisoned_home/ocx_home/config.toml/POISONED",
+    ],
+    env = {
+        "ALL_PROXY": "http://poisoned-ambient-read.invalid:9",
+        "DOCKER_CONFIG": "/proc/self/cwd/crates/ocx_cli/testdata/poisoned_home/docker",
+        "HOME": "/proc/self/cwd/crates/ocx_cli/testdata/poisoned_home",
+        "HTTPS_PROXY": "http://poisoned-ambient-read.invalid:9",
+        "HTTP_PROXY": "http://poisoned-ambient-read.invalid:9",
+        "NO_PROXY": "poisoned-ambient-read.invalid",
+        "OCX_AUTH_ocx_sh_TOKEN": "poisoned-ambient-read",
+        "OCX_AUTH_ocx_sh_TYPE": "poisoned-ambient-read",
+        "OCX_AUTH_ocx_sh_USER": "poisoned-ambient-read",
+        "OCX_HOME": "/proc/self/cwd/crates/ocx_cli/testdata/poisoned_home/ocx_home",
+        "SSL_CERT_DIR": "/dev/null/poisoned-ambient-read",
+        "SSL_CERT_FILE": "/dev/null/poisoned-ambient-read",
+        "XDG_CONFIG_HOME": "/proc/self/cwd/crates/ocx_cli/testdata/poisoned_home/.config",
+        "all_proxy": "http://poisoned-ambient-read.invalid:9",
+        "http_proxy": "http://poisoned-ambient-read.invalid:9",
+        "https_proxy": "http://poisoned-ambient-read.invalid:9",
+        "no_proxy": "poisoned-ambient-read.invalid",
+    },
 )
 
 rust_test(

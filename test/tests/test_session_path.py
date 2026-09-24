@@ -58,6 +58,8 @@ import pytest
 from src import shell_matrix as matrix
 from src.runner import OcxRunner
 
+pytestmark = pytest.mark.command("self_group/setup")
+
 # The install-layout path the bootstrap candidate lives at, relative to
 # OCX_HOME. Same constant as `test_self_setup.py`; seeding it lets the offline
 # bootstrap resolve `already_present` so no registry is involved.

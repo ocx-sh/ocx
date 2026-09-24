@@ -51,6 +51,34 @@ pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="Cast-layer targets Linux/macOS; Windows behaviour covered by the pytest suite.",
 )
+pytestmark = [
+    pytestmark,
+    pytest.mark.command(
+        "install",
+        "exec",
+        "which",
+        "env",
+        "select",
+        "deselect",
+        "uninstall",
+        "deps",
+        "package_create",
+        "package_push",
+        "package_pull",
+        "package_test",
+        "toolchain_env",
+        "toolchain_exec",
+        "add",
+        "init",
+        "pull",
+        "lock",
+        "shell_state",
+        "patch_test",
+        "index_list",
+        "index_update",
+        "self_group/activate",
+    ),
+]
 
 
 # ---------------------------------------------------------------------------

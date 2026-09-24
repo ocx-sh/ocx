@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.command("index_catalog")
+
 # The readmes the publish workflows hand to `ocx package describe --readme`.
 # One entry per describe call in `.github/workflows/oci-publish.yml`.
 CATALOG_READMES = [Path(__file__).parents[2] / "packaging" / "ocx" / "CATALOG.md"]

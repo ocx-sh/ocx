@@ -5,7 +5,8 @@
 //!
 //! These tests pin the published `$id` URLs and the structural shape that
 //! consumers (taplo, Schema Store, downstream LSPs) depend on. They run
-//! against [`ocx_schema::schema_for`] directly — no subprocess.
+//! against [`ocx_schema::schema_for`] directly, except the two binary
+//! contracts at the end of this file, which run the `ocx_schema` binary.
 //!
 //! Phase 10 specification scope (per plan_project_toolchain.md lines 859–873):
 //! * `project` schema must publish at `https://ocx.sh/schemas/project/v1.json`
@@ -24,7 +25,24 @@
 //! gate. Tests that fail today (the architect's `$comment` requirement)
 //! drive the implement-phase deliverable.
 
+use std::process::{Command, Output};
+
 use serde_json::Value;
+
+/// The `ocx_schema` binary itself (`src/main.rs`), for the two contracts only
+/// the binary owns: every kind it prints parses and carries its canonical
+/// `$id`, and an unknown kind exits nonzero. Cargo sets this for every
+/// integration test of a package with a `[[bin]]`; under Bazel the
+/// `schema_outputs` target sets it through `rustc_env` to the
+/// `:ocx_schema_bin` runfile.
+const SCHEMA_BINARY: &str = env!("CARGO_BIN_EXE_ocx_schema");
+
+fn run_binary(kind: &str) -> Output {
+    Command::new(SCHEMA_BINARY)
+        .arg(kind)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn {SCHEMA_BINARY} {kind}: {e}"))
+}
 
 /// Parse a generated schema string into a JSON `Value`. Panics with a
 /// descriptive message if the generator emits malformed JSON.
@@ -49,6 +67,7 @@ fn project_schema_publishes_at_canonical_id() {
 
 #[test]
 fn project_schema_exposes_tools_and_group_objects() {
+    // ported-from: test/tests/test_schema_generation.py::test_project_schema_describes_tools_and_groups
     let schema = parse("project");
     let properties = schema
         .get("properties")
@@ -217,6 +236,7 @@ fn project_lock_schema_publishes_at_canonical_id() {
 
 #[test]
 fn project_lock_schema_carries_machine_generated_comment() {
+    // ported-from: test/tests/test_schema_generation.py::test_project_lock_schema_carries_machine_generated_comment
     // Architect path-1 finding: project-lock schema MUST carry a top-level
     // `$comment` flagging the format as machine-generated and subject to
     // evolution. The user-guide locking subsection mirrors this with a
@@ -242,6 +262,7 @@ fn project_lock_schema_carries_machine_generated_comment() {
 
 #[test]
 fn project_lock_schema_pins_lock_version_to_three() {
+    // ported-from: test/tests/test_schema_generation.py::test_project_lock_schema_pins_lock_version_to_three
     // The written on-disk format version is now 3 (V3 is the only shape the
     // writer emits). Tightening to `enum: [3]` means a v1 OR v2 manuscript
     // fed into the v3 schema fails validation — the guard so consumers don't
@@ -571,5 +592,52 @@ fn config_schema_publishes_the_toolchain_dir_root_key_in_snake_case() {
         types,
         vec!["string", "null"],
         "`toolchain_dir` is an optional path scalar, so the schema admits a string or null; got {toolchain_dir}"
+    );
+}
+
+/// Every schema kind the binary prints is valid JSON carrying its canonical
+/// published `$id` — the URL `taplo`, Schema Store and `#:schema` bindings
+/// resolve. Runs the binary rather than `schema_for` so the stdout path
+/// `src/main.rs` owns is the one under test.
+#[test]
+fn every_schema_kind_the_binary_prints_carries_its_canonical_id() {
+    // ported-from: test/tests/test_schema_generation.py::test_schema_variant_emits_canonical_id
+    for (kind, expected_id) in [
+        ("metadata", "https://ocx.sh/schemas/metadata/v1.json"),
+        ("config", "https://ocx.sh/schemas/config/v1.json"),
+        ("project", "https://ocx.sh/schemas/project/v1.json"),
+        ("project-lock", "https://ocx.sh/schemas/project-lock/v3.json"),
+        ("execution-record", "https://ocx.sh/schemas/execution-record/v1.json"),
+    ] {
+        let output = run_binary(kind);
+        assert!(
+            output.status.success(),
+            "ocx_schema {kind} failed ({})\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.stdout.is_empty(), "ocx_schema {kind} produced empty stdout");
+        let schema: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|e| panic!("ocx_schema {kind} produced invalid JSON: {e}"));
+        assert_eq!(
+            schema.get("$id").and_then(Value::as_str),
+            Some(expected_id),
+            "ocx_schema {kind}: schema $id mismatch"
+        );
+    }
+}
+
+/// An unknown kind is a usage error at the process boundary, so a caller
+/// never silently accepts an unsupported variant.
+#[test]
+fn unknown_schema_kind_exits_nonzero_from_the_binary() {
+    // ported-from: test/tests/test_schema_generation.py::test_unknown_schema_kind_exits_nonzero
+    let output = run_binary("nonsense-kind");
+    assert!(
+        !output.status.success(),
+        "unknown schema kind must produce a non-zero exit code; got {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }

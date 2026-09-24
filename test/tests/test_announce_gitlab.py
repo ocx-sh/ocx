@@ -21,6 +21,7 @@ import json
 import re
 from pathlib import Path
 
+import pytest
 from announce_helpers import (
     INDEX_FULL,
     INDEX_OWNER,
@@ -37,6 +38,8 @@ from fake_forge import FakeForge
 
 from src.helpers import make_package
 from src.runner import OcxRunner
+
+pytestmark = pytest.mark.command("package_announce")
 
 FORK_NAMESPACE = "forkuser"
 FORK_FULL = f"{FORK_NAMESPACE}/{INDEX_REPO}"

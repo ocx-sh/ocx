@@ -33,6 +33,7 @@ pytestmark = pytest.mark.skipif(
     reason="scan drives raw Unix exec-bit fixtures; the Windows extension-allowlist "
     "convention is covered by bin_scan.rs unit tests",
 )
+pytestmark = [pytestmark, pytest.mark.command("package_create", "package_inspect")]
 
 EXIT_SUCCESS = 0
 EXIT_USAGE_ERR = 64  # UsageError — validate_bin_scan: --bin-scan given without --metadata

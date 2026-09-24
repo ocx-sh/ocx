@@ -3,8 +3,12 @@
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src import OcxRunner
 from src.helpers import make_package
+
+pytestmark = pytest.mark.command("package_description*")
 
 
 def _push_description(

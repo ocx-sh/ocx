@@ -59,6 +59,8 @@ from src.registry import (
 from src.runner import OcxRunner, PackageInfo
 from tests.fixtures.sigstore_stack import SigstoreStack
 
+pytestmark = pytest.mark.command("package_push")
+
 #: Sigstore bundle v0.3 artifact type — mirrors the Rust constant
 #: `oci::referrer::media_types::SIGSTORE_BUNDLE_V03`.
 SIGSTORE_BUNDLE_V03 = "application/vnd.dev.sigstore.bundle.v0.3+json"

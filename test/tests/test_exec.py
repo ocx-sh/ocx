@@ -1,4 +1,8 @@
+import pytest
+
 from src import OcxRunner, PackageInfo
+
+pytestmark = pytest.mark.command("exec")
 
 
 def test_exec_runs_correct_binary(

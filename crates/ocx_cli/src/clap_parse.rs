@@ -14,8 +14,9 @@ use clap_builder::{ArgMatches, Command};
 
 use ocx_exit::ExitCode;
 
-/// Drive [`Command::try_get_matches`] and classify any failure into an
-/// [`ExitCode`].
+/// Drive [`Command::try_get_matches_from`] over `argv` (program name first —
+/// the process's own `args_os()` in production) and classify any failure into
+/// an [`ExitCode`].
 ///
 /// - Help / version / `DisplayHelpOnMissingArgumentOrSubcommand` paths
 ///   delegate to clap's renderer via [`clap_builder::Error::exit`], which
@@ -32,8 +33,8 @@ use ocx_exit::ExitCode;
 /// (e.g. `Vec<Identifier>`) backed by `FromStr` instead of receiving
 /// `Vec<String>` and re-parsing in the body. Validation failures still reach
 /// users with the `EX_USAGE` (64) code expected by sysexits-aligned tooling.
-pub fn parse(cmd: Command) -> Result<ArgMatches, ExitCode> {
-    match cmd.try_get_matches() {
+pub fn parse(cmd: Command, argv: &[std::ffi::OsString]) -> Result<ArgMatches, ExitCode> {
+    match cmd.try_get_matches_from(argv) {
         Ok(matches) => Ok(matches),
         Err(err) => {
             if matches!(

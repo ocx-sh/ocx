@@ -466,14 +466,13 @@ def patches_consumer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[s
     )
 
     # Configure the [patches] tier in the data-dir config; the recorder shell
-    # and any child ocx read $OCX_HOME/config.toml.  Prefix the patch registry
-    # so the global-descriptor probe + per-base descriptors stay isolated per
-    # worker on the shared registry:2.
-    # Bare registry host (matches OCX_INSECURE_REGISTRIES → HTTP on registry:2).
-    # Per-worker isolation comes from the prefixed base repo embedded in each
-    # per-base descriptor path; no `--global` descriptor is published here, so
+    # and any child ocx read $OCX_HOME/config.toml. The patch registry is the
+    # bare host (matches OCX_INSECURE_REGISTRIES → HTTP on registry:2) plus a
+    # per-provision path, `<host>/<prefix>patches`: the global-descriptor probe
+    # then reads `<host>/<prefix>patches/global`, a rule another test left in
+    # the bare host's slot never reaches this cast, and
     # the shared `<host>/global` slot stays untouched.
-    patch_registry = ocx.registry
+    patch_registry = f"{ocx.registry}/{prefix}patches"
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     config_path.write_text(
         "[patches]\n"
@@ -540,11 +539,11 @@ def patches_maintainer(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict
         ocx, f"{prefix}corp/ca", "1.0.0", tmp_path, bins=[], env=companion_env,
     )
 
-    # Bare registry host (matches OCX_INSECURE_REGISTRIES → HTTP on registry:2).
-    # Per-worker isolation comes from the prefixed base repo embedded in each
-    # per-base descriptor path; no `--global` descriptor is published here, so
+    # The bare registry host (matches OCX_INSECURE_REGISTRIES → HTTP on registry:2)
+    # plus a per-provision path, as in `patches_consumer`: the install's global probe
+    # reads `<host>/<prefix>patches/global`, not a rule a grouped test left behind, so
     # the shared `<host>/global` slot stays untouched.
-    patch_registry = ocx.registry
+    patch_registry = f"{ocx.registry}/{prefix}patches"
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     config_path.write_text(
         "[patches]\n"

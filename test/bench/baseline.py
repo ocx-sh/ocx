@@ -171,12 +171,12 @@ def build_baseline_command(
     # The bench_cmd uses $tmpdir as a shell variable populated by prepare_cmd.
     # IMPORTANT: use a disk-backed directory — /tmp is tmpfs (RAM) on WSL2 and
     # many Linux systems; large layer tarballs there OOM the VM.
-    # Fall back to <repo-root>/target/bench-baseline-tmp (disk-backed, inside
-    # the gitignored target/ tree) when the caller does not provide scratch_dir.
+    # Fall back to ~/.cache/ocx-bench/bench-baseline-tmp (disk-backed, outside
+    # every git tree) when the caller does not provide scratch_dir.
     extract_dir = (
         scratch_dir
         if scratch_dir is not None
-        else str(_REPO_ROOT / "target" / "bench-baseline-tmp")
+        else str(Path.home() / ".cache" / "ocx-bench" / "bench-baseline-tmp")
     )
     prepare_cmd = f"rm -rf {extract_dir} && mkdir -p {extract_dir}"
     bench_cmd = f"curl -sS {download_url} | tar -xJ -C {extract_dir}"

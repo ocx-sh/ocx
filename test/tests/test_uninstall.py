@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from src import (
     OcxRunner,
     PackageInfo,
@@ -7,6 +9,8 @@ from src import (
     assert_symlink_exists,
     registry_dir,
 )
+
+pytestmark = pytest.mark.command("uninstall")
 
 
 def test_uninstall_removes_candidate_symlink(

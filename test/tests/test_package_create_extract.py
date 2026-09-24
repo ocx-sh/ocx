@@ -40,6 +40,7 @@ pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="asserts on Unix modes of archive entries and bundle members",
 )
+pytestmark = [pytestmark, pytest.mark.command("package_create")]
 
 EXIT_SUCCESS = 0
 EXIT_USAGE_ERR = 64  # ocx_lib::cli::UsageError

@@ -37,6 +37,8 @@ from src.assertions import assert_not_exists
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
 
+pytestmark = pytest.mark.command("lock")
+
 # ---------------------------------------------------------------------------
 # Exit code constants — align with crates/ocx_lib/src/cli/exit_code.rs
 # ---------------------------------------------------------------------------

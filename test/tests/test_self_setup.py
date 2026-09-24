@@ -51,6 +51,7 @@ pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="self setup fence/shim tests assume POSIX sh semantics.",
 )
+pytestmark = [pytestmark, pytest.mark.command("self_group/setup", "index_update")]
 
 # The install-layout path the bootstrap candidate lives at, relative to OCX_HOME.
 _CANDIDATE_REL = Path("symlinks") / "ocx.sh" / "ocx" / "cli" / "current" / "content" / "bin" / "ocx"

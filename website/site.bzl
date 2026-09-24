@@ -123,9 +123,17 @@ in one line in `website/BUILD.bazel`:
 
     filegroup(
         name = "doc_script_sources",
-        srcs = glob(["*.sh"], allow_empty = False),
-        visibility = ["//website:__pkg__"],
+        srcs = glob(["**"], allow_empty = False),
+        visibility = ["//test:__pkg__"] + ["//website:__pkg__"],
     )
+
+(`**` and `//test` since plan_test_speed_tiers.md C-020: three acceptance
+modules in `//test` walk the whole directory, so the group is every file in the
+package — the `.sh` bodies plus `BUILD.bazel`, `cast.bzl`, `gif.bzl` and
+`.gitkeep`, which only over-declares this coarse consumer. Each change there is
+a one-line re-point because `scripts/test_diff_guard.py` admits nothing else in
+that file, which is also why the visibility is a concatenation: buildifier
+reflows a two-element list literal onto four lines.)
 
 A `filegroup` rather than `exports_files`, and the difference from the two
 `exports_files` lists already in `//test` is deliberate: those exist so each

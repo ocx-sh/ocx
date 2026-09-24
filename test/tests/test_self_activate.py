@@ -37,6 +37,7 @@ pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="self activate output tests require POSIX shell semantics.",
 )
+pytestmark = [pytestmark, pytest.mark.command("self_group/activate")]
 
 
 # The global-env eval invokes the RESOLVED absolute ocx binary, never a bare
