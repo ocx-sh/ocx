@@ -12,6 +12,7 @@ Run:
 from __future__ import annotations
 
 import ast
+import functools
 import glob
 import os
 import re
@@ -26,6 +27,35 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 CLAUDE_DIR = ROOT / ".claude"
+
+
+@functools.cache
+def _tracked_paths() -> tuple[str, ...]:
+    """Every tracked path, submodules included, as `git ls-files` spells it.
+
+    Glob liveness is judged against this rather than the disk: a recursive
+    `glob.glob` from the root walked `target/` and followed the `bazel-*`
+    symlinks into the output base, 9 s for one pattern. A glob that only
+    matches build output or ignored files names nothing a rule could load on.
+    """
+    out = subprocess.run(  # noqa: S603
+        ["git", "ls-files", "-z", "--recurse-submodules"],  # noqa: S607
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    paths = tuple(name for name in out.split("\0") if name)
+    # Floor the reader: an empty listing would make every glob read as dead,
+    # and a truncated one would make the dead ones look like a real finding.
+    assert len(paths) >= 1000, f"`git ls-files` returned {len(paths)} paths; the reader stopped early"
+    return paths
+
+
+def _glob_is_live(pattern: str) -> bool:
+    """Does `pattern` (a `paths:` glob, relative to the root) match a tracked file?"""
+    regex = re.compile(glob.translate(pattern, recursive=True, include_hidden=True))
+    return any(regex.fullmatch(path) for path in _tracked_paths())
 CLAUDE_MD = ROOT / "CLAUDE.md"
 GRIMOIRE_LOCK = ROOT / "grimoire.lock"
 
@@ -394,7 +424,7 @@ class TestRuleGlobs:
         arch-principles.md, product-context.md, etc.).
         """
         patterns = self._extract_paths(rule)
-        dead = [p for p in patterns if not glob.glob(str(ROOT / p), recursive=True)]
+        dead = [p for p in patterns if not _glob_is_live(p)]
         if dead and self._is_shareable(rule):
             pytest.skip(
                 f"shareable rule: {len(patterns) - len(dead)}/{len(patterns)} globs match "
@@ -2717,7 +2747,7 @@ class TestCatalogAutoLoadPaths:
         named = re.findall(r"\[([a-z0-9._-]+\.md)\]", rules)
         patterns = re.findall(r"`([^`]+)`", edit_paths)
         assert patterns, f"auto-load row `{edit_paths}` spells no glob at all"
-        dead = [p for p in patterns if not glob.glob(str(ROOT / p), recursive=True)]
+        dead = [p for p in patterns if not _glob_is_live(p)]
         if dead and named and all(TestRuleGlobs._is_shareable(CLAUDE_DIR / "rules" / n) for n in named):
             pytest.skip(f"row names only shareable rules; unmatched here (not dead): {dead}")
         assert not dead, (
