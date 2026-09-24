@@ -22,12 +22,49 @@
 //! All groups are best-effort: if the source env var is absent at build
 //! time, the corresponding compile-time `option_env!()` resolves to `None`
 //! and the binary omits the field from `ocx version --format json`.
+//!
+//! ## Test builds (`--features ocx/__testing`)
+//!
+//! The acceptance binary must be a function of source and toolchain only, so
+//! its bytes — and every cache key hashed over them — do not churn per
+//! commit, per dirty state or per CI run. Under the `__testing` feature the
+//! script therefore reads no git state and no `CI`/`GITHUB_*` variable, and
+//! bakes the fixed [`TESTING_PLACEHOLDERS`] instead (ADR
+//! `adr_test_speed_tiers.md` § C-PROV). Every placeholder is detectable — a
+//! string marker, the all-zero SHA or `dirty = true` — which is what the ADR's
+//! release provenance check keys on to refuse a test build posing as a release.
 
 use std::env;
 
 use vergen_gix::{BuildBuilder, CargoBuilder, Emitter, GixBuilder, RustcBuilder};
 
+/// Fixed provenance baked into every `__testing` build, in place of the git,
+/// build-time and CI values a release build reads. One row per compile-time
+/// variable `app::build_info` consumes, except `__OCX_BUILD_VERSION`: that one
+/// stays a pass-through because it feeds `app::version()` (lock
+/// `generated_by`, update-check semver parsing) and no test build sets it.
+const TESTING_PLACEHOLDERS: &[(&str, &str)] = &[
+    ("VERGEN_GIT_SHA", "0000000000000000000000000000000000000000"),
+    ("VERGEN_GIT_DESCRIBE", "placeholder-g00000000"),
+    ("VERGEN_GIT_DIRTY", "true"),
+    ("VERGEN_GIT_COMMIT_TIMESTAMP", "1970-01-01T00:00:00.000000000Z"),
+    ("VERGEN_BUILD_TIMESTAMP", "1970-01-01T00:00:00.000000000Z"),
+    ("GITHUB_SERVER_URL", "https://ci.invalid"),
+    ("GITHUB_REPOSITORY", "placeholder/placeholder"),
+    ("GITHUB_RUN_ID", "0"),
+    ("GITHUB_WORKFLOW", "placeholder"),
+    ("GITHUB_REF", "refs/heads/placeholder"),
+    ("GITHUB_SHA", "0000000000000000000000000000000000000000"),
+    ("__OCX_BUILD_CHANNEL", "test"),
+];
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Cargo sets `CARGO_FEATURE_<NAME>` for every enabled feature of this
+    // package, uppercased with `-` → `_`, so `__testing` → `___TESTING`.
+    if env::var_os("CARGO_FEATURE___TESTING").is_some() {
+        return emit_testing_provenance();
+    }
+
     // ── 1. Vergen-gix git + build + rustc + cargo metadata ──────────────
     //
     // Failure here is non-fatal: a tarball checkout without `.git/` will
@@ -95,6 +132,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pass_through_env(var);
     }
 
+    Ok(())
+}
+
+/// The `__testing` branch: toolchain-derived metadata only, then the fixed
+/// placeholder table. No `GixBuilder` (it would emit `rerun-if-changed` on
+/// `.git/` and bake the commit), no `BuildBuilder` (its timestamp is a
+/// placeholder here), and no read of `CI` or `GITHUB_*` — so nothing about the
+/// checkout or the CI run reaches the binary or re-runs this script.
+fn emit_testing_provenance() -> Result<(), Box<dyn std::error::Error>> {
+    let cargo = CargoBuilder::default().target_triple(true).debug(true).build()?;
+    let rustc = RustcBuilder::default().semver(true).build()?;
+    Emitter::default()
+        .add_instructions(&cargo)?
+        .add_instructions(&rustc)?
+        .emit()?;
+
+    for (name, value) in TESTING_PLACEHOLDERS {
+        println!("cargo:rustc-env={name}={value}");
+    }
+    pass_through_env("__OCX_BUILD_VERSION");
+    println!("cargo:rerun-if-changed=build.rs");
     Ok(())
 }
 
