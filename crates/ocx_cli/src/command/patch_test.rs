@@ -381,12 +381,11 @@ async fn materialize_companions(
         // that. Refuse before touching the store.
         cross_check_companion_archive(archive, &identifier, companions)?;
         let info = ocx_package::info::Info {
-            identifier: identifier.clone(),
             metadata: metadata.into(),
             platform: platform.clone(),
         };
         let key = manager
-            .materialize_test_companion(info, std::slice::from_ref(&layer))
+            .materialize_test_companion(&identifier, info, std::slice::from_ref(&layer))
             .await
             .map_err(|kind| ocx_package_manager::Error::package(identifier.clone(), kind))
             .with_context(|| format!("materializing companion archive {}", archive.display()))?;

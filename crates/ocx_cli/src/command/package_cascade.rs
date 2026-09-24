@@ -51,6 +51,8 @@ impl CascadeGroup {
 /// plans from all three: a report alone says what is wrong, not what content
 /// already exists to fix it with.
 pub struct PackageAudit {
+    /// The package the user named, as named.
+    pub package: ocx_oci::Identifier,
     pub observation: graph::TagGraphObservation,
     pub expected: graph::ExpectedGraph,
     pub report: graph::CascadeReport,
@@ -63,13 +65,9 @@ pub struct PackageAudit {
 }
 
 impl PackageAudit {
-    /// The name to report this package under: the logical one when the
-    /// identifier was rewritten, otherwise the repository itself.
+    /// The name to report this package under — the one the user named.
     pub fn package(&self) -> &ocx_oci::Identifier {
-        self.observation
-            .logical
-            .as_ref()
-            .unwrap_or(&self.observation.identifier)
+        &self.package
     }
 }
 
@@ -159,14 +157,13 @@ async fn audit_one(
     // a committed root worth comparing against.
     let index = index_source(context, &package);
 
-    // Authoritative-stop: a logical name whose root will not resolve is an
-    // error here, never a silent fall-through to a registry repository that
-    // happens to share its spelling.
-    let physical = context.default_index().physical_reference(&package).await?;
-    let repository = physical.unwrap_or_else(|| package.clone());
-    let logical = (repository != package).then(|| package.clone());
+    // Authoritative-stop: a logical name the authoritative index does not
+    // hold is `NotInIndex` here, never a silent fall-through to a registry
+    // repository that happens to share its spelling. The gather below dials
+    // the answer directly, so it takes the dial-site SSRF floor with it.
+    let repository = context.default_index().route_for_dial(&package).await?;
 
-    let observation = gather::gather(context.remote_client()?, &repository, logical.as_ref(), index).await?;
+    let observation = gather::gather(context.remote_client()?, &repository, &package, index).await?;
     let expected = graph::fold_expected(&observation);
     let scope = graph::scope_filter(&observation.versions(), &requests)
         .map_err(|error| UsageError::with_source(format!("cannot audit '{package}'"), error))?;
@@ -178,6 +175,7 @@ async fn audit_one(
     let index_layer_skipped = index.is_some() && observation.index_root.is_none();
 
     Ok(PackageAudit {
+        package,
         observation,
         expected,
         report,

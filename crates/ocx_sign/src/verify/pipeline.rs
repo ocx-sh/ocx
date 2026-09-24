@@ -3578,6 +3578,12 @@ mod tests {
         Identifier::parse("registry.example/pkg:1.0").expect("parse test identifier")
     }
 
+    /// [`verify_id`], routed as the physical transport identifier — these
+    /// fixtures never model an index rewrite, so identity routing is exact.
+    fn verify_physical() -> ocx_oci::OciIdentifier {
+        ocx_oci::OciIdentifier::passthrough(&verify_id())
+    }
+
     /// Generate a self-signed P-256 certificate; return the key and its DER.
     ///
     /// A self-signed cert is its own CA, so a trust root holding it validates
@@ -4306,7 +4312,7 @@ mod tests {
         resolved: Option<(Digest, ocx_oci::Manifest)>,
     ) -> Box<VerifySubjectResolver<'a>> {
         Box::new(move |_identifier, platform| {
-            let physical = physical.clone();
+            let physical = ocx_oci::OciIdentifier::passthrough(&physical);
             let resolved = resolved.clone();
             Box::pin(async move {
                 let (target, index_members) = verify_target_from_resolution(resolved.as_ref(), platform)?;
@@ -7463,7 +7469,7 @@ mod tests {
         use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
 
         let client = Client::with_transport(Box::new(StubTransport::new(StubTransportData::new())));
-        let image = client.transport_reference(&verify_id());
+        let image = client.transport_reference(&verify_physical());
         let manifest: ocx_oci::ImageManifest = serde_json::from_str(ATT_MANIFEST).expect("the `.att` manifest parses");
         let layer = manifest.layers.first().expect("one layer").clone();
 
@@ -7623,7 +7629,7 @@ mod tests {
         let data = seed_signed_attestation_beside_an_unsigned_sbom_sidecar(&subject);
         let client = Client::with_transport(Box::new(StubTransport::new(StubTransportData::new())));
         let sbom_tag = sibling_tag_reference(
-            &client.transport_reference(&verify_id()),
+            &client.transport_reference(&verify_physical()),
             ocx_oci::tag::sbom_sidecar_tag(&subject),
         );
         data.write()
@@ -7656,7 +7662,7 @@ mod tests {
 
         let subject = ocx_oci::Algorithm::Sha256.hash(GOLDEN_SUBJECT_MANIFEST.as_bytes());
         let client = Client::with_transport(Box::new(StubTransport::new(StubTransportData::new())));
-        let image = client.transport_reference(&verify_id());
+        let image = client.transport_reference(&verify_physical());
         let data = StubTransportData::new();
         {
             let mut inner = data.write();
@@ -9365,7 +9371,7 @@ mod tests {
         let client = Client::with_transport(Box::new(ocx_oci::client::test_transport::StubTransport::new(
             StubTransportData::new(),
         )));
-        let image = client.transport_reference(&verify_id());
+        let image = client.transport_reference(&verify_physical());
         let manifest_bytes = SIDECAR_MANIFEST.as_bytes().to_vec();
         let descriptor = referrer_descriptor(&manifest_bytes, COSIGN_SIG_ARTIFACT_TYPE);
         let layer = sidecar_layer();
@@ -9520,7 +9526,7 @@ mod tests {
         let image = Client::with_transport(Box::new(ocx_oci::client::test_transport::StubTransport::new(
             ocx_oci::client::test_transport::StubTransportData::new(),
         )))
-        .transport_reference(&verify_id());
+        .transport_reference(&verify_physical());
         let index_digest = sidecar_subject();
         let child = membership_child_digest();
 

@@ -37,8 +37,8 @@ const MANIFEST_SIZE: i64 = 512;
 
 // ── Fixtures ────────────────────────────────────────────────────
 
-fn identifier() -> ocx_oci::Identifier {
-    ocx_oci::Identifier::new_registry(REPOSITORY, REGISTRY)
+fn identifier() -> ocx_oci::OciIdentifier {
+    ocx_oci::OciIdentifier::from_parts(REPOSITORY, REGISTRY)
 }
 
 /// The stub keys its manifest map on the transport reference's string form.
@@ -169,9 +169,14 @@ impl Registry {
             self.data.read().manifests.len(),
             "the tag list must name every manifest the replay wrote, and nothing else"
         );
-        gather(&self.client, &identifier(), None, None)
-            .await
-            .expect("a replayed graph gathers")
+        gather(
+            &self.client,
+            &identifier(),
+            &ocx_oci::Identifier::new_registry(REPOSITORY, REGISTRY),
+            None,
+        )
+        .await
+        .expect("a replayed graph gathers")
     }
 
     /// Fails one tag's manifest fetch, the way a registry failing a single read

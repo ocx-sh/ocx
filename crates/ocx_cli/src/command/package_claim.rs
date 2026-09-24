@@ -56,7 +56,7 @@ pub struct PackageClaim {
     /// against, so it names the registry repository, not the index.
     //
     // Deliberately a bare `String` with no `value_parser`: the pointer is parsed
-    // by the existing `ocx_index::parse_physical_repository`, which
+    // by the existing `ocx_oci::OciIdentifier::parse_repository_pointer`, which
     // `claim::root` already calls and which names the refused value back
     // (`ClaimError::MalformedRepository`, exit 64). A clap `value_parser` would
     // move that refusal to `ValueValidation` -- 64 as well, so the exit code
@@ -664,7 +664,7 @@ mod tests {
     /// C-057: `--repository` reaches the library **unparsed**.
     ///
     /// The physical pointer is parsed by the existing
-    /// `ocx_index::parse_physical_repository`, which `claim::root` already
+    /// `ocx_oci::OciIdentifier::parse_repository_pointer`, which `claim::root` already
     /// calls — mapping the failure to `ClaimError::MalformedRepository` (exit
     /// 64) and naming the refused value back. A clap `value_parser` would move
     /// that refusal to `ValueValidation` (64 as well, so the exit code cannot

@@ -792,7 +792,7 @@ async fn move_temp_to_object_store(
 async fn extract_layers(
     mgr: &PackageManager,
     pinned: &ocx_oci::PinnedIdentifier,
-    transport: &ocx_oci::PinnedIdentifier,
+    transport: &ocx_oci::PinnedOciIdentifier,
     manifest: &ocx_oci::ImageManifest,
     layer_group: LayerGroup,
 ) -> Result<Vec<ocx_oci::Digest>, PackageErrorKind> {
@@ -900,7 +900,7 @@ impl std::error::Error for DialRefusal {
 async fn extract_layer_atomic(
     mgr: &PackageManager,
     pinned: &ocx_oci::PinnedIdentifier,
-    transport: &ocx_oci::PinnedIdentifier,
+    transport: &ocx_oci::PinnedOciIdentifier,
     layer: &ocx_oci::Descriptor,
     layer_digest: &ocx_oci::Digest,
     layer_group: LayerGroup,
@@ -941,12 +941,12 @@ async fn extract_layer_atomic(
     // The layer is genuinely absent, so a request to the PHYSICAL location is
     // imminent — and `client` carries no SSRF resolver of its own. This is the
     // one point where a target the index rewrote is validated before anything
-    // dials it; the pre-flight `physical_reference` ran at resolve time had to
+    // dials it; the pre-flight routing ran at resolve time had to
     // tolerate a lookup failure, so its verdict cannot stand in for this one.
     if let Err(refusal) = dial_guard
         .get_or_init(|| async {
             mgr.index()
-                .guard_physical_dial(pinned.as_identifier(), transport.as_identifier())
+                .guard_physical_dial(pinned.as_identifier(), transport.as_oci_identifier())
                 .await
                 .map_err(|error| DialRefusal(Arc::new(error.into())))
         })
@@ -972,7 +972,7 @@ async fn extract_layer_atomic(
 /// Inner extraction implementation — runs only for the leader task.
 async fn extract_layer_inner(
     pinned: &ocx_oci::PinnedIdentifier,
-    transport: &ocx_oci::PinnedIdentifier,
+    transport: &ocx_oci::PinnedOciIdentifier,
     layer: &ocx_oci::Descriptor,
     layer_digest: &ocx_oci::Digest,
     client: &ocx_oci::Client,
@@ -1189,7 +1189,7 @@ mod tests {
 
         let resolved = ResolvedChain {
             pinned: pinned.clone(),
-            transport_pinned: pinned.clone(),
+            transport_pinned: ocx_oci::OciIdentifier::passthrough(pinned.as_identifier()).at_pin_of(&pinned),
             chain: vec![ChainBlob {
                 identifier: pinned.clone(),
                 role: ChainRole::Manifest,
@@ -1328,11 +1328,8 @@ mod tests {
         .expect("pinned identifier");
         // The physical pointer an index root would mint: a different registry,
         // carrying the same leaf digest (transport-only, Decision C2).
-        let transport_pinned = ocx_oci::PinnedIdentifier::try_from(
-            ocx_oci::Identifier::new_registry("mirror/indirected", physical_registry)
-                .clone_with_digest(manifest_digest.clone()),
-        )
-        .expect("pinned physical identifier");
+        let transport_pinned = ocx_oci::OciIdentifier::from_parts("mirror/indirected", physical_registry)
+            .pinned_at(manifest_digest.clone());
 
         if layers_cached {
             for layer_digest in &layer_digests {

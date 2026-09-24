@@ -1,0 +1,50 @@
+use ocx_oci::OciIdentifier;
+
+fn qualified(value: &str) -> ocx_oci::OciIdentifier {
+    ocx_oci::OciIdentifier::parse_target(value, "ocx.sh").unwrap()
+}
+
+fn imported(package: &ocx_oci::Identifier) -> OciIdentifier {
+    OciIdentifier::passthrough(package)
+}
+
+fn pointer(packages: &[ocx_oci::Identifier]) -> Vec<OciIdentifier> {
+    packages.iter().map(OciIdentifier::passthrough).collect()
+}
+
+fn in_macro() -> Vec<OciIdentifier> {
+    vec![OciIdentifier::from_parts("tool", "ghcr.io")]
+}
+
+fn routed(location: OciIdentifier, package: &ocx_oci::Identifier) -> OciIdentifier {
+    location.at_version_of(package)
+}
+
+#[cfg(test)]
+fn test_only() -> OciIdentifier {
+    OciIdentifier::parse_repository_pointer("oci://ghcr.io/tool").unwrap()
+}
+
+fn qualified_self(package: &ocx_oci::Identifier) -> OciIdentifier {
+    <OciIdentifier>::passthrough(package)
+}
+
+impl OciIdentifier {
+    fn self_in_impl(package: &ocx_oci::Identifier) -> Self {
+        Self::passthrough(package)
+    }
+}
+
+impl Other {
+    fn self_elsewhere() -> Self {
+        Self::passthrough()
+    }
+}
+
+fn minting_method(raw: &Identifier) -> OciIdentifier {
+    raw.as_target("ocx.sh").unwrap()
+}
+
+fn minting_method_in_macro(raw: &Identifier) -> Vec<OciIdentifier> {
+    vec![raw.as_target("ocx.sh").unwrap()]
+}

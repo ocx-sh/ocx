@@ -7,10 +7,17 @@ use super::metadata::Metadata;
 use ocx_oci::client::error::ClientError;
 use ocx_oci::manifest_builder::ManifestBuilder;
 
+/// What a package **is** — its metadata, for one platform — independent of
+/// where it is published or stored.
+///
+/// It carries no identifier on purpose. A publish writes it to a physical
+/// [`OciIdentifier`](ocx_oci::OciIdentifier) the caller names; a local
+/// materialization stores it under a package
+/// [`Identifier`](ocx_oci::Identifier). One field could not be both without
+/// a conversion between the two, which is the thing ocx#504 made impossible.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Info {
-    pub identifier: ocx_oci::Identifier,
     pub metadata: Metadata,
     pub platform: ocx_oci::Platform,
 }
@@ -48,7 +55,6 @@ mod tests {
 
     fn fixture_info() -> Info {
         Info {
-            identifier: ocx_oci::Identifier::new_registry("ocx", "ocx.sh").clone_with_tag("1.0.0"),
             metadata: Metadata::Bundle(Bundle {
                 binaries: None,
                 version: Version::V1,

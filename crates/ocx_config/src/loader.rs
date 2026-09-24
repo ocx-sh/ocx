@@ -548,7 +548,7 @@ impl ConfigLoader {
     /// `adr_managed_config_tier.md` amendment of 2026-09-13 (C-013). A later
     /// reviewer tightening this arm to match the Sigstore-only pin rule would
     /// silently regress every unpinned fleet's registry/index CA rollout.
-    fn guard_managed_sigstore_trust(parsed: &mut Config, source: &ocx_oci::Identifier) {
+    fn guard_managed_sigstore_trust(parsed: &mut Config, source: &ocx_oci::OciIdentifier) {
         if parsed.extra_ca_certs.take().is_some() {
             log::warn!(
                 "managed-config payload for '{source}' set extra_ca_certs to a local path; ignored (a remote payload \
@@ -1547,7 +1547,7 @@ impl ConfigLoader {
     /// why the managed tier degrades instead of refusing.
     ///
     /// [`ConsentScopeSpec::accumulate`]: crate::shell::ConsentScopeSpec::accumulate
-    fn guard_managed_shell_consent(parsed: &mut Config, source: &ocx_oci::Identifier) {
+    fn guard_managed_shell_consent(parsed: &mut Config, source: &ocx_oci::OciIdentifier) {
         use crate::shell::{ConsentScopeSpec, ShellConsent};
         use ocx_trust::ScopeSpec;
 
@@ -5115,7 +5115,8 @@ mod tests {
 
     fn managed_payload_after_guard(payload: &str, source: &str) -> ocx_trust::SigstoreTrust {
         let mut parsed: Config = toml::from_str(payload).expect("payload parses");
-        let source: ocx_oci::Identifier = source.parse().expect("identifier parses");
+        let source =
+            ocx_oci::OciIdentifier::parse_target(source, ocx_oci::DEFAULT_REGISTRY).expect("identifier parses");
         ConfigLoader::guard_managed_sigstore_trust(&mut parsed, &source);
         parsed.trust.expect("trust").sigstore.expect("sigstore")
     }
@@ -5126,7 +5127,8 @@ mod tests {
 
     fn managed_trust_after_guard(payload: &str, source: &str) -> ocx_trust::TrustConfig {
         let mut parsed: Config = toml::from_str(payload).expect("payload parses");
-        let source: ocx_oci::Identifier = source.parse().expect("identifier parses");
+        let source =
+            ocx_oci::OciIdentifier::parse_target(source, ocx_oci::DEFAULT_REGISTRY).expect("identifier parses");
         ConfigLoader::guard_managed_sigstore_trust(&mut parsed, &source);
         parsed.trust.expect("trust")
     }
@@ -5304,7 +5306,8 @@ mod tests {
 
     fn managed_config_after_guard(payload: &str, source: &str) -> Config {
         let mut parsed: Config = toml::from_str(payload).expect("payload parses");
-        let source: ocx_oci::Identifier = source.parse().expect("identifier parses");
+        let source =
+            ocx_oci::OciIdentifier::parse_target(source, ocx_oci::DEFAULT_REGISTRY).expect("identifier parses");
         ConfigLoader::guard_managed_sigstore_trust(&mut parsed, &source);
         parsed
     }
@@ -5706,7 +5709,8 @@ mod tests {
 
     fn managed_shell_after_guard(payload: &str, source: &str) -> Option<crate::ShellConfig> {
         let mut parsed: Config = toml::from_str(payload).expect("payload parses");
-        let source: ocx_oci::Identifier = source.parse().expect("identifier parses");
+        let source =
+            ocx_oci::OciIdentifier::parse_target(source, ocx_oci::DEFAULT_REGISTRY).expect("identifier parses");
         ConfigLoader::guard_managed_shell_consent(&mut parsed, &source);
         parsed.shell
     }
@@ -6235,7 +6239,7 @@ mod tests {
         let mut managed: Config = toml::from_str("[shell]\nhook = true\n").expect("managed parses");
         ConfigLoader::guard_managed_shell_consent(
             &mut managed,
-            &PINNED_SOURCE.parse::<ocx_oci::Identifier>().expect("identifier"),
+            &ocx_oci::OciIdentifier::parse_target(PINNED_SOURCE, ocx_oci::DEFAULT_REGISTRY).expect("identifier"),
         );
         ConfigLoader::stamp_shell_tier(&mut managed, ConfigTier::Managed);
         base.merge(managed);

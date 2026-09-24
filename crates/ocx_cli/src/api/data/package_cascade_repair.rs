@@ -95,7 +95,10 @@ impl PackageCascadeRepair {
         let mut rows = Vec::new();
         for entry in &self.entries {
             let report = &entry.report;
-            let package = report.logical.as_ref().unwrap_or(&report.identifier).to_string();
+            let package = report
+                .logical
+                .as_ref()
+                .map_or_else(|| report.identifier.to_string(), ToString::to_string);
             if entry.outcomes.is_empty() {
                 for planned in &entry.planned {
                     rows.push([
@@ -159,7 +162,10 @@ impl PackageCascadeRepair {
             if !wrote && !stale_index {
                 continue;
             }
-            let package = report.logical.as_ref().unwrap_or(&report.identifier).without_digest();
+            let package = report.logical.as_ref().map_or_else(
+                || report.identifier.without_digest().to_string(),
+                |logical| logical.without_digest().to_string(),
+            );
             let package = package.to_string();
             match (wrote, &self.tags_file) {
                 (true, Some(path)) => data.print_hint(&publish_moved_tags_hint(&package, path)),
@@ -285,7 +291,8 @@ mod tests {
 
     fn report() -> CascadeReport {
         CascadeReport {
-            identifier: ocx_oci::Identifier::parse("registry.test/acme/cmake").unwrap(),
+            identifier: ocx_oci::OciIdentifier::parse_target("registry.test/acme/cmake", ocx_oci::DEFAULT_REGISTRY)
+                .unwrap(),
             logical: None,
             aliases: Default::default(),
             rows: Vec::new(),
@@ -502,7 +509,7 @@ mod tests {
     #[test]
     fn the_skipped_index_layer_note_never_reaches_the_json() {
         let mut repair = PackageCascadeRepair::from_reports(vec![report()], false);
-        repair.index_layer_skipped = vec![report().identifier];
+        repair.index_layer_skipped = vec![ocx_oci::Identifier::parse("registry.test/acme/cmake").unwrap()];
 
         let value = serde_json::to_value(&repair).unwrap();
         let keys: Vec<&str> = value

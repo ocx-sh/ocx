@@ -1908,7 +1908,7 @@
       "type": "object",
       "properties": {
         "identifier": {
-          "$ref": "#/$defs/Identifier",
+          "$ref": "#/$defs/OciIdentifier",
           "description": "The physical repository the graph was read from."
         },
         "logical": {
@@ -1968,6 +1968,10 @@
         "unrepairable"
       ],
       "description": "The whole finding set for one package — the value both `check` and `repair`\nreport, and the input `plan_repairs` works from."
+    },
+    "OciIdentifier": {
+      "type": "string",
+      "description": "OCI registry location in the format 'registry/repository[:tag][@digest]'."
     },
     "AliasState": {
       "oneOf": [

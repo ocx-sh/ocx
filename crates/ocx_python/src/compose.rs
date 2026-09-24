@@ -13,12 +13,10 @@
 //!
 //! # Target-agnostic
 //!
-//! The composition is **not** a fully-formed [`Info`](ocx_package::info::Info):
-//! `Info` requires a concrete [`Identifier`](ocx_oci::Identifier) carrying
-//! a registry host, which this crate never knows. Instead it emits the two
-//! target-agnostic thirds of an `Info` — the composed [`Metadata`] and the base
-//! os/arch [`Platform`] — and [`EnvComposition::into_info`] assembles the final `Info`
-//! once the consumer supplies the `Identifier`.
+//! The composition carries what an [`Info`](ocx_package::info::Info) holds —
+//! the composed [`Metadata`] and the base os/arch [`Platform`] — plus the wheel
+//! layers, and [`EnvComposition::into_info`] assembles the `Info`. It never
+//! names a registry: the consumer publishes the `Info` to a location of its own.
 //!
 //! # Entrypoint synthesis
 //!
@@ -156,11 +154,10 @@ pub struct WheelLayer {
 
 /// The target-agnostic composition of an env package.
 ///
-/// Carries the two registry-independent thirds of an
-/// [`Info`](ocx_package::info::Info) — [`metadata`](Self::metadata) and
-/// [`platform`](Self::platform) — plus the layer descriptors. The consumer
-/// supplies the registry-bearing [`Identifier`](ocx_oci::Identifier) and
-/// calls [`into_info`](Self::into_info) to obtain the final `Info`.
+/// Carries an [`Info`](ocx_package::info::Info)'s
+/// [`metadata`](Self::metadata) and [`platform`](Self::platform) plus the
+/// layer descriptors. [`into_info`](Self::into_info) yields the `Info`; the
+/// consumer names the registry location it publishes to separately.
 #[derive(Debug, Clone)]
 pub struct EnvComposition {
     /// The composed bundle metadata: synthesized entrypoints, env vars
@@ -175,14 +172,13 @@ pub struct EnvComposition {
 }
 
 impl EnvComposition {
-    /// Assembles the final [`Info`](ocx_package::info::Info) by attaching a
-    /// consumer-supplied [`Identifier`](ocx_oci::Identifier).
+    /// Assembles the final [`Info`](ocx_package::info::Info).
     ///
-    /// This is the single seam where the registry host enters: the crate stays
-    /// target-agnostic; the consumer (the mirror) owns the identifier.
-    pub fn into_info(self, identifier: ocx_oci::Identifier) -> ocx_package::info::Info {
+    /// The crate stays target-agnostic: an `Info` names no registry, and the
+    /// consumer (the mirror) hands the publisher its own
+    /// [`OciIdentifier`](ocx_oci::OciIdentifier) target beside it.
+    pub fn into_info(self) -> ocx_package::info::Info {
         ocx_package::info::Info {
-            identifier,
             metadata: self.metadata,
             platform: self.platform,
         }

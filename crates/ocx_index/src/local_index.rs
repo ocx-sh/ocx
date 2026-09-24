@@ -825,7 +825,9 @@ impl LocalIndex {
     ///   the `c/index.json` catalog entry) or `IndexStore::read_root_uncatalogued`
     ///   for [`SourceKind::Derived`] (no catalog → `CatalogEntryStatus::NoCatalog`),
     ///   both passing the C3 `oci://` strict-parse
-    ///   [`super::parse_physical_repository`] as the `repository_check` hook.
+    ///   `super::parse_repository_pointer` (over
+    ///   [`ocx_oci::OciIdentifier::parse_repository_pointer`]) as the
+    ///   `repository_check` hook.
     ///   Resolve `tag → content` from the root's machine lane, then dispatch on
     ///   the `o/` lookup exactly as the digest case.
     ///
@@ -906,7 +908,7 @@ impl LocalIndex {
         // side of the trust boundary.
         self.check_format_version(source).await?;
         let repository_check =
-            |root: &super::wire::IndexRoot| super::parse_physical_repository(&root.repository).map(|_| ());
+            |root: &super::wire::IndexRoot| super::parse_repository_pointer(&root.repository).map(|_| ());
         match kind {
             SourceKind::Published => self.index_store.read_root(source, repository, repository_check).await,
             SourceKind::Derived => {
@@ -1023,8 +1025,8 @@ impl LocalIndex {
     /// transport.
     ///
     /// The logical tag and digest are carried onto the physical location
-    /// ([`super::at_version_of`], the same helper [`super::OcxIndex`] mints
-    /// with) — so a local answer and a source answer for one identifier can
+    /// ([`ocx_oci::OciIdentifier::at_version_of`], the same derivation
+    /// [`super::OcxIndex`] applies) — so a local answer and a source answer for one identifier can
     /// never disagree. The physical value is transport-only routing (C2),
     /// never a storage key.
     ///
@@ -1041,15 +1043,15 @@ impl LocalIndex {
         &self,
         identifier: &ocx_oci::Identifier,
         kind: SourceKind,
-    ) -> Result<Option<ocx_oci::Identifier>> {
+    ) -> Result<Option<ocx_oci::OciIdentifier>> {
         let Some(result) = self
             .read_root_by_kind(identifier.registry(), identifier.repository(), kind)
             .await?
         else {
             return Ok(None);
         };
-        let (registry, repository) = super::parse_physical_repository(&result.root.repository)?;
-        Ok(Some(super::at_version_of(registry, repository, identifier)))
+        let physical = super::parse_repository_pointer(&result.root.repository)?;
+        Ok(Some(physical.at_version_of(identifier)))
     }
 
     /// Merge a fetched published root into the local copy
@@ -1094,7 +1096,7 @@ impl LocalIndex {
         let source = identifier.registry();
         let repository = identifier.repository();
         let repository_check =
-            |root: &super::wire::IndexRoot| super::parse_physical_repository(&root.repository).map(|_| ());
+            |root: &super::wire::IndexRoot| super::parse_repository_pointer(&root.repository).map(|_| ());
 
         // The whole read-merge-write runs under the source's catalog lock: the
         // root and its `c/index.json` entry are one unit (F1), and a pre-lock
@@ -1192,7 +1194,7 @@ impl LocalIndex {
             .await?;
         transaction
             .write_root(identifier.repository(), bytes, |root| {
-                super::parse_physical_repository(&root.repository).map(|_| ())
+                super::parse_repository_pointer(&root.repository).map(|_| ())
             })
             .await?;
         transaction.commit().await
@@ -1613,7 +1615,7 @@ impl index_impl::IndexImpl for LocalIndex {
         Ok(None)
     }
 
-    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::Identifier>> {
+    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
         // Never take the trait default here: it answers `Ok(None)` = "no
         // rewrite", which a caller turns into the logical identifier even
         // though the committed root names a different physical location.
@@ -3673,7 +3675,7 @@ mod tests {
 
     /// Root-document bytes (wire grammar) that point tag `3.28` at `content` and
     /// carry an `oci://<REGISTRY>/<REPO>` physical pointer (passes the C3
-    /// `parse_physical_repository` cross-check).
+    /// `parse_repository_pointer` cross-check).
     fn root_bytes_for(content: &ocx_oci::Digest) -> Vec<u8> {
         format!(
             r#"{{"repository":"oci://{REGISTRY}/{REPO}","tags":{{"3.28":{{"content":"{content}","observed":"2026-07-18T09:00:00Z"}}}}}}"#
@@ -4554,7 +4556,11 @@ mod tests {
             .await
             .unwrap()
             .expect("the derived root is present");
-        assert_eq!(physical, logical, "a derived rewrite must be the identity");
+        assert_eq!(
+            physical,
+            ocx_oci::OciIdentifier::passthrough(&logical),
+            "a derived rewrite must be the identity"
+        );
     }
 
     #[tokio::test]

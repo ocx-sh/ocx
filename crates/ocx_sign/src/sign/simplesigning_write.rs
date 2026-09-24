@@ -485,10 +485,10 @@ fn serialization(error: serde_json::Error) -> SignErrorKind {
 mod tests {
     use super::*;
     use crate::verify::sidecar_tag;
-    use ocx_oci::Identifier;
     use ocx_oci::client::Client;
     use ocx_oci::client::sibling_tag_reference;
     use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
+    use ocx_oci::{DEFAULT_REGISTRY, OciIdentifier};
 
     /// The subject whose signatures these tests append to.
     fn subject() -> Digest {
@@ -506,8 +506,9 @@ mod tests {
     /// on a tag the code does not address.
     fn client_and_sidecar_key(data: &StubTransportData) -> (Client, native::Reference, String) {
         let client = Client::with_transport(Box::new(StubTransport::new(data.clone())));
-        let image = client
-            .transport_write_reference(&Identifier::parse("registry.example/team/pkg:1.0").expect("test identifier"));
+        let image = client.transport_write_reference(
+            &OciIdentifier::parse_target("registry.example/team/pkg:1.0", DEFAULT_REGISTRY).expect("test identifier"),
+        );
         let key = sibling_tag_reference(&image, sidecar_tag(&subject(), SidecarKind::Signature)).to_string();
         (client, image, key)
     }

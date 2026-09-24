@@ -90,7 +90,9 @@ impl PackageManager {
     ///
     /// # Parameters
     ///
-    /// * `info` — package identifier + metadata + platform.
+    /// * `identifier` — the package identifier the result is stored under, and
+    ///   the name a `Digest` layer's registry location is routed from.
+    /// * `info` — package metadata + platform.
     /// * `layers` — [`LayerRef`](ocx_oci::layer_ref::LayerRef)s in declaration order. `File` layers
     ///   are read, sha256-hashed, and staged into the regular `BlobStore`. `Digest` layers
     ///   are pulled from the registry on demand by the existing layer-fetch path. In offline
@@ -122,12 +124,13 @@ impl PackageManager {
     /// install pipeline.
     pub async fn pull_local(
         &self,
+        identifier: &ocx_oci::Identifier,
         info: ocx_package::info::Info,
         layers: &[ocx_oci::layer_ref::LayerRef],
         dest_override: Option<&std::path::Path>,
     ) -> Result<InstallInfo, PackageErrorKind> {
         let fs = self.file_structure();
-        let registry = info.identifier.registry().to_string();
+        let registry = identifier.registry().to_string();
 
         // Create a per-pull coordinator that coalesces concurrent same-digest
         // blob writes within this operation via singleflight dedup.
@@ -136,7 +139,7 @@ impl PackageManager {
         // Step 1: Resolve layer descriptors locally.
         // File layers → hash + write to blobs/ + extract to layers/{digest}/content/
         // Digest layers → pull from registry on demand (or error offline).
-        let layer_descriptors = stage_layers(self, layers, &info.identifier, &registry, &coordinator).await?;
+        let layer_descriptors = stage_layers(self, layers, identifier, &registry, &coordinator).await?;
 
         // Step 2: Synthesize the OCI image manifest from the info + layer descriptors.
         // Shared with `Publisher::push_package` so push and test agree byte-for-byte.
@@ -157,7 +160,7 @@ impl PackageManager {
 
         // Step 4: Synthesize a PinnedIdentifier keyed by the manifest digest.
         let pinned = {
-            let id_with_digest = info.identifier.clone_with_digest(parts.manifest_digest.clone());
+            let id_with_digest = identifier.clone_with_digest(parts.manifest_digest.clone());
             ocx_oci::PinnedIdentifier::try_from(id_with_digest).map_err(|e| PackageErrorKind::Internal(e.into()))?
         };
 
@@ -177,8 +180,10 @@ impl PackageManager {
         let chain = ResolvedChain {
             pinned: pinned.clone(),
             // Local materialization from already-present layers — no registry
-            // download, so the physical ref is the logical pinned itself.
-            transport_pinned: pinned.clone(),
+            // download, so the physical ref is the logical pinned's own
+            // coordinates. A missing `Digest` layer was already fetched from its
+            // routed location in `stage_layers`.
+            transport_pinned: ocx_oci::OciIdentifier::passthrough(pinned.as_identifier()).at_pin_of(&pinned),
             chain: vec![ChainBlob {
                 identifier: pinned.clone(),
                 role: ChainRole::Manifest,
@@ -399,8 +404,8 @@ async fn validate_file_layer(path: &std::path::Path) -> Result<(), PackageErrorK
 async fn layer_source<'a>(
     mgr: &PackageManager,
     base_identifier: &ocx_oci::Identifier,
-    routed: &'a tokio::sync::OnceCell<ocx_oci::Identifier>,
-) -> Result<&'a ocx_oci::Identifier, PackageErrorKind> {
+    routed: &'a tokio::sync::OnceCell<ocx_oci::OciIdentifier>,
+) -> Result<&'a ocx_oci::OciIdentifier, PackageErrorKind> {
     routed
         .get_or_try_init(|| mgr.index().route_for_dial(base_identifier))
         .await
@@ -420,7 +425,7 @@ async fn resolve_digest_size(
     mgr: &PackageManager,
     fs: &file_structure::FileStructure,
     base_identifier: &ocx_oci::Identifier,
-    routed: &tokio::sync::OnceCell<ocx_oci::Identifier>,
+    routed: &tokio::sync::OnceCell<ocx_oci::OciIdentifier>,
     registry: &str,
     digest: &ocx_oci::Digest,
 ) -> Result<i64, PackageErrorKind> {
@@ -471,7 +476,7 @@ async fn resolve_digest_size(
 async fn pull_digest_layer_to_temp(
     mgr: &PackageManager,
     base_identifier: &ocx_oci::Identifier,
-    routed: &tokio::sync::OnceCell<ocx_oci::Identifier>,
+    routed: &tokio::sync::OnceCell<ocx_oci::OciIdentifier>,
     digest: &ocx_oci::Digest,
     media_type: &ocx_oci::layer_ref::ArchiveMediaType,
     temp_layer: &std::path::Path,
@@ -500,8 +505,7 @@ async fn pull_digest_layer_to_temp(
         annotations: None,
     };
 
-    let synth_pinned = ocx_oci::PinnedIdentifier::try_from(source.clone_with_digest(digest.clone()))
-        .map_err(|e| PackageErrorKind::Internal(e.into()))?;
+    let synth_pinned = source.pinned_at(digest.clone());
 
     client.pull_layer(&synth_pinned, &layer_desc, temp_layer).await?;
 
@@ -621,11 +625,12 @@ mod tests {
         (dir, mgr)
     }
 
-    /// Build a minimal [`Info`] fixture for testing.
+    /// Build a minimal [`Info`] fixture for testing, alongside the identifier
+    /// `pull_local` now takes as its own leading argument.
     ///
     /// Uses a deterministic tag identifier (no digest). `pull_local` will
     /// compute and assign a digest internally after manifest assembly.
-    fn fixture_info(dir_name: &str) -> Info {
+    fn fixture_info(dir_name: &str) -> (ocx_oci::Identifier, Info) {
         let identifier =
             ocx_oci::Identifier::new_registry(format!("test/{dir_name}"), "example.com").clone_with_tag("1.0.0");
         let metadata = Metadata::Bundle(Bundle {
@@ -643,21 +648,17 @@ mod tests {
             variant: None,
             os_features: Vec::new(),
         };
-        Info {
-            identifier,
-            metadata,
-            platform,
-        }
+        (identifier, Info { metadata, platform })
     }
 
     /// Build a minimal [`Info`] fixture with one entrypoint so launcher
     /// generation is exercised.
-    fn fixture_info_with_entrypoint(dir_name: &str) -> Info {
-        let mut info = fixture_info(dir_name);
+    fn fixture_info_with_entrypoint(dir_name: &str) -> (ocx_oci::Identifier, Info) {
+        let (identifier, mut info) = fixture_info(dir_name);
         let name = ocx_package::metadata::entrypoint::EntrypointName::try_from("hello").unwrap();
         let Metadata::Bundle(ref mut b) = info.metadata;
         b.entrypoints = Entrypoints::new(std::collections::BTreeMap::from([(name, Entrypoint::default())]));
-        info
+        (identifier, info)
     }
 
     // ── dest_override_threads_to_move ─────────────────────────────────────────
@@ -670,13 +671,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn dest_override_threads_to_move() {
         let (root_dir, mgr) = setup_offline_manager();
-        let info = fixture_info("mytool");
+        let (identifier, info) = fixture_info("mytool");
 
         // Destination override: a fresh directory inside the temp root.
         let dest = root_dir.path().join("override-dest");
         std::fs::create_dir_all(&dest).unwrap();
 
-        let result = mgr.pull_local(info, &[], Some(&dest)).await;
+        let result = mgr.pull_local(&identifier, info, &[], Some(&dest)).await;
         let install_info = result.expect("pull_local with dest_override must succeed");
 
         // The package root reported by InstallInfo must equal the override path,
@@ -771,12 +772,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn launcher_baked_with_override_root() {
         let (root_dir, mgr) = setup_offline_manager();
-        let info = fixture_info_with_entrypoint("launcher-tool");
+        let (identifier, info) = fixture_info_with_entrypoint("launcher-tool");
 
         let dest = root_dir.path().join("launcher-dest");
         std::fs::create_dir_all(&dest).unwrap();
 
-        let result = mgr.pull_local(info, &[], Some(&dest)).await;
+        let result = mgr.pull_local(&identifier, info, &[], Some(&dest)).await;
         let _install_info = result.expect("pull_local with dest_override must succeed");
 
         // Launchers are written to `{dest}/entrypoints/`. Scan any launcher
@@ -814,8 +815,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn concurrent_same_content_distinct_dests() {
         let (root_dir, mgr) = setup_offline_manager();
-        let info_a = fixture_info("concurrent-tool");
-        let info_b = fixture_info("concurrent-tool"); // same identifier
+        let (identifier_a, info_a) = fixture_info("concurrent-tool");
+        let (identifier_b, info_b) = fixture_info("concurrent-tool"); // same identifier
 
         let dest_a = root_dir.path().join("dest-a");
         let dest_b = root_dir.path().join("dest-b");
@@ -824,8 +825,8 @@ mod tests {
 
         // Run both calls concurrently — they must not interfere.
         let (result_a, result_b) = tokio::join!(
-            mgr.pull_local(info_a, &[], Some(&dest_a)),
-            mgr.pull_local(info_b, &[], Some(&dest_b)),
+            mgr.pull_local(&identifier_a, info_a, &[], Some(&dest_a)),
+            mgr.pull_local(&identifier_b, info_b, &[], Some(&dest_b)),
         );
 
         let info_a = result_a.expect("first concurrent pull_local must succeed");
@@ -893,7 +894,7 @@ mod tests {
         );
         let mgr = PackageManager::new(fs.clone(), index, Some(client), "example.com");
 
-        let info = fixture_info("digest-parity-tool");
+        let (identifier, info) = fixture_info("digest-parity-tool");
         let dest = dir.path().join("dest");
         std::fs::create_dir_all(&dest).unwrap();
 
@@ -905,7 +906,7 @@ mod tests {
             mount_from: None,
         }];
 
-        let result = mgr.pull_local(info, &layers, Some(&dest)).await;
+        let result = mgr.pull_local(&identifier, info, &layers, Some(&dest)).await;
         assert!(
             result.is_ok(),
             "pull_local with a valid digest layer must succeed; err: {:?}",
@@ -985,7 +986,7 @@ mod tests {
         use std::io::Seek;
 
         let (root_dir, mgr) = setup_offline_manager();
-        let info = fixture_info("oversized-tool");
+        let (identifier, info) = fixture_info("oversized-tool");
 
         // Create a sparse file one byte beyond the cap.
         let archive_path = root_dir.path().join("oversized.tar.xz");
@@ -1007,7 +1008,7 @@ mod tests {
             layout: ocx_oci::LayerLayoutSpec::default(),
             mount_from: None,
         }];
-        let result = mgr.pull_local(info, &layers, None).await;
+        let result = mgr.pull_local(&identifier, info, &layers, None).await;
 
         assert!(
             result.is_err(),
@@ -1038,7 +1039,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn file_layer_with_unknown_extension_rejected() {
         let (root_dir, mgr) = setup_offline_manager();
-        let info = fixture_info("zip-layer-tool");
+        let (identifier, info) = fixture_info("zip-layer-tool");
 
         let source = root_dir.path().join("zip-src");
         std::fs::create_dir_all(&source).unwrap();
@@ -1054,7 +1055,7 @@ mod tests {
             mount_from: None,
         }];
         let error = mgr
-            .pull_local(info, &layers, None)
+            .pull_local(&identifier, info, &layers, None)
             .await
             .expect_err("a layer whose extension names no media type must be refused, not labelled tar+gzip");
 
@@ -1127,7 +1128,7 @@ mod tests {
         let layer_content = fs.layers.content(registry, &digest);
         tokio::fs::create_dir_all(&layer_content).await.unwrap();
 
-        let info = fixture_info("cached-blob-size-tool");
+        let (identifier, info) = fixture_info("cached-blob-size-tool");
         let dest = dir.path().join("dest");
         std::fs::create_dir_all(&dest).unwrap();
 
@@ -1138,7 +1139,7 @@ mod tests {
             mount_from: None,
         }];
 
-        let result = mgr.pull_local(info, &layers, Some(&dest)).await;
+        let result = mgr.pull_local(&identifier, info, &layers, Some(&dest)).await;
         assert!(
             result.is_ok(),
             "pull_local with cached layer but absent blob must succeed via head_blob; err: {:?}",
@@ -1220,8 +1221,9 @@ mod tests {
         let dest = dir.path().join("dest");
         std::fs::create_dir_all(&dest).unwrap();
 
+        let (identifier, info) = fixture_info("routed-layer-tool");
         let result = mgr
-            .pull_local(fixture_info("routed-layer-tool"), &digest_layer(&digest), Some(&dest))
+            .pull_local(&identifier, info, &digest_layer(&digest), Some(&dest))
             .await;
         assert!(
             result.is_ok(),
@@ -1261,8 +1263,9 @@ mod tests {
         let dest = dir.path().join("dest");
         std::fs::create_dir_all(&dest).unwrap();
 
+        let (identifier, info) = fixture_info("routed-cached-tool");
         let result = mgr
-            .pull_local(fixture_info("routed-cached-tool"), &digest_layer(&digest), Some(&dest))
+            .pull_local(&identifier, info, &digest_layer(&digest), Some(&dest))
             .await;
         assert!(
             result.is_ok(),
@@ -1294,7 +1297,7 @@ mod tests {
     #[cfg(unix)]
     async fn non_regular_file_layer_rejected() {
         let (root_dir, mgr) = setup_offline_manager();
-        let info = fixture_info("non-regular-tool");
+        let (identifier, info) = fixture_info("non-regular-tool");
 
         // Create a Unix domain socket at a path inside the temp root.
         // A socket is a non-regular file whose `Metadata::len()` is 0 on Linux
@@ -1308,7 +1311,7 @@ mod tests {
             layout: ocx_oci::LayerLayoutSpec::default(),
             mount_from: None,
         }];
-        let result = mgr.pull_local(info, &layers, None).await;
+        let result = mgr.pull_local(&identifier, info, &layers, None).await;
 
         assert!(
             result.is_err(),

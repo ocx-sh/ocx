@@ -132,7 +132,7 @@ impl schemars::JsonSchema for AliasTag {
 #[derive(Clone, Debug)]
 pub struct TagGraphObservation {
     /// The physical repository every tag below was read from.
-    pub identifier: ocx_oci::Identifier,
+    pub identifier: ocx_oci::OciIdentifier,
     /// The logical name the user asked for, when it differed from
     /// [`Self::identifier`]. `Some` is what turns the index layer on.
     pub logical: Option<ocx_oci::Identifier>,
@@ -302,7 +302,7 @@ pub enum Unrepairable {
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub struct CascadeReport {
     /// The physical repository the graph was read from.
-    pub identifier: ocx_oci::Identifier,
+    pub identifier: ocx_oci::OciIdentifier,
     /// The logical name the user asked for, when it differed.
     pub logical: Option<ocx_oci::Identifier>,
     /// Per alias, what the registry holds as a whole.

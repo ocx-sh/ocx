@@ -193,7 +193,6 @@ impl PackageTest {
         let platform = crate::build_receipt::resolve_target_platform(self.platform.clone(), receipt.as_ref())?;
         let metadata = ocx_package::metadata::ValidMetadata::try_from(metadata)?;
         let info = ocx_package::info::Info {
-            identifier: identifier.clone(),
             metadata: metadata.into(),
             platform: platform.clone(),
         };
@@ -280,7 +279,9 @@ impl PackageTest {
             };
 
         // Step 4: Materialize package via the local install pipeline.
-        let _install_info = manager.pull_local(info, &self.layers, Some(&dest_path)).await?;
+        let _install_info = manager
+            .pull_local(&identifier, info, &self.layers, Some(&dest_path))
+            .await?;
 
         // Step 5: Bridge to env composition via install_info_from_package_root.
         let info_via_root = manager

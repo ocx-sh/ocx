@@ -100,9 +100,8 @@ pub async fn verify_dependency_pins(
                     verify_any_pin_provenance(&client, &dependency_identifier, &routed.without_digest(), &pin).await?;
                 }
                 // `route_for_dial` carries the digest; re-stamping the pin's own
-                // digest makes that local rather than a promise from another crate.
-                let routed_pin = ocx_oci::PinnedIdentifier::try_from(routed.clone_with_digest(pin.digest()))
-                    .expect("an identifier just given a digest is pinned");
+                // version makes that local rather than a promise from another crate.
+                let routed_pin = routed.at_pin_of(&pin);
                 log::debug!("verifying dependency pin '{pin}' at '{routed_pin}'");
                 match client.pull_manifest(&routed_pin).await {
                     Ok(_) => Ok(()),
@@ -152,7 +151,7 @@ pub async fn verify_dependency_pins(
 async fn verify_any_pin_provenance(
     client: &Client,
     dependency_identifier: &ocx_oci::Identifier,
-    routed: &ocx_oci::Identifier,
+    routed: &ocx_oci::OciIdentifier,
     pin: &ocx_oci::PinnedIdentifier,
 ) -> Result<(), PublishGateError> {
     // Canonical, never a mirror: this read gates a publish, and Invariant #5
@@ -397,8 +396,7 @@ mod tests {
         let data = StubTransportData::new();
         let client = stub_client(data.clone()).with_test_mirror("example.com", "mirror.invalid", "upstream");
 
-        let dependency = "example.com/dep:1.0"
-            .parse::<ocx_oci::Identifier>()
+        let dependency = ocx_oci::OciIdentifier::parse_target("example.com/dep:1.0", ocx_oci::DEFAULT_REGISTRY)
             .expect("identifier parses");
         let mirror_reference = client.read_reference(&dependency, ReadAddressing::Mirrored).to_string();
         assert_ne!(

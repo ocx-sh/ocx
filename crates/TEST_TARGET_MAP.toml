@@ -215,7 +215,7 @@ cases = 2
 label = "//crates/ocx_test_support:workspace_structure"
 crate = "ocx_test_support"
 cases = 13
-skipped = 22
+skipped = 23
 
 [[target]]
 label = "//crates/ocx_trust:ocx_trust_test"

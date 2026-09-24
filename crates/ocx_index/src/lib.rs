@@ -10,9 +10,7 @@ use error::Result;
 
 pub mod error;
 
-pub use self::ocx_index::{
-    IndexBase, IndexFetch, IndexTransport, OcxIndex, OcxIndexConfig, ReqwestIndexTransport, parse_physical_repository,
-};
+pub use self::ocx_index::{IndexBase, IndexFetch, IndexTransport, OcxIndex, OcxIndexConfig, ReqwestIndexTransport};
 pub use file_transport::FileIndexTransport;
 pub use local_index::Config as LocalConfig;
 pub use local_index::LocalIndex;
@@ -405,74 +403,113 @@ impl Index {
         self.inner.fetch_blob(blob_ref).await
     }
 
-    /// The physical transport identifier for `identifier`, or `None` when no
-    /// source rewrites it (registry-backed: physical == logical). Transport-only
-    /// (`adr_index_indirection.md` C2) — the pull pipeline fetches layer content
-    /// from this location; storage paths stay keyed on the logical identifier.
-    pub async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::Identifier>> {
-        self.inner.physical_reference(identifier).await
+    /// Where a read of `identifier` goes: the physical location the index
+    /// routes it to, or `identifier` itself when no source rewrites it
+    /// (registry-backed). Either way it carries `identifier`'s tag and digest.
+    ///
+    /// No rewrite is passthrough only where no index is authoritative for the
+    /// name. Where one is, its miss is terminal: no routing call falls back
+    /// from the index protocol to the logical host (ocx#504).
+    ///
+    /// This is the only way to turn a package identifier into something a
+    /// [`Client`](ocx_oci::Client) accepts. Transport-only
+    /// (`adr_index_indirection.md` C2): the answer is never a storage key, and
+    /// anything reported to the user still names `identifier`.
+    ///
+    /// No dial guard runs here, so a warm, offline resolve that is downloading
+    /// nothing never has to resolve the physical host. A caller about to dial
+    /// the answer wants [`Self::route_for_dial`], or runs
+    /// [`Self::guard_physical_dial`] itself where the dial is imminent.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the index raises while looking the pointer up — the local
+    /// copy's SSRF floor included; [`error::Error::NotInIndex`] when the index
+    /// authoritative for the name does not hold it.
+    pub async fn route(&self, identifier: &ocx_oci::Identifier) -> Result<ocx_oci::OciIdentifier> {
+        match self.physical_reference(identifier).await? {
+            Some(physical) => Ok(physical),
+            None => self.unrouted(identifier),
+        }
     }
 
-    /// The identifier a read of `identifier` must dial: the physical location
-    /// the index routes it to, or `identifier` itself when no source rewrites
-    /// it (registry-backed). Either way it carries `identifier`'s tag and
-    /// digest.
+    /// The identifier a read of `identifier` must dial: [`Self::route`], plus
+    /// the refusals a direct dial needs.
     ///
     /// For a caller that reads the registry **directly** through a `Client`
     /// rather than through this index — `ocx package push`'s dependency-pin
     /// gate. A logical name dialled as-is reaches whatever host shares its
     /// spelling, not the registry the index points at (ocx#504). The dial-site
     /// SSRF floor ([`Self::guard_physical_dial`]) runs inside, so routing
-    /// cannot be had without it. Transport-only (`adr_index_indirection.md`
-    /// C2): the answer is never a storage key, and anything reported to the
-    /// user still names `identifier`.
-    ///
-    /// No rewrite is passthrough only where no index is authoritative for the
-    /// name. Where one is, its miss is terminal — OCX never falls back from
-    /// the index protocol to the logical host — exactly as the resolve path's
-    /// authoritative miss is.
+    /// cannot be had without it.
     ///
     /// # Errors
     ///
-    /// Whatever [`Self::physical_reference`] raises;
-    /// [`error::Error::NotInIndex`] when the index authoritative for the name
-    /// does not hold it; [`error::Error::Ssrf`] when the floor refuses the
-    /// rewritten target.
-    pub async fn route_for_dial(&self, identifier: &ocx_oci::Identifier) -> Result<ocx_oci::Identifier> {
-        let Some(physical) = self.physical_reference(identifier).await? else {
-            if let Some(base_url) = self.authoritative_index_base_url(identifier) {
-                return Err(error::Error::NotInIndex {
-                    identifier: identifier.to_string(),
-                    namespace: identifier.registry().to_string(),
-                    base_url: base_url.to_string(),
-                });
-            }
-            return Ok(identifier.clone());
+    /// Whatever [`Self::route`] raises; [`error::Error::NotInIndex`] when the
+    /// index authoritative for the name does not hold it;
+    /// [`error::Error::Ssrf`] when the floor refuses the rewritten target.
+    pub async fn route_for_dial(&self, identifier: &ocx_oci::Identifier) -> Result<ocx_oci::OciIdentifier> {
+        let Some(routed) = self.physical_reference(identifier).await? else {
+            return self.unrouted(identifier);
         };
-        let routed = at_version_of(physical.registry(), physical.repository(), identifier);
         self.guard_physical_dial(identifier, &routed).await?;
         Ok(routed)
     }
 
-    /// The physical transport identifier known **locally**, never dialling a
-    /// source — see [`index_impl::IndexImpl::physical_reference_local`]. Used by
-    /// the store-hit path of `PackageManager::find` (`ocx_lib`),
-    /// which is downloading nothing and so must not pay for a pointer it will
-    /// not use.
-    pub async fn physical_reference_local(
-        &self,
-        identifier: &ocx_oci::Identifier,
-    ) -> Result<Option<ocx_oci::Identifier>> {
-        self.inner.physical_reference_local(identifier).await
+    /// Where the **locally committed** root routes `identifier`, never
+    /// dialling a source — see [`index_impl::IndexImpl::physical_reference_local`].
+    /// `None` means no root is committed for the name. That is an answer, not
+    /// a refusal: nothing is dialled, so there is no logical host to fall back
+    /// to. Used by the store-hit path of `PackageManager::find`, which is
+    /// downloading nothing and so must not pay for a pointer it will not use.
+    ///
+    /// # Errors
+    ///
+    /// The local copy's SSRF floor refusing the committed pointer.
+    pub async fn route_local(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+        Ok(self
+            .inner
+            .physical_reference_local(identifier)
+            .await?
+            .map(|physical| physical.at_version_of(identifier)))
     }
 
-    /// Record the routing pointer for `identifier` locally — see
-    /// [`index_impl::IndexImpl::record_routing_pointer`]. Called by
-    /// `PackageManager::resolve_transport_pinned` (`ocx_lib`),
-    /// the one path that resolves in order to materialize; readers ask for a
-    /// physical address without calling this, and so leave no snapshot behind.
-    pub async fn record_routing_pointer(&self, identifier: &ocx_oci::Identifier) {
-        self.inner.record_routing_pointer(identifier).await;
+    /// [`Self::route`] for a resolve that exists in order to **materialize**,
+    /// which also records the routing pointer locally when a source answered
+    /// with one — see [`index_impl::IndexImpl::record_routing_pointer`].
+    ///
+    /// Called by `PackageManager::resolve_transport_pinned` only. Readers ask
+    /// [`Self::route`] and so leave no snapshot behind; keeping the write on
+    /// its own, separately named entry point is what gates it by call site
+    /// (#424).
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::route`] raises, [`error::Error::NotInIndex`] included.
+    /// The record itself is best-effort.
+    pub async fn route_to_materialize(&self, identifier: &ocx_oci::Identifier) -> Result<ocx_oci::OciIdentifier> {
+        match self.physical_reference(identifier).await? {
+            Some(physical) => {
+                self.inner.record_routing_pointer(identifier).await;
+                Ok(physical)
+            }
+            None => self.unrouted(identifier),
+        }
+    }
+
+    /// The answer for a name no source rewrites: `identifier` itself, unless an
+    /// index is authoritative for its registry. That index owns every name
+    /// there, so its miss is [`error::Error::NotInIndex`], never a read of the
+    /// host the name happens to spell.
+    fn unrouted(&self, identifier: &ocx_oci::Identifier) -> Result<ocx_oci::OciIdentifier> {
+        match self.authoritative_index_base_url(identifier) {
+            Some(base_url) => Err(error::Error::NotInIndex {
+                identifier: identifier.to_string(),
+                namespace: identifier.registry().to_string(),
+                base_url: base_url.to_string(),
+            }),
+            None => Ok(ocx_oci::OciIdentifier::passthrough(identifier)),
+        }
     }
 
     /// The `trusted_hosts` escape hatch configured for `registry`.
@@ -514,7 +551,7 @@ impl Index {
     /// immediately before the first request that would reach it, and only when
     /// one is imminent.
     ///
-    /// [`Self::physical_reference`] resolves the pointer on *every* resolve, warm
+    /// [`Self::route`] resolves the pointer on *every* resolve, warm
     /// or cold, so its own guard
     /// ([`guard_local_physical`](chained_index::ChainedIndex::guard_local_physical))
     /// must tolerate a lookup failure — a machine with no resolver has to keep
@@ -558,7 +595,7 @@ impl Index {
     pub async fn guard_physical_dial(
         &self,
         logical: &ocx_oci::Identifier,
-        physical: &ocx_oci::Identifier,
+        physical: &ocx_oci::OciIdentifier,
     ) -> Result<()> {
         if physical.registry() == logical.registry() {
             return Ok(());
@@ -579,6 +616,22 @@ impl Index {
         identifier: &ocx_oci::Identifier,
     ) -> Result<Option<(Vec<u8>, wire::IndexRoot)>> {
         self.inner.fetch_root_document(identifier).await
+    }
+
+    /// The physical location a source rewrites `identifier` to, or `None` for
+    /// no rewrite. `ocx_index`-internal: the chain asks each source through
+    /// this, and everything outside the crate asks [`Self::route`], which
+    /// cannot answer `None`.
+    ///
+    /// The answer is re-addressed at `identifier`'s version, so a source that
+    /// dropped the tag (or the digest) cannot hand a caller a location at the
+    /// wrong version.
+    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
+        Ok(self
+            .inner
+            .physical_reference(identifier)
+            .await?
+            .map(|physical| physical.at_version_of(identifier)))
     }
 
     /// Whether this index will answer for `identifier`, and what its silence
@@ -782,27 +835,18 @@ fn host_os_features(platform: &ocx_oci::Platform) -> Option<Vec<String>> {
     }
 }
 
-/// The physical location `registry/repository` addressed at `logical`'s
-/// version — its tag and its digest, whichever it carries.
+/// Parses an index root's `repository` pointer (`oci://host/path`) into the
+/// physical location it names — [`ocx_oci::OciIdentifier::parse_repository_pointer`]
+/// with its refusal reported as this crate's
+/// [`Error::MalformedPhysicalRef`](error::Error::MalformedPhysicalRef).
 ///
-/// The one place a rewrite stamps the logical version onto a physical
-/// location, so every source answers in one shape. The digest content-addresses
-/// a pinned read; the tag is what a read by tag needs (the `any`-provenance
-/// fetch of `ocx package push`'s gate). Tag first: `clone_with_tag` drops any
-/// digest.
-fn at_version_of(
-    registry: impl Into<String>,
-    repository: impl Into<String>,
-    logical: &ocx_oci::Identifier,
-) -> ocx_oci::Identifier {
-    let mut physical = ocx_oci::Identifier::new_registry(repository, registry);
-    if let Some(tag) = logical.tag() {
-        physical = physical.clone_with_tag(tag);
-    }
-    if let Some(digest) = logical.digest() {
-        physical = physical.clone_with_digest(digest);
-    }
-    physical
+/// The one parse every root read and every rewrite goes through, so a pointer
+/// the root-read hook accepts is exactly one a rewrite can dereference. The
+/// value is transport-only routing input, never a storage key (C2).
+fn parse_repository_pointer(value: &str) -> Result<ocx_oci::OciIdentifier> {
+    ocx_oci::OciIdentifier::parse_repository_pointer(value).map_err(|_| error::Error::MalformedPhysicalRef {
+        value: value.to_string(),
+    })
 }
 
 /// Collect the candidate platforms that share os+arch with the requested
@@ -976,9 +1020,9 @@ pub mod test_source {
         async fn fetch_blob(&self, _: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        async fn physical_reference(&self, identifier: &Identifier) -> Result<Option<Identifier>> {
+        async fn physical_reference(&self, identifier: &Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
             Ok(self.physical.as_ref().map(|(registry, repository)| {
-                let physical = Identifier::new_registry(repository, registry);
+                let physical = ocx_oci::OciIdentifier::from_parts(repository.clone(), registry.clone());
                 match identifier.digest() {
                     Some(digest) => physical.clone_with_digest(digest),
                     None => physical,
@@ -1869,8 +1913,8 @@ mod tests {
         Identifier::new_registry("kitware/cmake", "example.com")
     }
 
-    fn physical_id(registry: &str) -> Identifier {
-        Identifier::new_registry("evil/pkg", registry)
+    fn physical_id(registry: &str) -> ocx_oci::OciIdentifier {
+        ocx_oci::OciIdentifier::from_parts("evil/pkg", registry)
     }
 
     fn is_forbidden_refusal(error: &crate::error::Error) -> bool {
@@ -2038,7 +2082,7 @@ mod tests {
             .route_for_dial(&logical)
             .await
             .expect("an unrewritten identifier routes to itself");
-        assert_eq!(routed, logical);
+        assert_eq!(routed, ocx_oci::OciIdentifier::passthrough(&logical));
     }
 
     /// A name in a registry an index serves authoritatively, which that index
@@ -2073,6 +2117,59 @@ mod tests {
         }
     }
 
+    /// `route` refuses the same authoritative miss `route_for_dial` does: no
+    /// routing call falls back to the logical host of a namespace an index
+    /// owns (ocx#504), with or without a dial guard.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_refuses_a_name_its_authoritative_index_does_not_hold() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = Index::from_impl(EmptyIndexSource {
+            jurisdiction: Jurisdiction::Authoritative,
+        });
+        let error = chained_with(&directory, vec![source])
+            .route(&versioned_logical_id())
+            .await
+            .expect_err("an authoritative index's miss must not fall back to the logical host");
+        assert!(
+            matches!(error, error::Error::NotInIndex { .. }),
+            "expected NotInIndex, got: {error:?}"
+        );
+    }
+
+    /// And so does `route_to_materialize`: a pull must not read an index-owned
+    /// name from the host it spells.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_to_materialize_refuses_a_name_its_authoritative_index_does_not_hold() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = Index::from_impl(EmptyIndexSource {
+            jurisdiction: Jurisdiction::Authoritative,
+        });
+        let error = chained_with(&directory, vec![source])
+            .route_to_materialize(&versioned_logical_id())
+            .await
+            .expect_err("an authoritative index's miss must not fall back to the logical host");
+        assert!(
+            matches!(error, error::Error::NotInIndex { .. }),
+            "expected NotInIndex, got: {error:?}"
+        );
+    }
+
+    /// `route_local` answers from committed state alone and dials nothing, so
+    /// a name with no committed root is `None` — an answer, not a refusal —
+    /// even where an index is authoritative for it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_local_answers_none_for_a_name_with_no_committed_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = Index::from_impl(EmptyIndexSource {
+            jurisdiction: Jurisdiction::Authoritative,
+        });
+        let routed = chained_with(&directory, vec![source])
+            .route_local(&versioned_logical_id())
+            .await
+            .expect("no committed root is not an error");
+        assert_eq!(routed, None);
+    }
+
     /// The same miss from a source that only falls through — a plain registry
     /// claims nothing — is no verdict at all: the name is registry-backed and
     /// routes to itself (S-5).
@@ -2087,7 +2184,7 @@ mod tests {
             .route_for_dial(&logical)
             .await
             .expect("a fall-through miss is a registry-backed name");
-        assert_eq!(routed, logical);
+        assert_eq!(routed, ocx_oci::OciIdentifier::passthrough(&logical));
     }
 
     /// The routed identifier names the physical location at the logical
@@ -2128,16 +2225,26 @@ mod tests {
     #[test]
     fn at_version_of_keeps_both_the_tag_and_the_digest() {
         let logical = versioned_logical_id();
-        let physical = at_version_of("ghcr.io", "ocx-contrib/cmake", &logical);
+        let physical = ocx_oci::OciIdentifier::from_parts("ocx-contrib/cmake", "ghcr.io").at_version_of(&logical);
         assert_eq!(
             physical.to_string(),
             format!("ghcr.io/ocx-contrib/cmake:3.28@sha256:{}", "a".repeat(64))
         );
 
         let digest_only = logical.without_tag();
-        assert_eq!(at_version_of("ghcr.io", "ocx-contrib/cmake", &digest_only).tag(), None);
+        assert_eq!(
+            ocx_oci::OciIdentifier::from_parts("ocx-contrib/cmake", "ghcr.io")
+                .at_version_of(&digest_only)
+                .tag(),
+            None
+        );
         let tag_only = logical.without_digest();
-        assert_eq!(at_version_of("ghcr.io", "ocx-contrib/cmake", &tag_only).digest(), None);
+        assert_eq!(
+            ocx_oci::OciIdentifier::from_parts("ocx-contrib/cmake", "ghcr.io")
+                .at_version_of(&tag_only)
+                .digest(),
+            None
+        );
     }
 
     // ── The dial-site floor under an HTTP proxy (ocx#407) ────────────────────

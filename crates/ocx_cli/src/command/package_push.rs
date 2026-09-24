@@ -442,8 +442,11 @@ impl PackagePush {
         // published artifact nobody can edit (D14).
         let valid = ocx_package::metadata::validate_for_publish(metadata)?;
 
+        // A push writes where the identifier names: a write is never routed
+        // through an index, only a read of a package name is (ocx#504).
+        let target = ocx_oci::OciIdentifier::passthrough(&identifier);
         let publisher = Publisher::new(context.remote_client()?.clone());
-        publisher.ensure_auth(&identifier).await?;
+        publisher.ensure_auth(&target).await?;
 
         // Gate: every dependency pin must name an existing platform MANIFEST
         // digest — push makes no resolution decisions (run `ocx package
@@ -454,7 +457,6 @@ impl PackagePush {
         }
 
         let infos = vec![ocx_package::info::Info {
-            identifier: identifier.clone(),
             metadata: valid.into(),
             platform: platform.clone(),
         }];
@@ -476,13 +478,14 @@ impl PackagePush {
 
         let outcome = if self.cascade {
             let existing_tags = publisher
-                .list_tags(identifier.clone())
+                .list_tags(target.clone())
                 .await
                 .with_context(|| format!("listing existing tags for {identifier}"))?;
 
             let existing_versions = Publisher::parse_versions(&existing_tags);
             publisher
                 .push_cascade(
+                    &target,
                     infos,
                     &self.layers,
                     existing_versions,
@@ -495,6 +498,7 @@ impl PackagePush {
         } else {
             publisher
                 .push(
+                    &target,
                     infos,
                     &self.layers,
                     build_meta.as_deref(),

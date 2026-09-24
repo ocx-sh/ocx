@@ -5157,6 +5157,326 @@ fn unguarded_constructions(file: &syn::File) -> Vec<(String, usize)> {
 }
 
 // ---------------------------------------------------------------------------
+// OCI location mints
+// ---------------------------------------------------------------------------
+
+/// The ways to mint an `OciIdentifier` outside routing (ocx#504, plan C-9).
+///
+/// `ocx_index::Index::route*` is the normal way from a package name to a
+/// registry location, and it is not listed: that is the path the type split
+/// exists to force. Every constructor here bypasses it on purpose — a write
+/// target named on the command line, an index root's `oci://` pointer, a
+/// registry-backed identity, coordinates that arrive already split — and each
+/// production call site is a decision someone reviewed.
+const OCI_IDENTIFIER_MINTS: [&str; 4] = ["parse_target", "parse_repository_pointer", "passthrough", "from_parts"];
+
+/// Public methods that mint an `OciIdentifier` on their caller's behalf. The
+/// ratchet keys on the enclosing function, so a helper like this would hand
+/// every caller a mint the allowlist never names; each call is counted as one.
+const OCI_IDENTIFIER_MINTING_METHODS: [&str; 1] = ["as_target"];
+
+/// The OCI location mint ratchet (plan C-9): every production call of an
+/// [`OCI_IDENTIFIER_MINTS`] constructor is on the committed allowlist, keyed
+/// `<path> <fn> <count>` like the SSRF ratchet, and the list only shrinks. A
+/// new mint site — a package name turned into something `Client` accepts
+/// without being routed — reds here naming the function.
+#[test]
+fn oci_identifier_mint_ratchet() {
+    let allowlist_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/oci_identifier_mint_allowlist.txt");
+    let mut allowlist: BTreeMap<String, usize> = BTreeMap::new();
+    for line in std::fs::read_to_string(&allowlist_path)
+        .expect("allowlist readable")
+        .lines()
+    {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, count) = line
+            .rsplit_once(' ')
+            .and_then(|(key, count)| count.parse::<usize>().ok().map(|count| (key, count)))
+            .unwrap_or_else(|| panic!("{}: `{line}` is not `<path> <fn> <count>`", allowlist_path.display()));
+        assert!(
+            count > 0 && allowlist.insert(key.to_owned(), count).is_none(),
+            "{}: `{line}` — zero count or duplicate key",
+            allowlist_path.display()
+        );
+    }
+
+    let mut live: BTreeMap<String, usize> = BTreeMap::new();
+    let mut walked = 0;
+    for (_, dir) in crate_dirs() {
+        let sources = rust_sources(&dir.join("src"));
+        assert!(
+            !sources.is_empty(),
+            "{}: no `.rs` file — a crate that falls out of the walk leaves `walked` above its floor on the rest",
+            dir.join("src").display()
+        );
+        // One parse per file: the out-of-line test modules a file declares
+        // are only known once every file is read, so the skip is applied after.
+        let per_file = map_sources(&sources, &|file: &Path, source: &Source| {
+            let rel = file
+                .strip_prefix(crates_dir())
+                .expect("under crates/")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let mints: Vec<String> = oci_identifier_mints(&source.file)
+                .into_iter()
+                .map(|fn_name| format!("{rel} {fn_name}"))
+                .collect();
+            (file.to_path_buf(), cfg_test_module_files(file, &source.file), mints)
+        });
+        assert_eq!(
+            per_file.len(),
+            sources.len(),
+            "{}: the ratchet answered for {} of {} walked file(s)",
+            dir.join("src").display(),
+            per_file.len(),
+            sources.len()
+        );
+        walked += sources.len();
+        let test_only: Vec<&PathBuf> = per_file.iter().flat_map(|(_, declared, _)| declared).collect();
+        for (file, _, mints) in &per_file {
+            if test_only
+                .iter()
+                .any(|root| file == *root || file.starts_with(root.with_extension("")))
+            {
+                continue;
+            }
+            for key in mints {
+                *live.entry(key.clone()).or_default() += 1;
+            }
+        }
+    }
+    assert!(
+        walked >= floor::ALL_CRATE_SOURCES,
+        "oci_identifier_mint_ratchet walked {walked} source file(s), under its floor of {} — a mint in \
+         the part it stopped reading is not counted, and its allowlist entry then reads as stale",
+        floor::ALL_CRATE_SOURCES
+    );
+
+    // The witness: one mint per spelling the scanner must see — a qualified
+    // call, a bare call after an import, a function pointer, a call inside
+    // macro arguments — plus a `#[cfg(test)]` mint it must not.
+    let witness = fixture("oci_identifier_mint_ratchet.rs.txt");
+    let witness_hits: BTreeSet<String> = oci_identifier_mints(&Source::parse(&witness).file)
+        .into_iter()
+        .collect();
+    let expected: BTreeSet<String> = [
+        "qualified",
+        "imported",
+        "pointer",
+        "in_macro",
+        "qualified_self",
+        "self_in_impl",
+        "minting_method",
+        "minting_method_in_macro",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(
+        witness_hits,
+        expected,
+        "witness {} — every mint spelling it carries must be recognised, and the test-only one skipped",
+        witness.display()
+    );
+
+    let mut grown = Vec::new();
+    let mut stale = Vec::new();
+    for (key, count) in &live {
+        match allowlist.get(key) {
+            None => grown.push(format!("{key} ({count}, no entry)")),
+            Some(allowed) if count > allowed => grown.push(format!("{key} ({count} live, {allowed} allowed)")),
+            Some(allowed) if count < allowed => stale.push(format!("{key} ({allowed} allowed, {count} live)")),
+            Some(_) => {}
+        }
+    }
+    stale.extend(
+        allowlist
+            .iter()
+            .filter(|(key, _)| !live.contains_key(*key))
+            .map(|(key, allowed)| format!("{key} ({allowed} allowed, 0 live)")),
+    );
+    assert!(
+        grown.is_empty(),
+        "new OciIdentifier mint site(s) — route the package name through the index \
+         (`Index::route`/`route_for_dial`) instead, or justify the mint and add it to {}:\n  {}",
+        allowlist_path.display(),
+        grown.join("\n  ")
+    );
+    assert!(
+        stale.is_empty(),
+        "stale allowlist entries in {} — the list only shrinks, delete them or lower the count:\n  {}",
+        allowlist_path.display(),
+        stale.join("\n  ")
+    );
+    assert!(!live.is_empty(), "no mint found at all — the scanner stopped matching");
+}
+
+/// The files an out-of-line `#[cfg(test)] mod name;` in `file` declares — test code by
+/// their parent's attribute, which the per-file item walk cannot see. Each
+/// returned path's own subtree (`name/…`) is test-only too.
+fn cfg_test_module_files(file: &Path, parsed: &syn::File) -> Vec<PathBuf> {
+    let stem = file.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    let parent = file.parent().expect("a source file has a parent");
+    let children = match stem {
+        "lib" | "main" | "mod" => parent.to_path_buf(),
+        _ => parent.join(stem),
+    };
+    let mut out = Vec::new();
+    for item in &parsed.items {
+        if let syn::Item::Mod(module) = item
+            && module.content.is_none()
+            && is_cfg_test(&module.attrs)
+        {
+            let name = module.ident.to_string();
+            let flat = children.join(format!("{name}.rs"));
+            out.push(if flat.is_file() {
+                flat
+            } else {
+                children.join(&name).join("mod.rs")
+            });
+        }
+    }
+    out
+}
+
+/// `#[cfg(test)]`, or the `#[cfg(any(test, feature = "__testing"))]` gate the
+/// cross-crate test doubles carry — neither reaches a release build.
+fn is_test_scaffolding(attrs: &[syn::Attribute]) -> bool {
+    is_cfg_test(attrs)
+        || attrs.iter().any(|attr| match &attr.meta {
+            syn::Meta::List(list) if list.path.is_ident("cfg") => {
+                // `flatten` drops literals, and the feature name is one.
+                let text: String = list.tokens.to_string().split_whitespace().collect();
+                text == "any(test,feature=\"__testing\")"
+            }
+            _ => false,
+        })
+}
+
+/// The enclosing function of every [`OCI_IDENTIFIER_MINTS`] use in `file`
+/// outside `#[cfg(test)]` items — a call or a function pointer, and a spelling
+/// inside macro arguments. One outside any function is reported under `-`.
+///
+/// Matches the path tail `OciIdentifier::<mint>`, qualified or imported; the
+/// qualified-self form `<OciIdentifier>::<mint>`; `Self::<mint>` inside an
+/// `impl OciIdentifier`; and a call of an [`OCI_IDENTIFIER_MINTING_METHODS`]
+/// method. An import alias (`use ocx_oci::OciIdentifier as Location`) evades
+/// it; that is a tripwire's limit, not a gap anyone reaches by accident.
+fn oci_identifier_mints(file: &syn::File) -> Vec<String> {
+    struct Mints {
+        frames: Vec<String>,
+        /// Per enclosing `impl`: whether its self type is `OciIdentifier`.
+        impls: Vec<bool>,
+        out: Vec<String>,
+    }
+    fn names_oci_identifier(ty: &syn::Type) -> bool {
+        matches!(ty, syn::Type::Path(path)
+            if path.path.segments.last().is_some_and(|segment| segment.ident == "OciIdentifier"))
+    }
+    impl Mints {
+        fn record(&mut self) {
+            self.out
+                .push(self.frames.last().cloned().unwrap_or_else(|| "-".to_owned()));
+        }
+    }
+    impl<'ast> Visit<'ast> for Mints {
+        fn visit_item(&mut self, item: &'ast syn::Item) {
+            let attrs = match item {
+                syn::Item::Const(i) => &i.attrs,
+                syn::Item::Fn(i) => &i.attrs,
+                syn::Item::Impl(i) => &i.attrs,
+                syn::Item::Macro(i) => &i.attrs,
+                syn::Item::Mod(i) => &i.attrs,
+                syn::Item::Static(i) => &i.attrs,
+                syn::Item::Trait(i) => &i.attrs,
+                _ => &Vec::new(),
+            };
+            if !is_test_scaffolding(attrs) {
+                syn::visit::visit_item(self, item);
+            }
+        }
+        fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+            let attrs = match item {
+                syn::ImplItem::Const(i) => &i.attrs,
+                syn::ImplItem::Fn(i) => &i.attrs,
+                syn::ImplItem::Macro(i) => &i.attrs,
+                _ => &Vec::new(),
+            };
+            if !is_test_scaffolding(attrs) {
+                syn::visit::visit_impl_item(self, item);
+            }
+        }
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            self.frames.push(item.sig.ident.to_string());
+            syn::visit::visit_item_fn(self, item);
+            self.frames.pop();
+        }
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            self.frames.push(item.sig.ident.to_string());
+            syn::visit::visit_impl_item_fn(self, item);
+            self.frames.pop();
+        }
+        fn visit_trait_item_fn(&mut self, item: &'ast syn::TraitItemFn) {
+            self.frames.push(item.sig.ident.to_string());
+            syn::visit::visit_trait_item_fn(self, item);
+            self.frames.pop();
+        }
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            self.impls.push(names_oci_identifier(&item.self_ty));
+            syn::visit::visit_item_impl(self, item);
+            self.impls.pop();
+        }
+        fn visit_expr_path(&mut self, expr: &'ast syn::ExprPath) {
+            let segments: Vec<String> = expr.path.segments.iter().map(|s| s.ident.to_string()).collect();
+            let is_mint = |name: &String| OCI_IDENTIFIER_MINTS.contains(&name.as_str());
+            let minted = match (&expr.qself, segments.as_slice()) {
+                (Some(qself), [.., name]) => names_oci_identifier(&qself.ty) && is_mint(name),
+                (None, [.., owner, name]) if owner == "OciIdentifier" => is_mint(name),
+                (None, [owner, name]) if owner == "Self" => self.impls.last() == Some(&true) && is_mint(name),
+                _ => false,
+            };
+            if minted {
+                self.record();
+            }
+            syn::visit::visit_expr_path(self, expr);
+        }
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if OCI_IDENTIFIER_MINTING_METHODS.contains(&call.method.to_string().as_str()) {
+                self.record();
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+        fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+            let tokens = flatten(mac.tokens.clone());
+            for window in tokens.windows(4) {
+                if window[0].text == "OciIdentifier"
+                    && window[1].text == ":"
+                    && window[2].text == ":"
+                    && OCI_IDENTIFIER_MINTS.contains(&window[3].text.as_str())
+                {
+                    self.record();
+                }
+            }
+            for window in tokens.windows(2) {
+                if window[0].text == "." && OCI_IDENTIFIER_MINTING_METHODS.contains(&window[1].text.as_str()) {
+                    self.record();
+                }
+            }
+        }
+    }
+    let mut mints = Mints {
+        frames: Vec::new(),
+        impls: Vec::new(),
+        out: Vec::new(),
+    };
+    mints.visit_file(file);
+    mints.out
+}
+
+// ---------------------------------------------------------------------------
 // Inert test loops
 // ---------------------------------------------------------------------------
 

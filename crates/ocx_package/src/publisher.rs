@@ -135,7 +135,7 @@ impl Publisher {
     ///
     /// Call at the start of a publishing command to fail fast on credential
     /// issues before reading files or doing any other preparation.
-    pub async fn ensure_auth(&self, identifier: &ocx_oci::Identifier) -> Result<()> {
+    pub async fn ensure_auth(&self, identifier: &ocx_oci::OciIdentifier) -> Result<()> {
         Ok(self
             .client
             .ensure_auth(identifier, ocx_oci::RegistryOperation::Push)
@@ -160,6 +160,7 @@ impl Publisher {
     /// [`ocx_oci::Manifest`], and the layer-push counts.
     pub async fn push_package(
         &self,
+        target: &ocx_oci::OciIdentifier,
         info: &Info,
         layers: &[LayerRef],
         annotations: &BTreeMap<String, String>,
@@ -167,7 +168,7 @@ impl Publisher {
         let (index_digest, index, layer_counts) = self
             .client
             .push_manifest_and_merge_tags(
-                &info.identifier,
+                target,
                 &info.platform,
                 layers,
                 &[],
@@ -187,10 +188,9 @@ impl Publisher {
     /// the per-tag index merge is a read-modify-write, so concurrent merges
     /// would race.
     ///
-    /// When `build_meta` is `Some`, each identifier's tag is parsed as a
-    /// [`Version`] and the build segment is attached before push (the infos
-    /// share one identifier by construction, so every platform lands on the
-    /// same tag). Errors if the tag does not parse, lacks `X.Y.Z` form, or
+    /// Every info is written to `target`. When `build_meta` is `Some`, the
+    /// target's tag is parsed as a [`Version`] and the build segment is
+    /// attached before push, once, so every platform lands on the same tag. Errors if the tag does not parse, lacks `X.Y.Z` form, or
     /// already carries build metadata.
     ///
     /// When `keep_tag` is `true` (the default from `ocx package push`),
@@ -208,8 +208,13 @@ impl Publisher {
     /// version track. Without cascading there are no rolling tags to mirror, so
     /// it re-tags the bare version alone; a version carrying no variant writes
     /// no alias.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one push: where it lands, what to publish, which tracks it moves, and what to stamp on every index it writes"
+    )]
     pub async fn push(
         &self,
+        target: &ocx_oci::OciIdentifier,
         infos: Vec<Info>,
         layers: &[LayerRef],
         build_meta: Option<&str>,
@@ -217,7 +222,7 @@ impl Publisher {
         default: bool,
         annotations: &BTreeMap<String, String>,
     ) -> Result<PushOutcome> {
-        let infos = apply_build_meta_all(infos, build_meta)?;
+        let identifier = apply_build_meta(target, build_meta)?;
         let mut manifest_digest: Option<ocx_oci::Digest> = None;
         let mut keep_tags: Vec<String> = Vec::new();
         let mut platform_digests: Vec<(ocx_oci::Platform, ocx_oci::Digest)> = Vec::new();
@@ -226,12 +231,11 @@ impl Publisher {
         for info in infos {
             log::info!(
                 "pushing package with identifier {} (platform {})",
-                info.identifier,
+                identifier,
                 info.platform
             );
-            let identifier = info.identifier.clone();
             let platform = info.platform.clone();
-            let (digest, manifest, counts) = self.push_package(&info, layers, annotations).await?;
+            let (digest, manifest, counts) = self.push_package(&identifier, &info, layers, annotations).await?;
             layer_counts += counts;
             // Hoisted out of the keep-tag branch on purpose: this is the same
             // descriptor `push_keep_tag` reads, and `platform_digests` has to
@@ -296,6 +300,7 @@ impl Publisher {
     )]
     pub async fn push_cascade(
         &self,
+        target: &ocx_oci::OciIdentifier,
         infos: Vec<Info>,
         layers: &[LayerRef],
         existing_versions: BTreeSet<Version>,
@@ -304,7 +309,9 @@ impl Publisher {
         default: bool,
         annotations: &BTreeMap<String, String>,
     ) -> Result<PushOutcome> {
-        let infos = apply_build_meta_all(infos, build_meta)?;
+        let identifier = apply_build_meta(target, build_meta)?;
+        let version = Version::parse(identifier.tag_or_latest())
+            .ok_or_else(|| crate::error::Error::VersionInvalid(identifier.tag_or_latest().to_string()))?;
         let mut manifest_digest: Option<ocx_oci::Digest> = None;
         let mut cascade_tags: Vec<String> = Vec::new();
         let mut keep_tags: Vec<String> = Vec::new();
@@ -314,14 +321,13 @@ impl Publisher {
         for info in infos {
             log::info!(
                 "pushing package with identifier {} (cascade, platform {})",
-                info.identifier,
+                identifier,
                 info.platform
             );
-            let version = Version::parse(info.identifier.tag_or_latest())
-                .ok_or_else(|| crate::error::Error::VersionInvalid(info.identifier.tag_or_latest().to_string()))?;
             let platform = info.platform.clone();
             let outcome = crate::cascade::push_with_cascade(
                 &self.client,
+                &identifier,
                 info,
                 layers,
                 existing_versions.clone(),
@@ -363,7 +369,7 @@ impl Publisher {
     }
 
     /// Push a complete description artifact to the `__ocx.desc` tag.
-    pub async fn push_description(&self, identifier: &ocx_oci::Identifier, description: &Description) -> Result<()> {
+    pub async fn push_description(&self, identifier: &ocx_oci::OciIdentifier, description: &Description) -> Result<()> {
         log::debug!("Pushing description for {}", identifier);
         crate::description::transport::push_description(&self.client, identifier, description).await
     }
@@ -383,7 +389,7 @@ impl Publisher {
     /// name was typed for is [`pull_source_description`](Self::pull_source_description).
     pub async fn pull_description(
         &self,
-        identifier: &ocx_oci::Identifier,
+        identifier: &ocx_oci::OciIdentifier,
         temp_dir: &Path,
     ) -> Result<Option<Description>> {
         Ok(crate::description::transport::pull_description(&self.client, identifier, temp_dir).await?)
@@ -436,7 +442,7 @@ impl Publisher {
     /// A repository nobody has pushed to yet answers with a 404, which is the
     /// empty list, not a failure — `Client::list_tags_or_empty_addressed`
     /// carries why that fold is exactly this narrow.
-    pub async fn list_tags(&self, identifier: ocx_oci::Identifier) -> Result<Vec<String>> {
+    pub async fn list_tags(&self, identifier: ocx_oci::OciIdentifier) -> Result<Vec<String>> {
         Ok(self
             .client
             .list_tags_or_empty_addressed(identifier, ReadAddressing::Canonical)
@@ -450,27 +456,17 @@ impl Publisher {
     }
 }
 
-/// Apply [`apply_build_meta`] to every [`Info`] of a fan-out set.
-///
-/// The infos share one identifier (only metadata + platform differ), and the
-/// build segment is a fixed string computed once by the caller — every
-/// platform therefore lands on the same tag.
-fn apply_build_meta_all(infos: Vec<Info>, build_meta: Option<&str>) -> Result<Vec<Info>> {
-    infos
-        .into_iter()
-        .map(|info| apply_build_meta(info, build_meta))
-        .collect()
-}
-
-/// If `build_meta` is `Some`, parse the identifier's tag, attach the build
-/// segment, and return an [`Info`] whose identifier carries the new tag.
-fn apply_build_meta(mut info: Info, build_meta: Option<&str>) -> Result<Info> {
-    let Some(build) = build_meta else { return Ok(info) };
-    let tag = info.identifier.tag_or_latest();
+/// If `build_meta` is `Some`, parse `target`'s tag, attach the build segment,
+/// and return the target at the new tag. Computed once per push, so every
+/// platform of a fan-out lands on the same tag.
+fn apply_build_meta(target: &ocx_oci::OciIdentifier, build_meta: Option<&str>) -> Result<ocx_oci::OciIdentifier> {
+    let Some(build) = build_meta else {
+        return Ok(target.clone());
+    };
+    let tag = target.tag_or_latest();
     let version = Version::parse(tag).ok_or_else(|| crate::error::Error::VersionInvalid(tag.to_string()))?;
     let with_build = version.with_build(build).map_err(crate::error::Error::from)?;
-    info.identifier = info.identifier.clone_with_tag(with_build.to_string());
-    Ok(info)
+    Ok(target.clone_with_tag(with_build.to_string()))
 }
 
 #[cfg(test)]
@@ -484,8 +480,11 @@ mod tests {
         dependency, env as metadata_env,
     };
 
-    fn test_info(tag: &str) -> Info {
-        let identifier = ocx_oci::Identifier::new_registry("ocx", "ocx.sh").clone_with_tag(tag);
+    fn test_target(tag: &str) -> ocx_oci::OciIdentifier {
+        ocx_oci::OciIdentifier::from_parts("ocx", "ocx.sh").clone_with_tag(tag)
+    }
+
+    fn test_info() -> Info {
         let metadata = Metadata::Bundle(Bundle {
             binaries: None,
             version: bundle::Version::V1,
@@ -496,7 +495,6 @@ mod tests {
             integrations: Default::default(),
         });
         Info {
-            identifier,
             metadata,
             platform: "linux/amd64".parse().expect("platform parses"),
         }
@@ -504,60 +502,87 @@ mod tests {
 
     #[test]
     fn none_returns_info_unchanged() {
-        let info = test_info("mirror-0.3.0-dev");
-        let out = apply_build_meta(info.clone(), None).expect("no-op succeeds");
-        assert_eq!(out.identifier.tag_or_latest(), "mirror-0.3.0-dev");
+        let target = test_target("mirror-0.3.0-dev");
+        let out = apply_build_meta(&target, None).expect("no-op succeeds");
+        assert_eq!(out.tag_or_latest(), "mirror-0.3.0-dev");
     }
 
     #[test]
     fn attaches_build_meta_to_variant_prerelease() {
-        let info = test_info("mirror-0.3.0-dev");
-        let out = apply_build_meta(info, Some("20260514120000")).expect("attach succeeds");
+        let target = test_target("mirror-0.3.0-dev");
+        let out = apply_build_meta(&target, Some("20260514120000")).expect("attach succeeds");
         // Display normalizes `+` to `_` per OCI tag rules; clone_with_tag does the same.
-        assert_eq!(out.identifier.tag_or_latest(), "mirror-0.3.0-dev_20260514120000");
+        assert_eq!(out.tag_or_latest(), "mirror-0.3.0-dev_20260514120000");
     }
 
     #[test]
     fn attaches_build_meta_to_bare_patch_version() {
-        let info = test_info("0.3.0");
-        let out = apply_build_meta(info, Some("20260514120000")).expect("attach succeeds");
-        assert_eq!(out.identifier.tag_or_latest(), "0.3.0_20260514120000");
+        let target = test_target("0.3.0");
+        let out = apply_build_meta(&target, Some("20260514120000")).expect("attach succeeds");
+        assert_eq!(out.tag_or_latest(), "0.3.0_20260514120000");
     }
 
     #[test]
     fn rejects_tag_that_already_carries_build_meta() {
-        let info = test_info("0.3.0-dev_alreadyhere");
-        let err = apply_build_meta(info, Some("20260514120000")).expect_err("must reject double build meta");
+        let target = test_target("0.3.0-dev_alreadyhere");
+        let err = apply_build_meta(&target, Some("20260514120000")).expect_err("must reject double build meta");
         let msg = err.to_string();
         assert!(msg.contains("already has build metadata"), "unexpected error: {msg}");
     }
 
     #[test]
     fn rejects_tag_that_is_not_a_valid_version() {
-        let info = test_info("latest");
-        let err = apply_build_meta(info, Some("20260514120000")).expect_err("must reject non-version tag");
+        let target = test_target("latest");
+        let err = apply_build_meta(&target, Some("20260514120000")).expect_err("must reject non-version tag");
         let msg = err.to_string();
         assert!(msg.contains("invalid package version"), "unexpected error: {msg}");
     }
 
     #[test]
     fn rejects_tag_that_lacks_patch_segment() {
-        let info = test_info("1.2");
-        let err = apply_build_meta(info, Some("20260514120000")).expect_err("must reject X.Y tag");
+        let target = test_target("1.2");
+        let err = apply_build_meta(&target, Some("20260514120000")).expect_err("must reject X.Y tag");
         let msg = err.to_string();
         assert!(msg.contains("X.Y.Z"), "unexpected error: {msg}");
     }
 
     // ── Multi-platform fan-out — adr_dependency_manifest_pinning.md ──────
 
-    #[test]
-    fn build_meta_all_lands_every_platform_on_the_same_tag() {
-        let mut mac = test_info("0.3.0");
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_meta_lands_every_platform_on_the_same_tag() {
+        use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let publisher = Publisher::new(ocx_oci::Client::with_transport(Box::new(StubTransport::new(
+            data.clone(),
+        ))));
+        let mut mac = test_info();
         mac.platform = "darwin/arm64".parse().expect("platform parses");
-        let infos =
-            apply_build_meta_all(vec![test_info("0.3.0"), mac], Some("20260514120000")).expect("attach succeeds");
-        let tags: Vec<_> = infos.iter().map(|info| info.identifier.tag_or_latest()).collect();
-        assert_eq!(tags, vec!["0.3.0_20260514120000", "0.3.0_20260514120000"]);
+        publisher
+            .push(
+                &test_target("0.3.0"),
+                vec![test_info(), mac],
+                &[],
+                Some("20260514120000"),
+                false,
+                false,
+                &BTreeMap::new(),
+            )
+            .await
+            .expect("fan-out push succeeds");
+
+        let inner = data.read();
+        let (index_bytes, _) = inner
+            .manifests
+            .get("ocx.sh/ocx:0.3.0_20260514120000")
+            .expect("both platforms land on the one built tag");
+        let index: serde_json::Value = serde_json::from_slice(index_bytes).expect("index parses");
+        assert_eq!(index["manifests"].as_array().expect("manifests array").len(), 2);
+        assert!(
+            !inner.manifests.contains_key("ocx.sh/ocx:0.3.0"),
+            "no platform may land on the unbuilt tag"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -567,7 +592,15 @@ mod tests {
             StubTransportData::new(),
         ))));
         let err = publisher
-            .push(Vec::new(), &[], None, false, false, &BTreeMap::new())
+            .push(
+                &test_target("1.0.0"),
+                Vec::new(),
+                &[],
+                None,
+                false,
+                false,
+                &BTreeMap::new(),
+            )
             .await
             .expect_err("empty set");
         assert!(err.to_string().contains("at least one target platform"), "got: {err}");
@@ -583,10 +616,18 @@ mod tests {
             data.clone(),
         ))));
 
-        let mut mac = test_info("1.0.0");
+        let mut mac = test_info();
         mac.platform = "darwin/arm64".parse().expect("platform parses");
         let outcome = publisher
-            .push(vec![test_info("1.0.0"), mac], &[], None, false, false, &BTreeMap::new())
+            .push(
+                &test_target("1.0.0"),
+                vec![test_info(), mac],
+                &[],
+                None,
+                false,
+                false,
+                &BTreeMap::new(),
+            )
             .await
             .expect("fan-out push succeeds");
 
@@ -632,7 +673,15 @@ mod tests {
         ))));
 
         let outcome = publisher
-            .push(vec![test_info("1.0.0")], &[], None, true, false, &BTreeMap::new())
+            .push(
+                &test_target("1.0.0"),
+                vec![test_info()],
+                &[],
+                None,
+                true,
+                false,
+                &BTreeMap::new(),
+            )
             .await
             .expect("push succeeds");
 
@@ -665,7 +714,7 @@ mod tests {
             data.clone(),
         ))));
 
-        let mut mac = test_info("1.0.0");
+        let mut mac = test_info();
         mac.platform = "darwin/arm64".parse().expect("platform parses");
         // The keep tag names the *platform manifest* digest, and that
         // manifest is the metadata config blob plus the layers — neither of
@@ -677,7 +726,15 @@ mod tests {
         bundle.strip_components = Some(1);
 
         let outcome = publisher
-            .push(vec![test_info("1.0.0"), mac], &[], None, true, false, &BTreeMap::new())
+            .push(
+                &test_target("1.0.0"),
+                vec![test_info(), mac],
+                &[],
+                None,
+                true,
+                false,
+                &BTreeMap::new(),
+            )
             .await
             .expect("fan-out push succeeds");
 
@@ -715,12 +772,13 @@ mod tests {
         // real-world Rosetta-alias / noarch-bundle shape. Both index entries
         // point at the same leaf manifest, so both platforms yield the same
         // keep tag and the report must carry it once.
-        let mut alias = test_info("1.0.0");
+        let mut alias = test_info();
         alias.platform = "darwin/arm64".parse().expect("platform parses");
 
         let outcome = publisher
             .push(
-                vec![test_info("1.0.0"), alias],
+                &test_target("1.0.0"),
+                vec![test_info(), alias],
                 &[],
                 None,
                 true,
@@ -751,12 +809,13 @@ mod tests {
         // Both platforms compute the same rolling tags, and (identical
         // metadata) the same platform-manifest digest — the cascade loop must
         // report each of them once, not once per `Info`.
-        let mut alias = test_info("1.0.0");
+        let mut alias = test_info();
         alias.platform = "darwin/arm64".parse().expect("platform parses");
 
         let outcome = publisher
             .push_cascade(
-                vec![test_info("1.0.0"), alias],
+                &test_target("1.0.0"),
+                vec![test_info(), alias],
                 &[],
                 BTreeSet::new(),
                 None,
@@ -796,7 +855,15 @@ mod tests {
         ))));
 
         let outcome = publisher
-            .push(vec![test_info("1.0.0")], &[], None, false, false, &BTreeMap::new())
+            .push(
+                &test_target("1.0.0"),
+                vec![test_info()],
+                &[],
+                None,
+                false,
+                false,
+                &BTreeMap::new(),
+            )
             .await
             .expect("push succeeds");
 
@@ -830,7 +897,15 @@ mod tests {
         ))));
 
         let outcome = publisher
-            .push(vec![test_info("full-1.2.3")], &[], None, false, true, &BTreeMap::new())
+            .push(
+                &test_target("full-1.2.3"),
+                vec![test_info()],
+                &[],
+                None,
+                false,
+                true,
+                &BTreeMap::new(),
+            )
             .await
             .expect("push succeeds");
 
@@ -868,12 +943,13 @@ mod tests {
             data.clone(),
         ))));
 
-        let mut mac = test_info("full-1.0.0");
+        let mut mac = test_info();
         mac.platform = "darwin/arm64".parse().expect("platform parses");
 
         let outcome = publisher
             .push(
-                vec![test_info("full-1.0.0"), mac],
+                &test_target("full-1.0.0"),
+                vec![test_info(), mac],
                 &[],
                 None,
                 false,
@@ -903,12 +979,13 @@ mod tests {
             data.clone(),
         ))));
 
-        let mut mac = test_info("full-1.2.3");
+        let mut mac = test_info();
         mac.platform = "darwin/arm64".parse().expect("platform parses");
 
         let outcome = publisher
             .push_cascade(
-                vec![test_info("full-1.2.3"), mac],
+                &test_target("full-1.2.3"),
+                vec![test_info(), mac],
                 &[],
                 BTreeSet::new(),
                 None,
@@ -958,7 +1035,7 @@ mod tests {
         }];
 
         let _ = publisher
-            .push_package(&test_info("1.0.0"), &layers, &BTreeMap::new())
+            .push_package(&test_target("1.0.0"), &test_info(), &layers, &BTreeMap::new())
             .await;
         data
     }

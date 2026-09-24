@@ -48,6 +48,75 @@
 //!     fn box_clone(&self) -> Box<dyn OciTransport> { todo!() }
 //! }
 //! ```
+//!
+//! # A package identifier cannot be dialled
+//!
+//! [`Identifier`] names a package; [`OciIdentifier`] names the registry
+//! location a request goes to. An index may serve the first from somewhere
+//! else entirely, so dialling it as-is reaches whatever host shares its
+//! spelling (ocx#504). Every [`Client`] read and write takes the second, and
+//! the two types have no conversion in either direction — the way across is
+//! routing through the index, or one of the explicit `OciIdentifier`
+//! constructors a workspace ratchet counts. Each refusal below has a twin that compiles
+//! with the right type, so each one fails for the reason it names. A twin
+//! differs from its refusal in exactly one expression and names the same
+//! types, so renaming either type turns the twin red instead of letting the
+//! refusal pass on an unresolved name.
+//!
+//! A package identifier handed to the client is a type mismatch:
+//!
+//! ```compile_fail,E0308
+//! async fn read(client: ocx_oci::Client, location: ocx_oci::OciIdentifier, identifier: ocx_oci::Identifier) {
+//!     let _ = client.fetch_manifest(&identifier).await;
+//! }
+//! ```
+//!
+//! ```
+//! async fn read(client: ocx_oci::Client, location: ocx_oci::OciIdentifier, identifier: ocx_oci::Identifier) {
+//!     let _ = client.fetch_manifest(&location).await;
+//! }
+//! ```
+//!
+//! A location does not turn back into a package identifier:
+//!
+//! ```compile_fail,E0277
+//! fn relabel(location: ocx_oci::OciIdentifier, identifier: ocx_oci::Identifier) {
+//!     let _: ocx_oci::Identifier = location.into();
+//! }
+//! ```
+//!
+//! ```
+//! fn relabel(location: ocx_oci::OciIdentifier, identifier: ocx_oci::Identifier) {
+//!     let _: ocx_oci::Identifier = identifier.into();
+//! }
+//! ```
+//!
+//! And a package identifier does not become a location without routing,
+//! neither by `into` nor by `from`:
+//!
+//! ```compile_fail,E0277
+//! fn unroute(location: ocx_oci::OciIdentifier, identifier: ocx_oci::Identifier) {
+//!     let _: ocx_oci::OciIdentifier = identifier.into();
+//! }
+//! ```
+//!
+//! ```
+//! fn unroute(location: ocx_oci::OciIdentifier, identifier: ocx_oci::Identifier) {
+//!     let _: ocx_oci::OciIdentifier = location.into();
+//! }
+//! ```
+//!
+//! ```compile_fail,E0277
+//! fn unroute(identifier: ocx_oci::Identifier) {
+//!     let _ = ocx_oci::OciIdentifier::from(&identifier);
+//! }
+//! ```
+//!
+//! ```
+//! fn unroute(identifier: ocx_oci::Identifier) {
+//!     let _ = ocx_oci::OciIdentifier::passthrough(&identifier);
+//! }
+//! ```
 
 /// The seal on [`client::OciTransport`].
 ///
@@ -180,6 +249,10 @@ pub use digest::Digest;
 
 pub mod pinned_identifier;
 pub use pinned_identifier::PinnedIdentifier;
+
+// The physical side of the identifier split (ocx#504): what `Client` dials.
+pub mod oci_identifier;
+pub use oci_identifier::{OciIdentifier, PinnedOciIdentifier};
 
 pub mod repository;
 pub use repository::Repository;

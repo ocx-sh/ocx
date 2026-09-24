@@ -44,7 +44,7 @@ pub fn root_name(package: &ocx_oci::Identifier) -> String {
 /// Validate `--repository` as an `oci://host/path` pointer, returning it
 /// verbatim (C-047).
 ///
-/// The parse is `ocx_index::parse_physical_repository`'s, which demands an exact
+/// The parse is `ocx_oci::OciIdentifier::parse_repository_pointer`'s, which demands an exact
 /// `Identifier` round-trip — so every accepted value reconstructs byte-identically
 /// and the "verbatim" half has no reachable red. The refusal is the half that
 /// does, and it is [`ClaimError::MalformedRepository`] at **exit 64**, never the
@@ -56,11 +56,11 @@ pub fn root_name(package: &ocx_oci::Identifier) -> String {
 /// slash, an empty host or path, or a smuggled tag, digest, uppercase segment or
 /// stray colon.
 pub fn parse_repository(value: &str) -> Result<String, ClaimError> {
-    // The index error is deliberately dropped rather than carried as a
+    // The parse error is deliberately dropped rather than carried as a
     // `#[source]`: it classifies to `DataError` (65), and a malformed *flag
     // value* is operator input, which is `EX_USAGE` (64). The refused value is
     // named back instead, which is what an operator acts on.
-    ocx_index::parse_physical_repository(value)
+    ocx_oci::OciIdentifier::parse_repository_pointer(value)
         .map(|_| value.to_string())
         .map_err(|_| ClaimError::MalformedRepository {
             value: value.to_string(),

@@ -350,7 +350,11 @@ mod tests {
 
         let error = anyhow::Error::new(CopyError {
             source_identifier: "dev.example.com/acme/tool:1.4.2".parse().expect("source"),
-            target_identifier: "prod.example.com/acme/tool:1.4.2".parse().expect("target"),
+            target_identifier: ocx_oci::OciIdentifier::parse_target(
+                "prod.example.com/acme/tool:1.4.2",
+                ocx_oci::DEFAULT_REGISTRY,
+            )
+            .expect("target"),
             kind: CopyErrorKind::IndexNamedByDigest,
         });
         let rendered = render_error_envelope("package copy", &error).expect("render");

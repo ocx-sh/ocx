@@ -207,12 +207,12 @@ impl PackageCopy {
         &self,
         source: &ocx_oci::Identifier,
         default_registry: &str,
-    ) -> anyhow::Result<ocx_oci::Identifier> {
+    ) -> anyhow::Result<ocx_oci::OciIdentifier> {
         if let Some(identifier) = &self.identifier {
-            return identifier.with_domain(default_registry);
+            return identifier.as_target(default_registry);
         }
         let registry = self.to.as_deref().unwrap_or(default_registry);
-        let target = ocx_oci::Identifier::new_registry(source.repository(), registry);
+        let target = ocx_oci::OciIdentifier::from_parts(source.repository(), registry);
         Ok(match source.tag() {
             Some(tag) => target.clone_with_tag(tag),
             None => target,

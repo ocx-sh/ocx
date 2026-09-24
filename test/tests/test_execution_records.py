@@ -71,6 +71,7 @@ Test inventory
 24. test_multi_package_exec_names_only_the_absent_package          — attribution
 25. test_root_digest_is_the_platform_leaf_never_the_index          — rule 5
 26. test_cached_multi_platform_root_records_the_platform_it_selected — rule 5
+26b. test_cached_pinned_root_records_the_registry_its_derived_root_names — indirection
 27. test_dependency_entries_carry_no_platform_and_no_arch_qualifier — rule 5
 28. test_registries_name_the_content_host_not_the_logical_namespace — indirection
 29. test_required_true_with_no_sink_is_a_configuration_error            — fail closed
@@ -1900,6 +1901,46 @@ def test_cached_multi_platform_root_records_the_platform_it_selected(
     assert _purl_qualifiers(root["uri"]).get("arch") == [host_platform.split("/")[1]], (
         "the purl's arch qualifier carries the same selection; got "
         f"{root['uri']!r}"
+    )
+
+
+def test_cached_pinned_root_records_the_registry_its_derived_root_names(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """A digest-pinned exec answered from the store still names its content registry.
+
+    The pinned store-hit path resolves nothing, so the content registry can only
+    come from the locally committed index root. For a plain-registry package that
+    root is *derived*: it names the package's own registry. That is still where
+    the content came from, and the tag-resolving path records it, so the pinned
+    path must record it too. Otherwise the same artefact reports
+    ``resolution.registries`` depending on how it was named.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path)
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, unique_repo, "1.0.0")
+
+    # The install commits the derived root the pinned exec below reads.
+    ocx.plain("package", "install", f"{unique_repo}:1.0.0")
+    sink = _sink(tmp_path, "pinnedderived")
+
+    result = ocx.run(
+        "package", "exec", "--records-dir", str(sink),
+        f"{unique_repo}@{leaf_digest}", "--", "hello",
+        format=None, check=False,
+    )
+    assert result.returncode == EXIT_SUCCESS, (
+        f"pinned exec of the installed package must succeed; rc={result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+
+    record = _one_record(sink)
+    assert "autoInstalled" not in record["resolution"], (
+        "the pinned exec must answer from the store, or it exercises the pull "
+        f"path instead; got resolution={record['resolution']}"
+    )
+    assert record["resolution"].get("registries") == [ocx.registry], (
+        "a derived root naming the package's own registry still records it; "
+        f"got {record['resolution'].get('registries')!r}"
     )
 
 

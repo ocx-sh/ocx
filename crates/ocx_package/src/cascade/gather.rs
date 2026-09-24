@@ -48,12 +48,12 @@ const CASCADE_GATHER_CONCURRENCY: usize = 64;
 
 /// Reads one package's whole tag graph.
 ///
-/// `identifier` is the physical repository every registry read addresses;
-/// `logical` is the name the user asked for when it differed, carried through
-/// so the report can name what was requested. `index` is the source that
-/// serves the logical name's root — `Some` turns the index-staleness layer on,
-/// `None` (a physical invocation) leaves it off, since no root maps back to a
-/// bare repository.
+/// `location` is the physical repository every registry read addresses —
+/// `package` routed through the index; `package` is the name the user asked
+/// for, recorded on the observation when the two name different coordinates so
+/// the report can say what was requested. `index` is the source that serves
+/// `package`'s root — `Some` turns the index-staleness layer on, `None` leaves
+/// it off.
 ///
 /// # Errors
 ///
@@ -61,23 +61,23 @@ const CASCADE_GATHER_CONCURRENCY: usize = 64;
 /// registry then failed to serve.
 pub async fn gather(
     client: &ocx_oci::Client,
-    identifier: &ocx_oci::Identifier,
-    logical: Option<&ocx_oci::Identifier>,
+    location: &ocx_oci::OciIdentifier,
+    package: &ocx_oci::Identifier,
     index: Option<&OcxIndex>,
 ) -> Result<TagGraphObservation> {
     let listed = client
-        .list_tags_addressed(identifier.clone(), ReadAddressing::Canonical)
+        .list_tags_addressed(location.clone(), ReadAddressing::Canonical)
         .await?;
     let (nodes, ignored_tags) = classify(&listed);
     log::debug!(
-        "Cascade gather for '{identifier}': {} graph tags, {} ignored.",
+        "Cascade gather for '{location}': {} graph tags, {} ignored.",
         nodes.len(),
         ignored_tags.len()
     );
 
     let tags = stream::iter(nodes)
         .map(|(tag, alias)| async move {
-            let reference = identifier.clone_with_tag(&tag);
+            let reference = location.clone_with_tag(&tag);
             match client
                 .fetch_manifest_raw_bytes_addressed(&reference, ReadAddressing::Canonical)
                 .await?
@@ -110,13 +110,13 @@ pub async fn gather(
         .await?;
 
     let index_root = match index {
-        Some(source) => fetch_index_root(source, logical.unwrap_or(identifier)).await?,
+        Some(source) => fetch_index_root(source, package).await?,
         None => None,
     };
 
     Ok(TagGraphObservation {
-        identifier: identifier.clone(),
-        logical: logical.cloned(),
+        identifier: location.clone(),
+        logical: (!package.is_located_at(location)).then(|| package.clone()),
         tags,
         ignored_tags,
         index_root,
@@ -183,7 +183,12 @@ mod tests {
         ocx_oci::Client::with_transport(Box::new(StubTransport::new(data.clone())))
     }
 
-    fn identifier() -> ocx_oci::Identifier {
+    fn identifier() -> ocx_oci::OciIdentifier {
+        ocx_oci::OciIdentifier::from_parts(REPOSITORY, REGISTRY)
+    }
+
+    /// The package whose registry-backed location is [`identifier`].
+    fn package() -> ocx_oci::Identifier {
         ocx_oci::Identifier::new_registry(REPOSITORY, REGISTRY)
     }
 
@@ -391,7 +396,7 @@ mod tests {
         let data = StubTransportData::new();
         let tags = seed_healthy(&data);
 
-        let observation = gather(&client(&data), &identifier(), None, None)
+        let observation = gather(&client(&data), &identifier(), &package(), None)
             .await
             .expect("a healthy package gathers");
 
@@ -422,7 +427,7 @@ mod tests {
         seed_index(&data, "3.28.1", &["linux/amd64"]);
         seed_index(&data, "latest", &["linux/amd64"]);
 
-        let observation = gather(&client(&data), &identifier(), None, None)
+        let observation = gather(&client(&data), &identifier(), &package(), None)
             .await
             .expect("an unlisted alias is not an error");
 
@@ -441,7 +446,7 @@ mod tests {
         seed_index(&data, "3.28.1", &["linux/amd64"]);
         // `latest` is listed and then 404s — a concurrent delete, not an absence.
 
-        let error = gather(&client(&data), &identifier(), None, None)
+        let error = gather(&client(&data), &identifier(), &package(), None)
             .await
             .expect_err("a vanished listed tag is a race, not an absence");
 
@@ -465,7 +470,7 @@ mod tests {
             .manifest_errors
             .insert(manifest_key("3.28"), "503 service unavailable".to_string());
 
-        let error = gather(&client(&data), &identifier(), None, None)
+        let error = gather(&client(&data), &identifier(), &package(), None)
             .await
             .expect_err("a transient registry error must abort, never be swallowed");
 
@@ -481,7 +486,7 @@ mod tests {
         seed_healthy(&data);
         data.write().ensure_auth_error_override = Some("401 unauthorized".to_string());
 
-        let error = gather(&client(&data), &identifier(), None, None)
+        let error = gather(&client(&data), &identifier(), &package(), None)
             .await
             .expect_err("an auth failure must abort");
 
@@ -508,7 +513,7 @@ mod tests {
         let tags = seed_healthy(&data);
         let mirrored = client(&data).with_test_mirror(REGISTRY, "mirror.invalid", "upstream");
 
-        let observation = gather(&mirrored, &identifier(), None, None)
+        let observation = gather(&mirrored, &identifier(), &package(), None)
             .await
             .expect("the audit reads the canonical registry, which is the one that is seeded");
 
@@ -548,7 +553,7 @@ mod tests {
         }
 
         let started = std::time::Instant::now();
-        let observation = gather(&client(&data), &identifier(), None, None)
+        let observation = gather(&client(&data), &identifier(), &package(), None)
             .await
             .expect("the delayed run gathers");
         let elapsed = started.elapsed();
@@ -586,7 +591,7 @@ mod tests {
         seed_index(&data, "3.28.1", &["linux/amd64"]);
         seed_image(&data, "latest");
 
-        let observation = gather(&client(&data), &identifier(), None, None)
+        let observation = gather(&client(&data), &identifier(), &package(), None)
             .await
             .expect("a bare-manifest alias is observable, not an error");
 
@@ -620,7 +625,7 @@ mod tests {
         list(&data, &["3.28.1"]);
         seed_raw(&data, "3.28.1", index_bytes("3.28.1", &["linux/amd64"], 1));
 
-        let error = gather(&client(&data), &identifier(), None, None)
+        let error = gather(&client(&data), &identifier(), &package(), None)
             .await
             .expect_err("an index that fails validation must abort the run");
 
@@ -642,7 +647,7 @@ mod tests {
             (oversized, ocx_oci::Algorithm::Sha256.hash(b"unused").to_string()),
         );
 
-        let error = gather(&client(&data), &identifier(), None, None)
+        let error = gather(&client(&data), &identifier(), &package(), None)
             .await
             .expect_err("an over-cap body must abort");
 
@@ -675,7 +680,7 @@ mod tests {
             seed_index(&data, tag, &["linux/amd64"]);
         }
 
-        let observation = gather(&client(&data), &identifier(), None, None)
+        let observation = gather(&client(&data), &identifier(), &package(), None)
             .await
             .expect("a mixed listing gathers");
 
@@ -718,7 +723,7 @@ mod tests {
             seed_index(&data, tag, &["linux/amd64"]);
         }
 
-        let observation = gather(&client(&data), &identifier(), None, None)
+        let observation = gather(&client(&data), &identifier(), &package(), None)
             .await
             .expect("a large package gathers");
 
@@ -735,7 +740,7 @@ mod tests {
         let data = StubTransportData::new();
         seed_healthy(&data);
 
-        gather(&client(&data), &identifier(), None, None)
+        gather(&client(&data), &identifier(), &package(), None)
             .await
             .expect("a healthy package gathers");
 
@@ -758,14 +763,9 @@ mod tests {
         let committed = some_digest();
         let (source, transport) = seeded_index_source(&committed);
 
-        let observation = gather(
-            &client(&data),
-            &identifier(),
-            Some(&logical_identifier()),
-            Some(&source),
-        )
-        .await
-        .expect("a logical package gathers");
+        let observation = gather(&client(&data), &identifier(), &logical_identifier(), Some(&source))
+            .await
+            .expect("a logical package gathers");
 
         assert_eq!(observation.logical, Some(logical_identifier()));
         let root = observation.index_root.expect("the live root is recorded");
@@ -788,14 +788,9 @@ mod tests {
         let (source, transport) = seeded_index_source(&some_digest());
         transport.fail(&root_url());
 
-        let error = gather(
-            &client(&data),
-            &identifier(),
-            Some(&logical_identifier()),
-            Some(&source),
-        )
-        .await
-        .expect_err("a dead index endpoint must abort, not silently drop the layer");
+        let error = gather(&client(&data), &identifier(), &logical_identifier(), Some(&source))
+            .await
+            .expect_err("a dead index endpoint must abort, not silently drop the layer");
 
         let rendered = chain(&error);
         assert!(
@@ -834,14 +829,9 @@ mod tests {
             proxy_rules: ocx_oci::ssrf::ProxyRules::direct(),
         });
 
-        let observation = gather(
-            &client(&data),
-            &identifier(),
-            Some(&logical_identifier()),
-            Some(&source),
-        )
-        .await
-        .expect("an unpublished logical package is not an error");
+        let observation = gather(&client(&data), &identifier(), &logical_identifier(), Some(&source))
+            .await
+            .expect("an unpublished logical package is not an error");
 
         assert!(observation.index_root.is_none(), "a 404 root is an absence, not a root");
         assert_eq!(
@@ -875,7 +865,7 @@ mod tests {
         // physical invocation must simply never ask it.
         let (_source, transport) = seeded_index_source(&some_digest());
 
-        let observation = gather(&client(&data), &identifier(), None, None)
+        let observation = gather(&client(&data), &identifier(), &package(), None)
             .await
             .expect("a physical package gathers");
 

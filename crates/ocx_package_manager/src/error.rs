@@ -324,7 +324,7 @@ pub enum PackageErrorKind {
     /// [`ocx_oci::client::error::ClientError::BlobNotFound`] for the
     /// canonical construction contract.
     #[error("blob not found: {0}")]
-    BlobNotFound(ocx_oci::PinnedIdentifier),
+    BlobNotFound(Box<ocx_oci::PinnedOciIdentifier>),
     /// Multiple candidates matched the platform selection.
     #[error("ambiguous selection: {}", _0.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", "))]
     SelectionAmbiguous(Vec<ocx_oci::Identifier>),

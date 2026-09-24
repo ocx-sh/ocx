@@ -1,0 +1,42 @@
+# Production mints of an `ocx_oci::OciIdentifier` outside index routing
+# (`oci_identifier_mint_ratchet`, plan C-9, ocx#504). One line per function:
+# `<path under crates/> <fn> <count>`. The list only shrinks — a new mint is a
+# package name reaching the wire without `Index::route`, so it is a reviewed
+# decision, never a line appended to make the ratchet green.
+
+# Index root `oci://` pointers (C3): announce, claim, the index's own reader,
+# and patch slug recovery reading a committed root's host.
+ocx_announce/src/announce/pipeline.rs extract_physical 1
+ocx_announce/src/claim/root.rs parse_repository 1
+ocx_index/src/lib.rs parse_repository_pointer 1
+ocx_package_manager/src/tasks/resolve.rs recover_base_with_real_registry 1
+
+# Routing itself: a name no index owns and no source rewrites is its own
+# coordinates. Every `Index::route*` answers a miss through this one function.
+ocx_index/src/lib.rs unrouted 1
+
+# A plain OCI registry answers for the names it holds, as spelled.
+ocx_index/src/oci_index.rs fetch_blob 1
+ocx_index/src/oci_index.rs fetch_manifest 1
+ocx_index/src/oci_index.rs fetch_manifest_digest 1
+ocx_index/src/oci_index.rs fetch_manifest_raw_bytes 1
+ocx_index/src/oci_index.rs fetch_tags 1
+
+# Write targets: a publish writes where it is told, and is never routed.
+# `as_target` mints for its caller, so each caller is listed too.
+ocx_cli/src/options/identifier.rs as_target 1
+ocx_cli/src/command/config_push.rs execute 1
+ocx_cli/src/command/package_copy.rs resolve_target 2
+ocx_cli/src/command/package_description_push.rs execute 1
+ocx_cli/src/command/package_push.rs execute 1
+ocx_package_manager/src/tasks/patch_publish.rs push_patch_descriptor 1
+
+# Locations that are not packages: the managed-config artifact and the patch
+# descriptor are fetched from the registry their config names.
+ocx_config/src/managed.rs resolve_target 1
+ocx_config/src/managed.rs snapshot_matches_source 1
+ocx_setup/src/lib.rs apply_managed_config 1
+ocx_package_manager/src/patch/persistence.rs fetch_patch_descriptor_blobs 1
+
+# A local materialization downloads nothing under its own name.
+ocx_package_manager/src/tasks/pull_local.rs pull_local 1

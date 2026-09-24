@@ -1783,9 +1783,9 @@ mod tests {
         async fn physical_reference(
             &self,
             identifier: &ocx_oci::Identifier,
-        ) -> ocx_index::error::Result<Option<ocx_oci::Identifier>> {
+        ) -> ocx_index::error::Result<Option<ocx_oci::OciIdentifier>> {
             if self.published && identifier.registry() == self.namespace {
-                Ok(Some(identifier.clone()))
+                Ok(Some(ocx_oci::OciIdentifier::passthrough(identifier)))
             } else {
                 Ok(None)
             }
@@ -1850,9 +1850,11 @@ mod tests {
             media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
             size: 0,
         };
+        let manifest_pin = pin(&manifest_digest);
         let resolved = ResolvedChain {
-            pinned: pin(&manifest_digest),
-            transport_pinned: pin(&manifest_digest),
+            pinned: manifest_pin.clone(),
+            transport_pinned: ocx_oci::OciIdentifier::passthrough(manifest_pin.as_identifier())
+                .at_pin_of(&manifest_pin),
             chain: vec![
                 chain_blob(&manifest_digest, ChainRole::Manifest),
                 chain_blob(&config_digest, ChainRole::Config),
@@ -2000,9 +2002,11 @@ mod tests {
             .to_string(),
             size: 0,
         };
+        let manifest_pin = pin(&manifest_digest);
         let resolved = ResolvedChain {
-            pinned: pin(&manifest_digest),
-            transport_pinned: pin(&manifest_digest),
+            pinned: manifest_pin.clone(),
+            transport_pinned: ocx_oci::OciIdentifier::passthrough(manifest_pin.as_identifier())
+                .at_pin_of(&manifest_pin),
             chain: vec![
                 chain_blob(&dispatch_digest, ChainRole::Index),
                 chain_blob(&manifest_digest, ChainRole::Manifest),
@@ -2188,7 +2192,7 @@ mod tests {
         .unwrap();
         let resolved = ResolvedChain {
             pinned: pinned.clone(),
-            transport_pinned: pinned.clone(),
+            transport_pinned: ocx_oci::OciIdentifier::passthrough(pinned.as_identifier()).at_pin_of(&pinned),
             chain: vec![ChainBlob {
                 identifier: pinned,
                 role: ChainRole::Index,
@@ -2269,7 +2273,7 @@ mod tests {
         .unwrap();
         let resolved = ResolvedChain {
             pinned: pinned.clone(),
-            transport_pinned: pinned.clone(),
+            transport_pinned: ocx_oci::OciIdentifier::passthrough(pinned.as_identifier()).at_pin_of(&pinned),
             chain: vec![ChainBlob {
                 identifier: pinned.clone(),
                 role: ChainRole::Manifest,

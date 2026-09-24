@@ -36,7 +36,7 @@ pub struct ConfigPushArgs {
 
 impl ConfigPushArgs {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let identifier = self.identifier.with_domain(context.default_registry())?;
+        let identifier = self.identifier.as_target(context.default_registry())?;
 
         let publisher = Publisher::new(context.remote_client()?.clone());
         publisher.ensure_auth(&identifier).await?;

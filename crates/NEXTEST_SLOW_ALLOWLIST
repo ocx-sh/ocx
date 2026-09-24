@@ -95,6 +95,7 @@ ocx_test_support::workspace_structure no_classification_in_libraries
 ocx_test_support::workspace_structure no_log_shim
 ocx_test_support::workspace_structure every_source_file_is_reachable
 ocx_test_support::workspace_structure ssrf_guard_ratchet
+ocx_test_support::workspace_structure oci_identifier_mint_ratchet
 ocx_test_support::workspace_structure tests_hold_no_inert_loop
 
 # The last two are here for a DIFFERENT reason and would not be helped by any

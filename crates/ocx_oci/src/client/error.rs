@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use crate::{Digest, Identifier, PinnedIdentifier, native};
+use crate::{Digest, OciIdentifier, PinnedOciIdentifier, native};
 
 /// Errors that can occur during OCI client operations.
 #[derive(Debug, thiserror::Error)]
@@ -104,7 +104,7 @@ pub enum ClientError {
     /// tag (when present) is the tag of the image that triggered the
     /// blob resolution — not the blob itself.
     #[error("blob not found: {0}")]
-    BlobNotFound(PinnedIdentifier),
+    BlobNotFound(Box<PinnedOciIdentifier>),
     /// A registry operation failed.
     #[error("registry operation failed: {0}")]
     Registry(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -267,21 +267,21 @@ impl ClientError {
     /// The image's own digest (if any) is dropped — the stored identifier
     /// carries the *blob* digest, which is what was actually missing.
     /// Falls back to [`ClientError::Registry`] if the image reference
-    /// cannot produce a well-formed [`PinnedIdentifier`]. This path is
+    /// cannot produce a well-formed [`PinnedOciIdentifier`]. This path is
     /// unreachable after a HEAD succeeded against the registry: the
     /// transport has already used `image` to issue a real HTTP request,
     /// so the reference is known-valid by construction. The debug
     /// assertions fire loudly in dev builds to catch any regression.
     pub fn blob_not_found(image: &native::Reference, blob_digest: &Digest) -> Self {
-        let identifier = match Identifier::try_from(image.clone()) {
+        let identifier = match OciIdentifier::from_native(image.clone()) {
             Ok(id) => id.clone_with_digest(blob_digest.clone()),
             Err(e) => {
                 debug_assert!(false, "unreachable after HEAD succeeded: {e}");
                 return Self::Registry(Box::new(e));
             }
         };
-        match PinnedIdentifier::try_from(identifier) {
-            Ok(pinned) => Self::BlobNotFound(pinned),
+        match PinnedOciIdentifier::try_from(identifier) {
+            Ok(pinned) => Self::BlobNotFound(Box::new(pinned)),
             Err(e) => {
                 debug_assert!(false, "unreachable after HEAD succeeded: {e}");
                 Self::Registry(Box::new(e))

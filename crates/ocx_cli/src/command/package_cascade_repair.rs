@@ -89,7 +89,10 @@ impl PackageCascadeRepair {
             entry.outcomes = if attempted.is_empty() {
                 Vec::new()
             } else {
-                let package = observation.logical.as_ref().unwrap_or(&observation.identifier);
+                let package = observation
+                    .logical
+                    .as_ref()
+                    .map_or_else(|| observation.identifier.to_string(), ToString::to_string);
                 let _spinner = context.progress().spinner(format!("Repairing {package}"));
                 apply::apply(context.remote_client()?, &observation.identifier, attempted).await?
             };
@@ -208,7 +211,8 @@ mod tests {
 
     fn report() -> CascadeReport {
         CascadeReport {
-            identifier: ocx_oci::Identifier::parse("registry.test/acme/cmake").expect("fixture parses"),
+            identifier: ocx_oci::OciIdentifier::parse_target("registry.test/acme/cmake", ocx_oci::DEFAULT_REGISTRY)
+                .expect("fixture parses"),
             logical: None,
             aliases: Default::default(),
             rows: Vec::new(),

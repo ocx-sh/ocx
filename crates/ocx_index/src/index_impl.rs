@@ -114,7 +114,7 @@ pub trait IndexImpl: Send + Sync {
     /// never round-tripped into a storage path or lock. The default returns
     /// `None`; only [`super::OcxIndex`] (and `ChainedIndex`, which delegates)
     /// override it.
-    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::Identifier>> {
+    async fn physical_reference(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::OciIdentifier>> {
         let _ = identifier;
         Ok(None)
     }
@@ -132,7 +132,10 @@ pub trait IndexImpl: Send + Sync {
     /// exactly as [`Self::physical_reference`]'s `Ok(None)`: no rewrite known.
     /// The default returns `None`; only `ChainedIndex` overrides it, because it
     /// is the only implementor that holds a local copy to answer from.
-    async fn physical_reference_local(&self, identifier: &ocx_oci::Identifier) -> Result<Option<ocx_oci::Identifier>> {
+    async fn physical_reference_local(
+        &self,
+        identifier: &ocx_oci::Identifier,
+    ) -> Result<Option<ocx_oci::OciIdentifier>> {
         let _ = identifier;
         Ok(None)
     }

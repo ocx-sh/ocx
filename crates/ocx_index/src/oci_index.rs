@@ -39,7 +39,10 @@ impl OciIndex {
     async fn fetch_tags(&self, identifier: &ocx_oci::Identifier) -> Result<Vec<String>> {
         Ok(self
             .client
-            .list_tags_addressed(identifier.clone(), ReadAddressing::Mirrored)
+            .list_tags_addressed(
+                ocx_oci::OciIdentifier::passthrough(identifier),
+                ReadAddressing::Mirrored,
+            )
             .await?
             .into_iter()
             .filter(|tag| !is_reserved_tag(tag))
@@ -96,7 +99,10 @@ impl index_impl::IndexImpl for OciIndex {
     ) -> Result<Option<(ocx_oci::Digest, ocx_oci::Manifest)>> {
         Ok(Some(
             self.client
-                .fetch_manifest_addressed(identifier, ReadAddressing::Mirrored)
+                .fetch_manifest_addressed(
+                    &ocx_oci::OciIdentifier::passthrough(identifier),
+                    ReadAddressing::Mirrored,
+                )
                 .await?,
         ))
     }
@@ -124,7 +130,10 @@ impl index_impl::IndexImpl for OciIndex {
         // mirror is the right host to ask (Invariant #5).
         match self
             .client
-            .fetch_manifest_digest_addressed(identifier, ReadAddressing::Mirrored)
+            .fetch_manifest_digest_addressed(
+                &ocx_oci::OciIdentifier::passthrough(identifier),
+                ReadAddressing::Mirrored,
+            )
             .await
         {
             Ok(digest) => {
@@ -137,7 +146,8 @@ impl index_impl::IndexImpl for OciIndex {
     }
 
     async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
-        let bytes = self.client.pull_blob(blob_ref).await?;
+        let location = ocx_oci::OciIdentifier::passthrough(blob_ref.as_identifier()).at_pin_of(blob_ref);
+        let bytes = self.client.pull_blob(&location).await?;
         Ok(Some(bytes))
     }
 
@@ -150,7 +160,10 @@ impl index_impl::IndexImpl for OciIndex {
     ) -> Result<Option<(Vec<u8>, ocx_oci::Digest, ocx_oci::Manifest)>> {
         Ok(self
             .client
-            .fetch_manifest_raw_bytes_addressed(identifier, ReadAddressing::Mirrored)
+            .fetch_manifest_raw_bytes_addressed(
+                &ocx_oci::OciIdentifier::passthrough(identifier),
+                ReadAddressing::Mirrored,
+            )
             .await?)
     }
 

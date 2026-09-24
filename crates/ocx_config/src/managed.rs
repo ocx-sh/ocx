@@ -93,14 +93,16 @@ impl std::fmt::Display for RefreshPolicy {
 }
 
 /// Fully resolved form of [`ManagedConfig`] with defaults applied and the
-/// source parsed into a canonical `ocx_oci::Identifier`.
+/// source parsed into a canonical `ocx_oci::OciIdentifier`.
 ///
 /// Produced by [`resolve_managed_config`], called at `Context::try_init`
 /// (mirrors [`resolve_patch_config`](crate::patch::resolve_patch_config)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedManagedConfig {
-    /// The managed-config artifact reference.
-    pub source: ocx_oci::Identifier,
+    /// The managed-config artifact's registry location. A location, not a
+    /// package name: the artifact is fetched from exactly here, never routed
+    /// through an index.
+    pub source: ocx_oci::OciIdentifier,
     /// Whether an absent/mismatched snapshot fails closed.
     pub required: bool,
     /// Background refresh posture.
@@ -185,13 +187,11 @@ pub struct ManagedConfigSnapshot {
 /// `required` gate, the background tick, and the CLI's gated snapshot
 /// accessor so they can never drift.
 #[must_use]
-pub fn snapshot_matches_source(snapshot: &ManagedConfigSnapshot, source: &ocx_oci::Identifier) -> bool {
-    ocx_oci::Identifier::parse_with_default_registry(&snapshot.source, ocx_oci::DEFAULT_REGISTRY).is_ok_and(
-        |snapshot_source| {
-            snapshot_source.without_specifiers() == source.without_specifiers()
-                && source.digest().is_none_or(|pin| snapshot.digest == pin)
-        },
-    )
+pub fn snapshot_matches_source(snapshot: &ManagedConfigSnapshot, source: &ocx_oci::OciIdentifier) -> bool {
+    ocx_oci::OciIdentifier::parse_target(&snapshot.source, ocx_oci::DEFAULT_REGISTRY).is_ok_and(|snapshot_source| {
+        snapshot_source.without_specifiers() == source.without_specifiers()
+            && source.digest().is_none_or(|pin| snapshot.digest == pin)
+    })
 }
 
 /// Canonical [`ocx_oci::Identifier`](ocx_oci::Identifier) equality between two
@@ -254,7 +254,7 @@ pub enum ManagedConfigError {
         /// Named `effective_source`, not `source`, so `thiserror` does not
         /// treat this field as the variant's `#[source]` error (it is an
         /// `ocx_oci::Identifier`, not an error type).
-        effective_source: ocx_oci::Identifier,
+        effective_source: ocx_oci::OciIdentifier,
     },
 
     /// `required = true` and an identity-matching snapshot IS on disk, but its
@@ -273,7 +273,7 @@ pub enum ManagedConfigError {
         /// The effective managed-config source whose snapshot payload failed
         /// to parse. Named `effective_source` for the same reason as
         /// [`Self::SnapshotRequired`]'s field.
-        effective_source: ocx_oci::Identifier,
+        effective_source: ocx_oci::OciIdentifier,
     },
 
     /// An explicit `ocx self setup --managed-config` value was refused because
@@ -409,7 +409,7 @@ impl ManagedSnapshotState {
     /// observed directly (it has already parsed the payload) instead of
     /// calling this.
     #[must_use]
-    pub fn classify(snapshot: Option<&ManagedConfigSnapshot>, source: &ocx_oci::Identifier) -> Self {
+    pub fn classify(snapshot: Option<&ManagedConfigSnapshot>, source: &ocx_oci::OciIdentifier) -> Self {
         let Some(snapshot) = snapshot.filter(|snap| snapshot_matches_source(snap, source)) else {
             return Self::Unmatched;
         };
@@ -547,12 +547,13 @@ fn resolve_target(
         return Err(ManagedConfigError::EmptySource);
     }
 
-    let identifier = ocx_oci::Identifier::parse_with_default_registry(&source, ocx_oci::DEFAULT_REGISTRY).map_err(
-        |identifier_error| ManagedConfigError::InvalidSource {
-            value: source.clone(),
-            source: identifier_error,
-        },
-    )?;
+    let identifier =
+        ocx_oci::OciIdentifier::parse_target(&source, ocx_oci::DEFAULT_REGISTRY).map_err(|identifier_error| {
+            ManagedConfigError::InvalidSource {
+                value: source.clone(),
+                source: identifier_error,
+            }
+        })?;
 
     let required = managed.required.unwrap_or(ManagedConfig::DEFAULT_REQUIRED);
     let refresh = managed.refresh.unwrap_or(ManagedConfig::DEFAULT_REFRESH);
@@ -1216,8 +1217,8 @@ mod tests {
 
     // ── snapshot_matches_source (gate v2) ─────────────────────────────────────
 
-    fn gate_source(reference: &str) -> ocx_oci::Identifier {
-        ocx_oci::Identifier::parse_with_default_registry(reference, ocx_oci::DEFAULT_REGISTRY).unwrap()
+    fn gate_source(reference: &str) -> ocx_oci::OciIdentifier {
+        ocx_oci::OciIdentifier::parse_target(reference, ocx_oci::DEFAULT_REGISTRY).unwrap()
     }
 
     /// Gate v2 clause 1: tags float within one repository — a snapshot

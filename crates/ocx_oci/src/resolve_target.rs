@@ -21,7 +21,7 @@
 //! and a wall-clock check would red them every run. Nothing in this module
 //! reads a clock, and nothing added to it may.
 
-use crate::{Digest, Identifier, Manifest, Platform, Selection, select_best};
+use crate::{Digest, Manifest, OciIdentifier, Platform, Selection, select_best};
 
 /// What a sign, attest or verify run acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,7 +117,7 @@ pub struct ResolvedSubject {
     /// The physical transport identifier for the subject — the index
     /// indirection pointer already followed, or the logical reference when no
     /// source rewrites it.
-    pub physical: Identifier,
+    pub physical: OciIdentifier,
 }
 
 impl SignTarget {
