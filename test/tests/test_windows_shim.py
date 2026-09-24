@@ -32,6 +32,7 @@ run only on `windows-latest`. Individual tests additionally skip if the
 `ocx-shim` binary has not been built yet (Phase 4 deliverable) so the file
 is green-by-skip until the shim exists, then becomes a live gate.
 """
+
 from __future__ import annotations
 
 import json
@@ -127,6 +128,13 @@ def _install_shim_entrypoint(
     return exe_path
 
 
+def _holds_ocx(directory: Path) -> bool:
+    """Whether `directory` holds anything a bare `ocx` would resolve to."""
+    return any(
+        (directory / f"ocx{ext}").is_file() for ext in (".exe", ".com", ".cmd", ".bat")
+    )
+
+
 @pytest.fixture()
 def shim_entrypoint(tmp_path: Path) -> dict:
     """A built, registry-independent shim entrypoint ready to invoke.
@@ -143,6 +151,17 @@ def shim_entrypoint(tmp_path: Path) -> dict:
     exe = _install_shim_entrypoint(shim_bin, ep_dir, pkg_root)
     env = dict(os.environ)
     env["OCX_HOME"] = str(ocx_home)
+    # No ambient ocx. Unpinned, the shim spawns a bare `ocx` through the
+    # CreateProcessW search, so an ocx the host or runner carries on PATH
+    # (setup-ocx puts one there) would decide each outcome - and a released
+    # ocx exits 65 on this fixture's hand-written metadata. A test that wants
+    # a forward pins its own stand-in via OCX_BINARY_PIN.
+    env.pop("OCX_BINARY_PIN", None)
+    env["PATH"] = os.pathsep.join(
+        d
+        for d in env.get("PATH", "").split(os.pathsep)
+        if d and not _holds_ocx(Path(d))
+    )
     return {
         "exe": exe,
         "ep_dir": ep_dir,
@@ -225,7 +244,8 @@ def test_shim_resolves_via_pathext(shim_entrypoint: dict, shell: list[str]) -> N
         [*cmd, invocation],
         capture_output=True,
         text=True,
-        env=env, check=False,
+        env=env,
+        check=False,
     )
     # The shim must be reached and hit its deterministic pinned-miss E5
     # path. Its `ocx-shim:` stderr line is the authoritative cross-shell
@@ -255,25 +275,48 @@ def test_shim_argv0_is_real_target_not_cmd_exe(shim_entrypoint: dict) -> None:
         [str(shim_entrypoint["exe"]), "--version"],
         capture_output=True,
         text=True,
-        env=shim_entrypoint["env"], check=False,
+        env=shim_entrypoint["env"],
+        check=False,
     )
     assert "cmd.exe" not in proc.stderr.lower(), (
         f"shim must not route through cmd.exe; stderr={proc.stderr!r}"
     )
 
 
-def test_shim_forwards_args_verbatim(shim_entrypoint: dict) -> None:
-    """Args with spaces / unicode reach the target literally (one argument)."""
+def test_shim_forwards_args_verbatim(shim_entrypoint: dict, tmp_path: Path) -> None:
+    """Args with spaces / unicode reach the target literally (one argument).
+
+    Pinned to a fake `ocx.cmd` that records what it received, as the
+    `& whoami` test below does: with no ocx at all the shim exits E5 before
+    it forwards anything, and the argv would never be looked at.
+    """
+    fake_ocx_dir = tmp_path / "fake_ocx"
+    fake_ocx_dir.mkdir()
+    argv_log = tmp_path / "argv.txt"
+    (fake_ocx_dir / "ocx.cmd").write_text(
+        f'@ECHO off\r\n>"{argv_log}" ECHO %*\r\nEXIT /B 0\r\n',
+        encoding="utf-8",
+    )
+    env = dict(shim_entrypoint["env"])
+    env["OCX_BINARY_PIN"] = str(fake_ocx_dir / "ocx.cmd")
     proc = subprocess.run(
         [str(shim_entrypoint["exe"]), "arg with spaces", "café"],
         capture_output=True,
         text=True,
-        env=shim_entrypoint["env"], check=False,
+        env=env,
+        check=False,
     )
-    # Pre-spawn failures (no ocx) exit 69; a successful forward exits 0.
-    assert proc.returncode in (0, 69), (
-        f"verbatim arg forwarding must not corrupt argv; rc={proc.returncode} "
+    assert proc.returncode == 0, (
+        f"the pinned fake ocx must run and exit 0; rc={proc.returncode} "
         f"stderr={proc.stderr!r}"
+    )
+    # `ECHO` writes in the console code page, so only the ASCII argument is
+    # compared byte for byte; `café` still has to pass through without the
+    # shim failing. Quoted = forwarded as one argument, not three.
+    forwarded = argv_log.read_text(encoding="utf-8", errors="replace")
+    assert '"arg with spaces"' in forwarded, (
+        f"`arg with spaces` must reach ocx as ONE quoted argument; "
+        f"forwarded={forwarded!r}"
     )
 
 
@@ -304,9 +347,7 @@ def test_shim_ampersand_arg_not_executed(shim_entrypoint: dict, tmp_path: Path) 
     # shim had let a shell re-parse `& whoami`, `whoami` would have run
     # before this fake ocx ever saw the argument.
     (fake_ocx_dir / "ocx.cmd").write_text(
-        "@ECHO off\r\n"
-        f'>"{argv_log}" ECHO %*\r\n'
-        "EXIT /B 0\r\n",
+        f'@ECHO off\r\n>"{argv_log}" ECHO %*\r\nEXIT /B 0\r\n',
         encoding="utf-8",
     )
     env = dict(shim_entrypoint["env"])
@@ -315,7 +356,8 @@ def test_shim_ampersand_arg_not_executed(shim_entrypoint: dict, tmp_path: Path) 
         [str(shim_entrypoint["exe"]), "& whoami"],
         capture_output=True,
         text=True,
-        env=env, check=False,
+        env=env,
+        check=False,
     )
     assert proc.returncode == 0, (
         f"the pinned fake ocx must run and exit 0; rc={proc.returncode} "
@@ -372,7 +414,8 @@ def test_shim_propagates_child_exit_code(shim_entrypoint: dict, tmp_path: Path) 
         [str(shim_entrypoint["exe"])],
         capture_output=True,
         text=True,
-        env=env, check=False,
+        env=env,
+        check=False,
     )
     assert proc.returncode == 42, (
         f"shim must propagate the child's exit code verbatim (E8 full "
@@ -412,7 +455,7 @@ def test_shim_exe_resolves_and_no_cmd_emitted(shim_entrypoint: dict) -> None:
     `.cmd`, so the residual `%*` orphan is gone. This pins both halves of that
     invariant: the entrypoint dir has the `.exe`/`.shim` pair and NO `.cmd`,
     and bare-name resolution under the default Windows PATHEXT reaches the
-    shim (rc 0 forward or E5/69 when no `ocx` is resolvable — never a
+    shim (E5/69, since the fixture leaves no `ocx` resolvable — never a
     Python/loader crash, never cmd.exe).
     """
     ep_dir = shim_entrypoint["ep_dir"]
@@ -428,12 +471,14 @@ def test_shim_exe_resolves_and_no_cmd_emitted(shim_entrypoint: dict) -> None:
         ["cmd", "/c", "hello"],
         capture_output=True,
         text=True,
-        env=env, check=False,
+        env=env,
+        check=False,
     )
-    assert proc.returncode in (0, 69), (
+    # The fixture strips every ambient ocx, so reaching the shim means its
+    # unpinned E5: exit 69 with its own message, never a forward.
+    assert proc.returncode == 69 and "ocx-shim: ocx not found" in proc.stderr, (
         f"bare-name `hello` must resolve the `.exe` shim via default PATHEXT "
-        f"and either forward or report E5 (69); rc={proc.returncode} "
-        f"stderr={proc.stderr!r}"
+        f"and report E5 (69); rc={proc.returncode} stderr={proc.stderr!r}"
     )
     assert "cmd.exe" not in proc.stderr.lower(), (
         f"resolution must reach the shim, never route through cmd.exe; "
@@ -453,7 +498,8 @@ def test_shim_missing_sidecar_exits_78(shim_entrypoint: dict) -> None:
         [str(shim_entrypoint["exe"])],
         capture_output=True,
         text=True,
-        env=shim_entrypoint["env"], check=False,
+        env=shim_entrypoint["env"],
+        check=False,
     )
     assert proc.returncode == 78, (
         f"missing sidecar must exit 78 (EX_CONFIG / E1); rc={proc.returncode}"
@@ -470,7 +516,8 @@ def test_shim_malformed_sidecar_exits_78(shim_entrypoint: dict) -> None:
         [str(shim_entrypoint["exe"])],
         capture_output=True,
         text=True,
-        env=shim_entrypoint["env"], check=False,
+        env=shim_entrypoint["env"],
+        check=False,
     )
     assert proc.returncode == 78, (
         f"malformed sidecar must exit 78 (EX_CONFIG / E2); rc={proc.returncode}"
@@ -499,7 +546,8 @@ def test_shim_honours_ocx_binary_pin(shim_entrypoint: dict, tmp_path: Path) -> N
         [str(shim_entrypoint["exe"])],
         capture_output=True,
         text=True,
-        env=env, check=False,
+        env=env,
+        check=False,
     )
     assert proc.returncode == 57, (
         f"shim must spawn the OCX_BINARY_PIN binary (exit 57 sentinel), not a "
@@ -543,7 +591,8 @@ def test_shim_runs_without_console(shim_entrypoint: dict, tmp_path: Path) -> Non
         stdin=subprocess.DEVNULL,
         capture_output=True,
         creationflags=detached_process,
-        env=env, check=False,
+        env=env,
+        check=False,
     )
     assert proc.returncode == 73, (
         f"a no-console (DETACHED_PROCESS) shim must still spawn the pinned "
@@ -577,7 +626,8 @@ def test_shim_empty_pin_deterministic_fail(shim_entrypoint: dict) -> None:
         [str(shim_entrypoint["exe"])],
         capture_output=True,
         text=True,
-        env=env, check=False,
+        env=env,
+        check=False,
     )
     assert proc.returncode in (69, 74, 77), (
         f"an empty OCX_BINARY_PIN must take the pin branch and fail the spawn "

@@ -326,12 +326,15 @@ jobs:
           submodules: true
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
-      # uv only, never setup-ocx: the shim resolves `ocx` from PATH, and a
-      # released ocx there is reached by the tests below and cannot read their
-      # hand-written package metadata (exit 65). With no ocx on PATH the shim
-      # reports E5, which those tests accept.
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      # The ocx this puts on PATH never reaches the tests below: their fixture
+      # strips every ambient ocx and pins its own stand-ins.
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Toolchain from ocx.toml + ocx.lock (uv, go-task, CPython), as in
+          # verify-basic.yml; the object store stays uncached, as there.
+          cache: false
 
       # Native windows-latest build (debug — acceptance, not a published
       # binary; subsystem-ci.md "no --release for tests"). This is the shim
