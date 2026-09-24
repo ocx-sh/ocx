@@ -14,7 +14,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src import OcxRunner, assert_dir_exists, current_platform
+
+pytestmark = pytest.mark.command("package_push")
 
 
 def _make_shared_layer(tmp_path: Path, content: str) -> Path:

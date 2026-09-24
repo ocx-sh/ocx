@@ -6,6 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Internal-only escape hatch, the same `__name` convention every other crate
+# here uses. Gates `capture`, the stdout/stderr sink the in-process CLI seam
+# (`ocx::app::seam`) reads a command's output from. A release build lacks it.
+__testing = []
+
 [dependencies]
 # The only `ocx_*` row. `ocx_util::error::SerializationError` is what
 # `DataInterface::print_json` raises; `ocx_exit` is in this crate's allowed set

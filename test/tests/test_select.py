@@ -1,6 +1,8 @@
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src import (
     OcxRunner,
     PackageInfo,
@@ -9,6 +11,8 @@ from src import (
     registry_dir,
 )
 from src.helpers import make_package
+
+pytestmark = pytest.mark.command("select", "deselect", "install")
 
 
 def test_select_switches_current_symlink(

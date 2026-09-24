@@ -2,12 +2,11 @@
 # Copyright 2026 The OCX Authors
 """The `patch` verb's smoke-tier happy path (plan_crate_split_workspace.md C-013).
 
-Every other `ocx patch` acceptance test lives in `test_patches.py`, which is
-pinned `xdist_group("patch_global_slot")` because its tests share the
-registry-wide global descriptor at `<patch-registry>/global` and must run
-serially. A smoke tier wants the opposite — one parallel-safe test — so this
-one carries no `xdist_group` and never goes near that slot: the patch registry
-it names is a UUID-scoped path under the test registry (so even the `global`
+Every other `ocx patch` acceptance test lives in `test_patches.py`. A smoke
+tier wants one parallel-safe test, so this one carries no `xdist_group` and
+never goes near the bare registry's global descriptor at `<registry>/global`,
+the one slot `test_patches.py`'s grouped tests write: the patch registry it
+names is a UUID-scoped path under the test registry (so even the `global`
 repository under it is this test's own), and `ocx patch test` composes the
 descriptor from the file it is handed rather than from anything published.
 """
@@ -20,6 +19,8 @@ import pytest
 
 from src.helpers import make_package
 from src.runner import OcxRunner
+
+pytestmark = pytest.mark.command("patch_test")
 
 
 @pytest.mark.smoke

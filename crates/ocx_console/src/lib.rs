@@ -28,6 +28,8 @@
 //!   what an `Identifier` is made of, or what a `private`/`interface` pair
 //!   means, belongs to whoever owns that value.
 
+#[cfg(any(test, feature = "__testing"))]
+pub mod capture;
 mod data_interface;
 mod human;
 pub mod options;

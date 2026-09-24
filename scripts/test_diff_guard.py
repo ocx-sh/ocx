@@ -3,7 +3,7 @@
 # Copyright 2026 The OCX Authors
 """Refuse a diff that changes what the acceptance suite asserts.
 
-    scripts/test_diff_guard.py <base>..<head> [--allow test/tests/<file>.py:<line>]...
+    scripts/test_diff_guard.py <base>..<head> [--allow test/tests/<file>.py:<line>]... [--tiered-shapes]
     scripts/test_diff_guard.py --self-test
 
 The crate split (plan_crate_split_workspace.md DEC-10, C-077, S-012) moves
@@ -65,7 +65,11 @@ One hunk may be allow-listed by `--allow
 An allow-listed hunk must be exactly one line replacing one line: the
 neighbours of that constant are asserts, and a `--unified=0` hunk spanning
 them would let the allow-list re-point the constant and neutralise an assert
-in one commit.
+in one commit. Under `--tiered-shapes` an `--allow test/lint/<file>.py:<line>`
+also names a reviewed rewrite of a module-level binding a moved test reads
+(`_moved_global_problems`): every statement binding that name in the lint
+home must be allow-listed at its first line, and what the rewrite reads is
+held to the same rule in turn.
 
 A wholly new test function or `Test*` class is exempt from the line checks
 but not from every check — new code that rebinds what the existing tests
@@ -127,6 +131,25 @@ the full checks — so the guard is run over both the per-WP range and the
 merge-base range at each merge (DX-17), and neither range hides an edit the
 other would show.
 
+`--tiered-shapes` (plan_test_speed_tiers.md C-007, P-2) admits five more
+shapes, and only when passed — without it each is refused exactly as above
+(DEC-10's default, S-023): (a) a `test*` def removed under `test/tests/`
+whose AST-identical twin is added under `test/lint/` (a whole module when
+every def is matched; statements the move orphans may go with it); (b) a new
+`test/lint/conftest.py`, `test/lint/test_*.py`, `test/LINT_FLOOR` or a
+`test/LINT_*_CEILING`, whose
+own code is walked as new code except what it carries verbatim from a source
+module of its moved tests — module-level statements and undecorated helper
+defs; (c) one
+`pytest.mark.command("<key>", ...)` statement per module, in the form its
+existing `pytestmark` binding dictates; (d) `test/scoped_rows.toml` and
+`test/LINT_FLOOR` and the `test/LINT_*_CEILING` pair as config; (e) a removed def named by an added
+`// ported-from:` marker whose Rust test executed and passed in a fresh
+`target/bazel/junit.xml` — the guard runs `task bazel:test:unit` itself at
+HEAD (AM-7). A `test/SUITE_FLOOR` decrease may then not exceed the collected
+count of the (a)/(e) removals, and `test/LINT_FLOOR` may not decrease at all. In a config file, a `cargo` line's `--release`
+counts as the `--profile` it abbreviates (C-021's `--profile test-bin`).
+
 Stdlib only; driven by `git diff`. `--self-test` builds one throwaway git
 repository per shape under `<repo>/.tmp/` and shows the guard red on every
 forbidden shape and green on every allowed one — a guard that was never seen
@@ -137,11 +160,17 @@ from __future__ import annotations
 import argparse
 import ast
 import io
+import os
 import re
+import shutil
+import subprocess
 import sys
+import tarfile
 import tempfile
 import tokenize
-from dataclasses import dataclass, field
+import xml.etree.ElementTree as ET
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from _git import git
@@ -233,6 +262,23 @@ def _options(text: str) -> set[str]:
     return set() if text.lstrip().startswith("#") else set(_OPTION.findall(text))
 
 
+def _tiered_options(text: str) -> set[str]:
+    """`_options`, with cargo's `--release` read as the `--profile` it abbreviates.
+
+    `--tiered-shapes` only (plan_test_speed_tiers.md C-021 builds the acceptance
+    binary under `--profile test-bin`). The deletion rule compares option
+    *names* — a value is cut, so `--profile release` -> `--profile test-bin`
+    already passes — and cargo documents `--release` as `--profile release`.
+    Read that way, the short spelling is held exactly as the long one is: the
+    profile may change, every other option on the line must survive. Only on a
+    line that invokes `cargo`; anywhere else `--release` stays its own option.
+    """
+    options = _options(text)
+    if "--release" in options and "cargo" in text.split():
+        options = (options - {"--release"}) | {"--profile"}
+    return options
+
+
 def _replacement(removed: str, hunk: Hunk, hunks: list[Hunk], path: str) -> str | None:
     """The single added line `removed` turned into, or None if it just went.
 
@@ -271,7 +317,9 @@ def _selection_hit(text: str, path: str = "") -> str | None:
     for m in _SELECTION_TOKEN.finditer(text):
         if not _PERMITTED.match(text, m.start()):
             return f"the pytest selection token `{m.group(0)}`"
-    if path.endswith(".toml") and (m := _CONFIG_KEY.match(text)) and m["key"] not in _PERMITTED_CONFIG_KEYS:
+    # Scoped to the one pytest config: a `test/scoped_rows.toml` key
+    # (`ocx_setup = [...]`, C-007(d)) names a crate, not an ini setting.
+    if path == "test/pyproject.toml" and (m := _CONFIG_KEY.match(text)) and m["key"] not in _PERMITTED_CONFIG_KEYS:
         return f"the config key `{m['key']}`"
     return None
 
@@ -287,6 +335,11 @@ PLAN_OWNED_STRUCTURAL_TESTS = frozenset(
         "test/tests/test_smoke_coverage.py",
         "test/tests/test_logging.py",
         "test/tests/test_no_crate_path_assertions.py",
+        # Their lint-tier homes for the move window (C-007, C-LINT): the same
+        # oracles, so the same whole-module walk wherever they live.
+        "test/lint/test_smoke_coverage.py",
+        "test/lint/test_logging.py",
+        "test/lint/test_no_crate_path_assertions.py",
     }
 )
 
@@ -1125,6 +1178,9 @@ def check_python_edit(
     path: str,
     allow: frozenset[tuple[str, int]],
     inert_only: bool = False,
+    *,
+    sanctioned: frozenset[str] = frozenset(),
+    markers: bool = False,
 ) -> list[str]:
     """Judge a `test/**` edit line by line; `inert_only` drops the additive routes.
 
@@ -1133,6 +1189,10 @@ def check_python_edit(
     are all meaningful additions to a collected test module and meaningless in
     a fixture module, where the same shapes would be new fixture behaviour
     arriving under the permit written for new tests.
+
+    `sanctioned` and `markers` are `--tiered-shapes` only (C-007): the test
+    defs whose removal (a)/(e) already sanctioned, and whether the one
+    `pytest.mark.command` statement of shape (c) is admitted.
     """
     base_src = git(repo, "show", f"{base}:{path}")
     head_src = git(repo, "show", f"{head}:{path}")
@@ -1162,6 +1222,14 @@ def check_python_edit(
     if inert_only:
         exempt = frozenset()
     problems += [f"{path}:{p}" for p in def_problems]
+    removed_exempt: set[int] = set()
+    if sanctioned:
+        removed_all = {n for h in hunks for n, _ in h.removed}
+        removed_exempt = _sanctioned_base_lines(base_src, head_src, sanctioned, removed_all)
+    if markers:
+        marker_exempt, marker_problems = _marker_statement(base_src, head_src, hunks)
+        exempt = set(exempt) | marker_exempt
+        problems += [f"{path}:{p}" for p in marker_problems]
     # Inertness is judged per side, and git never shows an unchanged line — so
     # a docstring opened at one line and closed after the body is two inert
     # edits around a body that silently became text. Every untouched line
@@ -1175,6 +1243,8 @@ def check_python_edit(
             )
     for hunk in hunks:
         for lineno, text in hunk.removed:
+            if lineno in removed_exempt:
+                continue
             if word := _keyword_hit(text):
                 problems.append(f"{path}:-{lineno}: removed line carries {word}: {text.strip()!r}")
             elif lineno not in base_inert:
@@ -1433,7 +1503,7 @@ def check_relocation_only(
     return problems
 
 
-def check_config_edit(repo: Path, base: str, head: str, path: str) -> list[str]:
+def check_config_edit(repo: Path, base: str, head: str, path: str, tiered: bool = False) -> list[str]:
     """What an edit to an ALLOWED_CONFIG file may not do, in both directions.
 
     Added lines: a pytest selection token or an unlisted `.toml` key — the
@@ -1448,6 +1518,9 @@ def check_config_edit(repo: Path, base: str, head: str, path: str) -> list[str]:
     becomes a test that silently leaves the `-m smoke` selection. So the
     permit rule here is "an option survives the edit": a re-spelling that
     keeps every option passes, a deletion reds naming the option.
+
+    `tiered` (`--tiered-shapes`) reads cargo's `--release` as `--profile`
+    (`_tiered_options`); without it the comparison is today's, byte for byte.
     """
     diff = git(repo, "diff", "--no-color", "--no-renames", "--unified=0", base, head, "--", path)
     hunks = parse_hunks(diff)
@@ -1464,8 +1537,9 @@ def check_config_edit(repo: Path, base: str, head: str, path: str) -> list[str]:
     # single added line the removed one turned into.
     for hunk in hunks:
         for lineno, text in hunk.removed:
-            kept = _options(_replacement(text, hunk, hunks, path) or "")
-            for opt in sorted(_options(text) - kept):
+            options = _tiered_options if tiered else _options
+            kept = options(_replacement(text, hunk, hunks, path) or "")
+            for opt in sorted(options(text) - kept):
                 problems.append(
                     f"{path}:-{lineno}: removed line drops the option `{opt}`, which the line that "
                     f"replaced it does not carry: {text.strip()!r}"
@@ -1477,18 +1551,1382 @@ def _module_problems(repo: Path, head: str, path: str) -> list[str]:
     return [f"{path}:{p}" for p in module_rebinding_problems(git(repo, "show", f"{head}:{path}"))]
 
 
-def check_range(
-    repo: Path, base: str, head: str, allow: frozenset[tuple[str, int]]
+# ---------------------------------------------------------------------------
+# --tiered-shapes (plan_test_speed_tiers.md C-007, P-2): opt-in, never default
+# ---------------------------------------------------------------------------
+
+# (d) The config files the tiered plan adds. Joined to ALLOWED_CONFIG only
+# under the flag, so without it they are refused as today's new non-test file.
+LINT_FLOOR = "test/LINT_FLOOR"
+TIERED_CONFIG = frozenset(
+    {"test/scoped_rows.toml", LINT_FLOOR, "test/LINT_SKIP_CEILING", "test/LINT_XFAIL_CEILING"}
+)
+LINT_DIR = "test/lint/"
+# (e) The per-case report `task bazel:test:unit` writes — one `testcase` per
+# `#[test]`, `classname` the target, `name` the libtest path (AM-7). Never
+# `bazel-testlogs/**/test.xml`, which holds one `testcase` per *target*.
+UNIT_JUNIT = "target/bazel/junit.xml"
+#: `// ported-from: test/tests/<module>.py::<case>` on a line of its own (C-RUBRIC);
+#: `<case>` in pytest's spelling, `Class::method` for a method.
+PORTED_FROM = re.compile(
+    r"^\s*//\s*ported-from:\s*(?P<module>test/tests/[\w/.-]+\.py)::(?P<case>[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)\s*$"
+)
+
+#: Runs the unit lane in `repo`'s working tree and returns its exit status.
+UnitRunner = Callable[[Path], int]
+#: `(repo, base, nodeids)` → the count `pytest --collect-only -q` reports for
+#: `nodeids` in the `base` tree.
+Collector = Callable[[Path, str, list[str]], int]
+
+
+def run_unit_tests(repo: Path) -> int:
+    """`task bazel:test:unit` in `repo` — the only producer of UNIT_JUNIT.
+
+    No `sources:` cache on that task, so it always rewrites the report; a
+    green Bazel graph replays its test results from cache, which is what makes
+    running it here affordable.
+    """
+    task = shutil.which("task")
+    if task is None:
+        print("test-diff guard: `task` is not on PATH — run the guard under `ocx exec --`", file=sys.stderr)
+        return 127
+    # The lane's output is progress, not this guard's verdict: stdout stays the problem list.
+    return subprocess.run([task, "bazel:test:unit"], cwd=repo, stdout=sys.stderr, check=False).returncode
+
+
+_COLLECTED = re.compile(r"^(\d+) tests? collected", re.MULTILINE)
+
+
+def collect_count(repo: Path, base: str, nodeids: list[str]) -> int:
+    """One `pytest --collect-only -q` over `nodeids` at `base`, OCX_TESTS_NO_REGISTRY=1.
+
+    The base's whole tree is exported to a scratch directory and collected
+    there with the checkout's own pinned environment (`uv run --project
+    test`) — a parametrized test counts every case, which is the unit
+    `SUITE_FLOOR` is in. The whole tree, not `test/`: a module may import from
+    anywhere in the repository (`website/scripts` onto `sys.path`) and
+    parametrize over any of it (doc anchors, crate sources), and a partial
+    export turns the first into an ImportError and the second into a
+    different count than the base tree has.
+    """
+    scratch_root = repo / ".tmp"
+    scratch_root.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="diff-guard-collect-", dir=scratch_root) as tmp:
+        archive = subprocess.run(["git", "-C", str(repo), "archive", base], capture_output=True, check=False)
+        if archive.returncode != 0:
+            raise SystemExit(f"test-diff guard: git archive {base} failed:\n{archive.stderr.decode(errors='replace')}")
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+            tar.extractall(tmp, filter="data")
+        result = subprocess.run(
+            ["uv", "run", "--project", str(REPO_ROOT / "test"), "--directory", str(Path(tmp) / "test"),
+             "pytest", "--collect-only", "-q", "--color=no", *nodeids],
+            capture_output=True, text=True, encoding="utf-8", check=False,
+            env=os.environ | {"OCX_TESTS_NO_REGISTRY": "1"},
+        )
+    counted = _COLLECTED.findall(result.stdout)
+    if result.returncode != 0 or not counted:
+        raise SystemExit(
+            f"test-diff guard: collecting the {len(nodeids)} removed test(s) at {base} failed "
+            f"(exit {result.returncode}):\n{result.stdout[-2000:]}{result.stderr[-2000:]}"
+        )
+    count = int(counted[-1])
+    # Reader floor: every removed def collects at least one case, so fewer means
+    # pytest read something other than what was asked.
+    if count < len(nodeids):
+        raise SystemExit(f"test-diff guard: {count} case(s) collected for {len(nodeids)} removed test def(s) at {base}")
+    return count
+
+
+@dataclass(slots=True)
+class Tiered:
+    """The `--tiered-shapes` options; the two callables are the self-test's seams."""
+
+    unit_runner: UnitRunner = run_unit_tests
+    collector: Collector = collect_count
+
+
+def _lint_file_allowed(path: str) -> bool:
+    """(b) `test/lint/conftest.py` and `test/lint/test_*.py`, direct children only.
+
+    (`test/LINT_FLOOR` and the `test/LINT_*_CEILING` pair are admitted as
+    TIERED_CONFIG, where their edits are judged.)
+    `__init__.py` would make `test/lint` a package and change rootdir-relative
+    module names; a data file or a subdirectory is a decision, not a lint test.
+    """
+    rel = path.removeprefix(LINT_DIR)
+    return path.startswith(LINT_DIR) and "/" not in rel and (
+        rel == "conftest.py" or (rel.startswith("test_") and rel.endswith(".py"))
+    )
+
+
+def _removed_test_defs(base_src: str, head_src: str | None) -> dict[str, ast.AST]:
+    """Qualname → base node for every `test*` def the head no longer has (all, if deleted)."""
+    kept = set(_qualified_defs(head_src)) if head_src is not None else set()
+    return {
+        qualname: node
+        for qualname, node in _qualified_defs(base_src).items()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test")
+        and qualname not in kept
+    }
+
+
+def _move_key(defs: dict[str, ast.AST], qualname: str) -> tuple[str, str]:
+    """(qualname, the def as written plus every enclosing class's own context).
+
+    `ast.dump` omits positions by default, so the def is compared exactly as
+    written — decorators, docstring and body — wherever it sits. A method also
+    carries each enclosing class's decorators, bases, keywords and non-def
+    body: `@pytest.mark.usefixtures("check") class TestX` moved to a bare
+    `class TestX` runs its method without the fixture, and the method alone
+    would read identical.
+    """
+    parts = qualname.split(".")
+    context = []
+    for depth in range(1, len(parts)):
+        cls = defs[".".join(parts[:depth])]
+        if isinstance(cls, ast.ClassDef):
+            own = [item for item in cls.body if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+            context.append(ast.dump(ast.Module(body=[*cls.decorator_list, *cls.bases, *cls.keywords, *own], type_ignores=[])))
+    return qualname, "\n".join([*context, ast.dump(defs[qualname])])
+
+
+def _added_lint_defs(
+    repo: Path, base: str, head: str, listing: list[tuple[str, str]]
+) -> dict[tuple[str, str], list[str]]:
+    """`_move_key` of every def new under `test/lint/test_*.py` → the lint paths holding one.
+
+    One path per copy, because one added def sanctions one removal: two
+    identical tests in two modules read different module constants, and one
+    lint copy is one of them — the path is where `_moved_global_problems`
+    reads the constants the copy runs against.
+    """
+    found: dict[tuple[str, str], list[str]] = {}
+    for status, path in listing:
+        if status not in ("A", "M") or not _lint_file_allowed(path) or not Path(path).name.startswith("test_"):
+            continue
+        existing = set(_qualified_defs(git(repo, "show", f"{base}:{path}"))) if status == "M" else set()
+        defs = _qualified_defs(git(repo, "show", f"{head}:{path}"))
+        for qualname, node in defs.items():
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and qualname not in existing:
+                found.setdefault(_move_key(defs, qualname), []).append(path)
+    return found
+
+
+# A moved def is identical only together with the module-level names it runs
+# against: `for value in CASES: assert value` reads the same with `CASES = []`
+# as with `CASES = [False]`, and only one of them fails. So every name a moved
+# def reads — transitively, through the helpers, fixtures and constants that
+# bind it — must be bound in the lint home by the same statements as in the
+# source. The one sanctioned difference is a path constant (C-007(a): "path
+# constants move"), judged by `_path_constant`.
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+_PATH_FACTORIES = frozenset({"Path", "PurePath", "PosixPath", "PurePosixPath"})
+_PATH_METHODS = frozenset({"resolve", "absolute", "joinpath", "with_name", "with_suffix", "expanduser"})
+
+
+def _chain_root(node: ast.expr) -> str | None:
+    """The name an attribute/subscript chain hangs off (`A.b[0].c` → `A`), calls not followed."""
+    while isinstance(node, (ast.Attribute, ast.Subscript)):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _bound_names(stmt: ast.stmt) -> set[str]:
+    """The module-level names ``stmt`` binds or mutates.
+
+    A def/class binds its name; an import its aliases (`*` for a star import);
+    anything else every name stored, deleted or augmented at module scope —
+    including through an attribute or subscript (`CASES[0] = …`) and a
+    top-level mutating call (`CASES.append(…)`). Nested scopes are not entered.
+    """
+    if isinstance(stmt, _SCOPES):
+        return {stmt.name}
+    if isinstance(stmt, ast.Import):
+        return {alias.asname or alias.name.split(".")[0] for alias in stmt.names}
+    if isinstance(stmt, ast.ImportFrom):
+        return {alias.asname or alias.name for alias in stmt.names}
+    names: set[str] = set()
+    todo: list[ast.AST] = [stmt]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, _SCOPES):
+            if not isinstance(node, ast.Lambda):
+                names.add(node.name)
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names |= _bound_names(node)
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if root := _chain_root(node):
+                names.add(root)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        elif (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and (root := _chain_root(node.value.func.value))
+        ):
+            names.add(root)
+        todo.extend(ast.iter_child_nodes(node))
+    return names
+
+
+def _module_bindings(source: str) -> dict[str, list[ast.stmt]]:
+    """Name → every top-level statement binding or mutating it, in order."""
+    bindings: dict[str, list[ast.stmt]] = {}
+    for stmt in ast.parse(source).body:
+        for name in _bound_names(stmt):
+            bindings.setdefault(name, []).append(stmt)
+    return bindings
+
+
+def _reads(node: ast.AST) -> set[str]:
+    """Names ``node`` resolves outside itself: loads and a def's parameters, minus its locals.
+
+    Parameters count because a test's parameter is a fixture request, which
+    a module-level fixture of that name in the lint home would answer.
+    """
+    loads = {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return loads
+    stored = {n.id for stmt in node.body for n in ast.walk(stmt) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    params = {a.arg for a in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]}
+    return (loads - stored) | params
+
+
+def _path_constant(stmt: ast.stmt) -> bool:
+    """An assignment of a path expression: `Path(…)`, `__file__`, `.parent(s)[…]`, `/`-joins, str parts."""
+    if not isinstance(stmt, (ast.Assign, ast.AnnAssign)) or stmt.value is None:
+        return False
+    targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+    if not all(isinstance(t, ast.Name) for t in targets):
+        return False
+    marked = False
+    for node in ast.walk(stmt.value):
+        if isinstance(node, ast.Name):
+            marked |= node.id == "__file__"
+        elif isinstance(node, ast.Attribute):
+            if node.attr in ("parent", "parents"):
+                marked = True
+            elif node.attr not in _PATH_METHODS:
+                return False
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if node.keywords or not (
+                (isinstance(func, ast.Name) and func.id in _PATH_FACTORIES)
+                or (isinstance(func, ast.Attribute) and func.attr in _PATH_METHODS)
+            ):
+                return False
+            marked |= isinstance(func, ast.Name)
+        elif isinstance(node, ast.BinOp):
+            if not isinstance(node.op, ast.Div):
+                return False
+            marked = True
+        elif isinstance(node, ast.Constant):
+            if type(node.value) not in (str, int):
+                return False
+        elif not isinstance(node, (ast.Subscript, ast.expr_context, ast.Div)):
+            return False
+    return marked
+
+
+def _moved_global_problems(
+    base_src: str, lint_src: str, qualname: str, lint_path: str, allow: frozenset[tuple[str, int]] = frozenset()
 ) -> list[str]:
-    """Every violation in `base..head` under `test/`, as `path:line: reason` strings."""
+    """Names the moved def ``qualname`` reads that the lint home binds differently from its source.
+
+    A difference is admitted as a path constant on both sides, or as a
+    reviewed rewrite: every lint-home statement binding the name allow-listed
+    at its first line. Past either, the lint home's statements are what runs,
+    so their reads are checked in turn.
+    """
+    base_defs = _qualified_defs(base_src)
+    start: set[str] = {"*"} | _reads(base_defs[qualname])
+    parts = qualname.split(".")
+    for depth in range(1, len(parts)):
+        cls = base_defs[".".join(parts[:depth])]
+        if isinstance(cls, ast.ClassDef):
+            own = [item for item in cls.body if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+            for node in [*cls.decorator_list, *cls.bases, *cls.keywords, *own]:
+                start |= _reads(node)
+    base_bind, lint_bind = _module_bindings(base_src), _module_bindings(lint_src)
     problems: list[str] = []
-    listing = git(repo, "diff", "--name-status", "--no-renames", base, head, "--", "test/")
-    for row in listing.splitlines():
-        status, _, path = row.partition("\t")
+    # (name, reached only through a path constant's value). Past a path
+    # constant only the lint home's spelling runs, and it may be built from
+    # names the source never bound (`HERE = Path(__file__).parent`) — as long
+    # as each of those is itself a path constant or identical.
+    todo: list[tuple[str, bool]] = [(name, False) for name in sorted(start)]
+    seen: dict[str, bool] = {}
+    while todo:
+        name, via_path = todo.pop()
+        if name in seen and (not seen[name] or via_path):
+            continue
+        seen[name] = via_path
+        was, now = base_bind.get(name, []), lint_bind.get(name, [])
+        if [ast.dump(s) for s in was] == [ast.dump(s) for s in now]:
+            todo.extend((read, via_path) for stmt in now for read in sorted(_reads(stmt)))
+        elif now and all(map(_path_constant, now)) and (via_path or (was and all(map(_path_constant, was)))):
+            todo.extend((read, True) for stmt in now for read in sorted(_reads(stmt)))
+        elif now and all((lint_path, stmt.lineno) in allow for stmt in now):
+            todo.extend((read, via_path) for stmt in now for read in sorted(_reads(stmt)))
+        else:
+            where = f"line {now[0].lineno}" if now else "unbound"
+            problems.append(
+                f"{lint_path}: moved `{qualname}` reads `{name}`, bound differently than in its source module "
+                f"({where}) — a moved test runs against the same module-level names, only a path constant may change"
+            )
+    return problems
+
+
+# Comments, strings and char literals in Rust source — the spans a brace
+# counter must not read. Raw strings and nested block comments are closed by
+# hand in `_mask_rust`, since neither is a regular language.
+_RUST_SPAN = re.compile(
+    r"(?P<line>//[^\n]*)"
+    r"|(?P<block>/\*)"
+    r"|(?<!\w)(?P<raw>b?r(?P<hashes>#*)\")"
+    r"|(?P<str>b?\"(?:\\.|[^\"\\])*\")"
+    r"|(?P<char>b?'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]{1,6}\}|.)|[^'\\\n])')",
+    re.DOTALL,
+)
+_RUST_ITEM = re.compile(r"\b(?P<kind>fn|mod)\s+(?P<name>[A-Za-z_]\w*)")
+# What may stand between a leading marker and its `fn`, once comments are
+# masked and attributes removed: visibility and qualifiers.
+_RUST_QUALIFIERS = re.compile(r"(?:\s|pub(?:\s*\([\w\s:]*\))?|async|unsafe|const|extern)*")
+
+
+def _mask_rust(source: str) -> str:
+    """`source` with every comment, string and char literal blanked, newlines kept."""
+    out = list(source)
+
+    def blank(start: int, end: int) -> None:
+        for i in range(start, end):
+            if out[i] != "\n":
+                out[i] = " "
+
+    pos = 0
+    while m := _RUST_SPAN.search(source, pos):
+        if m["block"]:
+            depth, end = 1, m.end()
+            while depth and end < len(source):
+                if source.startswith("/*", end):
+                    depth, end = depth + 1, end + 2
+                elif source.startswith("*/", end):
+                    depth, end = depth - 1, end + 2
+                else:
+                    end += 1
+        elif m["raw"]:
+            close = source.find('"' + m["hashes"], m.end())
+            end = len(source) if close < 0 else close + 1 + len(m["hashes"])
+        else:
+            end = m.end()
+        blank(m.start(), end)
+        pos = end
+    return "".join(out)
+
+
+def _close_brace(masked: str, open_at: int) -> int:
+    depth = 0
+    for i in range(open_at, len(masked)):
+        if masked[i] == "{":
+            depth += 1
+        elif masked[i] == "}":
+            depth -= 1
+            if not depth:
+                return i
+    return len(masked)
+
+
+def _strip_attributes(text: str) -> str:
+    """`text` without its `#[...]` / `#![...]` attributes (brackets balanced)."""
+    out, i = [], 0
+    while i < len(text):
+        m = re.compile(r"#!?\[").match(text, i)
+        if not m:
+            out.append(text[i])
+            i += 1
+            continue
+        depth, i = 1, m.end()
+        while depth and i < len(text):
+            depth += {"[": 1, "]": -1}.get(text[i], 0)
+            i += 1
+    return "".join(out)
+
+
+def _rust_test_at(source: str, line: int) -> str | None:
+    """The in-file libtest path (`tests::fn`) of the fn a marker on `line` belongs to.
+
+    Its fn is the innermost one whose body holds the line, else the first fn
+    after it when only attributes, comments and qualifiers stand between (the
+    marker leads the test). The path prefixes every inline `mod x { … }`
+    enclosing that fn. None when the marker belongs to no fn.
+    """
+    masked = _mask_rust(source)
+    starts = [0]
+    for text_line in source.splitlines(keepends=True):
+        starts.append(starts[-1] + len(text_line))
+    if line > len(starts) - 1:
+        return None
+    at, after = starts[line - 1], starts[line]
+    items: list[tuple[str, str, int, int, int]] = []  # kind, name, keyword, open, close
+    for m in _RUST_ITEM.finditer(masked):
+        body = re.compile(r"[{;]").search(masked, m.end())
+        if body and body.group() == "{":
+            items.append((m["kind"], m["name"], m.start(), body.start(), _close_brace(masked, body.start())))
+    fns = [item for item in items if item[0] == "fn"]
+    inside = [item for item in fns if item[3] < at < item[4]]
+    if inside:
+        target = max(inside, key=lambda item: item[3])
+    else:
+        leading = [item for item in fns if item[2] >= after]
+        if not leading:
+            return None
+        target = min(leading, key=lambda item: item[2])
+        if not _RUST_QUALIFIERS.fullmatch(_strip_attributes(masked[after:target[2]])):
+            return None
+    mods = sorted((item for item in items if item[0] == "mod" and item[3] < target[2] < item[4]), key=lambda i: i[3])
+    return "::".join([*(mod[1] for mod in mods), target[1]])
+
+
+@dataclass(slots=True)
+class Port:
+    """One `ported-from` marker: where it is, and the libtest case it names."""
+
+    where: str  # `<file>:<line>`
+    crate: str | None = None  # `crates/<crate>/`
+    stem: str | None = None  # `tests/<stem>.rs` target, None for `src/`
+    name: str | None = None  # the full libtest path; None when underivable
+
+
+def _libtest_name(rs_path: str, in_file: str) -> tuple[str, str | None, str] | None:
+    """(crate dir, integration-test stem or None, libtest path), or None if underivable.
+
+    `crates/<c>/src/lib.rs`/`main.rs` are the module root, `src/a/mod.rs` is
+    `a`, `src/a/b.rs` is `a::b`; `crates/<c>/tests/<stem>.rs` is the root of
+    its own target. Anything else (`src/bin/`, `benches/`, `#[path]`) is not
+    derived, and an underivable port is refused rather than guessed.
+    """
+    parts = rs_path.split("/")
+    if len(parts) < 4 or parts[0] != "crates":
+        return None
+    crate, where, rel = parts[1], parts[2], parts[3:]
+    if where == "tests" and len(rel) == 1:
+        return crate, rel[0].removesuffix(".rs"), in_file
+    if where != "src" or rel[0] == "bin":
+        return None
+    if rel in (["lib.rs"], ["main.rs"]):
+        module: list[str] = []
+    elif rel[-1] == "mod.rs":
+        module = rel[:-1]
+    else:
+        module = [*rel[:-1], rel[-1].removesuffix(".rs")]
+    return crate, None, "::".join([*module, in_file])
+
+
+def _ported_markers(repo: Path, base: str, head: str) -> dict[tuple[str, str], list[Port]]:
+    """(module, qualname) → the ports of every `ported-from` marker added in the range."""
+    diff = git(repo, "diff", "--no-color", "--no-renames", "--unified=0", base, head, "--", "*.rs")
+    per_file: dict[str, list[str]] = {}
+    current: list[str] = []
+    in_header = False
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            current, in_header = [], True
+        elif in_header and line.startswith("+++ b/"):
+            per_file[line[len("+++ b/"):]] = current = []
+            in_header = False
+        elif not in_header:
+            current.append(line)
+    found: dict[tuple[str, str], list[Port]] = {}
+    for rs_path, lines in per_file.items():
+        source: str | None = None
+        for hunk in parse_hunks("\n".join(lines)):
+            for lineno, text in hunk.added:
+                if not (m := PORTED_FROM.match(text)):
+                    continue
+                if source is None:
+                    source = git(repo, "show", f"{head}:{rs_path}")
+                port = Port(where=f"{rs_path}:{lineno}")
+                in_file = _rust_test_at(source, lineno)
+                derived = _libtest_name(rs_path, in_file) if in_file else None
+                if derived:
+                    port.crate, port.stem, port.name = derived
+                found.setdefault((m["module"], m["case"].replace("::", ".")), []).append(port)
+    return found
+
+
+def _port_verdict(port: Port, cases: list[ET.Element]) -> str | None:
+    """Why this port's Rust test does not count as executed and passed, or None."""
+    if port.name is None:
+        return (
+            "the marker belongs to no fn whose libtest path can be derived — put it in a test's body or "
+            "leading attribute block, in crates/<crate>/src/** or crates/<crate>/tests/<stem>.rs"
+        )
+    label = f"//crates/{port.crate}:"
+
+    def owned(classname: str) -> bool:
+        if port.stem is not None:
+            return classname == f"{label}{port.stem}"
+        return classname.startswith(label) and classname.endswith("_test")
+
+    hits = [c for c in cases if c.get("name") == port.name and owned(c.get("classname", ""))]
+    test = f"`{port.name}` under {label}{port.stem or '*_test'}"
+    if not hits:
+        return (
+            f"{test} is not in {UNIT_JUNIT}, so it never executed — put the marker in a test that runs on "
+            "Linux under `//crates/...` (no cfg gate, no #[path]), named as libtest names it"
+        )
+    if any(c.find("skipped") is not None for c in hits):
+        return f"{test} was skipped, and an #[ignore]d port executes nothing — remove the #[ignore]"
+    if any(c.find("failure") is not None or c.find("error") is not None for c in hits):
+        return f"{test} failed in the unit run — fix the port until it passes, then delete the original"
+    return None
+
+
+def _report_problems(
+    repo: Path, head: str, ports: dict[tuple[str, str], list[Port]], tiered: Tiered
+) -> tuple[set[tuple[str, str]], list[str]]:
+    """(e) The ports whose Rust test executed and passed in a fresh UNIT_JUNIT at HEAD (AM-7).
+
+    Fresh means for a tree containing the tip: the tip is an ancestor of HEAD
+    (after P-5's `--no-ff` merge HEAD is the merge commit, never the tip), the
+    working tree is HEAD exactly (`git status --porcelain` empty — a staged or
+    unstaged edit is a tree HEAD does not hold, an untracked file one it does
+    not carry), and the report was written by the unit run this guard started.
+    """
+
+    def refuse_all(why: str) -> tuple[set[tuple[str, str]], list[str]]:
+        return set(), [
+            f"{port.where}: ported-from {module}::{qualname.replace('.', '::')} "
+            f"(Rust test `{port.name or '<underivable>'}`): {why}"
+            for (module, qualname), found in ports.items()
+            for port in found
+        ]
+
+    ancestor = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", head, "HEAD"], capture_output=True, check=False
+    ).returncode
+    if ancestor != 0:
+        return refuse_all(
+            f"the range tip {head[:12]} is not an ancestor of HEAD, so a unit run here tests a tree "
+            "without the port — check out the tip or its merge first"
+        )
+    dirty = git(repo, "status", "--porcelain", "--untracked-files=normal").splitlines()
+    if dirty:
+        return refuse_all(
+            f"the working tree differs from HEAD ({', '.join(d.strip() for d in dirty[:3])}"
+            f"{', …' if len(dirty) > 3 else ''}), so a unit run here would not test HEAD — commit or clean it"
+        )
+    # Freshness by construction rather than by mtime: an older report is
+    # deleted first, so any report present afterwards is this run's. (An mtime
+    # floor had a hole as wide as its rounding — a report written in the same
+    # second as the run started read as fresh.)
+    report = repo / UNIT_JUNIT
+    report.unlink(missing_ok=True)
+    status = tiered.unit_runner(repo)
+    if status != 0:
+        return refuse_all(
+            f"`task bazel:test:unit` exited {status} at HEAD, and a failed unit run proves no port — "
+            "make the unit lane green, then re-run the guard"
+        )
+    if not report.is_file():
+        return refuse_all(
+            f"stale or missing report: the unit run wrote no fresh {UNIT_JUNIT} (the previous one was deleted "
+            "before it started) — run the guard where `task bazel:test:unit` writes its per-case report (Linux)"
+        )
+    try:
+        cases = ET.parse(report).getroot().findall(".//testcase")
+    except ET.ParseError as err:
+        return refuse_all(f"{UNIT_JUNIT} is not readable JUnit ({err}) — re-run `task bazel:test:unit`")
+    admitted: set[tuple[str, str]] = set()
+    problems: list[str] = []
+    for key, found in ports.items():
+        # Every marker naming a case must hold: a marker is a claim of coverage.
+        verdicts = [(port, _port_verdict(port, cases)) for port in found]
+        failing = [(port, why) for port, why in verdicts if why]
+        if not failing:
+            admitted.add(key)
+        for port, why in failing:
+            problems.append(
+                f"{port.where}: ported-from {key[0]}::{key[1].replace('.', '::')} "
+                f"(Rust test `{port.name or '<underivable>'}`): {why}"
+            )
+    return admitted, problems
+
+
+# Names pytest reads by name, never through a load the orphan test can see.
+_NEVER_ORPHANED = re.compile(r"pytestmark|pytest_\w*|collect_ignore\w*|__\w+__")
+
+
+def _orphan_names(stmt: ast.stmt, suite: frozenset[str]) -> list[str] | None:
+    """The names `stmt` binds, when it is a removable kind; None when it is not.
+
+    Removable: an import (not `__future__`), a plain assignment the DEC-10(b)
+    walk finds nothing in, and an undecorated helper def. Never a test, a
+    fixture, a hook, a class or a bare expression — those act by being there.
+    """
+    if isinstance(stmt, ast.Import):
+        return [alias.asname or alias.name.split(".")[0] for alias in stmt.names]
+    if isinstance(stmt, ast.ImportFrom):
+        return None if stmt.module == "__future__" else [alias.asname or alias.name for alias in stmt.names]
+    if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        if stmt.value is None or not all(isinstance(t, ast.Name) for t in targets):
+            return None
+        if _store_problems([stmt], {}, enter_defs=False, suite=suite) or any(
+            _rebinding(node, {}) for node in ast.walk(stmt)
+        ):
+            return None
+        return [t.id for t in targets if isinstance(t, ast.Name)]
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None if stmt.decorator_list or stmt.name.startswith("test") else [stmt.name]
+    return None
+
+
+def _sanctioned_base_lines(base_src: str, head_src: str, sanctioned: frozenset[str], removed: set[int]) -> set[int]:
+    """Base lines a sanctioned removal may take: the defs, emptied classes, orphaned statements.
+
+    An orphan is a whole module-level statement the diff removes, of a kind
+    `_orphan_names` admits, every one of whose names a sanctioned removed def
+    — or another orphan, transitively — actually reads, none of which occurs as
+    a word anywhere in the head module (code, strings and comments alike — a
+    fixture is requested by parameter name and `usefixtures` by string, neither
+    a load) and none of which pytest reads by name. "Read by what left" is the
+    positive half: an import nothing reads (`from _support import leak_check
+    # noqa: F401`, an autouse fixture registered by being imported) acts by
+    being there, and its disappearance is not a consequence of the move. It is
+    what ruff's F401 would otherwise force a move to leave behind.
+    """
+    base_defs = _qualified_defs(base_src)
+    kept = set(_qualified_defs(head_src))
+    lines: set[int] = set()
+    for qualname in sanctioned:
+        lines.update(_span(base_defs[qualname]))
+    for qualname, node in base_defs.items():
+        if not isinstance(node, ast.ClassDef) or qualname in kept:
+            continue
+        body = node.body[1:] if ast.get_docstring(node) is not None else node.body
+        if body and all(
+            isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and f"{qualname}.{item.name}" in sanctioned
+            for item in body
+        ):
+            lines.update(_span(node))
+    def reads(node: ast.AST) -> set[str]:
+        return {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+
+    suite = _suite_modules(base_src)
+    candidates: list[tuple[ast.stmt, set[int], list[str]]] = []
+    for stmt in ast.parse(base_src).body:
+        span = set(_span(stmt)) if hasattr(stmt, "decorator_list") else set(
+            range(stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1)
+        )
+        names = _orphan_names(stmt, suite) if span <= removed else None
+        if names and not any(
+            _NEVER_ORPHANED.fullmatch(name) or re.search(rf"(?<!\w){re.escape(name)}(?!\w)", head_src)
+            for name in names
+        ):
+            candidates.append((stmt, span, names))
+    read = set().union(*(reads(base_defs[q]) for q in sanctioned))
+    grew = True
+    while grew:
+        grew = False
+        for entry in list(candidates):
+            stmt, span, names = entry
+            if set(names) <= read:
+                lines.update(span)
+                read |= reads(stmt)
+                candidates.remove(entry)
+                grew = True
+    return lines
+
+
+def _is_command_mark(node: ast.expr) -> bool:
+    """`pytest.mark.command("<key>", ...)` — string literals only, no keyword."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "command"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "mark"
+        and isinstance(node.func.value.value, ast.Name)
+        and node.func.value.value.id == "pytest"
+        and bool(node.args)
+        and all(isinstance(a, ast.Constant) and isinstance(a.value, str) for a in node.args)
+        and not node.keywords
+    )
+
+
+def _is_pytestmark(node: ast.expr, ctx: type) -> bool:
+    return isinstance(node, ast.Name) and node.id == "pytestmark" and isinstance(node.ctx, ctx)
+
+
+def _binds_pytestmark(stmt: ast.stmt) -> bool:
+    """A top-level statement that binds or extends `pytestmark`."""
+    if isinstance(stmt, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        return any(_is_pytestmark(t, ast.Store) for t in targets)
+    return (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Call)
+        and isinstance(stmt.value.func, ast.Attribute)
+        and _is_pytestmark(stmt.value.func.value, ast.Load)
+    )
+
+
+def _mark_state(tree: ast.Module) -> str | None:
+    """What the module binds: "none", "single", "list" — None when it binds it out of reach.
+
+    A `pytestmark` stored anywhere but a top-level statement (inside an `if`,
+    a `try`, a def) cannot be keyed, so no form is admitted over it.
+    """
+    top = [stmt for stmt in tree.body if _binds_pytestmark(stmt)]
+    stores = sum(1 for node in ast.walk(tree) if _is_pytestmark(node, ast.Store))
+    if stores != sum(1 for stmt in top if not isinstance(stmt, ast.Expr)):
+        return None
+    if not top:
+        return "none"
+    last = top[-1]
+    if isinstance(last, ast.Assign) and not isinstance(last.value, (ast.List, ast.Tuple)):
+        return "single"
+    return "list"
+
+
+def _marker_form_ok(stmt: ast.stmt, state: str) -> bool:
+    """The one form C-007(c) admits for `state`."""
+    if state == "list":
+        call = stmt.value if isinstance(stmt, ast.Expr) else None
+        return (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "append"
+            and _is_pytestmark(call.func.value, ast.Load)
+            and len(call.args) == 1
+            and not call.keywords
+            and _is_command_mark(call.args[0])
+        )
+    if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and _is_pytestmark(stmt.targets[0], ast.Store)):
+        return False
+    if state == "none":
+        return _is_command_mark(stmt.value)
+    return (
+        isinstance(stmt.value, ast.List)
+        and len(stmt.value.elts) == 2
+        and _is_pytestmark(stmt.value.elts[0], ast.Load)
+        and _is_command_mark(stmt.value.elts[1])
+    )
+
+
+def _marker_statement(base_src: str, head_src: str, hunks: list[Hunk]) -> tuple[set[int], list[str]]:
+    """(c) Head lines of the one admitted `pytest.mark.command` statement, and the problems.
+
+    A candidate is a wholly added top-level statement that binds `pytestmark`
+    or names `pytest.mark.command`; anything else added is left to the line
+    checks. The form is keyed by what the BASE module binds (`_mark_state`),
+    so the existing `skipif` is carried forward by the bare name and never
+    edited — a rewrite of it is a removed line in the marker's hunk.
+    """
+    added = {n for h in hunks for n, _ in h.added}
+    head_tree = ast.parse(head_src)
+
+    def names_command(stmt: ast.stmt) -> bool:
+        return any(
+            isinstance(node, ast.Attribute) and node.attr == "command"
+            and isinstance(node.value, ast.Attribute) and node.value.attr == "mark"
+            for node in ast.walk(stmt)
+        )
+
+    candidates = [
+        stmt
+        for stmt in head_tree.body
+        # A new def carrying `@pytest.mark.command` is a new test, judged as one.
+        if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and set(range(stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1)) <= added
+        and (_binds_pytestmark(stmt) or names_command(stmt))
+    ]
+    if not candidates:
+        return set(), []
+    if len(candidates) > 1:
+        return set(), [
+            f"line {stmt.lineno}: more than one added pytestmark statement — C-007(c) admits one per module"
+            for stmt in candidates
+        ]
+    stmt = candidates[0]
+    span = set(range(stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1))
+    text = ast.unparse(stmt)
+    # The marker's hunk is the one whose NEW side holds its lines. `covers`
+    # also matches the old side, and `span` is head numbering: over a range
+    # where an earlier hunk removed lines, an unrelated removal hunk's old
+    # line numbers overlap the marker's new ones (WP-06; branch-wide over
+    # test_doc_scripts_publish.py, `-80,2 +66,0` against a marker at 77-104).
+    if any(h.removed and h.new_start <= n < h.new_start + h.new_len for h in hunks for n in span):
+        return set(), [f"line {stmt.lineno}: the marker's hunk also removes a line — the existing binding is never edited: {text!r}"]
+    state = _mark_state(ast.parse(base_src))
+    if state is None:
+        return set(), [f"line {stmt.lineno}: the module binds pytestmark below top level, so no marker form applies: {text!r}"]
+    if not _marker_form_ok(stmt, state):
+        expected = {
+            "none": 'pytestmark = pytest.mark.command("<key>", ...)',
+            "single": 'pytestmark = [pytestmark, pytest.mark.command("<key>", ...)]',
+            "list": 'pytestmark.append(pytest.mark.command("<key>", ...))',
+        }[state]
+        return set(), [
+            (
+                f"line {stmt.lineno}: not the admitted marker line for a module binding {state} "
+                f"pytestmark — only `{expected}` with string-literal arguments: {text!r}"
+            )
+        ]
+    later = [s.lineno for s in head_tree.body if s is not stmt and _binds_pytestmark(s) and s.lineno > stmt.lineno]
+    if later:
+        return set(), [f"line {stmt.lineno}: the marker must follow the module's last pytestmark binding (line {later[-1]}): {text!r}"]
+    return span, []
+
+
+def _nodeid(path: str, qualname: str) -> str:
+    """pytest's node id relative to `test/` (the rootdir): `tests/x.py::Class::test`."""
+    return f"{path.removeprefix('test/')}::{qualname.replace('.', '::')}"
+
+
+# (b) A lint conftest governs collection of the moved tests, so the ways it
+# could make them never run are refused by name: every collection and
+# run-protocol hook below, `collect_ignore*`, any skip/xfail, and a plugin
+# other than `pytester` (C-008's own). Admission hooks — `pytest_runtest_setup`
+# raising, `pytest_sessionfinish` failing the session, fixtures — stay open.
+_LINT_CONFTEST_HOOKS = frozenset(
+    {
+        "pytest_collection",
+        "pytest_collection_modifyitems",
+        "pytest_ignore_collect",
+        "pytest_collect_file",
+        "pytest_collect_directory",
+        "pytest_pycollect_makemodule",
+        "pytest_pycollect_makeitem",
+        "pytest_generate_tests",
+        "pytest_deselected",
+        "pytest_pyfunc_call",
+        "pytest_runtest_call",
+        "pytest_runtest_protocol",
+        "pytest_runtest_makereport",
+        "pytest_runtest_logreport",
+        "pytest_report_teststatus",
+    }
+)
+# Beyond the named hooks, the ways a conftest flips a verdict rather than a
+# collection: pytest's private and unittest's skip machinery, a hook wrapper
+# (which sees and can replace any hook's result), a store to a report's or a
+# session's outcome, and ending the process early with a chosen status.
+_LINT_PRIVATE_ROOTS = frozenset({"_pytest", "unittest"})
+_LINT_SKIP_NAMES = frozenset({"SkipTest", "Skipped", "skip", "skipif", "xfail", "importorskip"})
+_LINT_VERDICT_ATTRS = frozenset({"outcome", "passed", "failed", "skipped", "exitstatus"})
+_LINT_EXIT_NAMES = frozenset({"exit", "_exit", "abort", "kill", "quit"})
+_LINT_PLUGINS = frozenset({"pytester"})
+_SKIPPING = frozenset({"skip", "skipif", "xfail", "importorskip"})
+
+
+def _skip_hits(nodes: list[ast.stmt], imports: dict[str, str]) -> list[str]:
+    """`line N: …` for every skip/xfail reachable from `nodes`.
+
+    `pytest.mark.skip(if)`/`xfail` and `pytest.skip`/`xfail`/`importorskip`
+    by attribute from the `pytest` root, and the same names imported bare from
+    pytest (`from pytest import skip`).
+    """
+    hits = []
+    for stmt in nodes:
+        for node in ast.walk(stmt):
+            if isinstance(node, ast.Attribute) and node.attr in _SKIPPING and _root_name(node) == "pytest":
+                hits.append(f"line {node.lineno}: `{ast.unparse(node)}` — a lint tier that skips runs nothing")
+            elif isinstance(node, ast.Name) and node.id in _SKIPPING and imports.get(node.id) == "pytest":
+                hits.append(f"line {node.lineno}: `{node.id}` from pytest — a lint tier that skips runs nothing")
+    return hits
+
+
+def _failing_status(value: ast.expr) -> bool:
+    """A status that can only fail a session: a nonzero int, or `pytest.ExitCode.<not OK>`."""
+    if isinstance(value, ast.Constant):
+        return type(value.value) is int and value.value != 0
+    return (
+        isinstance(value, ast.Attribute)
+        and value.attr != "OK"
+        and isinstance(value.value, ast.Attribute)
+        and value.value.attr == "ExitCode"
+        and _root_name(value) == "pytest"
+    )
+
+
+def _is_wrapper_hookimpl(decorator: ast.expr) -> bool:
+    """`@pytest.hookimpl(wrapper=…)` / `(hookwrapper=…)` with anything but a literal False."""
+    if not isinstance(decorator, ast.Call):
+        return False
+    func = decorator.func
+    if (func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)) != "hookimpl":
+        return False
+    return any(
+        kw.arg in ("wrapper", "hookwrapper") and not (isinstance(kw.value, ast.Constant) and kw.value.value is False)
+        for kw in decorator.keywords
+    )
+
+
+# The execution state an admitted hook must not write: pytest hands every hook
+# its node, session and config objects, and `item.obj = lambda: None` in a
+# `pytest_runtest_setup` turns every failing test into a passing one while
+# collection counts and skip ceilings stay exact. So a name holding one — a
+# parameter under a pytest hook/fixture argument name, or anything derived
+# from one by attribute, subscript, method result or unpacking — is read-only:
+# no store or `del` rooted at it, no method on it outside `_HOOK_READ_METHODS`,
+# never handed to a call that is not a pure builtin, and `getattr` on it only
+# for `_HOOK_READ_ATTRS`. `pytest` itself is a root for the store and argument
+# rules (`pytest.Function.runtest = …`, `monkeypatch.setattr(pytest.Function, …)`).
+_HOOK_OBJECT_PARAMS = frozenset(
+    {
+        "item", "items", "session", "config", "early_config", "request", "pyfuncitem", "collector",
+        "report", "reports", "call", "node", "metafunc", "parser", "pluginmanager", "fixturedef",
+        "excinfo", "nextitem", "parent", "manager", "plugin", "terminalreporter", "module", "fixturemanager",
+    }
+)
+_HOOK_READ_METHODS = frozenset(
+    {"get", "get_plugin", "getoption", "getini", "getvalue", "get_closest_marker", "iter_markers",
+     "write_sep", "write_line", "keys", "values", "startswith", "endswith", "split", "strip", "format"}
+)
+_HOOK_READ_ATTRS = frozenset({"fixturenames", "nodeid", "name", "originalname", "path", "location"})
+# Builtins a hook object may be handed to: they read it, and a container
+# they return still carries it (`_carries`), so the taint follows.
+_PURE_CALLS = frozenset(
+    {"getattr", "hasattr", "isinstance", "len", "str", "repr", "bool", "id", "sorted", "set",
+     "frozenset", "list", "tuple", "print", "float", "int"}
+)
+# Hooks registered under another name, which the named-hook refusal above
+# would never see: a plugin object handed to the plugin manager.
+_HOOK_REGISTRATION_ATTRS = frozenset(
+    {"register", "unregister", "import_plugin", "consider_module", "consider_pluginarg", "consider_conftest",
+     "consider_env", "consider_preparse", "add_hookspecs", "add_hookcall_monitoring", "subset_hook_caller",
+     "load_setuptools_entrypoints"}
+)
+
+
+# Calls whose result is a fresh scalar, never the object passed in.
+_SCALAR_CALLS = frozenset({"str", "repr", "len", "bool", "int", "float", "isinstance", "hasattr", "id"})
+
+
+def _carries(node: ast.expr | None, roots: set[str]) -> bool:
+    """Whether evaluating ``node`` can yield an object reachable from a name in ``roots``.
+
+    Conservative: any such name inside counts, through containers, calls,
+    lambdas and operators alike, except under what can only produce a fresh
+    scalar — an f-string, a comparison, `not`, a scalar builtin — or a read of
+    a `_HOOK_READ_ATTRS` attribute (`item.nodeid`, `getattr(item, "fixturenames")`).
+    """
+    if node is None:
+        return False
+    todo: list[ast.AST] = [node]
+    while todo:
+        cur = todo.pop()
+        if isinstance(cur, (ast.JoinedStr, ast.Compare)) or (
+            isinstance(cur, ast.UnaryOp) and isinstance(cur.op, ast.Not)
+        ):
+            continue
+        if isinstance(cur, ast.Attribute) and isinstance(cur.ctx, ast.Load) and cur.attr in _HOOK_READ_ATTRS:
+            continue
+        if isinstance(cur, ast.Call) and isinstance(cur.func, ast.Name):
+            if cur.func.id in _SCALAR_CALLS:
+                continue
+            if cur.func.id == "getattr" and len(cur.args) > 1 and isinstance(cur.args[1], ast.Constant) and (
+                cur.args[1].value in _HOOK_READ_ATTRS
+            ):
+                continue
+        if isinstance(cur, ast.Name) and cur.id in roots:
+            return True
+        todo.extend(ast.iter_child_nodes(cur))
+    return False
+
+
+def _hook_state_problems(tree: ast.Module, admitted_stores: set[int]) -> list[str]:
+    """Writes to pytest's execution state through a hook object (see `_HOOK_OBJECT_PARAMS`)."""
+    tainted = {a.arg for a in ast.walk(tree) if isinstance(a, ast.arg) and a.arg in _HOOK_OBJECT_PARAMS}
+    grew = True
+    while grew:
+        before = len(tainted)
+        for node in ast.walk(tree):
+            pairs: list[tuple[ast.expr, ast.expr | None]] = []
+            if isinstance(node, ast.Assign):
+                pairs = [(t, node.value) for t in node.targets]
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                pairs = [(node.target, node.value)]
+            elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                pairs = [(node.target, node.iter)]
+            elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+                pairs = [(node.optional_vars, node.context_expr)]
+            for target, value in pairs:
+                if _carries(value, tainted):
+                    tainted |= {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+        grew = len(tainted) > before
+    store_roots = tainted | {"pytest"}
+    stash_keys = {
+        t.id
+        for stmt in tree.body
+        if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call)
+        and ast.unparse(stmt.value.func).startswith("pytest.StashKey")
+        for t in stmt.targets if isinstance(t, ast.Name)
+    }
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            problems.append(f"line {node.lineno}: `{ast.unparse(node)}` — a lint conftest keeps no hook object past its call")
+        if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            own_stash = (
+                isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store)
+                and isinstance(node.value, ast.Attribute) and node.value.attr == "stash"
+                and isinstance(node.slice, ast.Name) and node.slice.id in stash_keys
+            )
+            if _carries(node.value, store_roots) and id(node) not in admitted_stores and not own_stash:
+                problems.append(
+                    f"line {node.lineno}: writes `{ast.unparse(node)}` — a hook object is read-only to a lint "
+                    "conftest (only `session.exitstatus = <failing>` and its own stash key are written)"
+                )
+        if isinstance(node, ast.Attribute) and node.attr in _HOOK_REGISTRATION_ATTRS:
+            problems.append(f"line {node.lineno}: `{ast.unparse(node)}` registers hooks under another name")
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        on_hook_object = isinstance(func, ast.Attribute) and _carries(func.value, tainted)
+        if on_hook_object and func.attr not in _HOOK_READ_METHODS:
+            problems.append(f"line {node.lineno}: calls `{ast.unparse(func)[:60]}` on a hook object — only reads are admitted")
+        if isinstance(func, ast.Name) and func.id == "getattr" and node.args and _carries(node.args[0], tainted) and not (
+            len(node.args) > 1 and isinstance(node.args[1], ast.Constant) and node.args[1].value in _HOOK_READ_ATTRS
+        ):
+            problems.append(f"line {node.lineno}: `{ast.unparse(node)[:80]}` — getattr on a hook object reads only {sorted(_HOOK_READ_ATTRS)}")
+        if not (on_hook_object or (isinstance(func, ast.Name) and func.id in _PURE_CALLS)):
+            for arg in [*node.args, *(kw.value for kw in node.keywords)]:
+                if _carries(arg, store_roots):
+                    problems.append(
+                        f"line {node.lineno}: hands `{ast.unparse(arg)[:60]}` to `{ast.unparse(func)[:40]}` — a hook "
+                        "object may reach only a pure builtin"
+                    )
+        if isinstance(func, ast.Attribute) and func.attr in ("setattr", "delattr", "setitem", "delitem") and node.args and (
+            isinstance(node.args[0], ast.Constant)
+        ):
+            problems.append(f"line {node.lineno}: `{ast.unparse(node)[:80]}` patches by dotted string — the target is unjudgeable")
+    return problems
+
+
+def _lint_conftest_problems(source: str) -> list[str]:
+    """(b) What `test/lint/conftest.py` may not do to the moved tests' collection or verdicts.
+
+    Admission is left open — a `pytest_runtest_setup` that raises, fixtures,
+    an autouse `monkeypatch` wrapper — and so is the budget hook, as long as
+    the status it stores can only fail the session (`_failing_status`).
+    """
+    tree = ast.parse(source)
+    problems = _skip_hits(tree.body, _import_bindings(source))
+    admitted_stores: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(a.name.split(".")[0] in _LINT_PRIVATE_ROOTS for a in node.names):
+            problems.append(f"line {node.lineno}: imports {_LINT_PRIVATE_ROOTS & {a.name.split('.')[0] for a in node.names}} — skip machinery outside pytest's public API")
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in _LINT_PRIVATE_ROOTS:
+            problems.append(f"line {node.lineno}: imports from `{node.module}` — skip machinery outside pytest's public API")
+        if (isinstance(node, ast.Name) and node.id in _LINT_SKIP_NAMES) or (
+            isinstance(node, ast.Attribute) and node.attr in _LINT_SKIP_NAMES and _root_name(node) != "pytest"
+        ):
+            problems.append(f"line {node.lineno}: `{ast.unparse(node)}` — a lint tier that skips runs nothing")
+        if (
+            isinstance(node, ast.Name)
+            and node.id in (_LINT_EXIT_NAMES | {"setattr", "delattr", "vars", "globals", "__import__", "exec", "eval"})
+        ) or (
+            isinstance(node, ast.Attribute)
+            and node.attr in (_LINT_EXIT_NAMES | {"__setattr__", "__delattr__", "__setitem__", "__delitem__", "__dict__"})
+        ):
+            problems.append(f"line {node.lineno}: `{ast.unparse(node)}` can end the run or reach an outcome by name")
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store) and node.attr in _LINT_VERDICT_ATTRS:
+            store = next(
+                (a for a in ast.walk(tree) if isinstance(a, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+                 and node in (a.targets if isinstance(a, ast.Assign) else [a.target])),
+                None,
+            )
+            admitted = (
+                node.attr == "exitstatus" and isinstance(store, ast.Assign) and _failing_status(store.value)
+            )
+            if admitted:
+                admitted_stores.add(id(node))
+            else:
+                problems.append(
+                    f"line {node.lineno}: stores `{ast.unparse(node)}` — a conftest may only fail a session "
+                    "(a nonzero int or pytest.ExitCode.<not OK>), never set an outcome"
+                )
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "setattr" and any(
+            isinstance(a, ast.Constant) and a.value in _LINT_VERDICT_ATTRS for a in node.args
+        ):
+            problems.append(f"line {node.lineno}: `{ast.unparse(node)[:80]}` sets an outcome by name")
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+            _is_wrapper_hookimpl(d) for d in node.decorator_list
+        ):
+            problems.append(f"line {node.lineno}: `{node.name}` is a hook wrapper — it sees and can replace any hook's result")
+        if isinstance(node, ast.keyword) and node.arg == "specname":
+            problems.append(f"line {node.value.lineno}: `specname=` implements a hook under another name")
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in _LINT_CONFTEST_HOOKS:
+            problems.append(f"line {node.lineno}: hook `{node.name}` can drop or neuter collected tests")
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id.startswith("collect_ignore"):
+            problems.append(f"line {node.lineno}: `{node.id}` drops files from collection")
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == "pytest_plugins":
+            value = next((a.value for a in ast.walk(tree) if isinstance(a, ast.Assign) and node in a.targets), None)
+            names = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
+            if not all(isinstance(n, ast.Constant) and n.value in _LINT_PLUGINS for n in names):
+                problems.append(f"line {node.lineno}: `pytest_plugins` may name only {sorted(_LINT_PLUGINS)}")
+    return problems + _hook_state_problems(tree, admitted_stores)
+
+
+MoveSources = dict[str, tuple[set[tuple[str, str]], set[str]]]
+
+
+def _carriable(stmt: ast.stmt) -> bool:
+    """A module-level statement a lint module may carry verbatim from a source module.
+
+    Every statement but a class, a test def and a decorated def: those are the
+    moved tests themselves (matched by `_move_key`) or fixtures and hooks,
+    which act by being there. An undecorated helper def is code the suite
+    already ran — carried only when its `ast.dump` is identical, so a helper
+    whose body changed on the way is walked as new code.
+    """
+    if isinstance(stmt, ast.ClassDef):
+        return False
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return not stmt.decorator_list and not stmt.name.startswith("test")
+    return True
+
+
+def _move_sources(repo: Path, base: str, head: str, listing: list[tuple[str, str]]) -> MoveSources:
+    """What a lint module may carry without judgement: code already in the suite.
+
+    The `_move_key` of every test def removed from `test/tests/` in the range,
+    and the `ast.dump` of every `_carriable` statement of a module those
+    removals came from (a verbatim `skipif`, a `sys.path` line, a helper) — so the
+    DEC-10(b) walk and the skip scan judge only what the move adds.
+    """
+    sources: MoveSources = {}
+    for status, path in listing:
+        if status not in ("D", "M") or not path.startswith("test/tests/") or not path.endswith(".py"):
+            continue
+        base_src = git(repo, "show", f"{base}:{path}")
+        removed = _removed_test_defs(base_src, None if status == "D" else git(repo, "show", f"{head}:{path}"))
+        if not removed:
+            continue
+        defs = _qualified_defs(base_src)
+        sources[path] = (
+            {_move_key(defs, qualname) for qualname in removed},
+            {
+                ast.dump(stmt)
+                for stmt in ast.parse(base_src).body
+                if _carriable(stmt)
+            },
+        )
+    return sources
+
+
+def _lint_module_problems(source: str, sources: MoveSources) -> list[str]:
+    """(b) A new `test/lint/test_*.py`: DEC-10(b)'s whole-module walk and a skip
+    scan over what it adds — every def that is not a moved twin and every
+    `_carriable` statement (helper defs included) not copied verbatim from a source module whose defs
+    THIS file carries (so one module's `skipif` cannot ride onto another's
+    moved tests in the same range)."""
+    keys = set().union(*(k for k, _ in sources.values()))
+    tree = ast.parse(source)
+    defs = _qualified_defs(source)
+    carried: set[int] = set()
+    for qualname, node in defs.items():
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _move_key(defs, qualname) in keys:
+            carried.update(_span(node))
+            # The key matched each enclosing class's own context too, so that
+            # context (decorators, header, non-def body) is carried as well.
+            parts = qualname.split(".")
+            for depth in range(1, len(parts)):
+                cls = defs[".".join(parts[:depth])]
+                carried.update(range(_span(cls).start, cls.body[0].lineno))
+                for item in cls.body:
+                    if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        carried.update(range(item.lineno, (item.end_lineno or item.lineno) + 1))
+    own_keys = {
+        _move_key(defs, q) for q, n in defs.items() if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    statements = set().union(*(stmts for k, stmts in sources.values() if k & own_keys))
+    for stmt in tree.body:
+        if _carriable(stmt) and ast.dump(stmt) in statements:
+            carried.update(range(stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1))
+    found = module_rebinding_problems(source) + _skip_hits(tree.body, _import_bindings(source))
+    return [p for p in found if not ((m := re.match(r"line (\d+):", p)) and int(m[1]) in carried)]
+
+
+def _tiered_removals(
+    repo: Path,
+    base: str,
+    head: str,
+    listing: list[tuple[str, str]],
+    tiered: Tiered,
+    allow: frozenset[tuple[str, int]] = frozenset(),
+) -> tuple[dict[str, frozenset[str]], list[str], list[str]]:
+    """(a) + (e): path → sanctioned qualnames, the problems, the sanctioned pytest node ids.
+
+    A deleted module appears in the result only when it held at least one
+    test def and every one of them is sanctioned — so its path being present
+    is the whole-module sanction `check_range` reads.
+    """
+    lint = _added_lint_defs(repo, base, head, listing)
+    removed: dict[str, dict[str, ast.AST]] = {}
+    base_defs: dict[str, dict[str, ast.AST]] = {}
+    base_srcs: dict[str, str] = {}
+    deleted: set[str] = set()
+    problems: list[str] = []
+    for status, path in listing:
+        if status not in ("D", "M") or not path.startswith("test/tests/") or not path.endswith(".py"):
+            continue
+        head_src = None if status == "D" else git(repo, "show", f"{head}:{path}")
+        base_src = git(repo, "show", f"{base}:{path}")
+        base_srcs[path] = base_src
+        base_defs[path] = _qualified_defs(base_src)
+        found = _removed_test_defs(base_src, head_src)
+        if found or status == "D":
+            removed[path] = found
         if status == "D":
-            problems.append(f"{path}: deleted — the suite never shrinks")
-        elif path in ALLOWED_CONFIG:
-            problems.extend(check_config_edit(repo, base, head, path))
+            deleted.add(path)
+    sanctioned: dict[str, set[str]] = {path: set() for path in removed}
+    unmatched: list[tuple[str, str]] = []
+    for path, defs in removed.items():
+        for qualname in defs:
+            key = _move_key(base_defs[path], qualname)
+            if lint.get(key):
+                lint_path = lint[key].pop()
+                problems += _moved_global_problems(
+                    base_srcs[path], git(repo, "show", f"{head}:{lint_path}"), qualname, lint_path, allow
+                )
+                sanctioned[path].add(qualname)
+            else:
+                unmatched.append((path, qualname))
+    if unmatched:
+        markers = _ported_markers(repo, base, head)
+        wanted = {key: markers[key] for key in unmatched if key in markers}
+        if wanted:
+            admitted, port_problems = _report_problems(repo, head, wanted, tiered)
+            problems += port_problems
+            for path, qualname in admitted:
+                sanctioned[path].add(qualname)
+    result: dict[str, frozenset[str]] = {}
+    for path, names in sanctioned.items():
+        if path in deleted:
+            missing = sorted(set(removed[path]) - names)
+            if not removed[path] or missing:
+                problems.append(
+                    f"{path}: deleted, but "
+                    + (f"{missing} have" if missing else "it holds no test def that")
+                    + " no identical move to test/lint/ and no executed ported-from port"
+                )
+                continue
+        if names:
+            result[path] = frozenset(names)
+    nodeids = [_nodeid(path, qualname) for path, names in result.items() for qualname in sorted(names)]
+    return result, problems, nodeids
+
+
+def _floor_pair(repo: Path, base: str, head: str, floor: str) -> tuple[int, int] | str | None:
+    """`floor`'s (base, head) counts when the range modified it, else None; a problem string when either is no count."""
+    if git(repo, "diff", "--name-status", "--no-renames", base, head, "--", floor).split()[:1] != ["M"]:
+        return None
+    values = []
+    for rev in (base, head):
+        text = git(repo, "show", f"{rev}:{floor}").strip()
+        if not text.isdigit():
+            return f"{floor}: {text!r} at {rev[:12]} is not a count"
+        values.append(int(text))
+    return values[0], values[1]
+
+
+def _floor_problems(repo: Path, base: str, head: str, nodeids: list[str], tiered: Tiered) -> list[str]:
+    """A `test/SUITE_FLOOR` decrease may not exceed the collected count of `nodeids`;
+    a `test/LINT_FLOOR` decrease is refused outright.
+
+    `≤`, where C-007 reads "equal": the merge-base range carries every
+    in-series floor RAISE as well (a WP adding tests lifts the floor in the
+    same series), so equality would red it forever once a raise and a move
+    have both landed. A smaller decrease leaves a stricter floor, which the
+    suite's own floor check reds if it is wrong — the direction that hides
+    nothing. The count is taken once, at the base.
+
+    The lint floor has no sanctioned decrease: nothing leaves `test/lint/`
+    under any shape (a deletion there is refused, and an edit is judged as
+    any collected module's), so a lower floor only hides lint tests that
+    stopped collecting.
+    """
+    problems: list[str] = []
+    lint = _floor_pair(repo, base, head, LINT_FLOOR)
+    if isinstance(lint, str):
+        problems.append(lint)
+    elif lint and lint[1] < lint[0]:
+        problems.append(
+            f"{LINT_FLOOR}: lowered ({lint[0]} -> {lint[1]}) — no shape moves a test out of test/lint/, "
+            "so the lint floor only rises"
+        )
+    floor = "test/SUITE_FLOOR"
+    pair = _floor_pair(repo, base, head, floor)
+    if isinstance(pair, str):
+        return [*problems, pair]
+    if pair is None or pair[0] <= pair[1]:
+        return problems
+    drop = pair[0] - pair[1]
+    count = tiered.collector(repo, base, nodeids) if nodeids else 0
+    if drop > count:
+        problems.append(
+            f"{floor}: lowered by {drop} ({pair[0]} -> {pair[1]}), but the sanctioned moves and ports "
+            f"remove {count} collected case(s) — a floor may drop by no more than the tests the range "
+            "moved to test/lint/ or ported away"
+        )
+    return problems
+
+
+def check_range(
+    repo: Path,
+    base: str,
+    head: str,
+    allow: frozenset[tuple[str, int]],
+    tiered: Tiered | None = None,
+) -> list[str]:
+    """Every violation in `base..head` under `test/`, as `path:line: reason` strings.
+
+    `tiered` is `--tiered-shapes`: None is today's guard, byte for byte.
+    """
+    problems: list[str] = []
+    listing = [
+        (status, path)
+        for status, _, path in (
+            row.partition("\t")
+            for row in git(repo, "diff", "--name-status", "--no-renames", base, head, "--", "test/").splitlines()
+        )
+    ]
+    config = ALLOWED_CONFIG | TIERED_CONFIG if tiered else ALLOWED_CONFIG
+    sanctioned: dict[str, frozenset[str]] = {}
+    sources: MoveSources | None = None
+    if tiered:
+        sanctioned, removal_problems, nodeids = _tiered_removals(repo, base, head, listing, tiered, allow)
+        problems.extend(removal_problems)
+        problems.extend(_floor_problems(repo, base, head, nodeids, tiered))
+    for status, path in listing:
+        if status == "D":
+            if not (tiered and path in sanctioned):
+                problems.append(f"{path}: deleted — the suite never shrinks")
+        elif path in config:
+            problems.extend(check_config_edit(repo, base, head, path, tiered=bool(tiered)))
+        elif status == "A" and tiered and path.startswith(LINT_DIR):
+            if not _lint_file_allowed(path):
+                problems.append(
+                    f"{path}: only test/lint/conftest.py and test/lint/test_*.py may be added under "
+                    "test/lint/ (no __init__.py, no data files, no subdirectories)"
+                )
+            elif path == f"{LINT_DIR}conftest.py":
+                problems.extend(f"{path}:{p}" for p in _lint_conftest_problems(git(repo, "show", f"{head}:{path}")))
+            else:
+                if sources is None:
+                    sources = _move_sources(repo, base, head, listing)
+                problems.extend(
+                    f"{path}:{p}" for p in _lint_module_problems(git(repo, "show", f"{head}:{path}"), sources)
+                )
         elif status == "A":
             if _new_file_allowed(path):
                 # The body rule is a Python AST rule about what a *test module*
@@ -1550,7 +2988,13 @@ def check_range(
                 # literal, and `test/recordings/` then reddened every merge for
                 # a docstring line predating the rule. A third directory would
                 # have been a third literal and a fourth ruling.
-                problems.extend(check_python_edit(repo, base, head, path, allow))
+                problems.extend(
+                    check_python_edit(
+                        repo, base, head, path, allow,
+                        sanctioned=sanctioned.get(path, frozenset()),
+                        markers=bool(tiered) and path.startswith("test/tests/"),
+                    )
+                )
             else:
                 problems.extend(check_relocation_only(repo, base, head, path, allow))
         else:
@@ -1650,6 +3094,215 @@ _BASE_TREE: dict[str, str] = {
     "test/scripts/sync_thing.sh": '#!/bin/sh\ndest="crates/ocx_lib/tests/fixtures"\n',
     "test/fixtures/pinned/inert_asset.json": '{"src": "crates/ocx_lib/src/a.rs"}\n',
     "crates/ocx_lib/src/lib.rs": "pub fn x() {}\n",
+    # C-007(e): UNIT_JUNIT lives under an ignored directory, as in the real
+    # tree, so writing the report never makes the tree "dirty".
+    ".gitignore": "/target/\n",
+}
+
+# ---- C-007 fixtures (--tiered-shapes) -------------------------------------
+# A module of two tests and their helpers, the (a) move subject. Supplied per
+# case through `Case.base` rather than `_BASE_TREE`, so no pre-existing case
+# sees it. `_rows`, `ROWS` and `tomllib` are read by `test_rows_parse` alone —
+# moving that test orphans exactly those three names.
+_STRUCTURE_PATH = "test/tests/test_structure.py"
+_STRUCTURE_ROWS_TEST = "def test_rows_parse():\n    assert isinstance(_rows(), dict)\n"
+_STRUCTURE_ORPHANS = (
+    "import tomllib\n",
+    'ROWS = ROOT / "scoped_rows.toml"\n',
+    '\n\ndef _rows():\n    return tomllib.loads(ROWS.read_text(encoding="utf-8"))\n',
+)
+_BASE_STRUCTURE = (
+    '"""Structural checks over the repository tree."""\n'
+    + _STRUCTURE_ORPHANS[0]
+    + "from pathlib import Path\n"
+    + "\n"
+    + "ROOT = Path(__file__).parent.parent\n"
+    + _STRUCTURE_ORPHANS[1]
+    + "\n\n"
+    + "def _read(name):\n"
+    + '    return (ROOT / name).read_text(encoding="utf-8")\n'
+    + _STRUCTURE_ORPHANS[2]
+    + "\n\n"
+    + "def test_floor_is_a_number():\n"
+    + '    assert _read("SUITE_FLOOR").strip().isdigit()\n'
+    + "\n\n"
+    + _STRUCTURE_ROWS_TEST
+)
+# The M-module move: `test_rows_parse` leaves, its helpers stay behind.
+_STRUCTURE_MINUS_ROWS_TEST = _BASE_STRUCTURE.replace("\n\n" + _STRUCTURE_ROWS_TEST, "", 1)
+# The move with its orphans cleaned up: nothing left reads them.
+_STRUCTURE_MINUS_ORPHANS = (
+    _STRUCTURE_MINUS_ROWS_TEST.replace(_STRUCTURE_ORPHANS[0], "", 1)
+    .replace(_STRUCTURE_ORPHANS[1], "", 1)
+    .replace(_STRUCTURE_ORPHANS[2], "", 1)
+)
+if "_rows" in _STRUCTURE_MINUS_ORPHANS or "tomllib" in _STRUCTURE_MINUS_ORPHANS or "ROWS" in _STRUCTURE_MINUS_ORPHANS:
+    raise SystemExit("self-test fixture: the orphan-cleanup module still names an orphan")
+# The lint homes. Module-level statements differ from the source on purpose:
+# the path constant is re-spelled and `_read` is local, as a real move reads.
+_LINT_ROWS = (
+    "import tomllib\n"
+    "from pathlib import Path\n"
+    "\n"
+    'ROWS = Path(__file__).resolve().parents[1] / "scoped_rows.toml"\n'
+    "\n\n"
+    "def _rows():\n"
+    '    return tomllib.loads(ROWS.read_text(encoding="utf-8"))\n'
+    "\n\n"
+    + _STRUCTURE_ROWS_TEST
+)
+_LINT_STRUCTURE = (
+    "import tomllib\n"
+    "from pathlib import Path\n"
+    "\n"
+    "ROOT = Path(__file__).resolve().parents[1]\n"
+    'ROWS = ROOT / "scoped_rows.toml"\n'
+    "\n\n"
+    "def _read(name):\n"
+    '    return (ROOT / name).read_text(encoding="utf-8")\n'
+    "\n\n"
+    "def _rows():\n"
+    '    return tomllib.loads(ROWS.read_text(encoding="utf-8"))\n'
+    "\n\n"
+    "def test_floor_is_a_number():\n"
+    '    assert _read("SUITE_FLOOR").strip().isdigit()\n'
+    "\n\n"
+    + _STRUCTURE_ROWS_TEST
+)
+# (c) bases: one module binding a single mark, one binding a list.
+_SKIPIF = 'pytest.mark.skipif(sys.platform == "win32", reason="posix shell")'
+_LOGIN_PATH = "test/tests/test_login.py"
+_BASE_LOGIN = (
+    "import sys\n\nimport pytest\n\n"
+    f"pytestmark = {_SKIPIF}\n"
+    "\n\n"
+    'def test_login(ocx):\n    assert ocx.run("login").returncode == 0\n'
+)
+# A module whose marker lands below removed comments (c007c_marker_below_earlier_removals).
+_SHIFT_PATH = "test/tests/test_shift.py"
+# The acceptance build line C-021 re-spells under `--profile test-bin`.
+_CARGO_TASKFILE = "version: '3'\ntasks:\n  build:\n    cmds:\n      - cargo build --release -p ocx --locked\n"
+_RECONCILE_PATH = "test/tests/test_shell_reconcile.py"
+_BASE_RECONCILE = (
+    "import sys\n\nimport pytest\n\n"
+    f"pytestmark = [{_SKIPIF}]\n"
+    "\n\n"
+    'def test_reconcile(ocx):\n    assert ocx.run("shell", "hook").returncode == 0\n'
+)
+# (e) the port of `test/tests/test_old.py::test_old` (a `_BASE_TREE` module
+# holding exactly that one test) into `crates/ocx_lib/src/lib.rs`, whose
+# libtest path is therefore `tests::old_is_true`.
+_PORTED_LIB_RS = (
+    "pub fn x() {}\n"
+    "\n"
+    "#[cfg(test)]\n"
+    "mod tests {\n"
+    "    // ported-from: test/tests/test_old.py::test_old\n"
+    "    #[test]\n"
+    "    fn old_is_true() {\n"
+    "        assert!(true);\n"
+    "    }\n"
+    "}\n"
+)
+_PORTED_LIB_RS_IGNORED = _PORTED_LIB_RS.replace("    #[test]\n", "    #[test]\n    #[ignore]\n", 1)
+_JUNIT_TARGET = "//crates/ocx_lib:ocx_lib_test"
+_JUNIT_TEMPLATE = (
+    f'<testsuites><testsuite name="{_JUNIT_TARGET}">'
+    f'<testcase classname="{_JUNIT_TARGET}" name="{{name}}" time="0"{{tail}}'
+    "</testsuite></testsuites>\n"
+)
+_JUNIT_PORT_PASSED = _JUNIT_TEMPLATE.format(name="tests::old_is_true", tail="/>")
+_JUNIT_PORT_IGNORED = _JUNIT_TEMPLATE.format(
+    name="tests::old_is_true", tail='><skipped message="ignored"/></testcase>'
+)
+# A report that executed something else: the port's name is absent.
+_JUNIT_PORT_ABSENT = _JUNIT_TEMPLATE.format(name="tests::something_else", tail="/>")
+# (b) content: C-008's conftest as the plan describes it — pytester, the
+# fixture admission raised at setup, the subprocess wrapper, the budget hook.
+_LINT_CONFTEST_C008 = (
+    "import os\nimport shutil\nimport subprocess\nimport time\nfrom pathlib import Path\n\nimport pytest\n\n"
+    'pytest_plugins = ["pytester"]\n\n'
+    'FORBIDDEN = frozenset({"ocx", "ocx_binary", "registry", "mirror_registry", "legacy_registry",'
+    ' "published_package", "sigstore_stack"})\n'
+    'BIN = Path(__file__).resolve().parents[1] / "bin"\n'
+    "_STARTED = time.monotonic()\n\n\n"
+    "def pytest_runtest_setup(item):\n"
+    '    banned = FORBIDDEN & set(getattr(item, "fixturenames", ()))\n'
+    "    if banned:\n"
+    '        raise pytest.UsageError(f"lint tier admits no fixture: {sorted(banned)}")\n\n\n'
+    "@pytest.fixture(autouse=True)\n"
+    "def _no_binaries(monkeypatch):\n"
+    "    real = subprocess.Popen\n\n"
+    "    def guarded(args, *rest, **kwargs):\n"
+    "        exe = shutil.which(str(args[0])) or str(args[0])\n"
+    '        if Path(exe).resolve().is_relative_to(BIN) or Path(exe).name == "task":\n'
+    '            raise RuntimeError(f"lint tier admits no binary: {args[0]}")\n'
+    "        return real(args, *rest, **kwargs)\n\n"
+    '    monkeypatch.setattr(subprocess, "Popen", guarded)\n\n\n'
+    "def pytest_sessionfinish(session, exitstatus):\n"
+    '    if time.monotonic() - _STARTED > float(os.environ.get("OCX_LINT_BUDGET_SECONDS", "30")):\n'
+    "        session.exitstatus = 1\n"
+)
+# A source module whose lint home carries it verbatim: a module-level skipif
+# and a def the DEC-10(b) walk would refuse as new code (`subprocess.run`).
+_SWEEP_PATH = "test/tests/test_sweep.py"
+_BASE_SWEEP = (
+    "import subprocess\nimport sys\n\nimport pytest\n\n"
+    'pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="posix paths")\n\n\n'
+    "def test_sweep():\n"
+    '    out = subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True).stdout\n'
+    "    assert out\n"
+)
+# The same spawn in an undecorated helper rather than the test: carried when
+# it arrives verbatim, walked as new code when its body changed on the way.
+_SWEEP_HELPER_PATH = "test/tests/test_sweep_helper.py"
+_BASE_SWEEP_HELPER = (
+    "import subprocess\n\n\n"
+    "def _tracked():\n"
+    '    return subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True).stdout\n'
+    "\n\n"
+    "def test_tree_is_tracked():\n"
+    "    assert _tracked()\n"
+)
+_AUTOUSE_PATH = "test/tests/test_p3.py"
+_BASE_AUTOUSE = (
+    "from src.helpers import leak_check  # noqa: F401\n\n\n"
+    "def test_keep():\n    assert 1\n\n\ndef test_moved():\n    assert 2\n"
+)
+_CLASS_DECO_PATH = "test/tests/test_p5.py"
+_BASE_CLASS_DECO = (
+    'import pytest\n\n\n@pytest.mark.usefixtures("check")\n'
+    "class TestX:\n    def test_m(self):\n        assert 1\n"
+)
+# Two modules, one identical test each; one lint copy sanctions only one of them.
+_DUP1_PATH = "test/tests/test_dup1.py"
+_DUP2_PATH = "test/tests/test_dup2.py"
+_BASE_DUP = "def test_same():\n    assert 1\n"
+_AA_PATH = "test/tests/test_aa.py"
+_BB_PATH = "test/tests/test_bb.py"
+_BASE_AA = "def test_a():\n    assert 1\n"
+_BB_SKIPIF = 'import sys\n\nimport pytest\n\npytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="mac")\n'
+_BASE_BB = _BB_SKIPIF + "\n\ndef test_b():\n    assert 2\n"
+_LINT_AA_WITH_BB_SKIPIF = _BB_SKIPIF + "\n\n" + _BASE_AA
+# A moved test whose body is identical but whose module constant is not.
+_CASES_PATH = "test/tests/test_cases.py"
+_BASE_CASES = (
+    "CASES = [0, False]\n\n\n"
+    "def _each():\n    return list(CASES)\n\n\n"
+    "def test_check():\n    for value in _each():\n        assert value\n"
+)
+_CLS_PATH = "test/tests/test_cls.py"
+_BASE_CLS = (
+    "def test_keep():\n    assert True\n\n\n"
+    "class TestOld:\n    def test_m(self):\n        assert 1 == 1\n"
+)
+_CLS_MINUS_CLASS = "def test_keep():\n    assert True\n"
+_PORTED_METHOD_LIB_RS = _PORTED_LIB_RS.replace(
+    "test/tests/test_old.py::test_old", "test/tests/test_cls.py::TestOld::test_m"
+).replace("fn old_is_true", "fn old_method_is_true")
+_PORT_HEAD: dict[str, str | None] = {
+    "test/tests/test_old.py": None,
+    "crates/ocx_lib/src/lib.rs": _PORTED_LIB_RS,
 }
 
 
@@ -1662,6 +3315,24 @@ class Case:
     # Files the case needs in the BASE commit, over `_BASE_TREE` — a removal
     # can only be shown against a base that carried the thing removed.
     base: dict[str, str] = field(default_factory=dict)
+    # --tiered-shapes (C-007). The case runs under the flag, with fakes for
+    # `task bazel:test:unit` (writes `junit` to UNIT_JUNIT unless None, returns
+    # `unit_exit`) and for pytest collection (one case per node id).
+    tiered: bool = False
+    junit: str | None = None
+    unit_exit: int = 0
+    # A report already on disk before the run, written moments earlier (same
+    # second, never backdated): the fake runner leaving it in place is the
+    # stale-report shape a rounded mtime check let through.
+    stale_junit: str | None = None
+    # HEAD when the guard runs: "tip" (the head commit itself), "merge" (a
+    # `--no-ff` merge of the tip into base's branch, P-5), "behind" (base
+    # checked out, so the tip is no ancestor of HEAD), "dirty" (an untracked,
+    # non-ignored file beside the tip).
+    head_state: str = "tip"
+    # A tiered green whose shape the guard already admits without the flag
+    # gets no `__flag_off` red twin.
+    twin: bool = True
 
 
 def _edit(text: str, old: str, new: str) -> str:
@@ -2552,6 +4223,512 @@ SELF_TEST_CASES: list[Case] = [
         + "    # never -k, never --deselect\n    cmd: uv run pytest -m smoke -n auto --dist loadgroup\n",
         "test/pyproject.toml": "[tool.pytest.ini_options]\n# run with `-m smoke -n auto` inside 90 s\nmarkers = ['smoke']\n",
     }),
+    # ======================================================================
+    # C-007 (plan_test_speed_tiers.md): the --tiered-shapes shapes (a)–(e) and
+    # the floor rule. Every case here runs under the flag; each green gets a
+    # `__flag_off` twin after the list (S-023). Names carry the shape letter.
+    # ======================================================================
+    # ---- (a) move to test/lint/ → green ------------------------------------
+    Case("c007a_move_one_test_out_of_a_modified_module", False, {
+        _STRUCTURE_PATH: _STRUCTURE_MINUS_ROWS_TEST,
+        "test/lint/test_structure_rows.py": _LINT_ROWS,
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007a_move_whole_module", False, {
+        # Every test def matched; the path constant `ROOT` is spelled
+        # differently in the lint home, which a path constant may be.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007a_move_with_orphan_cleanup", False, {
+        # `import tomllib`, `ROWS = …` and `def _rows` go with the moved test:
+        # none of the three names occurs in the head module any more.
+        _STRUCTURE_PATH: _STRUCTURE_MINUS_ORPHANS,
+        "test/lint/test_structure_rows.py": _LINT_ROWS,
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    # ---- (a) move → red ----------------------------------------------------
+    Case("c007a_body_changed_on_move_refused", True, {
+        _STRUCTURE_PATH: _STRUCTURE_MINUS_ROWS_TEST,
+        "test/lint/test_structure_rows.py": _edit(
+            _LINT_ROWS, "assert isinstance(_rows(), dict)", "assert _rows() is not None"
+        ),
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007a_deletion_without_counterpart_refused", True, {
+        _STRUCTURE_PATH: _STRUCTURE_MINUS_ROWS_TEST,
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007a_whole_module_deleted_with_one_test_unmatched_refused", True, {
+        # Whole-module sanction needs EVERY test def matched; only one is.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_rows.py": _LINT_ROWS,
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007a_orphan_removal_of_a_name_still_read_refused", True, {
+        # `ROOT` is not orphaned: `ROWS` and `_read` still read it.
+        _STRUCTURE_PATH: _edit(_STRUCTURE_MINUS_ROWS_TEST, "ROOT = Path(__file__).parent.parent\n", ""),
+        "test/lint/test_structure_rows.py": _LINT_ROWS,
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007a_orphan_autouse_import_refused", True, {
+        # Nothing the moved test reads: an import that acts by being there
+        # (an autouse fixture) is not orphaned by the move.
+        _AUTOUSE_PATH: "def test_keep():\n    assert 1\n",
+        "test/lint/test_p3.py": "def test_moved():\n    assert 2\n",
+    }, base={_AUTOUSE_PATH: _BASE_AUTOUSE}, tiered=True),
+    Case("c007a_move_drops_class_decorator_refused", True, {
+        # The method reads identical; the class it ran under lost its fixture.
+        _CLASS_DECO_PATH: None,
+        "test/lint/test_p5.py": "class TestX:\n    def test_m(self):\n        assert 1\n",
+    }, base={_CLASS_DECO_PATH: _BASE_CLASS_DECO}, tiered=True),
+    Case("c007a_move_drops_class_decorator_keeping_its_import_refused", True, {
+        # As above with `pytest` still bound identically, so only `_move_key`'s
+        # class context tells the two apart.
+        _CLASS_DECO_PATH: None,
+        "test/lint/test_p5.py": "import pytest\n\n\nclass TestX:\n    def test_m(self):\n        assert 1\n",
+    }, base={_CLASS_DECO_PATH: _BASE_CLASS_DECO}, tiered=True),
+    Case("c007a_one_lint_copy_sanctions_two_removals_refused", True, {
+        # One added def sanctions one removal: the second deletion is unmatched.
+        _DUP1_PATH: None,
+        _DUP2_PATH: None,
+        "test/lint/test_dup.py": _BASE_DUP,
+    }, base={_DUP1_PATH: _BASE_DUP, _DUP2_PATH: _BASE_DUP}, tiered=True),
+    Case("c007a_two_lint_copies_sanction_two_removals", False, {
+        _DUP1_PATH: None,
+        _DUP2_PATH: None,
+        "test/lint/test_dup1.py": _BASE_DUP,
+        "test/lint/test_dup2.py": _BASE_DUP,
+    }, base={_DUP1_PATH: _BASE_DUP, _DUP2_PATH: _BASE_DUP}, tiered=True),
+    Case("c007a_move_keeps_class_decorator", False, {
+        _CLASS_DECO_PATH: None,
+        "test/lint/test_p5.py": _BASE_CLASS_DECO,
+    }, base={_CLASS_DECO_PATH: _BASE_CLASS_DECO}, tiered=True),
+    Case("c007a_orphan_name_still_named_in_head_refused", True, {
+        # `_rows` is read only by what left, but the head still names it (a
+        # string or comment is how `usefixtures` and fixture requests read):
+        # the occurrence rule alone keeps it.
+        _STRUCTURE_PATH: _STRUCTURE_MINUS_ORPHANS + "\n# see _rows in test/lint/\n",
+        "test/lint/test_structure_rows.py": _LINT_ROWS,
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    # ---- (a) move: the module-level names a moved test reads (L2 Block) ---
+    Case("c007a_move_carries_constants_verbatim", False, {
+        _CASES_PATH: None,
+        "test/lint/test_cases.py": _BASE_CASES,
+    }, base={_CASES_PATH: _BASE_CASES}, tiered=True),
+    Case("c007a_move_empties_a_read_constant_refused", True, {
+        # The adversary's shape: `test_check` reads identical, the constant
+        # it loops over is emptied, and the failing assertion never runs.
+        _CASES_PATH: None,
+        "test/lint/test_cases.py": _edit(_BASE_CASES, "CASES = [0, False]", "CASES = []"),
+    }, base={_CASES_PATH: _BASE_CASES}, tiered=True),
+    Case("c007a_move_mutates_a_read_constant_refused", True, {
+        # The binding is verbatim; a later top-level call empties it.
+        _CASES_PATH: None,
+        "test/lint/test_cases.py": _BASE_CASES + "\n\nCASES.clear()\n",
+    }, base={_CASES_PATH: _BASE_CASES}, tiered=True),
+    Case("c007a_move_changes_a_helper_refused", True, {
+        # Reached through the helper `_each`, not the test body.
+        _CASES_PATH: None,
+        "test/lint/test_cases.py": _edit(_BASE_CASES, "return list(CASES)", "return []"),
+    }, base={_CASES_PATH: _BASE_CASES}, tiered=True),
+    Case("c007a_move_rewrites_a_path_helper_refused", True, {
+        # `_rows` is a helper, not a path constant: `return {}` passes the
+        # `isinstance(_rows(), dict)` assertion whatever the file holds.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _edit(
+            _LINT_STRUCTURE, 'return tomllib.loads(ROWS.read_text(encoding="utf-8"))', "return {}"
+        ),
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007a_move_allow_listed_rewrite", False, {
+        # A reviewed rewrite: the lint home's `CASES` line is named by
+        # `--allow`, so the difference is the reviewer's, not silent.
+        _CASES_PATH: None,
+        "test/lint/test_cases.py": _edit(_BASE_CASES, "CASES = [0, False]", "CASES = [0, False, None]"),
+    }, base={_CASES_PATH: _BASE_CASES}, allow=["test/lint/test_cases.py:1"], tiered=True),
+    Case("c007a_move_allow_listed_rewrite_reading_a_new_name_refused", True, {
+        # The allowed rewrite reads `MORE`, unbound in the source: held to
+        # the same rule, and not itself allow-listed.
+        _CASES_PATH: None,
+        "test/lint/test_cases.py": _edit(_BASE_CASES, "CASES = [0, False]", "MORE = []\nCASES = MORE"),
+    }, base={_CASES_PATH: _BASE_CASES}, allow=["test/lint/test_cases.py:2"], tiered=True),
+    Case("c007a_move_shadows_a_builtin_refused", True, {
+        # Unbound in the source (the builtin), bound in the lint home.
+        _CASES_PATH: None,
+        "test/lint/test_cases.py": "def list(_):\n    return [1]\n\n\n" + _BASE_CASES,
+    }, base={_CASES_PATH: _BASE_CASES}, tiered=True),
+    # ---- (b) new lint files → green / red ----------------------------------
+    Case("c007b_lint_conftest_test_file_and_lint_floor", False, {
+        "test/lint/conftest.py": 'pytest_plugins = ["pytester"]\n',
+        "test/lint/test_lint_tier_guards.py": "def test_lint_tier_collects():\n    assert True\n",
+        "test/LINT_FLOOR": "1\n",
+    }, tiered=True),
+    Case("c007b_lint_init_py_refused", True, {
+        "test/lint/conftest.py": 'pytest_plugins = ["pytester"]\n',
+        "test/lint/__init__.py": "",
+    }, tiered=True),
+    Case("c007b_lint_data_file_refused", True, {
+        "test/lint/expected_rows.json": "{}\n",
+    }, tiered=True),
+    Case("c007b_lint_subdirectory_refused", True, {
+        # Direct children only: a nested test module is "anything else".
+        "test/lint/nested/test_deep.py": "def test_deep():\n    assert True\n",
+    }, tiered=True),
+    # ---- (b) lint file CONTENT → green / red (L1 review Block) -------------
+    Case("c007b_lint_conftest_c008_shape", False, {
+        "test/lint/conftest.py": _LINT_CONFTEST_C008,
+    }, tiered=True),
+    Case("c007b_lint_module_carries_verbatim_source_context", False, {
+        # The whole module moves verbatim: its skipif and its subprocess call
+        # are code already in the suite, judged there, not new lint code.
+        _SWEEP_PATH: None,
+        "test/lint/test_sweep.py": _BASE_SWEEP,
+    }, base={_SWEEP_PATH: _BASE_SWEEP}, tiered=True),
+    Case("c007b_lint_module_carries_verbatim_helper", False, {
+        # A helper moved unchanged is code the suite already ran, like a
+        # verbatim module-level statement — its `subprocess.run` is not new.
+        _SWEEP_HELPER_PATH: None,
+        "test/lint/test_sweep_helper.py": _BASE_SWEEP_HELPER,
+    }, base={_SWEEP_HELPER_PATH: _BASE_SWEEP_HELPER}, tiered=True),
+    Case("c007b_lint_module_helper_changed_on_move_refused", True, {
+        # One argument added on the way: no longer the suite's code, so the
+        # DEC-10(b) walk judges it and refuses the spawn.
+        _SWEEP_HELPER_PATH: None,
+        "test/lint/test_sweep_helper.py": _edit(_BASE_SWEEP_HELPER, '"ls-files"]', '"ls-files", "-z"]'),
+    }, base={_SWEEP_HELPER_PATH: _BASE_SWEEP_HELPER}, tiered=True),
+    Case("c007b_lint_module_skip_mark_refused", True, {
+        # A moved test landing in a module that skips it never runs.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": 'import pytest\n\npytestmark = pytest.mark.skip(reason="x")\n'
+        + _LINT_STRUCTURE,
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007b_lint_module_bare_skip_mark_refused", True, {
+        # No call, so the DEC-10(b) walk has nothing to refuse: the skip scan
+        # alone stops it.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": "import pytest\n\npytestmark = pytest.mark.skip\n" + _LINT_STRUCTURE,
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007b_lint_module_new_code_rebinds_subprocess_refused", True, {
+        # New module-level code gets DEC-10(b)'s walk: neutering subprocess
+        # makes every moved `git ls-files` sweep vacuous.
+        _SWEEP_PATH: None,
+        "test/lint/test_sweep.py": _BASE_SWEEP + "\nsubprocess.run = print\n",
+    }, base={_SWEEP_PATH: _BASE_SWEEP}, tiered=True),
+    Case("c007b_lint_conftest_collect_ignore_refused", True, {
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+        "test/lint/conftest.py": 'collect_ignore_glob = ["test_*.py"]\n',
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007b_lint_conftest_modifyitems_skip_refused", True, {
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+        "test/lint/conftest.py": "def pytest_collection_modifyitems(items):\n    items.clear()\n",
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007b_lint_conftest_skip_in_setup_refused", True, {
+        "test/lint/conftest.py": "import pytest\n\n\ndef pytest_runtest_setup(item):\n    pytest.skip(\"x\")\n",
+    }, tiered=True),
+    Case("c007b_lint_conftest_c008_budget_as_exit_code", False, {
+        # The budget hook may fail the session by pytest.ExitCode too.
+        "test/lint/conftest.py": _LINT_CONFTEST_C008.replace(
+            "session.exitstatus = 1", "session.exitstatus = pytest.ExitCode.TESTS_FAILED"
+        ),
+    }, tiered=True),
+    Case("c007b_lint_conftest_sessionfinish_passes_session_refused", True, {
+        # L1 re-check probe N1: flips a verdict rather than a collection.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+        "test/lint/conftest.py": 'def pytest_sessionfinish(session, exitstatus):\n    session.exitstatus = 0\n',
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007b_lint_conftest_sessionfinish_exit_code_ok_refused", True, {
+        # L1 re-check probe N1: flips a verdict rather than a collection.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+        "test/lint/conftest.py": 'import pytest\n\n\ndef pytest_sessionfinish(session, exitstatus):\n    session.exitstatus = pytest.ExitCode.OK\n',
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007b_lint_conftest_logreport_flips_outcome_refused", True, {
+        # L1 re-check probe N2: flips a verdict rather than a collection.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+        "test/lint/conftest.py": "def pytest_runtest_logreport(report):\n    report.outcome = 'passed'\n",
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007b_lint_conftest_unittest_skiptest_refused", True, {
+        # L1 re-check probe N3: flips a verdict rather than a collection.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+        "test/lint/conftest.py": "import unittest\n\n\ndef pytest_runtest_setup(item):\n    raise unittest.SkipTest('x')\n",
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007b_lint_conftest_private_skipped_refused", True, {
+        # L1 re-check probe N4: flips a verdict rather than a collection.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+        "test/lint/conftest.py": "from _pytest.outcomes import Skipped\n\n\ndef pytest_runtest_setup(item):\n    raise Skipped('x')\n",
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007b_lint_conftest_hookimpl_wrapper_refused", True, {
+        # L1 re-check probe N5: flips a verdict rather than a collection.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+        "test/lint/conftest.py": 'import pytest\n\n\n@pytest.hookimpl(wrapper=True)\ndef pytest_runtest_teardown(item):\n    yield\n',
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007b_lint_conftest_hookimpl_hookwrapper_refused", True, {
+        # L1 re-check probe N5: flips a verdict rather than a collection.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+        "test/lint/conftest.py": 'import pytest\n\n\n@pytest.hookimpl(hookwrapper=True)\ndef pytest_runtest_teardown(item):\n    yield\n',
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007b_lint_conftest_setattr_outcome_by_name_refused", True, {
+        # L1 re-check probe N2: flips a verdict rather than a collection.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+        "test/lint/conftest.py": "def pytest_runtest_setup(item):\n    item.stash.setattr(item, 'outcome', 'passed')\n",
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007b_lint_conftest_exits_early_green_refused", True, {
+        # L1 re-check probe N1: flips a verdict rather than a collection.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+        "test/lint/conftest.py": 'import os\n\n\ndef pytest_sessionfinish(session, exitstatus):\n    os._exit(0)\n',
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE}, tiered=True),
+    Case("c007b_lint_module_foreign_skipif_carried_refused", True, {
+        # L1 re-check probe N6: two modules move in one range; A's lint home
+        # copies B's darwin-only skipif, verbatim from a source module — but
+        # not from one whose tests this file carries.
+        _AA_PATH: None,
+        _BB_PATH: None,
+        "test/lint/test_aa.py": _LINT_AA_WITH_BB_SKIPIF,
+        "test/lint/test_bb.py": _BASE_BB,
+    }, base={_AA_PATH: _BASE_AA, _BB_PATH: _BASE_BB}, tiered=True),
+    Case("c007b_lint_conftest_foreign_plugin_refused", True, {
+        "test/lint/conftest.py": 'pytest_plugins = ["pytester", "src.helpers"]\n',
+    }, tiered=True),
+    # ---- (b) lint conftest writing execution state (L2 Block) ---------------
+    # An admission hook is open, but the objects it is handed are read-only:
+    # `item.obj = lambda: None` turned a failing test into a passing one with
+    # every count exact. The live conftest's green is the `live_lint_conftest`
+    # probe.
+    Case("c007b_lint_conftest_replaces_the_test_callable_refused", True, {
+        "test/lint/conftest.py": "def pytest_runtest_setup(item):\n    item.obj = lambda: None\n",
+    }, tiered=True),
+    Case("c007b_lint_conftest_patches_the_item_class_refused", True, {
+        "test/lint/conftest.py": "def pytest_runtest_setup(item):\n    type(item).runtest = lambda self: None\n",
+    }, tiered=True),
+    Case("c007b_lint_conftest_mutates_through_a_helper_refused", True, {
+        "test/lint/conftest.py": "def _n(x):\n    x.obj = None\n\n\ndef pytest_runtest_setup(item):\n    _n(item)\n",
+    }, tiered=True),
+    Case("c007b_lint_conftest_adds_a_marker_refused", True, {
+        # `pytest_itemcollected` is no named collection hook; an xfail mark
+        # added there is evaluated at setup and passes a failing test.
+        "test/lint/conftest.py": 'def pytest_itemcollected(item):\n    item.add_marker("xfail")\n',
+    }, tiered=True),
+    Case("c007b_lint_conftest_alias_through_a_loop_refused", True, {
+        "test/lint/conftest.py": (
+            "def pytest_collection_finish(session):\n    for it in sorted(session.items):\n        it.obj = None\n"
+        ),
+    }, tiered=True),
+    Case("c007b_lint_conftest_monkeypatches_the_node_refused", True, {
+        "test/lint/conftest.py": (
+            "import pytest\n\n\n@pytest.fixture(autouse=True)\ndef f(request, monkeypatch):\n"
+            "    monkeypatch.setattr(request.node, 'obj', None)\n"
+        ),
+    }, tiered=True),
+    Case("c007b_lint_conftest_vars_write_refused", True, {
+        "test/lint/conftest.py": "def pytest_runtest_setup(item):\n    vars(item)['obj'] = None\n",
+    }, tiered=True),
+    Case("c007b_lint_conftest_registers_a_plugin_refused", True, {
+        "test/lint/conftest.py": (
+            "class P:\n    def pytest_itemcollected(self, item):\n        pass\n\n\n"
+            "def pytest_configure(config):\n    config.pluginmanager.register(P())\n"
+        ),
+    }, tiered=True),
+    Case("c007b_lint_conftest_hookimpl_specname_refused", True, {
+        "test/lint/conftest.py": (
+            "import pytest\n\n\n@pytest.hookimpl(specname='pytest_pyfunc_call')\ndef fine(pyfuncitem):\n"
+            "    return True\n"
+        ),
+    }, tiered=True),
+    # ---- (c) `command` marker line → green (one per binding form) ----------
+    Case("c007c_marker_where_no_pytestmark_is_bound", False, {
+        "test/tests/test_a.py": _edit(
+            _BASE_TEST, "# a comment line\n",
+            'pytestmark = pytest.mark.command("install", "package pull")\n# a comment line\n',
+        ),
+    }, tiered=True),
+    Case("c007c_marker_wraps_a_single_skipif_mark", False, {
+        # The form test_shell_activation.py:88 uses; the skipif line itself
+        # is untouched, so the hunk removes nothing.
+        _LOGIN_PATH: _edit(
+            _BASE_LOGIN, f"pytestmark = {_SKIPIF}\n",
+            f'pytestmark = {_SKIPIF}\npytestmark = [pytestmark, pytest.mark.command("login")]\n',
+        ),
+    }, base={_LOGIN_PATH: _BASE_LOGIN}, tiered=True),
+    Case("c007c_marker_appended_to_a_mark_list", False, {
+        # The form test_shell_reconcile.py:64 uses.
+        _RECONCILE_PATH: _edit(
+            _BASE_RECONCILE, f"pytestmark = [{_SKIPIF}]\n",
+            f'pytestmark = [{_SKIPIF}]\npytestmark.append(pytest.mark.command("shell hook"))\n',
+        ),
+    }, base={_RECONCILE_PATH: _BASE_RECONCILE}, tiered=True),
+    # ---- (c) marker → red ---------------------------------------------------
+    Case("c007c_marker_non_literal_argument_refused", True, {
+        "test/tests/test_a.py": _edit(
+            _BASE_TEST, "--COUNT\n", "--COUNT\npytestmark = pytest.mark.command(SCRIPT)\n"
+        ),
+    }, tiered=True),
+    Case("c007c_marker_keyword_argument_refused", True, {
+        "test/tests/test_a.py": _edit(
+            _BASE_TEST, "# a comment line\n",
+            'pytestmark = pytest.mark.command("install", reason="x")\n# a comment line\n',
+        ),
+    }, tiered=True),
+    Case("c007c_marker_combined_with_skip_refused", True, {
+        _LOGIN_PATH: _edit(
+            _BASE_LOGIN, f"pytestmark = {_SKIPIF}\n",
+            f"pytestmark = {_SKIPIF}\n"
+            'pytestmark = [pytestmark, pytest.mark.skipif(sys.platform == "darwin", reason="y"), '
+            'pytest.mark.command("x")]\n',
+        ),
+    }, base={_LOGIN_PATH: _BASE_LOGIN}, tiered=True),
+    Case("c007c_existing_skipif_rewritten_into_a_list_refused", True, {
+        # Same resulting marks as the green wrap, but the skipif line is a
+        # removed line in the marker's hunk.
+        _LOGIN_PATH: _edit(
+            _BASE_LOGIN, f"pytestmark = {_SKIPIF}\n",
+            f'pytestmark = [{_SKIPIF}, pytest.mark.command("login")]\n',
+        ),
+    }, base={_LOGIN_PATH: _BASE_LOGIN}, tiered=True),
+    Case("c007c_append_after_a_single_mark_refused", True, {
+        # The list form, where the module binds a single mark: wrong form.
+        _LOGIN_PATH: _edit(
+            _BASE_LOGIN, f"pytestmark = {_SKIPIF}\n",
+            f'pytestmark = {_SKIPIF}\npytestmark.append(pytest.mark.command("login"))\n',
+        ),
+    }, base={_LOGIN_PATH: _BASE_LOGIN}, tiered=True),
+    Case("c007c_bare_assignment_over_a_single_mark_refused", True, {
+        # The no-binding form where one exists: it silently drops the skipif.
+        _LOGIN_PATH: _edit(
+            _BASE_LOGIN, f"pytestmark = {_SKIPIF}\n",
+            f'pytestmark = {_SKIPIF}\npytestmark = pytest.mark.command("login")\n',
+        ),
+    }, base={_LOGIN_PATH: _BASE_LOGIN}, tiered=True),
+    Case("c007c_new_test_decorated_with_command_is_a_new_test", False, {
+        # Not a marker statement: a new def is judged by the new-test rules,
+        # which admit any `@pytest.mark.*` — the same verdict as flag-off.
+        "test/tests/test_a.py": _BASE_TEST
+        + '\n\n@pytest.mark.command("install")\ndef test_install(ocx):\n    assert ocx.run("install").returncode == 0\n',
+    }, tiered=True, twin=False),
+    Case("c007c_marker_hunk_removes_a_comment_refused", True, {
+        # Only the "no removed line in its hunk" clause stops this one: the
+        # replaced line is a comment, which the line checks let go.
+        "test/tests/test_a.py": _edit(
+            _BASE_TEST, "# a comment line\n", 'pytestmark = pytest.mark.command("install")\n',
+        ),
+    }, tiered=True),
+    Case("c007c_marker_below_earlier_removals", False, {
+        # WP-06's false red: comment removals above the marker shift head
+        # numbering, so a removal hunk's OLD lines (2-4, 6) overlap the
+        # marker's NEW lines (4-6). Neither is the marker's hunk, which
+        # removes nothing — judged by `covers` (either side) it read as one.
+        _SHIFT_PATH: (
+            "import pytest\nA = 1\nB = 2\n"
+            'pytestmark = pytest.mark.command(\n    "install",\n)\n'
+            "\n\ndef test_x():\n    assert A + B == 3\n"
+        ),
+    }, base={_SHIFT_PATH: (
+        "import pytest\n# c1\n# c2\n# c3\nA = 1\n# doomed\nB = 2\n"
+        "\n\ndef test_x():\n    assert A + B == 3\n"
+    )}, tiered=True),
+    Case("c007c_marker_before_the_last_pytestmark_binding_refused", True, {
+        _LOGIN_PATH: _edit(
+            _BASE_LOGIN, f"pytestmark = {_SKIPIF}\n",
+            f'pytestmark = [pytestmark, pytest.mark.command("login")]\npytestmark = {_SKIPIF}\n',
+        ),
+    }, base={_LOGIN_PATH: _BASE_LOGIN}, tiered=True),
+    # ---- (d) config → green / red ------------------------------------------
+    Case("c007d_new_scoped_rows_key", False, {
+        # A rows key is not an ini key: the permit-list is test/pyproject.toml's.
+        "test/scoped_rows.toml": 'ocx_setup = ["tests/test_self_setup.py"]\n',
+    }, tiered=True),
+    Case("c007d_unlisted_pyproject_key_refused", True, {
+        # The key rule still holds for test/pyproject.toml under the flag.
+        "test/pyproject.toml": '[tool.pytest.ini_options]\nmarkers = []\nconsole_output_style = "classic"\n',
+    }, tiered=True),
+    Case("c007d_scoped_rows_selection_token_refused", True, {
+        # The selection-token check still reads every rows line.
+        "test/scoped_rows.toml": 'ocx_setup = ["--deselect", "tests/test_self_setup.py::test_x"]\n',
+    }, tiered=True),
+    Case("c007d_cargo_release_respelled_as_profile", False, {
+        # `--release` is cargo's `--profile release`; the value is not compared,
+        # so this is the long spelling's `--profile release` -> `test-bin`.
+        "test/taskfile.yml": _edit(_CARGO_TASKFILE, "--release", "--profile test-bin"),
+    }, base={"test/taskfile.yml": _CARGO_TASKFILE}, tiered=True),
+    Case("c007d_cargo_release_respelled_dropping_locked_refused", True, {
+        # The profile may change; every other option must still survive.
+        "test/taskfile.yml": _edit(_CARGO_TASKFILE, "--release -p ocx --locked", "--profile test-bin -p ocx"),
+    }, base={"test/taskfile.yml": _CARGO_TASKFILE}, tiered=True),
+    Case("c007d_release_off_a_cargo_line_refused", True, {
+        # Not cargo: `--release` is nothing's abbreviation here.
+        "test/taskfile.yml": _edit(
+            _CARGO_TASKFILE.replace("cargo build", "./ship.sh"), "--release", "--profile test-bin"
+        ),
+    }, base={"test/taskfile.yml": _CARGO_TASKFILE.replace("cargo build", "./ship.sh")}, tiered=True),
+    # ---- (e) ported-from deletion → green ----------------------------------
+    Case("c007e_ported_deletion_at_tip", False, dict(_PORT_HEAD), tiered=True, junit=_JUNIT_PORT_PASSED),
+    Case("c007e_ported_deletion_post_merge", False, dict(_PORT_HEAD),
+         tiered=True, junit=_JUNIT_PORT_PASSED, head_state="merge"),
+    Case("c007e_ported_class_method_deletion", False, {
+        # A method port: the marker spells the case pytest's way
+        # (`Class::method`), and the emptied class goes with its method.
+        _CLS_PATH: _CLS_MINUS_CLASS,
+        "crates/ocx_lib/src/lib.rs": _PORTED_METHOD_LIB_RS,
+    }, base={_CLS_PATH: _BASE_CLS}, tiered=True, junit=_JUNIT_TEMPLATE.format(name="tests::old_method_is_true", tail="/>")),
+    # ---- (e) → red (S-020) -------------------------------------------------
+    Case("c007e_port_absent_from_report_refused", True, dict(_PORT_HEAD),
+         tiered=True, junit=_JUNIT_PORT_ABSENT),
+    Case("c007e_ignored_port_refused", True, {
+        "test/tests/test_old.py": None,
+        "crates/ocx_lib/src/lib.rs": _PORTED_LIB_RS_IGNORED,
+    }, tiered=True, junit=_JUNIT_PORT_IGNORED),
+    Case("c007e_failed_port_testcase_refused", True, dict(_PORT_HEAD), tiered=True,
+         junit=_JUNIT_TEMPLATE.format(name="tests::old_is_true", tail='><failure message="x"/></testcase>')),
+    Case("c007e_stale_report_refused", True, dict(_PORT_HEAD),
+         tiered=True, junit=None, stale_junit=_JUNIT_PORT_PASSED),
+    Case("c007e_failed_unit_run_refused", True, dict(_PORT_HEAD),
+         tiered=True, junit=_JUNIT_PORT_PASSED, unit_exit=1),
+    Case("c007e_tip_not_ancestor_of_head_refused", True, dict(_PORT_HEAD),
+         tiered=True, junit=_JUNIT_PORT_PASSED, head_state="behind"),
+    Case("c007e_dirty_tree_refused", True, dict(_PORT_HEAD),
+         tiered=True, junit=_JUNIT_PORT_PASSED, head_state="dirty"),
+    # ---- floor: SUITE_FLOOR decrease D vs sanctioned collected count N -----
+    Case("c007_floor_decrease_equals_sanctioned_count", False, {
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+        "test/SUITE_FLOOR": "8\n",  # D=2, N=2
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE, "test/SUITE_FLOOR": "10\n"}, tiered=True),
+    Case("c007_floor_decrease_below_sanctioned_count", False, {
+        # D=1 < N=2. Pins the orchestrator's `D <= N` reading of C-007's
+        # "must equal": a floor lowered by less than it could be stays green.
+        _STRUCTURE_PATH: None,
+        "test/lint/test_structure_lint.py": _LINT_STRUCTURE,
+        "test/SUITE_FLOOR": "9\n",
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE, "test/SUITE_FLOOR": "10\n"}, tiered=True),
+    Case("c007_lint_floor_raised", False, {
+        "test/LINT_FLOOR": "441\n",
+        "test/LINT_SKIP_CEILING": "3\n",
+        "test/LINT_XFAIL_CEILING": "1\n",
+    }, base={"test/LINT_FLOOR": "440\n", "test/LINT_SKIP_CEILING": "2\n", "test/LINT_XFAIL_CEILING": "0\n"}, tiered=True),
+    Case("c007_lint_floor_lowered_refused", True, {
+        "test/LINT_FLOOR": "1\n",
+    }, base={"test/LINT_FLOOR": "440\n"}, tiered=True),
+    Case("c007_plan_owned_lint_home_edit", False, {
+        # PLAN_OWNED_STRUCTURAL_TESTS at its test/lint/ home: an oracle the
+        # plan revises gets the whole-module walk, not the assertion freeze.
+        "test/lint/test_logging.py": "A = 2\n\n\ndef test_rows():\n    assert A == 2\n",
+    }, base={"test/lint/test_logging.py": "A = 1\n\n\ndef test_rows():\n    assert A == 1\n"}),
+    Case("c007_floor_decrease_exceeds_sanctioned_count_refused", True, {
+        _STRUCTURE_PATH: _STRUCTURE_MINUS_ROWS_TEST,
+        "test/lint/test_structure_rows.py": _LINT_ROWS,
+        "test/SUITE_FLOOR": "8\n",  # D=2, N=1
+    }, base={_STRUCTURE_PATH: _BASE_STRUCTURE, "test/SUITE_FLOOR": "10\n"}, tiered=True),
+]
+
+# S-023: every tiered green, checked WITHOUT the flag, is refused exactly as
+# today — the shapes are opt-in (DEC-10 default unchanged).
+SELF_TEST_CASES += [
+    replace(case, name=f"{case.name}__flag_off", tiered=False, expect_red=True)
+    for case in SELF_TEST_CASES
+    if case.tiered and not case.expect_red and case.twin
 ]
 
 
@@ -2577,6 +4754,8 @@ def _run_case(case: Case, scratch: Path) -> tuple[bool, list[str]]:
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "base")
     base = git(repo, "rev-parse", "HEAD").strip()
+    if case.head_state == "merge":
+        git(repo, "checkout", "-q", "-b", "wp")
     _write_tree(repo, case.head)
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "head")
@@ -2585,7 +4764,32 @@ def _run_case(case: Case, scratch: Path) -> tuple[bool, list[str]]:
     # be green for the wrong reason.
     if not git(repo, "diff", "--name-only", base, head).split():
         raise SystemExit(f"self-test: {case.name}: head commit changed nothing — a green here would be vacuous")
-    problems = check_range(repo, base, head, parse_allow(case.allow))
+    if case.head_state == "merge":
+        git(repo, "checkout", "-q", "main")
+        git(repo, "merge", "-q", "--no-ff", "-m", "merge wp", "wp")
+        if git(repo, "rev-parse", "HEAD^2").strip() != head:
+            raise SystemExit(f"self-test: {case.name}: HEAD is not a merge commit whose second parent is the tip")
+    elif case.head_state == "behind":
+        git(repo, "checkout", "-q", "--detach", base)
+    elif case.head_state == "dirty":
+        (repo / "stray.txt").write_text("untracked\n", encoding="utf-8")
+    elif case.head_state != "tip":
+        raise SystemExit(f"self-test fixture: {case.name}: unknown head_state {case.head_state!r}")
+    tiered = None
+    if case.tiered:
+        report = repo / UNIT_JUNIT
+        if case.stale_junit is not None:
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text(case.stale_junit, encoding="utf-8")
+
+        def runner(where: Path) -> int:
+            if case.junit is not None:
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text(case.junit, encoding="utf-8")
+            return case.unit_exit
+
+        tiered = Tiered(unit_runner=runner, collector=lambda _repo, _base, ids: len(ids))
+    problems = check_range(repo, base, head, parse_allow(case.allow), tiered)
     return bool(problems), problems
 
 
@@ -2661,6 +4865,36 @@ def _floor_probes(scratch: Path) -> list[tuple[str, bool, str]]:
     return probes
 
 
+def _collect_probes(scratch: Path) -> list[tuple[str, bool, str]]:
+    """`collect_count` itself — every `Case` fakes it — at a base whose test
+    module puts `website/scripts` on `sys.path` and imports from it, as
+    `test_doc_scripts_publish.py` does. A `test/`-only export fails that import."""
+    repo, base = _probe_repo(scratch, "collect-website-import", {
+        "website/scripts/probe_render.py": "VALUE = 1\n",
+        "test/tests/test_probe.py": (
+            "import sys\nfrom pathlib import Path\n\n"
+            'sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "website" / "scripts"))\n'
+            "from probe_render import VALUE  # noqa: E402\n\n\n"
+            "def test_probe():\n    assert VALUE == 1\n"
+        ),
+    })
+    try:
+        count: int | str = collect_count(repo, base, ["tests/test_probe.py::test_probe"])
+    except SystemExit as refused:
+        count = str(refused).splitlines()[0]
+    return [(
+        "collect_count collects a base module importing website/scripts",
+        count == 1,
+        f"got {count!r}, not 1",
+    )]
+
+
+def _live_lint_conftest_probe() -> tuple[str, bool, str]:
+    """The C-008 conftest as it is in the tree must stay admitted (b): the green twin of every hook-state red."""
+    problems = _lint_conftest_problems((REPO_ROOT / "test" / "lint" / "conftest.py").read_text(encoding="utf-8"))
+    return "live_lint_conftest", not problems, "; ".join(problems)
+
+
 def self_test() -> int:
     scratch_root = REPO_ROOT / ".tmp"
     scratch_root.mkdir(exist_ok=True)
@@ -2677,7 +4911,7 @@ def self_test() -> int:
                 print(f"       expected {'red' if case.expect_red else 'green'}")
             for p in problems:
                 print(f"       {p}")
-        probes = _floor_probes(Path(tmp))
+        probes = _floor_probes(Path(tmp)) + _collect_probes(Path(tmp)) + [_live_lint_conftest_probe()]
         for name, ok, detail in probes:
             failures += not ok
             print(f"{'ok  ' if ok else 'FAIL'} probe {name}")
@@ -2711,6 +4945,11 @@ def main(argv: list[str]) -> int:
         "--allow", action="append", default=[], metavar="PATH:LINE",
         help="allow-list the one hunk touching PATH at LINE (either side of the diff)",
     )
+    parser.add_argument(
+        "--tiered-shapes", action="store_true",
+        help="also admit plan_test_speed_tiers C-007's shapes: moves to test/lint/, lint files, "
+        "command marker lines, scoped_rows.toml/LINT_FLOOR, ported-from deletions",
+    )
     parser.add_argument("--self-test", action="store_true", help="show every shape red/green")
     ns = parser.parse_args(argv)
     if ns.self_test:
@@ -2720,7 +4959,7 @@ def main(argv: list[str]) -> int:
     base, head = split_range(ns.range)
     if "..." in ns.range:
         base = git(REPO_ROOT, "merge-base", base, head).strip()
-    problems = check_range(REPO_ROOT, base, head, parse_allow(ns.allow))
+    problems = check_range(REPO_ROOT, base, head, parse_allow(ns.allow), Tiered() if ns.tiered_shapes else None)
     for p in problems:
         print(p)
     if problems:

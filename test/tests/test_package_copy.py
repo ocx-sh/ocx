@@ -16,6 +16,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from src.helpers import make_package
 from src.registry import (
     IMAGE_MANIFEST_MEDIA_TYPE,
@@ -31,6 +33,8 @@ from src.registry import (
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures import cosign_artifacts
 from tests.fixtures.sigstore_stack import SigstoreStack
+
+pytestmark = pytest.mark.command("package_copy")
 
 
 def _copy(

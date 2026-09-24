@@ -10,6 +10,8 @@ from src import OcxRunner, PackageInfo, static_index
 from src.registry import fetch_manifest_raw, fetch_platform_manifest_digest
 from src.runner import registry_dir
 
+pytestmark = pytest.mark.command("index*")
+
 IMAGE_INDEX_MEDIA_TYPE = "application/vnd.oci.image.index.v1+json"
 IMAGE_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 

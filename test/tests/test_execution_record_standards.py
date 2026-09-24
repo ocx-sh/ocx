@@ -112,6 +112,8 @@ from tests.test_execution_records import (
     _sink,
 )
 
+pytestmark = pytest.mark.command("exec", "toolchain_exec", "launcher*")
+
 # ---------------------------------------------------------------------------
 # Reference-implementation bindings
 # ---------------------------------------------------------------------------
@@ -243,7 +245,7 @@ def _publish_companion(
         platform="any",
     )
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
-    config_path.write_text(f'[patches]\nregistry = "{ocx.registry}"\nrequired = false\n')
+    config_path.write_text(f'[patches]\nregistry = "{ocx.registry}/{companion_repo}_patches"\nrequired = false\n')
     descriptor = tmp_path / "record_descriptor.json"
     descriptor.write_text(
         json.dumps({"version": 1, "rules": [{"match": "*", "packages": [companion.fq]}]})

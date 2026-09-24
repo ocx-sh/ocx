@@ -26,6 +26,8 @@ from src.registry import (
 )
 from src.runner import OcxRunner, current_platform
 
+pytestmark = pytest.mark.command("package_push")
+
 # ---------------------------------------------------------------------------
 # Shared: build one bundle, push it, hand back the `--format json` report.
 # ---------------------------------------------------------------------------

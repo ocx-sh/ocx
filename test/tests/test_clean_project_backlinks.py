@@ -54,8 +54,12 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
+
+pytestmark = pytest.mark.command("clean")
 
 # ---------------------------------------------------------------------------
 # Exit code constants — mirror crates/ocx_lib/src/cli/exit_code.rs

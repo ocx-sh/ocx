@@ -24,6 +24,8 @@ from src.helpers import make_package
 from src.registry import fetch_manifest_digest, push_raw_config_package
 from src.runner import PackageInfo, registry_dir
 
+pytestmark = pytest.mark.command("patch_freeze", "index_update", "index_sync", "install")
+
 
 def _write_ocx_toml(project: Path, body: str) -> Path:
     path = project / "ocx.toml"
@@ -330,9 +332,16 @@ def _unique_repo(label: str) -> str:
 
 
 def _write_patches_config(ocx: OcxRunner, patch_registry: str, *, required: bool) -> None:
-    """Write `$OCX_HOME/config.toml` with a `[patches]` tier."""
+    """Write `$OCX_HOME/config.toml` with a `[patches]` tier.
+
+    The tier names `<patch_registry>/p<a uuid4 kept on the runner>` (`vars(ocx)`): the
+    global descriptor is one fixed repository per patch registry, and a
+    registry path per test is what keeps another test's global rule out of
+    this one. `test_frozen_config_setup_installs_floating_patch_companions`
+    spells the same path into its managed payload.
+    """
     (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(
-        f"[patches]\nregistry = \"{patch_registry}\"\nrequired = {str(required).lower()}\n"
+        f"[patches]\nregistry = \"{patch_registry}/p{vars(ocx).setdefault('patch_tier', uuid4().hex[:12])}\"\nrequired = {str(required).lower()}\n"
     )
 
 
@@ -421,7 +430,7 @@ def test_frozen_index_update_exits_81(
     )
 
 
-@pytest.mark.xdist_group("patch_global_slot")
+# No xdist group: the `[patches]` tier is a registry path of this test's own.
 def test_frozen_install_composes_a_pinned_companion(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
@@ -458,7 +467,7 @@ def test_frozen_install_composes_a_pinned_companion(
     assert entry["value"] == "/certs/pinned/ca.pem"
 
 
-@pytest.mark.xdist_group("patch_global_slot")
+# No xdist group: the `[patches]` tier is a registry path of this test's own.
 def test_snapshot_install_records_the_pin_it_adopted(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
@@ -550,7 +559,7 @@ def _assert_no_index_footprint(ocx: OcxRunner, registry: str, repo: str, why: st
     )
 
 
-@pytest.mark.xdist_group("patch_global_slot")
+# No xdist group: the `[patches]` tier is a registry path of this test's own.
 def test_frozen_config_setup_installs_floating_patch_companions(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
@@ -593,7 +602,7 @@ def test_frozen_config_setup_installs_floating_patch_companions(
         registry,
         config_repo,
         "v1",
-        f'[patches]\nregistry = "{registry}"\nrequired = false\n'.encode(),
+        f'[patches]\nregistry = "{registry}/p{vars(ocx).setdefault('patch_tier', uuid4().hex[:12])}"\nrequired = false\n'.encode(),
     )
 
     setup = _run(ocx, "--format", "json", "--frozen", "config", "setup", "--managed-config", ref)
@@ -623,7 +632,7 @@ def test_frozen_config_setup_installs_floating_patch_companions(
     )
 
 
-@pytest.mark.xdist_group("patch_global_slot")
+# No xdist group: the `[patches]` tier is a registry path of this test's own.
 def test_frozen_install_resolves_an_unpinned_companion_live(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:

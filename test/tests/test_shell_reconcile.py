@@ -67,6 +67,7 @@ pytestmark.append(
         reason="no ocx binary (set OCX_ACTIVATION_BINARY / OCX_COMMAND, or build test/bin/ocx).",
     )
 )
+pytestmark.append(pytest.mark.command("shell_state", "self_group/activate"))
 
 # The install-layout path the offline bootstrap candidate lives at.
 _CANDIDATE_REL = Path("symlinks") / "ocx.sh" / "ocx" / "cli" / "current" / "content" / "bin" / "ocx"

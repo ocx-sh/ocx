@@ -17,9 +17,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src.helpers import make_package, resolved_metadata_path
 from src.registry import fetch_manifest_from_registry
 from src.runner import OcxRunner, current_platform
+
+pytestmark = pytest.mark.command("package_push")
 
 SOURCE = "org.opencontainers.image.source"
 REVISION = "org.opencontainers.image.revision"

@@ -19,6 +19,8 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src.helpers import make_package, write_ocx_toml
 from src.runner import OcxRunner
 from src.toolchain_fixtures import (
@@ -28,6 +30,8 @@ from src.toolchain_fixtures import (
     shell_bin,
     toolchain_home,
 )
+
+pytestmark = pytest.mark.command("add")
 
 EXIT_SUCCESS = 0
 

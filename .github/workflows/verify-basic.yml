@@ -181,6 +181,16 @@ jobs:
       # a statement that has stopped being true, not a backlog number.
       - name: Dead-path sweep
         run: task scripts:dead-path-sweep
+      # The lint tier (`task test:lint:structure`, ADR C-LINT): the structural
+      # sweeps over the tree, run uncached against LINT_FLOOR and a 30 s
+      # budget. Here for the census's reason — it reads source only, and
+      # `test/lint/conftest.py` refuses a binary, a registry or `task` — and
+      # blocking, because a sweep that reds is a statement about the tree, not
+      # a backlog number. uv is its one tool, and this job had none.
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Lint tier
+        run: task test:lint:structure
       - name: Lint ratchet
         id: ratchet
         run: task rust:lint:ratchet
@@ -197,7 +207,7 @@ jobs:
       # lane swap removes, and saying otherwise would be a saving on paper.
       - name: Build
         run: task rust:build
-      # `task rust:build` compiles target/release/ocx with `--features
+      # `task rust:build` compiles target/test-bin/ocx with `--features
       # ocx/__testing`, enabling the `__OCX_SELF_IMAGE` seam the self-setup /
       # self-update acceptance tests use to redirect `ocx.sh/ocx/cli` at the
       # fixture registry. The upload sat before the test step because
@@ -210,7 +220,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ocx-binary
-          path: target/release/ocx
+          path: target/test-bin/ocx
           compression-level: 0
           retention-days: 1
       # The C-021 parity matrix drives all nine hook shells, but no runner image
@@ -563,7 +573,7 @@ jobs:
     # which fires on `main`, the queue and `workflow_dispatch` but on no pull
     # request at all. The same setup as that job minus everything the Sigstore
     # stack needs — no `--profile sigstore`, no readiness gate, no stack
-    # logs — because `test_smoke_coverage.py` asserts that no marked
+    # logs — because `test/lint/test_smoke_coverage.py` asserts that no marked
     # test takes the `sigstore_stack` / `identity_token` fixtures. The schema
     # artifacts are not downloaded either: the schema tests are outside the
     # selection and no module reads the schema at import.

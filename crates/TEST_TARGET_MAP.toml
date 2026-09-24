@@ -25,6 +25,11 @@
 #   bazel   : 35 `rust_test` targets, 8246 executed + 40 skipped + 8 ignored.
 #   8295 = 8246 + 40 + 8 + 1, the 1 being `ocx::linux_self_contained` below.
 #
+# One target stands outside both sums: `//crates/ocx_cli:ocx_cli_seam_test`,
+# an `sh_test` that re-runs `ocx_cli_test`'s own binary with its `seam::` cases
+# selected under a poisoned environment (ADR C-SEAM). It has no nextest suite of
+# its own, so it adds a row here and nothing to the reconciliation.
+#
 # `derive_exclusions` in that script no longer derives the set from
 # `kind != lib|test`. That rule was stale in both directions: `ocx::bin/ocx`
 # (1 case) and `ocx_shim::bin/ocx-shim` (109) do have `rust_test` targets, and
@@ -53,10 +58,15 @@ crate = "ocx_cli"
 cases = 1
 
 [[target]]
+label = "//crates/ocx_cli:ocx_cli_seam_test"
+crate = "ocx_cli"
+cases = 44
+
+[[target]]
 label = "//crates/ocx_cli:ocx_cli_test"
 crate = "ocx_cli"
-cases = 1360
-skipped = 8
+cases = 1435
+skipped = 9
 
 [[target]]
 label = "//crates/ocx_config:ocx_config_test"
@@ -66,7 +76,7 @@ cases = 615
 [[target]]
 label = "//crates/ocx_console:ocx_console_test"
 crate = "ocx_console"
-cases = 41
+cases = 47
 
 [[target]]
 label = "//crates/ocx_exit:ocx_exit_test"
@@ -109,7 +119,7 @@ cases = 1
 [[target]]
 label = "//crates/ocx_package:ocx_package_test"
 crate = "ocx_package"
-cases = 914
+cases = 915
 
 [[target]]
 label = "//crates/ocx_package:tag_verdicts"

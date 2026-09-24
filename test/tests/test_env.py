@@ -26,6 +26,8 @@ from src.helpers import inspect_entry, make_package, resolved_metadata_path
 from src.registry import fetch_platform_manifest_digest, push_raw_package
 from src.runner import current_platform
 
+pytestmark = pytest.mark.command("env")
+
 # Exit code for deleted commands
 EXIT_USAGE = 64
 # DataError (sysexits EX_DATAERR) — every interpolation refusal classifies here.

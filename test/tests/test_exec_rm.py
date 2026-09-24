@@ -8,7 +8,11 @@ kept with its install symlink intact, and a package held only by a project's
 
 from pathlib import Path
 
+import pytest
+
 from src import OcxRunner, PackageInfo, assert_not_exists
+
+pytestmark = pytest.mark.command("exec")
 
 
 def _store_path(ocx: OcxRunner, short: str) -> Path:

@@ -28,6 +28,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.command("install", "exec")
+
 # ---------------------------------------------------------------------------
 # sys.path bootstrap (bench/ is not under testpaths but is importable from test/)
 # ---------------------------------------------------------------------------

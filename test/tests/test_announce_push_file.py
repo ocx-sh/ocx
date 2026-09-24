@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from announce_helpers import (
     INDEX_FULL,
     announce_json,
@@ -25,6 +26,8 @@ from fake_forge import FakeForge
 
 from src.helpers import make_package, resolved_metadata_path
 from src.runner import OcxRunner
+
+pytestmark = pytest.mark.command("package_announce")
 
 
 def test_push_tags_file_feeds_announce_tags_file_union(

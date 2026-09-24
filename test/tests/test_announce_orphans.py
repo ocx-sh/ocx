@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from announce_helpers import (
     INDEX_FULL,
     announce_json,
@@ -44,6 +45,8 @@ from fake_forge import FakeForge
 
 from src.helpers import make_package
 from src.runner import OcxRunner
+
+pytestmark = pytest.mark.command("package_announce")
 
 #: `--fork` plus the index coordinate: every row here commits, so every row
 #: needs the branch the commit lands on.

@@ -25,6 +25,7 @@ path = "src/main.rs"
 __testing = [
   "ocx_announce/__testing",
   "ocx_config/__testing",
+  "ocx_console/__testing",
   "ocx_index/__testing",
   "ocx_package/__testing",
   "ocx_package_manager/__testing",
@@ -142,6 +143,8 @@ zeroize.workspace = true
 # edge is not built by `cargo build --release -p ocx`, so the seam reaches the
 # tests and never the shipped binary.
 ocx_config = { workspace = true, features = ["__testing"] }
+# `capture` — where `app::seam` reads a command's printer output from.
+ocx_console = { workspace = true, features = ["__testing"] }
 ocx_oci = { workspace = true, features = ["__testing"] }
 ocx_store = { workspace = true, features = ["__testing"] }
 ocx_util = { workspace = true, features = ["__testing"] }

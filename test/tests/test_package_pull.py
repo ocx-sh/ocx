@@ -1,7 +1,11 @@
 """Tests for ``ocx package pull``."""
 from pathlib import Path
 
+import pytest
+
 from src import OcxRunner, PackageInfo, assert_dir_exists, registry_dir
+
+pytestmark = pytest.mark.command("package_pull")
 
 
 def test_package_pull_populates_object_store(

@@ -96,13 +96,21 @@ SUITE = REPO_ROOT / "test"
 #: The census as of the ocx#477–#494 batch: `tests` 2859 -> 2904 with the
 #: batch's 45 rows, `skipped` 108 -> 110 with two more POSIX-only gates
 #: (`flock(2)` advisory contract, SIGKILL mid-add). 2904 -> 2906 with the two
-#: rows of `tests/test_patch_global_slot.py`, which keep the writers of the
-#: registry-wide `global` patch slot inside one xdist group. 2906 -> 2915
+#: rows of `lint/test_patch_global_slot.py`, which keep every patch tier off
+#: the bare registry's `global` slot outside its xdist group. 2906 -> 2915
 #: with the eight rows `tests/test_exec_forwarding.py` gains for the bare
 #: `--env NAME` pass-through and for the four ambient-only resolution knobs
 #: a `--clean` child now inherits, plus the project-tier pass-through row
 #: added beside the retargeted refusal row in `tests/test_project_env.py`.
-PINNED = {"tests": 2915, "skipped": 110, "xfailed": 4, "parametrized": 150}
+#: 2927 / 151 as the tree stood before C-020 (the floors had not been raised
+#: past 2915 / 150); 2922 / 150 once `tests/test_schema_generation.py` (five
+#: test functions, one `parametrize`) was ported into
+#: `crates/ocx_schema/tests/schema_outputs.rs` and deleted
+#: (plan_test_speed_tiers.md C-020). 2885 / 147 once the WP-13 pilot ported
+#: 37 test functions (three of them parametrized) out of `test_status.py`,
+#: `test_config_test.py` and `test_platform_pairs.py` into `ocx_cli` and
+#: `ocx_package` crate tests and deleted them (C-025).
+PINNED = {"tests": 2885, "skipped": 110, "xfailed": 4, "parametrized": 147}
 
 #: Which way each number may move on its own. DEC-38 pinned all four to
 #: equality for the duration of the crate split, so that a refactor could not

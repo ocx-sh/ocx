@@ -28,8 +28,12 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src.helpers import make_package
 from src.runner import OcxRunner
+
+pytestmark = pytest.mark.command("update")
 
 EXIT_SUCCESS = 0
 EXIT_DATA = 65  # a pin would change under --check

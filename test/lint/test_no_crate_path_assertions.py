@@ -24,7 +24,8 @@ from pathlib import Path
 
 import pytest
 
-TESTS_DIR = Path(__file__).resolve().parent
+# The acceptance modules this sweep reads; it lives in the lint tier beside them.
+TESTS_DIR = Path(__file__).resolve().parents[1] / "tests"
 SELF = Path(__file__).resolve()
 
 # The needles are built by concatenation, never written whole, so that this

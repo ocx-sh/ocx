@@ -109,6 +109,8 @@ from src.helpers import (
 from src.registry import fetch_manifest_digest, fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, current_platform
 
+pytestmark = pytest.mark.command("exec", "toolchain_exec", "launcher*", "install")
+
 # ---------------------------------------------------------------------------
 # Exit codes — mirror crates/ocx_lib/src/cli/exit_code.rs
 # ---------------------------------------------------------------------------
@@ -252,7 +254,7 @@ def _purl_qualifiers(uri: str) -> dict[str, list[str]]:
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_BINARY = PROJECT_ROOT / "target" / "release" / "ocx_schema"
+SCHEMA_BINARY = Path(os.environ.get("OCX_SCHEMA_BINARY", "OCX_SCHEMA_BINARY-unset"))
 
 
 @pytest.fixture(scope="module")
@@ -262,8 +264,8 @@ def execution_record_schema() -> dict:
     Read from the ``ocx_schema`` binary rather than from
     ``website/src/public/schemas/`` so the schema under test is the one this
     tree generates, not whatever copy happens to be checked in. The binary is
-    the same artefact ``test_schema_generation.py`` consumes; when it is absent
-    that module already skips, and so does this one test.
+    ``//crates/ocx_schema:ocx_schema_bin``, which this module's Bazel target
+    names as ``OCX_SCHEMA_BINARY``; outside Bazel it is absent and this skips.
     """
     if not SCHEMA_BINARY.exists():
         pytest.skip(
@@ -1426,7 +1428,7 @@ def test_emitted_record_validates_against_the_published_schema(
 ) -> None:
     """A record ocx actually wrote must validate against the schema ocx publishes.
 
-    The two are otherwise checked independently — ``test_schema_generation.py``
+    The two are otherwise checked independently — ``schema_outputs.rs``
     asserts the schema's shape, this module asserts the record's — so they can
     drift apart with both green and only a consumer would find out. Validating a
     real emitted record against the generated schema is the only assertion that
@@ -2279,10 +2281,11 @@ def _publish_companion_for(
 ) -> str:
     """Publish an env-only companion and a per-base rule admitting it.
 
-    Per-base rather than ``--global``: the global descriptor slot is one
-    registry-wide repository that ``test_patches.py`` serializes access to, and
-    this module must not join that contention. ``required = false`` so a rule a
-    concurrent module left in the global slot fails open here instead of failing
+    Per-base rather than ``--global``, and under a patch registry path of the
+    test's own (``<registry>/<companion_repo>_patches``): the global descriptor
+    is one fixed repository per patch registry, and a bare-registry tier would
+    read whatever rule another module left there. ``required = false`` stays so
+    that, were one ever to reach this tier, it fails open instead of failing
     this test closed.
     """
     companion = make_package(
@@ -2303,7 +2306,7 @@ def _publish_companion_for(
         platform="any",
     )
     _write_home_config(
-        ocx, f'[patches]\nregistry = "{ocx.registry}"\nrequired = false\n'
+        ocx, f'[patches]\nregistry = "{ocx.registry}/{companion_repo}_patches"\nrequired = false\n'
     )
     descriptor = tmp_path / "record_descriptor.json"
     descriptor.write_text(
@@ -2387,10 +2390,9 @@ def test_a_patched_invocation_records_its_companion_and_snapshot(
         "the overlay composes a companion's interface surface and nothing else; "
         f"got {companion['annotations']}"
     )
-    # A ``--global`` rule ``test_patches.py`` has live in the registry-wide slot
-    # composes a second companion here; that is the site tier working, not a
-    # defect. The claim is placement: every companion follows everything the
-    # caller asked for, however many the site tier overlaid.
+    # The claim is placement, not a count: every companion follows everything
+    # the caller asked for, however many the site tier overlaid (a global rule
+    # in this test's own patch registry path would add another, by design).
     roles = [entry["annotations"]["sh.ocx.role"] for entry in live_record["packages"]]
     first_companion = roles.index("companion")
     assert all(role == "companion" for role in roles[first_companion:]), (

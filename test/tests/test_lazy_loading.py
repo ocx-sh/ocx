@@ -56,6 +56,8 @@ from src.shell_eval import run_after_sourcing
 from src.terminal import requires_pty, run_on_a_terminal
 from tests.test_patches import assert_no_index_footprint
 
+pytestmark = pytest.mark.command("launcher/shim", "env", "which", "clean")
+
 # Exit codes — mirror crates/ocx_lib/src/cli/exit_code.rs.
 EXIT_SUCCESS = 0
 EXIT_DATA_ERROR = 65

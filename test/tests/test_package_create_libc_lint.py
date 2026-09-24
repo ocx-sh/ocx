@@ -35,6 +35,7 @@ pytestmark = pytest.mark.skipif(
     reason="fixtures are real ELF objects from the host C toolchain; cc emits "
     "Mach-O on macOS and PE on Windows, neither of which carries a PT_INTERP",
 )
+pytestmark = [pytestmark, pytest.mark.command("package_create")]
 
 EXIT_SUCCESS = 0
 EXIT_DATA_ERR = 65  # DataError — LibcLintError::{UndeclaredLibc,AgnosticPlatformClaim}

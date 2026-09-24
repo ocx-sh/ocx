@@ -278,6 +278,21 @@ impl Line {
     }
 
     fn write(&self, newline: bool) {
+        #[cfg(any(test, feature = "__testing"))]
+        {
+            let stream = match self.target {
+                Target::Stdout => crate::capture::Stream::Stdout,
+                Target::Stderr => crate::capture::Stream::Stderr,
+            };
+            let text = if newline {
+                format!("{}\n", self.buf)
+            } else {
+                self.buf.clone()
+            };
+            if crate::capture::write(stream, text.as_bytes()) {
+                return;
+            }
+        }
         match self.target {
             Target::Stdout => {
                 let mut out = std::io::stdout();

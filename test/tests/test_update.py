@@ -45,6 +45,8 @@ from src.assertions import assert_not_exists
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
 
+pytestmark = pytest.mark.command("update")
+
 EXIT_SUCCESS = 0
 EXIT_USAGE = 64        # clap unknown-arg / unknown group or name → EX_USAGE
 EXIT_DATA = 65         # scoped update on a drifted ocx.toml (StaleLockOnPartial)

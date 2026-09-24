@@ -25,9 +25,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.helpers import make_package, resolved_receipt_path
 from src.registry import fetch_manifest_digest, fetch_manifest_from_registry
 from src.runner import OcxRunner, current_platform
+
+pytestmark = pytest.mark.command("package_create")
 
 EXIT_USAGE = 64  # UsageError — unpinned deps without --platform
 EXIT_DATA_ERR = 65  # DataError — empty platform intersection etc.

@@ -19,8 +19,12 @@ import subprocess
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src.helpers import make_package
 from src.runner import OcxRunner
+
+pytestmark = pytest.mark.command("add", "remove")
 
 # ---------------------------------------------------------------------------
 # Exit code constants — align with crates/ocx_lib/src/cli/exit_code.rs

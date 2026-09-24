@@ -20,10 +20,14 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
+
 from src import static_index
 from src.helpers import make_package
 from src.registry import fetch_manifest_digest, fetch_manifest_raw, put_manifest
 from src.runner import OcxRunner, PackageInfo
+
+pytestmark = pytest.mark.command("package_cascade*")
 
 # ---------------------------------------------------------------------------
 # Command helpers

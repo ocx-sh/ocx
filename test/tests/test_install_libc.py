@@ -27,6 +27,8 @@ import pytest
 from src import OcxRunner, make_package, registry_dir
 from src.assertions import assert_symlink_exists
 
+pytestmark = pytest.mark.command("install", "about", "version")
+
 
 def _installed_marker_via_seam(ocx: OcxRunner, short: str, libc: str) -> str:
     """Read the marker from the installed ``bin/hello`` binary.

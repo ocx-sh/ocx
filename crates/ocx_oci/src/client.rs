@@ -120,6 +120,58 @@ pub(super) mod progress_reader;
 pub mod test_transport;
 mod transport;
 
+/// Refuses every registry transport a [`Client`] would build, for the
+/// in-process CLI seam's no-network guarantee.
+///
+/// Process-global on purpose: the seam cannot reach the clients a command
+/// builds, only the one lazy point every request passes through
+/// ([`Client::transport`]). A refused build yields an empty in-memory stub —
+/// nothing leaves the process — and the caller learns of it from [`disarm`],
+/// not from an error at the request site, so a command that swallows a
+/// registry failure cannot hide the attempt. Callers serialise arm/disarm
+/// themselves (the seam holds `ocx_util`'s `EnvLock` across both).
+#[cfg(any(test, feature = "__testing"))]
+pub mod network_refusal {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    static TRIPPED: AtomicBool = AtomicBool::new(false);
+
+    /// Refuses every transport built from now until [`disarm`].
+    pub fn arm() {
+        TRIPPED.store(false, Ordering::SeqCst);
+        ARMED.store(true, Ordering::SeqCst);
+    }
+
+    /// Stops refusing; `true` when a build was refused while armed.
+    pub fn disarm() -> bool {
+        ARMED.store(false, Ordering::SeqCst);
+        TRIPPED.swap(false, Ordering::SeqCst)
+    }
+
+    /// Whether a build right now is refused, recording the attempt if so.
+    pub(super) fn refuse() -> bool {
+        let armed = ARMED.load(Ordering::SeqCst);
+        if armed {
+            TRIPPED.store(true, Ordering::SeqCst);
+        }
+        armed
+    }
+}
+
+/// Whether a request about to leave through a transport this crate does not
+/// build — the index fetch — must be refused, recording the attempt for
+/// `network_refusal::disarm`. Always `false` without the testing gate, so a
+/// caller needs no `cfg` of its own: the answer follows this crate's features,
+/// which are the ones the seam arming it was built with.
+pub fn network_refused() -> bool {
+    #[cfg(any(test, feature = "__testing"))]
+    let refused = network_refusal::refuse();
+    #[cfg(not(any(test, feature = "__testing")))]
+    let refused = false;
+    refused
+}
+
 pub use builder::ClientBuilder;
 /// Re-exported so `auth::login`'s one-off ping client shares the single
 /// definition instead of picking its own idle bound.
@@ -327,7 +379,15 @@ impl Client {
     ///   process, only when a request is actually made, and only for whoever
     ///   makes the first one.
     pub fn transport(&self) -> &dyn OciTransport {
-        &**self.transport_cell.get_or_init(|| self.recipe.build())
+        &**self.transport_cell.get_or_init(|| {
+            #[cfg(any(test, feature = "__testing"))]
+            if network_refusal::refuse() {
+                return Box::new(test_transport::StubTransport::new(
+                    test_transport::StubTransportData::new(),
+                ));
+            }
+            self.recipe.build()
+        })
     }
 
     #[cfg(any(test, feature = "__testing"))]

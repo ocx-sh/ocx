@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import make_package, make_package_with_entrypoints
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, registry_dir
+
+pytestmark = pytest.mark.command("deps", "install", "env", "clean", "uninstall")
 
 EXIT_USAGE = 64  # UsageError (sysexits EX_USAGE); ocx maps clap errors here
 EXIT_DATA_ERR = 65  # DataError (sysexits EX_DATAERR); version conflict maps here

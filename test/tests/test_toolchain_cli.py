@@ -35,6 +35,8 @@ from src.helpers import make_package
 from src.runner import OcxRunner
 from src.toolchain_fixtures import shell_bin
 
+pytestmark = pytest.mark.command("add", "remove", "lock", "toolchain_exec")
+
 # ---------------------------------------------------------------------------
 # Exit code constants — mirror crates/ocx_lib/src/cli/exit_code.rs
 # ---------------------------------------------------------------------------

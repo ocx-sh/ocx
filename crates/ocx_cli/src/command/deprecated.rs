@@ -44,7 +44,7 @@ const REMOVAL_RELEASE: &str = "0.7";
 /// hand-written literals — the hidden `Command` / `Package` variant, its
 /// [`warn_renamed`] call, and its [`crate::app::canonical_command_name`] arm —
 /// with nothing naming the set, so a repo-wide check for stale spellings had no
-/// input it could be driven from. `test/tests/test_deprecated_spellings.py`
+/// input it could be driven from. `test/lint/test_deprecated_spellings.py`
 /// parses this list out of this file and sweeps every old spelling in it.
 ///
 /// The renamed **flag** (`ocx package announce --package`, C-062) is not here
@@ -209,7 +209,7 @@ mod tests {
             assert!(
                 RENAMED.contains(site),
                 "`{}` -> `{}` warns at a dispatch site but is missing from RENAMED, so the \
-                 repo-wide sweep in test/tests/test_deprecated_spellings.py never looks for it",
+                 repo-wide sweep in test/lint/test_deprecated_spellings.py never looks for it",
                 site.0,
                 site.1
             );

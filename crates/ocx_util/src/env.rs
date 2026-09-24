@@ -26,12 +26,19 @@ use std::path::PathBuf;
 #[cfg(any(test, feature = "__testing"))]
 pub mod overrides {
     use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{LazyLock, Mutex, MutexGuard};
 
     use tempfile::TempDir;
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
     static OVERRIDES: LazyLock<Mutex<HashMap<String, Option<String>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    /// Set by [`EnvLock::hermetic`]: a key with no override reads as absent
+    /// instead of falling through to the process environment.
+    static HERMETIC: AtomicBool = AtomicBool::new(false);
+    /// The working directory [`super::current_dir`] answers while hermetic.
+    static CWD: Mutex<Option<PathBuf>> = Mutex::new(None);
 
     /// Locks [`OVERRIDES`], recovering from a poisoned mutex.
     ///
@@ -51,7 +58,32 @@ pub mod overrides {
     /// - `Some(None)` — key is explicitly removed (treat as not present)
     /// - `None` — key has no override (fall through to `std::env::var`)
     pub(super) fn get(key: &str) -> Option<Option<String>> {
-        overrides().get(key).cloned()
+        match overrides().get(key).cloned() {
+            None if is_hermetic() => Some(None),
+            value => value,
+        }
+    }
+
+    /// Whether an [`EnvLock::hermetic`] guard is live — every environment
+    /// read then answers from the override table alone.
+    ///
+    /// `pub` for the one reader outside this module that cannot route through
+    /// [`super::var`]: a third-party resolver (`dirs::config_dir`) that reads
+    /// the process environment itself, and whose caller must answer from the
+    /// table instead while this is `true`.
+    pub fn is_hermetic() -> bool {
+        HERMETIC.load(Ordering::SeqCst)
+    }
+
+    /// The directory [`super::current_dir`] reports while hermetic.
+    pub(super) fn cwd() -> Option<PathBuf> {
+        CWD.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    fn reset() {
+        overrides().clear();
+        HERMETIC.store(false, Ordering::SeqCst);
+        *CWD.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     /// A guard that serialises environment-touching tests and provides safe
@@ -75,7 +107,7 @@ pub mod overrides {
             // below, so recovering the poisoned data is safe.
             let guard = TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             // Clear any stale overrides left by a previously panicked test.
-            overrides().clear();
+            reset();
             Self { _guard: guard }
         }
 
@@ -87,6 +119,19 @@ pub mod overrides {
         /// Marks `key` as removed.  [`super::var`] will return `None` for it.
         pub fn remove(&self, key: impl Into<String>) {
             overrides().insert(key.into(), None);
+        }
+
+        /// Makes the table the **whole** environment until this guard drops:
+        /// a key not [`set`](Self::set) reads as absent rather than falling
+        /// through to the process environment, [`super::current_dir`]
+        /// answers `cwd`, and [`super::home_dir`] answers from `HOME`
+        /// (`USERPROFILE` on Windows) in the table.
+        ///
+        /// The in-process CLI seam's no-ambient-read guarantee. Readers that
+        /// bypass [`super::var`] are not covered — see [`is_hermetic`].
+        pub fn hermetic(&self, cwd: impl Into<PathBuf>) {
+            *CWD.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cwd.into());
+            HERMETIC.store(true, Ordering::SeqCst);
         }
 
         /// Points `OCX_HOME` at a fresh empty directory and returns its
@@ -106,7 +151,7 @@ pub mod overrides {
 
     impl Drop for EnvLock {
         fn drop(&mut self) {
-            overrides().clear();
+            reset();
         }
     }
 
@@ -133,6 +178,10 @@ pub const PATH_SEPARATOR: &str = ":";
 /// abstraction boundary consistent (and gives us a single seam for future
 /// test injection without touching every consumer).
 pub fn current_dir() -> std::io::Result<PathBuf> {
+    #[cfg(any(test, feature = "__testing"))]
+    if let Some(cwd) = overrides::cwd() {
+        return Ok(cwd);
+    }
     std::env::current_dir()
 }
 
@@ -150,6 +199,11 @@ pub fn current_dir() -> std::io::Result<PathBuf> {
 /// It answers a different question — the *login shell's* home, for writing
 /// `.bashrc`/`.zshrc` — and reads `$HOME` first for exactly that reason.
 pub fn home_dir() -> Option<PathBuf> {
+    #[cfg(any(test, feature = "__testing"))]
+    if overrides::is_hermetic() {
+        let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        return var(key).filter(|home| !home.is_empty()).map(PathBuf::from);
+    }
     std::env::home_dir()
 }
 

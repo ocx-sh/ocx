@@ -79,3 +79,45 @@ exports_files(
     ],
     visibility = ["//crates:__subpackages__"],
 )
+
+# ---------------------------------------------------------------------------
+# Root-package files acceptance modules read (plan_test_speed_tiers.md C-020).
+#
+# Each is declared as `data` on exactly the `//test` targets that read it
+# (`test/BUILD.bazel` `module_data`), never in `//test:suite_inputs`: a
+# toolchain bump in `ocx.toml`/`ocx.lock` re-keys the ~11 modules that run
+# `ocx --project` (`test/tests/fixtures/cosign.py`), not all of them.
+# `ocx.lock` rides with `ocx.toml` because `ocx --project` reads both and the
+# undeclared-read predicate (`scripts/bazel_tag_guard.py`) can only see the one
+# a module names.
+# ---------------------------------------------------------------------------
+exports_files(
+    [
+        ".claude/artifacts/e2e_results_announce.md",
+        "ocx.lock",
+        "ocx.toml",
+        "packaging/ocx/CATALOG.md",
+        "taplo.toml",
+    ],
+    visibility = ["//test:__pkg__"],
+)
+
+# Every taskfile a `task` run at this root parses: go-task loads the whole
+# include graph eagerly, so `task website:scripts:publish` reads all of these
+# whatever it runs (`test/tests/test_doc_scripts_publish.py`). `taskfiles/**`
+# rather than a list, because the directory is what that module names and a
+# new include joins the graph without an edit here. The two packages below the
+# root that own taskfiles export their own: `//website:taskfiles`, and
+# `//test:taskfile.yml`, declared on that module's target alone.
+filegroup(
+    name = "taskfiles",
+    srcs = [
+        ".claude/taskfile.yml",
+        ".taskrc.yml",
+        "taskfile.yml",
+    ] + glob(
+        ["taskfiles/**"],
+        allow_empty = False,
+    ),
+    visibility = ["//test:__pkg__"],
+)

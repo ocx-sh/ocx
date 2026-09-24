@@ -1,0 +1,213 @@
+# The scoped gate's selection table (adr_test_speed_tiers.md C-ROWS).
+#
+# Read by scripts/scoped_gate.py and nothing else (stdlib tomllib); a missing
+# or malformed file is an exit 1 there, never a silent escalate. The coverage
+# guard (`task test:rows:check`) holds it to the tree: every workspace member
+# but `ocx` has a [crates] row, every glob collects a module, every acceptance
+# module is reached by a glob or a `command` marker, every command file is
+# reached by a marker, a [verbs] entry or [security], and [security] covers the
+# `reviewer:security` globs in .agents/memory/hex.md.
+
+# Crate (package name) → acceptance-module globs relative to test/, or
+# "escalate" when the crate's subset is the whole suite. `ocx` has no row: its
+# command files route by the `command` markers in the test modules, and every
+# other path under crates/ocx_cli/ escalates (permit-list default).
+[crates]
+# exit codes / error categories
+ocx_exit = ["tests/test_exit_codes.py"]
+# fs, archive extraction, TLS roots
+ocx_util = [
+    "tests/test_archive_containment.py",
+    "tests/test_extra_ca_certs.py",
+    "tests/test_package_create_extract.py",
+]
+# rendering, progress, colour, completion output
+ocx_console = [
+    "tests/test_color.py",
+    "tests/test_progress_channel.py",
+    "tests/test_pull_progress.py",
+    "tests/test_completion_ascii.py",
+]
+# registry transport, references, layers, referrers, auth (`login`, `push`, `tag`)
+ocx_oci = [
+    "tests/test_layer_layout.py",
+    "tests/test_multi_layer.py",
+    "tests/test_push*.py",
+    "tests/test_referrers_*.py",
+    "tests/test_proxy_registry.py",
+    "tests/test_oci_registry_mirror.py",
+    "tests/test_login.py",
+    "tests/test_tag_*.py",
+    "tests/test_registry_startup_retry.py",
+    "tests/test_resolution_chain_refs.py",
+    "tests/test_logging.py",
+]
+# signer-identity policy (`trust`)
+ocx_trust = ["tests/test_trust_*.py", "tests/test_logging.py"]
+# `sign`, `attest`, `verify`, cosign interop, SBOM referrers, the Sigstore
+# stack itself and the signed golden fixtures its readers pin
+ocx_sign = [
+    "tests/test_sign*.py",
+    "tests/test_attest.py",
+    "tests/test_verify.py",
+    "tests/test_auto_verify.py",
+    "tests/test_offline_verify.py",
+    "tests/test_cosign_*.py",
+    "tests/test_sbom.py",
+    "tests/test_sigstore_stack_smoke.py",
+    "tests/test_golden_fixtures.py",
+]
+# `config`, managed tier, `--frozen`
+ocx_config = ["tests/test_config*.py", "tests/test_managed_config.py", "tests/test_frozen.py"]
+# CAS + symlink namespace (`install`, `uninstall`, `purge`, `clean`, `which`), shim blob
+ocx_store = [
+    "tests/test_install.py",
+    "tests/test_uninstall.py",
+    "tests/test_purge.py",
+    "tests/test_clean*.py",
+    "tests/test_assembly.py",
+    "tests/test_cross_platform_materialize.py",
+    "tests/test_cross_repo_dedup.py",
+    "tests/test_path_idempotency.py",
+    "tests/test_which.py",
+    "tests/test_windows_shim.py",
+]
+# `index`, catalog, warm resolve
+ocx_index = ["tests/test_index*.py", "tests/test_catalog_readme.py", "tests/test_warm_resolve_no_network.py"]
+# `package create|push|pull|inspect|copy|cascade|description`, metadata, variants
+ocx_package = [
+    "tests/test_package_create_*.py",
+    "tests/test_package_push*.py",
+    "tests/test_package_pull.py",
+    "tests/test_package_info.py",
+    "tests/test_package_inspect*.py",
+    "tests/test_package_lifecycle.py",
+    "tests/test_package_copy.py",
+    "tests/test_package_cascade.py",
+    "tests/test_package_receipt.py",
+    "tests/test_cascade.py",
+    "tests/test_describe.py",
+    "tests/test_metadata_forward_compat.py",
+    "tests/test_variants.py",
+    "tests/test_platform_pairs.py",
+]
+# `shell`, `ci export`, `direnv`, activation output
+ocx_shell = [
+    "tests/test_shell_*.py",
+    "tests/test_ci_export.py",
+    "tests/test_direnv.py",
+    "tests/test_lazy_direnv.py",
+    "tests/test_toolchain_activate.py",
+    "tests/test_toolchain_render.py",
+    "tests/test_completion_ascii.py",
+]
+# `project *`, `lock`, lazy loading, project toolchain, trampoline
+ocx_project = [
+    "tests/test_project_*.py",
+    "tests/test_lazy_loading.py",
+    "tests/test_lock.py",
+    "tests/test_toolchain_cli.py",
+    "tests/test_toolchain_offline_after_pull.py",
+    "tests/test_global_toolchain.py",
+    "tests/test_taplo_project_toolchain.py",
+    "tests/test_trampoline_exec.py",
+]
+# `env`, `exec`, `run`, `update`, `select`, `status`, `inspect`, `offline`, patches, records, entrypoints
+ocx_package_manager = [
+    "tests/test_env*.py",
+    "tests/test_exec*.py",
+    "tests/test_patch*.py",
+    "tests/test_dependencies.py",
+    "tests/test_deps_interpolation.py",
+    "tests/test_entrypoints*.py",
+    "tests/test_launcher_exec.py",
+    "tests/test_run_global_isolation.py",
+    "tests/test_update.py",
+    "tests/test_select.py",
+    "tests/test_offline*.py",
+    "tests/test_pinned_offline.py",
+    "tests/test_install_libc.py",
+    "tests/test_status.py",
+    "tests/test_inspect*.py",
+    "tests/test_toolchain_env.py",
+    "tests/test_plugin_dispatch.py",
+]
+# `package announce`, `package claim`, forge drivers (and the fake forge's own contract), git transport
+ocx_announce = [
+    "tests/test_announce*.py",
+    "tests/test_package_claim.py",
+    "tests/test_transport_git.py",
+    "tests/test_fake_forge_*.py",
+    "tests/test_git_http_fixture.py",
+]
+# `package test --script`
+ocx_script = ["tests/test_package_test*.py"]
+# `self setup|update|activate`, session PATH, update-check throttle
+ocx_setup = ["tests/test_self_*.py", "tests/test_session_path.py", "tests/test_update_check_throttle.py"]
+# dev-dependency-only fixtures: no acceptance subset of its own
+ocx_test_support = "escalate"
+# ecosystem crate `ocx` does not link (ocx-mirror's PEP 751 translation):
+# no acceptance subset of its own, and the tier escalates anyway
+ocx_python = "escalate"
+ocx_schema = ["tests/test_schema.py", "tests/test_execution_records.py", "tests/test_project_env.py"]
+ocx_shim = ["tests/test_windows_shim.py"]
+
+# Path under crates/ocx_cli/src/command/ (fnmatch) → "escalate", the only
+# value. These files are shared by several verbs, so no one module's marker
+# can stand for them.
+[verbs]
+"*_common.rs" = "escalate"      # index_common, patch_common, package_sign_common
+"script_runner.rs" = "escalate"  # the Starlark host every `test --script` verb runs
+"deprecated.rs" = "escalate"     # every hidden old spelling in flight
+"package.rs" = "escalate"        # the `package` group: dispatches two dozen verbs
+# Groups that dispatch an AM-3 security verb: a swapped dispatch arm there
+# reaches that verb without touching its file.
+"config.rs" = "escalate"         # setup / update / push
+"shell.rs" = "escalate"          # allow / revoke
+"self_group.rs" = "escalate"     # update
+# The remaining group dispatchers: each routes two or more verbs, so an edit
+# there reaches every verb in its group, not the one a marker names.
+"index.rs" = "escalate"          # catalog / list / update / sync / regenerate
+"patch.rs" = "escalate"          # freeze / sync / publish / test / why
+"direnv.rs" = "escalate"         # init / export
+"launcher.rs" = "escalate"       # exec / shim
+
+# Repo-relative globs that always escalate, checked before any other route.
+# Matched with fnmatch, where `*` also crosses `/`: `**` reads as "anything
+# below", and `crates/*/build.rs` reaches a build.rs at any depth (the safe
+# direction). The ADR list, AM-3's seven command files, every crate build
+# script (build.rs runs at build time and decides the release binary's
+# provenance), and the WP-06 security review's additions.
+[security]
+escalate = [
+    ".github/workflows/**",
+    ".github/actions/**",
+    "crates/ocx_oci/**",
+    "crates/ocx_trust/**",
+    "crates/ocx_config/**",
+    "crates/ocx_store/**",
+    "crates/ocx_sign/**",
+    "crates/*/build.rs",
+    "crates/ocx_cli/src/command/package_sign*.rs",
+    "crates/ocx_cli/src/command/package_verify.rs",
+    "crates/ocx_cli/src/command/package_attest.rs",
+    "crates/ocx_cli/src/command/login.rs",
+    "crates/ocx_cli/src/command/logout.rs",
+    "crates/ocx_cli/src/command/package_sbom.rs",
+    "crates/ocx_cli/src/command/shell_allow.rs",
+    "crates/ocx_cli/src/command/shell_revoke.rs",
+    "crates/ocx_cli/src/command/self_group/update.rs",
+    "crates/ocx_cli/src/command/config_push.rs",
+    "crates/ocx_cli/src/command/config_update.rs",
+    "crates/ocx_cli/src/command/config_setup.rs",
+    # WP-06 security review: signature enforcement on install/pull, and the
+    # code that reads or completes a consent / rc-file write.
+    "crates/ocx_package_manager/src/tasks/auto_verify.rs",
+    "crates/ocx_package_manager/src/tasks/verify.rs",
+    "crates/ocx_project/src/consent.rs",
+    "crates/ocx_cli/src/command/shell_state.rs",
+    "crates/ocx_cli/src/command/self_group/activate.rs",
+    "crates/ocx_cli/src/command/self_group/setup.rs",
+    # `self_update` replaces the running ocx binary.
+    "crates/ocx_package_manager/src/tasks/update_check.rs",
+]

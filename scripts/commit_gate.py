@@ -47,6 +47,21 @@ than fixed.
      accepted cost is that `git commit --amend` on a merge commit OUTSIDE a
      rebase is refused as non-conventional; do it inside the rebase that
      reworded it.
+  1a. While `MERGE_HEAD` exists — a work-package merge concluded after `git
+     merge --no-ff --no-commit`, or a plain `git merge` committing itself —
+     only a `full` mark whose `tree` equals `git write-tree` of the index being
+     committed admits the commit (plan_test_speed_tiers.md C-017, ADR D4).
+     Checked before rule 2, so `Checkpoint` cannot conclude a merge; a failed
+     `write-tree` or a mark with no tree refuses. The recipe it prints is
+     merge `--no-commit` → `task verify` → `git commit`. Named residuals,
+     none of which leaves `MERGE_HEAD` for this rule to see: a fast-forward
+     merge (no commit at all), `git merge --squash` + `git commit` (an
+     ordinary commit to git), and `git commit --amend` of a merge that has
+     already landed (judged by rules 3-5 like any other commit). Two more run
+     no `commit-msg` hook at all, so no rule here sees them: `git merge
+     --no-verify` (and `git pull --no-verify`), which skips the hook, and `git
+     cherry-pick`, whose commits git writes without it (measured on git
+     2.54). Both are named residuals: agents never use `--no-verify`.
   2. The subject `Checkpoint` is ALLOWED with no mark. Deliberate, and the
      ruling on deferred finding D26: `taskfile.yml` `checkpoint:` writes
      `git commit --allow-empty -m "Checkpoint"` and then amends it, a
@@ -58,7 +73,9 @@ than fixed.
      rule 4 exists to gate it, so refusing it at rule 3 would make rule 4's
      release arm unreachable and refuse `task release:prepare`'s own commit.
   4. `release:` or a commit on main/master needs a *full* mark; anything else
-     a *scoped* one (plan_crate_split_workspace.md C-021).
+     a *scoped* one (plan_crate_split_workspace.md C-021). A `release:` commit
+     needs a full mark recording `nocache` — `task verify NOCACHE=1`, which
+     re-executes every acceptance module rather than replaying cached verdicts.
   5. The mark must be fresh (5-minute TTL), written at the current HEAD, of at
      least the required scope, and written BY THIS WORKING TREE. A mark
      carrying no `toplevel` reads as unverified.
@@ -145,6 +162,20 @@ _HANDBACK_MARKERS = (
     ("MERGE_HEAD", "a merge"),
     ("CHERRY_PICK_HEAD", "a cherry-pick"),
     ("REVERT_HEAD", "a revert"),
+)
+
+# The merge-commit clause (C-017) keys on this one handback marker only: a
+# cherry-pick or revert handed back is judged by rules 4 and 5 as before.
+_MERGE_MARKER = (("MERGE_HEAD", "a merge"),)
+
+_MERGE_DENY = (
+    "BLOCKED: a merge commit needs a FULL verify mark of the exact tree it commits"
+    " (plan_test_speed_tiers.md C-017).\n\n"
+    "Found scope: {scope}; the mark's tree is {marked}, the tree being committed is"
+    " {committing}.\n\n"
+    "Merge a work package as: `git merge --no-ff --no-commit <branch>` → `task verify`"
+    " (with the working tree equal to the index — it refuses otherwise) → `git commit`."
+    " A scoped mark or `task verify:mark` never admits a merge commit."
 )
 
 _PUSH_DENY = (
@@ -269,6 +300,7 @@ def is_recently_verified(
     head: str | None,
     toplevel: str | None,
     require_full: bool,
+    require_nocache: bool = False,
     ttl_seconds: int = TTL_SECONDS,
 ) -> bool:
     """True when ``mark`` certifies THIS tree, at THIS head, at the needed scope.
@@ -280,6 +312,8 @@ def is_recently_verified(
     if mark.get("scope") not in ("full", "scoped"):
         return False
     if require_full and mark["scope"] != "full":
+        return False
+    if require_nocache and mark.get("nocache") is not True:
         return False
     # A mark certifies the tree it was written on: same HEAD, same working
     # tree. Either unknown is a refusal, so one mark never covers a second
@@ -298,6 +332,28 @@ def is_recently_verified(
     return 0 <= time.time() - verified_time < ttl_seconds
 
 
+def merge_commit_refusal(mark: dict, repo_root: str) -> str | None:
+    """The merge-commit clause (C-017): why this merge commit is refused, or None.
+
+    Applies while `MERGE_HEAD` exists: only a `full` mark whose `tree` equals
+    `git write-tree` of the index being committed admits it. A `write-tree`
+    failure refuses (fail-closed).
+    """
+    scope = mark.get("scope", "none") if mark else "none"
+    marked = mark.get("tree") if mark else None
+    # Inherits the hook's GIT_INDEX_FILE on purpose: that is the index being
+    # committed (`git commit -a` hands the hook a different one), while the
+    # mark's side was written from the repository's real index.
+    committing = git_out(repo_root, "write-tree")
+    if scope == "full" and marked and committing and marked == committing:
+        return None
+    return _MERGE_DENY.format(
+        scope=scope,
+        marked=marked or "none",
+        committing=committing or "unknown — `git write-tree` failed (unmerged paths?)",
+    )
+
+
 def build_deny_reason(mark: dict, state_path: str, why_full: str | None) -> str:
     """The refusal text, carrying the remediation a blocked commit needs."""
     found = f"scope: {mark.get('scope', 'none')}" if mark else "no JSON mark"
@@ -305,6 +361,14 @@ def build_deny_reason(mark: dict, state_path: str, why_full: str | None) -> str:
         found += f" for HEAD {str(mark['head'])[:10]} (a mark certifies the HEAD it was written on)"
     if mark and mark.get("toplevel"):
         found += f", written by {mark['toplevel']} (and the working tree that earned it)"
+    if mark and "nocache" in mark:
+        # A `release:` commit is the one caller that can be denied over a mark
+        # that is otherwise full: `nocache` false means the run replayed a
+        # cached verdict, which a release cannot accept. Print the value so
+        # the refusal names its own cause instead of reading like a missing
+        # mark — `why_full`, when set, already points at `task verify
+        # NOCACHE=1` (requires_full_mark's release branch).
+        found += f", nocache: {mark['nocache']}"
     if why_full:
         how = (
             f"This commit needs a FULL verify mark ({why_full}); found {found}.\n"
@@ -329,7 +393,7 @@ def build_deny_reason(mark: dict, state_path: str, why_full: str | None) -> str:
 def requires_full_mark(subject: str, repo_root: str) -> str | None:
     """Why this commit needs a *full* mark, or None when a scoped one will do."""
     if subject.startswith(RELEASE_PREFIX):
-        return f"subject {subject!r} is a release"
+        return f"subject {subject!r} is a release, which needs `task verify NOCACHE=1`"
     branch = git_out(repo_root, "rev-parse", "--abbrev-ref", "HEAD")
     if branch in TRUNK_BRANCHES:
         return f"the branch is {branch}"
@@ -347,6 +411,16 @@ def check_message(msg_path: str, repo_root: str) -> str | None:
     git_dir = git_out(repo_root, "rev-parse", "--absolute-git-dir")
     if operation_in_progress(git_dir, _REPLAY_MARKERS):
         return None
+    # The merge-commit clause (C-017) runs before every carve-out that could
+    # otherwise conclude a merge unverified — `Checkpoint` above all, whose
+    # `git commit -m Checkpoint` during `git merge --no-commit` IS the merge
+    # commit. Only a rebase, exempt above, gets past it.
+    path = mark_file()
+    mark = read_mark(path)
+    if operation_in_progress(git_dir, _MERGE_MARKER):
+        refusal = merge_commit_refusal(mark, repo_root)
+        if refusal is not None:
+            return refusal
     if subject == CHECKPOINT_SUBJECT:
         return None
     # The handback carve-out, narrowed to the commit that concludes the
@@ -373,13 +447,12 @@ def check_message(msg_path: str, repo_root: str) -> str | None:
             refusal += _CONCLUDING.format(operation=handback)
         return refusal
     why_full = requires_full_mark(subject, repo_root)
-    path = mark_file()
-    mark = read_mark(path)
     if is_recently_verified(
         mark,
         head=git_out(repo_root, "rev-parse", "HEAD"),
         toplevel=worktree_id(Path(repo_root)),
         require_full=why_full is not None,
+        require_nocache=subject.startswith(RELEASE_PREFIX),
     ):
         return None
     return build_deny_reason(mark, str(path), why_full)
@@ -518,11 +591,31 @@ def _make_repo(path: Path, branch: str = "work") -> Path:
     return path
 
 
-def _mark(project_dir: Path, repo: Path, scope: str, *, age: int = 0, toplevel: Path | None = None) -> None:
-    """Write a verify mark for ``repo`` into ``project_dir``'s mark home."""
+_INDEX_TREE = object()
+
+
+def _mark(
+    project_dir: Path,
+    repo: Path,
+    scope: str,
+    *,
+    age: int = 0,
+    toplevel: Path | None = None,
+    tree: object = _INDEX_TREE,
+    nocache: bool = False,
+) -> None:
+    """Write a verify mark for ``repo`` into ``project_dir``'s mark home.
+
+    ``tree`` defaults to `git write-tree` of ``repo``'s index right now — the
+    definition `task verify` writes (C-017) — and takes an explicit id or None
+    for the cases that need a mark for another tree or none at all.
+    """
     path = project_dir / ".claude" / "hooks" / ".state" / "commit-verified"
     head = _git(repo, "rev-parse", "HEAD").stdout.strip()
-    write_mark(path, scope, [], head, str((toplevel or repo).resolve()))
+    if tree is _INDEX_TREE:
+        tree = _git(repo, "write-tree").stdout.strip() or None
+    assert tree is None or isinstance(tree, str)
+    write_mark(path, scope, [], head, str((toplevel or repo).resolve()), tree, nocache)
     if age:
         mark = json.loads(path.read_text(encoding="utf-8"))
         mark["timestamp"] -= age
@@ -641,9 +734,15 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         if release.returncode == 0 or "needs a FULL verify mark" not in release.stderr:
             return f"`release:` must refuse a scoped mark: {release.stderr!r}"
         _mark(repo, repo, "full")
+        cached = _shell(repo, "git commit -m 'release: v9.9.9'", repo)
+        if cached.returncode == 0 or "NOCACHE=1" not in cached.stderr:
+            return f"`release:` must refuse a full mark that replayed cached verdicts: {cached.stderr!r}"
+        if "nocache: False" not in cached.stderr:
+            return f"the refusal must print the mark's own nocache value: {cached.stderr!r}"
+        _mark(repo, repo, "full", nocache=True)
         released = _shell(repo, "git commit -m 'release: v9.9.9'", repo)
         if released.returncode != 0:
-            return f"`release:` must accept a full mark: {released.stderr!r}"
+            return f"`release:` must accept a NOCACHE full mark: {released.stderr!r}"
         # A commit on main needs the full mark too, on the same tree.
         _git(repo, "switch", "-q", "-c", "main")
         _dirty(repo)
@@ -710,14 +809,17 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         if _shell(repo, "git commit -m 'feat: trunk'", repo).returncode != 0:
             return "the trunk commit needs to land first"
         # Red: that mark certified the commit it was spent on, and HEAD has
-        # moved. A merge is a commit like any other to rules 4 and 5.
+        # moved. Since C-017 the merge-commit clause is what refuses a merge
+        # first: a scoped mark never admits one, fresh or spent.
         refused = _shell(repo, "git merge --no-ff -m 'Merge WP-41: side' side", repo)
         if refused.returncode == 0:
             return "a merge with no fresh mark must be refused"
-        if "Cannot commit without passing verification" not in refused.stderr + refused.stdout:
-            return f"the merge must be refused by the mark rule: {refused.stderr!r}"
-        # Green: the same merge, mid-flight, concluded on git's own subject.
-        _mark(repo, repo, "scoped")
+        if "git merge --no-ff --no-commit" not in refused.stderr + refused.stdout:
+            return f"the merge must be refused by the merge-commit clause: {refused.stderr!r}"
+        # Green: the same merge, mid-flight, concluded on git's own subject —
+        # on a FULL mark of the merged index tree, the only mark a merge
+        # commit accepts (C-017).
+        _mark(repo, repo, "full")
         concluded = _shell(repo, "git commit --no-edit", repo)
         if concluded.returncode != 0:
             return f"a marked merge must conclude: {concluded.stderr!r}{concluded.stdout!r}"
@@ -1080,6 +1182,152 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         path.write_text(str(int(time.time())), encoding="utf-8")
         return expect(run(repo).returncode == 1, "a bare-integer stamp must exit 1")
 
+    # -- C-017: the merge-commit clause ------------------------------------
+    #
+    # One fresh repository per case, so no case can inherit another's merge
+    # state. `work` and `side` diverge on disjoint files, so every merge below
+    # is conflict-free and `git merge --no-ff --no-commit side` leaves the
+    # merged tree in the index with `MERGE_HEAD` set and HEAD unmoved.
+
+    def _merge_repo(name: str) -> Path:
+        repo = _make_repo(tmp / name)
+        bypass = ("-c", f"core.hooksPath={no_hooks}")
+        _git(repo, "switch", "-q", "-c", "side")
+        (repo / "side").write_text("side\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, *bypass, "commit", "-q", "-m", "feat: side")
+        _git(repo, "switch", "-q", "work")
+        (repo / "trunk").write_text("trunk\n", encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, *bypass, "commit", "-q", "-m", "feat: trunk")
+        return repo
+
+    def _pause_merge(repo: Path) -> str | None:
+        paused = _shell(repo, "git merge --no-ff --no-commit side", repo)
+        if paused.returncode != 0:
+            return f"the fixture's paused merge failed: {paused.stderr!r}"
+        if not (Path(_git(repo, "rev-parse", "--absolute-git-dir").stdout.strip()) / "MERGE_HEAD").exists():
+            return "the fixture's paused merge left no MERGE_HEAD"
+        return None
+
+    def _merge_refused(repo: Path, run: subprocess.CompletedProcess[str], before: str, *needles: str) -> str | None:
+        """The merge clause's refusal: no commit landed, the text names the recipe and ``needles``."""
+        if _git(repo, "rev-parse", "HEAD").stdout.strip() != before:
+            return "the merge commit landed"
+        output = run.stderr + run.stdout
+        for needle in ("git merge --no-ff --no-commit", "task verify", "git commit", *needles):
+            if needle not in output:
+                return f"the refusal must name {needle!r}: {output!r}"
+        return None
+
+    def c017_merge_with_a_scoped_mark_is_refused() -> str | None:
+        repo = _merge_repo("c017-scoped")
+        if problem := _pause_merge(repo):
+            return problem
+        before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        tree = _git(repo, "write-tree").stdout.strip()
+        _mark(repo, repo, "scoped")
+        run = _shell(repo, "git commit --no-edit", repo)
+        return _merge_refused(repo, run, before, "scope: scoped", tree)
+
+    def c017_merge_with_a_full_mark_for_another_tree_is_refused() -> str | None:
+        repo = _merge_repo("c017-other-tree")
+        other = _git(repo, "rev-parse", "HEAD^{tree}").stdout.strip()
+        if problem := _pause_merge(repo):
+            return problem
+        before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        merged = _git(repo, "write-tree").stdout.strip()
+        if other == merged:
+            return "fixture: the pre-merge tree must differ from the merged one"
+        _mark(repo, repo, "full", tree=other)
+        run = _shell(repo, "git commit --no-edit", repo)
+        return _merge_refused(repo, run, before, "scope: full", other, merged)
+
+    def c017_merge_with_a_full_mark_for_this_tree_commits() -> str | None:
+        repo = _merge_repo("c017-this-tree")
+        if problem := _pause_merge(repo):
+            return problem
+        _mark(repo, repo, "full")
+        run = _shell(repo, "git commit --no-edit", repo)
+        if run.returncode != 0:
+            return f"a full mark of the merged tree must admit the merge: {run.stderr!r}{run.stdout!r}"
+        return expect(
+            len(_git(repo, "log", "-1", "--format=%p").stdout.split()) == 2,
+            "the admitted commit must be the merge (2 parents)",
+        )
+
+    def c017_an_ordinary_commit_on_a_scoped_mark_commits() -> str | None:
+        """Control: outside a merge the clause never runs."""
+        repo = _make_repo(tmp / "c017-ordinary")
+        _dirty(repo)
+        _mark(repo, repo, "scoped")
+        run = _shell(repo, "git commit -m 'chore: x'", repo)
+        return expect(run.returncode == 0, f"an ordinary commit on a scoped mark must commit: {run.stderr!r}")
+
+    def c017_an_untracked_file_after_the_mark_still_commits() -> str | None:
+        """Both sides are the index's tree, so an untracked file changes neither."""
+        repo = _merge_repo("c017-untracked")
+        if problem := _pause_merge(repo):
+            return problem
+        _mark(repo, repo, "full")
+        (repo / "scratch-notes").write_text("untracked\n", encoding="utf-8")
+        run = _shell(repo, "git commit --no-edit", repo)
+        if run.returncode != 0:
+            return f"an untracked file must not refuse the merge commit: {run.stderr!r}{run.stdout!r}"
+        return expect(
+            len(_git(repo, "log", "-1", "--format=%p").stdout.split()) == 2,
+            "the admitted commit must be the merge (2 parents)",
+        )
+
+    def c017_checkpoint_does_not_bypass_the_merge_clause() -> str | None:
+        """The `Checkpoint` carve-out ran before the mark rules: a live bypass."""
+        repo = _merge_repo("c017-checkpoint")
+        if problem := _pause_merge(repo):
+            return problem
+        before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        _mark(repo, repo, "scoped")
+        run = _shell(repo, "git commit -m Checkpoint", repo)
+        return _merge_refused(repo, run, before, "scope: scoped")
+
+    def c017_a_full_mark_with_no_tree_is_refused() -> str | None:
+        repo = _merge_repo("c017-null-tree")
+        if problem := _pause_merge(repo):
+            return problem
+        before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        merged = _git(repo, "write-tree").stdout.strip()
+        _mark(repo, repo, "full", tree=None)
+        run = _shell(repo, "git commit --no-edit", repo)
+        return _merge_refused(repo, run, before, "scope: full", merged)
+
+    def c017_the_clause_compares_the_index_being_committed() -> str | None:
+        """`commit -a` hands the hook a different index than the one marked."""
+        repo = _merge_repo("c017-commit-a")
+        if problem := _pause_merge(repo):
+            return problem
+        before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        marked = _git(repo, "write-tree").stdout.strip()
+        _mark(repo, repo, "full")
+        (repo / "seed").write_text("edited after the mark\n", encoding="utf-8")
+        # The tree `commit -a` will hand the hook, computed in a scratch index.
+        git_dir = Path(_git(repo, "rev-parse", "--absolute-git-dir").stdout.strip())
+        scratch = tmp / "c017-commit-a.index"
+        shutil.copyfile(git_dir / "index", scratch)
+        env = {**os.environ, "GIT_INDEX_FILE": str(scratch)}
+        _git(repo, "add", "-u", env=env)
+        committed = _git(repo, "write-tree", env=env).stdout.strip()
+        if committed == marked:
+            return "fixture: the edit must change the tree being committed"
+        run = _shell(repo, "git commit -a --no-edit", repo)
+        return _merge_refused(repo, run, before, "scope: full", marked, committed)
+
+    def c017_an_auto_committing_merge_sees_the_clause() -> str | None:
+        """`git merge --no-ff -m` commits itself; commit-msg still sees MERGE_HEAD."""
+        repo = _merge_repo("c017-auto")
+        before = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        _mark(repo, repo, "scoped")
+        run = _shell(repo, "git merge --no-ff -m 'Merge WP-41: side' side", repo)
+        return _merge_refused(repo, run, before, "scope: scoped")
+
     return [
         ("a commit is refused with no mark and allowed with one", the_load_bearing_red_and_green),
         ("the refusal survives every spelling", the_refusal_survives_every_spelling),
@@ -1096,6 +1344,15 @@ def _self_test_cases(tmp: Path) -> list[tuple[str, object]]:
         ("a sibling worktree's mark certifies nothing", a_mark_from_a_sibling_worktree_certifies_nothing),
         ("a mark with no writer reads as unverified", a_mark_with_no_writer_reads_as_unverified),
         ("the release:prepare guard", the_release_prepare_guard),
+        ("C-017 merge + scoped mark is refused", c017_merge_with_a_scoped_mark_is_refused),
+        ("C-017 merge + full mark for another tree is refused", c017_merge_with_a_full_mark_for_another_tree_is_refused),
+        ("C-017 merge + full mark for this tree commits", c017_merge_with_a_full_mark_for_this_tree_commits),
+        ("C-017 an ordinary commit on a scoped mark commits (control)", c017_an_ordinary_commit_on_a_scoped_mark_commits),
+        ("C-017 an untracked file after the mark still commits", c017_an_untracked_file_after_the_mark_still_commits),
+        ("C-017 `Checkpoint` does not bypass the merge clause", c017_checkpoint_does_not_bypass_the_merge_clause),
+        ("C-017 a full mark with a null tree is refused", c017_a_full_mark_with_no_tree_is_refused),
+        ("C-017 the clause compares the index being committed", c017_the_clause_compares_the_index_being_committed),
+        ("C-017 an auto-committing merge meets the clause", c017_an_auto_committing_merge_sees_the_clause),
     ]
 
 

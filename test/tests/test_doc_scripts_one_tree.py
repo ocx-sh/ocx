@@ -32,6 +32,32 @@ from recordings.conftest import sweep_orphan_casts
 from src.doc_scripts import doc_scripts_export, parse_doc_header
 from src.helpers import PROJECT_ROOT
 
+pytestmark = pytest.mark.command(
+    "install",
+    "exec",
+    "which",
+    "env",
+    "select",
+    "deselect",
+    "uninstall",
+    "deps",
+    "package_create",
+    "package_push",
+    "package_pull",
+    "package_test",
+    "toolchain_env",
+    "toolchain_exec",
+    "add",
+    "init",
+    "pull",
+    "lock",
+    "shell_state",
+    "patch_test",
+    "index_list",
+    "index_update",
+    "self_group/activate",
+)
+
 _DOC_SCRIPTS_DIR = PROJECT_ROOT / "test" / "doc_scripts"
 _LEGACY_SCRIPTS_DIR = PROJECT_ROOT / "test" / "recordings" / "scripts"
 
@@ -122,7 +148,7 @@ def test_eq3_no_recordings_scripts_glob_literal(rel_path: str) -> None:
     discovery path and an EQ3 violation, so we reject any occurrence that is
     not on a line also mentioning the removal ("legacy" / "removed").
     """
-    path = PROJECT_ROOT / rel_path
+    path = {"test/recordings/conftest.py": PROJECT_ROOT / "test/recordings/conftest.py", "test/recordings/test_recordings.py": PROJECT_ROOT / "test/recordings/test_recordings.py", "website/recordings.taskfile.yml": PROJECT_ROOT / "website/recordings.taskfile.yml"}[rel_path]
     assert path.exists(), f"expected {rel_path} to exist"
     for lineno, line in enumerate(
         path.read_text().splitlines(), start=1

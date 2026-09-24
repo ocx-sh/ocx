@@ -9,6 +9,9 @@ use crate::command;
 use crate::error_envelope::render_error_envelope;
 use crate::options::FormatMode;
 
+mod boundary;
+pub use boundary::finish;
+
 mod context;
 pub use context::{Context, ManagedConfigGate, is_published_namespace};
 
@@ -20,6 +23,9 @@ mod managed_config_check;
 pub mod plugin_dispatch;
 
 pub mod project_context;
+
+#[cfg(any(test, feature = "__testing"))]
+pub mod seam;
 
 mod update_check;
 
@@ -35,7 +41,7 @@ pub mod build_info;
 /// to exits other than 64 (e.g. `NotFound`, `ConfigError`, `DataError`) and
 /// whose originating type is not a library error. Commands return this
 /// instead of `eprintln!` + `Ok(ExitCode::…)` so the message flows through
-/// the single `main.rs` `log::error!` + classify boundary.
+/// the single [`finish`] boundary.
 #[derive(Debug)]
 pub struct CommandError {
     message: String,
@@ -102,18 +108,33 @@ impl App {
         let color_mode = ocx_console::ColorMode::from_args();
         let color_config = color_mode.config();
         color_config.apply();
+        self.run_from(std::env::args_os().collect(), color_mode, color_config)
+            .await
+    }
 
+    async fn run_from(
+        self,
+        argv: Vec<std::ffi::OsString>,
+        color_mode: ocx_console::ColorMode,
+        color_config: ocx_console::ColorModeConfig,
+    ) -> anyhow::Result<ExitCode> {
         let styles = ocx_console::clap_styles(color_config.stdout);
         // Route every clap failure (value-validation, missing args, unknown
         // flags) through `clap_parse::parse` so backend tools see typed exit
         // codes (`EX_USAGE` = 64) instead of clap's default `2`. Help, version
         // and `DisplayHelpOnMissingArgumentOrSubcommand` paths still print
         // and exit `0` via clap's renderer inside the helper.
-        let matches = match crate::clap_parse::parse(Cli::command().color(color_mode.into()).styles(styles.clone())) {
+        let matches = match parse(Cli::command().color(color_mode.into()).styles(styles.clone()), &argv) {
             Ok(matches) => matches,
-            Err(code) => return Ok(code.into()),
+            Err(code) => return Ok(code),
         };
         let cli = Cli::from_arg_matches(&matches)?;
+        // Before the static bypass below: under the seam, a verb that is not
+        // admitted must not run at all, static or not.
+        #[cfg(any(test, feature = "__testing"))]
+        if seam::active() {
+            seam::admit(cli.command.as_ref())?;
+        }
 
         // Static commands dispatch without constructing a Context so they
         // survive a malformed ambient config (`~/.ocx/config.toml`).
@@ -146,8 +167,8 @@ impl App {
             }
             Some(command::Command::Self_(command::self_group::SelfGroup::Activate(ref a))) => {
                 let result = a.execute(&cli.context, color_config).await;
-                // The `main.rs` boundary reports through `log::error!`, and
-                // the subscriber it needs is installed by `Context::try_init`,
+                // The `finish` boundary reports through `tracing::error!`,
+                // and the subscriber it needs is installed by `Context::try_init`,
                 // which this path skips — so a refused activation exited 64 in
                 // silence (#434). Installed only once the path has failed: the
                 // stream itself stays diagnostic-free (A-21), and a shell start
@@ -182,10 +203,11 @@ impl App {
             },
         )
         .await?;
-        if should_check_for_update(&cli.command) {
+        // Both probes reach the network; the seam never makes a request.
+        if !in_seam() && should_check_for_update(&cli.command) {
             update_check::check_for_update(&context).await;
         }
-        if should_check_managed_config_refresh(&cli.command) {
+        if !in_seam() && should_check_managed_config_refresh(&cli.command) {
             managed_config_check::check_for_managed_config_refresh(&context).await;
         }
         let Some(command) = &cli.command else {
@@ -456,6 +478,27 @@ fn is_managed_config_onboarding_command(command: &Option<command::Command>) -> b
 
 pub async fn run() -> anyhow::Result<ExitCode> {
     App::new().run().await
+}
+
+/// Drive clap over `argv`. Under the seam, help and version render into the
+/// capture instead of exiting the process.
+fn parse(cmd: clap::Command, argv: &[std::ffi::OsString]) -> Result<clap::ArgMatches, ExitCode> {
+    #[cfg(any(test, feature = "__testing"))]
+    if seam::active() {
+        return seam::parse(cmd, argv);
+    }
+    crate::clap_parse::parse(cmd, argv).map_err(Into::into)
+}
+
+/// Whether this invocation runs inside the in-process seam ([`seam::run`]),
+/// which replaces every process-global the production path installs or
+/// probes. Always `false` in a build without the testing gate.
+fn in_seam() -> bool {
+    #[cfg(any(test, feature = "__testing"))]
+    let active = seam::active();
+    #[cfg(not(any(test, feature = "__testing")))]
+    let active = false;
+    active
 }
 
 #[cfg(test)]

@@ -49,8 +49,12 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from src.helpers import make_package
 from src.runner import OcxRunner
+
+pytestmark = pytest.mark.command("toolchain_exec")
 
 # ---------------------------------------------------------------------------
 # Exit code constants — mirror crates/ocx_lib/src/cli/exit_code.rs

@@ -75,12 +75,12 @@ BASELINE_JSON = _BENCH_DIR / "baseline.json"
 # package tarballs, OCX_HOME dirs, and hyperfine extract dirs there OOM-kills
 # the VM under concurrent matrix runs.
 #
-# Default: <repo-root>/target/bench-tmp  (disk-backed, gitignored by target/).
+# Default: ~/.cache/ocx-bench/bench-tmp  (disk-backed, outside every git tree).
 # Override: set BENCH_TMPDIR env var to any writable disk-backed path.
 # ---------------------------------------------------------------------------
 _REPO_ROOT = _TEST_DIR.parent
 BENCH_SCRATCH_DIR = Path(
-    os.environ.get("BENCH_TMPDIR", str(_REPO_ROOT / "target" / "bench-tmp"))
+    os.environ.get("BENCH_TMPDIR", str(Path.home() / ".cache" / "ocx-bench" / "bench-tmp"))
 )
 
 # DEFAULT_RUNS and DEFAULT_WARMUP are imported from bench.scenarios.

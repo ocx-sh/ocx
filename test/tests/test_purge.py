@@ -11,6 +11,8 @@ from src.helpers import make_package
 from src.registry import fetch_platform_manifest_digest
 from tests.test_assembly import _make_two_packages_sharing_layer
 
+pytestmark = pytest.mark.command("uninstall")
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

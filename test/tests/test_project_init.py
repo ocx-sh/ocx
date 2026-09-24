@@ -18,6 +18,8 @@ import pytest
 
 from src.runner import OcxRunner
 
+pytestmark = pytest.mark.command("init")
+
 # Exit codes per quality-rust-exit_codes.md / error.rs ClassifyExitCode:
 # ConfigAlreadyExists → UsageError = 64
 EXIT_SUCCESS = 0

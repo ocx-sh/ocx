@@ -60,6 +60,29 @@ codegen-units = 1
 panic = "abort"
 strip = "symbols"
 
+# The acceptance binary (`--features ocx/__testing`): `task rust:build` and
+# `test/taskfile.yml` `.build-binaries` both build it here, into
+# target/test-bin/, and nothing else may — two producers on two profiles would
+# compile `ocx` twice per `task verify`. Never shipped: cargo-dist builds
+# `dist`. Measured in .claude/artifacts/measurement_test_tiers_stage0.md (T1 =
+# the first `task verify:scoped --force` after a one-crate edit).
+[profile.test-bin]
+inherits = "release"
+# Carries the whole win: `.build-binaries` 53.9 s -> 30.1 s after a one-crate
+# edit, T1 114.2 s -> 88.5 s (-22.5 %). The rebuild is a strictly serial
+# `ocx` lib -> bin chain that job count cannot help; incremental codegen
+# reuses most of its CGUs. Cost: a cold build 61 s slower (241.8 s vs
+# 180.6 s). Not combined with sccache, which caches no incremental unit
+# (measured 0 hits per T1 run; ADR AM-5). Inert on CI, where
+# Swatinem/rust-cache exports CARGO_INCREMENTAL=0, which overrides it.
+incremental = true
+# Cargo's own default once `incremental` is on (release's is 16), stated
+# because the bench ran it: with incremental off it measured no effect
+# (54.6 s vs 53.9 s; L3, under local sccache).
+codegen-units = 256
+# Restates the release default; listed because the bench ran it.
+debug = 0
+
 [workspace.dependencies]
 # Internal crates — this block alone is kept sorted, so that every extraction
 # commit of the crate split lands on a distinct line (design spec D-052).

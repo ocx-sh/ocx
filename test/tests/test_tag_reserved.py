@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import requests
 from announce_helpers import (
     FIXED_CLOCK,
@@ -51,6 +52,8 @@ from fake_forge import FakeForge
 from src.helpers import make_package
 from src.registry import fetch_manifest_raw, fetch_platform_manifest_digest
 from src.runner import OcxRunner
+
+pytestmark = pytest.mark.command("index_list", "index_update")
 
 # The reserved forms the rule has to cover, spelled out rather than generated:
 # `__ocx.desc` (a real internal tag), `__ocx` (the bare namespace, no

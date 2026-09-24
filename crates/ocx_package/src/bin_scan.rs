@@ -623,6 +623,56 @@ mod tests {
         assert_eq!(binaries.iter().count(), 0, "the filled claim is empty");
     }
 
+    /// The claim `ocx package create -p <platform>` fills for the acceptance
+    /// suite's default package tree (`bin/hello`, executable, reached through
+    /// a `public` `PATH` entry): empty for a wasm target, `["hello"]` for the
+    /// identical tree under `linux/amd64`. The native leg is what makes the
+    /// empty wasm claim evidence of the no-scan rule rather than of a tree the
+    /// scan could not read.
+    #[cfg(unix)]
+    #[tokio::test]
+    // ported-from: test/tests/test_platform_pairs.py::test_wasm_target_claims_no_binaries
+    async fn wasm_target_claims_no_binaries_where_the_same_tree_under_linux_claims_hello() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_exec_file(&bin.join("hello"));
+        let metadata = || -> AuthoringMetadata {
+            serde_json::from_str(
+                r#"{"type":"bundle","version":1,"env":[
+                    {"key":"PATH","type":"path","required":true,"value":"${installPath}/bin","visibility":"public"},
+                    {"key":"HELLO_HOME","type":"constant","value":"${installPath}","visibility":"public"}]}"#,
+            )
+            .expect("fixture metadata parses")
+        };
+        let claimed = |resolved: &AuthoringMetadata| -> Vec<String> {
+            resolved
+                .binaries()
+                .expect("an auto scan fills the claim rather than leaving it absent")
+                .iter()
+                .map(|name| name.as_str().to_owned())
+                .collect()
+        };
+
+        let wasm = resolve_binaries(dir.path(), metadata(), &"wasip1/wasm".parse().unwrap(), ScanMode::Auto)
+            .await
+            .expect("a wasm target resolves");
+        assert_eq!(
+            claimed(&wasm),
+            Vec::<String>::new(),
+            "a wasm target must claim no binaries"
+        );
+
+        let native = resolve_binaries(dir.path(), metadata(), &linux_platform(), ScanMode::Auto)
+            .await
+            .expect("a linux target resolves");
+        assert_eq!(
+            claimed(&native),
+            vec!["hello"],
+            "control: the identical tree under linux/amd64 must claim its executable"
+        );
+    }
+
     // ── Symlink follow + dangling symlink exclude ───────────────────────
 
     #[cfg(unix)]

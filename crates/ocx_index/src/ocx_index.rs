@@ -534,6 +534,15 @@ impl IndexTransport for ReqwestIndexTransport {
     /// retry *volume* is what the budget bounds, and per-attempt duration is
     /// what `TransportHardening::outer_cap` bounds.
     async fn get(&self, url: &str) -> Result<IndexFetch> {
+        // The in-process CLI seam's no-network guarantee reaches this client
+        // too, not only the registry transport; `false` outside tests.
+        if ocx_oci::client::network_refused() {
+            return Err(super::error::Error::IndexHttpFailed {
+                url: redact_url(url),
+                status: None,
+                source: "network access refused".into(),
+            });
+        }
         let client = self.client();
         let policy = &self.policy;
         transport_policy::run(policy, &self.budget, move |attempt| async move {

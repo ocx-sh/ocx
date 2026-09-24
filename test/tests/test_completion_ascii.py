@@ -31,6 +31,8 @@ import pytest
 
 from src.runner import OcxRunner
 
+pytestmark = pytest.mark.command("shell_completion")
+
 # Shells that clap_complete has a backend for -- the only values
 # `ocx shell completion` emits a script for (others exit 64).
 _BACKEND_SHELLS = ("bash", "zsh", "fish", "elvish", "powershell")

@@ -114,6 +114,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bazel_gate_proofs import (
     CRATES_TEST_TARGETS,
+    CRATES_TWIN_TEST_TARGETS,
     Finding,
     codes,
     expect,
@@ -728,8 +729,9 @@ def prove_floor(work: Path, rows: list[Row]) -> int:
     observed, read_findings = read_results(bep)
     expect(not read_findings, f"the green fixture must read cleanly, got {codes(read_findings)}")
     expect(
-        len(observed) == len(rows) == CRATES_TEST_TARGETS,
-        f"the fixture must carry all {CRATES_TEST_TARGETS} targets, it carries {len(observed)}",
+        len(observed) == len(rows) == CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS,
+        f"the fixture must carry all {CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS} targets, "
+        f"it carries {len(observed)}",
     )
     total = sum(counts.executed for counts in observed.values())
     findings = floor_findings(observed, rows) + ceiling_findings(observed, ceiling)
@@ -993,9 +995,10 @@ def prove_synthesised_xml_is_not_the_count() -> int:
 def prove_counts(rows: list[Row]) -> int:
     """The two floors that judge the same universe must agree, or one of them is stale."""
     expect(
-        len(rows) == CRATES_TEST_TARGETS,
+        len(rows) == CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS,
         f"crates/TEST_TARGET_MAP.toml has {len(rows)} rows, "
-        f"bazel_gate_proofs.CRATES_TEST_TARGETS is {CRATES_TEST_TARGETS} — the two floors "
+        f"bazel_gate_proofs.CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS is "
+        f"{CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS} — the two floors "
         f"read the same universe and disagree",
     )
     expect(

@@ -30,6 +30,8 @@ import pytest
 from src.helpers import make_package, make_package_with_entrypoints
 from src.runner import OcxRunner, current_platform
 
+pytestmark = pytest.mark.command("env")
+
 EXIT_USAGE = 64  # UsageError (sysexits EX_USAGE)
 EXIT_DATA_ERR = 65  # DataError (sysexits EX_DATAERR)
 EXIT_SUCCESS = 0

@@ -31,6 +31,8 @@ from announce_e2e.evidence import (
     render_evidence_markdown,
 )
 
+pytestmark = pytest.mark.command("package_announce")
+
 FIXTURES = Path(__file__).parent / "fixtures" / "announce_e2e"
 
 #: The index bot's numeric actor id, as `BOT_ACTOR_IDS` carries it at run time.

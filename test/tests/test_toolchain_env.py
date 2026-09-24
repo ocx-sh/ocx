@@ -36,6 +36,8 @@ from src.runner import OcxRunner
 from src.shell_eval import run_after_sourcing
 from src.toolchain_fixtures import locked_project, resolved_toolchain_home, run_in
 
+pytestmark = pytest.mark.command("toolchain_env")
+
 # ---------------------------------------------------------------------------
 # Exit code constants — mirror crates/ocx_lib/src/cli/exit_code.rs
 # ---------------------------------------------------------------------------

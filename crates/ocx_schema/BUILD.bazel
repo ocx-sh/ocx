@@ -2,7 +2,7 @@
 # Copyright 2026 The OCX Authors
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 
 package(default_visibility = ["//crates:__subpackages__"])
 
@@ -27,6 +27,33 @@ rust_library(
         "//crates/ocx_package_manager",
         "//crates/ocx_project",
     ],
+)
+
+# The `ocx_schema` binary (`src/main.rs`, cargo's default `[[bin]]`), built
+# by Bazel so that no consumer reads cargo's `target/release/ocx_schema`:
+# `target/` is `.bazelignore`d and cannot be a label, so an acceptance module
+# reading it was cached over an input no key named (plan_test_speed_tiers.md
+# C-020, ADR C-UNCACHED AM-6). Two consumers take it as `data`: the
+# `schema_outputs` integration test below (as `CARGO_BIN_EXE_ocx_schema`, the
+# name cargo gives the same binary) and the `test_project_env` /
+# `test_execution_records` acceptance targets (as `OCX_SCHEMA_BINARY`,
+# `test/BUILD.bazel`).
+#
+# `stamp = 0`, spelled out: the binary embeds no build metadata, and
+# `bazel:tag:guard` clause 2 credits only an explicitly specified `stamp = 0`
+# (rules_rust defaults a `rust_binary` to -1).
+rust_binary(
+    name = "ocx_schema_bin",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_schema"},
+    stamp = 0,
+    version = "0.6.2",
+    visibility = [
+        "//crates:__subpackages__",
+        "//test:__pkg__",
+    ],
+    deps = [":ocx_schema"],
 )
 
 rust_test(
@@ -247,13 +274,20 @@ rust_test(
         ],
         allow_empty = True,
         exclude = ["tests/*.rs"],
-    ),
+    ) + [":ocx_schema_bin"],
     edition = "2024",
     proc_macro_deps = all_crate_deps(
         proc_macro = True,
         proc_macro_dev = True,
     ),
-    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_schema"},
+    # `CARGO_BIN_EXE_ocx_schema` is what cargo sets for an integration test of
+    # a package with a `[[bin]]`; the two binary contracts at the end of
+    # `tests/schema_outputs.rs` read it through `env!`. A `rootpath` is relative
+    # to the runfiles root, which is the test's working directory under Bazel.
+    rustc_env = {
+        "CARGO_BIN_EXE_ocx_schema": "$(rootpath :ocx_schema_bin)",
+        "CARGO_MANIFEST_DIR": "crates/ocx_schema",
+    },
     version = "0.6.2",
     deps = all_crate_deps(
         normal = True,

@@ -34,6 +34,8 @@ from src.registry import (
 )
 from src.runner import OcxRunner, current_platform
 
+pytestmark = pytest.mark.command("package_push")
+
 EXIT_USAGE = 64
 EXIT_DATA_ERR = 65
 EXIT_NOT_FOUND = 79

@@ -874,6 +874,10 @@ mod firewall_tests {
             "integration test running `otool` against the built binary",
         ),
         (
+            "ocx_schema/tests/schema_outputs.rs",
+            "integration test running the built `ocx_schema` generator binary as its subject",
+        ),
+        (
             "ocx_test_support/tests/workspace_structure.rs",
             "structural guards running `cargo metadata` and `cargo tree` over the workspace \
              (plan_crate_split_workspace.md C-009, C-078)",

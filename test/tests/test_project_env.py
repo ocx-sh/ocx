@@ -79,6 +79,8 @@ import pytest
 from src.helpers import make_package, make_package_with_entrypoints
 from src.runner import OcxRunner
 
+pytestmark = pytest.mark.command("toolchain_env")
+
 # ---------------------------------------------------------------------------
 # Exit code constants — mirror crates/ocx_lib/src/cli/exit_code.rs
 # ---------------------------------------------------------------------------
@@ -89,7 +91,7 @@ EXIT_CONFIG = 78  # ConfigError (sysexits EX_CONFIG)
 EXIT_DATA = 65  # DataError (sysexits EX_DATAERR) — malformed/rejected OCX_ENV payload
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_BINARY = PROJECT_ROOT / "target" / "release" / "ocx_schema"
+SCHEMA_BINARY = Path(shutil.which("ocx_schema") or "ocx_schema-not-on-PATH")
 
 # ---------------------------------------------------------------------------
 # Helpers (DAMP — self-contained, mirrors idiom in test_project_run.py /
@@ -1691,7 +1693,7 @@ def _project_schema_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     if not SCHEMA_BINARY.exists():
         build = subprocess.run(
             ["cargo", "build", "--release", "-p", "ocx_schema"],
-            cwd=PROJECT_ROOT,
+            cwd=PROJECT_ROOT / "test",
             capture_output=True,
             text=True,
             check=False,

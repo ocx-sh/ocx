@@ -10,6 +10,8 @@ import requests
 
 from src import OcxRunner, fetch_manifest_from_registry
 
+pytestmark = pytest.mark.command("package_description*")
+
 
 @pytest.fixture()
 def unique_repo(request: pytest.FixtureRequest) -> str:

@@ -25,9 +25,13 @@ import urllib.request
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src import OcxRunner
 from src.helpers import inspect_entry, inspect_names, make_package
 from src.runner import registry_dir
+
+pytestmark = pytest.mark.command("package_inspect")
 
 
 def test_inspect_default_lists_index_candidates(

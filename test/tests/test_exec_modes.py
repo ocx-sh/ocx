@@ -19,6 +19,8 @@ from src.helpers import make_package, make_package_with_entrypoints
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo
 
+pytestmark = pytest.mark.command("exec", "env")
+
 # ---------------------------------------------------------------------------
 # Helpers (DAMP per quality-core.md — keep tests self-contained)
 # ---------------------------------------------------------------------------

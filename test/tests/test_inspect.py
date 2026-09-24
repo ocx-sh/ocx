@@ -32,6 +32,8 @@ import pytest
 from src.helpers import inspect_entry, inspect_names, make_package
 from src.runner import OcxRunner, current_platform
 
+pytestmark = pytest.mark.command("inspect")
+
 EXIT_SUCCESS = 0
 EXIT_USAGE = 64
 EXIT_DATA = 65

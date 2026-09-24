@@ -97,7 +97,10 @@ tasks:
       Phase 1 (parallel, .verify:lint): rust:format:check, rust:clippy:check,
         shell:verify (shellcheck + shfmt), ci:verify (actionlint), claude:verify
         (structural tests + link check), scripts:verify (the gate-tool self-tests),
-        test:lint (ruff over the acceptance suite), website:lint:links,
+        test:lint (ruff over the acceptance suite), test:lint:structure (the
+        lint tier: test/lint/'s structural sweeps, uncached, floored and
+        budgeted), test:rows:check (the scoped gate's coverage guard over
+        test/scoped_rows.toml and the `command` markers), website:lint:links,
         bazel:pin:check (the Bazel pin authority; it reads text and one
         `bazel --version`, loads no graph, and so belongs in the parallel leg)
       Phase 2 (sequential, .verify:build-test): rust:license:check,
@@ -120,13 +123,19 @@ tasks:
         rust:test:doc
         (nextest runs no doctest, and the scoped gate's per-crate doctest step
         is iterated over an empty CRATES on every escalate), then
-        bazel:test:accept — one serial `bazel test` over the acceptance
-        package, the suite as 181 cached sh_test targets, carrying the suite
+        bazel:test:accept — one concurrent `bazel test` over the acceptance
+        package, the suite as one cached sh_test target per module, carrying the suite
         floor and the skip/xfail ceilings read off its own per-case JUnit
         reports, and carrying the pytest entry point's own summary parser
         fixtures where the step it replaces reached them
       Ends with a *full* verify mark (.verify:mark SCOPE=full) — the only
-        mark a `release:` commit or a commit on main accepts.
+        mark a `release:` commit, a commit on main or a merge commit accepts
+        (a `release:` commit only one from `task verify NOCACHE=1`).
+        The mark records the index's tree; a merge commit is admitted only
+        when that tree is the one being committed, and while a merge is in
+        progress the mark step refuses a working tree that differs from the
+        index. Work-package merge recipe: `git merge --no-ff --no-commit
+        <branch>`, then this task, then `git commit`.
       A step whose `sources:` are unchanged is skipped, and the full mark is
         written anyway — that is the point: the check already passed on this
         content, and re-running it buys nothing. `--force` re-runs everything
@@ -139,6 +148,12 @@ tasks:
       # Deliberately not named in the summary above: that text is checked
       # against what `.verify:lint` / `.verify:build-test` run, and this is
       # neither — it is the one-line bootstrap that installs the git hooks.
+      # C-017/AM-8 up front: during a merge, a working tree that differs from
+      # the index is refused now rather than at the mark step after the whole
+      # suite. A tree equal to its index is snapshot so the mark step records
+      # it as proven (and, merging, refuses one restaged mid-run); a dirty
+      # tree outside a merge gets no snapshot, so its mark carries no tree.
+      - python3 {{.ROOT_DIR}}/scripts/scoped_gate.py --mark-precheck
       - task: git:hooks
       - task: .verify:lint
       - task: .verify:build-test
@@ -148,16 +163,23 @@ tasks:
   verify:scoped:
     desc: Scoped quality gate — only what changed since the last full verify (hubs and unrouted paths escalate to `task verify`)
     summary: |
-      scripts/scoped_gate.py --plan decides (plan_crate_split_workspace.md C-019):
-        escalate → task verify: a hub crate (≥ 4 reverse dependents), an
-                   ecosystem crate, a crate whose test:scoped row reads
-                   `escalate` (TABLE_ESCALATES: ocx_test_support, ocx,
-                   ocx_python — `ocx` until the verbs move out of the CLI
-                   crate), a path with no
-                   route, or the gate tooling under `scripts/**` changed (its
+      scripts/scoped_gate.py --plan decides (plan_crate_split_workspace.md C-019,
+      plan_test_speed_tiers.md C-014), reading test/scoped_rows.toml:
+        escalate → task verify: a path under a [security] glob (checked
+                   first), a command file a [verbs] entry names or no
+                   `command` marker selects, any other path under
+                   crates/ocx_cli/ (permit-list default), a hub crate (≥ 4
+                   reverse dependents), an ecosystem crate, a crate whose
+                   [crates] row reads `escalate` (TABLE_ESCALATES:
+                   ocx_test_support, ocx_python — the table), a path
+                   with no route, or the gate tooling under `scripts/**`
+                   changed (its
                    self-tests are routed too, and the full run's
                    `.verify:lint` runs them)
-        routed   → only the routed checks: claude:tests for `.claude/**`,
+        routed   → the lint tier (test:lint:structure) and the coverage guard
+                   (test:rows:check), on every routed and scoped run (an
+                   escalate reaches both through `verify`), then only the
+                   routed checks: ruff for `test/lint/**`, claude:tests for `.claude/**`,
                    `.agents/**` and CLAUDE.md, actionlint (+ test_workflows.py)
                    for `.github/**`, test:parallel over the touched
                    `test/tests/test_*.py`, scripts:self-test for `scripts/**`,
@@ -169,13 +191,24 @@ tasks:
                    `Cargo.lock` carries no feature data, so nothing else
                    would catch a `[features]` edit that breaks the build
                    (D40)
-        scoped   → the routed checks, cargo check --workspace, then per changed
-                   crate clippy / nextest / doc tests, the workspace
-                   rust:doc:ratchet, then
-                   test:smoke and test:scoped -- <crates>
+        scoped   → the routed checks, cargo check --workspace, per changed
+                   crate clippy and doc tests, one bazel:test:unit (cached, so
+                   it executes the changed crates' reverse dependents and
+                   serves the rest), the workspace rust:doc:ratchet, then
+                   test:smoke and test:scoped over the plan's acceptance_globs
+                   (the changed command files' marked modules plus the
+                   changed crates' [crates] globs). These run as concurrent
+                   lanes (`.verify:scoped:lanes`): the lint tier and the
+                   Bazel unit run (`--jobs=4`) beside one cargo lane that
+                   builds the acceptance binaries first, then runs the
+                   pytest legs beside check, clippy, doc tests and the doc
+                   ratchet — one cargo compile at a time, so the arm peaks
+                   at 12 + 4 compiler jobs
       Ends with a *scoped* mark: the pre-commit hook accepts it for ordinary
-      commits, never for a `release:` commit or a commit on main (those need
-      `task verify`). Sub-tasks (`claude:tests`, `test:parallel`,
+      commits, never for a `release:` commit, a commit on main or a merge
+      commit (those need `task verify`). The run's selection is appended to
+      the shared scoped-run log, which a failed T2 during a merge reads to
+      record escapes. Sub-tasks (`claude:tests`, `test:parallel`,
       `test:smoke`) keep their `sources:` cache, so an unchanged step is
       skipped — `--force` re-runs everything.
     vars:
@@ -188,6 +221,8 @@ tasks:
       ROUTE_CLAUDE: '{{(fromJson .PLAN).routes.claude | join " "}}'
       ROUTE_WORKFLOWS: '{{(fromJson .PLAN).routes.workflows | join " "}}'
       ROUTE_TESTS: '{{(fromJson .PLAN).routes.tests | join " "}}'
+      ROUTE_LINT: '{{(fromJson .PLAN).routes.lint | join " "}}'
+      ACCEPTANCE_GLOBS: '{{(fromJson .PLAN).acceptance_globs | join " "}}'
       ROUTE_SCRIPTS: '{{(fromJson .PLAN).routes.scripts | join " "}}'
       ROUTE_MANIFESTS: '{{(fromJson .PLAN).routes.manifests | join " "}}'
       WORKFLOW_TEST_CMD: '{{(fromJson .PLAN).workflow_test_cmd}}'
@@ -201,6 +236,17 @@ tasks:
       - printf '%s\n' {{shellQuote .PLAN}}
       - if: '[ "{{.DECISION}}" = escalate ]'
         task: verify
+      # C-015 at T0: a command file or module the table no longer covers reds
+      # here, before any build is spent.
+      - if: '[ "{{.DECISION}}" != escalate ]'
+        task: test:rows:check
+      # The lint tier on both non-escalating arms: it is uncached and cheap,
+      # and a sweep over the tree is exactly what a narrow route cannot select.
+      # The scoped arm runs it as a lane of `.verify:scoped:lanes`.
+      - if: '[ "{{.DECISION}}" = routed ]'
+        task: test:lint:structure
+      - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_LINT}}" ]'
+        task: test:lint
       - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_CLAUDE}}" ]'
         task: claude:tests
       - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_WORKFLOWS}}" ]'
@@ -211,7 +257,7 @@ tasks:
         task: test:lint
       - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_TESTS}}" ]'
         task: test:parallel
-        vars: { CLI_ARGS: '{{.ROUTE_TESTS}}' }
+        vars: { CLI_ARGS: '{{.ROUTE_TESTS}}', OCX_GATE: inner }
       # Today a `scripts/**` change always escalates (the full run's
       # `.verify:lint` covers this); the step is the route's consumer for
       # when the gate ever certifies a scripts edit on its own.
@@ -224,8 +270,6 @@ tasks:
       # which builds in seconds, so the route certifies the path on its own.
       - if: '[ "{{.DECISION}}" != escalate ] && [ -n "{{.ROUTE_MANIFESTS}}" ]'
         cmd: cargo nextest run -p ocx_test_support --test workspace_structure --locked
-      - if: '[ "{{.DECISION}}" = scoped ]'
-        cmd: cargo fmt --all -- --check
       # D40: a manifest edit decides what the workspace compiles — `[features]`,
       # a dependency edge, `default-features`, a `[[bin]]` — and `Cargo.lock`
       # carries no feature data, so such an edit never drags the lock into the
@@ -233,49 +277,130 @@ tasks:
       # `ocx_test_support` alone, so on its own this route certified a
       # workspace that does not build. `--locked` is part of the check: a
       # manifest edit the lock has not caught up with fails here by name.
-      - if: '[ "{{.DECISION}}" != escalate ] && { [ "{{.DECISION}}" = scoped ] || [ -n "{{.ROUTE_MANIFESTS}}" ]; }'
+      # The scoped arm runs the same check in `.verify:scoped:cargo`.
+      - if: '[ "{{.DECISION}}" = routed ] && [ -n "{{.ROUTE_MANIFESTS}}" ]'
         cmd: cargo check --workspace --all-targets --locked
-      - for: { var: CRATES }
-        cmd: cargo clippy -p {{.ITEM}} --all-targets --locked -- -D warnings
-      # The scoped arm's unit run follows `.verify:build-test`'s: the engine
-      # is Bazel, so a crate that passes here and a crate that passes in the
-      # full gate passed under the same runner. `:all` rather than a named
-      # target because a crate's test rules are not enumerable from the crate
-      # name, and `--nocache_test_results` is deliberately NOT set - the point
-      # of the scoped arm is that an untouched crate is free.
+      # Everything else the scoped arm runs, as concurrent lanes.
+      - if: '[ "{{.DECISION}}" = scoped ]'
+        task: .verify:scoped:lanes
+        vars: { CRATES: '{{.CRATES}}', ACCEPTANCE_GLOBS: '{{.ACCEPTANCE_GLOBS}}' }
+      # LOG_RUN: this run's selection goes to the shared scoped-run log that
+      # a failed T2 during a merge reads to attribute escapes (C-018). Only
+      # here — a hand `verify:mark` ran no selection and logs nothing.
+      - if: '[ "{{.DECISION}}" != escalate ]'
+        task: .verify:mark
+        vars: { SCOPE: scoped, CRATES: '{{.CRATES}}', LOG_RUN: '1' }
+
+  .verify:scoped:lanes:
+    internal: true
+    desc: The scoped arm's legs as concurrent lanes — lint tier, Bazel unit run, cargo
+    # The same steps the arm ran one after another, none dropped or narrowed;
+    # only the order changed. Each lane writes its own place — the lint tier
+    # nothing, `bazel:test:unit` the Bazel output base — and every cargo step
+    # stays in `.verify:scoped:cargo`. go-task fails this task when any lane
+    # fails, after the others finish.
+    #
+    # Compiler jobs are a RAM cap on this host, not a speed knob
+    # (`.cargo/config.toml`, `.bazelrc`: 12 each). Two compiling lanes are the
+    # most this task runs at once: the cargo lane — one cargo invocation at a
+    # time, 12 jobs — and the Bazel lane at 4. The doc ratchet used to be a
+    # third lane with its own target dir, which put three 12-job compilers on
+    # the host together (review-3 finding 3); it is the cargo lane's last
+    # check now.
+    deps:
+      # Uncached and cheap; a sweep over the tree is exactly what a narrow
+      # route cannot select.
+      - task: test:lint:structure
+      # The scoped arm's unit run IS `.verify:build-test`'s (ADR D3, C-016):
+      # one `bazel:test:unit` over //crates/..., reader floor and skip
+      # ceiling included. The test-result cache makes it cost what changed —
+      # the edited crate and every reverse dependent recompile and re-run,
+      # everything else is served — so a change in `ocx_setup` now runs
+      # `ocx_cli`'s rust_test targets too, which the old per-crate
+      # `bazel test //crates/<c>:all` never reached.
       #
       # `cargo nextest run -p <crate>` stays reachable as `rust:test:nextest`
       # (local convenience, per the goal's "nextest stays local-only"); it is
       # no longer what a gate reads.
+      #
+      # `--jobs=4` beside cargo's 12. A scoped change recompiles a chain of
+      # reverse dependents, which runs one crate at a time whatever the cap,
+      # and every other action is a cache hit.
+      # ponytail: a fixed 4 — derive it from cargo's `jobs` if that cap moves.
+      - task: bazel:test:unit
+        vars: { CLI_ARGS: '--jobs=4' }
+      - task: .verify:scoped:cargo
+        vars: { CRATES: '{{.CRATES}}', ACCEPTANCE_GLOBS: '{{.ACCEPTANCE_GLOBS}}' }
+
+  .verify:scoped:cargo:
+    internal: true
+    desc: The scoped arm's cargo lane — the acceptance build first, then the pytest legs beside check, clippy and doc tests
+    # The acceptance binaries are the longest chain in the arm and the pytest
+    # legs wait on nothing else, so they are built first; after that the
+    # compile-only checks (still one at a time over target/) overlap pytest.
+    cmds:
+      - cargo fmt --all -- --check
+      - task: test:build
+      - task: .verify:scoped:after-build
+        vars: { CRATES: '{{.CRATES}}', ACCEPTANCE_GLOBS: '{{.ACCEPTANCE_GLOBS}}' }
+
+  .verify:scoped:after-build:
+    internal: true
+    deps:
+      - task: .verify:scoped:checks
+        vars: { CRATES: '{{.CRATES}}' }
+      - task: .verify:scoped:acceptance
+        vars: { ACCEPTANCE_GLOBS: '{{.ACCEPTANCE_GLOBS}}' }
+
+  .verify:scoped:checks:
+    internal: true
+    cmds:
+      # D40: a manifest edit decides what the workspace compiles, so the
+      # scoped arm checks the whole workspace, not only the changed crates.
+      - cargo check --workspace --all-targets --locked
       - for: { var: CRATES }
-        cmd: ocx exec bazel -- bazel test //crates/{{.ITEM}}:all
+        cmd: cargo clippy -p {{.ITEM}} --all-targets --locked -- -D warnings
       - for: { var: CRATES }
         cmd: cargo test --doc -p {{.ITEM}} --locked
-      # Both arms, deliberately: the escalate arm reaches this through
-      # `verify`. Until WP-10 only the scoped arm ran a doc check at all, so
-      # escalating — which every batch does — *lost* the one gate that reads
-      # intra-doc links. Workspace-wide rather than per-crate because the
-      # baseline is keyed by file and a partial stream reads as a decrease.
-      - if: '[ "{{.DECISION}}" = scoped ]'
-        task: rust:doc:ratchet
-      - if: '[ "{{.DECISION}}" = scoped ]'
-        task: test:smoke
-      - if: '[ "{{.DECISION}}" = scoped ]'
-        task: test:scoped
-        vars: { CLI_ARGS: '{{.CRATES}}' }
-      - if: '[ "{{.DECISION}}" != escalate ]'
-        task: .verify:mark
-        vars: { SCOPE: scoped, CRATES: '{{.CRATES}}' }
+      # Scoped arm only here; the escalate arm reaches it through `verify`.
+      # Until WP-10 only the scoped arm ran a doc check at all, so escalating
+      # — which every batch does — *lost* the one gate that reads intra-doc
+      # links. Workspace-wide rather than per-crate because the baseline is
+      # keyed by file and a partial stream reads as a decrease. In this lane,
+      # not a lane of its own: its target/docratchet build is a third
+      # 12-job compiler otherwise (`.verify:scoped:lanes`).
+      - task: rust:doc:ratchet
+
+  .verify:scoped:acceptance:
+    internal: true
+    cmds:
+      # `OCX_GATE` names the tier on the telemetry spans these legs push
+      # (C-018). An explicit var, not `env:`: go-task 3.53 hands neither a
+      # task's `env:` nor its vars to the tasks it calls (measured), so this
+      # is the only way the value reaches `telemetry:push` three calls down.
+      - task: test:smoke
+        vars: { OCX_GATE: inner }
+      - task: test:scoped
+        vars: { CLI_ARGS: '{{.ACCEPTANCE_GLOBS}}', OCX_GATE: inner }
 
   .verify:mark:
     internal: true
     desc: >-
-      Write the JSON verify mark ({timestamp, head, scope, crates}) the
-      pre-commit hook and verify:scoped read. Only `verify` passes SCOPE=full.
+      Write the JSON verify mark ({timestamp, head, scope, crates, toplevel,
+      tree, nocache}) the commit-msg hook and verify:scoped read. `nocache`
+      is true when NOCACHE=1 reached the run with no CLI_ARGS alongside it —
+      a `release:` commit needs it. CLI_ARGS (global, `task verify NOCACHE=1
+      -- <args>`) rides into `bazel:test:accept` and can itself re-enable
+      caching or filter which targets ran, so a CLI_ARGS present at all
+      voids the nocache claim rather than recording a full-coverage promise
+      the run may not have kept. Only `verify` passes SCOPE=full; only
+      `verify:scoped` passes LOG_RUN. During a merge it refuses a working
+      tree that differs from the index (C-017, AM-8), which fails `task
+      verify` at this step.
     vars:
       SCOPE: '{{.SCOPE | default "scoped"}}'
     cmds:
-      - python3 {{.ROOT_DIR}}/scripts/scoped_gate.py --mark {{.SCOPE}} {{if .CRATES}}--crates {{.CRATES}}{{end}}
+      - python3 {{.ROOT_DIR}}/scripts/scoped_gate.py --mark {{.SCOPE}} {{if .CRATES}}--crates {{.CRATES}}{{end}} {{if .LOG_RUN}}--log-run{{end}} {{if and .NOCACHE (not .CLI_ARGS)}}--nocache{{end}}
 
   verify:mark:
     desc: |
@@ -298,7 +423,7 @@ tasks:
       # Pinned, not defaulted: a CLI var (`task verify:mark SCOPE=full`) beats
       # the callee's `default`, and a hand mark must never be `full`.
       - task: .verify:mark
-        vars: { SCOPE: scoped, CRATES: '' }
+        vars: { SCOPE: scoped, CRATES: '', LOG_RUN: '' }
       - cmd: 'echo "verify:mark: scoped mark written at HEAD $(git rev-parse --short HEAD), 5-minute TTL"'
 
   .verify:lint:
@@ -311,6 +436,13 @@ tasks:
       - task: claude:verify
       - task: scripts:verify
       - task: test:lint
+      # The lint tier (ADR C-LINT): uncached by design, so it is here rather
+      # than behind a Bazel cache key, and in phase 1 because it builds nothing.
+      - task: test:lint:structure
+      # C-015: the scoped gate's table and markers still cover the tree. Here
+      # as well as on the scoped arm, because an escalated run is how a new
+      # command file or test module usually arrives.
+      - task: test:rows:check
       - task: website:lint:links
       # The one Bazel gate that loads no graph: `bazel --version` against
       # `.bazelversion`, plus the `rust-toolchain.toml` ↔ `MODULE.bazel` twin.
@@ -415,19 +547,23 @@ tasks:
       # defect, fixed for `rust:doc:ratchet` and left standing here.
       - task: rust:test:doc
       # A7's fourth line over the acceptance half, replacing `test:parallel`.
-      # The 181 `sh_test` targets have existed since WP-36 and nothing ran
+      # The acceptance `sh_test` targets have existed since WP-36 and nothing ran
       # them: both this phase and `verify-deep.yml`'s acceptance job called
       # `task test:parallel`, i.e. pytest directly, so stage 4 was neither
       # cached nor reported through Bazel. It is now, with its results CACHED
-      # (adr_bazel_build_adoption.md § Stage 4, amended) — which is what pays
-      # for the serial `--local_test_jobs=1` run: an unchanged tree executes 0
-      # of 181, and one edited module executes 1.
+      # (adr_bazel_build_adoption.md § Stage 4, amended): an unchanged tree
+      # executes only `UNCACHED_MODULES`, an edited module re-runs itself and
+      # its importers, and an edit to `//test:suite_inputs` re-runs every
+      # target. The targets run concurrently behind the runner's host locks
+      # (`test/bazel.bzl` § Concurrency), so a cold run is not the serial one
+      # it used to be.
       #
       # `test/SUITE_FLOOR` and the skip/xfail ceilings did not leave with
-      # `test:parallel`: `bazel:test:accept` reads them off the 181 per-case
+      # `test:parallel`: `bazel:test:accept` reads them off the per-module per-case
       # JUnit reports Bazel writes, which is more than the terminal-summary
       # parser they replace saw. `task test:parallel` survives as the local
-      # xdist convenience and as `verify:scoped`'s acceptance leg.
+      # xdist convenience and as `verify:scoped`'s leg for a touched
+      # `test/tests/test_*.py` (the scoped arm runs `test:smoke` + `test:scoped`).
       #
       # That parser's own red/green fixtures stay on the gate — inside
       # `bazel:test:accept` rather than beside it, which is where the step it

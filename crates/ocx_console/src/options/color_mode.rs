@@ -22,9 +22,15 @@ impl ColorMode {
     /// This allows setting color state *before* clap parses, so that clap's own
     /// help/error rendering respects `--color never`/`--color always`.
     pub fn from_args() -> Self {
+        Self::from_argv(std::env::args().skip(1))
+    }
+
+    /// [`Self::from_args`] over an explicit argument list, program name
+    /// excluded — for a caller whose argv is not the process's own.
+    pub fn from_argv(args: impl IntoIterator<Item = String>) -> Self {
         use clap_builder::ValueEnum;
 
-        let mut args = std::env::args().skip(1);
+        let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             if arg == "--" {
                 break;

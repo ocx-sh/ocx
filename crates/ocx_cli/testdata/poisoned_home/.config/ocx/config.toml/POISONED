@@ -1,0 +1,5 @@
+poisoned-ambient-read: this path is a DIRECTORY on purpose. The config loader keeps a
+candidate that exists and is not a symlink, and reading a directory is an
+error, so an ambient HOME / XDG_CONFIG_HOME / OCX_HOME read fails the case
+(ocx_cli_seam_test, ADR C-SEAM invariant 1). A regular file would reach
+the sandbox as a symlink, which the loader skips.

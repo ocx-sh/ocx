@@ -28,8 +28,12 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures.sigstore_stack import SigstoreStack
+
+pytestmark = pytest.mark.command("config_test")
 
 # The public half of the key pair cosign generated for the golden fixtures. It
 # signs nothing outside this repository, and it is a *public* key besides — see

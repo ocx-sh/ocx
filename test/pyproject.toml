@@ -22,7 +22,7 @@ testpaths = ["tests"]
 pythonpath = [".", "src"]
 # A marker that is misspelled (`@pytest.mark.smok`) is otherwise a silently
 # unregistered marker: the test still runs in the full suite and simply never
-# joins the `-m smoke` selection, which `test_smoke_coverage.py` would report as
+# joins the `-m smoke` selection, which `lint/test_smoke_coverage.py` would report as
 # a verb without coverage rather than as a typo. `--strict-markers` turns the
 # typo into a collection error at the line that carries it.
 addopts = "--strict-markers"
@@ -32,7 +32,7 @@ markers = [
     # a 90 s wall-clock budget. Never a signing/attest/verify test and never a
     # test that takes the `sigstore_stack` / `identity_token` fixtures — the
     # tier's whole point is a gate that runs without the seven-container
-    # Sigstore stack. `tests/test_smoke_coverage.py` enforces both.
+    # Sigstore stack. `lint/test_smoke_coverage.py` enforces both.
     "smoke: the per-verb smoke tier — cheap, registry-only, no Sigstore stack (see task test:smoke)",
     "requires_tty: test requires a real TTY on stderr; skipped in capture-output environments (is_terminal() returns false in pipes)",
     # The cosign interop matrix (WP6) contains two kinds of passing test, and a
@@ -43,6 +43,13 @@ markers = [
     # recipe is therefore `-m \"not divergence\"`, and anyone citing the matrix
     # as evidence of cosign compatibility must use it.
     "divergence: pins a measured ocx/cosign disagreement or an open finding, not parity; passing means the defect is still present",
+    # The scoped gate's verb → module map (adr_test_speed_tiers.md C-ROWS):
+    # `pytestmark = pytest.mark.command("package_push", ...)` names the files
+    # under crates/ocx_cli/src/command/ (path without `.rs`, fnmatch-able) whose
+    # edit selects this module. scripts/scoped_gate.py reads it with `ast`;
+    # `task test:rows:check` reds a command file no marker, [verbs] entry or
+    # [security] glob names. Only a module-level `pytestmark` binding counts.
+    "command(*keys): the crates/ocx_cli/src/command/ files whose edit selects this module in `task verify:scoped` (see test/scoped_rows.toml)",
 ]
 
 # Temp-dir retention: pytest keeps the last 3 runs and every test's tmp_path by

@@ -21,6 +21,8 @@ from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
 
+pytestmark = pytest.mark.command("remove")
+
 EXIT_SUCCESS = 0
 # StaleLockOnPartial → DataError (65) per error.rs ClassifyExitCode
 EXIT_DATA_ERROR = 65

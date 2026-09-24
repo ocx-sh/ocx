@@ -6,7 +6,11 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 from src import OcxRunner, current_platform
+
+pytestmark = pytest.mark.command("package_create", "package_push")
 
 
 def test_create_push_install_find(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
