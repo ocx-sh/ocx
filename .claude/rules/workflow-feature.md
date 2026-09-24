@@ -26,8 +26,8 @@ Run `/swarm-execute` (optional tier `low | high | max`; `auto` default reads pla
 5. **Stub** — `worker-builder` (focus: `stubbing`) creates type sigs, traits, function shells with `unimplemented!()` / `raise NotImplementedError`. Gate: `cargo check` passes.
 6. **Verify Architecture** — `worker-reviewer` (focus: `spec-compliance`, phase: `post-stub`) validates stubs match design record. Gate: reviewer passes. *Optional for features touching ≤3 files.*
 7. **Specify** — `worker-tester` (focus: `specification`) writes unit + acceptance tests from design record. Tests fail against stubs. Gate: tests compile + fail with `unimplemented`.
-8. **Implement** — `worker-builder` (focus: `implementation`) fills stub bodies until all tests pass. Gate: subsystem verify succeeds (e.g., `task rust:verify` for Rust — see Quality Gate section in each `subsystem-*.md` rule).
-9. **Review-Fix Loop** — Apply canonical Review-Fix Loop to feature diff. See [`workflow-swarm.md`](./workflow-swarm.md#review-fix-loop). Run **subsystem verify** for changed area, NOT full `task verify`.
+8. **Implement** — `worker-builder` (focus: `implementation`) fills stub bodies until all tests pass. Gate: `task verify:scoped --force` succeeds (see Quality Gate section in each `subsystem-*.md` rule).
+9. **Review-Fix Loop** — Apply canonical Review-Fix Loop to feature diff. See [`workflow-swarm.md`](./workflow-swarm.md#review-fix-loop). Per iteration: `task verify:scoped --force`, NOT full `task verify` — full `task verify` runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates.
 10. **Cross-Model Adversarial Pass** — Documented inside canonical Review-Fix Loop (see [`workflow-swarm.md`](./workflow-swarm.md#review-fix-loop)). Opt-out flag: `--no-cross-model` on `/swarm-execute`.
 11. **Commit** — All changes committed on feature branch, conventional commit message. Deferred findings printed as summary.
 12. **Push** — Human decides when to push (CI cost real).
@@ -62,4 +62,4 @@ Every plan in `.claude/state/plans/plan_*.md` carries a `## Status` block at the
 
 ## Quality Gates
 
-Run `task verify` (fmt check + clippy + build + unit tests + acceptance tests). See `.claude/rules/quality-core.md` for canonical gate list.
+Per task / review-fix iteration: `task verify:scoped --force`. Full `task verify` (fmt check + clippy + build + unit tests + acceptance tests) runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates (it then runs `task verify` itself). See `.claude/rules/quality-core.md` for canonical gate list.

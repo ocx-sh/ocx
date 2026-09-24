@@ -80,7 +80,7 @@ Use `task` commands: `task test:quick` (all acceptance tests, skip rebuild), `ta
 - Every bug fix gets regression test
 - NEVER remove or skip existing tests
 - Specification mode: NEVER read impl code, only design record + stubs
-- Run `task verify` before reporting done (required by swarm coordination protocol)
+- Run `task verify:scoped --force` before reporting done (required by swarm coordination protocol); full `task verify` runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates
 
 ## On Completion
 

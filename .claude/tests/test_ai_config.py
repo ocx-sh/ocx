@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import ast
 import glob
+import os
 import re
+import shutil
 import subprocess
+import time
 import tomllib
 from pathlib import Path
 
@@ -2720,4 +2723,464 @@ class TestCatalogAutoLoadPaths:
         assert not dead, (
             f"`.claude/rules.md` § By auto-load path row `{edit_paths}` spells dead glob(s) "
             f"{dead} — the rule it describes no longer fires on them"
+        )
+
+
+class TestTelemetryGateAttributes:
+    """C-018: `task telemetry:push` tags the span with the gate that ran.
+
+    Runs the task FOR REAL against a copy of the taskfile in a fresh git repo,
+    with a stub `junit2otlp` first on PATH that records its argv. `task --dry`
+    would print the unexpanded `$vars`, so only a real run can see the value
+    that reaches `--additional-attributes` — and the red on today's taskfile
+    (no `ocx.gate`) is reachable only this way.
+    """
+
+    TASKFILE = ROOT / "taskfiles" / "telemetry.taskfile.yml"
+    # The fixture's run start, local time; the escape marker is judged against it.
+    RUN_START = "2026-01-01T00:00:00"
+    RUN_START_EPOCH = time.mktime((2026, 1, 1, 0, 0, 0, 0, 0, -1))
+
+    def _push(
+        self, tmp_path: Path, *, gate: str | None = None, marker_mtime: float | None = None
+    ) -> tuple[dict[str, str], Path]:
+        task = shutil.which("task")
+        if task is None:
+            pytest.fail("`task` (go-task) is not on PATH — run under `ocx exec --` or `task claude:tests`")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        shutil.copyfile(self.TASKFILE, repo / "Taskfile.yml")
+        for args in (
+            ("init", "-q", "-b", "work"),
+            ("add", "-A"),
+            ("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "seed"),
+        ):
+            subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, encoding="utf-8")
+        junit = tmp_path / "junit.xml"
+        junit.write_text(
+            f'<testsuites><testsuite name="s" timestamp="{self.RUN_START}" tests="1">'
+            '<testcase classname="c" name="n" time="0.1"/></testsuite></testsuites>\n',
+            encoding="utf-8",
+        )
+        if marker_mtime is not None:
+            marker = repo / "target" / "bazel" / "accept" / "gate_escape"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("", encoding="utf-8")
+            os.utime(marker, (marker_mtime, marker_mtime))
+        stub_dir = tmp_path / "stub"
+        stub_dir.mkdir()
+        argv_file = tmp_path / "junit2otlp.argv"
+        stub = stub_dir / "junit2otlp"
+        stub.write_text(f"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{argv_file}'\ncat > /dev/null\n", encoding="utf-8")
+        stub.chmod(0o755)
+        home = tmp_path / "home"
+        home.mkdir()
+        env = {k: v for k, v in os.environ.items() if k != "OCX_GATE" and not k.startswith("GIT_")}
+        env.update(
+            PATH=f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
+            OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:9",
+            HOME=str(home),
+        )
+        if gate is not None:
+            env["OCX_GATE"] = gate
+        run = subprocess.run(
+            [task, "-d", str(repo), "push", f"JUNIT={junit}", "SUITE=acceptance"],
+            capture_output=True, encoding="utf-8", env=env, check=False,
+        )
+        assert run.returncode == 0, f"`task push` failed: {run.stdout}{run.stderr}"
+        assert argv_file.is_file(), f"the stub junit2otlp never ran: {run.stdout}{run.stderr}"
+        argv = argv_file.read_text(encoding="utf-8").splitlines()
+        assert "--additional-attributes" in argv, f"no --additional-attributes in {argv}"
+        value = argv[argv.index("--additional-attributes") + 1]
+        attrs = dict(pair.partition("=")[::2] for pair in value.split(","))
+        return attrs, repo
+
+    def test_ocx_gate_comes_from_the_environment(self, tmp_path: Path) -> None:
+        attrs, _ = self._push(tmp_path, gate="inner")
+        assert attrs.get("ocx.gate") == "inner", attrs
+
+    def test_an_unset_ocx_gate_omits_the_attribute(self, tmp_path: Path) -> None:
+        attrs, _ = self._push(tmp_path)
+        assert "ocx.gate" not in attrs, attrs
+
+    def test_the_git_tree_is_heads_tree(self, tmp_path: Path) -> None:
+        attrs, repo = self._push(tmp_path, gate="inner")
+        tree = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"],
+            check=True, capture_output=True, encoding="utf-8",
+        ).stdout.strip()
+        assert attrs.get("ocx.git.tree") == tree, attrs
+
+    def test_a_marker_newer_than_the_run_start_is_an_escape(self, tmp_path: Path) -> None:
+        attrs, _ = self._push(tmp_path, gate="full", marker_mtime=self.RUN_START_EPOCH + 3600)
+        assert attrs.get("ocx.gate.escape") == "true", attrs
+
+    def test_a_marker_older_than_the_run_start_is_stale(self, tmp_path: Path) -> None:
+        attrs, _ = self._push(tmp_path, gate="full", marker_mtime=self.RUN_START_EPOCH - 3600)
+        assert "ocx.gate.escape" not in attrs, attrs
+
+    def test_no_marker_is_no_escape(self, tmp_path: Path) -> None:
+        attrs, _ = self._push(tmp_path, gate="full")
+        assert "ocx.gate.escape" not in attrs, attrs
+
+
+class TestTelemetryAcceptPush:
+    """C-018 / S-018: T2's own push — `task telemetry:accept`, which `bazel:test:accept` calls.
+
+    `task verify` reaches no other `telemetry:push`, so without this `ocx.gate=full`
+    and `ocx.gate.escape` never leave the host. Run FOR REAL, as the class above:
+    a copy of the taskfile in a fresh repo, a stub `junit2otlp` first on PATH that
+    records its argv and the XML it was fed.
+    """
+
+    TASKFILE = ROOT / "taskfiles" / "telemetry.taskfile.yml"
+    SINCE = 1_800_000_000  # the run start `bazel:test:accept` passes
+
+    def _accept(
+        self, tmp_path: Path, *, fresh: bool = True, endpoint: bool = True, marker: bool = True
+    ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+        task = shutil.which("task")
+        if task is None:
+            pytest.fail("`task` (go-task) is not on PATH — run under `ocx exec --` or `task claude:tests`")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        shutil.copyfile(self.TASKFILE, repo / "Taskfile.yml")
+        for args in (
+            ("init", "-q", "-b", "work"),
+            ("add", "-A"),
+            ("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "seed"),
+        ):
+            subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, encoding="utf-8")
+        reports = repo / "target" / "bazel" / "accept"
+        start = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(self.SINCE + 5))
+        for module, mtime in (("test_fresh", self.SINCE + 60 if fresh else self.SINCE - 60), ("test_cached", self.SINCE - 3600)):
+            report = reports / module / "junit.xml"
+            report.parent.mkdir(parents=True)
+            report.write_text(
+                f'<testsuites><testsuite name="pytest" timestamp="{start}" tests="1">'
+                f'<testcase classname="c" name="{module}_case" time="0.1"/></testsuite></testsuites>\n',
+                encoding="utf-8",
+            )
+            os.utime(report, (mtime, mtime))
+        if marker:
+            (reports / "gate_escape").write_text("test_fresh\n", encoding="utf-8")
+            os.utime(reports / "gate_escape", (self.SINCE + 120, self.SINCE + 120))
+        stub_dir = tmp_path / "stub"
+        stub_dir.mkdir()
+        argv_file, stdin_file = tmp_path / "junit2otlp.argv", tmp_path / "junit2otlp.stdin"
+        stub = stub_dir / "junit2otlp"
+        stub.write_text(
+            f"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > '{argv_file}'\ncat > '{stdin_file}'\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        home = tmp_path / "home"
+        home.mkdir()
+        env = {k: v for k, v in os.environ.items() if k not in ("OCX_GATE", "OTEL_EXPORTER_OTLP_ENDPOINT") and not k.startswith("GIT_")}
+        env.update(PATH=f"{stub_dir}{os.pathsep}{os.environ['PATH']}", HOME=str(home))
+        if endpoint:
+            env["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://127.0.0.1:9"
+        run = subprocess.run(
+            [task, "-d", str(repo), "accept", f"REPORTS={reports}", f"SINCE={self.SINCE}"],
+            capture_output=True, encoding="utf-8", env=env, check=False,
+        )
+        assert run.returncode == 0, f"`task accept` failed: {run.stdout}{run.stderr}"
+        return run, argv_file, stdin_file
+
+    def test_t2_pushes_this_runs_reports_as_gate_full_with_the_escape(self, tmp_path: Path) -> None:
+        run, argv_file, stdin_file = self._accept(tmp_path)
+        assert argv_file.is_file(), f"T2 pushed nothing: {run.stdout}{run.stderr}"
+        argv = argv_file.read_text(encoding="utf-8").splitlines()
+        value = argv[argv.index("--additional-attributes") + 1]
+        attrs = dict(pair.partition("=")[::2] for pair in value.split(","))
+        assert attrs.get("ocx.gate") == "full", attrs
+        assert attrs.get("ocx.suite") == "acceptance", attrs
+        assert attrs.get("ocx.gate.escape") == "true", attrs
+        pushed = stdin_file.read_text(encoding="utf-8")
+        assert "test_fresh_case" in pushed, pushed
+        assert "test_cached_case" not in pushed, "a cached verdict from an earlier run must not be re-pushed"
+
+    def test_a_run_that_executed_nothing_pushes_nothing(self, tmp_path: Path) -> None:
+        run, argv_file, _ = self._accept(tmp_path, fresh=False)
+        assert not argv_file.exists(), f"an all-cached run must push nothing: {run.stdout}{run.stderr}"
+
+    def test_no_endpoint_no_push(self, tmp_path: Path) -> None:
+        run, argv_file, _ = self._accept(tmp_path, endpoint=False)
+        assert not argv_file.exists(), f"with no OTLP endpoint nothing may be pushed: {run.stdout}{run.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# One profile for the acceptance binary (plan_test_speed_tiers.md C-021, P-12)
+# ---------------------------------------------------------------------------
+
+
+def _acceptance_build_drift(test_taskfile: str, rust_taskfile: str) -> list[str]:
+    """What keeps `rust:build` and `.build-binaries` from sharing one build of `ocx`.
+
+    `task verify` runs both. On two profiles each rebuilds `ocx` over the other's
+    work (a second full compile per verify), and a copy line still reading the
+    old profile's directory hands the suite a stale binary.
+    """
+
+    def profile(cmd: str) -> str | None:
+        if not re.search(r"\bcargo build\b", cmd):
+            return None
+        m = re.search(r"--profile[= ](\S+)", cmd)
+        return m.group(1) if m else ("release" if "--release" in cmd.split() else "dev")
+
+    def features(cmd: str) -> str | None:
+        m = re.search(r"(?:--features|-F)[= ](\S+)", cmd)
+        return m.group(1) if m else None
+
+    def cmds(task: dict) -> list[str]:
+        raw = task.get("cmds", []) + ([task["cmd"]] if "cmd" in task else [])
+        return [c if isinstance(c, str) else c.get("cmd", "") for c in raw]
+
+    binaries = cmds(yaml.safe_load(test_taskfile)["tasks"][".build-binaries"])
+    build = cmds(yaml.safe_load(rust_taskfile)["tasks"]["build"])
+    ours = [p for p in map(profile, binaries) if p]
+    theirs = [p for p in map(profile, build) if p]
+    if len(ours) != 1 or len(theirs) != 1:
+        return [f"expected one `cargo build` each, got .build-binaries={ours} rust:build={theirs}"]
+    problems = []
+    # `--target` moves the output to target/<triple>/<profile>/, which no copy reads.
+    problems += [f"a producer passes --target: {c}" for c in binaries + build if profile(c) and re.search(r"--target\b", c)]
+    if ours != theirs:
+        problems.append(f".build-binaries builds profile {ours[0]!r}, rust:build builds {theirs[0]!r}")
+    # Same profile, different features: still two builds of `ocx` into one path.
+    ours_f = [features(c) for c in binaries if profile(c)]
+    theirs_f = [features(c) for c in build if profile(c)]
+    if ours_f != theirs_f:
+        problems.append(f".build-binaries builds features {ours_f[0]!r}, rust:build builds {theirs_f[0]!r}")
+    out_dir = {"dev": "debug"}.get(ours[0], ours[0])
+    copies = [c for c in binaries if "target/" in c and not profile(c)]
+    if not copies:
+        problems.append(".build-binaries copies no binary")
+    for c in copies:
+        src = re.search(r"/target/([^/\s]+)/", c)
+        if src is None or src.group(1) != out_dir:
+            problems.append(f"copy reads {src.group(1) if src else '?'!r}, the build writes target/{out_dir}/: {c}")
+    return problems
+
+
+class TestAcceptanceBinaryOneProfile:
+    """C-021: `.build-binaries` and `rust:build` name the same `--profile`, and the copy reads it."""
+
+    TEST_TASKFILE = ROOT / "test" / "taskfile.yml"
+    RUST_TASKFILE = ROOT / "taskfiles" / "rust.taskfile.yml"
+
+    def _texts(self) -> tuple[str, str]:
+        return self.TEST_TASKFILE.read_text(encoding="utf-8"), self.RUST_TASKFILE.read_text(encoding="utf-8")
+
+    def test_tree_builds_the_acceptance_binary_once(self) -> None:
+        assert _acceptance_build_drift(*self._texts()) == []
+
+    def test_divergent_profiles_red(self) -> None:
+        test_tf, rust_tf = self._texts()
+        diverged = re.sub(r"cargo build --profile \S+ -p ocx ", "cargo build --release -p ocx ", rust_tf)
+        assert diverged != rust_tf, "the synthetic divergence did not land"
+        problems = _acceptance_build_drift(test_tf, diverged)
+        assert any("rust:build builds 'release'" in p for p in problems), problems
+
+    def test_copy_from_another_profile_reds(self) -> None:
+        test_tf, rust_tf = self._texts()
+        stale = test_tf.replace("/target/test-bin/ocx", "/target/release/ocx")
+        assert stale != test_tf, "the synthetic stale copy did not land"
+        problems = _acceptance_build_drift(stale, rust_tf)
+        assert len([p for p in problems if p.startswith("copy reads 'release'")]) == 2, problems
+
+    def test_short_features_flag_is_read(self) -> None:
+        test_tf, rust_tf = self._texts()
+        short = rust_tf.replace("-p ocx --features ocx/__testing --locked", "-p ocx -F ocx/__testing --locked")
+        assert short != rust_tf, "the -F spelling did not land"
+        assert _acceptance_build_drift(test_tf, short) == []
+        dropped = rust_tf.replace("-p ocx --features ocx/__testing --locked", "-p ocx -F ocx/other --locked")
+        assert any("rust:build builds 'ocx/other'" in p for p in _acceptance_build_drift(test_tf, dropped))
+
+    def test_target_flag_reds(self) -> None:
+        test_tf, rust_tf = self._texts()
+        targeted = rust_tf.replace("-p ocx --features", "-p ocx --target x86_64-unknown-linux-gnu --features")
+        assert targeted != rust_tf, "the synthetic --target did not land"
+        problems = _acceptance_build_drift(test_tf, targeted)
+        assert any(p.startswith("a producer passes --target") for p in problems), problems
+
+    def test_divergent_features_red(self) -> None:
+        test_tf, rust_tf = self._texts()
+        diverged = rust_tf.replace("-p ocx --features ocx/__testing --locked", "-p ocx --locked")
+        assert diverged != rust_tf, "the synthetic divergence did not land"
+        problems = _acceptance_build_drift(test_tf, diverged)
+        assert any("rust:build builds None" in p for p in problems), problems
+
+
+# ---------------------------------------------------------------------------
+# C-022 (plan_test_speed_tiers.md; ADR adr_test_speed_tiers.md § C-AGENT):
+# agent-gate wording sweep
+# ---------------------------------------------------------------------------
+
+
+class TestAgentGateWording:
+    """Every project-authored file under `.claude/rules/**`, `.claude/agents/**`
+    and `.claude/skills/**` that prescribes a gate must state the canonical
+    sentence (ADR `adr_test_speed_tiers.md` § C-AGENT):
+
+        Per task / review-fix iteration: `task verify:scoped --force`. Full
+        `task verify` runs at WP merge (enforced by the commit gate), at
+        finalize, and whenever `verify:scoped` escalates (it then runs
+        `task verify` itself).
+
+    The line-scoped regex below is the ADR's own enforcement design: a line
+    naming bare `` `task verify` `` (never `` `task verify:<subcommand>` ``)
+    together with a per-task/final-gate trigger phrase is the old, false
+    "full verify per task" prescription this sweep forbids — UNLESS the same
+    line also names `merge`, `finalize` or `escalat`, which is what the
+    correct sentence always does, or the file:line sits on the explicit
+    allow-list below with a reason.
+    """
+
+    _TRIGGER = re.compile(
+        r"per task|each task|every iteration|final gate before commit|review-fix",
+        re.IGNORECASE,
+    )
+    _BARE_VERIFY = re.compile(r"task verify(?!:)")
+    _EXEMPT = re.compile(r"merge|finalize|escalat", re.IGNORECASE)
+
+    # (repo-relative path, 1-indexed line number): reason. Empty today —
+    # every known gate-prescribing line either avoids the trigger phrases or
+    # names merge/finalize/escalat on the same line. Add an entry here only
+    # with a comment explaining why the qualifier cannot live on that line.
+    _ALLOWLIST: frozenset[tuple[str, int]] = frozenset()
+
+    @classmethod
+    def _offending_lines(cls, text: str) -> list[int]:
+        """1-indexed line numbers violating the C-AGENT sentence."""
+        return [
+            i
+            for i, line in enumerate(text.splitlines(), start=1)
+            if cls._BARE_VERIFY.search(line)
+            and cls._TRIGGER.search(line)
+            and not cls._EXEMPT.search(line)
+        ]
+
+    @staticmethod
+    def _sweep_targets() -> list[Path]:
+        targets = []
+        for sub in ("rules", "agents", "skills"):
+            for md in sorted((CLAUDE_DIR / sub).rglob("*.md")):
+                if is_vendored(md):
+                    continue
+                targets.append(md)
+        return targets
+
+    def test_synthetic_offending_line_is_red(self) -> None:
+        """A line combining bare `task verify` with a per-task trigger and no
+        merge/finalize/escalat qualifier must be flagged."""
+        text = "Run `task verify` per task, before every commit.\n"
+        hits = self._offending_lines(text)
+        assert hits == [1], f"expected line 1 flagged, got {hits}"
+
+    def test_synthetic_allowed_line_is_green(self) -> None:
+        """The same shape, qualified with `merge` on the same line, must not
+        be flagged — this is what the canonical sentence itself does."""
+        text = "Run `task verify` per task at WP merge time.\n"
+        assert self._offending_lines(text) == []
+
+    def test_one_site_reverted_is_red(self) -> None:
+        """Reverting `subsystem-cli.md`'s Quality Gate section to its
+        pre-C-022 text (`task rust:verify` per review-fix loop, `task
+        verify` = "final gate before commit") must red the sweep."""
+        target = CLAUDE_DIR / "rules" / "subsystem-cli.md"
+        original = target.read_text(encoding="utf-8")
+        canonical = (
+            "Per task / review-fix iteration: `task verify:scoped --force`. "
+            "Full `task verify` runs at WP merge (enforced by the commit "
+            "gate), at finalize, and whenever `verify:scoped` escalates (it "
+            "then runs `task verify` itself)."
+        )
+        assert canonical in original, (
+            "fixture text not found in subsystem-cli.md — update this test's "
+            "`canonical` string to match the current C-AGENT sentence"
+        )
+        reverted_text = (
+            "During review-fix loop, run `task rust:verify` — not full "
+            "`task verify`.\nFull `task verify` = final gate before commit."
+        )
+        reverted = original.replace(canonical, reverted_text)
+        assert reverted != original
+        hits = self._offending_lines(reverted)
+        assert hits, "reverting subsystem-cli.md's Quality Gate section must red the sweep"
+
+    def test_tree_is_green(self) -> None:
+        """Every project-authored gate-prescribing file states the C-AGENT
+        sentence (or an exempt/allow-listed variant) today."""
+        violations: dict[str, list[int]] = {}
+        for md in self._sweep_targets():
+            rel = str(md.relative_to(ROOT))
+            hits = [
+                ln
+                for ln in self._offending_lines(md.read_text(encoding="utf-8"))
+                if (rel, ln) not in self._ALLOWLIST
+            ]
+            if hits:
+                violations[rel] = hits
+        assert not violations, (
+            f"C-AGENT sentence violations (bare `task verify` + a per-task/"
+            f"final-gate trigger phrase, no merge/finalize/escalat qualifier "
+            f"on the same line): {violations}. State the canonical sentence "
+            f"(ADR adr_test_speed_tiers.md § C-AGENT) or add a reasoned "
+            f"entry to `_ALLOWLIST`."
+        )
+
+    # Sites whose *old* wording carried no per-task/final-gate trigger phrase
+    # (e.g. "task verify before mark complete"), so `_offending_lines` is
+    # blind to them by construction — the line-scoped regex can only catch a
+    # line naming the false claim, not a line that merely fails to name the
+    # true one. These five are asserted positively instead: each must contain
+    # the literal canonical fragment `` `task verify:scoped --force` ``.
+    _POSITIVE_SITES: tuple[Path, ...] = (
+        CLAUDE_DIR / "agents" / "worker-builder.md",
+        CLAUDE_DIR / "agents" / "worker-tester.md",
+        CLAUDE_DIR / "skills" / "builder" / "SKILL.md",
+        CLAUDE_DIR / "skills" / "deps" / "SKILL.md",
+        CLAUDE_DIR / "rules" / "workflow-swarm.md",
+    )
+
+    _CANONICAL_FRAGMENT = "task verify:scoped --force"
+
+    def test_positive_sites_are_red_when_reverted(self) -> None:
+        """`worker-builder.md`'s pre-C-022 text ("task verify before mark
+        complete") carries no trigger phrase, so the regex sweep cannot see
+        it revert — the positive assertion must."""
+        target = CLAUDE_DIR / "agents" / "worker-builder.md"
+        original = target.read_text(encoding="utf-8")
+        assert self._CANONICAL_FRAGMENT in original
+        reverted = original.replace(
+            "Use `task` commands for standard workflows: `task verify:scoped "
+            "--force` per task/review-fix iteration; full `task verify` runs "
+            "at WP merge (enforced by the commit gate), at finalize, and "
+            "whenever `verify:scoped` escalates (it then runs `task verify` "
+            "itself). `task test:quick` (acceptance). Run `task --list` to "
+            "discover commands.",
+            "Use `task` commands for standard workflows: `task verify` "
+            "(full gate), `task test:quick` (acceptance). Run `task --list` "
+            "to discover commands.",
+        )
+        assert reverted != original, (
+            "fixture text not found in worker-builder.md — update this "
+            "test's replacement strings to match the current wording"
+        )
+        assert self._CANONICAL_FRAGMENT not in reverted
+
+    def test_positive_sites_are_green_on_the_tree(self) -> None:
+        """Every site whose old wording the regex sweep is blind to states
+        the canonical `task verify:scoped --force` fragment today."""
+        missing = [
+            str(p.relative_to(ROOT))
+            for p in self._POSITIVE_SITES
+            if self._CANONICAL_FRAGMENT not in p.read_text(encoding="utf-8")
+        ]
+        assert not missing, (
+            f"these gate-prescribing sites are missing the canonical "
+            f"`{self._CANONICAL_FRAGMENT}` fragment, and the ADR regex "
+            f"cannot see their old wording revert (no trigger phrase): "
+            f"{missing}"
         )

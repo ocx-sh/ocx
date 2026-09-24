@@ -248,5 +248,4 @@ The stable wire ABI is the `launcher` + `exec` subcommand name pair and position
 
 ## Quality Gate
 
-During review-fix loops, run `task rust:verify` — not full `task verify`.
-Full `task verify` = final gate before commit.
+Per task / review-fix iteration: `task verify:scoped --force`. Full `task verify` runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates (it then runs `task verify` itself).

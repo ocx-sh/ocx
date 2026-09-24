@@ -211,7 +211,7 @@ Every `.claude/state/plans/plan_*.md` carries a `## Status` block at top: `Plan`
 When worker completes assigned task, MUST follow full completion protocol from AGENTS.md:
 
 1. File issues for remaining work
-2. Run quality gates via `task verify` (if code changed) — run `task --list` to discover available commands
+2. Run quality gates via `task verify:scoped --force` (if code changed) — full `task verify` runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates (it then runs `task verify` itself); run `task --list` to discover available commands
 3. **Commit all changes** on feature branch
 4. Report completion to orchestrator
 
@@ -226,9 +226,19 @@ Plans MUST be parallel-capable by design when work packages (WPs) are file-disjo
 - One worktree per WP, at `.agents/worktrees/<wp-slug>` (gitignored)
 - Worktree created from the **DAG-designated base tip** — NOT always main/feature-root; a WP may base on another WP's tip when the dependency DAG says so
 - One branch per WP
-- Merge back in DAG order
+- Merge back in DAG order, using the recipe below — never a plain `git merge` and never `--squash`
 - Run `cargo check` after **every** merge — catches cross-file interactions per-file verify misses
 - Remove the worktree after its WP merges
+
+**The merge recipe (mechanically enforced, plan_test_speed_tiers.md C-017/P-5, ADR D4):**
+
+```sh
+git merge --no-ff --no-commit <wp-branch>
+task verify           # full gate on the clean, merged (pre-commit) tree
+git commit             # only a full mark whose tree matches admits this commit
+```
+
+While `MERGE_HEAD` exists, `scripts/commit_gate.py` accepts only a **full** verify mark whose recorded `tree` equals `git write-tree` of the index being committed — a scoped mark, or `git commit -m Checkpoint`, is refused. `task verify` itself refuses to start with an unstaged/untracked working tree during a merge, and refuses to write the mark if the tree changed mid-run. Full detail, including the named residuals a fast-forward merge, an `--amend` of an already-landed merge and a `git merge --squash` fall outside → [workflow-git.md](./workflow-git.md) "Work-Package Merges".
 
 ### Memory budget — build parallelism, not worktree count
 

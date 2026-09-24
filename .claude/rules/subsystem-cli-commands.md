@@ -60,7 +60,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 
 ## Command Summary
 
-**A new visible top-level verb ships with a `@pytest.mark.smoke` acceptance test that invokes it** — `test/tests/test_smoke_coverage.py` reds every verb of `pub enum Command` without one (`subsystem-tests.md` § Smoke Tier and Guards) — and `test/SUITE_FLOOR` rises in the same commit.
+**A new visible top-level verb ships with a `@pytest.mark.smoke` acceptance test that invokes it, and a `command` marker on its module** — `test/lint/test_smoke_coverage.py` reds every verb of `pub enum Command` without a smoke test (`subsystem-tests.md` § Smoke Tier and Guards), and `task test:rows:check` (T0) reds a command file or module the coverage guard's marker/glob table does not reach (`subsystem-tests.md` § Verification tiers) — and `test/SUITE_FLOOR` rises in the same commit.
 
 ### Toolchain-Tier Commands
 

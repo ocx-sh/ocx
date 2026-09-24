@@ -30,6 +30,7 @@ To modify release workflow:
 Key config fields in `dist-workspace.toml`:
 - `plan-jobs` — reusable workflows for plan phase (e.g., `["./verify-version"]`)
 - `post-announce-jobs` — reusable workflows after release announcement (e.g., `["./post-release-oci-publish"]`)
+- `global-artifacts-jobs = ["./scan-binaries"]` — renders `scan-binaries.yml` (`adr_test_speed_tiers.md` C-PROV) as the `custom-scan-binaries` job, run after `build-local-artifacts` and required by `host` (GitHub Release, then OCI publish) via `needs:`; a test build's placeholder provenance markers red the scan before either happens. No job-level `if:` or `continue-on-error` — cargo-dist reads a `skipped` result as a pass, so this job cannot be allowed to skip itself.
 
 Reusable workflows themselves (e.g., `verify-version.yml`, `post-release-oci-publish.yml`) hand-written, edit directly — only `release.yml` generated.
 
@@ -102,12 +103,15 @@ Release creation during normal ceremony driven by cargo-dist in CI — do not in
 Release ceremony = human-driven process with tooling support:
 
 ```bash
-task release:prepare    # Compute version, update CHANGELOG.md, run verify
+task release:prepare    # Refuse without a fresh full verify mark, prove provenance,
+                         # compute version, update CHANGELOG.md, run verify NOCACHE=1
 # Human reviews the changes
 git add -A && git commit -m "release: vX.Y.Z"
 git tag vX.Y.Z
 # Human decides when to push (never auto-push)
 ```
+
+`release:prepare` (`taskfiles/release.taskfile.yml`) requires a fresh **full** mark from `task verify` before it touches a file (`scripts/commit_gate.py --require-full-mark`; a scoped mark never satisfies it), then runs `provenance:proof` — the release provenance scan on real bytes: green on a `__testing`-free build, red on one carrying the placeholder markers (`adr_test_speed_tiers.md` C-PROV) — before any version bump. It ends with `task verify NOCACHE=1`: `NOCACHE=1` is a global go-task CLI var, so it reaches `bazel:test:accept` too and forces every acceptance module to re-execute with `--nocache_test_results` rather than trust a cached verdict — a release re-runs the suite, it never believes a key.
 
 After tag pushed, CI takes over: build → test → GitHub Release → publish to registry → deploy website.
 

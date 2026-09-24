@@ -107,11 +107,44 @@ task test              # Build + registry + all tests
 task test:quick        # Skip rebuild
 task test:parallel     # pytest-xdist (-n auto)
 task test:smoke        # The smoke tier only (-m smoke), ~5 s
-task test:scoped -- ocx_setup   # The acceptance subset the named crates own
+task test:scoped -- tests/test_login.py   # The modules verify:scoped selected; every glob must collect >= 1 test
 
 # Single test (runs prebuilt test/bin/ocx — rebuild via `task test` after Rust changes):
 cd test && uv run pytest tests/test_install.py::test_name -v
 ```
+
+## Verification tiers
+
+Four tiers (ADR `adr_test_speed_tiers.md` § C-TIER; plan `plan_test_speed_tiers.md` C-008…C-020):
+
+| Tier | Runs | Trigger | Budget |
+|---|---|---|---|
+| **T0 lint** | `task test:lint:structure` (pytest over `test/lint/`, uncached) + `scripts/scoped_gate.py --check-coverage` (`task test:rows:check`) | verify phase 1; every `verify:scoped`, regardless of decision (an escalate reaches it through `verify`) | ≤ 30 s wall (`OCX_LINT_BUDGET_SECONDS`), floored on `test/LINT_FLOOR`, ceilinged on `test/LINT_SKIP_CEILING` / `test/LINT_XFAIL_CEILING` |
+| **T1 inner** | T0 + `task bazel:test:unit` (cached, reverse-dependents) + `cargo clippy -p <crate>` per changed crate + `test:smoke` + `test:scoped` over the plan's `acceptance_globs` | `task verify:scoped --force`, per task / review-fix iteration | ≤ 120 s on the first verification after a code-changing edit |
+| **T2 full** | `task verify` (both phases, ending in `bazel:test:accept`) | WP merge commit (mechanically enforced — `workflow-git.md` "Work-Package Merges"), `/hex-finalize`, any `verify:scoped` escalation, commits on `main` | unbounded, measured |
+| **T3 deep** | `verify-deep.yml` | push to `main`, merge queue, `workflow_dispatch` | CI, cold disk |
+
+### Lint tier admission (`test/lint/`)
+
+`test/lint/conftest.py` refuses a lint test that requests `ocx`, `ocx_binary`, `registry`, `mirror_registry`, `legacy_registry`, `target_registry`, `published_package` or `sigstore_stack`; it wraps `subprocess` so an argv resolving under `test/bin/` or spelled `task` raises. `git` and `sys.executable` stay allowed. The session budget is `OCX_LINT_BUDGET_SECONDS` (default 30); `task test:lint:structure` also floors the collected count on `test/LINT_FLOOR`, as a `cmds:` entry (never `preconditions:`, so `--force` cannot skip it), and caps the run's `skipped` / `xfailed` counts at `test/LINT_SKIP_CEILING` / `test/LINT_XFAIL_CEILING` through the acceptance tier's `.suite-ceilings`. `test_lint_tier_guards.py` drives both with `pytester` fixtures, red and green.
+
+### `command` markers and `test/scoped_rows.toml`
+
+The coverage guard (`scripts/scoped_gate.py --check-coverage`, wired as `task test:rows:check`) reds unless: every acceptance module is reached by a `test/scoped_rows.toml` glob or a `@pytest.mark.command(...)` marker; every `crates/ocx_cli/src/command/*.rs` file is named by a marker, a `[verbs]` entry, or falls under `[security]`; and `[security]` covers hex config's `reviewer:security` globs. Each reader is floored independently of the globs it checks — a table that collects nothing reds rather than passing vacuously.
+
+**Adding a verb needs a `command` marker** on its acceptance test (`subsystem-cli-commands.md` § Command Summary), or `task test:rows:check` reds naming the file — at T0, before any build is spent.
+
+`test/scoped_rows.toml` carries more than the ADR's original list: `[verbs]` escalates every multi-verb group file (`package`, `config`, `shell`, `self_group`, `index`, `patch`, `direnv`, `launcher`); `[security]` widens to every `build.rs`, `auto_verify.rs`/`verify.rs`, `consent.rs`, `shell_state.rs`, `self_group/{activate,setup}.rs`; every other path under `crates/ocx_cli/` escalates by default (permit-list, not deny-list); `test/lint/**` routes to the lint tier.
+
+### `UNCACHED_MODULES` and the `external` tag
+
+`test/bazel.bzl`'s `UNCACHED_MODULES` lists acceptance modules whose declared input closure `scripts/bazel_tag_guard.py` cannot yet certify complete; each carries `external`, the only tag that stops a cached verdict being reused, so it re-executes on every `bazel:test:accept` run. The list shrinks only by declaring the input, never by deleting a line. It holds **one named residual**: `tests/test_windows_shim.py` — its `_find_shim_binary` fallback reads `target/{release,debug}/` on two adjacent lines, and `scripts/test_diff_guard.py`'s one-line-for-one-line `--allow` admits only a one-line-for-one-line hunk, so dropping both lines at once is refused by design and the only 1:1 rewrite would hide the read from the tag guard instead of fixing it. The module is `skipif(sys.platform != "win32")` as a whole, so on the Linux lane that runs this suite `external` costs one collection and hides no verdict.
+
+`bazel:test:accept` runs its targets **concurrently** against the one compose stack (no `exclusive` tag), at parity with `test:parallel`'s xdist run — `test/bazel.bzl` § Concurrency. Two obligations follow for a module author: every `xdist_group` a module names — shared with another module or not, because every target is its own process and runs from sibling checkouts overlap — is listed for that module in `test/BUILD.bazel` `module_slots` (the runner's per-group host lock replaces xdist's one-worker placement), spelled in the module itself as a string literal or a module-level dict of literals; and a file only some modules read (anything outside `conftest.py`, `src/`, the `tests/` helpers and the stack config) is declared in those modules' `module_data`, not in `:suite_inputs` — importing a helper counts as reading it. `scripts/bazel_tag_guard.py` reds a missing or extra slot, a group spelled outside a `tests/test_*.py` module, and a read its AST derivation can see; a read it cannot see (a `task` recipe, the lock beside a manifest) is declared in the guard's hand-kept `HAND_DECLARED_READS` / `IMPLIED_READS`, and a module that launches `task` or names by string a path under a `test/` directory holding no `:suite_inputs` member reds `tag-hand-read-unreviewed` until it has a `HAND_DECLARED_READS` entry (empty when the review finds no read).
+
+### `--tiered-shapes`
+
+`scripts/test_diff_guard.py` gained the sanctioned shapes this plan needed — a move into `test/lint/`, a new `test/lint/**` module, an added `@pytest.mark.command(...)` marker line, a `test/scoped_rows.toml` / floor-file edit, and a fresh `// ported-from:` deletion (C-RUBRIC) — all behind one opt-in flag: `task scripts:test-diff-guard -- --tiered-shapes`. Without the flag the guard behaves exactly as it did before this plan (crate-split DEC-10's default is untouched). Whether the marker/config shapes become the default is an open owner decision (`plan_test_speed_tiers.md` § Deferred owner decisions, B2).
 
 ## Smoke Tier and Guards
 
@@ -123,15 +156,21 @@ the suite an unmodified proof while `ocx_lib` is taken apart. Four mechanisms:
   test. `test/pyproject.toml` registers the marker and sets `--strict-markers`, so a misspelled
   marker is a collection error, not a silently unselected test. `task test:smoke` runs
   `-m smoke -n auto --dist loadgroup` under a 90 s wall-clock budget (target 60 s);
-  `tests/test_smoke_coverage.py` reds a verb without a smoke test and a smoke test on the
-  signing surface. `task test:scoped -- <crate>...` runs the rows of `SCOPED_ROWS` in
-  `test/taskfile.yml`; a missing row, an `escalate` row or a glob collecting no test fails.
+  `test/lint/test_smoke_coverage.py` reds a verb without a smoke test and a smoke test on the
+  signing surface. `task test:scoped -- <glob>...` runs the acceptance modules `verify:scoped`
+  selected (`scripts/scoped_gate.py`'s `acceptance_globs`, from `test/scoped_rows.toml` rows
+  and `command` markers — moved off `test/taskfile.yml`'s old `SCOPED_ROWS`, C-012); every
+  glob must collect at least one test, or the run fails.
 - **Floor files.** `test/SUITE_FLOOR` (collected count, only ever rises — in the commit that
   adds the tests), `test/SKIP_CEILING`, `test/XFAIL_CEILING`. `task test` (and `test:quick` /
   `test:parallel`, which route through it) refuses below the floor before the run and above a
   ceiling after it, both as `cmds:` (`--force` skips `preconditions:`).
 - **Diff guard.** `scripts/test_diff_guard.py <base>..<head>` (run at every merge over both the
-  per-WP range and `merge-base(origin/main)..HEAD`) refuses any diff under `test/` except:
+  per-WP range and `merge-base(origin/main)..HEAD`, with `--tiered-shapes` on ranges that
+  legitimately move or add a `test/lint/` module, add a `command` marker, edit
+  `test/scoped_rows.toml`/a floor file, or delete a ported original under C-007(e) — see
+  "Verification tiers" § `--tiered-shapes` above; every other range runs without the flag)
+  refuses any diff under `test/` except:
   an added `@pytest.mark.smoke` line (and the `import pytest` a module lacked); an added
   `@pytest.mark.xdist_group("<name>")` line — scheduling, the one mark that cannot change
   what a test asserts, and the only way to serialise writers of a registry-wide singleton
@@ -150,11 +189,13 @@ the suite an unmodified proof while `ocx_lib` is taken apart. Four mechanisms:
   A new def or class is exempt from the line checks but not from the rebinding checks — the
   shapes `scripts/test_diff_guard.py`'s docstring names (that list is the authority; it
   widens as adversaries find shapes). One `--allow <path>:<line>` exempts a single
-  one-line-for-one-line hunk (the trampoline blob path, DEC-10 d). The plan's own oracles (`test_smoke_coverage.py`,
-  `test_logging.py`, `test_no_crate_path_assertions.py`) are the only modules exempt from
+  one-line-for-one-line hunk (the trampoline blob path, DEC-10 d). The plan's own oracles
+  (`test/lint/test_smoke_coverage.py`, `test/lint/test_logging_structure.py`,
+  `test/lint/test_no_crate_path_assertions.py`) are the only modules exempt from
   the line checks. `--self-test` shows every shape red and green.
 - **Adding a verb** (see `subsystem-cli-commands.md`): its acceptance test carries a `smoke`
-  row, or `test_smoke_coverage.py` reds; `SUITE_FLOOR` rises in the same commit.
+  row and a `command` marker, or `test:rows:check` (T0) and
+  `test/lint/test_smoke_coverage.py` (T0) both red; `SUITE_FLOOR` rises in the same commit.
 
 ## Unit-Test Duration Budget (Rust)
 
@@ -412,7 +453,7 @@ failed assert on a missing prerequisite over `pytest.skip`.
 
 ## Quality Gate
 
-During review-fix loops, run `task test:parallel` — not full `task verify`. Direct `uv run pytest` never builds: it runs the existing `test/bin/ocx` (stale after Rust changes — refresh via `task test` / `task test:parallel`, which rebuild with `--features ocx/__testing` and copy the binary there).
+Per task / review-fix iteration: `task verify:scoped --force` (T0 lint + rows check, then `test:parallel` over the touched modules at T1/T2). Full `task verify` runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates (it then runs `task verify` itself). Direct `uv run pytest` never builds: it runs the existing `test/bin/ocx` (stale after Rust changes — refresh via `task test` / `task test:parallel`, which rebuild with `--features ocx/__testing` and copy the binary there).
 
 **Never run `task website:build` while an acceptance suite is running.** Its
 `website:recordings:ensure-binary` step rebuilds `-p ocx` in *release* — without

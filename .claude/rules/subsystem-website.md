@@ -227,4 +227,4 @@ See `.claude/rules/docs-style.md` for narrative structure, link conventions, cal
 
 ## Quality Gate
 
-In review-fix loops, run `task website:build` — not full `task verify`. Full website build validates generated content, schema, VitePress output.
+Per task / review-fix iteration for website-only changes: `task website:build` (validates generated content, schema, VitePress output), not full `task verify`. Full `task verify` runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates (it then runs `task verify` itself).
