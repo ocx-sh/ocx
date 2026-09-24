@@ -38,8 +38,8 @@ the answer a *broken reader* gives: proto3 omits a false boolean, so the
 natural spelling `payload.get("cachedLocally") is not False` reports every
 target that ran as cached. A one-run reading cannot tell a working cache from
 that reader. So `--check-s015` takes two BEPs — run 2 of an unchanged tree
-(everything cached) and a run after `test/bin/ocx` was rebuilt with different
-bytes (**nothing** cached) — and the second is the control. It is also the ADR's
+(everything cached) and a run after the binary under test was rebuilt with
+different bytes (**nothing** cached) — and the second is the control. It is also the ADR's
 own half 3, which under the old contract was defence in depth and is now the
 only thing holding the green up.
 
@@ -82,16 +82,17 @@ passes it on its own command line.
 **S-015's second half — the binary under test.** A green suite against last
 week's `ocx` is silent, and this repository has shipped one. With results cached
 a *stale green* is the same defect reached one step earlier, which is why
-`bin/ocx*` is a declared input of every acceptance target (through
-`//test:suite_anchor`) and why `--check-s015` requires that declaration in the
-tag table as well as requiring the binary-swap run to re-execute everything.
-The proof is a content digest on both sides: what the build produced, and what
-the suite executed, resolved through symlinks. Path and mtime both answer "fine" on a
-freshly-*copied* stale binary — `test/bin/ocx` is a `cp` of
-`target/test-bin/ocx` (`test/taskfile.yml` `.build-binaries`), so the stale file's mtime is
-the copy's, not the build's — and `_mtime_reader` and `_existence_reader` are
-kept as named controls answering exactly that on the same fixture the digest
-comparator reds.
+`//crates/ocx_cli:ocx` is a declared input of every acceptance target and why
+`--check-s015` requires that declaration in the tag table as well as requiring
+the binary-swap run to re-execute everything. The runner executes that Bazel
+output as a runfile, so the built and the executed binary are one file by
+construction; the proof still takes a content digest on both sides, resolved
+through symlinks, because path and mtime both answer "fine" on a
+freshly-*copied* stale binary — the pytest entry points' `test/bin/ocx` is a
+`cp` of the Bazel output (`test/taskfile.yml` `.build-binaries`), so a stale
+copy's mtime is the copy's, not the build's — and `_mtime_reader` and
+`_existence_reader` are kept as named controls answering exactly that on the
+same fixture the digest comparator reds.
 
 **S-004 — selection, through the entry point.** Two independent readings, and
 they answer different questions. The *selection* reading is the discriminator:
@@ -235,12 +236,14 @@ none of `local`'s `no-remote` half. Measured on the pin (`--prove-s015`,
 `acc_no_sandbox`): cached in both warm states, exactly like an untagged
 sibling."""
 
-ACCEPTANCE_DECLARED_INPUTS = frozenset({"//test:docker-compose.yml", "//test:suite_anchor"})
+ACCEPTANCE_DECLARED_INPUTS = frozenset(
+    {"//crates/ocx_cli:ocx", "//test:docker-compose.yml", "//test:suite_anchor"}
+)
 """The declaration that makes caching these results defensible.
 
-The compose definition carries every service image reference and host port; `:suite_anchor`
-carries `bin/ocx*`, the binary under test. Same two labels
-`bazel_tag_guard.py` requires before it credits the `no-sandbox` exemption —
+The compose definition carries every service image reference and host port;
+`//crates/ocx_cli:ocx` is the binary under test; `:suite_anchor` carries the
+runner's anchor. Same three labels `bazel_tag_guard.py` requires before it credits the `no-sandbox` exemption —
 one contract, checked from both ends: that gate reads the *graph*, this one
 reads the *run*."""
 
@@ -286,9 +289,9 @@ ACCEPT_CONTROL_ABSENT_MSG = (
     "refused"
 )
 ACCEPT_CONTROL_CACHED_MSG = (
-    "S-015 BLOCK: {count} acceptance target(s) still reported cached after `test/bin/ocx` "
-    "changed, first {sample}. The binary is supposed to be a declared input through "
-    "//test:suite_anchor, so its bytes moving must move every target's key — that is ADR A4's "
+    "S-015 BLOCK: {count} acceptance target(s) still reported cached after the binary under "
+    "test changed, first {sample}. The binary is supposed to be a declared input "
+    "(//crates/ocx_cli:ocx), so its bytes moving must move every target's key — that is ADR A4's "
     "red half 3, and it is the whole control on the cached green above"
 )
 ACCEPT_CONTROL_UNSEEN_MSG = (
@@ -490,7 +493,7 @@ def caching_on_findings(
     * `warm` is run 2 of an **unchanged** tree and every acceptance target must
       report cached. A target that re-executed means an input moved that the
       tree did not — a generated file inside a glob is the way that happens.
-    * `mutated` is a run after `test/bin/ocx` was rebuilt with different bytes,
+    * `mutated` is a run after the binary under test was rebuilt with different bytes,
       and **no** acceptance target may report cached. This is ADR A4's red half
       3, and under the old contract it was defence in depth; it is now the only
       control on `warm`. "Everything reported cached" is exactly what a reader
@@ -977,12 +980,20 @@ def taskfile_lock_paths(home: Path, text: str | None = None) -> dict[str, str]:
     return paths
 
 
+RUNNER_BINARIES = {
+    "OCX_COMMAND": "_main/probe/ocx",
+    "OCX_SHIM_BINARY": "_main/probe/ocx-shim",
+}
+"""Stand-ins for the rlocationpaths `test/bazel.bzl`'s `_BINARY_ENV` expands
+to, which the runner resolves under `$TEST_SRCDIR`; the runner reads only the
+env value, so the fake runfiles tree need not mirror the real labels."""
+
+
 def _run_runner(runner: str, scratch: Path, *, flock: bool, opt_in: bool) -> tuple[int, str, list[str]]:
     """Run `runner` once in a fake runfiles tree: `(rc, stderr, probe log lines)`."""
     root = Path(tempfile.mkdtemp(dir=scratch))
     suite = root / "checkout" / "test"
     (suite / "tests").mkdir(parents=True)
-    (suite / "bin").mkdir()
     (suite / "src").mkdir()
     for name, text in (
         ("pyproject.toml", ""),
@@ -991,12 +1002,15 @@ def _run_runner(runner: str, scratch: Path, *, flock: bool, opt_in: bool) -> tup
         ("src/helpers.py", _STUB_HELPERS),
     ):
         (suite / name).write_text(text, encoding="utf-8")
-    ocx = suite / "bin" / "ocx"
-    ocx.write_text("#!/bin/sh\n", encoding="utf-8")
-    ocx.chmod(0o755)
     srcdir = root / "srcdir"
     (srcdir / "_main" / "test").mkdir(parents=True)
     (srcdir / "_main" / "test" / "conftest.py").symlink_to(suite / "conftest.py")
+    # The two binaries every target carries as runfiles (`test/bazel.bzl`
+    # `_BINARY_ENV`), named by rlocationpath in the env below.
+    for binary in RUNNER_BINARIES.values():
+        (srcdir / binary).parent.mkdir(parents=True, exist_ok=True)
+        (srcdir / binary).write_text("#!/bin/sh\n", encoding="utf-8")
+        (srcdir / binary).chmod(0o755)
     (srcdir / "tools").mkdir()
     uv = srcdir / "tools" / "uv"
     uv.write_text(_FAKE_UV, encoding="utf-8")
@@ -1032,6 +1046,7 @@ def _run_runner(runner: str, scratch: Path, *, flock: bool, opt_in: bool) -> tup
         "RUNNER_COMPOSE_LOCK": str(root / "compose.lock"),
         "OCX_TEST_REGISTRY_PORT": RUNNER_PORT,
         "OCX_ACCEPTANCE_SLOTS": " ".join(RUNNER_PROBE_SLOTS),
+        **RUNNER_BINARIES,
     }
     if opt_in:
         env[UNSERIALISED_ENV] = "1"
@@ -1886,7 +1901,7 @@ def _no_prefix_reader(tags: set[str]) -> bool:
 def _mtime_reader(built: Path, under_test: Path) -> bool:
     """The wrong freshness reader: "the binary under test is not older".
 
-    `test/bin/ocx` is a `cp` of `target/test-bin/ocx` (`test/taskfile.yml` `.build-binaries`),
+    `test/bin/ocx` is a `cp` of the Bazel output (`test/taskfile.yml` `.build-binaries`),
     so a stale copy carries the *copy's* mtime, not the build's — this reader
     calls it fresh on exactly the bytes the digest comparator reds.
     """
@@ -1935,7 +1950,7 @@ def prove_caching_on(scratch: Path) -> int:
     expect(green == [], f"the compliant run must be silent, got {[f.message for f in green]}")
     print(
         f"S-015 GREEN: {ACCEPTANCE_MODULES} acceptance targets reported cached on run 2 of an "
-        f"unchanged tree and every one of them re-executed once `test/bin/ocx` changed"
+        f"unchanged tree and every one of them re-executed once the binary under test changed"
     )
     checks += 1
 
@@ -2182,7 +2197,7 @@ def prove_binary_digest(scratch: Path) -> int:
     checks += 1
 
     # --- the stale copy. Same size, same path, *newer* mtime: the shape
-    #     `cp target/test-bin/ocx test/bin/ocx` leaves when the build it copied
+    #     `cp <the Bazel output> test/bin/ocx` leaves when the build it copied
     #     from was not the build that just ran.
     test_path.write_bytes(stale)
     time.sleep(0.01)
@@ -3035,7 +3050,7 @@ def main() -> int:
     parser.add_argument(
         "--mutated",
         type=Path,
-        help="--check-s015: the BEP of a run taken after `test/bin/ocx` was rebuilt with "
+        help="--check-s015: the BEP of a run taken after the binary under test was rebuilt with "
         "different bytes. ADR A4's red half 3, and the control on --warm: without it "
         "'everything cached' is what a broken reader answers too",
     )

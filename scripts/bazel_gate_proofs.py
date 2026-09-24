@@ -93,10 +93,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #
 #   kind(rust_library, //crates/...)          20
 #   kind(rust_test, //crates/...)             35
-#   kind(rust_binary, //crates/...)            1   (`ocx_schema:ocx_schema_bin`, C-020)
-#   kind("^rust_.*rule$", //crates/...)       56
+#   kind(rust_binary, //crates/...)            3   (`ocx_cli:ocx`, `ocx_schema:ocx_schema_bin`,
+#                                                  `ocx_shim:ocx_shim`)
+#   kind("^rust_.*rule$", //crates/...)       58
 #   kind(filegroup, //crates/...)              4
-#   kind(rule, //crates/...)                  60
+#   kind(rule, //crates/...)                  62
 #   kind(rule, //crates/...) --output=package 21
 #
 # They stay written as sums, not literals, so a later correction to one summand
@@ -159,10 +160,12 @@ the `seam::` cases again, under a poisoned `env`). An `sh_test` over
 holds `CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS` rows and the drift
 reader's parity counts `rust_test` and `sh_test` alike."""
 
-CRATES_BINARY_TARGETS = 1
-"""`ocx_schema:ocx_schema_bin` — the one `rust_binary`, built so the schema
-consumers (its own `schema_outputs` test and two acceptance modules) never read
-cargo's `target/` (plan_test_speed_tiers.md C-020)."""
+CRATES_BINARY_TARGETS = 3
+"""`ocx_schema:ocx_schema_bin`, built so the schema consumers (its own
+`schema_outputs` test and two acceptance modules) never read cargo's `target/`
+(plan_test_speed_tiers.md C-020), and `ocx_cli:ocx` + `ocx_shim:ocx_shim`, the
+acceptance suite's binary under test and launcher, which every `//test` target
+takes as `data`."""
 
 CRATES_FILEGROUP_TARGETS = 4
 """`ocx_cli:api_data`, `ocx_index:index_wire_fixtures`, `ocx_test_support:data`
@@ -170,12 +173,12 @@ CRATES_FILEGROUP_TARGETS = 4
 `ocx_store:shim_blobs`, the committed launcher blobs an acceptance module reads
 (C-020)."""
 
-CRATES_RULE_TARGETS = CRATES_LIB_TARGETS + CRATES_TEST_TARGETS + CRATES_BINARY_TARGETS  # 56
+CRATES_RULE_TARGETS = CRATES_LIB_TARGETS + CRATES_TEST_TARGETS + CRATES_BINARY_TARGETS  # 58
 """Every **Rust** rule target under `//crates/...` — the stage-1 tag-guard
 floor, which reads `kind("^rust_.*rule$", ...)` and so does not see filegroups."""
 
 DRIFT_PACKAGE_FLOOR = CRATE_PACKAGES + EXTERNAL_PACKAGES  # 21
-DRIFT_TARGET_FLOOR = CRATES_RULE_TARGETS + CRATES_FILEGROUP_TARGETS  # 60
+DRIFT_TARGET_FLOOR = CRATES_RULE_TARGETS + CRATES_FILEGROUP_TARGETS  # 62
 """`bazel:build:drift` reads `kind(rule, //crates/...)`, which is every rule
 target of every kind, so its target floor counts the filegroups too. The
 package floor keeps `+ EXTERNAL_PACKAGES` rather than dropping the term: the
@@ -246,9 +249,10 @@ total to 332; the lint-tier move took eight modules out, so 324; C-020 deleted
 one module and added one `rust_binary` and four filegroups, so 328; C-SEAM added
 `ocx_cli:ocx_cli_seam_test`, so 329 (59 + 176 + 87 + 7, re-measured); the
 per-module split of `:suite_inputs` added five filegroups, so 334; `ocx_python`'s
-two targets take `//crates/...` to 61 and the total to 336 today
-(61 + 181 + 87 + 7). The floor stays one under: it counts the drift floor's 60,
-which excludes the seam twin."""
+two targets take `//crates/...` to 61 and the total to 336; the acceptance
+binary under test and launcher (`ocx_cli:ocx`, `ocx_shim:ocx_shim`) take them
+to 63 and 338 today (63 + 181 + 87 + 7). The floor stays one under: it counts
+the drift floor's 62, which excludes the seam twin."""
 
 # ---------------------------------------------------------------------------
 # Two traps this graph has already sprung. Recorded here because both are
@@ -1352,7 +1356,7 @@ def prove_tags() -> int:
     print(f"S-012 RED  : {unknown[0].message}")
     checks += 1
 
-    # Stage 3's floor, and the reason it is not the Rust subset: 147 rule targets
+    # Stage 3's floor, and the reason it is not the Rust subset: 149 rule targets
     # over the union universe, of which the 87 in //test/doc_scripts/... are all
     # non-Rust and carry every no-sandbox tag in the graph.
     stage3 = STAGE_FLOORS["stage-3"]
@@ -1605,14 +1609,14 @@ def prove_counts() -> int:
     expect(EXTERNAL_PACKAGES == 0, f"external packages is {EXTERNAL_PACKAGES}, the tree has 0")
     expect(CRATES_LIB_TARGETS == 20, f"crates lib targets is {CRATES_LIB_TARGETS}, the tree has 20")
     expect(CRATES_TEST_TARGETS == 35, f"crates test targets is {CRATES_TEST_TARGETS}, the tree has 35")
-    expect(CRATES_BINARY_TARGETS == 1, f"crates binaries is {CRATES_BINARY_TARGETS}, the tree has 1")
+    expect(CRATES_BINARY_TARGETS == 3, f"crates binaries is {CRATES_BINARY_TARGETS}, the tree has 3")
     expect(
         CRATES_FILEGROUP_TARGETS == 4,
         f"crates filegroups is {CRATES_FILEGROUP_TARGETS}, the tree has 4",
     )
-    expect(CRATES_RULE_TARGETS == 56, f"crates rule targets is {CRATES_RULE_TARGETS}, the tree has 56")
+    expect(CRATES_RULE_TARGETS == 58, f"crates rule targets is {CRATES_RULE_TARGETS}, the tree has 58")
     expect(DRIFT_PACKAGE_FLOOR == 21, f"package floor is {DRIFT_PACKAGE_FLOOR}, the tree has 21")
-    expect(DRIFT_TARGET_FLOOR == 60, f"target floor is {DRIFT_TARGET_FLOOR}, the tree has 60")
+    expect(DRIFT_TARGET_FLOOR == 62, f"target floor is {DRIFT_TARGET_FLOOR}, the tree has 62")
     expect(
         CAST_GENRULE_TARGETS == 40,
         f"cast genrules is {CAST_GENRULE_TARGETS}, the tree has 40 (39 casts + manifest_drift)",
@@ -1628,8 +1632,8 @@ def prove_counts() -> int:
     expect(GIF_SUPPORT_TARGETS == 3, f"gif support targets is {GIF_SUPPORT_TARGETS}, the tree has 3")
     expect(GIF_RULE_TARGETS == 42, f"gif rule targets is {GIF_RULE_TARGETS}, the tree has 42")
     expect(
-        STAGE_FLOORS["stage-3"].minimum == 147,
-        f"stage-3's floor is {STAGE_FLOORS['stage-3'].minimum}, the union universe has 147",
+        STAGE_FLOORS["stage-3"].minimum == 149,
+        f"stage-3's floor is {STAGE_FLOORS['stage-3'].minimum}, the union universe has 149",
     )
     expect(
         ACCEPTANCE_MODULE_TARGETS == 172,
@@ -1640,8 +1644,8 @@ def prove_counts() -> int:
         f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 181",
     )
     expect(
-        STAGE_FLOORS["stage-4"].minimum == 335,
-        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 335",
+        STAGE_FLOORS["stage-4"].minimum == 337,
+        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 337",
     )
     expect(
         STAGE_FLOORS["stage-4"].minimum
@@ -1650,8 +1654,8 @@ def prove_counts() -> int:
         "read the acceptance modules and nothing else would clear it",
     )
     print(
-        "counts  OK : 21 = 21 + 0, 56 = 20 + 35 + 1, 60 = 56 + 4, 45 = 40 + 5, 42 = 39 + 3, "
-        "147 = 60 + 45 + 42, 181 = 172 + 9, 335 = 147 + 181 + 7 — internal consistency only; "
+        "counts  OK : 21 = 21 + 0, 58 = 20 + 35 + 3, 62 = 58 + 4, 45 = 40 + 5, 42 = 39 + 3, "
+        "149 = 62 + 45 + 42, 181 = 172 + 9, 337 = 149 + 181 + 7 — internal consistency only; "
         "WP-15/WP-16 must assert these against WP-12's generated table, which is the reality "
         "check"
     )

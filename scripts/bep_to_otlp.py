@@ -4,7 +4,7 @@
 """Bazel BEP -> OTLP traces, so S-013 can be asked of a real build.
 
     scripts/bep_to_otlp.py --self-test
-    scripts/bep_to_otlp.py --bep bep.json --min-targets 56
+    scripts/bep_to_otlp.py --bep bep.json --min-targets 58
 
 Emits, per Bazel invocation found in the BEP, one `summary` span carrying the
 target count this reader actually read, plus one `target` span per
@@ -151,10 +151,11 @@ distinguishably from a clean build. Three floors, all loud:
 * every invocation must yield a `started.uuid` and at least one
   `TargetComplete`;
 * the invocations together must reach `--min-targets`, default
-  `CRATES_RULE_TARGETS` — **56** — imported from `bazel_gate_proofs` rather
-  than restated, so the number has one home. 56 is `bazel query 'kind("rust_.*
+  `CRATES_RULE_TARGETS` — **58** — imported from `bazel_gate_proofs` rather
+  than restated, so the number has one home. 58 is `bazel query 'kind("rust_.*
   rule", //crates/...)'` on this tree today (20 `rust_library` + 35
-  `rust_test` + 1 `rust_binary`, `ocx_schema:ocx_schema_bin`).
+  `rust_test` + 3 `rust_binary`: `ocx_cli:ocx`, `ocx_schema:ocx_schema_bin`,
+  `ocx_shim:ocx_shim`).
 
 ## Exits
 
@@ -1718,12 +1719,12 @@ def prove_bep_not_persisted() -> int:
 def prove_counts() -> int:
     """The floor has one home, and this asserts it is still that tree's answer."""
     expect(
-        CRATES_RULE_TARGETS == 56,
-        f"the //crates/... floor is {CRATES_RULE_TARGETS}; `bazel query` answers 56 today",
+        CRATES_RULE_TARGETS == 58,
+        f"the //crates/... floor is {CRATES_RULE_TARGETS}; `bazel query` answers 58 today",
     )
     print(
-        "counts  OK : min-targets defaults to CRATES_RULE_TARGETS = 56, imported from "
-        "bazel_gate_proofs (20 rust_library + 35 rust_test + 1 rust_binary) — "
+        "counts  OK : min-targets defaults to CRATES_RULE_TARGETS = 58, imported from "
+        "bazel_gate_proofs (20 rust_library + 35 rust_test + 3 rust_binary) — "
         "bazel_gate_proofs.prove_counts is what re-checks the number"
     )
     return 1

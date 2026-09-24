@@ -199,30 +199,6 @@ jobs:
         id: docratchet
         run: task rust:doc:ratchet
         continue-on-error: true
-      # The release compile stays in this job, and the rule is instruction-level
-      # rather than habit: a cargo `Build` step stays exactly where a later job
-      # needs the release binary. `smoke-acceptance` below `needs: smoke` and
-      # downloads `ocx-binary`, so dropping it here would leave that job with
-      # nothing to run. Measured at 197.5 s (WP-30 § 6); it is not what the
-      # lane swap removes, and saying otherwise would be a saving on paper.
-      - name: Build
-        run: task rust:build
-      # `task rust:build` compiles target/test-bin/ocx with `--features
-      # ocx/__testing`, enabling the `__OCX_SELF_IMAGE` seam the self-setup /
-      # self-update acceptance tests use to redirect `ocx.sh/ocx/cli` at the
-      # fixture registry. The upload sat before the test step because
-      # `cargo nextest --workspace --release` recompiled the same path without
-      # that feature and overwrote it. The Bazel lane writes to `bazel-out/`
-      # and touches `target/` not at all, so that hazard is gone — the order is
-      # kept because an artifact uploaded early is one a later failure cannot
-      # take away, not because anything downstream still overwrites it.
-      - name: Upload Binaries
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ocx-binary
-          path: target/test-bin/ocx
-          compression-level: 0
-          retention-days: 1
       # The C-021 parity matrix drives all nine hook shells, but no runner image
       # carries elvish, nushell or fish — and an arm that never runs is a green
       # indistinguishable from an absent test (#349). ocx packages all three, so
@@ -257,12 +233,12 @@ jobs:
       # authority, then the loading check, then the two gates that read the
       # graph it proves loadable, then A7's two lint lines (C-025).
       #
-      # They sit here rather than beside `Build` above, where the phase runs
-      # them, for a mechanical reason: every task in
+      # They sit here rather than beside the ratchets above, where the phase
+      # runs them, for a mechanical reason: every task in
       # `taskfiles/bazel.taskfile.yml` shells out through `ocx exec bazel --`,
       # and `ocx` first reaches this job's PATH at the `Setup OCX` step above.
-      # Directly after `Build` all four would exit 127 on `ocx: command not
-      # found` on every run. `ocx exec` resolves the binding from `ocx.toml`
+      # Directly after the ratchets all four would exit 127 on `ocx: command
+      # not found` on every run. `ocx exec` resolves the binding from `ocx.toml`
       # itself (measured: outside a project it exits non-zero with `no ocx.toml
       # found`), so the `project: ''` opt-out on that step does not reach it —
       # bazel still comes from the `9.2.0` pin `bazel:pin:check` asserts.
@@ -401,6 +377,26 @@ jobs:
         run: task bazel:lint
       - name: Bazel lockfile freshness
         run: task bazel:mod:check
+      # The acceptance binary, built where a later job needs it:
+      # `smoke-acceptance` below `needs: smoke` and downloads `ocx-binary`, so
+      # dropping it here would leave that job with nothing to run. `task
+      # rust:build` is a `bazel build` of `//crates/ocx_cli:ocx` — the binary
+      # the Bazel acceptance targets run, carrying the `__testing` provenance
+      # and the `__OCX_SELF_IMAGE` seam the self-setup / self-update tests use
+      # to redirect `ocx.sh/ocx/cli` at the fixture registry — copied to
+      # `test/bin/ocx`. Here and not beside the ratchets above, because it
+      # needs `ocx exec bazel`, the cache credential and lld, as the gates do;
+      # uploaded before the unit tests because an artifact uploaded early is
+      # one a later failure cannot take away.
+      - name: Build
+        run: task rust:build
+      - name: Upload Binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ocx-binary
+          path: test/bin/ocx
+          compression-level: 0
+          retention-days: 1
       # The lane swap (C-016), and the re-spec that makes it worth taking.
       # WP-30 measured this job step by step: `Test` (`cargo nextest run
       # --workspace --release`) 173.5 s, and `Unit-test floor` (`cargo nextest

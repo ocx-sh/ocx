@@ -43,6 +43,10 @@ use vergen_gix::{BuildBuilder, CargoBuilder, Emitter, GixBuilder, RustcBuilder};
 /// variable `app::build_info` consumes, except `__OCX_BUILD_VERSION`: that one
 /// stays a pass-through because it feeds `app::version()` (lock
 /// `generated_by`, update-check semver parsing) and no test build sets it.
+///
+/// Bazel never runs this script: `crates/ocx_cli/BUILD.bazel`'s
+/// `_TESTING_PROVENANCE` carries the same rows for the Bazel-built acceptance
+/// binary, so an edit here is an edit there too.
 const TESTING_PLACEHOLDERS: &[(&str, &str)] = &[
     ("VERGEN_GIT_SHA", "0000000000000000000000000000000000000000"),
     ("VERGEN_GIT_DESCRIBE", "placeholder-g00000000"),

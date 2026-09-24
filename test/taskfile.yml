@@ -156,13 +156,6 @@ tasks:
       - task: .build-binaries
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
-      # Outside `.build-binaries`' SKIP_BUILD guard: the schema step above
-      # already compiled it on CI too, so this build is a no-op there, and it
-      # restores the binary when that step was skipped as up to date over a
-      # cleaned target/.
-      - cargo build --release -p ocx_schema --locked
-      - mkdir -p {{.SCHEMA_BIN_DIR}}
-      - cp {{.ROOT_DIR}}/target/release/ocx_schema{{exeExt}} {{.OCX_SCHEMA_BINARY}}.new && mv {{.OCX_SCHEMA_BINARY}}.new {{.OCX_SCHEMA_BINARY}}
 
   # The binaries alone, with no schema generation. `shells` and `shell-latency`
   # mount one binary and three Python modules into a container and read no
@@ -172,25 +165,46 @@ tasks:
   # Anything that runs pytest against the suite wants `build`, not this.
   .build-binaries:
     internal: true
+    # The repository root, not `test/`: `ocx exec` resolves `bazel` from the
+    # nearest `ocx.toml`, and `test/ocx.toml` binds no `bazel`.
+    dir: '{{.ROOT_DIR}}'
+    vars:
+      # The CI cache credential, derived exactly as `bazel:test:unit` derives
+      # it (`taskfiles/bazel.taskfile.yml` says why the file's existence and
+      # not a lane decides): a startup option, so it precedes the command word.
+      CACHE_RC:
+        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
-      # `--features ocx/__testing` enables internal-only test seams in
-      # the tier crates (currently the `__OCX_SELF_IMAGE` override in
-      # `ocx_oci::identifier::ocx_cli_identifier` that lets
+      # The very outputs the Bazel acceptance targets run (`test/bazel.bzl`),
+      # so the pytest entry points and `bazel:test:accept` test one binary.
+      # `//crates/ocx_cli:ocx` carries the `__testing` provenance placeholders
+      # (`crates/ocx_cli/BUILD.bazel`) and every tier crate's `rust_library`
+      # enables the `__testing` seams (currently the `__OCX_SELF_IMAGE`
+      # override in `ocx_oci::identifier::ocx_cli_identifier` that lets
       # `test_self_update.py::test_self_update_installs_newer_version`
-      # redirect the canonical `ocx.sh/ocx/cli` to localhost:5000). The
-      # seams are loopback-only-asserted at runtime and compile-gated;
-      # release builds never include them. See `crates/ocx_cli/Cargo.toml`
-      # for the contract.
-      # `--profile test-bin` is the one profile `rust:build` shares (root
-      # Cargo.toml `[profile.test-bin]`): on two profiles `task verify` would
-      # compile `ocx` twice. `.claude/tests/test_ai_config.py` holds the pair.
-      - cargo build --profile test-bin -p ocx -p ocx_shim --features ocx/__testing --locked
-      - mkdir -p {{.BIN_DIR}}
-      # Copy beside, then rename: `cp` straight onto a binary another run is
-      # executing fails ETXTBSY, while a rename replaces the directory entry
-      # and leaves that run on the inode it started with.
-      - cp {{.ROOT_DIR}}/target/test-bin/ocx{{exeExt}} {{.OCX_BINARY}}.new && mv {{.OCX_BINARY}}.new {{.OCX_BINARY}}
-      - cp {{.ROOT_DIR}}/target/test-bin/ocx-shim{{exeExt}} {{.OCX_SHIM_BINARY}}.new && mv {{.OCX_SHIM_BINARY}}.new {{.OCX_SHIM_BINARY}}
+      # redirect the canonical `ocx.sh/ocx/cli` to localhost:5000). The seams
+      # are loopback-only-asserted at runtime and compile-gated; release
+      # builds come from cargo-dist and never include them.
+      - task: :bazel:bootstrap
+      - ocx exec bazel -- bazel {{.CACHE_RC}} build //crates/ocx_cli:ocx //crates/ocx_shim:ocx_shim //crates/ocx_schema:ocx_schema_bin
+      - mkdir -p {{.BIN_DIR}} {{.SCHEMA_BIN_DIR}}
+      # Each output's path from `cquery --output=files`, never a spelled
+      # `bazel-bin/...` path: that symlink follows whichever configuration
+      # built last. Copy beside, then rename: `cp` straight onto a binary
+      # another run is executing fails ETXTBSY, while a rename replaces the
+      # directory entry and leaves that run on the inode it started with.
+      # Bazel outputs are read-only, so the copy is made writable for the next
+      # `cp` over it.
+      - cmd: |
+          set -eu
+          publish() {
+            src=$(ocx exec bazel -- bazel {{.CACHE_RC}} cquery --output=files "$1" 2>/dev/null)
+            [ -f "$src" ] || { echo "test:.build-binaries: bazel reports no output file for $1 (got '$src')" >&2; exit 1; }
+            cp "$src" "$2.new" && chmod u+w "$2.new" && mv "$2.new" "$2"
+          }
+          publish //crates/ocx_cli:ocx '{{.OCX_BINARY}}'
+          publish //crates/ocx_shim:ocx_shim '{{.OCX_SHIM_BINARY}}'
+          publish //crates/ocx_schema:ocx_schema_bin '{{.OCX_SCHEMA_BINARY}}'
     status:
       - '{{eq .SKIP_BUILD "true"}}'
 

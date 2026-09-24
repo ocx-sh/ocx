@@ -52,10 +52,11 @@ tasks:
   # shows the guard red on synthetic fixtures; whether a real release build's
   # dependency bytes stay clear of the markers can only be answered by
   # scanning one. So: a release build of `ocx` without `__testing`, in its own
-  # target dir (target/test-bin/ocx is the `__testing` build the suite runs)
-  # must scan GREEN, and the `__testing` acceptance binary must scan RED — exit
-  # 1 with a marker line, not merely non-zero: a crash or a usage error is not
-  # the red this proves.
+  # target dir, must scan GREEN, and the acceptance binary — Bazel's
+  # `//crates/ocx_cli:ocx`, copied to test/bin/ocx, whose placeholders come from
+  # `crates/ocx_cli/BUILD.bazel` since Bazel never runs `build.rs` — must scan
+  # RED: exit 1 with a marker line, not merely non-zero: a crash or a usage
+  # error is not the red this proves.
   provenance:proof:
     desc: Prove the release provenance scan on real bytes — green on a release build, red on the __testing build
     dir: '{{.ROOT_DIR}}'

@@ -2910,61 +2910,48 @@ class TestTelemetryAcceptPush:
 
 
 # ---------------------------------------------------------------------------
-# One profile for the acceptance binary (plan_test_speed_tiers.md C-021, P-12)
+# One build of the acceptance binary (plan_test_speed_tiers.md C-021, P-12)
 # ---------------------------------------------------------------------------
 
 
 def _acceptance_build_drift(test_taskfile: str, rust_taskfile: str) -> list[str]:
-    """What keeps `rust:build` and `.build-binaries` from sharing one build of `ocx`.
+    """What keeps `rust:build` and `.build-binaries` from building `ocx` twice.
 
-    `task verify` runs both. On two profiles each rebuilds `ocx` over the other's
-    work (a second full compile per verify), and a copy line still reading the
-    old profile's directory hands the suite a stale binary.
+    `task verify` runs both, and the Bazel acceptance targets run
+    `//crates/ocx_cli:ocx` itself. So `rust:build` must only delegate, and
+    `.build-binaries` must copy the Bazel output rather than compile a second
+    binary with cargo — a second producer is a second compile per verify, and a
+    copy from any other directory hands the pytest entry points a binary the
+    Bazel lane never tested.
     """
 
-    def profile(cmd: str) -> str | None:
-        if not re.search(r"\bcargo build\b", cmd):
-            return None
-        m = re.search(r"--profile[= ](\S+)", cmd)
-        return m.group(1) if m else ("release" if "--release" in cmd.split() else "dev")
+    def cmds(task: dict) -> list:
+        return task.get("cmds", []) + ([task["cmd"]] if "cmd" in task else [])
 
-    def features(cmd: str) -> str | None:
-        m = re.search(r"(?:--features|-F)[= ](\S+)", cmd)
-        return m.group(1) if m else None
-
-    def cmds(task: dict) -> list[str]:
-        raw = task.get("cmds", []) + ([task["cmd"]] if "cmd" in task else [])
-        return [c if isinstance(c, str) else c.get("cmd", "") for c in raw]
+    def text(cmd: object) -> str:
+        return cmd if isinstance(cmd, str) else (cmd.get("cmd", "") if isinstance(cmd, dict) else "")
 
     binaries = cmds(yaml.safe_load(test_taskfile)["tasks"][".build-binaries"])
     build = cmds(yaml.safe_load(rust_taskfile)["tasks"]["build"])
-    ours = [p for p in map(profile, binaries) if p]
-    theirs = [p for p in map(profile, build) if p]
-    if len(ours) != 1 or len(theirs) != 1:
-        return [f"expected one `cargo build` each, got .build-binaries={ours} rust:build={theirs}"]
     problems = []
-    # `--target` moves the output to target/<triple>/<profile>/, which no copy reads.
-    problems += [f"a producer passes --target: {c}" for c in binaries + build if profile(c) and re.search(r"--target\b", c)]
-    if ours != theirs:
-        problems.append(f".build-binaries builds profile {ours[0]!r}, rust:build builds {theirs[0]!r}")
-    # Same profile, different features: still two builds of `ocx` into one path.
-    ours_f = [features(c) for c in binaries if profile(c)]
-    theirs_f = [features(c) for c in build if profile(c)]
-    if ours_f != theirs_f:
-        problems.append(f".build-binaries builds features {ours_f[0]!r}, rust:build builds {theirs_f[0]!r}")
-    out_dir = {"dev": "debug"}.get(ours[0], ours[0])
-    copies = [c for c in binaries if "target/" in c and not profile(c)]
-    if not copies:
-        problems.append(".build-binaries copies no binary")
-    for c in copies:
-        src = re.search(r"/target/([^/\s]+)/", c)
-        if src is None or src.group(1) != out_dir:
-            problems.append(f"copy reads {src.group(1) if src else '?'!r}, the build writes target/{out_dir}/: {c}")
+    delegated = [c for c in build if isinstance(c, dict) and c.get("task") == ":test:.build-binaries"]
+    if len(delegated) != 1 or len(build) != 1:
+        problems.append(f"rust:build must only delegate to :test:.build-binaries, got {build}")
+    shell = [text(c) for c in binaries]
+    problems += [f".build-binaries compiles with cargo: {c}" for c in shell if re.search(r"\bcargo build\b", c)]
+    if not any(re.search(r"\bbazel\b.* build .*//crates/ocx_cli:ocx\b", c) for c in shell):
+        problems.append(".build-binaries builds no //crates/ocx_cli:ocx with bazel")
+    body = "\n".join(shell)
+    if "cquery --output=files" not in body:
+        problems.append(".build-binaries does not ask Bazel for its output paths")
+    if not re.search(r"^\s*publish //crates/ocx_cli:ocx ", body, re.MULTILINE):
+        problems.append(".build-binaries publishes no //crates/ocx_cli:ocx")
+    problems += [f"copy reads cargo's target/: {line}" for line in body.splitlines() if re.search(r"\bcp\s+\S*target/", line)]
     return problems
 
 
-class TestAcceptanceBinaryOneProfile:
-    """C-021: `.build-binaries` and `rust:build` name the same `--profile`, and the copy reads it."""
+class TestAcceptanceBinaryOneBuild:
+    """C-021: one producer of `ocx` — `.build-binaries` copies Bazel's, `rust:build` delegates."""
 
     TEST_TASKFILE = ROOT / "test" / "taskfile.yml"
     RUST_TASKFILE = ROOT / "taskfiles" / "rust.taskfile.yml"
@@ -2975,41 +2962,55 @@ class TestAcceptanceBinaryOneProfile:
     def test_tree_builds_the_acceptance_binary_once(self) -> None:
         assert _acceptance_build_drift(*self._texts()) == []
 
-    def test_divergent_profiles_red(self) -> None:
+    def test_a_second_cargo_producer_reds(self) -> None:
         test_tf, rust_tf = self._texts()
-        diverged = re.sub(r"cargo build --profile \S+ -p ocx ", "cargo build --release -p ocx ", rust_tf)
-        assert diverged != rust_tf, "the synthetic divergence did not land"
-        problems = _acceptance_build_drift(test_tf, diverged)
-        assert any("rust:build builds 'release'" in p for p in problems), problems
+        cargo = rust_tf.replace(
+            "      - task: :test:.build-binaries\n",
+            "      - cargo build --profile test-bin -p ocx --features ocx/__testing --locked\n"
+            "      - task: :test:.build-binaries\n",
+        )
+        assert cargo != rust_tf, "the synthetic cargo producer did not land"
+        problems = _acceptance_build_drift(test_tf, cargo)
+        assert any(p.startswith("rust:build must only delegate") for p in problems), problems
 
-    def test_copy_from_another_profile_reds(self) -> None:
+    def test_copy_from_cargo_target_reds(self) -> None:
         test_tf, rust_tf = self._texts()
-        stale = test_tf.replace("/target/test-bin/ocx", "/target/release/ocx")
+        stale = test_tf.replace('cp "$src" "$2.new"', 'cp {{.ROOT_DIR}}/target/release/ocx "$2.new"')
         assert stale != test_tf, "the synthetic stale copy did not land"
         problems = _acceptance_build_drift(stale, rust_tf)
-        assert len([p for p in problems if p.startswith("copy reads 'release'")]) == 2, problems
+        assert len([p for p in problems if p.startswith("copy reads cargo's target/")]) == 1, problems
 
-    def test_short_features_flag_is_read(self) -> None:
+    def test_a_spelled_output_path_reds(self) -> None:
         test_tf, rust_tf = self._texts()
-        short = rust_tf.replace("-p ocx --features ocx/__testing --locked", "-p ocx -F ocx/__testing --locked")
-        assert short != rust_tf, "the -F spelling did not land"
-        assert _acceptance_build_drift(test_tf, short) == []
-        dropped = rust_tf.replace("-p ocx --features ocx/__testing --locked", "-p ocx -F ocx/other --locked")
-        assert any("rust:build builds 'ocx/other'" in p for p in _acceptance_build_drift(test_tf, dropped))
+        spelled = test_tf.replace("cquery --output=files", "info bazel-bin")
+        assert spelled != test_tf, "the synthetic output-path spelling did not land"
+        problems = _acceptance_build_drift(spelled, rust_tf)
+        assert ".build-binaries does not ask Bazel for its output paths" in problems, problems
 
-    def test_target_flag_reds(self) -> None:
+    def test_not_publishing_ocx_reds(self) -> None:
         test_tf, rust_tf = self._texts()
-        targeted = rust_tf.replace("-p ocx --features", "-p ocx --target x86_64-unknown-linux-gnu --features")
-        assert targeted != rust_tf, "the synthetic --target did not land"
-        problems = _acceptance_build_drift(test_tf, targeted)
-        assert any(p.startswith("a producer passes --target") for p in problems), problems
+        dropped = test_tf.replace("publish //crates/ocx_cli:ocx ", "publish //crates/ocx_cli:elsewhere ")
+        assert dropped != test_tf, "the synthetic publish drop did not land"
+        problems = _acceptance_build_drift(dropped, rust_tf)
+        assert ".build-binaries publishes no //crates/ocx_cli:ocx" in problems, problems
 
-    def test_divergent_features_red(self) -> None:
+    def test_cargo_build_in_build_binaries_reds(self) -> None:
         test_tf, rust_tf = self._texts()
-        diverged = rust_tf.replace("-p ocx --features ocx/__testing --locked", "-p ocx --locked")
-        assert diverged != rust_tf, "the synthetic divergence did not land"
-        problems = _acceptance_build_drift(test_tf, diverged)
-        assert any("rust:build builds None" in p for p in problems), problems
+        cargo = re.sub(
+            r"ocx exec bazel -- bazel \{\{\.CACHE_RC\}\} build ",
+            "cargo build -p ocx && ocx exec bazel -- bazel {{.CACHE_RC}} build ",
+            test_tf,
+        )
+        assert cargo != test_tf, "the synthetic cargo build did not land"
+        problems = _acceptance_build_drift(cargo, rust_tf)
+        assert any(p.startswith(".build-binaries compiles with cargo") for p in problems), problems
+
+    def test_dropping_the_ocx_target_reds(self) -> None:
+        test_tf, rust_tf = self._texts()
+        dropped = test_tf.replace(" //crates/ocx_cli:ocx ", " ")
+        assert dropped != test_tf, "the synthetic label drop did not land"
+        problems = _acceptance_build_drift(dropped, rust_tf)
+        assert ".build-binaries builds no //crates/ocx_cli:ocx with bazel" in problems, problems
 
 
 # ---------------------------------------------------------------------------

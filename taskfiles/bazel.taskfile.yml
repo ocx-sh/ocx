@@ -529,24 +529,26 @@ tasks:
       reused) and `local` off too, because its `no-remote` half suppresses the
       `--disk_cache` hit on a **fresh server**, which is the state every CI
       runner is in. `no-sandbox` buys the execroot the runner needs with none of
-      that. The compensating control is A4's own red half 3: `bin/ocx*` is a
-      declared input through `//test:suite_anchor`, so a rebuilt binary re-keys
-      every target. `bazel:tag:guard` enforces that declaration on every
-      acceptance target from the graph side, on every `task verify` and every
-      pull request — along with the tag set, the sibling-sweep declarations and
+      that. The compensating control is A4's own red half 3: the binary under
+      test is Bazel's own `//crates/ocx_cli:ocx`, declared as `data` on every
+      target, so a rebuild that changes its bytes re-keys every target.
+      `bazel:tag:guard` enforces that declaration on every acceptance target
+      from the graph side, on every `task verify` and every pull request — along with the tag set, the sibling-sweep declarations and
       `//test:suite_inputs`' own contents.
 
       **The run-side half is manual, and that is stated rather than implied.**
       `scripts/bazel_accept_proofs.py --check-s015` compares the built and the
-      under-test binary's digests and requires a binary-swap run in which
-      nothing cached. No lane and no task invokes it: it needs a rebuilt binary
-      and a warm run. By hand:
+      under-test binary's digests — one file by construction now, since the
+      runner executes the Bazel output itself — and requires a binary-swap run
+      (a Rust edit that changes the bytes) in which nothing cached. No lane and
+      no task invokes it: it needs a rebuilt binary and a warm run. By hand:
 
           task -d test bazel:tags
           python3 scripts/bazel_accept_proofs.py --check-s015 \
               --warm <unchanged-tree BEP> --mutated <binary-swap BEP> \
               --tags test/results/bazel-acceptance-tags.json \
-              --built-binary target/test-bin/ocx --binary-under-test test/bin/ocx
+              --built-binary "$(ocx exec bazel -- bazel cquery --output=files //crates/ocx_cli:ocx)" \
+              --binary-under-test "$(ocx exec bazel -- bazel cquery --output=files //crates/ocx_cli:ocx)"
 
       **`//test:all`, not `//test/...`, and that is a deviation with a measured
       reason.** `bazel test` over a target pattern builds the non-test targets
@@ -637,12 +639,11 @@ tasks:
         sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
       - task: bootstrap
-      # `test/bin/ocx` and the generated JSON schemas. Not optional and not the
-      # runner's job: the runner refuses an absent binary out loud, which is the
-      # right failure but a late one, and several modules read a schema straight
-      # off disk. This is the task `test:default` uses, so both entry points
-      # build the same way.
-      - task: :test:build
+      # The generated JSON schemas: several modules read one straight off
+      # disk, and they are cargo-generated outside this graph. The binaries
+      # are not built here — `bazel test //test:all` builds `//crates/ocx_cli:ocx`
+      # and the other `data` it runs, and `test/bin/` is no input of any target.
+      - task: :website:schema:default
       # Inherited from the step this task replaces in `task verify` phase 2.
       # `test:parallel` -> `test:default` reached `ceilings:self-test`, the
       # red/green fixtures for the shell parser that reads a pytest summary

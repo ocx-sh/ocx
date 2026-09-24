@@ -132,9 +132,9 @@ jobs:
         uses: ./.github/actions/build-rust
         with:
           target: ${{ matrix.job.target }}
-          # Acceptance (Linux) runs this binary; the self-update test seam
-          # (__OCX_SELF_IMAGE) is gated behind ocx/__testing — match the
-          # local `task test` build. These are test-only artifacts.
+          # Test-only artifacts: `ocx/__testing` compiles in the loopback-only
+          # test seams (__OCX_SELF_IMAGE). The acceptance job does not run
+          # them — `bazel:test:accept` builds its binary under Bazel.
           features: ocx/__testing
       # nextest is the engine on macOS and Windows only. The two legs are split
       # rather than unified, and the reason is the floor: `crates/TEST_TARGET_MAP.toml`
@@ -375,21 +375,14 @@ jobs:
             docker compose -f test/docker-compose.yml --profile sigstore logs --tail=80 "$service" || true
             echo "::endgroup::"
           done
-      - name: Download Binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ocx-${{ matrix.job.target }}
-          path: test/bin
+      # No binary download: `bazel:test:accept` builds the binary under test
+      # itself (`//crates/ocx_cli:ocx`, a `data` input of every target) and
+      # reads nothing from `test/bin/`.
       - name: Download Schema
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ocx-schema
           path: website/src/public/schemas/metadata
-      - name: Prepare Binaries
-        shell: bash
-        run: |
-          mv "test/bin/ocx-${{ matrix.job.target }}${{ matrix.job.ext }}" "test/bin/ocx${{ matrix.job.ext }}"
-          chmod +x test/bin/ocx${{ matrix.job.ext }}
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Setup Task
@@ -418,8 +411,9 @@ jobs:
         with:
           read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
       # The twin of the `build` job's step, for the same reason: this lane
-      # compiles Rust under Bazel too — `//crates/ocx_schema:ocx_schema_bin`,
-      # a declared data input of two acceptance targets — and its action keys
+      # compiles Rust under Bazel too — the binary under test
+      # (`//crates/ocx_cli:ocx`, a declared data input of every acceptance
+      # target) and `//crates/ocx_schema:ocx_schema_bin` — and its action keys
       # only match the entries the cache writer uploaded when the
       # autoconfigured C++ toolchain picks the same linker.
       - name: Install lld

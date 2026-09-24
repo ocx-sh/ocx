@@ -18,8 +18,8 @@ uv run pytest -v
 
 The registry container is started automatically. The binary is **not** built
 by pytest — tests run the prebuilt `test/bin/ocx` (or `$OCX_COMMAND`). After
-Rust changes, refresh it via `task test` (builds with `--features
-ocx/__testing` and copies the binary into `test/bin/`).
+Rust changes, refresh it via `task test` (a `bazel build` of
+`//crates/ocx_cli:ocx`, the `__testing` build, copied into `test/bin/`).
 
 To run tests in parallel:
 
