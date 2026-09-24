@@ -283,6 +283,15 @@ pub trait IndexImpl: Send + Sync {
         None
     }
 
+    /// The refusal for a name no source rewrites when config names an index
+    /// as its owner but no source for it is present to say so — `--offline`
+    /// builds none. `None` lets [`super::Index::route`] pass the name through.
+    /// The default refuses nothing; only
+    /// [`ChainedIndex`](super::chained_index::ChainedIndex) knows the config.
+    fn refuse_unrouted(&self, _identifier: &ocx_oci::PackageRef) -> Option<super::error::Error> {
+        None
+    }
+
     /// The base URL of the configured index that is
     /// [`Authoritative`](super::Jurisdiction::Authoritative) for `identifier`,
     /// or `None` when no index is — the question a terminal miss asks to name

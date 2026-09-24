@@ -403,6 +403,10 @@ impl Context {
         // reads the same operator config. `--offline` builds no sources at all,
         // so without this the floor would have no exemption to read there.
         .with_trusted_hosts(trusted_hosts_by_namespace(&config))
+        // Which registries an index owns, from config rather than from the
+        // built sources: `--offline` builds none, and a name there must still
+        // never be read at the host it spells (ocx#504).
+        .with_index_namespaces(index_namespaces(&config, local_only_config.mirrors.as_ref()))
         // The authorities dialled over plain HTTP, for the same reason and by
         // the same route: the dial-site SSRF guard has to know a physical
         // pointer's scheme to know which proxy setting covers it (ocx#407).
@@ -1444,6 +1448,39 @@ fn build_auto_verify(
     }))
 }
 
+/// Condition 2 of [`is_published_namespace`], without its warning — so
+/// [`index_namespaces`] can reach the same verdict a second time in one
+/// invocation without warning twice.
+fn index_suppressed_by_local_mirror(
+    entry: &ocx_config::RegistryConfig,
+    namespace: &str,
+    local_mirrors: Option<&std::collections::HashMap<String, ocx_config::mirror::MirrorConfig>>,
+) -> bool {
+    // A bare-string `[mirrors]` entry sets `registry`, so it counts too.
+    let locally_pinned_at_a_mirror =
+        local_mirrors.is_some_and(|table| table.get(namespace).is_some_and(|entry| entry.registry.is_some()));
+    entry.index_is_compiled_default && locally_pinned_at_a_mirror
+}
+
+/// Every namespace [`is_published_namespace`] would admit, silently: the
+/// registries an index owns, handed to the local index so ownership holds
+/// under `--offline`, where no source is built to claim them.
+fn index_namespaces(
+    config: &ocx_config::Config,
+    local_mirrors: Option<&std::collections::HashMap<String, ocx_config::mirror::MirrorConfig>>,
+) -> std::collections::HashSet<String> {
+    config
+        .registries
+        .iter()
+        .flatten()
+        .filter(|(namespace, entry)| {
+            entry.index.as_deref().is_some_and(|index| !index.is_empty())
+                && !index_suppressed_by_local_mirror(entry, namespace, local_mirrors)
+        })
+        .map(|(namespace, _)| namespace.clone())
+        .collect()
+}
+
 /// Whether `<namespace>` resolves through the ocx-index protocol — the single
 /// published/derived test, shared by every consumer that needs the answer.
 ///
@@ -1475,10 +1512,7 @@ pub fn is_published_namespace(
     if entry.index.as_deref().is_none_or(str::is_empty) {
         return false;
     }
-    // A bare-string `[mirrors]` entry sets `registry`, so it counts too.
-    let locally_pinned_at_a_mirror =
-        local_mirrors.is_some_and(|table| table.get(namespace).is_some_and(|entry| entry.registry.is_some()));
-    if entry.index_is_compiled_default && locally_pinned_at_a_mirror {
+    if index_suppressed_by_local_mirror(entry, namespace, local_mirrors) {
         // `build_index_sources` feeds this from the MERGED config, so a
         // namespace key can come from the managed tier rather than from the
         // operator — neutralized for the same reason the report payloads are.

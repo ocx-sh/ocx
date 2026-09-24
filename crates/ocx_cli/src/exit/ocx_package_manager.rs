@@ -90,6 +90,7 @@ impl ClassifyExitCode for PackageManagerError {
             // strips a leading `return` and a binder and nothing else.
             Self::OfflineMode => Some(ExitCode::PolicyBlocked),
             Self::InternalFile(_, _) => Some(ExitCode::IoError),
+            Self::LayerNotStaged { .. } => Some(ExitCode::Failure),
             Self::LayerLayout(_) => None,
             Self::SymlinkWalk(e) => e.classify(),
             Self::InternalPathInvalid(_) => Some(ExitCode::Failure),

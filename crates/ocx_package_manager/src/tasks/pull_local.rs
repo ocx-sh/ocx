@@ -11,7 +11,7 @@ use ocx_store::file_structure;
 
 use super::super::PackageManager;
 use super::pull::{SetupGroups, setup_owned};
-use super::resolve::{ChainBlob, ChainRole, ResolvedChain};
+use super::resolve::{ChainBlob, ChainRole, NoTransport, ResolvedChain};
 
 /// Singleflight coordinator for blob writes within a single `pull_local` operation.
 ///
@@ -179,11 +179,11 @@ impl PackageManager {
             .unwrap_or_else(|| ocx_oci::OCI_IMAGE_MEDIA_TYPE.to_string());
         let chain = ResolvedChain {
             pinned: pinned.clone(),
-            // Local materialization from already-present layers — no registry
-            // download, so the physical ref is the logical pinned's own
-            // coordinates. A missing `Digest` layer was already fetched from its
-            // routed location in `stage_layers`.
-            transport_pinned: ocx_oci::OciIdentifier::passthrough(pinned.as_identifier()).at_pin_of(&pinned),
+            // Local materialization: every layer was staged above (a `Digest`
+            // layer fetched from its routed location), so there is nothing to
+            // download and no transport. The name is author-supplied and never
+            // resolved; it is not a place to read from (ocx#504).
+            transport_pinned: Err(NoTransport::LocalMaterialization),
             chain: vec![ChainBlob {
                 identifier: pinned.clone(),
                 role: ChainRole::Manifest,
@@ -1164,6 +1164,69 @@ mod tests {
                  got: {sizes:?}"
             );
         }
+    }
+
+    // ── a local materialization never routes the name it was given ───────────
+    //
+    // With file layers only there is nothing to download, so the name is never
+    // asked of the index: a name its index does not hold yet, and an
+    // index-owned name under `--offline`, both materialize as they always did.
+
+    /// An online manager whose index is authoritative for `example.com` and
+    /// holds nothing — any routing of the name is `NotInIndex`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_name_its_index_does_not_hold_materializes_from_local_layers() {
+        use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let dir = tempfile::tempdir().unwrap();
+        let stub_data = StubTransportData::new();
+        let client = ocx_oci::Client::with_transport(Box::new(StubTransport::new(stub_data.clone())));
+        let index =
+            ocx_index::test_source::RoutingSource::authoritative_miss("https://index.example.invalid").into_index();
+        let mgr = PackageManager::new(
+            FileStructure::with_root(dir.path().to_path_buf()),
+            index,
+            Some(client),
+            "example.com",
+        );
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let (identifier, info) = fixture_info("unannounced-tool");
+        let result = mgr.pull_local(&identifier, info, &[], Some(&dest)).await;
+        assert!(result.is_ok(), "nothing needs routing; err: {:?}", result.err());
+        assert!(
+            stub_data.read().calls.is_empty(),
+            "nothing may be dialled: {:?}",
+            stub_data.read().calls
+        );
+    }
+
+    /// Offline, with `example.com` owned by an index in config and no root
+    /// committed — routing the name would be refused as policy-blocked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_index_owned_name_materializes_offline_from_local_layers() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::new(dir.path().join("index")),
+            })
+            .with_index_namespaces(std::collections::HashSet::from(["example.com".to_string()])),
+            Vec::new(),
+            ChainMode::Offline,
+        );
+        let mgr = PackageManager::new(
+            FileStructure::with_root(dir.path().to_path_buf()),
+            index,
+            None,
+            "example.com",
+        );
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let (identifier, info) = fixture_info("offline-owned-tool");
+        let result = mgr.pull_local(&identifier, info, &[], Some(&dest)).await;
+        assert!(result.is_ok(), "nothing needs routing offline; err: {:?}", result.err());
     }
 
     // ── digest layers are read where the index routes the package ─────────────

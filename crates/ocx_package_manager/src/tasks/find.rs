@@ -110,9 +110,11 @@ impl PackageManager {
         // differently depending on whether this invocation happened to find it
         // in the store or had to fetch it: a cached find would report no
         // platform and no content registry at all.
-        let info = info
-            .with_platform(resolved.platform.clone())
-            .with_transport_registry(resolved.transport_pinned.registry());
+        let info = info.with_platform(resolved.platform.clone());
+        let info = match &resolved.transport_pinned {
+            Ok(transport) => info.with_transport_registry(transport.registry()),
+            Err(_) => info,
+        };
 
         // Upsert the resolution chain into the installed package's `refs/blobs/`
         // — idempotent, covers legacy installs and alt-tag resolves that walked

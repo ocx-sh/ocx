@@ -20,6 +20,7 @@ use ocx_util::prelude::SerdeExt;
 use ocx_util::singleflight;
 
 use super::super::PackageManager;
+use super::resolve::NoTransport;
 
 /// Singleflight group capacity — maximum number of unique
 /// [`PinnedPackageRef`](ocx_oci::PinnedPackageRef)s (root packages + transitive
@@ -308,7 +309,11 @@ pub async fn setup_owned(
     // wrapper (rather than at each `return`) makes it structurally impossible
     // for a new early return in `setup_owned_impl` to forget the stamp.
     let resolved_platform = resolved.platform.clone();
-    let transport_registry = resolved.transport_pinned.registry().to_string();
+    let transport_registry = resolved
+        .transport_pinned
+        .as_ref()
+        .ok()
+        .map(|transport| transport.registry().to_string());
     setup_owned_impl(
         mgr,
         pinned,
@@ -320,8 +325,11 @@ pub async fn setup_owned(
     )
     .await
     .map(|info| {
-        info.with_platform(resolved_platform)
-            .with_transport_registry(transport_registry)
+        let info = info.with_platform(resolved_platform);
+        match transport_registry {
+            Some(registry) => info.with_transport_registry(registry),
+            None => info,
+        }
     })
 }
 
@@ -792,7 +800,7 @@ async fn move_temp_to_object_store(
 async fn extract_layers(
     mgr: &PackageManager,
     pinned: &ocx_oci::PinnedPackageRef,
-    transport: &ocx_oci::PinnedOciIdentifier,
+    transport: &Result<ocx_oci::PinnedOciIdentifier, NoTransport>,
     manifest: &ocx_oci::ImageManifest,
     layer_group: LayerGroup,
 ) -> Result<Vec<ocx_oci::Digest>, PackageErrorKind> {
@@ -825,7 +833,16 @@ async fn extract_layers(
         let layer_group = layer_group.clone();
         let dial_guard = dial_guard.clone();
         tasks.spawn(async move {
-            let res = extract_layer_atomic(&mgr, &pinned, &transport, &layer, &digest, layer_group, &dial_guard).await;
+            let res = extract_layer_atomic(
+                &mgr,
+                &pinned,
+                transport.as_ref(),
+                &layer,
+                &digest,
+                layer_group,
+                &dial_guard,
+            )
+            .await;
             (idx, res)
         });
     }
@@ -897,10 +914,13 @@ impl std::error::Error for DialRefusal {
 /// `dial_guard` memoizes the pull operation's SSRF pre-flight over the physical
 /// target, so the check runs once however many layers are fetched — and a
 /// refusal stays refused ([`DialVerdict`]).
+///
+/// No `transport` means there is nowhere to read a missing layer from: it is
+/// refused with [`NoTransport::missing_layer`], never dialled.
 async fn extract_layer_atomic(
     mgr: &PackageManager,
     pinned: &ocx_oci::PinnedPackageRef,
-    transport: &ocx_oci::PinnedOciIdentifier,
+    transport: Result<&ocx_oci::PinnedOciIdentifier, &NoTransport>,
     layer: &ocx_oci::Descriptor,
     layer_digest: &ocx_oci::Digest,
     layer_group: LayerGroup,
@@ -928,6 +948,14 @@ async fn extract_layer_atomic(
         handle.complete(());
         return Ok(layer_digest.clone());
     }
+
+    let transport = match transport {
+        Ok(transport) => transport,
+        Err(absent) => {
+            let shared = handle.fail(PackageErrorKind::Internal(absent.missing_layer(pinned, layer_digest)));
+            return Err(map_singleflight_error(singleflight::Error::Failed(shared)));
+        }
+    };
 
     let client = match mgr.require_client() {
         Ok(c) => c,
@@ -1110,7 +1138,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{SetupGroups, setup_owned};
+    use super::{NoTransport, SetupGroups, extract_layers, setup_owned};
     use crate::{
         PackageManager,
         error::PackageErrorKind,
@@ -1189,7 +1217,7 @@ mod tests {
 
         let resolved = ResolvedChain {
             pinned: pinned.clone(),
-            transport_pinned: ocx_oci::OciIdentifier::passthrough(pinned.as_identifier()).at_pin_of(&pinned),
+            transport_pinned: Ok(ocx_oci::OciIdentifier::passthrough(pinned.as_identifier()).at_pin_of(&pinned)),
             chain: vec![ChainBlob {
                 identifier: pinned.clone(),
                 role: ChainRole::Manifest,
@@ -1211,6 +1239,202 @@ mod tests {
         )
         .await
         .expect_err("a foreign leaf artifact type must be refused")
+    }
+
+    /// A local materialization carries no transport, so a layer absent from
+    /// the store is refused before anything is dialled — never fetched from
+    /// the name as typed (ocx#504). The manager is online on purpose: without
+    /// the refusal, nothing else would stop the fetch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_missing_layer_without_a_transport_is_refused_before_any_dial() {
+        use ocx_oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::new(dir.path().join("index")),
+            }),
+            Vec::new(),
+            ChainMode::Default,
+        );
+        let stub_data = StubTransportData::new();
+        let client = ocx_oci::Client::with_transport(Box::new(StubTransport::new(stub_data.clone())));
+        let manager = PackageManager::new(file_structure, index, Some(client), "example.com");
+
+        let layer_digest = ocx_oci::Digest::Sha256("e".repeat(64));
+        let pinned = ocx_oci::PinnedPackageRef::try_from(
+            ocx_oci::PackageRef::new_registry("test/local", "example.com")
+                .clone_with_digest(ocx_oci::Digest::Sha256("d".repeat(64))),
+        )
+        .expect("pinned identifier");
+        let manifest = ocx_oci::ImageManifest {
+            layers: vec![ocx_oci::Descriptor {
+                media_type: ocx_oci::media_type::MEDIA_TYPE_TAR_XZ.to_string(),
+                digest: layer_digest.to_string(),
+                size: 1,
+                urls: None,
+                artifact_type: None,
+                annotations: None,
+            }],
+            ..Default::default()
+        };
+
+        let error = extract_layers(
+            &manager,
+            &pinned,
+            &Err(NoTransport::LocalMaterialization),
+            &manifest,
+            SetupGroups::new().layers,
+        )
+        .await
+        .expect_err("an unstaged layer with no transport must be refused");
+        let mut rendered = error.to_string();
+        let mut cause = std::error::Error::source(&error);
+        while let Some(current) = cause {
+            rendered.push_str(&format!(": {current}"));
+            cause = current.source();
+        }
+        assert!(
+            rendered.contains("is not staged locally") && rendered.contains(&layer_digest.to_string()),
+            "{rendered}"
+        );
+        assert!(
+            stub_data.read().calls.is_empty(),
+            "nothing may be dialled: {:?}",
+            stub_data.read().calls
+        );
+    }
+
+    // ── offline: an index-owned pin with no recorded location ────────────────
+    //
+    // `ocx --remote install ocx.sh/x@sha256:…` writes no root, so a later
+    // `ocx --offline install` of the same pin has a chain in the blob store and
+    // nothing that says where the package lives. The refusal belongs to the
+    // layer that would need that answer, not to routing.
+
+    /// Pulls `ocx.sh/acme/tool@<digest>` offline, with `ocx.sh` owned by an
+    /// index in config, no root committed, and the manifest + config blob in
+    /// the blob store. `missing_layer` adds one layer the store does not hold.
+    /// The manager carries a stub client so a dial would be recorded.
+    async fn pull_unrecorded_index_owned_pin(
+        missing_layer: Option<&ocx_oci::Digest>,
+    ) -> (Result<InstallInfo, PackageErrorKind>, StubTransportData) {
+        let dir = tempfile::tempdir().unwrap();
+        let file_structure = FileStructure::with_root(dir.path().to_path_buf());
+        let index = Index::from_chained_with_content_store(
+            LocalIndex::new(LocalConfig {
+                index_store: IndexStore::machine_local(&file_structure),
+            })
+            .with_index_namespaces(std::collections::HashSet::from(["ocx.sh".to_string()])),
+            Vec::new(),
+            ChainMode::Offline,
+            file_structure.blobs.clone(),
+        );
+        let stub_data = StubTransportData::new();
+        let client = ocx_oci::Client::with_transport(Box::new(StubTransport::new(stub_data.clone())));
+        let manager = PackageManager::new(file_structure.clone(), index, Some(client), "ocx.sh");
+
+        let config = serde_json::to_vec(&bundle_metadata()).unwrap();
+        let config_digest = ocx_oci::Algorithm::Sha256.hash(&config);
+        let layers: Vec<serde_json::Value> = missing_layer
+            .iter()
+            .map(|digest| {
+                serde_json::json!({
+                    "mediaType": ocx_oci::media_type::MEDIA_TYPE_TAR_GZ,
+                    "digest": digest.to_string(),
+                    "size": 1,
+                })
+            })
+            .collect();
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": ocx_oci::OCI_IMAGE_MEDIA_TYPE,
+            "artifactType": super::MEDIA_TYPE_PACKAGE_V1,
+            "config": {
+                "mediaType": ocx_oci::media_type::MEDIA_TYPE_PACKAGE_METADATA_V1,
+                "digest": config_digest.to_string(),
+                "size": config.len(),
+            },
+            "layers": layers,
+        }))
+        .unwrap();
+        let manifest_digest = ocx_oci::Algorithm::Sha256.hash(&manifest);
+        file_structure
+            .blobs
+            .write_blob("ocx.sh", &manifest_digest, &manifest)
+            .await
+            .unwrap();
+        file_structure
+            .blobs
+            .write_blob("ocx.sh", &config_digest, &config)
+            .await
+            .unwrap();
+
+        let package = ocx_oci::PackageRef::new_registry("acme/tool", "ocx.sh").clone_with_digest(manifest_digest);
+        let outcome = manager.pull(&package, ocx_oci::Platform::any()).await;
+        (outcome, stub_data)
+    }
+
+    /// Every blob the pin needs is in the store, so the missing location is
+    /// never asked for: the pull succeeds offline, dialling nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unrecorded_index_owned_pin_materializes_offline_from_the_blob_store() {
+        let (outcome, stub_data) = pull_unrecorded_index_owned_pin(None).await;
+        assert!(
+            outcome.is_ok(),
+            "a cached chain needs no location; err: {:?}",
+            outcome.err()
+        );
+        assert!(
+            stub_data.read().calls.is_empty() && stub_data.read().auth_calls.is_empty(),
+            "nothing may be dialled: {:?}",
+            stub_data.read().calls
+        );
+    }
+
+    /// A layer the store does not hold needs the location offline mode cannot
+    /// look up: the pull is refused with the policy block (exit 81), not the
+    /// internal `LayerNotStaged`, and still dials nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_missing_layer_of_an_unrecorded_index_owned_pin_is_refused_as_unrecorded() {
+        let layer_digest = ocx_oci::Digest::Sha256("e".repeat(64));
+        let (outcome, stub_data) = pull_unrecorded_index_owned_pin(Some(&layer_digest)).await;
+        let error = outcome.expect_err("a missing layer with no location must be refused offline");
+
+        let mut rendered = error.to_string();
+        let mut cause = std::error::Error::source(&error);
+        let mut blocked = false;
+        while let Some(current) = cause {
+            rendered.push_str(&format!(": {current}"));
+            // The node exit-code classification descends to for 81. Only a
+            // refusal raised at the layer sits below the top: the same
+            // refusal raised at routing is the top error and is never visited.
+            blocked |= matches!(
+                current.downcast_ref::<PackageErrorKind>(),
+                Some(PackageErrorKind::Internal(crate::Error::OciIndex(
+                    ocx_index::error::Error::PolicyResolutionBlocked {
+                        policy: "offline",
+                        block: ocx_index::error::PolicyBlock::UnrecordedLocation,
+                        ..
+                    }
+                )))
+            );
+            cause = current.source();
+        }
+        assert!(blocked, "the refusal must be the offline policy block: {rendered}");
+        assert!(
+            rendered.contains(
+                "'ocx.sh/acme/tool' is served by an index and has no locally recorded location, \
+                 which offline mode cannot look up; run `ocx index update ocx.sh/acme/tool` once online"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            stub_data.read().calls.is_empty() && stub_data.read().auth_calls.is_empty(),
+            "nothing may be dialled: {:?}",
+            stub_data.read().calls
+        );
     }
 
     fn bundle_metadata() -> Metadata {
@@ -1372,7 +1596,7 @@ mod tests {
 
         let resolved = ResolvedChain {
             pinned: pinned.clone(),
-            transport_pinned,
+            transport_pinned: Ok(transport_pinned),
             chain: vec![ChainBlob {
                 identifier: pinned.clone(),
                 role: ChainRole::Manifest,

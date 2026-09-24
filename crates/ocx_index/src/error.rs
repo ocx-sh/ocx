@@ -230,16 +230,17 @@ pub enum Error {
     NestedImageIndex { digest: ocx_oci::Digest },
 
     /// A no-resolve routing policy (`--offline` or `--frozen`) refused to
-    /// resolve an unpinned (tag-only) reference from a source. The local
-    /// index did not have the tag and the active policy forbids walking the
-    /// chain to fetch + commit an unknown version. `policy` is the lowercase
+    /// ask a source what the local index cannot answer — `block` says which
+    /// question, and so what the user is told to do. `policy` is the lowercase
     /// flag label (`"offline"` / `"frozen"`); `identifier` is the reference
     /// that could not be resolved. Populate the local index (e.g.
     /// `ocx index update`) or loosen the flag.
-    #[error(
-        "{policy} mode refused to resolve unpinned reference '{identifier}'; run `ocx index update` or pin a digest"
-    )]
-    PolicyResolutionBlocked { identifier: String, policy: &'static str },
+    #[error("{}", .block.message(.identifier, .policy))]
+    PolicyResolutionBlocked {
+        identifier: String,
+        policy: &'static str,
+        block: PolicyBlock,
+    },
 
     /// An index document carrying the format's version pin — `config.json` or
     /// the `c/index.json` envelope, read off the wire or off a local copy —
@@ -525,5 +526,31 @@ mod tests {
              [registries.\"ocx.sh\"].trusted_hosts"
         );
         assert_eq!(Error::from(refused).to_string(), rendered);
+    }
+}
+
+/// What a no-resolve policy could not look up — the half of
+/// [`Error::PolicyResolutionBlocked`] that decides what the refusal tells the
+/// user to do about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyBlock {
+    /// An unpinned tag the local index does not hold.
+    UnpinnedTag,
+    /// A name in a registry an index owns, whose location no locally
+    /// committed root records — only the index can say where it lives.
+    UnrecordedLocation,
+}
+
+impl PolicyBlock {
+    /// The refusal's rendered text, shared by every error that carries one.
+    pub fn message(self, identifier: &str, policy: &str) -> String {
+        match self {
+            Self::UnpinnedTag => format!(
+                "{policy} mode refused to resolve unpinned reference '{identifier}'; run `ocx index update` or pin a digest"
+            ),
+            Self::UnrecordedLocation => format!(
+                "'{identifier}' is served by an index and has no locally recorded location, which {policy} mode cannot look up; run `ocx index update {identifier}` once online"
+            ),
+        }
     }
 }

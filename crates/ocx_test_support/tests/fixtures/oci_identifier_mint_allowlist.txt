@@ -37,6 +37,3 @@ ocx_config/src/managed.rs resolve_target 1
 ocx_config/src/managed.rs snapshot_matches_source 1
 ocx_setup/src/lib.rs apply_managed_config 1
 ocx_package_manager/src/patch/persistence.rs fetch_patch_descriptor_blobs 1
-
-# A local materialization downloads nothing under its own name.
-ocx_package_manager/src/tasks/pull_local.rs pull_local 1

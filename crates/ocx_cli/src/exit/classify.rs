@@ -354,6 +354,7 @@ mod tests {
         let err = ocx_index::error::Error::PolicyResolutionBlocked {
             identifier: "registry.test/cmake:3.28".to_string(),
             policy: "frozen",
+            block: ocx_index::error::PolicyBlock::UnpinnedTag,
         };
         assert_eq!(classify(err), ExitCode::PolicyBlocked);
     }
@@ -367,6 +368,7 @@ mod tests {
         let kind = ProjectErrorKind::PolicyBlocked {
             identifier: Box::new(id),
             policy: "offline",
+            block: ocx_index::error::PolicyBlock::UnpinnedTag,
         };
         let err = ocx_project::error::Error::Project(ProjectError::new(PathBuf::new(), kind));
         assert_eq!(classify(err), ExitCode::PolicyBlocked);
@@ -1045,6 +1047,7 @@ mod tests {
             ocx_index::error::Error::PolicyResolutionBlocked {
                 identifier: "pkg:1.0.0".to_string(),
                 policy: "offline",
+                block: ocx_index::error::PolicyBlock::UnpinnedTag,
             },
         ));
         assert_eq!(
