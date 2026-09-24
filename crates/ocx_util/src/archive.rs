@@ -222,7 +222,8 @@ impl Archive {
     }
 
     /// Extracts the given archive to the given output path with the given options.
-    /// If the algorithm is not specified, it will be inferred from the file extension.
+    /// If the algorithm is not specified, it is inferred from the file extension,
+    /// then from the file's magic number; neither matching means a plain tar.
     /// Zip archives are detected by extension; compression options are only used for tar archives.
     pub async fn extract_with_options(
         archive: impl AsRef<Path>,
@@ -255,9 +256,16 @@ impl Archive {
             .map_err(error::Error::internal)?;
         }
 
-        let algorithm = options
+        // Extension first, then content: a compressed tarball whose name does
+        // not say so used to reach the tar parser raw and fail on a garbage
+        // checksum (ocx-sh/ocx#283) instead of being decoded.
+        let algorithm = match options
             .algorithm
-            .or_else(|| compression::CompressionAlgorithm::from_file(&archive));
+            .or_else(|| compression::CompressionAlgorithm::from_file(&archive))
+        {
+            Some(algorithm) => Some(algorithm),
+            None => compression::CompressionAlgorithm::from_file_magic(&archive).await?,
+        };
 
         let reader: Box<dyn std::io::Read + Send> = if let Some(algorithm) = algorithm {
             compression::read_file(&archive, Some(algorithm)).await?
@@ -359,6 +367,54 @@ mod tests {
         assert!(!output.join("level_0.txt").exists());
         assert!(!output.join("content_0.txt").exists());
         assert!(output.join("content_0_0.txt").exists());
+    }
+
+    /// A compressed tarball whose name carries no compression extension is
+    /// decoded by its magic number instead of reaching the tar parser raw,
+    /// which failed on a garbage checksum (ocx-sh/ocx#283).
+    #[tokio::test]
+    async fn extraction_detects_compression_by_magic_without_an_extension() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("file.txt"), b"content").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let named = dir.path().join("pkg.tar.gz");
+        let mut archive = Archive::create(&named).await.unwrap();
+        archive.add_file("file.txt", src.path().join("file.txt")).await.unwrap();
+        archive.finish().await.unwrap();
+        let unnamed = dir.path().join("pkg");
+        std::fs::rename(&named, &unnamed).unwrap();
+
+        let output = dir.path().join("output");
+        Archive::extract(&unnamed, &output)
+            .await
+            .expect("a gzip tarball must extract whatever its name");
+        assert_eq!(std::fs::read(output.join("file.txt")).unwrap(), b"content");
+    }
+
+    /// A plain tar whose first entry name starts with the printable bzip2
+    /// prefix `BZh` must still extract as a plain tar.
+    #[tokio::test]
+    async fn a_plain_tar_starting_with_bzh_is_not_taken_for_bzip2() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("BZh-notes.txt"), b"notes").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let named = dir.path().join("pkg.tar");
+        let mut archive = Archive::create(&named).await.unwrap();
+        archive
+            .add_file("BZh-notes.txt", src.path().join("BZh-notes.txt"))
+            .await
+            .unwrap();
+        archive.finish().await.unwrap();
+        let unnamed = dir.path().join("pkg");
+        std::fs::rename(&named, &unnamed).unwrap();
+
+        let output = dir.path().join("output");
+        Archive::extract(&unnamed, &output)
+            .await
+            .expect("a plain tar must extract");
+        assert_eq!(std::fs::read(output.join("BZh-notes.txt")).unwrap(), b"notes");
     }
 
     /// strip_components works for zip archives.
