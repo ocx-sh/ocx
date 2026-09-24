@@ -97,6 +97,10 @@ jobs:
         if: ${{ inputs.artifact_source == 'bare' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
+          # Exactly the set `deploy-dev.yml`'s scan read (`artifact-pattern:
+          # ocx-*`). Without it every artifact of the run is staged under
+          # dist/, so an upload the scan never saw could be published.
+          pattern: ocx-*
           path: dist/
           merge-multiple: true
 
@@ -162,7 +166,11 @@ jobs:
             exit 1
           fi
           install -m 0755 "$SRC" /usr/local/bin/ocx
-          ocx version
+          # Refuse to publish a binary built with test provenance: the one
+          # binary native to this runner must report a real commit, a clean
+          # tree, this repository's CI run and a real build time (ADR C-PROV).
+          # The byte scan over every target ran in scan-binaries.yml before.
+          python3 scripts/release_provenance_check.py --exec /usr/local/bin/ocx
 
       - name: Publish to registry
         env:

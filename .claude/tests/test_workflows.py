@@ -659,8 +659,8 @@ _BUILD_TEST_ELSEWHERE = {
     # The deep workflow runs the acceptance suite. It once spelled this
     # `task test`, the SERIAL pytest entry point (21:41 for 3819 tests on an
     # idle four-core runner), then `task test:parallel`, and now the Bazel
-    # lane: 181 `sh_test` targets with their results cached, which is what
-    # pays for `--local_test_jobs=1` giving up xdist. `verify-basic.yml` is
+    # lane: 172 `sh_test` targets with their results cached, run concurrently
+    # behind the runner's host locks. `verify-basic.yml` is
     # deliberately not the home for it — that workflow is the fast PR gate and
     # the acceptance suite is the deep one's long half.
     "bazel:test:accept": ("verify-deep.yml", "task bazel:test:accept"),
@@ -3243,3 +3243,163 @@ def test_the_remote_cache_serves_the_read_credential() -> None:
         f"holding this credential then reads zero blobs and stays green at full cost, which "
         f"is exactly the silent failure S-016 exists to make loud"
     )
+
+
+# ---------------------------------------------------------------------------
+# Release provenance scan (plan_test_speed_tiers.md C-005, S-013, S-024; ADR
+# adr_test_speed_tiers.md C-PROV wiring). A `__testing` build carries fixed
+# placeholder provenance; these pin the wiring that keeps one from being
+# published. Each is a property of a workflow file, so each is structural.
+# ---------------------------------------------------------------------------
+
+WORKFLOW_DIR = ROOT / ".github" / "workflows"
+SCAN_WORKFLOW_USES = "./.github/workflows/scan-binaries.yml"
+PROVENANCE_CHECK = "scripts/release_provenance_check.py"
+
+
+def _scan_callers(workflow: Path) -> list[str]:
+    """Names of the jobs in `workflow` that call the reusable scan."""
+    jobs = _load(workflow).get("jobs") or {}
+    return [name for name, job in jobs.items() if (job or {}).get("uses") == SCAN_WORKFLOW_USES]
+
+
+def _needs(job: dict) -> list[str]:
+    needs = job.get("needs") or []
+    return [needs] if isinstance(needs, str) else list(needs)
+
+
+def _run_steps(job: dict) -> list[tuple[int, str]]:
+    return [(index, step.get("run") or "") for index, step in enumerate(job.get("steps") or [])]
+
+
+def _scan_input_default(name: str) -> object:
+    inputs = _on(WORKFLOW_DIR / "scan-binaries.yml")["workflow_call"]["inputs"]
+    return inputs[name].get("default")
+
+
+def test_every_scan_marker_is_a_placeholder_the_testing_build_plants() -> None:
+    """The scan's markers and `build.rs`'s placeholder table are two spellings of one fact;
+    rename a placeholder and the matching marker would silently stop matching."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("release_provenance_check", ROOT / PROVENANCE_CHECK)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    build_rs = (ROOT / "crates" / "ocx_cli" / "build.rs").read_text(encoding="utf-8")
+    table = re.search(r"const TESTING_PLACEHOLDERS: &\[\(&str, &str\)\] = &\[(.*?)\];", build_rs, re.S)
+    assert table, "crates/ocx_cli/build.rs no longer defines TESTING_PLACEHOLDERS — the reader found nothing"
+    values = re.findall(r'\("[A-Z_]+",\s*"([^"]*)"\)', table.group(1))
+    assert len(values) >= 12, f"read {len(values)} placeholder rows from build.rs, expected the 12 of ADR C-PROV"
+    assert len(module.MARKERS) == 3, module.MARKERS
+    for marker in module.MARKERS:
+        assert any(marker.decode() in value for value in values), (
+            f"scan marker {marker!r} is in no TESTING_PLACEHOLDERS value {values} — it can never match a test build"
+        )
+
+
+def test_release_host_needs_the_provenance_scan() -> None:
+    """`host` (the GitHub Release, then every post-announce publish) waits for the scan,
+    reads its result, and the scan waits for the binaries it scans (P-4)."""
+    jobs = _load(WORKFLOW_DIR / "release.yml")["jobs"]
+    callers = _scan_callers(WORKFLOW_DIR / "release.yml")
+    assert len(callers) == 1, (
+        f"release.yml has {len(callers)} jobs calling {SCAN_WORKFLOW_USES} ({callers}); expected exactly "
+        f"one, rendered from `global-artifacts-jobs` in dist-workspace.toml"
+    )
+    scan = callers[0]
+    assert "build-local-artifacts" in _needs(jobs[scan]), (
+        f"release.yml `{scan}` needs {_needs(jobs[scan])}: without `build-local-artifacts` it runs "
+        f"beside the build and scans no binary (that is the `local-artifacts-jobs` render)"
+    )
+    assert scan in _needs(jobs["host"]), f"release.yml `host` needs {_needs(jobs['host'])}, not `{scan}`"
+    clause = f"(needs.{scan}.result == 'skipped' || needs.{scan}.result == 'success')"
+    assert clause in str(jobs["host"].get("if", "")), (
+        f"release.yml `host.if` does not read `{scan}`'s result, so an `always()` host "
+        f"would publish after a failed scan: {jobs['host'].get('if')}"
+    )
+
+
+def test_the_scan_workflow_cannot_pass_by_skipping() -> None:
+    """`host` accepts a `skipped` scan, so the scan must never be able to skip or soften itself."""
+    document = _load(WORKFLOW_DIR / "scan-binaries.yml")
+    assert document.get("permissions") == {"contents": "read"}, document.get("permissions")
+    runs = []
+    for name, job in document["jobs"].items():
+        assert "if" not in job, f"scan-binaries.yml `{name}` has an `if:` — a skipped scan reads as a pass to `host`"
+        assert "continue-on-error" not in job, f"scan-binaries.yml `{name}` has `continue-on-error`"
+        for step in job.get("steps") or []:
+            assert "if" not in step, f"scan-binaries.yml `{name}` step {step.get('name')!r} has an `if:`"
+            assert "continue-on-error" not in step, f"scan-binaries.yml `{name}` step {step.get('name')!r} may fail silently"
+            assert "upload-artifact" not in str(step.get("uses", "")), (
+                f"scan-binaries.yml `{name}` uploads an artifact; `host` publishes every `artifacts-*` it downloads"
+            )
+            runs.append(step.get("run") or "")
+    body = "\n".join(runs)
+    assert f"{PROVENANCE_CHECK} --scan" in body and '--min-files "$MIN_FILES"' in body, body
+    assert f"{PROVENANCE_CHECK} --exec" in body, body
+
+
+def test_the_release_scan_floor_is_one_binary_per_dist_target() -> None:
+    """cargo-dist passes the scan only `plan`, so the input defaults ARE the release's floor."""
+    import tomllib
+
+    targets = tomllib.loads((ROOT / "dist-workspace.toml").read_text(encoding="utf-8"))["dist"]["targets"]
+    assert _scan_input_default("min-files") == len(targets), (
+        f"scan-binaries.yml `min-files` defaults to {_scan_input_default('min-files')}, but "
+        f"dist-workspace.toml builds {len(targets)} targets — a missing binary would pass the floor"
+    )
+    assert _scan_input_default("extract") is True
+    assert _scan_input_default("artifact-pattern") == "artifacts-build-local-*"
+
+
+def test_deploy_dev_publish_needs_the_provenance_scan() -> None:
+    """S-024: builds → `scan-binaries` → publish; a marker in any staged binary skips the publish."""
+    jobs = _load(WORKFLOW_DIR / "deploy-dev.yml")["jobs"]
+    callers = _scan_callers(WORKFLOW_DIR / "deploy-dev.yml")
+    assert callers, f"deploy-dev.yml has no job calling {SCAN_WORKFLOW_USES}"
+    assert any(caller in _needs(jobs["publish"]) for caller in callers), (
+        f"deploy-dev.yml `publish` needs {_needs(jobs['publish'])}, none of which is a scan job ({callers})"
+    )
+    builds = sorted(name for name in jobs if name.startswith("build-"))
+    targets = json.loads(jobs["publish"]["with"]["targets"])
+    for caller in callers:
+        assert set(builds) <= set(_needs(jobs[caller])), f"`{caller}` needs {_needs(jobs[caller])}, not every {builds}"
+        with_ = jobs[caller].get("with") or {}
+        assert with_.get("min-files") == len(targets), (
+            f"`{caller}` floors the scan at {with_.get('min-files')} binaries; `publish` pushes {len(targets)} targets"
+        )
+        assert with_.get("extract") is False, "deploy-dev uploads raw binaries, not archives"
+
+
+def test_oci_publish_execs_the_provenance_check_before_publishing() -> None:
+    """The native binary that drives the push must itself report release provenance."""
+    steps = _run_steps(_load(WORKFLOW_DIR / "oci-publish.yml")["jobs"]["publish"])
+    execs = [index for index, run in steps if f"{PROVENANCE_CHECK} --exec" in run]
+    pushes = [index for index, run in steps if "ocx package push" in run]
+    assert execs, "oci-publish.yml never runs `release_provenance_check.py --exec`"
+    assert pushes and min(execs) < min(pushes), f"--exec at step {execs}, push at step {pushes}"
+
+
+def test_oci_publish_bare_download_is_the_scanned_set() -> None:
+    """S2: the bare path publishes only what deploy-dev's scan read. Without a `pattern`,
+    `download-artifact` fetches every artifact of the run, so any other upload would be
+    staged under `dist/` and pushed without ever having been scanned."""
+    steps = _load(WORKFLOW_DIR / "oci-publish.yml")["jobs"]["publish"]["steps"]
+    [download] = [step for step in steps if step.get("name") == "Download bare-binary artifacts"]
+    jobs = _load(WORKFLOW_DIR / "deploy-dev.yml")["jobs"]
+    callers = _scan_callers(WORKFLOW_DIR / "deploy-dev.yml")
+    scanned = {(jobs[caller].get("with") or {}).get("artifact-pattern") for caller in callers}
+    assert scanned == {"ocx-*"}, f"deploy-dev.yml scans {scanned}"
+    assert (download.get("with") or {}).get("pattern") in scanned, (
+        f"oci-publish.yml downloads pattern {(download.get('with') or {}).get('pattern')!r}; the scan read {scanned}"
+    )
+
+
+def test_cross_compile_scans_its_release_build() -> None:
+    """AM-2: the one release build (no `__testing`) on every `main` push scans green on real bytes."""
+    steps = _run_steps(_load(VERIFY_DEEP)["jobs"]["cross-compile"])
+    scans = [index for index, run in steps if f"{PROVENANCE_CHECK} --scan" in run]
+    builds = [index for index, run in steps if "cargo xwin build --release" in run]
+    assert scans, "verify-deep.yml `cross-compile` has no `release_provenance_check.py --scan` step"
+    assert builds and min(scans) > min(builds), f"--scan at step {scans}, build at step {builds}"

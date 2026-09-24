@@ -278,6 +278,50 @@ class TestReleasePrepareGuard:
         first = next(line for line in cmds.splitlines() if line.strip().startswith("- "))
         assert "commit_gate.py --require-full-mark" in first
 
+    @staticmethod
+    def _prepare_cmds() -> list[str]:
+        """`release:prepare`'s `cmds:`, each rendered as the text task would run or call."""
+        import yaml
+
+        tasks = yaml.safe_load(RELEASE_TASKFILE.read_text(encoding="utf-8"))["tasks"]
+        return [cmd if isinstance(cmd, str) else f"task: {cmd.get('task')}" for cmd in tasks["prepare"]["cmds"]]
+
+    def test_release_prepare_runs_the_provenance_proof_before_any_edit(self) -> None:
+        """C-006 / S-019: the real-bytes proof (release build green, `__testing` build red)
+        runs before `cargo set-version` touches a file."""
+        cmds = self._prepare_cmds()
+        proof = [i for i, cmd in enumerate(cmds) if cmd == "task: provenance:proof"]
+        bump = [i for i, cmd in enumerate(cmds) if cmd.startswith("cargo set-version")]
+        assert proof, f"release:prepare never runs `provenance:proof`: {cmds}"
+        assert bump and proof[0] < bump[0], f"provenance:proof at {proof}, the version bump at {bump}"
+
+    def test_release_prepare_verifies_with_no_cached_verdicts(self) -> None:
+        """C-006 / P-7: a release re-executes every acceptance module (`NOCACHE=1`)."""
+        verifies = [cmd for cmd in self._prepare_cmds() if cmd.strip().startswith("task verify")]
+        assert verifies == ["task verify NOCACHE=1"], verifies
+
+    @pytest.mark.parametrize(("cli_vars", "expect_nocache"), [([], False), (["NOCACHE=1"], True)])
+    def test_nocache_reaches_the_acceptance_bazel_test(self, cli_vars: list[str], expect_nocache: bool) -> None:
+        """`task verify NOCACHE=1` renders `--nocache_test_results` onto `bazel test //test:all`
+        (go-task CLI vars are global); without the var it does not — both ways, so the
+        green cannot be a flag that is always there."""
+        if shutil.which("task") is None:
+            pytest.skip("`task` is not on PATH (shutil.which returned None)")
+        result = subprocess.run(
+            ["task", "--dry", "verify", *cli_vars],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            encoding="utf-8",
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        lines = (result.stdout + result.stderr).splitlines()
+        starts = [i for i, line in enumerate(lines) if "bazel  test //test:all" in line or "bazel test //test:all" in line]
+        assert starts, "the dry run rendered no `bazel test //test:all` line — the probe read nothing"
+        # The command continues on the next line (`\` continuation).
+        rendered = "\n".join(lines[starts[0] : starts[0] + 2])
+        assert ("--nocache_test_results" in rendered) is expect_nocache, rendered
+
 
 class TestHandMarkScope:
     """`task verify:mark` writes a *scoped* mark whatever the command line says (DX-3).
