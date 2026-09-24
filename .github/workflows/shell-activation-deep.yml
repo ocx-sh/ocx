@@ -74,8 +74,13 @@ jobs:
           target: aarch64-apple-darwin
           features: ocx/__testing
           artifact_suffix: "-testing"
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.6.2'
+          # Toolchain from ocx.toml + ocx.lock (uv, go-task, CPython), as in
+          # verify-basic.yml; the object store stays uncached, as there.
+          cache: false
       - name: Install ocx-packaged shells and run the activation matrix
         shell: bash
         run: |
@@ -110,8 +115,6 @@ jobs:
             python -m pytest test_shell_activation.py test_shell_reconcile.py \
             -v -p no:cacheprovider
 
-      - name: Setup Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
       # C-044 is a PER-PLATFORM assert with the floor measured in the same job.
       # A Linux number imported onto macOS would be exactly the "another tool's
       # benchmark as a budget" mistake the ADR calls out, so macOS measures its
