@@ -2,9 +2,36 @@
 # Copyright 2026 The OCX Authors
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
 
 package(default_visibility = ["//crates:__subpackages__"])
+
+# `ocx-shim`, the Windows launcher, as the acceptance suite's
+# `OCX_SHIM_BINARY` (`test/bazel.bzl`; `test/taskfile.yml`'s `.build-binaries`
+# copies it to `test/bin/ocx-shim`). Only `test_windows_shim.py` executes it,
+# on Windows; elsewhere it is a compile-only check.
+#
+# `stamp = 0`, spelled out: `bazel:tag:guard` clause 2 credits only an
+# explicitly specified `stamp = 0` (rules_rust defaults a `rust_binary` to -1).
+rust_binary(
+    name = "ocx_shim",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(
+        normal = True,
+        proc_macro = True,
+    ),
+    crate_root = "src/main.rs",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_shim"},
+    stamp = 0,
+    version = "0.6.2",
+    visibility = [
+        "//crates:__subpackages__",
+        "//test:__pkg__",
+    ],
+    deps = all_crate_deps(normal = True),
+)
 
 rust_test(
     name = "ocx_shim_bin_test",

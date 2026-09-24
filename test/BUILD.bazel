@@ -65,26 +65,15 @@ exports_files(
     visibility = ["//crates:__subpackages__"],
 )
 
-# The one runfile every acceptance target carries, and the three binaries the
-# suite drives: `ocx`, `ocx-mirror`, and `ocx-shim` — the last only on the
-# windows-latest leg, where `OCX_SHIM_BINARY` points `test_windows_shim.py` at
-# it (`test/taskfile.yml:13`); its ELF is never executed on Linux. Measured:
-# `bazel query 'labels(srcs, //test:suite_anchor)'` answers all three plus
-# `conftest.py`, so the wildcard below is doing what this comment says.
-#
-# `conftest.py` is the anchor: the runner resolves its symlink to find the
-# source tree, so it is load-bearing rather than decorative. `bin/ocx*` is
-# globbed with `allow_empty = True` because `cargo` writes those binaries and a
-# fresh clone has none — an absent `bin/ocx` is refused by the runner, out
-# loud, rather than by an analysis error nobody can act on. A glob whose
-# emptiness is silent is exactly the unfalsifiable shape, which is why the
-# runtime check is the one that governs and this is only the declaration.
+# The one runfile every acceptance target carries. `conftest.py` is the
+# anchor: the runner resolves its symlink to find the source tree, so it is
+# load-bearing rather than decorative. The binaries the suite drives are not
+# here: `test/bazel.bzl` declares `//crates/ocx_cli:ocx` and
+# `//crates/ocx_shim:ocx_shim` on every target itself, so `test/bin/` (the
+# pytest entry points' copy) is no input of any acceptance target.
 filegroup(
     name = "suite_anchor",
-    srcs = ["conftest.py"] + glob(
-        ["bin/ocx*"],
-        allow_empty = True,
-    ),
+    srcs = ["conftest.py"],
 )
 
 # Everything (nearly) every acceptance module reads that is NOT the module.
@@ -121,7 +110,7 @@ filegroup(
 # a generated file inside a globbed directory would re-key every target on
 # every run and "second run fully cached" would be unreachable. Measured by
 # snapshotting every path under `test/` around a `task test:parallel --force`:
-# `__pycache__/`, `.pytest_cache/`, `bin/ocx*` and `results/junit.xml` moved and
+# `__pycache__/`, `.pytest_cache/`, `bin/**` and `results/junit.xml` moved and
 # nothing else — so `**/__pycache__/**` and `**/*.pyc` are the only exclusions a
 # globbed directory needs, and `bench/results/` (gitignored `task test:bench`
 # output) the one generated path under a globbed directory.
@@ -138,9 +127,9 @@ filegroup(
 filegroup(
     name = "suite_inputs",
     srcs = [
-        # `:suite_anchor` carries `conftest.py` and `bin/ocx*`; nested rather
-        # than re-globbed so the runner's anchor and the cache key name one
-        # group. It is the second label the tag guard requires.
+        # `:suite_anchor` carries `conftest.py`; nested rather than listed so
+        # the runner's anchor and the cache key name one group. It is a label
+        # the tag guard requires.
         ":suite_anchor",
         "docker-compose.yml",
         "ocx.lock",

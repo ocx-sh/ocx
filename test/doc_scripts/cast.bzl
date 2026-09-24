@@ -359,8 +359,9 @@ fi
 user database gave none"
 export HOME
 
-# Built by `cargo`, never by Bazel: there is no `rust_binary` for `ocx` in this
-# graph. It IS a declared input — `//test:recording_inputs` globs `bin/ocx`, so
+# Built by `cargo --release`, not by `//crates/ocx_cli:ocx`: a recording runs
+# the release binary, without the `__testing` placeholders and seams the
+# acceptance binary carries. It IS a declared input — `//test:recording_inputs` globs `bin/ocx`, so
 # a rebuilt binary moves the action key and this action re-executes against it.
 # The refusal below is therefore about the *absent* case only: on a fresh clone
 # `bin/ocx` does not exist, the glob is `allow_empty = True`, and this line is

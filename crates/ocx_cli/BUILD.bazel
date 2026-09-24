@@ -2,7 +2,7 @@
 # Copyright 2026 The OCX Authors
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//crates:__subpackages__"])
@@ -11,6 +11,37 @@ filegroup(
     name = "api_data",
     srcs = glob(["src/api/data/**"]),
 )
+
+# The fixed `__testing` provenance, as `build.rs`'s `TESTING_PLACEHOLDERS`
+# bakes it for cargo — keep the two lists equal. Bazel never runs `build.rs`,
+# so without these every `option_env!` in `app/build_info.rs` reads `None` and
+# the release provenance scan (`task release:provenance:proof`) finds no marker
+# in the binary under test. On the library, not the binary: the reads live
+# here. Sound because this graph is test-only — releases stay on cargo-dist.
+#
+# The toolchain-derived rows `build.rs` gets from vergen are spelled out:
+# `VERGEN_RUSTC_SEMVER` is `MODULE.bazel`'s pin, `VERGEN_CARGO_DEBUG` is
+# `false` because fastbuild emits no debug info (vergen reads cargo's `DEBUG`),
+# and the triple is read off the target platform. A platform not listed gets
+# no triple, so `build` drops out of `ocx version` and
+# `test_version_json_reports_placeholder_provenance` reds by name.
+_TESTING_PROVENANCE = {
+    "CARGO_MANIFEST_DIR": "crates/ocx_cli",
+    "GITHUB_REF": "refs/heads/placeholder",
+    "GITHUB_REPOSITORY": "placeholder/placeholder",
+    "GITHUB_RUN_ID": "0",
+    "GITHUB_SERVER_URL": "https://ci.invalid",
+    "GITHUB_SHA": "0000000000000000000000000000000000000000",
+    "GITHUB_WORKFLOW": "placeholder",
+    "VERGEN_BUILD_TIMESTAMP": "1970-01-01T00:00:00.000000000Z",
+    "VERGEN_CARGO_DEBUG": "false",
+    "VERGEN_GIT_COMMIT_TIMESTAMP": "1970-01-01T00:00:00.000000000Z",
+    "VERGEN_GIT_DESCRIBE": "placeholder-g00000000",
+    "VERGEN_GIT_DIRTY": "true",
+    "VERGEN_GIT_SHA": "0000000000000000000000000000000000000000",
+    "VERGEN_RUSTC_SEMVER": "1.95.0",
+    "__OCX_BUILD_CHANNEL": "test",
+}
 
 rust_library(
     name = "ocx_cli",
@@ -21,10 +52,20 @@ rust_library(
         allow_empty = True,
         exclude = ["src/**/*.rs"],
     ),
+    # `app::seam`, as cargo's `--features ocx/__testing` compiles it into the
+    # acceptance binary; the tier crates' libraries enable their own.
+    crate_features = ["__testing"],
     crate_name = "ocx",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
-    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_cli"},
+    rustc_env = select({
+        "@rules_rust//rust/platform:" + triple: _TESTING_PROVENANCE | {"VERGEN_CARGO_TARGET_TRIPLE": triple}
+        for triple in [
+            "aarch64-apple-darwin",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-unknown-linux-gnu",
+        ]
+    } | {"//conditions:default": _TESTING_PROVENANCE}),
     version = "0.6.2",
     deps = all_crate_deps(normal = True) + [
         "//crates/ocx_announce",
@@ -44,6 +85,38 @@ rust_library(
         "//crates/ocx_trust",
         "//crates/ocx_util",
     ],
+)
+
+# The `ocx` binary the acceptance suite runs (`src/main.rs`, cargo's `[[bin]]`),
+# built by Bazel so that no acceptance target reads cargo's `target/`: every
+# `//test` target takes it as `data` and the runner resolves its
+# rlocationpath (`test/bazel.bzl`). `task test`'s `.build-binaries` copies the
+# same output into `test/bin/` for the pytest entry points. The provenance
+# placeholders arrive through `:ocx_cli`'s `rustc_env` above.
+#
+# `stamp = 0`, spelled out: the binary embeds no build metadata, and
+# `bazel:tag:guard` clause 2 credits only an explicitly specified `stamp = 0`
+# (rules_rust defaults a `rust_binary` to -1).
+rust_binary(
+    name = "ocx",
+    srcs = ["src/main.rs"],
+    aliases = aliases(
+        normal = True,
+        proc_macro = True,
+    ),
+    # Not `ocx`: that is the library's crate name, which this crate links.
+    crate_name = "ocx_bin",
+    crate_root = "src/main.rs",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_cli"},
+    stamp = 0,
+    version = "0.6.2",
+    visibility = [
+        "//crates:__subpackages__",
+        "//test:__pkg__",
+    ],
+    deps = all_crate_deps(normal = True) + [":ocx_cli"],
 )
 
 rust_test(

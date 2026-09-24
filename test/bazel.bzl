@@ -49,14 +49,14 @@ a developer is in after `bazel shutdown`. A lane tagged `local` would report
 
 **`no-sandbox` buys the property the runner actually needs** without the cache
 half: the test runs in the execroot rather than in a sandbox, which is a hard
-requirement here (the suite drives `docker compose`, a uv-managed virtualenv and
-a `cargo`-built binary, none of which survive a sandboxed working directory).
+requirement here (the suite drives `docker compose` and a uv-managed virtualenv
+from the source tree, neither of which survives a sandboxed working directory).
 Measured above: it caches exactly like an untagged sibling in both warm states.
 
 And measured again on **this** workspace, where the probe's rc does not apply:
-after a run that rebuilt `test/bin/ocx` and re-executed every acceptance target
-(181 at the time), the binary was restored and the next `bazel test //test:all`
-reported `Executed 0 out of 181 tests` in 2 s. The local action cache could not have
+after a run that rebuilt the binary under test and re-executed every acceptance
+target (181 at the time), the binary was restored and the next `bazel test
+//test:all` reported `Executed 0 out of 181 tests` in 2 s. The local action cache could not have
 served that — it holds one entry per action and every one of them had just been
 rewritten with the mutated binary's key — so the results came back from
 `--disk_cache`, which is the tier a fresh server has and `local` would have
@@ -157,8 +157,9 @@ Per target: the module itself, the `uv` launcher, `:suite_inputs` — the one
 shared group carrying what (nearly) every module reads that is not the module
 (`conftest.py`, `pyproject.toml`, `uv.lock`, `ocx.toml`, `ocx.lock`,
 `src/**/*.py`, the non-`test_*` helpers and the fixture tree under `tests/**`,
-`sigstore/**`, `docker-compose.yml`, `zot-config.json`, and `bin/ocx*` through
-`:suite_anchor`) — and its `module_data`: the files only a few modules read
+`sigstore/**`, `docker-compose.yml`, `zot-config.json`), the binary under test
+and the launcher (`//crates/ocx_cli:ocx`, `//crates/ocx_shim:ocx_shim`) — and
+its `module_data`: the files only a few modules read
 (`taskfile.yml`, `bench/**`, `recordings/**/*.py`, `scenarios/**`,
 `scripts/**`, `specs/**`, and the cross-package reads), declared on exactly
 those modules so an edit to one re-runs its readers and not the suite.
@@ -226,22 +227,23 @@ cache's *read* credential and no write credential on any trigger. A wrong entry
 here is one developer's or one runner's, and a `NOCACHE=1` (which adds
 `--nocache_test_results`) clears it.
 
-What is **not** a gap any more: the binary under test. `bin/ocx*` is a declared
-input through `:suite_anchor`, so rebuilding `test/bin/ocx` with different bytes
-moves every acceptance target's key and re-runs every module — A4's red half 3.
+What is **not** a gap any more: the binary under test. It is a Bazel output,
+`//crates/ocx_cli:ocx`, in every target's `data`, so the targets key on the
+binary Bazel built from the source graph — a Rust edit that changes its bytes
+re-runs every module (A4's red half 3), one that leaves them identical re-runs
+nothing, and "the built and the under-test binary are the same bytes" holds by
+construction: the runner executes the runfile, never a copy.
 
-**Which of the two controls is live, exactly.** The *declaration* is enforced on
-every run: `scripts/bazel_tag_guard.py` reads the graph in `task verify` and in
+**Which control is live, exactly.** The *declaration* is enforced on every run:
+`scripts/bazel_tag_guard.py` reads the graph in `task verify` and in
 `verify-basic.yml`, reds an acceptance target whose input closure has lost
-`//test:suite_anchor` or `//test:docker-compose.yml`, reds one that has acquired
-a cache-suppressing tag, and floors what `//test:suite_inputs` itself contains.
-The *binary digest* — A4's red half 3 proper, "the built and the under-test
-binary are the same bytes, and moving them re-executes every target" — is **not** in
-any lane: it needs a rebuilt binary and a warm run, so it is a command a person
-runs, `scripts/bazel_accept_proofs.py --check-s015 --warm BEP --mutated BEP
---tags TAGS.json --built-binary FILE --binary-under-test FILE`, with the tag
-table from `task -d test bazel:tags`. Nothing here should be read as claiming it
-runs on its own.
+`//crates/ocx_cli:ocx`, `//test:suite_anchor` or `//test:docker-compose.yml`,
+reds one that has acquired a cache-suppressing tag, and floors what
+`//test:suite_inputs` itself contains. The *run-side* proof — a binary-swap run
+in which no target reports cached — is **not** in any lane: it needs a rebuilt
+binary and a warm run, so it is a command a person runs,
+`scripts/bazel_accept_proofs.py --check-s015` (`bazel:test:accept`'s summary
+spells it out). Nothing here should be read as claiming it runs on its own.
 """
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
@@ -285,6 +287,18 @@ UNCACHED_MODULES = [
     # verdict; it leaves the list with that edit.
     "tests/test_windows_shim.py",
 ]
+
+# The binary under test and the Windows launcher, built by Bazel (`stamp = 0`,
+# the `__testing` provenance on `:ocx_cli`), declared on every target and handed
+# to the runner by rlocationpath. Declaring them is what makes a Rust edit
+# re-run the suite: the targets re-key on the binary's source graph, and an
+# edit that leaves its bytes unchanged re-runs nothing.
+_OCX = "//crates/ocx_cli:ocx"
+_OCX_SHIM = "//crates/ocx_shim:ocx_shim"
+_BINARY_ENV = {
+    "OCX_COMMAND": "$(rlocationpath %s)" % _OCX,
+    "OCX_SHIM_BINARY": "$(rlocationpath %s)" % _OCX_SHIM,
+}
 
 # The runner's slot-lock list (§ Concurrency). Spelled once; the tag guard
 # reads the same name off each target's `env`.
@@ -414,15 +428,18 @@ esac
 [ -f "$suite/pyproject.toml" ] || fail "$suite carries no pyproject.toml - wrong tree"
 [ -f "$suite/$module" ] || fail "no acceptance module at $suite/$module"
 
-# Built by `cargo` through `task test`, never by Bazel: there is no
-# `rust_binary` for `ocx` in this graph (the crates carry `rust_library` and
-# `rust_test` only). A suite run against a stale or absent binary is silent,
-# so its absence is a refusal rather than a skip.
-ocx="$suite/bin/ocx"
-[ -x "$ocx" ] || fail "no acceptance binary at $ocx - \\`task test\\` builds and copies it"
-
-OCX_COMMAND="$ocx"
-OCX_SHIM_BINARY="$suite/bin/ocx-shim"
+# The binary under test and the Windows launcher, as Bazel built them
+# (`//crates/ocx_cli:ocx`, `//crates/ocx_shim:ocx_shim`): every target carries
+# both as `data` and names each by rlocationpath in its `env`
+# (`acceptance_suite` below). Resolved to absolute paths because pytest runs in
+# the source tree, where a runfiles-relative path means nothing. A suite run
+# against an absent binary is silent, so its absence is a refusal.
+[ -n "${OCX_COMMAND:-}" ] || fail "OCX_COMMAND is unset - the target's env names no binary under test"
+OCX_COMMAND="$TEST_SRCDIR/$OCX_COMMAND"
+[ -x "$OCX_COMMAND" ] || fail "no executable ocx runfile at $OCX_COMMAND"
+[ -n "${OCX_SHIM_BINARY:-}" ] || fail "OCX_SHIM_BINARY is unset - the target's env names no ocx-shim"
+OCX_SHIM_BINARY="$TEST_SRCDIR/$OCX_SHIM_BINARY"
+[ -x "$OCX_SHIM_BINARY" ] || fail "no executable ocx-shim runfile at $OCX_SHIM_BINARY"
 
 # The `ocx_schema` binary, on the targets whose `env` names it
 # (`test/BUILD.bazel` `module_env`): Bazel builds it and hands its
@@ -677,8 +694,10 @@ def acceptance_suite(
                 module,
                 uv,
                 ":suite_inputs",
+                _OCX,
+                _OCX_SHIM,
             ] + module_data.get(module, []),
-            env = module_env.get(module, {}) | (
+            env = _BINARY_ENV | module_env.get(module, {}) | (
                 {_SLOTS_ENV: " ".join(sorted(module_slots[module]))} if module in module_slots else {}
             ),
             env_inherit = _INHERITED_ENV,

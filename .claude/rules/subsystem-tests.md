@@ -109,7 +109,7 @@ task test:parallel     # pytest-xdist (-n auto)
 task test:smoke        # The smoke tier only (-m smoke), ~5 s
 task test:scoped -- tests/test_login.py   # The modules verify:scoped selected; every glob must collect >= 1 test
 
-# Single test (runs prebuilt test/bin/ocx — rebuild via `task test` after Rust changes):
+# Single test (runs prebuilt test/bin/ocx — a copy of Bazel's //crates/ocx_cli:ocx; refresh via `task test` after Rust changes):
 cd test && uv run pytest tests/test_install.py::test_name -v
 ```
 
@@ -432,7 +432,7 @@ When an acceptance test must force internal state that production code derives a
 3. **Env-var name is double-underscore-prefixed `__OCX_*`** (e.g. `__OCX_SELF_IMAGE`, `__OCX_TEST_LIBC`) — the prefix signals "private test seam, not user-facing config." These are NOT documented in `website/src/docs/reference/environment.md` and are NOT forwarded via `Env::apply_ocx_config`.
 4. **Defense-in-depth assert inside the gate** where misuse is dangerous — e.g. `__OCX_SELF_IMAGE` asserts the override targets a loopback registry, so even a build with the feature on cannot be coerced against a real registry.
 
-The acceptance harness already builds with the feature: `test/taskfile.yml` and `taskfiles/rust.taskfile.yml` pass `--features ocx/__testing`. Adding a new seam needs **no build change** — just gate it and read the `__OCX_*` var. Reference implementation: `crates/ocx_package_manager/src/tasks/update_check.rs::ocx_cli_identifier` (the `__OCX_SELF_IMAGE` seam). Acceptance usage: `test/tests/test_self_update.py`.
+The acceptance harness already builds with the feature: the binary under test is Bazel's `//crates/ocx_cli:ocx`, and every tier crate's `rust_library` in `crates/*/BUILD.bazel` sets `crate_features = ["__testing"]`. Adding a new seam needs **no build change** — just gate it and read the `__OCX_*` var. Reference implementation: `crates/ocx_package_manager/src/tasks/update_check.rs::ocx_cli_identifier` (the `__OCX_SELF_IMAGE` seam). Acceptance usage: `test/tests/test_self_update.py`.
 
 ## Unfalsifiable Greens
 
@@ -453,7 +453,7 @@ failed assert on a missing prerequisite over `pytest.skip`.
 
 ## Quality Gate
 
-Per task / review-fix iteration: `task verify:scoped --force` (T0 lint + rows check, then `test:parallel` over the touched modules at T1/T2). Full `task verify` runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates (it then runs `task verify` itself). Direct `uv run pytest` never builds: it runs the existing `test/bin/ocx` (stale after Rust changes — refresh via `task test` / `task test:parallel`, which rebuild with `--features ocx/__testing` and copy the binary there).
+Per task / review-fix iteration: `task verify:scoped --force` (T0 lint + rows check, then `test:parallel` over the touched modules at T1/T2). Full `task verify` runs at WP merge (enforced by the commit gate), at finalize, and whenever `verify:scoped` escalates (it then runs `task verify` itself). Direct `uv run pytest` never builds: it runs the existing `test/bin/ocx` (stale after Rust changes — refresh via `task test` / `task test:parallel`, which `bazel build` `//crates/ocx_cli:ocx` and copy it there; `task bazel:test:accept` runs that Bazel output directly and reads nothing from `test/bin/`).
 
 **Never run `task website:build` while an acceptance suite is running.** Its
 `website:recordings:ensure-binary` step rebuilds `-p ocx` in *release* — without

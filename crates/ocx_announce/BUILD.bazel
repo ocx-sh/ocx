@@ -15,6 +15,10 @@ rust_library(
         allow_empty = True,
         exclude = ["src/**/*.rs"],
     ),
+    # The graph is test-only, so the library carries the seams the acceptance
+    # binary (`//crates/ocx_cli:ocx`) needs — `ocx`'s cargo `__testing`
+    # forwards this crate's.
+    crate_features = ["__testing"],
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_announce"},

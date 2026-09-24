@@ -113,11 +113,12 @@ blanket rule demands of a `no-sandbox` test action, is precisely the tag it must
 not carry. A blanket rule would red every one, and the two ways out of that are a
 hole (skip the package) and a narrowing (demand something else of it). This file
 narrows: an acceptance target is credited without `external` **only while its
-input closure declares `//test:docker-compose.yml` and `//test:suite_anchor`** —
-the compose definition, which pins every service image and port, and the group
-carrying the binary under test. Those are the two inputs whose change a cached
-green would otherwise hide, which is what makes the declaration a compensating
-control rather than a formality. Lose either and `tag-acceptance-undeclared`
+input closure declares `//test:docker-compose.yml`, `//test:suite_anchor` and
+`//crates/ocx_cli:ocx`** — the compose definition, which pins every service
+image and port, the group carrying the runner's anchor, and the binary under
+test. The compose definition and the binary are the inputs whose change a
+cached green would otherwise hide, which is what makes the declaration a
+compensating control rather than a formality. Lose either and `tag-acceptance-undeclared`
 fires beside the blanket finding; carry `external` after all and the blanket
 escape still works. `--self-test`'s mode 4 shows both, plus the case a one-hop
 reader would miss (a source leaving the shared group, which reds every target at
@@ -132,11 +133,11 @@ query would be a second reading of a second universe, and two readings of one
 fact are how they stop agreeing.
 
 **The floor is stage-scoped and advances — and this is the default stage.**
-`STAGE_FLOORS` (WP-13) declares stage 1 (`//crates/...` >= 60), stage 3
-(`//crates/... + //test/doc_scripts/...` >= 147, WP-33's 45 and WP-33b's 42
-added to `//crates/...`'s 60 — the 42 GIF renders took that package from 45 targets to
+`STAGE_FLOORS` (WP-13) declares stage 1 (`//crates/...` >= 62), stage 3
+(`//crates/... + //test/doc_scripts/...` >= 149, WP-33's 45 and WP-33b's 42
+added to `//crates/...`'s 62 — the 42 GIF renders took that package from 45 targets to
 87, and until the floor moved with them it cleared by 42 and discriminated
-nothing) and now stage 4 (`//...` >= 335: 147 + the acceptance package's 181 +
+nothing) and now stage 4 (`//...` >= 337: 149 + the acceptance package's 181 +
 the 7 root and website targets no earlier universe names). `--stage` defaults to
 stage 4, which is the single place the adoption's stage advances:
 `bazel:tag:guard` passes no `--stage` on purpose, so a second spelling cannot go
@@ -294,6 +295,7 @@ ACCEPTANCE_PACKAGE = "//test:"
 
 ACCEPTANCE_DECLARED_INPUTS = frozenset(
     {
+        "//crates/ocx_cli:ocx",
         "//test:docker-compose.yml",
         "//test:suite_anchor",
     }
@@ -301,21 +303,12 @@ ACCEPTANCE_DECLARED_INPUTS = frozenset(
 """What an acceptance target must declare to be credited without `external`.
 
 `docker-compose.yml` carries every service image reference and every host
-port, so a bumped registry or a moved port re-keys the suite. `:suite_anchor` is the group that
-carries `conftest.py` and `bin/ocx*` — the binary under test, which is A4 red
-half 3's whole subject and the input whose staleness a cached green would
-otherwise hide.
-
-**Why the anchor label and not `//test:bin/ocx` itself.** That file is a
-gitignored `cargo` output: `test/BUILD.bazel` globs it with
-`allow_empty = True` because a fresh clone has none, and `task verify` runs
-this gate *before* the step that builds it. A required `//test:bin/ocx` would
-therefore red on every clean checkout — a red for a state that is fine, which
-is the way a gate stops being read. So this clause floors on the *declaration*
-(the group is in the target's `data`) and the binary's *bytes* are floored
-where they can be: `scripts/bazel_accept_proofs.py --check-s015` compares the
-built and under-test digests and proves the whole suite re-executes when they
-move."""
+port, so a bumped registry or a moved port re-keys the suite.
+`//crates/ocx_cli:ocx` is the binary under test — A4 red half 3's whole subject
+and the input whose staleness a cached green would otherwise hide. It is a
+Bazel output, so declaring it keys the target on the binary Bazel built, and
+the runner executes that runfile rather than a copy. `:suite_anchor` carries
+`conftest.py`, the runner's anchor into the source tree."""
 
 ACCEPTANCE_SUPPRESSING_TAGS = INSUFFICIENT_TAGS | {CACHE_DEFEATING_TAG}
 """Tags an acceptance target must NOT carry, now that its results are cached.
@@ -366,14 +359,14 @@ A glob deleted outright takes its whole directory out of the closure, which a
 count floor alone would only catch for the big ones."""
 
 SUITE_INPUTS_FLOOR = 100
-"""How many labels the group's expanded closure must carry, `bin/**` excluded.
+"""How many labels the group's expanded closure must carry.
 
 Measured on this tree (bazel 9.2.0): 100 labels once the per-module files
 (`bench/`, `recordings/`, `scenarios/`, `scripts/`, `specs/`, `taskfile.yml`)
 left for `module_data` and the unread ones (`docker/`, the floor and ceiling
-files) left altogether — it was 156 before. `bin/ocx` and `bin/ocx-shim` are
-excluded because a fresh clone has not built them (`allow_empty = True`), so
-the number is the same on a clean checkout as on a built one. A floor, so it
+files) left altogether — it was 156 before. No binary is in the group (the
+acceptance targets declare `//crates/ocx_cli:ocx` themselves), so the number
+is the same on a clean checkout as on a built one. A floor, so it
 only rises except when a file moves to its readers' targets, which the
 per-module derivation (`uncached_findings`) then guards: a narrowed glob that
 still covers every directory above is what this number is for."""
@@ -443,8 +436,8 @@ TAG_ACCEPTANCE_MSG = (
     "absent by design — and the exemption is only defensible while every one of these "
     "targets declares the binary under test and the compose definition, because those are "
     "the two inputs whose change a cached green would otherwise hide. Add "
-    "`:suite_inputs` back to the target's `data` in test/bazel.bzl, or re-add the missing "
-    "source to //test:suite_inputs / //test:suite_anchor"
+    "`:suite_inputs` and `_OCX` back to the target's `data` in test/bazel.bzl, or re-add the "
+    "missing source to //test:suite_inputs / //test:suite_anchor"
 )
 TAG_SUPPRESSED_MSG = (
     "bazel tag guard: {label} is an acceptance target and carries {present} — the acceptance "
@@ -862,13 +855,6 @@ a `sys.path` entry) re-states its own working directory, so it is not counted �
 which leaves one named residual: a walk *of* `test/` (`rglob` over it) reaches
 `test/doc_scripts/` and `test/lint/` unseen."""
 
-ANCHOR_GLOBS = ("test/bin/ocx*",)
-"""Declared through `//test:suite_anchor`'s `bin/ocx*` glob, which is
-`allow_empty = True`: on a fresh clone the files do not exist yet, so they are
-absent from the query's closure while still declared. Matched as a pattern so
-the verdict is the same on a clean checkout as on a built one. `test/bin/`
-itself counts too — it is gitignored cargo output holding nothing else."""
-
 HELPER_EXCLUDED_PARTS = frozenset({".venv", "__pycache__", "lint", "results"})
 """Directories under `test/` whose Python no acceptance module imports: the
 virtualenv, bytecode, the lint tier (run uncached by its own task) and bench
@@ -1238,8 +1224,7 @@ def label_path(label: str) -> str | None:
 def declared(path: str, members: set[str], tracked: frozenset[str]) -> bool:
     """Is `path` — a file, or a directory the module walks — in the closure?
 
-    A file is declared when it is a closure member (or `ANCHOR_GLOBS` covers
-    it). A directory is declared only when EVERY tracked file under it is a
+    A file is declared when it is a closure member. A directory is declared only when EVERY tracked file under it is a
     member: one declared file under `test/doc_scripts/` does not declare the
     rest a module walks. An untracked path inside `test/` is generated output
     and counts as declared (see below). The root itself and anything above it
@@ -1247,9 +1232,7 @@ def declared(path: str, members: set[str], tracked: frozenset[str]) -> bool:
     """
     if not path or path.startswith(("..", "/")):
         return False
-    if path in members or any(
-        fnmatch.fnmatch(path, pattern) or path == posixpath.dirname(pattern) for pattern in ANCHOR_GLOBS
-    ):
+    if path in members:
         return True
     under = [file for file in tracked if file == path or file.startswith(path + "/")]
     if not under and path.startswith(AMBIENT_DIR + "/"):
@@ -1567,11 +1550,7 @@ def suite_inputs_findings(
             )
         )
 
-    # `bin/**` is globbed `allow_empty = True` because `cargo` writes it and a
-    # fresh clone has none, so counting it would make this floor two lower on a
-    # clean checkout than on a built one — a number that means two things is not
-    # a floor.
-    counted = len({member for member in members if not member.startswith(ACCEPTANCE_PACKAGE + "bin/")})
+    counted = len(members)
     if counted < SUITE_INPUTS_FLOOR:
         findings.append(
             Finding(
@@ -2238,9 +2217,11 @@ def prove_build_action(scratch: Path, live: list[dict]) -> int:
 def prove_rust_binary(scratch: Path, live: list[dict]) -> int:
     """Mode 2 (C-011 clause 2) — a `rust_binary` with neither per-target escape.
 
-    The live graph's one real `rust_binary` (`//crates/ocx_schema:ocx_schema_bin`,
-    plan_test_speed_tiers.md C-020) is the subject of the unmutated green
-    below: it must carry an explicitly specified `stamp = 0`. Every red state is
+    The live graph's three real `rust_binary` targets — the acceptance suite's
+    binary under test and launcher (`//crates/ocx_cli:ocx`,
+    `//crates/ocx_shim:ocx_shim`) and `//crates/ocx_schema:ocx_schema_bin`
+    (plan_test_speed_tiers.md C-020) — are the subject of the unmutated green
+    below: each must carry an explicitly specified `stamp = 0`. Every red state is
     one real `rust_library` record retyped to `rust_binary` with its `stamp` set
     to the default rules_rust measurably gives one (-1), so the reds do not
     depend on how the real binary is written.
@@ -2251,9 +2232,11 @@ def prove_rust_binary(scratch: Path, live: list[dict]) -> int:
 
     binaries = sorted(r["rule"]["name"] for r in live if r["rule"]["ruleClass"] == "rust_binary")
     expect(
-        binaries == ["//crates/ocx_schema:ocx_schema_bin"],
+        binaries
+        == ["//crates/ocx_cli:ocx", "//crates/ocx_schema:ocx_schema_bin", "//crates/ocx_shim:ocx_shim"],
         f"the live graph's rust_binary targets are {binaries}; this proof was re-read against "
-        "exactly one, //crates/ocx_schema:ocx_schema_bin, and must be re-read against the real ones",
+        "exactly //crates/ocx_cli:ocx, //crates/ocx_schema:ocx_schema_bin and "
+        "//crates/ocx_shim:ocx_shim, and must be re-read against the real ones",
     )
     expect(
         all(record.stamp_zero for record in read_rules("\n".join(json.dumps(r) for r in live))[0]
