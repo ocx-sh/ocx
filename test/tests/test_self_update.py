@@ -160,6 +160,50 @@ def test_version_json_under_env_clear(ocx: OcxRunner) -> None:
     )
 
 
+def test_version_json_reports_placeholder_provenance(ocx: OcxRunner) -> None:
+    """C-003: the test binary reports the exact placeholder provenance, and the
+    version report carries exactly the known keys.
+
+    The exact key set is the point: a new key that the test build populates
+    reds here until this expected set names it. `Provenance` omits an
+    unpopulated key, so this case cannot see one the test build leaves empty;
+    the early return in `build.rs` is what keeps real git/CI values out.
+    `build.profile`, `build.target` and `build.rustc` stay real — they are
+    toolchain-derived and do not vary per commit.
+    """
+    # The fixed provenance `crates/ocx_cli/build.rs` bakes into every
+    # `--features ocx/__testing` build (ADR C-PROV, plan C-002/C-003).
+    zero_sha = "0" * 40
+    epoch = "1970-01-01T00:00:00.000000000Z"
+    placeholder_commit = {
+        "sha": zero_sha,
+        "short": zero_sha[:8],
+        "describe": "placeholder-g00000000",
+        "dirty": True,
+        "timestamp": epoch,
+    }
+    placeholder_ci = {
+        "provider": "github-actions",
+        "run_url": "https://ci.invalid/placeholder/placeholder/actions/runs/0",
+        "workflow": "placeholder",
+        "ref": "refs/heads/placeholder",
+        "sha": zero_sha,
+    }
+
+    payload = ocx.json("version")
+
+    assert set(payload) == {"version", "channel", "commit", "build", "ci"}, (
+        f"version report key set changed: {sorted(payload)!r}"
+    )
+    assert payload["channel"] == "test", f"channel: {payload['channel']!r}"
+    assert payload["commit"] == placeholder_commit, f"commit: {payload['commit']!r}"
+    assert payload["ci"] == placeholder_ci, f"ci: {payload['ci']!r}"
+    assert set(payload["build"]) == {"timestamp", "profile", "target", "rustc"}, (
+        f"build key set changed: {sorted(payload['build'])!r}"
+    )
+    assert payload["build"]["timestamp"] == epoch, f"build: {payload['build']!r}"
+
+
 # ---------------------------------------------------------------------------
 # URI-1 — End-to-end self-update install path via `__OCX_SELF_IMAGE` seam
 #
