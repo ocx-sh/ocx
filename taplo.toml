@@ -1,22 +1,32 @@
 [schema]
 enabled = true
 
+# Each pattern twice. taplo (0.10) joins a relative pattern onto the working
+# directory, so `**/ocx.toml` alone covers only files below wherever `taplo`
+# runs; the `/**/` form is absolute and matches the file anywhere. The
+# relative form is what an editor's language server anchors on the workspace.
+
 [[rule]]
 include = [
   "**/.config/ocx/config.toml",
+  "/**/.config/ocx/config.toml",
   "**/.ocx/config.toml",
+  "/**/.ocx/config.toml",
   "**/ocx/config.toml",
+  "/**/ocx/config.toml",
 ]
-url = "https://ocx.sh/schemas/config/v1.json"
+schema = { url = "https://ocx.sh/schemas/config/v1.json" }
 
 [[rule]]
 include = [
   "**/ocx.toml",
+  "/**/ocx.toml",
 ]
-url = "https://ocx.sh/schemas/project/v1.json"
+schema = { url = "https://ocx.sh/schemas/project/v1.json" }
 
 [[rule]]
 include = [
   "**/ocx.lock",
+  "/**/ocx.lock",
 ]
-url = "https://ocx.sh/schemas/project-lock/v3.json"
+schema = { url = "https://ocx.sh/schemas/project-lock/v3.json" }
