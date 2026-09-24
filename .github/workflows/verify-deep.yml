@@ -150,6 +150,10 @@ jobs:
           tool: cargo-nextest
       - name: Test
         if: matrix.job.name != 'Linux'
+        env:
+          # The only leg where Windows PowerShell 5.1 meets the emitted wrapper
+          # (ocx#524); both interpreters ship on the image, so a skip is a red.
+          __OCX_TESTING_REQUIRE_LIVE_SHELLS: ${{ matrix.job.name == 'Windows' && 'pwsh,powershell' || '' }}
         run: cargo nextest run --workspace --target=${{ matrix.job.target }} --profile ci --locked
       - name: Setup Task
         if: matrix.job.name == 'Linux'

@@ -235,6 +235,37 @@ if (Test-Path env:WP18_CONST) {
 Write-Host '[S-045] revert PASS - $env:WP18_CONST gone on leaving the project'
 
 # ---------------------------------------------------------------------------
+# ocx#524 - the `ocx` wrapper function must keep a bare `--`. PowerShell's
+# binder drops the first `--` of a FUNCTION call, so without the repair
+# `ocx package exec <pkg> -- tool -h` reached ocx as `exec <pkg> tool -h` and
+# clap printed ocx's own usage. `--hook` forces the wrapper into this
+# non-interactive session. The call without `--` is the red state, asserted
+# beside it so a wrapper that never reached ocx cannot pass.
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '[ocx#524] Wrapper keeps the -- separator ...'
+
+(& $ocxBin --offline self activate --shell=powershell --no-completion --hook 2>$null) | Out-String | Invoke-Expression
+if ((Get-Command ocx).CommandType -ne 'Function') {
+    throw "ocx#524 FAIL: 'ocx' resolves to $((Get-Command ocx).CommandType), not the wrapper function"
+}
+& {
+    # Native stderr merged under 'Stop' would throw on 5.1 before the exit code is read.
+    $ErrorActionPreference = 'Continue'
+    $kept = ocx --offline package exec example.com/absent/pkg:1 -- tool -h 2>&1 | Out-String
+    $keptCode = $LASTEXITCODE
+    $lost = ocx --offline package exec example.com/absent/pkg:1 tool -h 2>&1 | Out-String
+    $lostCode = $LASTEXITCODE
+    if ($lostCode -ne 0 -or $lost -notmatch 'Usage:') {
+        throw "ocx#524 FAIL (control): without --, ocx must print its usage and exit 0; got exit $lostCode"
+    }
+    if ($keptCode -eq 0 -or $kept -match 'Usage:') {
+        throw "ocx#524 FAIL: the wrapper dropped --, ocx printed its usage (exit $keptCode): $kept"
+    }
+}
+Write-Host '[ocx#524] PASS - ocx received the -- separator through the wrapper'
+
+# ---------------------------------------------------------------------------
 # Done.
 # ---------------------------------------------------------------------------
 Write-Host ''
