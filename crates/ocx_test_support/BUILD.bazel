@@ -116,8 +116,9 @@ rust_test(
     # slower. Serialising the binary is what makes `bazel test` deterministic.
     # The testcase-level half of C-008's exclusion set. Every name here fails
     # under `bazel test` for a reason that is a property of the *test*, not of
-    # this graph, and each is still executed by `cargo nextest` — which is what
-    # `rust:test:floor` counts, so nothing here shrinks the declared suite.
+    # this graph, and each is still executed by `cargo nextest` — in `task
+    # verify` by `rust:test:workspace-structure`, and on verify-deep's macOS and
+    # Windows legs — so nothing here drops out of the gate.
     # Two causes, both measured:
     #   (a) the testcase walks `crates/*/src` of crates this target does not
     #       depend on. Declaring that as data would make the target a reverse

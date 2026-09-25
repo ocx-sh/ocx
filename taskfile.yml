@@ -125,7 +125,9 @@ tasks:
         it replaces the three-step cargo nextest bracket, whose listing step
         alone measured 536.5 s on CI against 173.5 s for the run it fenced,
         and runs the doctests too, as one rust_doc_test target per library
-        crate), then bazel:test:accept — one concurrent `bazel test` over the acceptance
+        crate), then rust:test:workspace-structure (nextest over the
+        workspace_structure cases that Bazel target skips), then
+        bazel:test:accept — one concurrent `bazel test` over the acceptance
         package, the suite as one cached sh_test target per module, carrying the suite
         floor and the skip/xfail ceilings read off its own per-case JUnit
         reports
@@ -527,6 +529,10 @@ tasks:
       # convenience and as `verify-deep.yml`'s macOS and Windows legs; they
       # are simply not what the gate reads any more.
       - task: bazel:test:unit
+      # The 23 workspace_structure cases the Bazel target `--skip`s ran nowhere
+      # on Linux once the nextest bracket left: a new `pub` in ocx_util with no
+      # consumer passed this gate and redded verify-deep on macOS and Windows.
+      - task: rust:test:workspace-structure
       # The nextest ceiling parser's red/green proof is
       # scripts/tests/test_nextest_ceiling.py, run with the gate-tooling suite.
       # `rust:test:duration` is NOT here, for the reason `rust:test:ceiling`
