@@ -57,12 +57,28 @@ jobs:
           cache: false
       - name: Build ocx binary
         run: cargo build --release -p ocx --locked
+      # `task schema` is a Bazel build of `//crates/ocx_schema:schemas`, so the
+      # step gets `verify-basic.yml` `smoke`'s Bazel setup: the read credential
+      # (this workflow never writes the cache) and lld, which keeps its action
+      # keys equal to the lanes that fill the shared cache.
+      - name: Bazel cache credential
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+      - name: Install lld
+        run: sudo apt-get update && sudo apt-get install -y lld
       # `task schema` generates every published schema (metadata, config,
-      # project, project-lock, patch) — the `#:schema` directive `ocx init`
-      # writes and the `taplo.toml` rules both point at these URLs, so a
-      # metadata-only generation step leaves editors staring at a 404.
+      # project, project-lock, patch, reports, execution-record) — the
+      # `#:schema` directive `ocx init` writes and the `taplo.toml` rules both
+      # point at these URLs, so a metadata-only generation step leaves editors
+      # staring at a 404.
       - name: Generate JSON Schemas
         run: task schema
+      - name: Remove the Bazel cache credential
+        if: always()
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          cleanup: 'true'
       - name: Upload Binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -178,6 +194,14 @@ jobs:
           # Toolchain from ocx.toml + ocx.lock (uv, go-task, CPython), as in
           # verify-basic.yml; the object store stays uncached, as there.
           cache: false
+      # The drift gate reaches `test:build`, whose schema generation is a
+      # Bazel build: same setup as the `build-binary` job above.
+      - name: Bazel cache credential
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+      - name: Install lld
+        run: sudo apt-get update && sudo apt-get install -y lld
       # Registry-backed drift gate for ALL `# doc:` scripts (not just
       # cast:true).  Deploy-CI only — the ADR cost-lever keeps this out of
       # the per-commit `task verify`; gating publish on it here closes the
@@ -186,6 +210,11 @@ jobs:
         run: task test:doc-scripts:drift
         env:
           SKIP_BUILD: "true"
+      - name: Remove the Bazel cache credential
+        if: always()
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          cleanup: 'true'
 
   doc-scripts:
     name: Generate Doc Scripts

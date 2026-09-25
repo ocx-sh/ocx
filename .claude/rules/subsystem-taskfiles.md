@@ -111,9 +111,9 @@ Each subsystem rule has a Quality Gate section, and every one of them now reads 
 
 ```yaml
 # Pattern A -- skip when output exists, re-run when sources change
-schema:generate:
-  cmds: [cargo run -p ocx_schema --release -- metadata > {{.OUT}}]
-  sources: [crates/ocx_schema/src/**/*.rs, Cargo.lock]
+sbom:generate:
+  cmds: [uv run scripts/sbom-to-markdown.py --input {{.IN}} --output {{.OUT}}]
+  sources: ['{{.IN}}', scripts/sbom-to-markdown.py]
   status: [test -f {{.OUT}}]
 
 # Pattern B -- wrap a tool with its own incremental build
@@ -185,7 +185,7 @@ Set `dir:` on include block when all tasks should run relative to sub-taskfile's
 
 ## OCX-Specific Task Contracts
 
-- **Generation tasks** (`schema:generate`, `recordings:*`) should depend on compiled binary via `deps: [build]` + `sources: [target/release/ocx_schema]`, NOT on Rust source file lists. Cargo already tracks source deps — duplicating in Taskfile = maintenance overhead.
+- **Generation tasks** never fingerprint Rust source lists. A generator that is a Bazel target is a Bazel action: `schema:generate` builds the `//crates/ocx_schema:schemas` genrule (`ocx exec bazel -- bazel build`, `test:.build-binaries`' `CACHE_RC`), reads its outputs with `cquery --output=files`, refuses anything but the seven expected paths before writing one, and carries no `sources:` — Bazel is the cache. It calls `bazel:bootstrap` as a nested `task -d <root>`, because `website/schema.taskfile.yml` is included at two depths and go-task resolves a leading `:` one namespace up, not at the root. A cargo-built generator (`recordings:*`) depends on the compiled binary via `deps: [build]` + `sources: [<binary>]`; cargo already tracks source deps.
 
 ## Sources
 

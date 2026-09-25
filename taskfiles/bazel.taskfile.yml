@@ -641,7 +641,8 @@ tasks:
     cmds:
       - task: bootstrap
       # The generated JSON schemas: several modules read one straight off
-      # disk, and they are cargo-generated outside this graph. The binaries
+      # disk (`src/public/schemas/`, outside this graph), copied there from
+      # the `//crates/ocx_schema:schemas` genrule. The binaries
       # are not built here — `bazel test //test:all` builds `//crates/ocx_cli:ocx`
       # and the other `data` it runs, and `test/bin/` is no input of any target.
       - task: :website:schema:default

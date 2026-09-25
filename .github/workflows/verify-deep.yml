@@ -98,10 +98,6 @@ jobs:
           - { os: macos-latest, name: macOS, target: aarch64-apple-darwin }
           - { os: windows-latest, name: Windows, target: x86_64-pc-windows-msvc }
     env:
-      # One target dir per job: the build passes `--target=`, so a bare
-      # `cargo run` (task schema:generate) landed in target/release and paid a
-      # second full compile of the workspace (5.8 min on Linux, run 35003182482).
-      CARGO_BUILD_TARGET: ${{ matrix.job.target }}
       # Shared compile cache: sccache in front of the Garage S3 store at
       # sccache.ocx.sh (herwig-systems/server-hetzner1#2). A fork PR sees no
       # secrets; then RUSTC_WRAPPER is empty, cargo runs rustc directly and the
@@ -189,8 +185,8 @@ jobs:
       # swap and the measurement behind it; this leg differs only in that its
       # `Test` step had no floor and no ceiling at all — it was a bare
       # `cargo nextest run`, so the swap *adds* a coverage gate here rather
-      # than moving one. `CARGO_BUILD_TARGET` is set job-wide and Bazel ignores
-      # it; the Bazel lane's platform comes from its own toolchain resolution.
+      # than moving one. The Bazel lane's platform comes from its own toolchain
+      # resolution.
       # The twin of `verify-basic.yml`'s, which carries the reasoning. Both
       # lanes compile Rust under Bazel against one shared remote cache, so the
       # linker the autoconfigured C++ toolchain picks has to be the same on
@@ -201,6 +197,11 @@ jobs:
       - name: Unit tests (Bazel)
         if: matrix.job.name == 'Linux'
         run: task bazel:test:unit
+      # The `//crates/ocx_schema:schemas` genrule, so it runs before the
+      # credential goes and reads the shared cache.
+      - name: Generate Schema
+        if: matrix.job.name == 'Linux'
+        run: task schema:generate
       # C-015's caller half; see the twin in `verify-basic.yml`. `always()`
       # rather than `success()`, and no platform half in the condition: the
       # cleanup is `rm -f` over two names, so it is green on the macOS and
@@ -211,9 +212,6 @@ jobs:
         uses: ./.github/actions/bazel-cache-rc
         with:
           cleanup: 'true'
-      - name: Generate Schema
-        if: matrix.job.name == 'Linux'
-        run: task schema:generate
       - name: Upload Schema
         if: matrix.job.name == 'Linux'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -148,8 +148,9 @@ tasks:
     # (the binary arrives as an artifact) and the schemas must still be
     # generated for the readers named above. That asymmetry is also why the
     # binaries live in their own task — a caller that wants only a binary has
-    # to be able to ask for only a binary, or it drags a `cargo run -p
-    # ocx_schema` along with it and needs a workspace that can build.
+    # to be able to ask for only a binary, or it drags the
+    # `//crates/ocx_schema:schemas` Bazel build along with it and needs a
+    # workspace that can build.
     deps:
       - task: :website:schema:default
     cmds:
@@ -160,7 +161,7 @@ tasks:
   # The binaries alone, with no schema generation. `shells` and `shell-latency`
   # mount one binary and three Python modules into a container and read no
   # schema at all, and their CI job checks out WITHOUT submodules on purpose —
-  # so going through `build` there runs `cargo run -p ocx_schema` against
+  # so going through `build` there builds `//crates/ocx_schema:schemas` against
   # absent `external/` patch sources and reds the job on a tree that is fine.
   # Anything that runs pytest against the suite wants `build`, not this.
   .build-binaries:

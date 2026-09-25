@@ -56,6 +56,36 @@ rust_binary(
     deps = [":ocx_schema"],
 )
 
+# The seven published JSON Schemas, one `ocx_schema_bin <kind>` stdout each —
+# what `task schema:generate` copies into `website/src/public/schemas/`, so the
+# workspace is never compiled outside Bazel to produce them. The binary is in
+# `srcs`, not `tools`: `tools` would build its 19-crate closure a second time in
+# the exec configuration, while `srcs` reuses the target-configuration binary
+# `test:.build-binaries` already builds. Executing a target-configuration
+# binary needs host = target, which holds for every lane that runs this (Linux).
+genrule(
+    name = "schemas",
+    srcs = [":ocx_schema_bin"],
+    outs = [
+        "schemas/metadata/v1.json",
+        "schemas/config/v1.json",
+        "schemas/project/v1.json",
+        "schemas/project-lock/v3.json",
+        "schemas/patch/v1.json",
+        "schemas/reports/v1.json",
+        "schemas/execution-record/v1.json",
+    ],
+    cmd = " && ".join([
+        "$(location :ocx_schema_bin) metadata > $(location schemas/metadata/v1.json)",
+        "$(location :ocx_schema_bin) config > $(location schemas/config/v1.json)",
+        "$(location :ocx_schema_bin) project > $(location schemas/project/v1.json)",
+        "$(location :ocx_schema_bin) project-lock > $(location schemas/project-lock/v3.json)",
+        "$(location :ocx_schema_bin) patch > $(location schemas/patch/v1.json)",
+        "$(location :ocx_schema_bin) reports > $(location schemas/reports/v1.json)",
+        "$(location :ocx_schema_bin) execution-record > $(location schemas/execution-record/v1.json)",
+    ]),
+)
+
 rust_test(
     name = "ocx_schema_test",
     aliases = aliases(
