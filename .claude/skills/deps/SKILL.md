@@ -13,7 +13,7 @@ Role: add, update, audit Rust crate deps with license + advisory compliance.
 2. **Check license** — `cargo deny check licenses` against OCX allowlist
 3. **Check advisories** — `cargo deny check advisories` — no known vulns
 4. **Add** — prefer workspace deps for shared crates
-5. **Verify** — `task license:deps` + `cargo clippy --workspace`
+5. **Verify** — `task license:deps` + `task rust:clippy:check`
 6. **Update** — `cargo update` + `cargo deny check` + `task verify:scoped --force` (full `task verify` runs at WP merge, finalize, or an escalate)
 
 ## Relevant Rules (load explicitly for planning)

@@ -648,6 +648,13 @@ read posture is the § Context contradiction, unresolved until WP-0 runs the `cu
 
 **Container.**
 
+> **SUPERSEDED 2026-09-25 by [plan_bazel_cargo_port.md](./plan_bazel_cargo_port.md).**
+> Three rows below no longer hold: the lint phase's `cargo clippy` moved to
+> the `rust:clippy:check` Bazel aspect, `cargo test --doc` moved into
+> `bazel:test:unit` as `rust_doc_test` targets, and `//crates/ocx_schema:schemas`
+> became a Bazel genrule the build+test phase depends on. The diagram below is
+> the original sketch.
+
 ```
   developer / CI runner
         │  task verify | task verify:scoped
@@ -991,6 +998,12 @@ Modelled on `scripts/crate_map.toml` + `workspace_structure.rs::deps_direction`
 | **Runs in** | **Not** `.verify:lint` — that is a parallel `deps:` block that runs before anything has established the graph loads, and this gate reads through `bazel query`, which needs a loading-clean graph. It runs in `.verify:build-test` **immediately after** `bazel build --nobuild //...`, and in the `smoke` job in the same order. In `cmds:`, never `preconditions:`. |
 | **Red state** | Delete one first-party `deps` entry from one generated `BUILD.bazel` in a scratch copy → exit 1 naming that package. Delete one `@crates//` entry → exit 1 naming it (**the half the narrow scope could not red**). Add a bogus entry → exit 1 in the other direction. Rename one third-party label so no mapping row matches → exit 1 on the unmapped-label message. Point the query at an empty directory → exit 1 on the reader floor. Restore → exit 0. |
 
+> **SUPERSEDED 2026-09-25 by [plan_bazel_cargo_port.md](./plan_bazel_cargo_port.md).**
+> Doctests moved off cargo: `bazel:test:unit` now carries one `rust_doc_test`
+> target per library crate alongside its `rust_test` targets, so they run
+> inside the same cached Bazel lane the paragraph below says has never seen
+> them. The paragraph below is the original ruling.
+
 **Doctests stay on cargo.** `taskfiles/rust.taskfile.yml:257-278` runs
 `cargo test --doc --workspace --locked`, and that task's own summary states
 nextest cannot run doctests at all — so `test:unit` never executes one and the
@@ -1179,6 +1192,12 @@ nobody owns, and the CI minutes it costs are the ones this change exists to redu
 `taskfile.yml`'s `verify:scoped` (`:129-251`) is the fast local loop, and it holds
 **three** nextest-family invocations. The previous draft cited `L152-155`, which is
 inside `summary: |` — prose, not a step. The live steps, each opened at the line:
+
+> **SUPERSEDED 2026-09-25 by [plan_bazel_cargo_port.md](./plan_bazel_cargo_port.md)**
+> for the `:225` row below: doctests moved into the Bazel graph as
+> `rust_doc_test` targets inside `bazel:test:unit`, so the scoped arm's doctest
+> coverage now comes from that one cached run rather than a per-crate
+> `cargo test --doc`. The table below is the original ruling.
 
 | Line | Step | Bazel-native equivalent |
 |---|---|---|
@@ -2877,3 +2896,4 @@ the questions being quietly dropped.
 | 2026-09-21 | Architect (`/hex-architect high`, measured-facts pass) | Five measurements arrived and closed both remaining open questions, taking the marker count to **zero**. Anonymous reads measured **401** (`ocx-sh-10-bazel-cache.conf:29-33`, no `limit_except`) — the dossier's premise traced to a stale `bazel-cache/README.md`, the second ratified decision in this run to rest on a stale record; branch (a), a read-only credential, ruled in. CI medians measured (verify-basic **1731 s**, verify-deep **3407 s**), superseding `hex.md`'s 3347 s; the go/no-go reading rewritten against them — reading 3's "cheaper fix named as insufficient" clause is now **evidenced as no demonstrated movement** (not as a regression: different measurement windows), and the reading still lands on the fallthrough because 3407 s is a **total, not a decomposition**, which is now the single remaining empty signal row. `rules_ocx` corrected from "API 0.1.0" to **v0.4.0** with `ocx.project()` already implemented — WP-0b resized from a build to a version bump, and Q9's coupling objection correspondingly weakened. `bazel` mirror confirmed published and enumerated (no linux/arm64 musl candidate). `agg` confirmed to need a **new mirror repository**, not a tag. Host envelope added as ruling 12 (`-Xmx2g`, `--jobs=12`, disk cache off `/tmp`). New § Orchestrator rulings pending owner ratification records R1 and R2 as chain decisions, not owner ones; Status stays **Proposed**. |
 | 2026-09-22 | Owner decision, executed | **Stage 4's "cache-result caching is disabled, deliberately" ruling reversed.** The acceptance suite runs as `task bazel:test:accept` (`bazel test //test:all --local_test_jobs=1`) in `task verify` phase 2 and in `verify-deep.yml`'s acceptance job, **with results cached**. The ruling's own exit condition was the precondition and it is met in the same change: `external` and `local` both off (measured — `local`'s `no-remote` half suppresses the disk-cache hit on a fresh server), `no-sandbox` in their place, the real input set declared through `//test:suite_inputs`, `bazel:tag:guard` advanced to stage 4 and narrowed so it refuses an acceptance target that stops declaring the binary and the compose definition, and `--check-s015` rebuilt around the binary-swap control. A4's red half 2 is inverted, half 3 is promoted from defence in depth to the control, and A4's 50 % wall-clock abort condition is recorded as **breached and overruled** with its three numbers in `plan_bazel_build_adoption.md`'s DX-97 row. The residual under-declaration (the live compose stack, and ~20 modules reading across a package boundary) is named in `test/bazel.bzl`'s docstring rather than closed. |
 | 2026-09-21 | Architect (`/hex-architect high`, R2 fix pass) | Closes the R2 residual, which was one systematic substitution the previous pass introduced. `54` (all `//crates/...` targets) replaced by **34** (test targets) at the five sites whose subject is test targets, `rust-suites` or `TEST_TARGET_MAP` rows, and by **57** at the two whose subject is every target in the 23 Rust BUILD files; the drift gate's false "the two floors cannot disagree" claim replaced by four floors each named on its own reader's universe (34 / 57 / 54 / ≥ 274); "23-crate pilot" corrected to 20; the `GITHUB_*` enumeration mirrored into the disposition table; BZL-CI-01 quoted instead of paraphrased, so ~300 reads as the signal to measure rather than half a trigger; the decision file's empty-cell count taken from the quoted check (three rows) instead of by eye, and the `Build owner` Answer cell filled; `build.rs` cited `:35-42`. NC#3 retired to WP-0b as a lookup rather than a decision, leaving **two** markers — three is a cap, not a quota. Every `hex.md` citation converted from a line number to a quoted phrase, that file being appended to at the top. |
+| 2026-09-25 | `plan_bazel_cargo_port.md` execution | Doctests, clippy, rustdoc diagnostics and schema generation ported off cargo onto Bazel — doctests as `rust_doc_test` targets inside `bazel:test:unit`, clippy and rustdoc as cached aspects (`rust:clippy:check`, `rust:doc:ratchet`), schemas as the `//crates/ocx_schema:schemas` genrule. Superseded blockquotes added at the C4 sketch, § Stage 1's "doctests stay on cargo" ruling, and § Stage 2's scoped-arm table. |

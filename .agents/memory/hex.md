@@ -103,10 +103,14 @@ research-axes:
 
 ## Memory
 
-- **Active plan (goat, 2026-09-25): `.claude/artifacts/plan_bazel_cargo_port.md`** — port the
+- **Plan (goat, 2026-09-25, done — reviewed and approved at c3e6ad672): `.claude/artifacts/plan_bazel_cargo_port.md`** — port the
   remaining `task verify` cargo compiles (schema, clippy, doc ratchet, doctests) to cached Bazel
   actions on `refactor/bazel-test-binary` (PR [ocx-sh/ocx#527](https://github.com/ocx-sh/ocx/pull/527)).
   `/hex-execute` high, 4 serial WPs run in place on the branch; pointer in `.claude/state/current_plan.md`.
+  Executed and approved 2026-09-25, `State: done`. Lessons: (1) a serial chain whose WPs all need the
+  checkout's gitignored Bazel state runs best in place, one collapsed opus builder + opus L1 per WP;
+  (2) the L2 cross-WP seat found real gaps no leaf saw (a new BEP producer outside the CWE-532
+  proof's file set); (3) `dead_path_sweep` reds a spelled Bazel output path — derive it.
 - **Plan `plan_test_speed_tiers.md` executed 2026-09-22…24 (goat checkout, `hex/test-speed-tiers`)** —
   14 WPs merged, `State: review`, `Next: /hex-review`. Lessons: (1) a *resumed* subagent's final
   report is delivered to the session lead, not to the sub-orchestrator that resumed it — ask every

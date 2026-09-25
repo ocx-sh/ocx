@@ -61,7 +61,7 @@ Every `.rs` file in `crates/` must have:
 4. Check maintenance (last release, open issues). Use Context7 MCP for current API shape.
 5. Add to `Cargo.toml`. Use workspace deps when shared across crates.
 6. `task license:deps` to verify compliance
-7. `cargo clippy --workspace` to verify no new warnings
+7. `task rust:clippy:check` to verify no new warnings
 
 ## Workspace Dependencies
 
