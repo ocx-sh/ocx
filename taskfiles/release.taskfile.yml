@@ -118,6 +118,10 @@ tasks:
       - task: provenance:proof
       - echo "Next version:{{.NEXT_VERSION}}"
       - cargo set-version "{{.NEXT_VERSION | trimPrefix "v"}}"
+      # The bump changes every workspace crate's version, so crate_universe's
+      # (gitignored) Cargo.bazel.lock.json digest goes stale and every
+      # `bazel query` in the verify below exits 7 until it is repinned.
+      - CARGO_BAZEL_REPIN=1 ocx exec bazel -- bazel fetch --repo=@crates
       - git-cliff --tag "{{.NEXT_VERSION}}" -o CHANGELOG.md
       - task: changelog:validate
       # NOCACHE=1 reaches `bazel:test:accept` (CLI vars are global), which runs
