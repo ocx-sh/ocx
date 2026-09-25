@@ -163,7 +163,9 @@ tasks:
   # schema at all, and their CI job checks out WITHOUT submodules on purpose —
   # so going through `build` there builds `//crates/ocx_schema:schemas` against
   # absent `external/` patch sources and reds the job on a tree that is fine.
-  # Anything that runs pytest against the suite wants `build`, not this.
+  # `smoke` also calls this directly rather than `build`: no smoke-marked test
+  # reads a generated schema. `default`, `quick` and `parallel` — which run the
+  # full suite, where schema-reading modules live — go through `build` instead.
   .build-binaries:
     internal: true
     # The repository root, not `test/`: `ocx exec` resolves `bazel` from the
@@ -342,7 +344,12 @@ tasks:
       starts. Budgeted at 90 s wall clock; the local target is 60 s.
     cmds:
       - task: .evict-stale-run
-      - task: build
+      # `.build-binaries`, not `build`: no smoke-marked test reads a generated
+      # schema (the only smoke test in test_project_init.py reads its own
+      # ocx.toml), so this tier has no reason to drag
+      # `//crates/ocx_schema:schemas` — the Bazel genrule `build` depends on —
+      # into a run budgeted at 90 s.
+      - task: .build-binaries
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
       # The tier's own coverage contract (every visible verb has a marked

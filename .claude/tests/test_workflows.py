@@ -857,9 +857,9 @@ def test_the_shell_zoo_runs_no_task_its_checkout_cannot_build() -> None:
     need the schemas. The shell-zoo legs pass the same `SKIP_BUILD=true` but
     mount one binary and three Python modules into a container and read no
     schema at all, and their checkout omits `submodules:` on purpose. Reaching
-    `test:build` from there runs `cargo run -p ocx_schema` against absent
-    `external/` patch sources and reds the job on a tree that is fine — which
-    is how both legs failed on `main`.
+    `test:build` from there builds `//crates/ocx_schema:schemas` against
+    absent `external/` patch sources and reds the job on a tree that is fine —
+    which is how both legs failed on `main`.
 
     The positive control is in this same test: `default` MUST still reach the
     schema task, or the check would pass just as well with the schemas

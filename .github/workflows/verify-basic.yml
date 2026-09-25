@@ -163,16 +163,16 @@ jobs:
       # credential and lld the Bazel gates need.
       #
       # The crate-split structural gates `task verify` runs
-      # (plan_crate_split_workspace.md C-011, C-070), in its order: the doc
-      # ratchet before the build, then the unit run. The floor and the skip
-      # ceiling used to bracket that run as two cargo steps; both now come off
-      # the Bazel run's own build event stream in one step (see `Unit tests
-      # (Bazel)` below), which is why nothing brackets it here any more.
-      # The lints follow section 3 of subsystem-ci.md: they never block the
-      # test results, the final gate step reports them.
-      # The acceptance suite's shape, beside the doc ratchet: it reads no
-      # binary and starts no registry, so it belongs in this job rather than
-      # in the acceptance one.
+      # (plan_crate_split_workspace.md C-011, C-070), in its order: clippy and
+      # the doc ratchet run after `Install lld` and the Bazel graph gates
+      # (`Clippy` / `Doc ratchet` below), before the build, then the unit run.
+      # The floor and the skip ceiling used to bracket that run as two cargo
+      # steps; both now come off the Bazel run's own build event stream in one
+      # step (see `Unit tests (Bazel)` below), which is why nothing brackets
+      # it here any more. The lints follow section 3 of subsystem-ci.md: they
+      # never block the test results, the final gate step reports them.
+      # The acceptance suite's shape: it reads no binary and starts no
+      # registry, so it belongs in this job rather than in the acceptance one.
       - name: Suite census
         run: task scripts:suite-census
       # Sibling of the census and here for the same reason: it reads tracked
@@ -225,11 +225,11 @@ jobs:
       # authority, then the loading check, then the two gates that read the
       # graph it proves loadable, then A7's two lint lines (C-025).
       #
-      # They sit here rather than beside the ratchets above, where the phase
-      # runs them, for a mechanical reason: every task in
-      # `taskfiles/bazel.taskfile.yml` shells out through `ocx exec bazel --`,
-      # and `ocx` first reaches this job's PATH at the `Setup OCX` step above.
-      # Directly after the ratchets all four would exit 127 on `ocx: command
+      # They sit here rather than up beside Suite census, where a cargo-only
+      # step can run without any of this, for a mechanical reason: every task
+      # in `taskfiles/bazel.taskfile.yml` shells out through `ocx exec bazel
+      # --`, and `ocx` first reaches this job's PATH at the `Setup OCX` step
+      # above. Placed up there, all four would exit 127 on `ocx: command
       # not found` on every run. `ocx exec` resolves the binding from `ocx.toml`
       # itself (measured: outside a project it exits non-zero with `no ocx.toml
       # found`), so the `project: ''` opt-out on that step does not reach it —
@@ -393,10 +393,11 @@ jobs:
       # the Bazel acceptance targets run, carrying the `__testing` provenance
       # and the `__OCX_SELF_IMAGE` seam the self-setup / self-update tests use
       # to redirect `ocx.sh/ocx/cli` at the fixture registry — copied to
-      # `test/bin/ocx`. Here and not beside the ratchets above, because it
-      # needs `ocx exec bazel`, the cache credential and lld, as the gates do;
-      # uploaded before the unit tests because an artifact uploaded early is
-      # one a later failure cannot take away.
+      # `test/bin/ocx`. Directly after the doc ratchet, not up beside Suite
+      # census, because it needs `ocx exec bazel`, the cache credential and
+      # lld, as the ratchets and the gates above do; uploaded before the unit
+      # tests because an artifact uploaded early is one a later failure cannot
+      # take away.
       - name: Build
         run: task rust:build
       - name: Upload Binaries
@@ -573,7 +574,10 @@ jobs:
     # logs — because `test/lint/test_smoke_coverage.py` asserts that no marked
     # test takes the `sigstore_stack` / `identity_token` fixtures. The schema
     # artifacts are not downloaded either: the schema tests are outside the
-    # selection and no module reads the schema at import.
+    # selection and no module reads the schema at import — and `task
+    # test:smoke` builds only the binaries (`test:.build-binaries`), never
+    # `//crates/ocx_schema:schemas`, so this job carries no Bazel setup of
+    # its own.
     needs: smoke
     runs-on: ubuntu-latest
     # The 90 s budget in `task test:smoke` is measured after pytest returns,
@@ -625,30 +629,12 @@ jobs:
           # Default-off for the reason the workflow-lint job states: a restored
           # object store is runner-executable content.
           cache: false
-      # `task test:smoke` reaches `test:build`, whose `:website:schema:default`
-      # is a Bazel build of `//crates/ocx_schema:schemas`, so this job carries
-      # the `smoke` job's Bazel setup: the read credential (never the write
-      # one, on any trigger — this job uploads nothing) and lld, for the reason
-      # the `smoke` job's `Install lld` gives. The artifact download above
-      # covers `ocx` only.
-      - name: Bazel cache credential
-        uses: ./.github/actions/bazel-cache-rc
-        with:
-          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
-      - name: Install lld
-        run: sudo apt-get update && sudo apt-get install -y lld
       - name: Run Smoke Tier
         # The JUnit report is not asked for here any more: the task writes
         # `test/results/junit-smoke.xml` on every run, local ones included, so
         # one flag in one place (test/taskfile.yml `SMOKE_JUNIT_XML`) feeds
         # both the check below and the timings a developer's run pushes.
         run: task test:smoke
-      # C-015's caller half, as in the `smoke` job.
-      - name: Remove the Bazel cache credential
-        if: always()
-        uses: ./.github/actions/bazel-cache-rc
-        with:
-          cleanup: 'true'
       - name: Publish Smoke Results
         if: ${{ !cancelled() }}
         uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
