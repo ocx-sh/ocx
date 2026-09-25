@@ -44,8 +44,8 @@ pub struct Exec {
     ///
     /// A package this invocation downloaded leaves nothing behind. Only what
     /// nothing else holds is removed: a package that is also installed, one a
-    /// project's `ocx.lock` pins, and a site-patch companion all stay, and each
-    /// is named on stderr as kept.
+    /// project's `ocx.lock` pins, and a site-patch companion all stay. Removed
+    /// and kept packages are logged at the `info` level.
     ///
     /// The exit code is the command's, always. A removal that fails warns on
     /// stderr and leaves the exit code alone.
@@ -282,20 +282,19 @@ impl Exec {
         // `ocx package exec` is reading the tool's status, and a removal that
         // failed is not the tool's status.
         match manager.purge_unrooted(&pinned).await {
+            // Log records, never `ui().status`: an interactive status line
+            // bypasses `--log-level`, and `package exec` must leave the
+            // terminal to the child. Each removal is already logged by the
+            // garbage collector itself.
             Ok(purged) => {
-                for path in &purged.removed {
-                    context.ui().status("Removed", path.display());
-                }
                 match purged.root_set {
                     // Retaining because something holds the package is the
                     // flag's designed outcome, not a problem: it is what keeps
                     // `--rm` from deleting an install out from under its own
-                    // symlink. A status line, like the removals above.
+                    // symlink.
                     RootSet::Determinate => {
                         for identifier in &purged.retained {
-                            context
-                                .ui()
-                                .status("Kept", format!("{identifier} (still held by something else)"));
+                            log::info!("kept {identifier}: still held by something else");
                         }
                     }
                     // A different sentence, because it is a different fact: the
