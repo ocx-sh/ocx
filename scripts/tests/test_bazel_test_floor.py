@@ -1,7 +1,8 @@
 """`bazel_test_floor.py`'s proofs, as pytest — the floor shown red on a
 deleted target, on three tests deleted inside a surviving target, on a
 stopped reader, on a mute log and on an empty stream, and green on the live
-universe; `--junit` shown red on a mangled per-case parser (one target and
+universe; the skip ceiling shown green with the `rust_doc_test` targets' `ignore`
+fences left out and red on a non-doctest target over it (C-034); `--junit` shown red on a mangled per-case parser (one target and
 all of them), on an unreadable log and on a target Bazel failed while its
 cases passed, and green at exactly the recorded case count with a failure
 named and its panic attached."""

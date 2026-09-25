@@ -8,7 +8,7 @@
 - Updated: 2026-09-25
 - Next:    /hex-execute .claude/artifacts/plan_bazel_cargo_port.md
 - **Plan:** plan_bazel_cargo_port
-- **Active phase:** 3 — WP-4 rust_doc_test + floor
+- **Active phase:** 4 — WP-3 rustdoc ratchet aspect (spike)
 - **Step:** `/hex-execute → Stub`
 - **Last update:** 2026-09-25 (after 6f23c8364: chore: tick the PR 528 inclusion in the goal file)
 - **Branch:** `refactor/bazel-test-binary` (PR [ocx-sh/ocx#527](https://github.com/ocx-sh/ocx/pull/527))
@@ -376,7 +376,7 @@ They are accepted, and a follow-up covers them.
 |---|---|---|---|---|---|---|---|---|---|
 | WP-1 | ocx | C-001–C-004, S-001 | `crates/ocx_schema/BUILD.bazel`, `website/schema.taskfile.yml`, `.github/workflows/verify-deep.yml`, `.github/workflows/verify-basic.yml` / `deploy-website.yml` (only as C-004 requires), `.claude/rules/subsystem-taskfiles.md` (`:114,188`), `.claude/rules/subsystem-ci.md` (`:23`), `.claude/rules/subsystem-website.md` / `subsystem-metadata-schema.md` (only if they name cargo) | S | 1 | — | risk: CI workflow | scoped | merged |
 | WP-2 | ocx | C-010–C-018, S-002–S-004, S-007 | `.bazelrc`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `scripts/lint_ratchet.py`, `scripts/tests/test_lint_ratchet.py`, `clippy-warn-baseline.json`, `.github/workflows/verify-basic.yml`, `.claude/rules/subsystem-taskfiles.md`, `.claude/rules/subsystem-ci.md`, `.claude/rules/rust-cargo.md` | M | 2 | WP-1 | risk: CI workflow + gate semantics | scoped | merged |
-| WP-4 | ocx | C-030–C-035, S-006 | `crates/*/BUILD.bazel` (20), `crates/TEST_TARGET_MAP.toml`, `scripts/bazel_build_drift.py`, `scripts/bazel_gate_proofs.py`, `scripts/bazel_floor_proofs.py`, `scripts/bazel_test_floor.py`, `scripts/tests/test_bazel_test_floor.py`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `.github/workflows/verify-basic.yml`, `.claude/tests/test_workflows.py` (docstring), `.claude/rules/subsystem-taskfiles.md`, `.claude/rules/subsystem-ci.md` | M | 3 | WP-1, WP-2 | risk: floor/drift gate scripts | scoped | pending |
+| WP-4 | ocx | C-030–C-035, S-006 | `crates/*/BUILD.bazel` (20), `crates/TEST_TARGET_MAP.toml`, `scripts/bazel_build_drift.py`, `scripts/bazel_gate_proofs.py`, `scripts/bazel_floor_proofs.py`, `scripts/bazel_test_floor.py`, `scripts/tests/test_bazel_test_floor.py`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `.github/workflows/verify-basic.yml`, `.claude/tests/test_workflows.py` (docstring), `.claude/rules/subsystem-taskfiles.md`, `.claude/rules/subsystem-ci.md` | M | 3 | WP-1, WP-2 | risk: floor/drift gate scripts | scoped | merged |
 | WP-3 | ocx | C-020–C-024, S-004 (rustdoc half), S-005 | new `.bzl` at repo root + `BUILD.bazel`, `.bazelrc`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `scripts/lint_ratchet.py`, `scripts/tests/test_lint_ratchet.py`, `rustdoc-warn-baseline.json`, `.github/workflows/verify-basic.yml`, `.claude/rules/subsystem-taskfiles.md` | M | 4 | WP-2, WP-4 | risk: private rules_rust API | scoped | pending |
 
 ```mermaid
@@ -542,3 +542,15 @@ replaced, and its baselines revert with it.
   - Residual: a `manual`-tagged crate target falls outside `//crates/...` and nothing reds it
     (`bazel:tag:guard` and `bazel:build:drift` both stay green when one is planted). Tracked with
     [ocx-sh/ocx#533](https://github.com/ocx-sh/ocx/issues/533).
+  - WP-4 landed. C-031 compared the doctest names: cargo `--list` reports 23 and Bazel reports 24.
+    The only extra name is `ocx_cli::src/app/seam.rs - app::seam::run (line 49)`. It is an
+    `ignore` fence in a module gated on `__testing`, and Bazel always builds that feature. Bazel's
+    split is 7 runnable, 5 `compile_fail` and 12 ignored. The plan's "24 runnable" was a fence grep,
+    not a rustdoc count.
+  - C-032 and C-034 were each shown red and green. The cached doctests take 0.37 s, against
+    5.7 s for cargo `test --doc`.
+  - Deviation: each library's `crate_features` is copied onto its `rust_doc_test`. The L1 review
+    asked for a `drift-doctest-features` guard to keep them equal; it is added and shown red and
+    green. The target floors rose to 78, 82, 169 and 357.
+  - Deferred to the owner: the vendored `rust-quality` rules DOC-08 and TEST-22 still require a
+    `cargo test --doc` step. Either upstream a `rust_doc_test` clause or record a local waiver.

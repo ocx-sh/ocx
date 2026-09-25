@@ -432,29 +432,6 @@ tasks:
         [ "$status" -eq 0 ] || exit "$status";
         echo "bazel unit: $selected test target(s) selected under //crates/... (floor $floor), all green"
 
-  test:doc:
-    desc: Run the workspace doctests
-    summary: |
-      `cargo test --doc --workspace`. nextest cannot run doctests at all, so
-      `test:unit` above never executes one and the unit floor/ceiling bracket
-      cannot see them either.
-
-      On the full route deliberately, not only in `verify:scoped`'s per-crate
-      loop: that loop is driven by `CRATES`, which `verify:scoped` sets to the
-      empty string on an escalate, and `ocx` is in TABLE_ESCALATES — so a
-      change under the CLI escalates and the per-crate doctest step iterated
-      over nothing. (`ocx_lib` was the other such row until WP-37 deleted the
-      crate, which is why every extraction escalated.) The same defect
-      `rust:doc:ratchet` was moved here for (DX-58), left standing beside it
-      for `cargo test --doc` until a doctest carried across a crate boundary
-      (`ocx_util::list`, then still naming `ocx_lib`) landed red on `evelynn`
-      with no gate to catch it.
-
-      Dev profile, matching the per-crate step in `verify:scoped` byte for
-      byte: the two arms must judge the same thing, and a release doctest run
-      would also drop every `debug_assert!` a doctest may rely on.
-    cmd: cargo test --doc --workspace --locked {{.CLI_ARGS}}
-
   install:hawkeye:
     internal: true
     cmds:

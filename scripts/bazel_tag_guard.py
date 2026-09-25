@@ -132,11 +132,11 @@ query would be a second reading of a second universe, and two readings of one
 fact are how they stop agreeing.
 
 **The floor is stage-scoped and advances — and this is the default stage.**
-`STAGE_FLOORS` (WP-13) declares stage 1 (`//crates/...` >= 62), stage 3
-(`//crates/... + //test/doc_scripts/...` >= 149, WP-33's 45 and WP-33b's 42
-added to `//crates/...`'s 62 — the 42 GIF renders took that package from 45 targets to
+`STAGE_FLOORS` (WP-13) declares stage 1 (`//crates/...` >= 82), stage 3
+(`//crates/... + //test/doc_scripts/...` >= 169, WP-33's 45 and WP-33b's 42
+added to `//crates/...`'s 82 — the 42 GIF renders took that package from 45 targets to
 87, and until the floor moved with them it cleared by 42 and discriminated
-nothing) and now stage 4 (`//...` >= 337: 149 + the acceptance package's 181 +
+nothing) and now stage 4 (`//...` >= 357: 169 + the acceptance package's 181 +
 the 7 root and website targets no earlier universe names). `--stage` defaults to
 stage 4, which is the single place the adoption's stage advances:
 `bazel:tag:guard` passes no `--stage` on purpose, so a second spelling cannot go

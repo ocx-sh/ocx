@@ -720,12 +720,14 @@ def _runs(workflow: str, command: str) -> bool:
 def test_ci_runs_every_step_of_the_build_test_phase(task: str) -> None:
     """A step of the full local gate that no workflow runs is a gate CI skips.
 
-    `verify-basic.yml` re-lists `.verify:build-test`'s steps by hand, and
-    `rust:test:doc` was added to the phase and not to the file: it appeared in
-    none of the workflows, in no spelling, so CI ran zero doctests while every
-    local `task verify` ran them. That is DX-5/C-008's pattern — a gate
-    outside the full gate is a gate nobody runs — and a hand-kept second list
-    is how it recurs, so the two are held together here instead.
+    `verify-basic.yml` re-lists `.verify:build-test`'s steps by hand, and the
+    since-deleted `rust:test:doc` (the doctests now run as `rust_doc_test`
+    targets inside `bazel:test:unit`) was added to the phase and not to the
+    file: it appeared in none of the workflows, in no spelling, so CI ran zero
+    doctests while every local `task verify` ran them. That is DX-5/C-008's
+    pattern — a gate outside the full gate is a gate nobody runs — and a
+    hand-kept second list is how it recurs, so the two are held together here
+    instead.
     """
     if task in _BUILD_TEST_ELSEWHERE:
         workflow, command = _BUILD_TEST_ELSEWHERE[task]

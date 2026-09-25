@@ -87,6 +87,7 @@ from pathlib import Path
 from bazel_gate_proofs import (
     CRATE_PACKAGES,
     CRATES_BINARY_TARGETS,
+    CRATES_DOC_TEST_TARGETS,
     CRATES_FILEGROUP_TARGETS,
     CRATES_LIB_TARGETS,
     CRATES_TEST_TARGETS,
@@ -136,6 +137,17 @@ ORPHAN_RULE_MSG = (
     "`# .../crates/<pkg>/BUILD.bazel:<line>:<col>` header, so the reader cannot place them in a "
     "package — their edges were read by nobody"
 )
+DOCTEST_FEATURES_MSG = (
+    "BUILD drift: {doc} has crate_features {doc_features}, its crate {crate} has "
+    "{lib_features} — rust_doc_test does not inherit the library's features, so rustdoc "
+    "reads a different cfg than the rlib it links and a feature-gated doctest drops out "
+    "with no error (plan_bazel_cargo_port.md C-031). Copy the library's list onto the target"
+)
+DOCTEST_MISSING_MSG = (
+    "BUILD drift: {crate} is a rust_library no rust_doc_test names as its `crate` — its "
+    "doctests run nowhere. `cargo test --doc --workspace` picked a new crate up by itself; "
+    "Bazel does not. Add `{crate_name}_doc_test` beside it, and its TEST_TARGET_MAP row"
+)
 UPDATE_UNDERIVABLE_MSG = (
     "BUILD drift --update: {label} matches no `<name>-<version>` in the cargo resolve graph and "
     "has no existing row to keep. Add the row by hand; the map was NOT rewritten"
@@ -164,13 +176,23 @@ BUILD_HEADER = re.compile(r"^# (?:.*/)?crates/(?P<pkg>[A-Za-z0-9_]+)/BUILD\.baze
 RULE_OPEN = re.compile(r"^(?P<kind>[a-z_][a-z0-9_]*)\($")
 RULE_CLOSE = re.compile(r"^\)$")
 DEP_ATTR = re.compile(r"^  (?:deps|proc_macro_deps) = (?P<value>.*)$")
+NAME_ATTR = re.compile(r'^  name = "(?P<value>[^"]*)",?$')
+CRATE_ATTR = re.compile(r'^  crate = "(?P<value>[^"]*)",?$')
+FEATURES_ATTR = re.compile(r"^  crate_features = (?P<value>.*)$")
 STRING_LITERAL = re.compile(r'"([^"]*)"')
 DEP_LABEL_PREFIX = ("@crates//", "//crates/")
 # Every kind that is a `crates/TEST_TARGET_MAP.toml` row. `sh_test` is the one
 # `ocx_cli:ocx_cli_seam_test`: it runs `ocx_cli_test`'s own binary under a
 # poisoned environment rather than compiling the crate a second time, and it
-# still carries a row (and a floored case count) of its own.
-TEST_RULE_KINDS = frozenset({"rust_test", "sh_test"})
+# still carries a row (and a floored case count) of its own. `rust_doc_test` is
+# the one `<crate>_doc_test` per library crate (plan_bazel_cargo_port.md C-030):
+# `bazel:test:unit` runs and floors it like any other test target, so it needs a
+# row, and a doctest target added without one reds `drift-map-parity`.
+TEST_RULE_KINDS = frozenset({"rust_test", "sh_test", "rust_doc_test"})
+
+#: The map rows `sample_tree()`'s universe needs: every `rust_test` plus one
+#: `rust_doc_test` per lib. No `sh_test` twin — the fixture has none.
+SAMPLE_TEST_ROWS = CRATES_TEST_TARGETS + CRATES_DOC_TEST_TARGETS
 
 
 @dataclasses.dataclass
@@ -189,6 +211,10 @@ class BuildRead:
     targets: int = 0
     rust_tests: int = 0
     orphan_rules: int = 0
+    #: `//crates/<pkg>:<name>` -> its sorted `crate_features`, per `rust_library`.
+    lib_features: dict[str, tuple[str, ...]] = dataclasses.field(default_factory=dict)
+    #: `rust_doc_test` label -> (its `crate` label, its sorted `crate_features`).
+    doc_tests: dict[str, tuple[str, tuple[str, ...]]] = dataclasses.field(default_factory=dict)
 
 
 def read_build_output(text: str) -> BuildRead:
@@ -208,6 +234,8 @@ def read_build_output(text: str) -> BuildRead:
     """
     read = BuildRead()
     package: str | None = None
+    kind = name = crate = ""
+    features: tuple[str, ...] = ()
     for line in text.splitlines():
         header = BUILD_HEADER.match(line)
         if header is not None:
@@ -218,14 +246,31 @@ def read_build_output(text: str) -> BuildRead:
         opener = RULE_OPEN.match(line)
         if opener is not None:
             read.targets += 1
-            if opener.group("kind") in TEST_RULE_KINDS:
+            kind, name, crate, features = opener.group("kind"), "", "", ()
+            if kind in TEST_RULE_KINDS:
                 read.rust_tests += 1
             if package is None:
                 read.orphan_rules += 1
             continue
         if RULE_CLOSE.match(line):
+            if package is not None and name:
+                label = f"//{package}:{name}"
+                if kind == "rust_library":
+                    read.lib_features[label] = features
+                elif kind == "rust_doc_test":
+                    read.doc_tests[label] = (crate, features)
             package = None
             continue
+        for pattern in (NAME_ATTR, CRATE_ATTR, FEATURES_ATTR):
+            found = pattern.match(line)
+            if found is None:
+                continue
+            if pattern is NAME_ATTR:
+                name = found.group("value")
+            elif pattern is CRATE_ATTR:
+                crate = found.group("value")
+            else:
+                features = tuple(sorted(STRING_LITERAL.findall(found.group("value"))))
         attribute = DEP_ATTR.match(line)
         if attribute is None or package is None:
             continue
@@ -297,6 +342,48 @@ def read_test_map_rows(path: Path) -> int:
     return len(rows) if isinstance(rows, list) else 0
 
 
+def doctest_feature_drift(read: BuildRead) -> list[Finding]:
+    """Every `rust_doc_test` whose `crate_features` differ from its library's.
+
+    A doctest target naming a crate the read holds no `rust_library` for is a
+    finding too, reported with `<absent>`: an unread library cannot be agreed with.
+    """
+    findings: list[Finding] = []
+    for doc, (crate, features) in sorted(read.doc_tests.items()):
+        library = read.lib_features.get(crate)
+        if library != features:
+            findings.append(
+                Finding(
+                    "drift-doctest-features",
+                    DOCTEST_FEATURES_MSG.format(
+                        doc=doc,
+                        doc_features=list(features),
+                        crate=crate or "<unset>",
+                        lib_features="<absent>" if library is None else list(library),
+                    ),
+                )
+            )
+    return findings
+
+
+def doctest_missing(read: BuildRead) -> list[Finding]:
+    """Every `rust_library` no `rust_doc_test` names as its `crate`.
+
+    `doctest_feature_drift` walks the doctest targets, so it can only judge the
+    ones that exist; this walks the libraries, so a crate added with no doctest
+    target reds here instead of passing the gate, the unit run and the floor
+    with zero doctests read.
+    """
+    covered = {crate for crate, _ in read.doc_tests.values()}
+    return [
+        Finding(
+            "drift-doctest-missing",
+            DOCTEST_MISSING_MSG.format(crate=label, crate_name=label.rsplit(":", 1)[1]),
+        )
+        for label in sorted(set(read.lib_features) - covered)
+    ]
+
+
 def stale_map_rows(label_map: dict[str, str], read: BuildRead) -> list[Finding]:
     """Rows for labels nothing depends on — the mirror of `drift-unmapped`.
 
@@ -335,6 +422,8 @@ def check_drift(
         findings.append(
             Finding("drift-orphan-rule", ORPHAN_RULE_MSG.format(count=read.orphan_rules))
         )
+    findings += doctest_feature_drift(read)
+    findings += doctest_missing(read)
     if len(cargo) < CRATE_PACKAGES:
         findings.append(
             Finding(
@@ -598,12 +687,22 @@ def expect(condition: bool, problem: str) -> None:
         raise SystemExit(f"bazel build drift self-test: {problem}")
 
 
-def _rule(package: str, kind: str, name: str, *, deps: list[str], proc_macro: list[str]) -> str:
-    """One `--output=build` record, in the grammar bazel 9.2.0 prints."""
+def _rule(
+    package: str,
+    kind: str,
+    name: str,
+    *,
+    deps: list[str],
+    proc_macro: list[str],
+    extra: tuple[str, ...] = (),
+) -> str:
+    """One `--output=build` record, in the grammar bazel 9.2.0 prints. `extra` is
+    further attribute lines, already spelled (`  crate = "...",`)."""
     body = [
         f"# /abs/path/{package}/BUILD.bazel:9:13",
         f"{kind}(",
         f'  name = "{name}",',
+        *extra,
         "  deps = [" + ", ".join(f'"{d}"' for d in deps) + "],",
     ]
     if proc_macro:
@@ -616,7 +715,8 @@ def _rule(package: str, kind: str, name: str, *, deps: list[str], proc_macro: li
 def sample_tree() -> tuple[str, dict]:
     """A synthetic tree with this repository's real shape: `CRATE_PACKAGES`
     packages, `DRIFT_TARGET_FLOOR` rule targets, `CRATES_TEST_TARGETS` of them
-    `rust_test`, and a Cargo side that agrees with all of it.
+    `rust_test` and `CRATES_DOC_TEST_TARGETS` `rust_doc_test` (one per lib), and
+    a Cargo side that agrees with all of it.
 
     The shape is copied because two of its irregularities are the ones a
     reader gets wrong. `ocx_shim` is a `[[bin]]` with no lib, so it holds a
@@ -648,6 +748,7 @@ def sample_tree() -> tuple[str, dict]:
 
     libs = 0
     tests = 0
+    doc_tests = 0
     binaries = 0
     filegroups = 0
     integration_budget = CRATES_TEST_TARGETS - CRATE_PACKAGES
@@ -676,12 +777,33 @@ def sample_tree() -> tuple[str, dict]:
             )
             tests += 1
         else:
+            # Every other lib carries a feature, so the doctest-feature check
+            # compares non-empty lists as well as empty ones.
+            features = ('  crate_features = ["__testing"],',) if index % 2 else ()
             records.append(
-                _rule(package, "rust_library", directory, deps=edges, proc_macro=[ASYNC_TRAIT])
+                _rule(
+                    package,
+                    "rust_library",
+                    directory,
+                    deps=edges,
+                    proc_macro=[ASYNC_TRAIT],
+                    extra=features,
+                )
             )
             libs += 1
             records.append(_rule(package, "rust_test", f"{directory}_test", deps=[], proc_macro=[]))
             tests += 1
+            records.append(
+                _rule(
+                    package,
+                    "rust_doc_test",
+                    f"{directory}_doc_test",
+                    deps=[],
+                    proc_macro=[],
+                    extra=(f'  crate = "//crates/{directory}:{directory}",', *features),
+                )
+            )
+            doc_tests += 1
             if integration_budget > 0:
                 # The integration target, carrying the self-edge back onto its
                 # own lib — the label Cargo never spells in a manifest.
@@ -740,10 +862,12 @@ def sample_tree() -> tuple[str, dict]:
     expect(
         libs == CRATES_LIB_TARGETS
         and tests == CRATES_TEST_TARGETS
+        and doc_tests == CRATES_DOC_TEST_TARGETS
         and binaries == CRATES_BINARY_TARGETS
         and filegroups == CRATES_FILEGROUP_TARGETS,
-        f"fixture shape is {libs}/{tests}/{binaries}/{filegroups}, expected "
-        f"{CRATES_LIB_TARGETS}/{CRATES_TEST_TARGETS}/{CRATES_BINARY_TARGETS}/{CRATES_FILEGROUP_TARGETS}",
+        f"fixture shape is {libs}/{tests}/{doc_tests}/{binaries}/{filegroups}, expected "
+        f"{CRATES_LIB_TARGETS}/{CRATES_TEST_TARGETS}/{CRATES_DOC_TEST_TARGETS}/"
+        f"{CRATES_BINARY_TARGETS}/{CRATES_FILEGROUP_TARGETS}",
     )
     metadata = {"packages": packages, "workspace_members": members, "resolve": {"nodes": nodes}}
     return "\n".join(records) + "\n", metadata
@@ -771,7 +895,7 @@ def _first_party_only_gate(text: str, metadata: dict) -> list[Finding]:
         packages_read=len(read.packages),
         targets_read=read.targets,
         rust_test_targets_read=read.rust_tests,
-        test_map_rows=CRATES_TEST_TARGETS,
+        test_map_rows=SAMPLE_TEST_ROWS,
     )
 
 
@@ -784,11 +908,11 @@ def prove_readers(text: str, metadata: dict) -> int:
         f"reader saw {len(read.packages)} packages / {read.targets} targets, expected "
         f"{DRIFT_PACKAGE_FLOOR} / {DRIFT_TARGET_FLOOR}",
     )
-    expect(read.rust_tests == CRATES_TEST_TARGETS, f"reader saw {read.rust_tests} rust_test targets")
+    expect(read.rust_tests == SAMPLE_TEST_ROWS, f"reader saw {read.rust_tests} test-kind targets")
     expect(read.orphan_rules == 0, "a well-formed fixture must produce no orphan rules")
     print(
         f"reader GREEN: {len(read.packages)} packages, {read.targets} rule targets, "
-        f"{read.rust_tests} rust_test, 0 orphan rules"
+        f"{read.rust_tests} test-kind (rust_test + rust_doc_test), 0 orphan rules"
     )
     checks += 1
 
@@ -824,7 +948,7 @@ def prove_readers(text: str, metadata: dict) -> int:
 def prove_drift_gate(text: str, metadata: dict) -> int:
     """C-010's three failure modes plus both directions, each shown red and green."""
     checks = 0
-    baseline = {"label_map": FIXTURE_MAP, "test_map_rows": CRATES_TEST_TARGETS}
+    baseline = {"label_map": FIXTURE_MAP, "test_map_rows": SAMPLE_TEST_ROWS}
 
     green = check_drift(build_text=text, metadata=metadata, **baseline)
     expect(green == [], f"the agreeing tree must be silent, got {[f.message for f in green]}")
@@ -956,7 +1080,7 @@ def prove_drift_gate(text: str, metadata: dict) -> int:
         build_text=text,
         metadata=metadata,
         label_map=FIXTURE_MAP | {bumped: "tokio"},
-        test_map_rows=CRATES_TEST_TARGETS,
+        test_map_rows=SAMPLE_TEST_ROWS,
     )
     expect(codes(stale) == ["drift-map-stale"], f"got {codes(stale)}")
     print(f"C-010 RED  : {stale[0].message}")
@@ -967,7 +1091,7 @@ def prove_drift_gate(text: str, metadata: dict) -> int:
 def prove_floors(text: str, metadata: dict) -> int:
     """Every way this gate could read less than the tree and stay quiet."""
     checks = 0
-    baseline = {"label_map": FIXTURE_MAP, "test_map_rows": CRATES_TEST_TARGETS}
+    baseline = {"label_map": FIXTURE_MAP, "test_map_rows": SAMPLE_TEST_ROWS}
 
     # A zero-match `bazel query` exits 0 and prints nothing (measured on
     # 9.2.0), so the empty read is the shape the floor exists for.
@@ -1065,10 +1189,90 @@ def prove_floors(text: str, metadata: dict) -> int:
     # TEST_TARGET_MAP parity — the generated table the plan requires the floor
     # to be taken against, alongside WP-13's constants.
     parity = check_drift(
-        build_text=text, metadata=metadata, label_map=FIXTURE_MAP, test_map_rows=CRATES_TEST_TARGETS - 1
+        build_text=text, metadata=metadata, label_map=FIXTURE_MAP, test_map_rows=SAMPLE_TEST_ROWS - 1
     )
     expect(codes(parity) == ["drift-map-parity"], f"got {codes(parity)}")
     print(f"C-010 RED  : {parity[0].message}")
+    checks += 1
+
+    # C-033: a `rust_doc_test` is a map row like any test target. Drop one from
+    # the graph and the unchanged row count no longer matches — the reader
+    # counted it, so a doctest target added without a row reds the same way.
+    victim = f"crates/{LEAF}"
+    head, blocks = _records(text)
+    doc_block = next(
+        block
+        for block in blocks
+        if block.startswith(f"{victim}/") and f'name = "{LEAF}_doc_test"' in block
+    )
+    no_doc = head + "".join("# /abs/path/" + block for block in blocks if block is not doc_block)
+    expect(
+        read_build_output(no_doc).rust_tests == SAMPLE_TEST_ROWS - 1,
+        "the doctest drop did not land in the text the reader reads",
+    )
+    doc_parity = check_drift(build_text=no_doc, metadata=metadata, **baseline)
+    expect("drift-map-parity" in codes(doc_parity), f"got {codes(doc_parity)}")
+    print(f"C-033 RED  : {next(f for f in doc_parity if f.code == 'drift-map-parity').message}")
+    checks += 1
+
+    # A library with no doctest target at all. The doctest rule is re-kinded
+    # rather than dropped, and its map row dropped too, so the target floor and
+    # row parity both hold: only the library walk can see what is missing.
+    expect(not doctest_missing(read_build_output(text)), "every fixture lib must have a doctest")
+    rekinded = head + "".join(
+        "# /abs/path/" + (block.replace("rust_doc_test(", "filegroup(") if block is doc_block else block)
+        for block in blocks
+    )
+    expect(
+        f"//{victim}:{LEAF}_doc_test" not in read_build_output(rekinded).doc_tests,
+        "the re-kinded doctest did not land in the text the reader reads",
+    )
+    missing = check_drift(
+        build_text=rekinded,
+        metadata=metadata,
+        label_map=FIXTURE_MAP,
+        test_map_rows=SAMPLE_TEST_ROWS - 1,
+    )
+    expect(codes(missing) == ["drift-doctest-missing"], f"got {codes(missing)}")
+    expect(f"//{victim}:{LEAF} " in missing[0].message, f"names the wrong lib: {missing[0].message}")
+    print(f"C-030 RED  : {missing[0].message[:160]}")
+    checks += 1
+
+    # C-031's premise: a doctest target reads the same features as its library.
+    # Green on the fixture (which has featured and unfeatured libs), then red
+    # with the one feature line dropped from one doctest target.
+    read = read_build_output(text)
+    featured = [doc for doc, (_, features) in read.doc_tests.items() if features]
+    expect(
+        len(read.doc_tests) == CRATES_DOC_TEST_TARGETS and featured,
+        f"the fixture must hold {CRATES_DOC_TEST_TARGETS} doctest targets, some featured",
+    )
+    expect(not doctest_feature_drift(read), "the agreeing fixture must carry no feature drift")
+    print(
+        f"C-031 GREEN: {len(read.doc_tests)} rust_doc_test targets, {len(featured)} of them "
+        "featured, each matching its library"
+    )
+    checks += 1
+    victim_doc = featured[0]
+    victim_pkg = victim_doc.split(":")[0].removeprefix("//")
+    head, blocks = _records(text)
+    feature_line = '  crate_features = ["__testing"],\n'
+    planted = head + "".join(
+        "# /abs/path/"
+        + (
+            block.replace(feature_line, "")
+            if block.startswith(f"{victim_pkg}/") and "rust_doc_test(" in block
+            else block
+        )
+        for block in blocks
+    )
+    expect(
+        read_build_output(planted).doc_tests[victim_doc][1] == (),
+        "the dropped doctest feature did not land in the text the reader reads",
+    )
+    drifted = check_drift(build_text=planted, metadata=metadata, **baseline)
+    expect(codes(drifted) == ["drift-doctest-features"], f"got {codes(drifted)}")
+    print(f"C-031 RED  : {drifted[0].message[:160]}")
     checks += 1
     return checks
 

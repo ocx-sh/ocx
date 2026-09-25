@@ -150,10 +150,9 @@ jobs:
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
       # `Install nextest` stood here and is gone with the lane swap below: the
-      # unit run and its floor are both `bazel test //crates/...` now, and
-      # `task rust:test:doc` is `cargo test --doc`. Nothing left in this job
-      # invokes nextest, and an install for a tool nothing runs is a minute of
-      # every run.
+      # unit run, its floor and the doctests are all `bazel test //crates/...`
+      # now. Nothing left in this job invokes nextest, and an install for a tool
+      # nothing runs is a minute of every run.
       - name: Check formatting
         id: fmt
         run: task rust:format:check
@@ -508,14 +507,6 @@ jobs:
       # green on an allowlisted one.
       - name: Duration self-test
         run: uv run --project test pytest scripts/tests/test_unit_test_duration_gate.py -q
-      # nextest runs no doctest, so nothing above this line executes one, and
-      # until B5R-4 no workflow in this repository did either — in any
-      # spelling. `.verify:build-test` has run it locally since DX-58; a gate
-      # that lives only on the local route is a gate CI never runs, which is
-      # DX-5/C-008's pattern. `TestCiRunsTheBuildTestPhase` now holds this
-      # step and that phase together.
-      - name: Doc tests
-        run: task rust:test:doc
       # Kept as a check that the generator runs; nothing in this workflow
       # consumes the output any more (the schema tests are outside the smoke
       # tier, and `verify-deep.yml`'s acceptance job ships its own). It is the

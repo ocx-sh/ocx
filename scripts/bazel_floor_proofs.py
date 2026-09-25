@@ -111,6 +111,7 @@ import subprocess
 from pathlib import Path
 
 from bazel_gate_proofs import (
+    CRATES_DOC_TEST_TARGETS,
     CRATES_TEST_TARGETS,
     REPO_ROOT,
     Finding,
@@ -937,6 +938,16 @@ def prove_counts() -> int:
     """Sums, and the two constants this file floors against on disk."""
     expect(NEXTEST_SUITE_FLOOR == 37, f"suite floor is {NEXTEST_SUITE_FLOOR}, expected 35+2")
     expect(CRATES_TEST_TARGETS == 35, f"{CRATES_TEST_TARGETS} rust_test targets, the tree has 35")
+    # The 20 `rust_doc_test` targets (C-030) are Bazel test targets with no nextest
+    # suite — nextest runs no doctest — so they sit outside this reconciliation, like
+    # the seam twin. A floor that folded them in would demand 20 suites the listing
+    # can never report.
+    expect(
+        NEXTEST_SUITE_FLOOR == CRATES_TEST_TARGETS + NEXTEST_EXCLUDED_SUITES
+        and CRATES_DOC_TEST_TARGETS == 20,
+        f"the suite floor {NEXTEST_SUITE_FLOOR} must count rust_test targets only; "
+        f"{CRATES_DOC_TEST_TARGETS} rust_doc_test targets have no nextest suite",
+    )
     expect(
         NEXTEST_EXCLUDED_SUITES == 2,
         f"{NEXTEST_EXCLUDED_SUITES} excluded suites, TEST_TARGET_MAP.toml has 2",
@@ -945,7 +956,8 @@ def prove_counts() -> int:
     ceiling = int(CEILING_FILE.read_text(encoding="utf-8").strip())
     expect(floor > 0 and ceiling >= 0, f"crates/ floor={floor} ceiling={ceiling}")
     print(
-        f"counts  OK : 37 = 20 + 14 + 3 = {CRATES_TEST_TARGETS} + {NEXTEST_EXCLUDED_SUITES}; "
+        f"counts  OK : 37 = 20 + 14 + 3 = {CRATES_TEST_TARGETS} + {NEXTEST_EXCLUDED_SUITES} "
+        f"(the {CRATES_DOC_TEST_TARGETS} rust_doc_test targets have no suite); "
         f"crates/NEXTEST_FLOOR={floor}, crates/NEXTEST_SKIP_CEILING={ceiling} — internal "
         "consistency only; WP-12's generated table is the reality check"
     )

@@ -163,18 +163,17 @@ tasks:
       neither creates nor removes it. `bazel:build:nobuild` is the only
       caller and its `defer:` is what guarantees the removal.
 
-      **The floor is the script's own default** — `CRATES_RULE_TARGETS`, 56,
+      **The floor is the script's own default** — `CRATES_RULE_TARGETS`, 78,
       imported from `scripts/bazel_gate_proofs.py` — and no `--min-targets` is
       passed here. The one lane that writes a BEP analyses `//...`, which is
-      280 targets today, so 56 is a floor it clears by a wide margin. That is
+      359 targets today, so 78 is a floor it clears by a wide margin. That is
       the point of it: the floor exists to tell "the reader read nothing" from
-      "the build was clean", and 56 is the only number for this that has a
-      home. Spelling 280 here would mint the `//...` constant
-      `bazel_gate_proofs.prove_counts` refuses to declare ("stage-4 stays
-      undeclared … a number here would be a guess"), in a taskfile, where
-      nothing re-measures it. The tighter reads of the same graph are two
-      steps away and do block: `build:drift` floors at 58 and `tag:guard` at
-      101.
+      "the build was clean", and 78 is the only number for this that has a
+      home. Spelling 359 here would be a second copy of the `//...` floor
+      `STAGE_FLOORS["stage-4"]` already holds, in a taskfile, where nothing
+      re-measures it. The tighter reads of the same graph are two
+      steps away and do block: `build:drift` floors at 82 and `tag:guard` at
+      357.
 
       Failure is loud and non-fatal, the contract `push` above already has:
       the script prints one line per finding on stderr and exits 1, and this
