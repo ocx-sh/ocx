@@ -122,11 +122,9 @@ tasks:
         then bazel:test:unit (`bazel test //crates/...` with its floor and
         skip ceiling read per target off that run's own build event stream —
         it replaces the three-step cargo nextest bracket, whose listing step
-        alone measured 536.5 s on CI against 173.5 s for the run it fenced),
-        rust:test:doc
-        (nextest runs no doctest, and the scoped gate's per-crate doctest step
-        is iterated over an empty CRATES on every escalate), then
-        bazel:test:accept — one concurrent `bazel test` over the acceptance
+        alone measured 536.5 s on CI against 173.5 s for the run it fenced,
+        and runs the doctests too, as one rust_doc_test target per library
+        crate), then bazel:test:accept — one concurrent `bazel test` over the acceptance
         package, the suite as one cached sh_test target per module, carrying the suite
         floor and the skip/xfail ceilings read off its own per-case JUnit
         reports
@@ -336,7 +334,7 @@ tasks:
 
   .verify:scoped:cargo:
     internal: true
-    desc: The scoped arm's cargo lane — the acceptance build first, then the pytest legs beside check, clippy and doc tests
+    desc: The scoped arm's cargo lane — the acceptance build first, then the pytest legs beside check and clippy
     # The acceptance binaries are the longest chain in the arm and the pytest
     # legs wait on nothing else, so they are built first; after that the
     # compile-only checks (still one at a time over target/) overlap pytest.
@@ -362,8 +360,6 @@ tasks:
       - cargo check --workspace --all-targets --locked
       - for: { var: CRATES }
         cmd: cargo clippy -p {{.ITEM}} --all-targets --locked -- -D warnings
-      - for: { var: CRATES }
-        cmd: cargo test --doc -p {{.ITEM}} --locked
       # Scoped arm only here; the escalate arm reaches it through `verify`.
       # Until WP-10 only the scoped arm ran a doc check at all, so escalating
       # — which every batch does — *lost* the one gate that reads intra-doc
@@ -538,12 +534,10 @@ tasks:
       #
       # Its red/red/green fixtures are scripts/tests/test_unit_test_duration_gate.py,
       # run with the gate-tooling suite.
-      # nextest cannot run doctests, so nothing above this line executes one.
-      # The per-crate `cargo test --doc` in `verify:scoped` runs under
-      # `for: {var: CRATES}`, and CRATES is empty on an escalate — which a
-      # change under the CLI crate is, `ocx` being in TABLE_ESCALATES. DX-58's
-      # defect, fixed for `rust:doc:ratchet` and left standing here.
-      - task: rust:test:doc
+      #
+      # The doctests are not a step of their own: `bazel:test:unit` above runs
+      # one `rust_doc_test` per library crate (plan_bazel_cargo_port.md C-033),
+      # floored per target like every other row of `crates/TEST_TARGET_MAP.toml`.
       # A7's fourth line over the acceptance half, replacing `test:parallel`.
       # The acceptance `sh_test` targets have existed since WP-36 and nothing ran
       # them: both this phase and `verify-deep.yml`'s acceptance job called

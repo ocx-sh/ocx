@@ -2,7 +2,7 @@
 # Copyright 2026 The OCX Authors
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_doc_test", "rust_library", "rust_test")
 
 package(default_visibility = ["//crates:__subpackages__"])
 
@@ -64,4 +64,15 @@ filegroup(
         allow_empty = False,
     ),
     visibility = ["//test:__pkg__"],
+)
+
+rust_doc_test(
+    name = "ocx_store_doc_test",
+    crate = ":ocx_store",
+    # rust_doc_test does not inherit the library's features: without these the
+    # `__testing`-gated items' doctests silently drop out (C-031 name diff).
+    crate_features = [
+        "__test_scaffolding",
+        "__testing",
+    ],
 )

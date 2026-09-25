@@ -45,14 +45,16 @@ existing target, because the sum has 10 tests of headroom and the target count
 does not move at all. The map records the count *per label*, this compares
 *per label*, and the sum falls out of that rather than being asserted beside it.
 
-**Three floors, three subjects** (ADR § "Its authority stops at that number"):
+**Three floors, three subjects** (ADR § "Its authority stops at that number"),
+each a constant in `scripts/bazel_gate_proofs.py` and not a number here:
 
-    this reader     crate test targets      `TEST_TARGET_MAP.toml` rows — 34
-    bazel:build:drift   every //crates/ + external/ target      56
-    bep_to_otlp     every target the BEP announces              54
+    this reader         crate test targets          `TEST_TARGET_MAP.toml` rows
+                                                    (`MAP_ROWS` below)
+    bazel:build:drift   every //crates/ rule        `DRIFT_TARGET_FLOOR`
+    bep_to_otlp         every target the BEP names  `CRATES_RULE_TARGETS`
 
-`CRATES_TEST_TARGETS` is imported from `scripts/bazel_gate_proofs.py` rather
-than spelled here: a second copy of a floor is the copy that goes stale.
+They are imported rather than spelled here: a second copy of a floor is the
+copy that goes stale.
 
 **`--junit <path>` — the per-case report, from the same logs.** Until the WP-30
 lane swap, `verify-basic.yml`'s `smoke` job published
@@ -111,6 +113,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bazel_gate_proofs import (
+    CRATES_DOC_TEST_TARGETS,
     CRATES_TEST_TARGETS,
     CRATES_TWIN_TEST_TARGETS,
     Finding,
@@ -120,6 +123,8 @@ from bazel_gate_proofs import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+#: One row per test target: every `rust_test`, the seam twin, and every doctest target.
+MAP_ROWS = CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS + CRATES_DOC_TEST_TARGETS
 TEST_TARGET_MAP = REPO_ROOT / "crates" / "TEST_TARGET_MAP.toml"
 CEILING_FILE = REPO_ROOT / "crates" / "NEXTEST_SKIP_CEILING"
 
@@ -168,6 +173,16 @@ XML_FORBIDDEN = re.compile(
 #: policy that does emit it must not manufacture a phantom failure.
 PASSING_STATUS = frozenset({"PASSED", "FLAKY"})
 
+#: The BEP's `targetConfigured.targetKind` for a `rust_doc_test` — measured on
+#: bazel 9.2.0, which spells a `rust_test` as `rust_test rule`. The skip ceiling
+#: leaves these targets out (plan_bazel_cargo_port.md C-034): an `ignore` fence is
+#: documentation that rustdoc reports as `ignored`, not a `#[ignore]`d test or a
+#: `--skip` filter, which are what `crates/NEXTEST_SKIP_CEILING` bounds. The set of
+#: ignored doctests is pinned by name instead (C-031). Keyed on the kind Bazel
+#: reports, never the `_doc_test` label suffix, so a `rust_test` that happens to
+#: share the suffix stays under the ceiling.
+DOC_TEST_KIND = "rust_doc_test rule"
+
 READER_MSG = (
     "bazel test floor read {read} test target(s) from the build event stream, "
     "crates/TEST_TARGET_MAP.toml has {rows} rows and scripts/bazel_gate_proofs.py "
@@ -188,7 +203,7 @@ SHRANK_MSG = (
 )
 CEILING_MSG = (
     "bazel test ceiling: {ignored} `#[ignore]`d case(s) across {targets} target(s) exceeds "
-    "crates/NEXTEST_SKIP_CEILING ({ceiling})"
+    "crates/NEXTEST_SKIP_CEILING ({ceiling}); {doc_tests} rust_doc_test target(s) left out"
 )
 EMPTY_MSG = (
     "bazel test floor: {path} holds no `testResult` event. An export of nothing is the one "
@@ -260,6 +275,7 @@ class Run:
     log: Path
     status: str
     seconds: float
+    kind: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -325,6 +341,7 @@ def read_runs(bep: Path) -> dict[str, Run]:
     would be two chances for the report to name a target set the floor never judged.
     """
     best: dict[str, tuple[int, Run]] = {}
+    kinds: dict[str, str] = {}
     try:
         text = bep.read_text(encoding="utf-8")
     except OSError:
@@ -335,6 +352,14 @@ def read_runs(bep: Path) -> dict[str, Run]:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        configured = event.get("id", {}).get("targetConfigured")
+        # The aspect's own `targetConfigured` (the clippy aspect, `.bazelrc`) names
+        # the same label and carries no kind; only the target's event does.
+        if isinstance(configured, dict) and "aspect" not in configured:
+            kinds[str(configured.get("label", ""))] = str(
+                event.get("configured", {}).get("targetKind", "")
+            )
             continue
         identifier = event.get("id", {}).get("testResult")
         if not isinstance(identifier, dict):
@@ -358,7 +383,10 @@ def read_runs(bep: Path) -> dict[str, Run]:
                     seconds=_seconds(payload),
                 ),
             )
-    return {label: run for label, (_, run) in sorted(best.items())}
+    return {
+        label: dataclasses.replace(run, kind=kinds.get(label, ""))
+        for label, (_, run) in sorted(best.items())
+    }
 
 
 def _read_log(path: Path) -> str:
@@ -446,19 +474,36 @@ def floor_findings(
     return findings
 
 
-def ceiling_findings(observed: dict[str, Counts], ceiling: int) -> list[Finding]:
+def ceiling_findings(
+    observed: dict[str, Counts], ceiling: int, doc_tests: frozenset[str] = frozenset()
+) -> list[Finding]:
     """C-013 in Bazel's currency. A cache hit replays the target's `test.log`, so the
     ignored count is the test binary's own and cannot move with cache warmth — which is
-    the property the nextest arm buys by never reading a run artifact at all."""
-    ignored = sum(counts.ignored for counts in observed.values())
+    the property the nextest arm buys by never reading a run artifact at all.
+
+    `doc_tests` are left out (`DOC_TEST_KIND`, C-034). A label absent from the stream's
+    `targetConfigured` events has no kind and is counted: an unknown kind stays under
+    the ceiling rather than escaping it."""
+    judged = {label: counts for label, counts in observed.items() if label not in doc_tests}
+    ignored = sum(counts.ignored for counts in judged.values())
     if ignored > ceiling:
         return [
             Finding(
                 "ceiling",
-                CEILING_MSG.format(ignored=ignored, targets=len(observed), ceiling=ceiling),
+                CEILING_MSG.format(
+                    ignored=ignored,
+                    targets=len(judged),
+                    ceiling=ceiling,
+                    doc_tests=len(observed) - len(judged),
+                ),
             )
         ]
     return []
+
+
+def doc_test_labels(runs: dict[str, Run]) -> frozenset[str]:
+    """The labels the stream itself calls `rust_doc_test`."""
+    return frozenset(label for label, run in runs.items() if run.kind == DOC_TEST_KIND)
 
 
 def read_ceiling(path: Path) -> int:
@@ -590,7 +635,9 @@ def run_check(bep: Path, junit: Path | None = None) -> int:
         return 1
     rows = read_rows(TEST_TARGET_MAP)
     findings += floor_findings(observed, rows)
-    findings += ceiling_findings(observed, read_ceiling(CEILING_FILE))
+    ceiling = read_ceiling(CEILING_FILE)
+    doc_tests = doc_test_labels(runs)
+    findings += ceiling_findings(observed, ceiling, doc_tests)
     if junit is not None:
         written, junit_findings = write_junit(junit, runs, observed)
         findings += junit_findings
@@ -603,10 +650,13 @@ def run_check(bep: Path, junit: Path | None = None) -> int:
                 f"written to {junit}"
             )
     if not findings:
+        fences = sum(observed[label].ignored for label in doc_tests if label in observed)
         print(
             f"bazel test floor: {len(observed)} test target(s) under //crates/... reported "
             f"{sum(c.executed for c in observed.values())} executed case(s), "
-            f"{sum(c.ignored for c in observed.values())} ignored, "
+            f"{sum(c.ignored for c in observed.values()) - fences} ignored against the "
+            f"ceiling of {ceiling}, {fences} doctest `ignore` fence(s) across "
+            f"{len(doc_tests)} rust_doc_test target(s) left out of it, "
             f"{sum(c.filtered for c in observed.values())} filtered out — every one of "
             f"{len(rows)} recorded targets at or above its count"
         )
@@ -665,11 +715,40 @@ def _log(
     return path.as_uri()
 
 
-def _bep(path: Path, entries: dict[str, str], *, status: str = "PASSED") -> Path:
+def _fixture_kind(label: str) -> str:
+    """The kind a fixture label is configured as. C-030 names every doctest target
+    `<crate>_doc_test`, so the suffix is what tells the live map's rows apart here; the
+    reader itself only ever trusts the stream's `targetKind`."""
+    return DOC_TEST_KIND if label.endswith("_doc_test") else "rust_test rule"
+
+
+def _bep(
+    path: Path,
+    entries: dict[str, str],
+    *,
+    status: str = "PASSED",
+    kinds: dict[str, str] | None = None,
+) -> Path:
     """A build event stream carrying one `TestResult` per entry, and the noise a real one
     carries around them — a reader keyed on line position would pass over this and fail on
-    the real thing."""
+    the real thing. Each label is configured first, with the aspect's kindless
+    `targetConfigured` beside the target's own, as `.bazelrc`'s clippy aspect makes it."""
     lines = [json.dumps({"id": {"started": {}}, "started": {"uuid": "fixture"}})]
+    for label in entries:
+        lines.append(
+            json.dumps(
+                {"id": {"targetConfigured": {"label": label, "aspect": "clippy.bzl%rust_clippy_aspect"}}}
+            )
+        )
+        kind = (kinds or {}).get(label, _fixture_kind(label))
+        lines.append(
+            json.dumps(
+                {
+                    "id": {"targetConfigured": {"label": label}},
+                    "configured": {"targetKind": kind, "testSize": "MEDIUM"},
+                }
+            )
+        )
     for label, uri in entries.items():
         lines.append(
             json.dumps(
@@ -724,15 +803,17 @@ def prove_floor(work: Path, rows: list[Row]) -> int:
     ceiling = read_ceiling(CEILING_FILE)
 
     bep = _fixture(work, rows)
-    observed, read_findings = read_results(bep)
+    runs = read_runs(bep)
+    observed, read_findings = count_results(runs)
     expect(not read_findings, f"the green fixture must read cleanly, got {codes(read_findings)}")
     expect(
-        len(observed) == len(rows) == CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS,
-        f"the fixture must carry all {CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS} targets, "
-        f"it carries {len(observed)}",
+        len(observed) == len(rows) == MAP_ROWS,
+        f"the fixture must carry all {MAP_ROWS} targets, it carries {len(observed)}",
     )
     total = sum(counts.executed for counts in observed.values())
-    findings = floor_findings(observed, rows) + ceiling_findings(observed, ceiling)
+    findings = floor_findings(observed, rows) + ceiling_findings(
+        observed, ceiling, doc_test_labels(runs)
+    )
     expect(not findings, f"the green fixture must produce no finding, got {codes(findings)}")
     print(
         f"FLOOR GREEN : {len(observed)} targets, {total} executed cases, "
@@ -800,21 +881,54 @@ def prove_floor(work: Path, rows: list[Row]) -> int:
 
 
 def prove_ceiling(work: Path, rows: list[Row]) -> int:
-    """The skip ceiling, red and green, on the same stream the floor reads."""
+    """The skip ceiling, red and green, on the same stream the floor reads — and the
+    doctest exclusion (C-034) green on the live map and red where it must not reach."""
     ceiling = read_ceiling(CEILING_FILE)
     expect(ceiling > 0, f"crates/NEXTEST_SKIP_CEILING is {ceiling} — a ceiling of 0 proves nothing")
-    observed, _ = read_results(_fixture(work, rows, name="ceiling-bep.json"))
-    live = sum(counts.ignored for counts in observed.values())
-    expect(not ceiling_findings(observed, ceiling), f"{live} ignored must be under {ceiling}")
+    runs = read_runs(_fixture(work, rows, name="ceiling-bep.json"))
+    observed, _ = count_results(runs)
+    doc_tests = doc_test_labels(runs)
+    expect(
+        len(doc_tests) == CRATES_DOC_TEST_TARGETS,
+        f"the stream must configure {CRATES_DOC_TEST_TARGETS} rust_doc_test targets, it "
+        f"configures {len(doc_tests)}",
+    )
+    live = sum(counts.ignored for label, counts in observed.items() if label not in doc_tests)
+    fences = sum(observed[label].ignored for label in doc_tests)
+    expect(
+        not ceiling_findings(observed, ceiling, doc_tests), f"{live} ignored must be under {ceiling}"
+    )
+    # The green above is only evidence of the exclusion if the doctests' `ignore` fences
+    # would have cleared the ceiling on their own terms. They do on this map.
+    expect(
+        codes(ceiling_findings(observed, ceiling)) == ["ceiling"],
+        f"{live} + {fences} ignore fences must exceed {ceiling} with no exclusion, or the "
+        "green above does not show the exclusion doing anything",
+    )
+    print(
+        f"CEILING GREEN: {live} ignored against a ceiling of {ceiling}; {fences} doctest "
+        f"`ignore` fence(s) across {len(doc_tests)} rust_doc_test target(s) left out"
+    )
 
     over = dict(observed)
-    victim = rows[0].label
+    victim = next(row.label for row in rows if row.label not in doc_tests)
     over[victim] = dataclasses.replace(observed[victim], ignored=ceiling + 1)
-    red = ceiling_findings(over, ceiling)
-    expect(codes(red) == ["ceiling"], f"an over-ceiling stream must red, got {codes(red)}")
-    print(f"CEILING GREEN: {live} ignored against a ceiling of {ceiling}")
+    red = ceiling_findings(over, ceiling, doc_tests)
+    expect(codes(red) == ["ceiling"], f"an over-ceiling non-doctest target must red, got {codes(red)}")
     print(f"CEILING RED  : {red[0].message[:150]}")
-    return 2
+
+    # The exclusion follows the kind the stream reports, not the label: a `rust_test`
+    # that happens to be named `*_doc_test` is still judged.
+    label = "//crates/demo:demo_doc_test"
+    log = _log(work / "ceiling-kind" / "test.log", passed=1, ignored=ceiling + 1)
+    runs = read_runs(
+        _bep(work / "ceiling-kind.json", {label: log}, kinds={label: "rust_test rule"})
+    )
+    observed, _ = count_results(runs)
+    red = ceiling_findings(observed, ceiling, doc_test_labels(runs))
+    expect(codes(red) == ["ceiling"], f"a rust_test named *_doc_test must stay judged, got {codes(red)}")
+    print(f"CEILING RED  : {label} configured as `rust_test rule` stays under the ceiling")
+    return 3
 
 
 def prove_junit(work: Path, rows: list[Row]) -> int:
@@ -993,19 +1107,26 @@ def prove_synthesised_xml_is_not_the_count() -> int:
 def prove_counts(rows: list[Row]) -> int:
     """The two floors that judge the same universe must agree, or one of them is stale."""
     expect(
-        len(rows) == CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS,
+        len(rows) == MAP_ROWS,
         f"crates/TEST_TARGET_MAP.toml has {len(rows)} rows, "
-        f"bazel_gate_proofs.CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS is "
-        f"{CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS} — the two floors "
-        f"read the same universe and disagree",
+        f"bazel_gate_proofs.CRATES_TEST_TARGETS + CRATES_TWIN_TEST_TARGETS + "
+        f"CRATES_DOC_TEST_TARGETS is {MAP_ROWS} — the two floors read the same universe "
+        f"and disagree",
+    )
+    doc_rows = [row for row in rows if _fixture_kind(row.label) == DOC_TEST_KIND]
+    expect(
+        len(doc_rows) == CRATES_DOC_TEST_TARGETS,
+        f"crates/TEST_TARGET_MAP.toml has {len(doc_rows)} `_doc_test` rows, "
+        f"CRATES_DOC_TEST_TARGETS is {CRATES_DOC_TEST_TARGETS}",
     )
     expect(
-        sum(row.ignored for row in rows) <= read_ceiling(CEILING_FILE),
+        sum(row.ignored for row in rows if row not in doc_rows) <= read_ceiling(CEILING_FILE),
         "the recorded ignored counts already exceed crates/NEXTEST_SKIP_CEILING",
     )
     print(
-        f"COUNTS      : {len(rows)} rows = CRATES_TEST_TARGETS, "
-        f"{sum(r.cases for r in rows)} recorded cases, {sum(r.ignored for r in rows)} ignored"
+        f"COUNTS      : {len(rows)} rows = CRATES_TEST_TARGETS + twin + "
+        f"{len(doc_rows)} doctest, {sum(r.cases for r in rows)} recorded cases, "
+        f"{sum(r.ignored for r in rows)} ignored ({sum(r.ignored for r in doc_rows)} doctest fences)"
     )
     return 1
 

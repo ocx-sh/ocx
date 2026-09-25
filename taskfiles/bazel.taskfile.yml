@@ -300,7 +300,7 @@ tasks:
       C-010. Reads `bazel query --output=build` over `//crates/...` and `cargo
       metadata --locked`, compares the full dep set in both directions, and
       reds on an unmapped external label rather than ignoring it. Its own
-      reader floors (58 targets / 21 packages) are what make a green mean
+      reader floors (82 targets / 21 packages) are what make a green mean
       something, so nothing here passes `--bazel` or a captured query: a second
       spelling of either is a thing to forget.
     dir: '{{.ROOT_DIR}}'

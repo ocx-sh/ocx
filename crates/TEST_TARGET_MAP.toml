@@ -1,14 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
 #
-# C-009 — one row per Bazel `rust_test` target under `//crates/...`, with the
-# testcase count `bazel test` last executed for it.
+# C-009 — one row per Bazel test target under `//crates/...` (`rust_test`,
+# the `sh_test` seam twin, and one `rust_doc_test` per library crate), with the
+# testcase count `bazel test` last executed for it. `bazel:build:drift` holds
+# the row count to the number of those targets the graph has.
 #
-# Generated, never hand-edited: regenerate with the task's `-- --update`, which
-# re-reads `bazel-testlogs/**/test.log`. **Counts rise only.** A row whose count
-# falls is either a deleted test or a `--skip` filter that widened past the name
-# it was written for, and both are findings — say which in the commit body or
-# the ratchet is doing nothing.
+# **Rows are hand-derived; no writer exists.** `scripts/bazel_test_floor.py`
+# only reads this file (`--bep`/`--junit`). A row is copied from the target's
+# own `test.log` — the one `bazel test //crates/... --build_event_json_file=…`
+# names in its `testResult` event — off libtest's summary line
+# `test result: … P passed; F failed; I ignored; 0 measured; S filtered out`:
+# `cases = P + F`, `ignored = I`, `skipped = S`, each omitted when 0. A target's
+# row lands in the commit that adds the target. **Counts rise only.** A row
+# whose count falls is either a deleted test or a `--skip` filter that widened
+# past the name it was written for, and both are findings — say which in the
+# commit body or the ratchet is doing nothing.
+#
+# A `rust_doc_test` row's `ignored` is its `ignore` fences. They are
+# documentation rather than skipped tests, so the skip ceiling
+# (`crates/NEXTEST_SKIP_CEILING`) leaves those targets out (C-034). Which
+# doctests are ignored was pinned once, by C-031's name diff against
+# `cargo test --doc --workspace -- --list` in the commit that added the rows;
+# no gate repeats that diff. Afterwards a running doctest turned `ignore`
+# lowers its row's executed count, and the floor reds on that.
 #
 # `cases` is *executed* testcases (passed + failed), so it excludes the
 # `--skip`ped ones; `skipped` records how many a target's `args` filter out and
@@ -25,6 +40,8 @@
 #   bazel   : 35 `rust_test` targets, 8246 executed + 40 skipped + 8 ignored.
 #   8295 = 8246 + 40 + 8 + 1, the 1 being `ocx::linux_self_contained` below.
 #
+# The 20 `rust_doc_test` rows stand outside it too: nextest runs no doctest.
+#
 # One target stands outside both sums: `//crates/ocx_cli:ocx_cli_seam_test`,
 # an `sh_test` that re-runs `ocx_cli_test`'s own binary with its `seam::` cases
 # selected under a poisoned environment (ADR C-SEAM). It has no nextest suite of
@@ -36,6 +53,11 @@
 # `ocx::linux_self_contained` is `kind = "test"` and has none, which the rule
 # could not see — it reported 3 suites / 110 testcases against a true 2 / 1.
 # The set below is the measured one and the script now names the same two.
+
+[[target]]
+label = "//crates/ocx_announce:ocx_announce_doc_test"
+crate = "ocx_announce"
+cases = 0
 
 [[target]]
 label = "//crates/ocx_announce:ocx_announce_test"
@@ -58,6 +80,12 @@ crate = "ocx_cli"
 cases = 1
 
 [[target]]
+label = "//crates/ocx_cli:ocx_cli_doc_test"
+crate = "ocx_cli"
+cases = 0
+ignored = 3
+
+[[target]]
 label = "//crates/ocx_cli:ocx_cli_seam_test"
 crate = "ocx_cli"
 cases = 44
@@ -69,14 +97,30 @@ cases = 1435
 skipped = 9
 
 [[target]]
+label = "//crates/ocx_config:ocx_config_doc_test"
+crate = "ocx_config"
+cases = 0
+
+[[target]]
 label = "//crates/ocx_config:ocx_config_test"
 crate = "ocx_config"
 cases = 615
 
 [[target]]
+label = "//crates/ocx_console:ocx_console_doc_test"
+crate = "ocx_console"
+cases = 0
+ignored = 2
+
+[[target]]
 label = "//crates/ocx_console:ocx_console_test"
 crate = "ocx_console"
 cases = 47
+
+[[target]]
+label = "//crates/ocx_exit:ocx_exit_doc_test"
+crate = "ocx_exit"
+cases = 0
 
 [[target]]
 label = "//crates/ocx_exit:ocx_exit_test"
@@ -99,10 +143,21 @@ crate = "ocx_index"
 cases = 3
 
 [[target]]
+label = "//crates/ocx_index:ocx_index_doc_test"
+crate = "ocx_index"
+cases = 0
+
+[[target]]
 label = "//crates/ocx_index:ocx_index_test"
 crate = "ocx_index"
 cases = 432
 skipped = 1
+
+[[target]]
+label = "//crates/ocx_oci:ocx_oci_doc_test"
+crate = "ocx_oci"
+cases = 9
+ignored = 3
 
 [[target]]
 label = "//crates/ocx_oci:ocx_oci_test"
@@ -117,6 +172,12 @@ crate = "ocx_package"
 cases = 1
 
 [[target]]
+label = "//crates/ocx_package:ocx_package_doc_test"
+crate = "ocx_package"
+cases = 0
+ignored = 1
+
+[[target]]
 label = "//crates/ocx_package:ocx_package_test"
 crate = "ocx_package"
 cases = 915
@@ -127,10 +188,21 @@ crate = "ocx_package"
 cases = 5
 
 [[target]]
+label = "//crates/ocx_package_manager:ocx_package_manager_doc_test"
+crate = "ocx_package_manager"
+cases = 0
+
+[[target]]
 label = "//crates/ocx_package_manager:ocx_package_manager_test"
 crate = "ocx_package_manager"
 cases = 1097
 skipped = 5
+ignored = 1
+
+[[target]]
+label = "//crates/ocx_project:ocx_project_doc_test"
+crate = "ocx_project"
+cases = 1
 ignored = 1
 
 [[target]]
@@ -139,6 +211,11 @@ crate = "ocx_project"
 cases = 455
 skipped = 1
 ignored = 2
+
+[[target]]
+label = "//crates/ocx_python:ocx_python_doc_test"
+crate = "ocx_python"
+cases = 0
 
 [[target]]
 label = "//crates/ocx_python:ocx_python_test"
@@ -161,6 +238,11 @@ crate = "ocx_schema"
 cases = 1
 
 [[target]]
+label = "//crates/ocx_schema:ocx_schema_doc_test"
+crate = "ocx_schema"
+cases = 0
+
+[[target]]
 label = "//crates/ocx_schema:ocx_schema_test"
 crate = "ocx_schema"
 cases = 13
@@ -171,15 +253,30 @@ crate = "ocx_schema"
 cases = 13
 
 [[target]]
+label = "//crates/ocx_script:ocx_script_doc_test"
+crate = "ocx_script"
+cases = 0
+
+[[target]]
 label = "//crates/ocx_script:ocx_script_test"
 crate = "ocx_script"
 cases = 62
 skipped = 1
 
 [[target]]
+label = "//crates/ocx_setup:ocx_setup_doc_test"
+crate = "ocx_setup"
+cases = 0
+
+[[target]]
 label = "//crates/ocx_setup:ocx_setup_test"
 crate = "ocx_setup"
 cases = 242
+
+[[target]]
+label = "//crates/ocx_shell:ocx_shell_doc_test"
+crate = "ocx_shell"
+cases = 0
 
 [[target]]
 label = "//crates/ocx_shell:ocx_shell_test"
@@ -192,9 +289,19 @@ crate = "ocx_shim"
 cases = 109
 
 [[target]]
+label = "//crates/ocx_sign:ocx_sign_doc_test"
+crate = "ocx_sign"
+cases = 1
+
+[[target]]
 label = "//crates/ocx_sign:ocx_sign_test"
 crate = "ocx_sign"
 cases = 473
+
+[[target]]
+label = "//crates/ocx_store:ocx_store_doc_test"
+crate = "ocx_store"
+cases = 0
 
 [[target]]
 label = "//crates/ocx_store:ocx_store_test"
@@ -205,6 +312,11 @@ cases = 350
 label = "//crates/ocx_test_support:boundary"
 crate = "ocx_test_support"
 cases = 56
+
+[[target]]
+label = "//crates/ocx_test_support:ocx_test_support_doc_test"
+crate = "ocx_test_support"
+cases = 0
 
 [[target]]
 label = "//crates/ocx_test_support:ocx_test_support_test"
@@ -218,9 +330,20 @@ cases = 13
 skipped = 23
 
 [[target]]
+label = "//crates/ocx_trust:ocx_trust_doc_test"
+crate = "ocx_trust"
+cases = 0
+
+[[target]]
 label = "//crates/ocx_trust:ocx_trust_test"
 crate = "ocx_trust"
 cases = 95
+
+[[target]]
+label = "//crates/ocx_util:ocx_util_doc_test"
+crate = "ocx_util"
+cases = 1
+ignored = 2
 
 [[target]]
 label = "//crates/ocx_util:ocx_util_test"
