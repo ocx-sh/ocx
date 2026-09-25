@@ -1,16 +1,17 @@
 # Plan: Port the remaining `task verify` cargo compiles to cached Bazel actions
 
 ## Status
-- State:   executing          <!-- planning → plan-approved → executing → review → done -->
+- State:   done               <!-- planning → plan-approved → executing → review → done -->
 - Tier:    high
 - Tier-grammar: 5
 - Effective-tier: derived
 - Updated: 2026-09-25
-- Next:    /hex-execute .claude/artifacts/plan_bazel_cargo_port.md
+- Next:    (none — approved)
 - **Plan:** plan_bazel_cargo_port
-- **Active phase:** 5 — final verify
-- **Step:** `/hex-execute → Stub`
-- **Last update:** 2026-09-25 (after 6f23c8364: chore: tick the PR 528 inclusion in the goal file)
+- **Active phase:** 5 — reviewed, approved
+- **Step:** `awaiting /hex-finalize`
+- **Last update:** 2026-09-25 (after c3e6ad672: docs(contributing): split the Bazel page's long sentences and mark clippy Linux-only)
+- Reviewed: c3e6ad672
 - **Branch:** `refactor/bazel-test-binary` (PR [ocx-sh/ocx#527](https://github.com/ocx-sh/ocx/pull/527))
 
 Source: goal file `.agents/goals/pr-527.md` § Emphasis; per-step design in issue
@@ -47,8 +48,9 @@ Source: goal file `.agents/goals/pr-527.md` § Emphasis; per-step design in issu
     `rustdoc_compile_action` (loadable: `rust/private` declares no `visibility()`) and sends stderr to
     a declared file.
   - It reuses WP-2's BEP reader and rustc-JSON adapter unchanged, and those are most of the cost.
-  - Cost: coupling to a private rules_rust function. A bump that changes it fails loudly at
-  analysis, never silently.
+  - Cost: coupling to a private rules_rust function. A bump that renames or re-shapes it fails
+  loudly at analysis; one that starts reading a new rule attribute off `ctx.attr` does not — that
+  attribute is silently absent on the aspect (see the `rustdoc_diagnostics.bzl` docstring).
   - **Spike gate:** the spike runs on `ocx_util`. If within 2 h it cannot produce a JSON diagnostics
   file for that crate, WP-3 stops and its changes are dropped. The executor then records in the goal
   file (§ Emphasis item 3): "deferred, estimate 6–8 h, blocker: <what failed>". `rust:doc:ratchet`
@@ -571,3 +573,56 @@ replaced, and its baselines revert with it.
     - A bazel failure now names `cargo doc -p <crate> --no-deps` as the way to read the swallowed
       stderr.
     - The scoped-lane prose is corrected.
+  - L2 aggregate review (opus, full checklist): no Block, 7 actionable, all fixed in c128f22ee.
+    Fixes: CWE-532 proof now reads every taskfile BEP producer; `bep_to_otlp` skips aspect
+    completions; per-suffix error-format hint; graph floor 358; CLAUDE.md Bazel paragraph. The
+    first full verify had caught a dead-path-sweep red on the literal Bazel output path in
+    `schema.taskfile.yml`; also fixed there.
+  - Final gate on c128f22ee: two back-to-back `task verify --force` runs, both exit 0 (45 s, 40 s).
+    In run 2, clippy was `1 process: 58 action cache hit, 1 internal`, rustdoc `1 process: 27
+    action cache hit, 1 internal`, unit tests `Executed 0 out of 56`, and acceptance `Executed 1
+    out of 172`. The one executed acceptance target is the `UNCACHED_MODULES` residual.
+    `task --dry verify` contains 0 `cargo run -p ocx_schema` and no workspace cargo compile.
+  - Deferred to the owner:
+    - Vendored `rust-cargo.md` LINT-15 and `rust-quality` DOC-08/TEST-22 still prescribe cargo
+      clippy and doc steps. Either upstream the change or record a local waiver.
+    - `smoke-acceptance` `timeout-minutes: 10` is unmeasured against a cold Bazel build (PR CI).
+    - [NEEDS CLARIFICATION] 2 default-feature residual, tracked in
+      [ocx-sh/ocx#533](https://github.com/ocx-sh/ocx/issues/533).
+- 2026-09-25: /hex-review (tier high, baseline `fa464c637`, breadth full, rca on, adversary on —
+  Codex `terra`). Seats (all opus): spec + convergence, test coverage, fail-closed quality, cache
+  correctness, CI security, docs. Convergence: C-035 and S-003 partial, both fixed below; then
+  Converged. No Block. Fixed on this branch:
+  - `bazel:build:drift` gains `drift-doctest-missing`: a `rust_library` with no `rust_doc_test`
+    naming it now reds (cargo `test --doc --workspace` found new crates by itself; the port did
+    not). Planted proof, and shown red with the check deleted.
+  - `rustdoc_diagnostics.bzl`: the unknown-`crate_features` guard is a failing action, not an
+    analysis `fail()`, so it reds only `rust:doc:ratchet` and no longer every Bazel lane. Shown
+    red (`fake_probe` feature → ratchet exit 201, plain build exit 0) and green.
+  - Ratchet/floor fixtures now emit the aspect's own `targetConfigured` event after the target's,
+    plus error-level, `bytestream://` and rustdoc allow-codes cases: five surviving mutations now
+    red. The regression notice names `task rust:clippy:check -- --update` /
+    `task rust:doc:ratchet -- --update` (S-003).
+  - Stale cargo prose: `taskfile.yml` verify summary (C-035), `verify-basic.yml` placement
+    comments, CONTRIBUTING.md, contributing/bazel.md (four BEP producers), ADR superseded notes,
+    deps skill/rule, subsystem-tests/arch-principles pointers, golden_schemas.rs, test_workflows.py.
+  - Codex's `CARGO_PKG_NAME=""` claim refuted by aquery (`ocx_util`, `0.6.2`, same as `Rustc`).
+- Deferred item resolutions:
+  1. Vendored LINT-15 / DOC-08 / TEST-22: vendored via `grimoire.toml` (digest-pinned in
+     `grimoire.lock`), so not edited. Local waiver recorded in project-owned
+     `subsystem-taskfiles.md` (LINT-15 already there; DOC-08/TEST-22 added). Upstream
+     reconciliation with bazel-quality BZL-RUST-28 is an owner follow-up.
+  2. `smoke-acceptance` timeout: the prior cargo schema compile already took 6m51s of the 10-min
+     job (run 36074396318); the Bazel path added bootstrap + lld on top. Root cause: `test:smoke`
+     went through `test:build`, whose schema dep no smoke test reads. `test:smoke` now calls
+     `.build-binaries`; the job loses its Bazel credential window and lld step and keeps 10 min.
+  3. `manual`-tagged targets escaping clippy: unchanged, tracked in
+     [ocx-sh/ocx#533](https://github.com/ocx-sh/ocx/issues/533).
+- Review deferrals (reported, not fixed): rustdoc actions miss the remote cache on hosts with a
+  host `--linkopt` in `~/.bazelrc` (predates the diff); legacy-mode `rust_doc_test` recompiles
+  doctests per run (C-030 accepts it); no standing test for `schema:generate`'s exact-7 check;
+  `deploy-website.yml` `doc-scripts-drift` regenerates schemas `build-binary` already uploads;
+  `test_workflows.py` credential-cleanup check asserts presence, not order.
+- 2026-09-25: review round 2 (opus, delta `e0bc3971a..b99a21821`): 2 Warn (docs sentence length),
+  3 Suggest, all fixed in c3e6ad672. Full `task verify --force` exit 0 on b99a21821 and on c3e6ad672.
+  Verdict: Approve. Fold-Back not performed — the plan carries no `## Spec Deltas` block.

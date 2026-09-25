@@ -120,7 +120,7 @@ Four tiers (ADR `adr_test_speed_tiers.md` § C-TIER; plan `plan_test_speed_tiers
 | Tier | Runs | Trigger | Budget |
 |---|---|---|---|
 | **T0 lint** | `task test:lint:structure` (pytest over `test/lint/`, uncached) + `scripts/scoped_gate.py --check-coverage` (`task test:rows:check`) | verify phase 1; every `verify:scoped`, regardless of decision (an escalate reaches it through `verify`) | ≤ 30 s wall (`OCX_LINT_BUDGET_SECONDS`), floored on `test/LINT_FLOOR`, ceilinged on `test/LINT_SKIP_CEILING` / `test/LINT_XFAIL_CEILING` |
-| **T1 inner** | T0 + `task bazel:test:unit` (cached, reverse-dependents) + `cargo clippy -p <crate>` per changed crate + `test:smoke` + `test:scoped` over the plan's `acceptance_globs` | `task verify:scoped --force`, per task / review-fix iteration | ≤ 120 s on the first verification after a code-changing edit |
+| **T1 inner** | T0 + `task bazel:test:unit` (cached, reverse-dependents — its `rust_doc_test` targets are the doctests) + `cargo clippy -p <crate>` per changed crate + the workspace `rust:doc:ratchet` + `test:smoke` + `test:scoped` over the plan's `acceptance_globs` | `task verify:scoped --force`, per task / review-fix iteration | ≤ 120 s on the first verification after a code-changing edit |
 | **T2 full** | `task verify` (both phases, ending in `bazel:test:accept`) | WP merge commit (mechanically enforced — `workflow-git.md` "Work-Package Merges"), `/hex-finalize`, any `verify:scoped` escalation, commits on `main` | unbounded, measured |
 | **T3 deep** | `verify-deep.yml` | push to `main`, merge queue, `workflow_dispatch` | CI, cold disk |
 
