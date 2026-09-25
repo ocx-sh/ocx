@@ -78,8 +78,12 @@ tasks:
       # is worth nothing until those hooks are in git's hooks directory.
       - task: git:hooks
       - task: rust:format:check
-      - task: rust:clippy:check
       - task: check
+    # After `cargo check`, never beside it: `rust:clippy:check` is a Bazel
+    # build, and two 12-job compilers at once exceed this host's RAM cap
+    # (the reason `.verify:scoped:lanes` caps its Bazel lane).
+    cmds:
+      - task: rust:clippy:check
 
   # Shared internal helpers (called by subsystem taskfiles via :prefix)
   # Convention: dot-prefix (.name) for internal tasks, like GitLab CI hidden jobs.
@@ -94,7 +98,7 @@ tasks:
   verify:
     desc: Full quality gate
     summary: |
-      Phase 1 (parallel, .verify:lint): rust:format:check, rust:clippy:check,
+      Phase 1 (parallel, .verify:lint): rust:format:check,
         shell:verify (shellcheck + shfmt), ci:verify (actionlint), claude:verify
         (structural tests + link check), scripts:verify (the gate-tool self-tests),
         test:lint (ruff over the acceptance suite), test:lint:structure (the
@@ -105,8 +109,11 @@ tasks:
         `bazel --version`, loads no graph, and so belongs in the parallel leg)
       Phase 2 (sequential, .verify:build-test): rust:license:check,
         rust:license:deps, rust:license:notice:check,
-        scripts:suite-census, scripts:dead-path-sweep, rust:lint:ratchet,
-        rust:doc:ratchet, rust:build,
+        scripts:suite-census, scripts:dead-path-sweep, rust:clippy:check
+        (one cached Bazel clippy pass over //crates/..., ratcheted per file
+        against clippy-warn-baseline.json — it is a build, so it runs here
+        rather than beside phase 1's other checks), rust:doc:ratchet,
+        rust:build,
         bazel:build:nobuild, then bazel:build:drift and bazel:tag:guard,
         which read the graph that step proves loadable, then bazel:lint
         (buildifier over every BUILD/.bzl file) and bazel:mod:check
@@ -425,7 +432,6 @@ tasks:
     internal: true
     deps:
       - task: rust:format:check
-      - task: rust:clippy:check
       - task: shell:verify
       - task: ci:verify
       - task: claude:verify
@@ -468,7 +474,10 @@ tasks:
       # compiler reads — so this belongs in the unconditional leg, not in
       # `scripts:verify`, which a diff touching only `crates/**` never reaches.
       - task: scripts:dead-path-sweep
-      - task: rust:lint:ratchet
+      # The clippy gate and its backlog ratchet in one cached Bazel pass —
+      # here, not in phase 1, because it builds //crates/... and phase 1's
+      # parallel legs would put it beside other compilers.
+      - task: rust:clippy:check
       # Sibling of the clippy ratchet, added for the same reason: the rustdoc
       # backlog can only be denied wholesale, so the gate that watched it ran
       # on the scoped arm alone and no escalated work package ever saw it.

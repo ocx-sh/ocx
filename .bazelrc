@@ -54,6 +54,36 @@ build --disk_cache=~/.cache/ocx/bazel-disk
 # when this workspace's pin crosses 9.3.0.
 
 # ---------------------------------------------------------------------------
+# Clippy — one cached pass, read by `task rust:clippy:check`.
+# ---------------------------------------------------------------------------
+
+# On the bare `build` config, never a task's command line (BZL-RUST-23): a
+# Starlark setting that differs between two invocations discards the analysis
+# cache on every switch, and `task verify` alternates between several Bazel
+# invocations. The aspect has no `attr_aspects`, so its cost on a build that does
+# not request `--output_groups=clippy_output` is analysis of the top-level
+# targets only — no `Clippy` action runs, and the rustc action keys and the
+# `k8-fastbuild` output path stay what they were.
+#
+# `--aspects` is on `bazel help build --long` at 9.2.0 (and, as a build option,
+# not on `bazel help startup_options`). The three settings are Starlark flags,
+# which no help surface lists; each was proven by `bazel query
+# @rules_rust//rust/settings:<name>` resolving (a misspelt name exits 7).
+#
+# `clippy_output_diagnostics` makes the aspect write `<target>.clippy.diagnostics`
+# and caps lints at warn, so the action is an ordinary cacheable one that fails
+# only on a real compile error; `clippy_error_format=json` makes that file
+# rustc-native JSON lines, which `scripts/lint_ratchet.py --bep` reads.
+# `clippy_flag` replaces the default `-Dwarnings` (any flag set drops it): the
+# ratchet reproduces `warnings = "deny"` by failing any key above its baseline,
+# and `unreachable_pub` is the one backlog lint it holds. rules_rust reads no
+# Cargo `[lints]` table, which is why the ratchet refuses one it cannot see.
+build --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+build --@rules_rust//rust/settings:clippy_output_diagnostics=true
+build --@rules_rust//rust/settings:clippy_error_format=json
+build --@rules_rust//rust/settings:clippy_flag=-Wunreachable_pub
+
+# ---------------------------------------------------------------------------
 # Remote cache — read-only everywhere this file reaches.
 # ---------------------------------------------------------------------------
 
@@ -127,6 +157,12 @@ build:ci --remote_download_minimal
 # `test` inherits every `build` option. The value is a Java regular expression
 # matched against the output path.
 build:ci --remote_download_regex=.*/test\.(xml|log)$
+
+# The same exception for the lint diagnostics: the ratchet reads each file the
+# build event stream names off local disk, so a cached one left remote is a
+# refusal naming this line. The flag repeats ("Multiple patterns may be
+# specified by repeating this flag", `bazel help build --long`).
+build:ci --remote_download_regex=.*\.(clippy|rustdoc)\.diagnostics$
 
 # Hand `--jobs` back to Bazel on the lane this file's local cap does not fit.
 build:ci --jobs=auto

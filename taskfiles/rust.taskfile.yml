@@ -87,20 +87,19 @@ tasks:
 
       Runs all Rust-specific checks sequentially (fail-fast):
         1. cargo fmt --check
-        2. cargo clippy
-        3. the lint ratchet (Linux; lint:ratchet)
-        4. cargo check of ocx_shim on both Windows MSVC targets
+        2. clippy through Bazel, ratcheted (Linux; clippy:check)
+        3. cargo check of ocx_shim on both Windows MSVC targets
            (see check:windows-cfg for why the rest cannot join it here)
-        5. hawkeye license headers
-        6. cargo-deny license audit
-        7. cargo-about third-party notice freshness
-        8. cargo build --release
-        9. the unit-test floor (Linux; test:floor)
-       10. the unit tests (test:unit — `cargo nextest run`, or
+        4. hawkeye license headers
+        5. cargo-deny license audit
+        6. cargo-about third-party notice freshness
+        7. cargo build --release
+        8. the unit-test floor (Linux; test:floor)
+        9. the unit tests (test:unit — `cargo nextest run`, or
            `bazel test //crates/...` under OCX_TEST_ENGINE=bazel)
-       11. the ignored/skipped ceiling for whichever of the two ran
+       10. the ignored/skipped ceiling for whichever of the two ran
            (Linux; test:ceiling)
-       12. the one-second per-test budget over that run (Linux; test:duration)
+       11. the one-second per-test budget over that run (Linux; test:duration)
       The two parsers' red/green fixtures are pytest now
       (scripts/tests/test_nextest_ceiling.py,
       scripts/tests/test_unit_test_duration_gate.py), run by `task scripts:test`.
@@ -108,7 +107,6 @@ tasks:
     cmds:
       - task: format:check
       - task: clippy:check
-      - task: lint:ratchet
       - task: check:windows-cfg
       - task: license:check
       - task: license:deps
@@ -170,8 +168,63 @@ tasks:
     cmd: cargo fmt
 
   clippy:check:
-    desc: Run clippy linter
-    cmd: cargo clippy --workspace --locked --all-targets -- -D warnings
+    desc: Clippy over //crates/... as one cached Bazel aspect pass, ratcheted against clippy-warn-baseline.json
+    summary: |
+      One pass for what used to be two cargo runs (`cargo clippy -- -D
+      warnings` here plus a second `-W unreachable_pub` run in its own
+      `target/ratchet`). The aspect, its settings and `-Wunreachable_pub` live
+      on `.bazelrc`'s bare `build` (BZL-RUST-23), so this command line only
+      asks for the `clippy_output` group: each target's
+      `<name>.clippy.diagnostics` is a cached action output, and a second run
+      executes no `Clippy` action at all.
+
+      scripts/lint_ratchet.py reads the files THIS run's build event stream
+      names — never a `bazel-bin` glob — and fails on any `<file>::<lint>` key
+      above its committed count, where an absent key counts as 0. That one
+      compare is both the old `-D warnings` gate (a new warning of any code
+      reds) and the backlog ratchet; the baseline may only ever hold
+      `unreachable_pub` (C-018), so `-- --update --allow-regression` cannot
+      park a new code. A decrease is committed with `-- --update`. The script
+      also refuses a `[lints]` entry Bazel would not read (C-017).
+
+      Stream handling is `bazel:test:unit`'s: `mktemp -d` outside the
+      checkout, 0700 directory and 0600 stream (it serialises the client
+      environment), removal deferred before anything can fail, and an empty
+      stream is a red naming the flag. A failed build exits with bazel's
+      status and the ratchet never reads the partial stream — lints are
+      capped at warn, so a failed build is a compile, loading or fetch error.
+
+      Linux only, like the unit lane: `cfg`-gated code makes the counts
+      platform-dependent. No `sources:` — Bazel is the cache, and a
+      fingerprint-cached verdict is the last tree's.
+    dir: '{{.ROOT_DIR}}'
+    platforms: [linux]
+    vars:
+      BEP_DIR:
+        sh: mktemp -d -t ocx-clippy-bep.XXXXXXXX
+      BEP: '{{.BEP_DIR}}/clippy-bep.json'
+      # `bazel:test:unit`'s CACHE_RC, and why it is derived from the file.
+      CACHE_RC:
+        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
+    cmds:
+      - defer: rm -rf '{{.BEP_DIR}}'
+      - task: :bazel:bep:mode
+        vars: {DIR: '{{.BEP_DIR}}'}
+      - task: :bazel:bootstrap
+      - cmd: |
+          status=0
+          ocx exec bazel -- bazel {{.CACHE_RC}} build //crates/... --output_groups=clippy_output \
+            --build_event_json_file='{{.BEP}}' || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "clippy: bazel build failed (compile, loading or fetch error), exit $status — lints are capped at warn, so no lint fails it; the ratchet does not read a partial build event stream" >&2
+            exit "$status"
+          fi
+          if [ ! -s '{{.BEP}}' ]; then
+            echo 'clippy: --build_event_json_file wrote nothing to {{.BEP}}, so the ratchet has no subject and would read a clean tree. Restore the flag on the build above.' >&2
+            exit 1
+          fi
+          chmod 600 '{{.BEP}}'
+          python3 {{.ROOT_DIR}}/scripts/lint_ratchet.py --by-file --bep '{{.BEP}}' {{.CLI_ARGS | default "--check"}}
 
   doc:ratchet:
     desc: Ratchet the rustdoc backlog against rustdoc-warn-baseline.json, per (file, lint code)
@@ -190,15 +243,15 @@ tasks:
       a crate split that is the common case. A decrease is committed with
       `-- --update`; a file move reds until it is.
 
-      `RUSTDOCFLAGS=--cap-lints warn` for the same reason `lint:ratchet`
-      passes it to clippy: `[workspace.lints] warnings = "deny"` reaches
+      `RUSTDOCFLAGS=--cap-lints warn` for the reason the clippy aspect caps
+      at warn (`clippy:check`): `[workspace.lints] warnings = "deny"` reaches
       rustdoc too, and without the cap the walk aborts at the first crate
       with a backlog and the stream describes nothing after it.
 
       No `sources:`, for the reason `test:lint` gives: a fingerprint-cached
       gate reports the verdict of an earlier run. Its own CARGO_TARGET_DIR
       (target/docratchet) keeps the trailing rustdoc flags out of the
-      fingerprint the other cargo tasks share. Linux only, like lint:ratchet:
+      fingerprint the other cargo tasks share. Linux only, like clippy:check:
       cfg-gated code makes the counts platform-dependent.
     platforms: [linux]
     cmds:
@@ -672,43 +725,6 @@ tasks:
     # default, and nextest is unpinned here — a zero-test green would be a
     # toolchain accident rather than a property of this repository.
     cmd: cargo nextest run -p ocx_test_support --test workspace_structure --release --locked --no-tests=fail inert
-
-  lint:ratchet:
-    desc: Ratchet the lints with a backlog against clippy-warn-baseline.json (LINT-15/16)
-    summary: |
-      A second clippy invocation, separate from `clippy:check`: the lints that
-      still carry a backlog (`-W unreachable_pub`, rust-cargo.md LINT-11) run
-      with NO `-D warnings`, and `--cap-lints warn` keeps the manifest's
-      `warnings = "deny"` from turning them into build errors that would stop
-      the walk at the first crate. scripts/lint_ratchet.py groups the JSON by
-      FILE and lint code (`--by-file`) and fails on any key above its committed
-      count; a decrease is committed with `-- --update`. Linux only: cfg-gated
-      code makes the counts platform-dependent.
-
-      `--by-file` sits outside CLI_ARGS on purpose: `-- --update` must not have
-      to re-spell the keying, or an update would rewrite a per-file baseline in
-      per-code shape and discard the attribution in silence. One scalar per
-      lint code cannot see X warnings appearing in one crate while X are fixed
-      in another, and crate-boundary `pub` promotion is exactly what
-      `unreachable_pub` fires on, so this refactor produces that shape at every
-      extraction. Keying per file is also what puts `member_of` to work: the
-      baseline becomes the record of which crates carry a backlog, which is the
-      evidence the "member gone quiet" refusal needs to tell a crate that was
-      fixed from a crate that was never linted.
-
-      Its own CARGO_TARGET_DIR (target/ratchet): the trailing rustc args are
-      part of cargo's fingerprint, so sharing `clippy:check`'s directory made
-      each of the two re-lint every workspace member the other had just
-      linted (≈ 40 s each way, every `task verify`). The dependency
-      artifacts are built once more, cold, and never again.
-    platforms: [linux]
-    cmds:
-      - >-
-        set -o pipefail;
-        CARGO_TARGET_DIR='{{.ROOT_DIR}}/target/ratchet'
-        cargo clippy --workspace --all-targets --locked --message-format=json
-        -- --cap-lints warn -W unreachable_pub
-        | python3 {{.ROOT_DIR}}/scripts/lint_ratchet.py --by-file {{.CLI_ARGS | default "--check"}}
 
   # The unit-test set never shrinks or goes quiet (C-070). Both checks are
   # `cmds:` entries, never `preconditions:`, so `task --force` cannot skip

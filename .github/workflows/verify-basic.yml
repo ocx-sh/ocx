@@ -158,19 +158,20 @@ jobs:
         id: fmt
         run: task rust:format:check
         continue-on-error: true
-      - name: Clippy
-        id: clippy
-        run: task rust:clippy:check
-        continue-on-error: true
+      # `Clippy` stood here and moved below `Install lld`: it is a Bazel build
+      # now (`task rust:clippy:check`, one cached aspect pass that is both the
+      # `-D warnings` gate and the backlog ratchet), so it needs the cache
+      # credential and lld the Bazel gates need.
+      #
       # The crate-split structural gates `task verify` runs
-      # (plan_crate_split_workspace.md C-011, C-070), in its order: the two
-      # ratchets before the build, then the unit run. The floor and the skip
+      # (plan_crate_split_workspace.md C-011, C-070), in its order: the doc
+      # ratchet before the build, then the unit run. The floor and the skip
       # ceiling used to bracket that run as two cargo steps; both now come off
       # the Bazel run's own build event stream in one step (see `Unit tests
       # (Bazel)` below), which is why nothing brackets it here any more.
-      # The two lints follow section 3 of subsystem-ci.md: they never block
-      # the test results, the final gate step reports them.
-      # The acceptance suite's shape, beside the two ratchets: it reads no
+      # The lints follow section 3 of subsystem-ci.md: they never block the
+      # test results, the final gate step reports them.
+      # The acceptance suite's shape, beside the doc ratchet: it reads no
       # binary and starts no registry, so it belongs in this job rather than
       # in the acceptance one.
       - name: Suite census
@@ -191,10 +192,6 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Lint tier
         run: task test:lint:structure
-      - name: Lint ratchet
-        id: ratchet
-        run: task rust:lint:ratchet
-        continue-on-error: true
       - name: Doc ratchet
         id: docratchet
         run: task rust:doc:ratchet
@@ -377,6 +374,16 @@ jobs:
         run: task bazel:lint
       - name: Bazel lockfile freshness
         run: task bazel:mod:check
+      # Clippy over //crates/... as `.bazelrc`'s aspect, ratcheted against
+      # clippy-warn-baseline.json off this run's build event stream. After
+      # `Install lld` and the cache credential for the reason the gates above
+      # are, and before `Build` so the dependency compiles it shares with the
+      # binary are warm. A lint: `continue-on-error`, reported by the final
+      # gate step.
+      - name: Clippy
+        id: clippy
+        run: task rust:clippy:check
+        continue-on-error: true
       # The acceptance binary, built where a later job needs it:
       # `smoke-acceptance` below `needs: smoke` and downloads `ocx-binary`, so
       # dropping it here would leave that job with nothing to run. `task
@@ -543,8 +550,8 @@ jobs:
       - name: Check lint results
         if: ${{ !cancelled() }}
         run: |
-          if [[ "${{ steps.fmt.outcome }}" == "failure" || "${{ steps.clippy.outcome }}" == "failure" || "${{ steps.ratchet.outcome }}" == "failure" || "${{ steps.docratchet.outcome }}" == "failure" ]]; then
-            echo "::error::Lint checks failed (fmt=${{ steps.fmt.outcome }}, clippy=${{ steps.clippy.outcome }}, ratchet=${{ steps.ratchet.outcome }}, docratchet=${{ steps.docratchet.outcome }})"
+          if [[ "${{ steps.fmt.outcome }}" == "failure" || "${{ steps.clippy.outcome }}" == "failure" || "${{ steps.docratchet.outcome }}" == "failure" ]]; then
+            echo "::error::Lint checks failed (fmt=${{ steps.fmt.outcome }}, clippy=${{ steps.clippy.outcome }}, docratchet=${{ steps.docratchet.outcome }})"
             exit 1
           fi
       # C-015's caller half, which a composite action cannot carry itself: the
