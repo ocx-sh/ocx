@@ -251,9 +251,10 @@ floor has to."""
 
 ACCEPTANCE_RULE_TARGETS = ACCEPTANCE_MODULE_TARGETS + ACCEPTANCE_SUPPORT_TARGETS  # 181
 
-GRAPH_TAIL_TARGETS = 7
-"""What `//...` holds that no earlier stage's universe names: `//:all` (3 —
-`buildifier`, `buildifier.check` and the `taskfiles` filegroup) and
+GRAPH_TAIL_TARGETS = 8
+"""What `//...` holds that no earlier stage's universe names: `//:all` (4 —
+`buildifier`, `buildifier.check`, the `taskfiles` filegroup and the
+`rustdoc_error_format` setting `rust:doc:ratchet` reads) and
 `//website/...` (4 — the site, its runner, and the `taskfiles` and
 `publish_scripts` filegroups C-020 added for `test_doc_scripts_publish`). Measured:
 `bazel query 'kind(rule, //...)'` answers 331 today and 56 + 45 + 42 + 184 + 4
@@ -265,8 +266,9 @@ per-module split of `:suite_inputs` added five filegroups, so 334; `ocx_python`'
 two targets take `//crates/...` to 61 and the total to 336; the acceptance
 binary under test and launcher (`ocx_cli:ocx`, `ocx_shim:ocx_shim`) take them
 to 63 and 338; the `//crates/ocx_schema:schemas` genrule (plan_bazel_cargo_port.md
-C-001) and the 20 `rust_doc_test` targets (C-030) take them to 84 and 359 today
-(84 + 181 + 87 + 7). The floor stays two under: it counts the drift floor's 82,
+C-001) and the 20 `rust_doc_test` targets (C-030) take them to 84 and 359; the
+`//:rustdoc_error_format` setting takes the total to 360 today (84 + 181 + 87 +
+8). The floor stays two under: it counts the drift floor's 82,
 which excludes the seam twin and the schemas genrule."""
 
 # ---------------------------------------------------------------------------
@@ -1669,8 +1671,8 @@ def prove_counts() -> int:
         f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 181",
     )
     expect(
-        STAGE_FLOORS["stage-4"].minimum == 357,
-        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 357",
+        STAGE_FLOORS["stage-4"].minimum == 358,
+        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 358",
     )
     expect(
         STAGE_FLOORS["stage-4"].minimum
@@ -1680,7 +1682,7 @@ def prove_counts() -> int:
     )
     print(
         "counts  OK : 21 = 21 + 0, 78 = 20 + 35 + 3 + 20, 82 = 78 + 4, 45 = 40 + 5, 42 = 39 + 3, "
-        "169 = 82 + 45 + 42, 181 = 172 + 9, 357 = 169 + 181 + 7 — internal consistency only; "
+        "169 = 82 + 45 + 42, 181 = 172 + 9, 358 = 169 + 181 + 8 — internal consistency only; "
         "WP-15/WP-16 must assert these against WP-12's generated table, which is the reality "
         "check"
     )

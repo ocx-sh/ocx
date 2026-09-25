@@ -54,7 +54,7 @@ tasks:
           trap 'rm -f "$err" "{{.SCHEMA_DIR}}"/*/*.new' EXIT
           files=$(ocx exec bazel -- bazel {{.CACHE_RC}} cquery --output=files {{.SCHEMA_TARGET}} 2>"$err") || {
             echo "schema:generate: cquery failed; nothing written" >&2; cat "$err" >&2; exit 1; }
-          got=$(printf '%s\n' "$files" | sed -n 's|^.*/bin/crates/ocx_schema/schemas/||p' | sort)
+          got=$(printf '%s\n' "$files" | sed -n 's|^.*/schemas/||p' | sort)
           count=$(printf '%s\n' "$files" | wc -l)
           if [ "$got" != "$expected" ] || [ "$count" -ne 7 ]; then
             echo "schema:generate: {{.SCHEMA_TARGET}} does not report exactly the 7 schemas; nothing written. cquery reported:" >&2
@@ -66,13 +66,13 @@ tasks:
           done
           # Stage all seven before renaming any, so a failed copy publishes nothing.
           for src in $files; do
-            dst="{{.SCHEMA_DIR}}/${src##*/bin/crates/ocx_schema/schemas/}"
+            dst="{{.SCHEMA_DIR}}/${src##*/schemas/}"
             mkdir -p "$(dirname "$dst")"
             cp "$src" "$dst.new"
             chmod 0644 "$dst.new"
           done
           for src in $files; do
-            dst="{{.SCHEMA_DIR}}/${src##*/bin/crates/ocx_schema/schemas/}"
+            dst="{{.SCHEMA_DIR}}/${src##*/schemas/}"
             mv "$dst.new" "$dst"
           done
 

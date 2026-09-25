@@ -165,15 +165,15 @@ tasks:
 
       **The floor is the script's own default** — `CRATES_RULE_TARGETS`, 78,
       imported from `scripts/bazel_gate_proofs.py` — and no `--min-targets` is
-      passed here. The one lane that writes a BEP analyses `//...`, which is
-      359 targets today, so 78 is a floor it clears by a wide margin. That is
+      passed here. The one lane that hands this task a BEP analyses `//...`, which is
+      360 targets today, so 78 is a floor it clears by a wide margin. That is
       the point of it: the floor exists to tell "the reader read nothing" from
       "the build was clean", and 78 is the only number for this that has a
-      home. Spelling 359 here would be a second copy of the `//...` floor
+      home. Spelling 360 here would be a second copy of the `//...` floor
       `STAGE_FLOORS["stage-4"]` already holds, in a taskfile, where nothing
       re-measures it. The tighter reads of the same graph are two
       steps away and do block: `build:drift` floors at 82 and `tag:guard` at
-      357.
+      358.
 
       Failure is loud and non-fatal, the contract `push` above already has:
       the script prints one line per finding on stderr and exits 1, and this

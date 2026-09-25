@@ -136,8 +136,8 @@ fact are how they stop agreeing.
 (`//crates/... + //test/doc_scripts/...` >= 169, WP-33's 45 and WP-33b's 42
 added to `//crates/...`'s 82 — the 42 GIF renders took that package from 45 targets to
 87, and until the floor moved with them it cleared by 42 and discriminated
-nothing) and now stage 4 (`//...` >= 357: 169 + the acceptance package's 181 +
-the 7 root and website targets no earlier universe names). `--stage` defaults to
+nothing) and now stage 4 (`//...` >= 358: 169 + the acceptance package's 181 +
+the 8 root and website targets no earlier universe names). `--stage` defaults to
 stage 4, which is the single place the adoption's stage advances:
 `bazel:tag:guard` passes no `--stage` on purpose, so a second spelling cannot go
 stale. **Stage 4 had to be declared in the same change as the exemption above**:

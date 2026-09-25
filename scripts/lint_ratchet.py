@@ -21,9 +21,12 @@ same span twice), and compares the counts to the baseline file:
 
   - a code above its entry fails (a regression);
   - a code absent from the baseline has an implicit entry of 0;
-  - a baseline entry of 0 fails — that lint belongs in `[workspace.lints]`
-    now, deleted from the baseline in the same commit;
-  - a code in both the baseline and `[workspace.lints]` fails (LINT-16);
+  - a baseline entry of 0 fails — the backlog is clear: delete the entry and
+    deny the lint through the aspect's flags (`.bazelrc`'s `clippy_flag`), in
+    the same commit. Not `[workspace.lints]`: Bazel does not read it, and
+    C-017 refuses any entry there but `rust.warnings`;
+  - a code in both the baseline and `[workspace.lints]` fails (LINT-16) —
+    unreachable while C-017/C-018 hold, back with LINT-19 (ocx-sh/ocx#533);
   - a decrease passes with a notice: run `--update` and commit the new file.
 
 `--update` writes a **downward** move freely — locking in an improvement is the
@@ -104,11 +107,13 @@ ASPECT_KINDS = frozenset(
 
 class Aspect(NamedTuple):
     """What the aspect writing one diagnostics suffix visits: the rule kinds
-    that must each leave a file, and the tags that make it skip a target."""
+    that must each leave a file, the tags that make it skip a target, and the
+    setting that makes its file JSON (named when a line is not)."""
 
     name: str
     kinds: frozenset[str]
     opt_out: frozenset[str]
+    error_format: str
 
 
 #: Per suffix, because the two aspects cover different targets:
@@ -116,8 +121,12 @@ class Aspect(NamedTuple):
 #: crates only — `cargo doc` has no test target to document — and honours no
 #: tag, so a clippy opt-out tag is not its concern.
 ASPECTS = {
-    DEFAULT_SUFFIX: Aspect("rust_clippy_aspect", ASPECT_KINDS, CLIPPY_OPT_OUT),
-    ".rustdoc.diagnostics": Aspect("rustdoc_diagnostics_aspect", ASPECT_KINDS - {"rust_test"}, frozenset()),
+    DEFAULT_SUFFIX: Aspect(
+        "rust_clippy_aspect", ASPECT_KINDS, CLIPPY_OPT_OUT, "`--@rules_rust//rust/settings:clippy_error_format=json`"
+    ),
+    ".rustdoc.diagnostics": Aspect(
+        "rustdoc_diagnostics_aspect", ASPECT_KINDS - {"rust_test"}, frozenset(), "`//:rustdoc_error_format` at `json`"
+    ),
 }
 
 
@@ -268,19 +277,37 @@ def member_of(key: str) -> str | None:
     return parts[1] if len(parts) > 1 and parts[0] == "crates" else None
 
 
+#: Which task line clears a regression notice, keyed by the diagnostics suffix
+#: `judge()` was called with — the prompt has to name the invocation that
+#: actually owns the baseline it is reading, not a bare flag neither task's
+#: `--update` is spelled as on its own.
+UPDATE_TASK = {
+    DEFAULT_SUFFIX: "task rust:clippy:check -- --update",
+    ".rustdoc.diagnostics": "task rust:doc:ratchet -- --update",
+}
+
+
 def compare(
     live: Counter[str],
     baseline: dict[str, int],
     enforced: set[str],
     by_file: bool = False,
+    update_cmd: str = "--update",
 ) -> tuple[list[str], list[str]]:
     """(failures, notices) of `live` against `baseline`."""
     failures: list[str] = []
     notices: list[str] = []
+    # LINT-16's two clauses. Under C-017 `[workspace.lints]` holds only
+    # `rust.warnings`, and C-018's allow-lists admit no `warnings` key, so the
+    # double listing can only name a key `foreign_keys` already refuses, and a
+    # zero entry's remedy is the aspect's flags, not that table. Both come back
+    # as live paths with LINT-19 (Refs ocx-sh/ocx#533), when lint levels move
+    # to `extract_cargo_lints`.
     for key, entry in sorted(baseline.items()):
         if entry == 0:
             failures.append(
-                f"{key}: baseline entry is 0 — move it into [workspace.lints] and delete the entry"
+                f"{key}: baseline entry is 0 — delete the entry and deny the lint through the "
+                "aspect's flags (`.bazelrc` `clippy_flag`); [workspace.lints] is not read by Bazel (C-017)"
             )
         if code_of(key, by_file) in enforced:
             failures.append(
@@ -295,7 +322,7 @@ def compare(
             )
         elif count < entry:
             notices.append(
-                f"{key}: dropped to {count} (baseline {entry}) — run `--update` and commit"
+                f"{key}: dropped to {count} (baseline {entry}) — run `{update_cmd}` and commit"
             )
     return failures, notices
 
@@ -328,6 +355,7 @@ def judge(
     by_file: bool,
     allow_regression: bool,
     allow_codes: list[str],
+    suffix: str = DEFAULT_SUFFIX,
 ) -> int:
     """The verdict over one census: coverage, the zero-diagnostic and
     dark-member refusals, then compare or update."""
@@ -351,7 +379,8 @@ def judge(
             "lint ratchet: the input carries no diagnostic for a workspace member — "
             "empty input, a truncated run, not the diagnostics format this mode reads, or the "
             "lint flags were not passed. If the backlog is genuinely clear, delete "
-            f"{baseline_path.name} and move the lint into [workspace.lints] instead",
+            f"{baseline_path.name} and deny the lint through the aspect's flags (`.bazelrc` "
+            "`clippy_flag`) instead — not [workspace.lints], which Bazel does not read (C-017)",
             file=sys.stderr,
         )
         return 1
@@ -416,7 +445,9 @@ def judge(
     # fault the gate should crash on, not an empty set every live key then
     # reds against — and a stream with no diagnostics would read as clean.
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-    failures, notices = compare(live, baseline, workspace_lints(), by_file)
+    failures, notices = compare(
+        live, baseline, workspace_lints(), by_file, update_cmd=UPDATE_TASK.get(suffix, "--update")
+    )
     failures += [
         f"{key}: a baseline entry outside the allow-list — fix it; this code cannot be baselined"
         for key in foreign_keys(baseline, by_file, allow_codes)
@@ -632,7 +663,7 @@ def bep_census(bep: Path, suffix: str = DEFAULT_SUFFIX, by_file: bool = False) -
             except json.JSONDecodeError as error:
                 raise Refusal(
                     f"{path}:{number} ({member}) is not JSON ({error}) — was it written without "
-                    "`--@rules_rust//rust/settings:clippy_error_format=json`?"
+                    f"{aspect.error_format}?"
                 ) from error
             if isinstance(record, dict) and record.get("$message_type") == "diagnostic":
                 messages.append((member, record))
@@ -666,7 +697,7 @@ def run_bep(
     except Refusal as refusal:
         print(f"lint ratchet: {refusal}", file=sys.stderr)
         return 1
-    return judge(mode, census, baseline_path, by_file, allow_regression, list(allow_codes))
+    return judge(mode, census, baseline_path, by_file, allow_regression, list(allow_codes), suffix)
 
 # ---------------------------------------------------------------------------
 # Proofs. Every mutation below is checked to have landed before its result is
@@ -692,7 +723,10 @@ def prove_compare() -> int:
     )
     red, _ = compare(Counter(), {"unreachable_pub": 0}, set())
     assert red == [
-        "unreachable_pub: baseline entry is 0 — move it into [workspace.lints] and delete the entry"
+        (
+            "unreachable_pub: baseline entry is 0 — delete the entry and deny the lint through the "
+            "aspect's flags (`.bazelrc` `clippy_flag`); [workspace.lints] is not read by Bazel (C-017)"
+        )
     ], f"zero entry not refused: {red}"
     red, _ = compare(live, {"unreachable_pub": 2}, {"unreachable_pub"})
     assert red == ["unreachable_pub: listed in both the baseline and [workspace.lints]"], (
@@ -863,15 +897,22 @@ def _bep_fixture(
     configured: bool = True,
     tags: dict[str, list[str]] | None = None,
     extra_targets: tuple[tuple[str, str], ...] = (),
+    remote: frozenset[str] = frozenset(),
 ) -> Path:
     """A BEP naming one `<member><suffix>` per member (default: every workspace
     member), each holding an artifact notification plus `records[member]`.
     `finished` None drops `buildFinished`, False reports it failed; a member in
-    `absent` is named by the BEP but never written to disk. `nested` puts every
-    file set behind a parent set, the transitive shape Bazel emits for deps.
-    Each member library gets a `targetConfigured` event (`configured` False
-    drops them all), carrying `tags[member]`; `extra_targets` adds configured
-    `(label, kind)` targets that own no diagnostics file."""
+    `absent` is named by the BEP but never written to disk, and a member in
+    `remote` is named through a non-`file:` URI (a cached output kept remote
+    under `--remote_download_minimal`) instead. `nested` puts every file set
+    behind a parent set, the transitive shape Bazel emits for deps. Each member
+    library gets a `targetConfigured` event (`configured` False drops them
+    all), carrying `tags[member]`, immediately followed by the clippy aspect's
+    OWN `targetConfigured` for the same label — real Bazel's shape, kindless
+    and tagless, `aspect` in its id rather than a `configured` payload —
+    positioned second so a reader that stops filtering it out overwrites the
+    real entry with an empty one rather than leaving it be. `extra_targets`
+    adds configured `(label, kind)` targets that own no diagnostics file."""
     records = records or {}
     members = workspace_members() if members is None else members
     out = tmp_path / "bazel-bin"
@@ -880,19 +921,35 @@ def _bep_fixture(
     for label, kind in extra_targets:
         events.append({"id": {"targetConfigured": {"label": label}}, "configured": {"targetKind": f"{kind} rule"}})
     for index, member in enumerate(sorted(members)):
+        label = f"//crates/{member}:{member}"
         if configured:
             payload: dict = {"targetKind": "rust_library rule"}
             if (tags or {}).get(member):
                 payload["tag"] = tags[member]
-            events.append({"id": {"targetConfigured": {"label": f"//crates/{member}:{member}"}}, "configured": payload})
+            events.append({"id": {"targetConfigured": {"label": label}}, "configured": payload})
+            events.append(
+                {
+                    "id": {
+                        "targetConfigured": {
+                            "label": label,
+                            "aspect": "@@rules_rust+//rust/private:clippy.bzl%rust_clippy_aspect",
+                        }
+                    }
+                }
+            )
         path = out / f"{member}{suffix}"
-        if member not in absent:
+        if member in remote:
+            uri = f"bytestream://example.invalid/blobs/{path.name}/0"
+        elif member not in absent:
             path.write_text("\n".join([_ARTIFACT, *records.get(member, [])]) + "\n", encoding="utf-8")
+            uri = path.as_uri()
+        else:
+            uri = path.as_uri()
         leaf, parent = f"{index}f", f"{index}p"
         events.append(
             {
                 "id": {"namedSet": {"id": leaf}},
-                "namedSetOfFiles": {"files": [{"name": path.name, "uri": path.as_uri()}]},
+                "namedSetOfFiles": {"files": [{"name": path.name, "uri": uri}]},
             }
         )
         if nested:
@@ -901,7 +958,7 @@ def _bep_fixture(
             {
                 "id": {
                     "targetCompleted": {
-                        "label": f"//crates/{member}:{member}",
+                        "label": label,
                         "aspect": "@@rules_rust+//rust/private:clippy.bzl%rust_clippy_aspect",
                     }
                 },
@@ -962,8 +1019,26 @@ def prove_bep_fail_closed(tmp_path: Path) -> int:
     _refusal(garbage, "not JSON")
     _refusal(whole, "no diagnostics file", suffix=".rustdoc.diagnostics")
     _refusal(_bep_fixture(tmp_path / "absent", absent=frozenset({"ocx_util"})), "ocx_util", "missing on disk", "remote_download")
+    # A non-`file:` URI (a cached output `--remote_download_minimal` kept
+    # remote) is refused by its own branch — never downloaded, so there is no
+    # local path to read at all, and the message must still name the scheme.
+    _refusal(
+        _bep_fixture(tmp_path / "remote", remote=frozenset({"ocx_util"})),
+        "ocx_util",
+        "missing on disk",
+        "uri 'bytestream:",
+        "remote_download",
+    )
     torn = _bep_fixture(tmp_path / "torn", {"ocx_util": ["{not json"]})
-    _refusal(torn, "ocx_util", "not JSON")
+    _refusal(torn, "ocx_util", "not JSON", "clippy_error_format")
+    # The hint names the setting of the aspect that wrote the file, per suffix.
+    doc = ".rustdoc.diagnostics"
+    torn_doc = _bep_fixture(tmp_path / "torn-doc", {"ocx_util": ["{not json"]}, suffix=doc)
+    _refusal(torn_doc, "ocx_util", "not JSON", "//:rustdoc_error_format", suffix=doc)
+    try:
+        bep_census(torn_doc, doc, by_file=True)
+    except Refusal as refusal:
+        assert "clippy_error_format" not in str(refusal), f"a rustdoc file must not name clippy's setting: {refusal}"
     _refusal(_bep_fixture(tmp_path / "unfinished", finished=None), "did not finish")
     _refusal(_bep_fixture(tmp_path / "failed", finished=False), "did not finish")
     _refusal(_bep_fixture(tmp_path / "no-last", last_message=False), "lastMessage")
@@ -998,6 +1073,17 @@ def prove_bep_gate_semantics(tmp_path: Path) -> int:
     assert run_bep("check", green, baseline, by_file=True) == 0, "a key at its count must pass"
     new_code = _bep_fixture(tmp_path / "new", {"ocx_util": [*at_count, _diag("dead_code", _UTIL_A, 9)]})
     assert run_bep("check", new_code, baseline, by_file=True) == 1, "a new code must red"
+    # `level` filters on ("warning", "error") — an error-level record must be
+    # counted exactly like a warning-level one, never dropped.
+    error_level = _bep_fixture(
+        tmp_path / "error", {"ocx_util": [*at_count, _diag("clippy::x", _UTIL_A, 11, level="error")]}
+    )
+    assert bep_census(error_level, by_file=True).counts[f"{_UTIL_A}::clippy::x"] == 1, (
+        "an error-level diagnostic must be counted"
+    )
+    assert run_bep("check", error_level, baseline, by_file=True) == 1, (
+        "an error-level diagnostic must red as a new code"
+    )
     uncoded = _bep_fixture(tmp_path / "uncoded", {"ocx_util": [*at_count, _diag(None, _UTIL_A, 7)]})
     assert bep_census(uncoded, by_file=True).counts[f"{_UTIL_A}::{UNCODED}"] == 1, "uncoded must be keyed"
     assert run_bep("check", uncoded, baseline, by_file=True) == 1, "a spanned uncoded warning must red"
@@ -1134,6 +1220,39 @@ def prove_allow_codes(tmp_path: Path) -> int:
     assert json.loads(baseline.read_text(encoding="utf-8")) == {f"{_UTIL_A}::unreachable_pub": 2}
     baseline.write_text(json.dumps({f"{_UTIL_A}::unreachable_pub": 2, f"{_UTIL_A}::dead_code": 1}) + "\n", encoding="utf-8")
     assert run_bep("check", parked, baseline, by_file=True) == 1, "a baseline parking a foreign code must red"
+    return 1
+
+
+def prove_rustdoc_allow_codes(tmp_path: Path) -> int:
+    """C-018 end to end on the `.rustdoc.diagnostics` suffix `rust:doc:ratchet`
+    drives: `--allow-codes rustdoc::` parks a `rustdoc::` code through
+    `--update --allow-regression`, and the same allow-list still refuses
+    `dead_code` — the code-allow gate is suffix-generic, not clippy-only."""
+    doc = ".rustdoc.diagnostics"
+    baseline = tmp_path / "rustdoc-baseline.json"
+    broken_link = _bep_fixture(
+        tmp_path / "broken-link", {"ocx_util": [_diag("rustdoc::broken_intra_doc_links", _UTIL_A)]}, suffix=doc
+    )
+    assert (
+        run_bep(
+            "update", broken_link, baseline, suffix=doc, by_file=True, allow_codes=["rustdoc::"], allow_regression=True
+        )
+        == 0
+    ), "an allow-listed rustdoc:: code must be parkable through --update --allow-regression"
+    assert json.loads(baseline.read_text(encoding="utf-8")) == {
+        f"{_UTIL_A}::rustdoc::broken_intra_doc_links": 1
+    }, f"the rustdoc baseline was not written: {baseline.read_text(encoding='utf-8')}"
+    foreign = _bep_fixture(
+        tmp_path / "foreign",
+        {"ocx_util": [_diag("rustdoc::broken_intra_doc_links", _UTIL_A), _diag("dead_code", _UTIL_A, 9)]},
+        suffix=doc,
+    )
+    payload = baseline.read_text(encoding="utf-8")
+    assert (
+        run_bep("update", foreign, baseline, suffix=doc, by_file=True, allow_codes=["rustdoc::"], allow_regression=True)
+        == 1
+    ), "dead_code must be refused on the rustdoc suffix even with --allow-regression"
+    assert baseline.read_text(encoding="utf-8") == payload, "the refusal must leave the baseline byte-identical"
     return 1
 
 

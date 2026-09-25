@@ -83,8 +83,9 @@ Measured on this repository's own `//...` analysis, 274,298 bytes:
 | `--remote_header=authorization=Basic <credential>` | 9 |
 
 So the threat model is not "keep the secret out of the input" — it cannot be
-kept out. It is: **the input never persists**. `bazel:build:nobuild` writes it
-to a `mktemp -d` outside the checkout and removes that directory from a
+kept out. It is: **the input never persists**. Each of the four producers
+(`bazel:build:nobuild`, `bazel:test:unit`, `rust:clippy:check`,
+`rust:doc:ratchet`) writes it to a `mktemp -d` outside the checkout and removes that directory from a
 `defer:`, which go-task runs whether the build, the floor or this export
 failed. `bep_persistence_findings` below is what holds it there; before R-2 of
 the end-of-run review the path was `target/bep.json`, mode 0644, inside the
@@ -279,10 +280,10 @@ BEP_ARG = re.compile(
     r"--build_event_json_file=(\S+)|--bep[= ]+(\S+)|^\s+BEP:\s*(\S+)", re.MULTILINE
 )
 
-#: The one sanctioned scratch spelling in `taskfiles/bazel.taskfile.yml`, and
-#: the `defer:` that removes it. Named rather than pattern-matched: there is
-#: one producer in this repository, and a finding that cannot name the variable
-#: it wants is a finding nobody can act on.
+#: The one sanctioned scratch spelling every producer uses (`bazel.taskfile.yml`'s
+#: nobuild and unit lanes, `rust.taskfile.yml`'s clippy and rustdoc), and the
+#: `defer:` that removes it. Named rather than pattern-matched: a finding that
+#: cannot name the variable it wants is a finding nobody can act on.
 SCRATCH_VAR = "BEP_DIR"
 SCRATCH_DECL = re.compile(rf"{SCRATCH_VAR}:\s*\n\s*sh:\s*mktemp -d")
 SCRATCH_DEFER = re.compile(rf"defer:\s*rm -rf\s*'?\{{\{{\.{SCRATCH_VAR}\}}\}}")
@@ -483,6 +484,12 @@ def read_bep(path: Path) -> tuple[list[Invocation], list[Finding]]:
             continue
 
         if "targetCompleted" in identity:
+            # An aspect's own `targetCompleted` (clippy, rustdoc — `.bazelrc`'s
+            # bare `build`) names the target's label; read as the target, it
+            # would overwrite the target's verdict and cache tier with its own.
+            # `lint_ratchet.py` and `bazel_test_floor.py` skip it the same way.
+            if "aspect" in identity["targetCompleted"]:
+                continue
             label = str(identity["targetCompleted"].get("label") or "")
             if not label:
                 continue
@@ -1252,6 +1259,43 @@ def prove_reader_floor(scratch: Path) -> int:
     return checks
 
 
+def prove_aspect_completion(scratch: Path) -> int:
+    """An aspect's `targetCompleted` must not stand in for the target's.
+
+    `.bazelrc` registers the clippy and rustdoc aspects on the bare `build`, so
+    every `//crates/...` target completes twice under one label. The planted
+    stream is a failed target (proto3 omits its false `success`) followed by
+    its aspect completing green — the order a lint aspect over a broken crate
+    produces.
+    """
+    checks = 0
+    stream = scratch / "aspect.json"
+    stream.write_text(
+        "\n".join(
+            json.dumps(event)
+            for event in (
+                {"id": {"started": {}}, "started": {"uuid": "aspect-proof", "startTimeMillis": "1"}},
+                {"id": {"targetCompleted": {"label": "//:lib"}}, "completed": {}},
+                {
+                    "id": {"targetCompleted": {"label": "//:lib", "aspect": "//:clippy.bzl%a"}},
+                    "completed": {"success": True},
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    expect('"aspect"' in stream.read_text(encoding="utf-8"), "the aspect event did not land")
+    invocations, findings = read_bep(stream)
+    expect(findings == [], f"the aspect stream must read clean, got {findings}")
+    target = invocations[0].targets.get("//:lib")
+    expect(target is not None and not target.success, "the aspect's success overwrote the failed target")
+    expect(invocations[0].target_count == 1, "the aspect event must not count as a target")
+    print("S-013 GREEN: a failed //:lib stays failed past its aspect's green `targetCompleted`")
+    checks += 1
+    return checks
+
+
 def prove_two_invocations(scratch: Path) -> int:
     """One file, two streams — the measured Bazel-retry shape."""
     checks = 0
@@ -1669,10 +1713,19 @@ def prove_bep_not_persisted() -> int:
     checks += 1
 
     taskfile = REPO_ROOT / "taskfiles" / "bazel.taskfile.yml"
-    live = {taskfile.name: taskfile.read_text(encoding="utf-8")} | {
+    # Every taskfile, not a named list: WP-2/WP-3 added two producers in
+    # `rust.taskfile.yml` that a named list did not cover. The one exemption
+    # reads a stream it does not own — `telemetry:bazel` is handed `BEP` by its
+    # caller, whose `defer:` removes it.
+    live = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in sorted((REPO_ROOT / "taskfiles").glob("*.yml"))
+        if path.name != "telemetry.taskfile.yml"
+    } | {
         path.name: path.read_text(encoding="utf-8")
         for path in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
     }
+    expect(taskfile.name in live, f"{taskfile.name} fell out of the live corpus")
     expect(
         any(BEP_ARG.search(text) for text in live.values()),
         "no source in the live corpus names a build event stream — the reader drifted",
@@ -1680,7 +1733,7 @@ def prove_bep_not_persisted() -> int:
     findings = bep_persistence_findings(live)
     expect(findings == [], f"the live corpus must be silent, got {[f.message for f in findings]}")
     print(
-        f"R-2 GREEN : {len(live)} live source(s) — the one `--build_event_json_file=` is rooted "
+        f"R-2 GREEN : {len(live)} live source(s) — every `--build_event_json_file=` is rooted "
         f"at a `mktemp -d` outside the checkout and a `defer:` removes it"
     )
     checks += 1

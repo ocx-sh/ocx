@@ -48,10 +48,11 @@ tasks:
     internal: true
     desc: Pin a BEP scratch directory to 0700 and prove it, before anything writes a secret into it
     summary: |
-      Called by both BEP producers with `DIR` set to their `mktemp -d`, rather
-      than spelled twice: the two call sites are 200 lines apart, and a guard
-      edited in one of them is a guard that silently stopped agreeing with
-      itself in the other.
+      Called by all four BEP producers (`build:nobuild`, `test:unit`,
+      `rust:clippy:check`, `rust:doc:ratchet`) with `DIR` set to their
+      `mktemp -d`, rather than spelled four times: the call sites span two
+      taskfiles, and a guard edited in one of them is a guard that silently
+      stopped agreeing with itself in the others.
 
       `mktemp -d` is already 0700 on GNU coreutils 9.7 (measured here), so the
       `chmod` is a no-op on this host — the read-back is the part that can go
@@ -209,9 +210,9 @@ tasks:
       `build:drift` and `tag:guard` reading 0 targets, and both red on their
       own floors in the two steps that follow this one.
 
-      It is also the repository's only producer of a Build Event Protocol
-      stream, which is why `--build_event_json_file` is here and the telemetry
-      call is at the tail (C-019, S-013). Measured on 9.2.0: `--nobuild` stops
+      It is also the one Build Event Protocol producer of the four whose
+      stream is exported, which is why the telemetry call is at the tail
+      (C-019, S-013). Measured on 9.2.0: `--nobuild` stops
       after analysis and still emits one `targetCompleted` per target — 280 of
       them for this `//...`, 272 KB — so the analysis-only lane is a real
       subject for `scripts/bep_to_otlp.py` rather than an empty one.

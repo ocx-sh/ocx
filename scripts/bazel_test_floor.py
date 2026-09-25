@@ -178,9 +178,12 @@ PASSING_STATUS = frozenset({"PASSED", "FLAKY"})
 #: leaves these targets out (plan_bazel_cargo_port.md C-034): an `ignore` fence is
 #: documentation that rustdoc reports as `ignored`, not a `#[ignore]`d test or a
 #: `--skip` filter, which are what `crates/NEXTEST_SKIP_CEILING` bounds. The set of
-#: ignored doctests is pinned by name instead (C-031). Keyed on the kind Bazel
-#: reports, never the `_doc_test` label suffix, so a `rust_test` that happens to
-#: share the suffix stays under the ceiling.
+#: standing guard against a doctest going quiet is the per-target `executed`
+#: floor above: turning a runnable doctest into an `ignore` fence drops
+#: `executed`, which `floor_findings` catches like any other shrink. C-031 was
+#: only the one-time comparison run at the cargo → Bazel port, not an ongoing
+#: check. Keyed on the kind Bazel reports, never the `_doc_test` label suffix,
+#: so a `rust_test` that happens to share the suffix stays under the ceiling.
 DOC_TEST_KIND = "rust_doc_test rule"
 
 READER_MSG = (
@@ -731,15 +734,13 @@ def _bep(
 ) -> Path:
     """A build event stream carrying one `TestResult` per entry, and the noise a real one
     carries around them — a reader keyed on line position would pass over this and fail on
-    the real thing. Each label is configured first, with the aspect's kindless
-    `targetConfigured` beside the target's own, as `.bazelrc`'s clippy aspect makes it."""
+    the real thing. Each label's own `targetConfigured` (the one carrying its kind) is
+    written FIRST, with the clippy aspect's kindless `targetConfigured` for the same label
+    right after it — the order `read_runs`' `"aspect" not in configured` filter is for: a
+    reader that stopped filtering it out would let the aspect's kindless record overwrite
+    the real one, since a later write for the same label wins either way."""
     lines = [json.dumps({"id": {"started": {}}, "started": {"uuid": "fixture"}})]
     for label in entries:
-        lines.append(
-            json.dumps(
-                {"id": {"targetConfigured": {"label": label, "aspect": "clippy.bzl%rust_clippy_aspect"}}}
-            )
-        )
         kind = (kinds or {}).get(label, _fixture_kind(label))
         lines.append(
             json.dumps(
@@ -747,6 +748,11 @@ def _bep(
                     "id": {"targetConfigured": {"label": label}},
                     "configured": {"targetKind": kind, "testSize": "MEDIUM"},
                 }
+            )
+        )
+        lines.append(
+            json.dumps(
+                {"id": {"targetConfigured": {"label": label, "aspect": "clippy.bzl%rust_clippy_aspect"}}}
             )
         )
     for label, uri in entries.items():
