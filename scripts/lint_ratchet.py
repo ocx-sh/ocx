@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Per-lint-code ratchet over a cargo JSON diagnostic stream (rust-cargo.md LINT-15/16, plan C-011).
+"""Per-lint-code ratchet over compiler diagnostics (rust-cargo.md LINT-16,
+plan_bazel_cargo_port.md C-012/C-013/C-017/C-018).
 
-    cargo clippy --workspace --all-targets --locked --message-format=json \\
-        -- --cap-lints warn -W unreachable_pub | scripts/lint_ratchet.py --check
-    … | scripts/lint_ratchet.py --update
+Two input modes, one verdict (`judge`):
+
+  - `--bep PATH` (`task rust:clippy:check`): a Bazel build event stream. The
+    `*.clippy.diagnostics` files (`--suffix` selects another) its output-group
+    file sets name are read as rustc-native JSON lines and attributed to the
+    member whose `//crates/<member>` package produced them. One compare is both
+    the `-D warnings` gate and the backlog ratchet — any key above its entry,
+    an absent key counting as 0, fails. The baseline may hold only
+    `--allow-codes` codes (C-018), and a Cargo `[lints]` entry Bazel does not
+    read is refused (C-017).
+  - cargo JSON on stdin or `--input` (`task rust:doc:ratchet`):
+    `cargo doc --message-format=json` emits `compiler-message` records, keyed
+    `--by-file --baseline rustdoc-warn-baseline.json`. Deleted by whichever
+    work package moves the last caller to Bazel.
 
 Its proofs run as pytest, from `scripts/tests/test_lint_ratchet.py`.
-
-`cargo doc --message-format=json` emits the same `compiler-message` records,
-so the rustdoc backlog ratchets through this script too — `--by-file
---baseline rustdoc-warn-baseline.json`, driven by `task rust:doc:ratchet`.
 
 Groups every compiler diagnostic of a workspace member by `.message.code.code`,
 deduplicated by primary span (the lib and the lib-test targets report the
@@ -51,7 +59,7 @@ as decreases, which the upward-move gate cannot see. The expected member set is
 derived from the manifest and the filesystem, never from the stream: a set read
 out of the stream is satisfied by whatever the stream happened to carry.
 
-Stdlib only; `task rust:lint:ratchet` and `task rust:doc:ratchet` are the
+Stdlib only; `task rust:clippy:check` and `task rust:doc:ratchet` are the
 callers.
 
 `--by-file` keys each entry `<file>::<code>` instead of `<code>` alone. A bare
@@ -59,16 +67,20 @@ per-code count lets one broken link be fixed while another appears elsewhere
 in the same pass — across a nine-batch crate split that is the expected case,
 not a hypothesis. The cost is that moving a file reds the ratchet until
 `--update` is run, which is the intended prompt to look. The clippy baseline
-stays per-code: its subject is one lint with a large flat backlog, where the
-finer key would only add churn.
+is per-file too (`task rust:clippy:check` passes `--by-file`): crate-boundary
+`pub` promotion is exactly what `unreachable_pub` fires on, so per-code counts
+would hide one crate's rise behind another's fix.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import tomllib
+import urllib.parse
+import urllib.request
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
@@ -77,6 +89,24 @@ from typing import NamedTuple
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE = REPO_ROOT / "clippy-warn-baseline.json"
 WORKSPACE_MANIFEST = REPO_ROOT / "Cargo.toml"
+DEFAULT_SUFFIX = ".clippy.diagnostics"
+#: C-018's clippy allow-list; `task rust:doc:ratchet` passes its own.
+DEFAULT_ALLOW_CODES = ("unreachable_pub",)
+#: The code a spanned diagnostic with no lint code is keyed under (C-013).
+UNCODED = "<uncoded>"
+#: rustc's per-crate summary — span-less, code-less, and the ONLY such record
+#: the gate may drop. Measured over the 58 diagnostics files of this tree: every
+#: one reads `N warnings emitted` / `1 warning emitted`. (cargo's "generated N
+#: warnings" line never reaches a rustc-native file.)
+RUSTC_SUMMARY = re.compile(r"^\d+ warnings? emitted$")
+#: `rust_clippy_aspect`'s opt-out tags (rules_rust 0.74 `clippy.bzl`
+#: `get_clippy_ready_crate_info`), compared after `-` → `_` and lower-casing.
+CLIPPY_OPT_OUT = frozenset({"no_clippy", "no_lint", "nolint", "noclippy"})
+#: The rule kinds that provide `CrateInfo` / `TestCrateInfo`, which is exactly
+#: what the aspect visits — each must leave a diagnostics file.
+ASPECT_KINDS = frozenset(
+    {"rust_library", "rust_binary", "rust_test", "rust_proc_macro", "rust_shared_library", "rust_static_library"}
+)
 
 
 def member_dir(package_id: str, member_prefix: str) -> str | None:
@@ -169,6 +199,52 @@ class Census(NamedTuple):
     diagnosing: set[str]
 
 
+def tally(
+    messages: Iterable[tuple[str, dict]], by_file: bool, key_uncoded: bool
+) -> tuple[Counter[str], int, set[str]]:
+    """Unique diagnostics per key over `(member, rustc message)` pairs, the
+    number of counted records, and the members a counted record arrived for.
+
+    One path for both input modes, so cargo's stream and Bazel's diagnostics
+    files cannot disagree about dedup or keying: a diagnostic is deduplicated
+    by `(code, file, line, column)` of its primary span (the lib and its
+    `crate =` test target report the same span twice).
+
+    The cargo mode never counts a record with no lint code. `key_uncoded` (the
+    Bazel mode, C-013) keys every code-less warning as `UNCODED` — spanned as
+    `<file>::<uncoded>`, span-less as `<no span>::<uncoded>` — so it fails like
+    any other new key, and drops only rustc's own `RUSTC_SUMMARY` line, matched
+    by its exact text rather than by its shape."""
+    seen: set[tuple] = set()
+    counts: Counter[str] = Counter()
+    records = 0
+    diagnosing: set[str] = set()
+    for member, message in messages:
+        if message.get("level") not in ("warning", "error"):
+            continue
+        primary = next((s for s in message.get("spans", []) if s.get("is_primary")), None)
+        code = (message.get("code") or {}).get("code")
+        if code is None:
+            if not key_uncoded or (not primary and RUSTC_SUMMARY.match(str(message.get("message", "")))):
+                continue
+            code = UNCODED
+        records += 1
+        diagnosing.add(member)
+        key = (
+            (code, primary["file_name"], primary["line_start"], primary["column_start"])
+            if primary
+            else (code, message.get("rendered"))
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        if by_file:
+            counts[f"{primary['file_name'] if primary else '<no span>'}::{code}"] += 1
+        else:
+            counts[code] += 1
+    return counts, records, diagnosing
+
+
 def count_codes(lines: Iterable[str], member_prefix: str, by_file: bool = False) -> Census:
     """Unique diagnostics per key, for packages under `member_prefix`; the
     number of **coded-diagnostic** records that named such a package; the
@@ -202,12 +278,9 @@ def count_codes(lines: Iterable[str], member_prefix: str, by_file: bool = False)
     which `compare`'s zero-entry rule already demands.
 
     The key is the lint code, or `<file>::<code>` under `by_file`."""
-    seen: set[tuple] = set()
-    counts: Counter[str] = Counter()
-    member_records = 0
     reported: set[str] = set()
-    diagnosing: set[str] = set()
     finished: bool | None = None
+    messages: list[tuple[str, dict]] = []
     for line in lines:
         line = line.strip()
         if not line.startswith("{"):
@@ -219,29 +292,9 @@ def count_codes(lines: Iterable[str], member_prefix: str, by_file: bool = False)
         if member is None:
             continue
         reported.add(member)
-        if record.get("reason") != "compiler-message":
-            continue
-        message = record["message"]
-        code = (message.get("code") or {}).get("code")
-        if code is None or message.get("level") not in ("warning", "error"):
-            continue
-        member_records += 1
-        diagnosing.add(member)
-        primary = next(
-            (s for s in message.get("spans", []) if s.get("is_primary")), None
-        )
-        key = (
-            (code, primary["file_name"], primary["line_start"], primary["column_start"])
-            if primary
-            else (code, message.get("rendered"))
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        if by_file:
-            counts[f"{primary['file_name'] if primary else '<no span>'}::{code}"] += 1
-        else:
-            counts[code] += 1
+        if record.get("reason") == "compiler-message":
+            messages.append((member, record["message"]))
+    counts, member_records, diagnosing = tally(messages, by_file, key_uncoded=False)
     return Census(counts, member_records, reported, finished, diagnosing)
 
 
@@ -347,15 +400,32 @@ def run(
     by_file: bool = False,
     allow_regression: bool = False,
 ) -> int:
+    """The cargo-JSON stdin mode (`task rust:doc:ratchet` until WP-3 moves it)."""
     prefix = f"path+file://{REPO_ROOT}/crates/"
-    census = count_codes(lines, prefix, by_file)
+    return judge(mode, count_codes(lines, prefix, by_file), baseline_path, by_file, allow_regression, None)
+
+
+def judge(
+    mode: str,
+    census: Census,
+    baseline_path: Path,
+    by_file: bool,
+    allow_regression: bool,
+    allow_codes: list[str] | None,
+) -> int:
+    """The verdict over one census, shared by both input modes: coverage,
+    the zero-diagnostic and dark-member refusals, then compare or update.
+    `allow_codes` None is the cargo mode, which predates C-018."""
     live, member_records = census.counts, census.member_records
     expected = workspace_members()
     missing = sorted(expected - census.reported)
     if missing or not census.finished:
         reasons = []
         if missing:
-            reasons.append(f"{len(missing)} of {len(expected)} member(s) never reported: {', '.join(missing)}")
+            reasons.append(
+                f"{len(missing)} of {len(expected)} member(s) never reported (no cargo record, or no "
+                f"diagnostics file in the build event stream): {', '.join(missing)}"
+            )
         if census.finished is None:
             reasons.append("the stream carries no `build-finished` record")
         elif not census.finished:
@@ -368,14 +438,14 @@ def run(
             "A run truncated after one crate leaves every other key reading as a decrease, so --check "
             "would exit 0 and --update would write the partial payload with no rises and therefore "
             "without --allow-regression, erasing the backlog. Re-run the whole gate "
-            "(`task rust:lint:ratchet` / `task rust:doc:ratchet`), which passes --workspace",
+            "(`task rust:clippy:check` / `task rust:doc:ratchet`), which covers every member",
             file=sys.stderr,
         )
         return 1
     if member_records == 0:
         print(
-            f"lint ratchet: the stream carries no diagnostic for a workspace member ({prefix}*) — "
-            "empty input, a truncated run, not cargo's --message-format=json output, or the "
+            "lint ratchet: the input carries no diagnostic for a workspace member — "
+            "empty input, a truncated run, not the diagnostics format this mode reads, or the "
             "lint flags were not passed. If the backlog is genuinely clear, delete "
             f"{baseline_path.name} and move the lint into [workspace.lints] instead",
             file=sys.stderr,
@@ -403,6 +473,17 @@ def run(
         print(f"lint ratchet: --allow-regression accepting {len(dark)} member(s) gone quiet: {', '.join(dark)}")
     if mode == "update":
         payload = {code: count for code, count in sorted(live.items()) if count > 0}
+        # C-018, ahead of the rise gate and deaf to --allow-regression: that
+        # flag records a backlog `-D warnings` once allowed, never a new code.
+        foreign = foreign_keys(payload, by_file, allow_codes)
+        if foreign:
+            print(
+                f"lint ratchet: refusing to write {baseline_path.name} — {len(foreign)} key(s) carry a "
+                f"code outside the allow-list ({', '.join(allow_codes or [])}): {', '.join(foreign)}. "
+                "Fix it; this code cannot be baselined, even with --allow-regression",
+                file=sys.stderr,
+            )
+            return 1
         rises = raised(live, read_baseline(baseline_path))
         if rises and not allow_regression:
             print(
@@ -432,6 +513,10 @@ def run(
     # reds against — and a stream with no diagnostics would read as clean.
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     failures, notices = compare(live, baseline, workspace_lints(), by_file)
+    failures += [
+        f"{key}: a baseline entry outside the allow-list — fix it; this code cannot be baselined"
+        for key in foreign_keys(baseline, by_file, allow_codes)
+    ]
     for notice in notices:
         print(f"lint ratchet: {notice}")
     if failures:
@@ -446,6 +531,239 @@ def run(
     print(f"lint ratchet: {summary} within {baseline_path.name}")
     return 0
 
+
+# ---------------------------------------------------------------------------
+# Bazel input mode (plan_bazel_cargo_port.md C-012/C-013/C-017/C-018).
+# ---------------------------------------------------------------------------
+
+class Refusal(Exception):
+    """A fail-closed cause; `run_bep` prints it and exits 1."""
+
+
+def label_member(label: str) -> str | None:
+    """The workspace member a Bazel label's package belongs to — `crates/<name>`
+    or a subpackage of it — or `None` for any other package or repository.
+
+    C-012 attributes a diagnostics file by the target that PRODUCED it, never
+    by the span paths inside it: a span names whatever file the lint fired in,
+    and a clean crate has no span at all, yet still has to count as covered."""
+    repo, separator, rest = label.partition("//")
+    if not separator or repo not in ("", "@", "@@"):
+        return None
+    parts = rest.partition(":")[0].split("/")
+    return parts[1] if len(parts) > 1 and parts[0] == "crates" and parts[1] else None
+
+
+def unread_lints(root: Path = REPO_ROOT) -> list[str]:
+    """C-017: every `[lints]` entry Bazel does not read, named.
+
+    rules_rust reads no Cargo `[lints]` table; the clippy aspect sees only the
+    `.bazelrc` `clippy_flag` levels. The ratchet reproduces exactly one entry —
+    `rust.warnings = "deny"`, because any key above its baseline fails — so
+    anything else in `[workspace.lints]`, or a crate `[lints]` that is not
+    `workspace = true`, would be silently ignored by the gate that claims to
+    enforce it."""
+    found: list[str] = []
+    table = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8")).get("workspace", {}).get("lints", {})
+    for tool, entries in sorted(table.items()):
+        for name in sorted(entries) if isinstance(entries, dict) else [""]:
+            if (tool, name) != ("rust", "warnings"):
+                found.append(f"Cargo.toml: workspace.lints.{tool}.{name}".rstrip("."))
+    for manifest in sorted((root / "crates").glob("*/Cargo.toml")):
+        lints = tomllib.loads(manifest.read_text(encoding="utf-8")).get("lints", {})
+        rel = manifest.relative_to(root).as_posix()
+        for key, value in sorted(lints.items()):
+            if key == "workspace" and value is True:
+                continue
+            names = sorted(value) if isinstance(value, dict) else [""]
+            found += [f"{rel}: lints.{key}.{name}".rstrip(".") for name in names]
+    return found
+
+
+def code_allowed(code: str, allow_codes: Iterable[str]) -> bool:
+    """C-018: whether `code` may sit in a baseline. An allow-list entry ending
+    `::` is a prefix (`rustdoc::`); any other entry is an exact code."""
+    return any(code == entry or (entry.endswith("::") and code.startswith(entry)) for entry in allow_codes)
+
+
+def foreign_keys(keys: Iterable[str], by_file: bool, allow_codes: list[str] | None) -> list[str]:
+    """The keys whose code is outside `allow_codes`; none when there is no list."""
+    if allow_codes is None:
+        return []
+    return sorted(key for key in keys if not code_allowed(code_of(key, by_file), allow_codes))
+
+
+_REMOTE_HINT = (
+    "under --remote_download_minimal a cached output stays remote unless `build:ci "
+    "--remote_download_regex` in .bazelrc matches it (it must cover `.clippy.diagnostics` "
+    "and `.rustdoc.diagnostics`)"
+)
+
+
+def bep_census(bep: Path, suffix: str = DEFAULT_SUFFIX, by_file: bool = False) -> Census:
+    """C-012: the census of every `*<suffix>` file this build event stream
+    names, read from the output-group file sets of its `targetCompleted`
+    events — the files THIS invocation built or took from cache, never a
+    `bazel-bin` glob, which would read stale files and whichever configuration
+    the symlink points at.
+
+    Fails closed (`Refusal`) on: an unreadable stream, a line that is not JSON,
+    no successful `buildFinished` or no `lastMessage` (the stream was cut
+    short — this replaces cargo's `build-finished` guard), a file set it
+    references but never declares, no matching file, a named file missing on
+    disk, and a diagnostics line that is not JSON. Coverage (every member owns
+    a file) is `judge`'s census check, through `Census.reported`."""
+    try:
+        text = bep.read_text(encoding="utf-8")
+    except OSError as error:
+        raise Refusal(
+            f"the build event stream {bep} is unreadable ({error}) — restore `--build_event_json_file` on the build"
+        ) from error
+    sets: dict[str, dict] = {}
+    produced: list[tuple[str, str]] = []
+    configured: dict[str, tuple[str, list[str]]] = {}
+    succeeded = last = False
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise Refusal(f"{bep}:{number} is not JSON ({error}) — a torn or foreign build event stream") from error
+        identifier = event.get("id", {})
+        if "namedSet" in identifier:
+            sets[str(identifier["namedSet"].get("id"))] = event.get("namedSetOfFiles", {})
+        elif "targetConfigured" in identifier and "aspect" not in identifier["targetConfigured"]:
+            payload = event.get("configured", {})
+            configured[str(identifier["targetConfigured"].get("label", ""))] = (
+                str(payload.get("targetKind", "")).removesuffix(" rule"),
+                [str(tag) for tag in payload.get("tag", [])],
+            )
+        elif "targetCompleted" in identifier:
+            label = str(identifier["targetCompleted"].get("label", ""))
+            for group in event.get("completed", {}).get("outputGroup", []):
+                produced += [(label, str(file_set.get("id"))) for file_set in group.get("fileSets", [])]
+        elif "buildFinished" in identifier:
+            succeeded = event.get("finished", {}).get("overallSuccess") is True
+        last = last or event.get("lastMessage") is True
+    if not succeeded or not last:
+        causes = []
+        if not succeeded:
+            causes.append("no `buildFinished` event reporting success")
+        if not last:
+            causes.append("no `lastMessage` event, so the stream was cut short")
+        raise Refusal(
+            f"the build did not finish: {bep} carries {' and '.join(causes)}. A partial stream names "
+            "only the diagnostics it reached, so every other key would read as a decrease"
+        )
+    files: dict[Path, str] = {}
+    linted: set[str] = set()
+    for label, root_set in produced:
+        member = label_member(label)
+        if member is None:
+            continue
+        pending, visited = [root_set], set()
+        while pending:
+            set_id = pending.pop()
+            if set_id in visited:
+                continue
+            visited.add(set_id)
+            if set_id not in sets:
+                raise Refusal(f"{bep} references file set {set_id} it never declares — a truncated stream")
+            pending += [str(child.get("id")) for child in sets[set_id].get("fileSets", [])]
+            for entry in sets[set_id].get("files", []):
+                if not str(entry.get("name", "")).endswith(suffix):
+                    continue
+                uri = str(entry.get("uri", ""))
+                if not uri.startswith("file:"):
+                    raise Refusal(f"{entry.get('name')} ({member}) is missing on disk (uri {uri!r}) — {_REMOTE_HINT}")
+                files.setdefault(Path(urllib.request.url2pathname(urllib.parse.urlparse(uri).path)), member)
+                linted.add(label)
+    if not files:
+        raise Refusal(
+            f"{bep} names no diagnostics file ending in {suffix!r} under //crates — the build did not "
+            "request the output group, or the aspect is not registered in .bazelrc"
+        )
+    # Per TARGET, not per member: a member's library owning a file says nothing
+    # about its tests or binaries, and the aspect silently skips a target
+    # carrying an opt-out tag — its sources would stop being linted while the
+    # member still counted as covered. `manual` targets never reach this stream
+    # (`//crates/...` does not expand them); that residual is named in the WP-2
+    # report, not guarded here.
+    crate_targets = {label: shape for label, shape in configured.items() if label_member(label)}
+    opted_out = sorted(
+        f"{label} ({tag})"
+        for label, (_, tags) in crate_targets.items()
+        for tag in tags
+        if tag.replace("-", "_").lower() in CLIPPY_OPT_OUT
+    )
+    if opted_out:
+        raise Refusal(
+            f"{', '.join(opted_out)} carry a clippy opt-out tag, so rust_clippy_aspect skips them and "
+            "their sources are not linted — remove the tag; a lint exemption belongs in an "
+            "`#[allow]` the suppression cap counts, not in BUILD metadata"
+        )
+    expected = {label for label, (kind, _) in crate_targets.items() if kind in ASPECT_KINDS}
+    if not expected:
+        raise Refusal(
+            f"{bep} carries no `targetConfigured` event for a //crates Rust target, so the per-target "
+            "coverage check has no subject — a torn or foreign build event stream"
+        )
+    unlinted = sorted(expected - linted)
+    if unlinted:
+        raise Refusal(
+            f"{len(unlinted)} //crates Rust target(s) left no diagnostics file: {', '.join(unlinted)} — "
+            "the aspect did not run on them, so their sources were not linted"
+        )
+    messages: list[tuple[str, dict]] = []
+    for path, member in sorted(files.items()):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as error:
+            raise Refusal(f"{path} ({member}) is named by the build event stream but missing on disk — {_REMOTE_HINT}") from error
+        for number, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise Refusal(
+                    f"{path}:{number} ({member}) is not JSON ({error}) — was it written without "
+                    "`--@rules_rust//rust/settings:clippy_error_format=json`?"
+                ) from error
+            if isinstance(record, dict) and record.get("$message_type") == "diagnostic":
+                messages.append((member, record))
+    counts, records, diagnosing = tally(messages, by_file, key_uncoded=True)
+    return Census(counts, records, set(files.values()), True, diagnosing)
+
+
+def run_bep(
+    mode: str,
+    bep: Path,
+    baseline_path: Path,
+    *,
+    suffix: str = DEFAULT_SUFFIX,
+    by_file: bool = False,
+    allow_regression: bool = False,
+    allow_codes: Iterable[str] = DEFAULT_ALLOW_CODES,
+    root: Path = REPO_ROOT,
+) -> int:
+    """The Bazel input mode: C-017's guard, then the BEP census, then the same
+    verdict the cargo mode reaches, restricted to `allow_codes` (C-018)."""
+    try:
+        unread = unread_lints(root)
+        if unread:
+            raise Refusal(
+                f"Bazel does not read {'; '.join(unread)} — rules_rust ignores Cargo [lints], so this "
+                "gate would not enforce it. Wire it through `.bazelrc`'s "
+                "`--@rules_rust//rust/settings:clippy_flag` (or `extract_cargo_lints`) and extend the "
+                "ratchet's allow-list"
+            )
+        census = bep_census(bep, suffix, by_file)
+    except Refusal as refusal:
+        print(f"lint ratchet: {refusal}", file=sys.stderr)
+        return 1
+    return judge(mode, census, baseline_path, by_file, allow_regression, list(allow_codes))
 
 _SYNTHETIC_PREFIX = "path+file:///w/crates/"
 
@@ -915,6 +1233,293 @@ def prove_run_update_gate(tmp_path: Path) -> int:
 
 
 
+# --- Bazel input mode (C-012/C-013/C-017/C-018) -----------------------------
+
+
+def _diag(code: str | None, file: str | None, line: int = 1, level: str = "warning", text: str | None = None) -> str:
+    """A rustc-native diagnostic line, as the clippy aspect writes it. `file`
+    None is a spanless record — rustc's "N warnings emitted" summary shape."""
+    spans = (
+        [{"is_primary": True, "file_name": file, "line_start": line, "column_start": 1}] if file else []
+    )
+    return json.dumps(
+        {
+            "$message_type": "diagnostic",
+            "message": text if text is not None else f"{code} at {file}:{line}",
+            "code": {"code": code, "explanation": None} if code else None,
+            "level": level,
+            "spans": spans,
+            "children": [],
+            "rendered": f"{level}: {code}",
+        }
+    )
+
+
+_ARTIFACT = json.dumps({"$message_type": "artifact", "artifact": "x.rmeta", "emit": "metadata"})
+
+
+def _bep_fixture(
+    tmp_path: Path,
+    records: dict[str, list[str]] | None = None,
+    *,
+    members: set[str] | None = None,
+    finished: bool | None = True,
+    last_message: bool = True,
+    absent: frozenset[str] = frozenset(),
+    suffix: str = DEFAULT_SUFFIX,
+    nested: bool = True,
+    configured: bool = True,
+    tags: dict[str, list[str]] | None = None,
+    extra_targets: tuple[tuple[str, str], ...] = (),
+) -> Path:
+    """A BEP naming one `<member><suffix>` per member (default: every workspace
+    member), each holding an artifact notification plus `records[member]`.
+    `finished` None drops `buildFinished`, False reports it failed; a member in
+    `absent` is named by the BEP but never written to disk. `nested` puts every
+    file set behind a parent set, the transitive shape Bazel emits for deps.
+    Each member library gets a `targetConfigured` event (`configured` False
+    drops them all), carrying `tags[member]`; `extra_targets` adds configured
+    `(label, kind)` targets that own no diagnostics file."""
+    records = records or {}
+    members = workspace_members() if members is None else members
+    out = tmp_path / "bazel-bin"
+    out.mkdir(parents=True, exist_ok=True)
+    events: list[dict] = []
+    for label, kind in extra_targets:
+        events.append({"id": {"targetConfigured": {"label": label}}, "configured": {"targetKind": f"{kind} rule"}})
+    for index, member in enumerate(sorted(members)):
+        if configured:
+            payload: dict = {"targetKind": "rust_library rule"}
+            if (tags or {}).get(member):
+                payload["tag"] = tags[member]
+            events.append({"id": {"targetConfigured": {"label": f"//crates/{member}:{member}"}}, "configured": payload})
+        path = out / f"{member}{suffix}"
+        if member not in absent:
+            path.write_text("\n".join([_ARTIFACT, *records.get(member, [])]) + "\n", encoding="utf-8")
+        leaf, parent = f"{index}f", f"{index}p"
+        events.append(
+            {
+                "id": {"namedSet": {"id": leaf}},
+                "namedSetOfFiles": {"files": [{"name": path.name, "uri": path.as_uri()}]},
+            }
+        )
+        if nested:
+            events.append({"id": {"namedSet": {"id": parent}}, "namedSetOfFiles": {"fileSets": [{"id": leaf}]}})
+        events.append(
+            {
+                "id": {
+                    "targetCompleted": {
+                        "label": f"//crates/{member}:{member}",
+                        "aspect": "@@rules_rust+//rust/private:clippy.bzl%rust_clippy_aspect",
+                    }
+                },
+                "completed": {
+                    "success": True,
+                    "outputGroup": [{"name": "clippy_output", "fileSets": [{"id": parent if nested else leaf}]}],
+                },
+            }
+        )
+    if finished is not None:
+        events.append(
+            {"id": {"buildFinished": {}}, "finished": {"overallSuccess": finished, "exitCode": {"name": "SUCCESS" if finished else "BUILD_FAILURE"}}}
+        )
+    last = {"id": {"buildMetrics": {}}, "buildMetrics": {}}
+    if last_message:
+        last["lastMessage"] = True
+    events.append(last)
+    bep = tmp_path / "bep.json"
+    bep.write_text("".join(json.dumps(event) + "\n" for event in events), encoding="utf-8")
+    return bep
+
+
+_UTIL_A = "crates/ocx_util/src/a.rs"
+
+
+def _refusal(bep: Path, *causes: str, suffix: str = DEFAULT_SUFFIX) -> None:
+    """`bep_census` must refuse `bep`, naming every one of `causes`."""
+    try:
+        bep_census(bep, suffix, by_file=True)
+    except Refusal as refusal:
+        for cause in causes:
+            assert cause in str(refusal), f"the refusal must name {cause!r}: {refusal}"
+    else:
+        raise AssertionError(f"{bep} must be refused ({causes})")
+
+
+def prove_label_member() -> int:
+    """The member is the Bazel package's `crates/<name>`, never a span path."""
+    assert label_member("//crates/ocx_util:ocx_util") == "ocx_util"
+    assert label_member("@@//crates/ocx_util:ocx_util_test") == "ocx_util"
+    assert label_member("@//crates/ocx_cli:ocx") == "ocx_cli"
+    assert label_member("//crates/ocx_cli/sub:x") == "ocx_cli", "a subpackage belongs to its member"
+    for outside in ("//test:foo", "//:root", "@@rules_rust+//rust:x", "//crates:x", "crates/ocx_util:x"):
+        assert label_member(outside) is None, f"{outside} names no member"
+    return 1
+
+
+def prove_bep_fail_closed(tmp_path: Path) -> int:
+    """C-012: every fail-closed cause is refused and named, and the same
+    fixture with the cause removed passes — else the red says nothing."""
+    whole = _bep_fixture(tmp_path / "whole", {"ocx_util": [_diag("unreachable_pub", _UTIL_A)]})
+    census = bep_census(whole, by_file=True)
+    assert census.counts == Counter({f"{_UTIL_A}::unreachable_pub": 1}), f"green fixture wrong: {census}"
+    assert census.reported == workspace_members() and census.finished, "every member must own a file"
+    _refusal(tmp_path / "no-such.json", "unreadable")
+    garbage = tmp_path / "garbage.json"
+    garbage.write_text(whole.read_text(encoding="utf-8") + "not json\n", encoding="utf-8")
+    _refusal(garbage, "not JSON")
+    _refusal(whole, "no diagnostics file", suffix=".rustdoc.diagnostics")
+    _refusal(_bep_fixture(tmp_path / "absent", absent=frozenset({"ocx_util"})), "ocx_util", "missing on disk", "remote_download")
+    torn = _bep_fixture(tmp_path / "torn", {"ocx_util": ["{not json"]})
+    _refusal(torn, "ocx_util", "not JSON")
+    _refusal(_bep_fixture(tmp_path / "unfinished", finished=None), "did not finish")
+    _refusal(_bep_fixture(tmp_path / "failed", finished=False), "did not finish")
+    _refusal(_bep_fixture(tmp_path / "no-last", last_message=False), "lastMessage")
+    flat = _bep_fixture(tmp_path / "flat", {"ocx_util": [_diag("unreachable_pub", _UTIL_A)]}, nested=False)
+    assert bep_census(flat, by_file=True).counts == census.counts, "a flat file set must read the same"
+    # End to end: `run_bep` turns each refusal into exit 1 and a clean run into 0.
+    baseline = tmp_path / "baseline.json"
+    payload = json.dumps({f"{_UTIL_A}::unreachable_pub": 1}) + "\n"
+    baseline.write_text(payload, encoding="utf-8")
+    for mode in ("check", "update"):
+        assert run_bep(mode, tmp_path / "unfinished" / "bep.json", baseline, by_file=True) == 1
+    assert baseline.read_text(encoding="utf-8") == payload, "a refusal must leave the baseline byte-identical"
+    assert run_bep("check", whole, baseline, by_file=True) == 0, "the whole fixture must pass"
+    return 1
+
+
+def prove_bep_gate_semantics(tmp_path: Path) -> int:
+    """C-013: a key at its baseline count passes, a new code reds, a spanned
+    uncoded warning reds as `<file>::<uncoded>`, the spanless summary is
+    ignored, and the lib/test duplicate is one key."""
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({f"{_UTIL_A}::unreachable_pub": 1}) + "\n", encoding="utf-8")
+    at_count = [
+        _diag("unreachable_pub", _UTIL_A, 4),
+        _diag(None, None, text="2 warnings emitted"),
+        _diag(None, None, text="1 warning emitted"),
+    ]
+    green = _bep_fixture(tmp_path / "green", {"ocx_util": at_count, "ocx_cli": [_diag("unreachable_pub", _UTIL_A, 4)]})
+    assert bep_census(green, by_file=True).counts == Counter({f"{_UTIL_A}::unreachable_pub": 1}), (
+        "the summary must be ignored and the duplicate span counted once"
+    )
+    assert run_bep("check", green, baseline, by_file=True) == 0, "a key at its count must pass"
+    new_code = _bep_fixture(tmp_path / "new", {"ocx_util": [*at_count, _diag("dead_code", _UTIL_A, 9)]})
+    assert run_bep("check", new_code, baseline, by_file=True) == 1, "a new code must red"
+    uncoded = _bep_fixture(tmp_path / "uncoded", {"ocx_util": [*at_count, _diag(None, _UTIL_A, 7)]})
+    assert bep_census(uncoded, by_file=True).counts[f"{_UTIL_A}::{UNCODED}"] == 1, "uncoded must be keyed"
+    assert run_bep("check", uncoded, baseline, by_file=True) == 1, "a spanned uncoded warning must red"
+    # A span-less, code-less warning that is NOT rustc's summary is a real
+    # warning of that shape, keyed rather than dropped.
+    bare = _bep_fixture(tmp_path / "bare", {"ocx_util": [*at_count, _diag(None, None, text="some lint fired")]})
+    assert bep_census(bare, by_file=True).counts[f"<no span>::{UNCODED}"] == 1, "span-less uncoded must be keyed"
+    assert run_bep("check", bare, baseline, by_file=True) == 1, "a span-less non-summary warning must red"
+    raised_count = _bep_fixture(tmp_path / "raised", {"ocx_util": [*at_count, _diag("unreachable_pub", _UTIL_A, 8)]})
+    assert run_bep("check", raised_count, baseline, by_file=True) == 1, "a key above its count must red"
+    return 1
+
+
+def prove_bep_dark_member(tmp_path: Path) -> int:
+    """A member the baseline attributes keys to that produced no diagnostic
+    reds; a member that owns no diagnostics file at all reds on coverage."""
+    baseline = tmp_path / "baseline.json"
+    console = "crates/ocx_console/src/z.rs"
+    payload = json.dumps({f"{_UTIL_A}::unreachable_pub": 1, f"{console}::unreachable_pub": 1}) + "\n"
+    baseline.write_text(payload, encoding="utf-8")
+    util = [_diag("unreachable_pub", _UTIL_A)]
+    dark = _bep_fixture(tmp_path / "dark", {"ocx_util": util})
+    for mode in ("check", "update"):
+        assert run_bep(mode, dark, baseline, by_file=True) == 1, f"--{mode} must refuse a dark member"
+    assert baseline.read_text(encoding="utf-8") == payload, "the refusal must leave the baseline byte-identical"
+    speaking = _bep_fixture(tmp_path / "speaking", {"ocx_util": util, "ocx_console": [_diag("unreachable_pub", console)]})
+    assert run_bep("check", speaking, baseline, by_file=True) == 0, "no member is quiet, so it passes"
+    uncovered = _bep_fixture(
+        tmp_path / "uncovered",
+        {"ocx_util": util, "ocx_console": [_diag("unreachable_pub", console)]},
+        members=workspace_members() - {"ocx_exit"},
+    )
+    assert run_bep("check", uncovered, baseline, by_file=True) == 1, "a member with no diagnostics file must red"
+    return 1
+
+
+def prove_bep_target_coverage(tmp_path: Path) -> int:
+    """Per-target coverage: a //crates target carrying a clippy opt-out tag
+    (any spelling the aspect normalises) reds; a configured Rust target that
+    left no diagnostics file reds; a non-Rust target and a stream with the
+    configured events present pass; a stream with none reds on its floor."""
+    util = {"ocx_util": [_diag("unreachable_pub", _UTIL_A)]}
+    assert bep_census(_bep_fixture(tmp_path / "green", util), by_file=True).counts, "the green fixture reads"
+    for tag in ("no-clippy", "NoLint", "noclippy", "no_lint"):
+        _refusal(_bep_fixture(tmp_path / f"opt-{tag}", util, tags={"ocx_exit": [tag]}), "//crates/ocx_exit:ocx_exit", tag)
+    benign = _bep_fixture(tmp_path / "benign", util, tags={"ocx_exit": ["manual-review", "no-sandbox"]})
+    assert bep_census(benign, by_file=True).counts, "an unrelated tag must pass"
+    _refusal(
+        _bep_fixture(tmp_path / "unlinted", util, extra_targets=(("//crates/ocx_util:ocx_util_test", "rust_test"),)),
+        "//crates/ocx_util:ocx_util_test",
+        "no diagnostics file",
+    )
+    other = _bep_fixture(tmp_path / "other", util, extra_targets=(("//crates/ocx_schema:schemas", "genrule"),))
+    assert bep_census(other, by_file=True).counts, "a non-Rust target owes no diagnostics file"
+    _refusal(_bep_fixture(tmp_path / "no-configured", util, configured=False), "targetConfigured")
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({f"{_UTIL_A}::unreachable_pub": 1}) + "\n", encoding="utf-8")
+    assert run_bep("check", tmp_path / "opt-no-clippy" / "bep.json", baseline, by_file=True) == 1
+    assert run_bep("check", tmp_path / "green" / "bep.json", baseline, by_file=True) == 0
+    return 1
+
+
+def _lint_tree(tmp_path: Path, root_lints: str, crate_lints: str) -> Path:
+    (tmp_path / "crates" / "a").mkdir(parents=True)
+    (tmp_path / "Cargo.toml").write_text(f'[workspace]\nmembers = ["crates/*"]\n{root_lints}', encoding="utf-8")
+    (tmp_path / "crates" / "a" / "Cargo.toml").write_text(f'[package]\nname = "a"\n{crate_lints}', encoding="utf-8")
+    return tmp_path
+
+
+def prove_unread_lints(tmp_path: Path) -> int:
+    """C-017: a `[workspace.lints]` entry beyond `rust.warnings`, or a crate
+    `[lints]` beyond `workspace = true`, is named as unread by Bazel."""
+    clean_root = '[workspace.lints.rust]\nwarnings = "deny"\n[workspace.lints.clippy]\n'
+    clean_crate = "[lints]\nworkspace = true\n"
+    assert unread_lints(_lint_tree(tmp_path / "clean", clean_root, clean_crate)) == [], "the live shape passes"
+    assert unread_lints() == [], "this repository's manifests must pass"
+    root = unread_lints(_lint_tree(tmp_path / "root", clean_root + 'pedantic = "warn"\n', clean_crate))
+    assert root and "workspace.lints.clippy.pedantic" in root[0], f"root entry not named: {root}"
+    crate = unread_lints(_lint_tree(tmp_path / "crate", clean_root, clean_crate + '[lints.rust]\nx = "warn"\n'))
+    assert crate and "crates/a/Cargo.toml" in crate[0] and "lints.rust" in crate[0], f"crate entry not named: {crate}"
+    bep = _bep_fixture(tmp_path / "bep", {"ocx_util": [_diag("unreachable_pub", _UTIL_A)]})
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({f"{_UTIL_A}::unreachable_pub": 1}) + "\n", encoding="utf-8")
+    assert run_bep("check", bep, baseline, by_file=True, root=tmp_path / "root") == 1, "root entry must red"
+    assert run_bep("check", bep, baseline, by_file=True, root=tmp_path / "crate") == 1, "crate entry must red"
+    assert run_bep("check", bep, baseline, by_file=True, root=tmp_path / "clean") == 0, "clean tree passes"
+    return 1
+
+
+def prove_allow_codes(tmp_path: Path) -> int:
+    """C-018: an update that would write a code outside the allow-list is
+    refused even with --allow-regression; a baseline already parking one reds."""
+    assert code_allowed("unreachable_pub", ["unreachable_pub"]) and not code_allowed("dead_code", ["unreachable_pub"])
+    assert code_allowed("rustdoc::broken_intra_doc_links", ["rustdoc::"]), "`::` suffix is a prefix"
+    assert not code_allowed("rustdoc_x", ["rustdoc::"]) and not code_allowed(UNCODED, ["unreachable_pub"])
+    baseline = tmp_path / "baseline.json"
+    payload = json.dumps({f"{_UTIL_A}::unreachable_pub": 1}) + "\n"
+    baseline.write_text(payload, encoding="utf-8")
+    parked = _bep_fixture(tmp_path / "parked", {"ocx_util": [_diag("unreachable_pub", _UTIL_A), _diag("dead_code", _UTIL_A, 3)]})
+    assert run_bep("update", parked, baseline, by_file=True, allow_regression=True) == 1, (
+        "--allow-regression must not park a code outside the allow-list"
+    )
+    assert baseline.read_text(encoding="utf-8") == payload, "the refusal must leave the baseline byte-identical"
+    allowed = _bep_fixture(
+        tmp_path / "allowed", {"ocx_util": [_diag("unreachable_pub", _UTIL_A), _diag("unreachable_pub", _UTIL_A, 3)]}
+    )
+    assert run_bep("update", allowed, baseline, by_file=True, allow_regression=True) == 0, "an allowed raise writes"
+    assert json.loads(baseline.read_text(encoding="utf-8")) == {f"{_UTIL_A}::unreachable_pub": 2}
+    baseline.write_text(json.dumps({f"{_UTIL_A}::unreachable_pub": 2, f"{_UTIL_A}::dead_code": 1}) + "\n", encoding="utf-8")
+    assert run_bep("check", parked, baseline, by_file=True) == 1, "a baseline parking a foreign code must red"
+    return 1
+
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -926,7 +1531,23 @@ def main() -> int:
     mode.add_argument(
         "--update", action="store_true", help="rewrite the baseline from the stream"
     )
-    parser.add_argument("--input", type=Path, help="clippy JSON lines (default: stdin)")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--input", type=Path, help="cargo JSON lines (default: stdin)")
+    source.add_argument(
+        "--bep",
+        type=Path,
+        help="a Bazel build event stream (--build_event_json_file); reads the diagnostics files it names",
+    )
+    parser.add_argument(
+        "--suffix",
+        default=DEFAULT_SUFFIX,
+        help=f"--bep only: the diagnostics file suffix (default {DEFAULT_SUFFIX})",
+    )
+    parser.add_argument(
+        "--allow-codes",
+        default=",".join(DEFAULT_ALLOW_CODES),
+        help="--bep only: comma-separated codes a baseline may hold; an entry ending `::` is a prefix",
+    )
     parser.add_argument("--baseline", type=Path, default=BASELINE)
     parser.add_argument(
         "--by-file",
@@ -939,6 +1560,16 @@ def main() -> int:
         help="let --update raise an entry; prints every key it raises",
     )
     args = parser.parse_args()
+    if args.bep:
+        return run_bep(
+            "update" if args.update else "check",
+            args.bep,
+            args.baseline,
+            suffix=args.suffix,
+            by_file=args.by_file,
+            allow_regression=args.allow_regression,
+            allow_codes=[code for code in args.allow_codes.split(",") if code],
+        )
     if args.input:
         lines = args.input.read_text(encoding="utf-8").splitlines()
     else:

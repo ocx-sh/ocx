@@ -8,7 +8,7 @@
 - Updated: 2026-09-25
 - Next:    /hex-execute .claude/artifacts/plan_bazel_cargo_port.md
 - **Plan:** plan_bazel_cargo_port
-- **Active phase:** 2 — WP-2 clippy aspect + ratchet
+- **Active phase:** 3 — WP-4 rust_doc_test + floor
 - **Step:** `/hex-execute → Stub`
 - **Last update:** 2026-09-25 (after 6f23c8364: chore: tick the PR 528 inclusion in the goal file)
 - **Branch:** `refactor/bazel-test-binary` (PR [ocx-sh/ocx#527](https://github.com/ocx-sh/ocx/pull/527))
@@ -375,7 +375,7 @@ They are accepted, and a follow-up covers them.
 | WP | Repo | Scope | Expected files | Size | Wave | Depends-on | Review | Verify | Status |
 |---|---|---|---|---|---|---|---|---|---|
 | WP-1 | ocx | C-001–C-004, S-001 | `crates/ocx_schema/BUILD.bazel`, `website/schema.taskfile.yml`, `.github/workflows/verify-deep.yml`, `.github/workflows/verify-basic.yml` / `deploy-website.yml` (only as C-004 requires), `.claude/rules/subsystem-taskfiles.md` (`:114,188`), `.claude/rules/subsystem-ci.md` (`:23`), `.claude/rules/subsystem-website.md` / `subsystem-metadata-schema.md` (only if they name cargo) | S | 1 | — | risk: CI workflow | scoped | merged |
-| WP-2 | ocx | C-010–C-018, S-002–S-004, S-007 | `.bazelrc`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `scripts/lint_ratchet.py`, `scripts/tests/test_lint_ratchet.py`, `clippy-warn-baseline.json`, `.github/workflows/verify-basic.yml`, `.claude/rules/subsystem-taskfiles.md`, `.claude/rules/subsystem-ci.md`, `.claude/rules/rust-cargo.md` | M | 2 | WP-1 | risk: CI workflow + gate semantics | scoped | pending |
+| WP-2 | ocx | C-010–C-018, S-002–S-004, S-007 | `.bazelrc`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `scripts/lint_ratchet.py`, `scripts/tests/test_lint_ratchet.py`, `clippy-warn-baseline.json`, `.github/workflows/verify-basic.yml`, `.claude/rules/subsystem-taskfiles.md`, `.claude/rules/subsystem-ci.md`, `.claude/rules/rust-cargo.md` | M | 2 | WP-1 | risk: CI workflow + gate semantics | scoped | merged |
 | WP-4 | ocx | C-030–C-035, S-006 | `crates/*/BUILD.bazel` (20), `crates/TEST_TARGET_MAP.toml`, `scripts/bazel_build_drift.py`, `scripts/bazel_gate_proofs.py`, `scripts/bazel_floor_proofs.py`, `scripts/bazel_test_floor.py`, `scripts/tests/test_bazel_test_floor.py`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `.github/workflows/verify-basic.yml`, `.claude/tests/test_workflows.py` (docstring), `.claude/rules/subsystem-taskfiles.md`, `.claude/rules/subsystem-ci.md` | M | 3 | WP-1, WP-2 | risk: floor/drift gate scripts | scoped | pending |
 | WP-3 | ocx | C-020–C-024, S-004 (rustdoc half), S-005 | new `.bzl` at repo root + `BUILD.bazel`, `.bazelrc`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `scripts/lint_ratchet.py`, `scripts/tests/test_lint_ratchet.py`, `rustdoc-warn-baseline.json`, `.github/workflows/verify-basic.yml`, `.claude/rules/subsystem-taskfiles.md` | M | 4 | WP-2, WP-4 | risk: private rules_rust API | scoped | pending |
 
@@ -526,3 +526,19 @@ replaced, and its baselines revert with it.
     stderr is surfaced, the copy is staged then renamed, and the `test_workflows.py` message is
     reworded. Deferred to PR CI: `smoke-acceptance` `timeout-minutes: 10` now covers a Bazel build
     of the schema binary.
+  - WP-2 landed. Cargo and Bazel key sets are identical in both directions: 44 keys, 179
+    diagnostics, all `unreachable_pub`. So the re-baseline left `clippy-warn-baseline.json`
+    unchanged, and the named residuals carried 0 keys under cargo. C-016: the second run was
+    `1 process: 1 internal` in 0.43 s. Before the port, cargo took 11.16 s warm; the first Bazel pass
+    took 17.6 s.
+  - The L1 review folded in two Warns and one Suggest:
+    - Only rustc's `N warnings emitted` summary is dropped; any other warning with no span and no
+      code now fails the gate.
+    - Coverage is now checked per target through the BEP `targetConfigured` events, so an opt-out
+      tag (`no_clippy`/`no_lint`/`nolint`/`noclippy`) or an unlinted Rust target is refused.
+    - The bazel-failure message is reworded.
+  - Q: `rust-cargo.md` LINT-15 prescribes two clippy runs, but the file is vendored (grimoire).
+    Decision: leave the vendored file alone. `subsystem-taskfiles.md` records the local override.
+  - Residual: a `manual`-tagged crate target falls outside `//crates/...` and nothing reds it
+    (`bazel:tag:guard` and `bazel:build:drift` both stay green when one is planted). Tracked with
+    [ocx-sh/ocx#533](https://github.com/ocx-sh/ocx/issues/533).
