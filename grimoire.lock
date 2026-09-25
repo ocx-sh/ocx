@@ -5,7 +5,7 @@ lock_version = 1
 declaration_hash_version = 1
 declaration_hash = "sha256:e4370dc135bbe1596c7c86c2cd930a736a68c54bcaa3e437fce8d76d7f242584"
 generated_by = "grim 0.14.2"
-generated_at = "2026-09-23T20:26:19Z"
+generated_at = "2026-09-25T15:39:00Z"
 
 [[skill]]
 name = "bazel-adopt"
@@ -39,55 +39,67 @@ bundle_tag = "latest"
 
 [[skill]]
 name = "hex-architect"
-pinned = "ghcr.io/michael-herwig/arcana/hex-architect@sha256:0c11bd63d965172ffe781e1d4f1ba238fa9cf272e925e04177cd4d6240a0628b"
+pinned = "ghcr.io/michael-herwig/arcana/hex-architect@sha256:3863ee5d4fa1f81552e80bff35478426745b0b6a778868c2fef7870347132120"
 bundle = "ghcr.io/michael-herwig/arcana/hex"
 bundle_tag = "latest"
 
 [[skill]]
 name = "hex-core"
-pinned = "ghcr.io/michael-herwig/arcana/hex-core@sha256:62148998888cbf5a18207319b3ffbb335fc65c0585a96eb867b97d32fe404ff8"
+pinned = "ghcr.io/michael-herwig/arcana/hex-core@sha256:3a566087c46123e6bd35e81885df4901148040386bd12ccdd6175b9ce8454863"
 bundle = "ghcr.io/michael-herwig/arcana/hex"
 bundle_tag = "latest"
 
 [[skill]]
 name = "hex-discuss"
-pinned = "ghcr.io/michael-herwig/arcana/hex-discuss@sha256:e92146ce38924c507b5840d1c80641bff0aa5616d867b5cd1ff54a9b513f37d6"
+pinned = "ghcr.io/michael-herwig/arcana/hex-discuss@sha256:9b9831fe2a5f6ce0056287769a94f4ee2276a1a5785cad6297b73796ecd8a8b0"
 bundle = "ghcr.io/michael-herwig/arcana/hex"
 bundle_tag = "latest"
 
 [[skill]]
 name = "hex-execute"
-pinned = "ghcr.io/michael-herwig/arcana/hex-execute@sha256:ff85b8c3fdfbceb606dd5f2819c138b4dea3957d8002c76328cbf5202c098103"
+pinned = "ghcr.io/michael-herwig/arcana/hex-execute@sha256:3fe60f56dec0be1646ab10d76bf222dc51b0ddcf413ba09314e3f80deec21fcd"
 bundle = "ghcr.io/michael-herwig/arcana/hex"
 bundle_tag = "latest"
 
 [[skill]]
 name = "hex-finalize"
-pinned = "ghcr.io/michael-herwig/arcana/hex-finalize@sha256:357404a1fa4adfeb4f094ce999f2e0b65ac5a053d97f6b4e6f5a26ba16e9c493"
+pinned = "ghcr.io/michael-herwig/arcana/hex-finalize@sha256:bfa652655daf2fa13fd6ce02b1c69d9aa230920c6b100182283751e4d16e39d8"
 bundle = "ghcr.io/michael-herwig/arcana/hex"
 bundle_tag = "latest"
 
 [[skill]]
 name = "hex-init"
-pinned = "ghcr.io/michael-herwig/arcana/hex-init@sha256:975a56adb6c0ee3d201aa748fff3766e53b12be9cb692c649dd8d7528b09d72d"
+pinned = "ghcr.io/michael-herwig/arcana/hex-init@sha256:a6b80ead357bdddb8e49dfb2262199d89877ecdd6f8f3ef1c3befac6d1f69afb"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-loop"
+pinned = "ghcr.io/michael-herwig/arcana/hex-loop@sha256:e3b7b8d87cbf535ae61e46f93067895dc07d081e27189531f2ea547b1b5ea502"
 bundle = "ghcr.io/michael-herwig/arcana/hex"
 bundle_tag = "latest"
 
 [[skill]]
 name = "hex-plan"
-pinned = "ghcr.io/michael-herwig/arcana/hex-plan@sha256:e631dce56c2ba0fcc4694d00c56413a34ecb2725a6bb35c22397cd19fb17ce37"
+pinned = "ghcr.io/michael-herwig/arcana/hex-plan@sha256:1ac257e1ed69ee077b1da175f1a9502e071507ce9a8b103c41750467f9c4214c"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-retro"
+pinned = "ghcr.io/michael-herwig/arcana/hex-retro@sha256:0b8ca30ea30b972f9c353d2ac4334281d03920b2f5d2f892cca4615bec92fa08"
 bundle = "ghcr.io/michael-herwig/arcana/hex"
 bundle_tag = "latest"
 
 [[skill]]
 name = "hex-review"
-pinned = "ghcr.io/michael-herwig/arcana/hex-review@sha256:1bce65ec2f7c47b281cf33ceab4016dc4fef2d5d3d3ac6126c68e096019cb166"
+pinned = "ghcr.io/michael-herwig/arcana/hex-review@sha256:508a08f474b28a9a3f7c02c65ab012eeabdfb57cbd4e10f57e8f99b0e8587c1a"
 bundle = "ghcr.io/michael-herwig/arcana/hex"
 bundle_tag = "latest"
 
 [[skill]]
 name = "nox-review"
-pinned = "ghcr.io/michael-herwig/arcana/nox-review@sha256:5c034b0a921f284f74fc43906c794203196670a2c032bde01c4562e47e56d3f6"
+pinned = "ghcr.io/michael-herwig/arcana/nox-review@sha256:3ae4376c48b5a9d532fef035e02c0de36f487247602b9613386a45cad2afb7d6"
 bundle = "ghcr.io/michael-herwig/arcana/nox"
 bundle_tag = "latest"
 
@@ -105,7 +117,7 @@ bundle_tag = "latest"
 
 [[rule]]
 name = "hex-state"
-pinned = "ghcr.io/michael-herwig/arcana/hex-state@sha256:e2155d4951caa58b34e1b352a27988ef451dfcea9f6e379e3bcda2732c8994ed"
+pinned = "ghcr.io/michael-herwig/arcana/hex-state@sha256:cfe8ddfa6b23b29211de2f67ab1baa8951fcb2a463894f4899f37259a07caf03"
 bundle = "ghcr.io/michael-herwig/arcana/hex"
 bundle_tag = "latest"
 
@@ -196,7 +208,7 @@ id = "ghcr.io/ocx-sh/lore/docs-quality:latest"
 name = "hex"
 repo = "ghcr.io/michael-herwig/arcana/hex"
 tag = "latest"
-pinned = "ghcr.io/michael-herwig/arcana/hex@sha256:d69f647dfa31ac3df25f2f84db30263db649a15b5b7a19e70602641c010347d4"
+pinned = "ghcr.io/michael-herwig/arcana/hex@sha256:f2a3e37397af11cd398c8b07c75f09b42ff60c42cce4f1ad40f57ee4b9c48cf5"
 
 [[bundle.member]]
 kind = "skill"
@@ -230,8 +242,18 @@ id = "ghcr.io/michael-herwig/arcana/hex-init:latest"
 
 [[bundle.member]]
 kind = "skill"
+name = "hex-loop"
+id = "ghcr.io/michael-herwig/arcana/hex-loop:latest"
+
+[[bundle.member]]
+kind = "skill"
 name = "hex-plan"
 id = "ghcr.io/michael-herwig/arcana/hex-plan:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-retro"
+id = "ghcr.io/michael-herwig/arcana/hex-retro:latest"
 
 [[bundle.member]]
 kind = "skill"
@@ -247,7 +269,7 @@ id = "ghcr.io/michael-herwig/arcana/hex-state:latest"
 name = "nox"
 repo = "ghcr.io/michael-herwig/arcana/nox"
 tag = "latest"
-pinned = "ghcr.io/michael-herwig/arcana/nox@sha256:a3916576ba85fe68646c03a31b6bc45f781a73cfffc34ac8e6f8ef9175586674"
+pinned = "ghcr.io/michael-herwig/arcana/nox@sha256:e30deee69b61c29c6e215786900e13bdac50cd5210a9617362d35881f1087f6f"
 
 [[bundle.member]]
 kind = "skill"
