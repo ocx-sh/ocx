@@ -8,7 +8,7 @@
 - Updated: 2026-09-25
 - Next:    /hex-execute .claude/artifacts/plan_bazel_cargo_port.md
 - **Plan:** plan_bazel_cargo_port
-- **Active phase:** 1 — WP-1 schema genrule
+- **Active phase:** 2 — WP-2 clippy aspect + ratchet
 - **Step:** `/hex-execute → Stub`
 - **Last update:** 2026-09-25 (after 6f23c8364: chore: tick the PR 528 inclusion in the goal file)
 - **Branch:** `refactor/bazel-test-binary` (PR [ocx-sh/ocx#527](https://github.com/ocx-sh/ocx/pull/527))
@@ -374,7 +374,7 @@ They are accepted, and a follow-up covers them.
 
 | WP | Repo | Scope | Expected files | Size | Wave | Depends-on | Review | Verify | Status |
 |---|---|---|---|---|---|---|---|---|---|
-| WP-1 | ocx | C-001–C-004, S-001 | `crates/ocx_schema/BUILD.bazel`, `website/schema.taskfile.yml`, `.github/workflows/verify-deep.yml`, `.github/workflows/verify-basic.yml` / `deploy-website.yml` (only as C-004 requires), `.claude/rules/subsystem-taskfiles.md` (`:114,188`), `.claude/rules/subsystem-ci.md` (`:23`), `.claude/rules/subsystem-website.md` / `subsystem-metadata-schema.md` (only if they name cargo) | S | 1 | — | risk: CI workflow | scoped | pending |
+| WP-1 | ocx | C-001–C-004, S-001 | `crates/ocx_schema/BUILD.bazel`, `website/schema.taskfile.yml`, `.github/workflows/verify-deep.yml`, `.github/workflows/verify-basic.yml` / `deploy-website.yml` (only as C-004 requires), `.claude/rules/subsystem-taskfiles.md` (`:114,188`), `.claude/rules/subsystem-ci.md` (`:23`), `.claude/rules/subsystem-website.md` / `subsystem-metadata-schema.md` (only if they name cargo) | S | 1 | — | risk: CI workflow | scoped | merged |
 | WP-2 | ocx | C-010–C-018, S-002–S-004, S-007 | `.bazelrc`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `scripts/lint_ratchet.py`, `scripts/tests/test_lint_ratchet.py`, `clippy-warn-baseline.json`, `.github/workflows/verify-basic.yml`, `.claude/rules/subsystem-taskfiles.md`, `.claude/rules/subsystem-ci.md`, `.claude/rules/rust-cargo.md` | M | 2 | WP-1 | risk: CI workflow + gate semantics | scoped | pending |
 | WP-4 | ocx | C-030–C-035, S-006 | `crates/*/BUILD.bazel` (20), `crates/TEST_TARGET_MAP.toml`, `scripts/bazel_build_drift.py`, `scripts/bazel_gate_proofs.py`, `scripts/bazel_floor_proofs.py`, `scripts/bazel_test_floor.py`, `scripts/tests/test_bazel_test_floor.py`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `.github/workflows/verify-basic.yml`, `.claude/tests/test_workflows.py` (docstring), `.claude/rules/subsystem-taskfiles.md`, `.claude/rules/subsystem-ci.md` | M | 3 | WP-1, WP-2 | risk: floor/drift gate scripts | scoped | pending |
 | WP-3 | ocx | C-020–C-024, S-004 (rustdoc half), S-005 | new `.bzl` at repo root + `BUILD.bazel`, `.bazelrc`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `scripts/lint_ratchet.py`, `scripts/tests/test_lint_ratchet.py`, `rustdoc-warn-baseline.json`, `.github/workflows/verify-basic.yml`, `.claude/rules/subsystem-taskfiles.md` | M | 4 | WP-2, WP-4 | risk: private rules_rust API | scoped | pending |
@@ -520,3 +520,9 @@ replaced, and its baselines revert with it.
     contract-first inside the spawn (proof red before implementation green), then an opus `L1`
     reviewer. Reason: owner's short-loop directive; the red/green evidence is carried in the
     builder's report and grep-verified at `L0`.
+  - WP-1 landed. The seven schemas are byte-identical to cargo's output (`cmp`, all 7). `task --dry
+    verify` has 0 `cargo run -p ocx_schema` lines. `schema:generate` takes 0.68 s on a cache hit
+    against 1.94 s warm on cargo. The L1 review passed and its 3 Suggests are folded in: cquery
+    stderr is surfaced, the copy is staged then renamed, and the `test_workflows.py` message is
+    reworded. Deferred to PR CI: `smoke-acceptance` `timeout-minutes: 10` now covers a Bazel build
+    of the schema binary.

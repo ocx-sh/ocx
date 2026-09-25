@@ -912,7 +912,7 @@ def test_the_shell_zoo_runs_no_task_its_checkout_cannot_build() -> None:
             continue  # A job that checks the submodules out may build whatever it likes.
         assert not needs_cargo, (
             f"{SHELL_ACTIVATION.name}: job `{name}` checks out without submodules but runs "
-            f"test:{', test:'.join(needs_cargo)}, which reach `{SCHEMA_TASK}` and so run cargo "
+            f"test:{', test:'.join(needs_cargo)}, which reach `{SCHEMA_TASK}` and so build `//crates/ocx_schema:schemas` "
             f"against the `external/` patch sources that checkout did not fetch"
         )
 

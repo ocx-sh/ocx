@@ -2262,8 +2262,14 @@ def prove_build_action(scratch: Path, live: list[dict]) -> int:
         f"the live capture holds {len(genrules)} genrules, below the measured "
         f"{CAST_GENRULE_TARGETS} — this proof's subject is the real cast targets",
     )
-    victim = genrules[0]["rule"]["name"]
-    tags = frozenset(_attr(genrules[0], "tags").get("stringListValue", []))
+    # The first no-sandbox genrule, not the first genrule: an ordinary sandboxed
+    # genrule (`//crates/ocx_schema:schemas`) sorts ahead of the cast targets.
+    subject = next(
+        (r for r in genrules if NO_SANDBOX_TAG in _attr(r, "tags").get("stringListValue", [])),
+        genrules[0],
+    )
+    victim = subject["rule"]["name"]
+    tags = frozenset(_attr(subject, "tags").get("stringListValue", []))
     expect(
         NO_SANDBOX_TAG in tags and STAMP_ESCAPE_TAG in tags,
         f"{victim} carries {sorted(tags)} — this proof assumed a no-sandbox build action "

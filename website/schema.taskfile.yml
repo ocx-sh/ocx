@@ -2,24 +2,9 @@
 
 version: '3'
 
-x-shared:
-  # Globbed, not enumerated: ocx_schema's dependency closure is 19 of the 20
-  # workspace members, so a hand-written list is a table that goes stale at the
-  # next extraction, while the glob costs exactly one crate of spurious cache
-  # misses (ocx_shim, the only member outside the closure).
-  schema-sources: &schema-sources
-    - '{{.ROOT_DIR}}/crates/*/src/**/*.rs'
-    - '{{.ROOT_DIR}}/crates/*/build.rs'
-    - '{{.ROOT_DIR}}/Cargo.lock'
-
 vars:
-  METADATA_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/metadata"
-  CONFIG_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/config"
-  PROJECT_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/project"
-  PROJECT_LOCK_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/project-lock"
-  PATCH_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/patch"
-  REPORTS_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/reports"
-  EXECUTION_RECORD_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/execution-record"
+  SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas"
+  SCHEMA_TARGET: //crates/ocx_schema:schemas
   # Vendored upstream specs the borrowed-vocabulary conformance test reads.
   # Provenance, pins and checksums live in that directory's SOURCES.md.
   SPECS_DIR: "{{.ROOT_DIR}}/crates/ocx_schema/tests/specs"
@@ -28,53 +13,68 @@ vars:
 
 tasks:
   generate:
-    desc: Generate JSON Schema for metadata.json
-    sources: *schema-sources
+    desc: >-
+      Generate every published JSON Schema (metadata, config, project,
+      project-lock, patch, reports, execution-record) from the Bazel genrule
+      //crates/ocx_schema:schemas into src/public/schemas/<kind>/.
+    # No `sources:` fingerprint: Bazel is the cache, and a cache hit costs one
+    # analysis. The repository root, because `ocx exec` resolves `bazel` from
+    # the nearest `ocx.toml`.
+    dir: '{{.ROOT_DIR}}'
+    vars:
+      # The CI cache credential, derived exactly as `test:.build-binaries`
+      # derives it: a startup option, present only when the file exists.
+      CACHE_RC:
+        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
-      - mkdir -p {{.METADATA_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- metadata > {{.METADATA_SCHEMA_DIR}}/v1.json.new && mv {{.METADATA_SCHEMA_DIR}}/v1.json.new {{.METADATA_SCHEMA_DIR}}/v1.json
-
-  generate-config:
-    desc: Generate JSON Schema for config.toml
-    sources: *schema-sources
-    cmds:
-      - mkdir -p {{.CONFIG_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- config > {{.CONFIG_SCHEMA_DIR}}/v1.json.new && mv {{.CONFIG_SCHEMA_DIR}}/v1.json.new {{.CONFIG_SCHEMA_DIR}}/v1.json
-
-  generate-project:
-    desc: Generate JSON Schema for ocx.toml
-    sources: *schema-sources
-    cmds:
-      - mkdir -p {{.PROJECT_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- project > {{.PROJECT_SCHEMA_DIR}}/v1.json.new && mv {{.PROJECT_SCHEMA_DIR}}/v1.json.new {{.PROJECT_SCHEMA_DIR}}/v1.json
-
-  generate-project-lock:
-    desc: Generate JSON Schema for ocx.lock
-    sources: *schema-sources
-    cmds:
-      - mkdir -p {{.PROJECT_LOCK_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- project-lock > {{.PROJECT_LOCK_SCHEMA_DIR}}/v3.json.new && mv {{.PROJECT_LOCK_SCHEMA_DIR}}/v3.json.new {{.PROJECT_LOCK_SCHEMA_DIR}}/v3.json
-
-  generate-patch:
-    desc: Generate JSON Schema for patch descriptor files (ocx patch publish --descriptor)
-    sources: *schema-sources
-    cmds:
-      - mkdir -p {{.PATCH_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- patch > {{.PATCH_SCHEMA_DIR}}/v1.json.new && mv {{.PATCH_SCHEMA_DIR}}/v1.json.new {{.PATCH_SCHEMA_DIR}}/v1.json
-
-  generate-reports:
-    desc: Generate the JSON Schema for every --format json report
-    sources: *schema-sources
-    cmds:
-      - mkdir -p {{.REPORTS_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- reports > {{.REPORTS_SCHEMA_DIR}}/v1.json.new && mv {{.REPORTS_SCHEMA_DIR}}/v1.json.new {{.REPORTS_SCHEMA_DIR}}/v1.json
-
-  generate-execution-record:
-    desc: Generate JSON Schema for execution records (ocx exec / package exec / launcher exec / launcher shim)
-    sources: *schema-sources
-    cmds:
-      - mkdir -p {{.EXECUTION_RECORD_SCHEMA_DIR}}
-      - cargo run -p ocx_schema --release -- execution-record > {{.EXECUTION_RECORD_SCHEMA_DIR}}/v1.json.new && mv {{.EXECUTION_RECORD_SCHEMA_DIR}}/v1.json.new {{.EXECUTION_RECORD_SCHEMA_DIR}}/v1.json
+      # A nested `task`, not `task: :bazel:bootstrap`: this file is included at
+      # two depths (root `schema:` and `website:schema:`), and go-task resolves
+      # a leading `:` one namespace up rather than at the root — from
+      # `website:schema:` it names `website:bazel:bootstrap`, which does not
+      # exist (measured on go-task 3.53.1).
+      - task -d '{{.ROOT_DIR}}' bazel:bootstrap
+      - ocx exec bazel -- bazel {{.CACHE_RC}} build {{.SCHEMA_TARGET}}
+      # Output paths from `cquery --output=files`, never a spelled `bazel-bin/`
+      # path (that symlink follows whichever configuration built last). The
+      # whole set is checked before any file is written, so a target that
+      # stopped producing exactly the seven schemas publishes nothing. Copy
+      # beside, reset the mode (Bazel outputs are read-only and executable),
+      # then rename.
+      - cmd: |
+          set -eu
+          expected='config/v1.json
+          execution-record/v1.json
+          metadata/v1.json
+          patch/v1.json
+          project-lock/v3.json
+          project/v1.json
+          reports/v1.json'
+          expected=$(printf '%s\n' "$expected" | sort)
+          err=$(mktemp)
+          trap 'rm -f "$err" "{{.SCHEMA_DIR}}"/*/*.new' EXIT
+          files=$(ocx exec bazel -- bazel {{.CACHE_RC}} cquery --output=files {{.SCHEMA_TARGET}} 2>"$err") || {
+            echo "schema:generate: cquery failed; nothing written" >&2; cat "$err" >&2; exit 1; }
+          got=$(printf '%s\n' "$files" | sed -n 's|^.*/bin/crates/ocx_schema/schemas/||p' | sort)
+          count=$(printf '%s\n' "$files" | wc -l)
+          if [ "$got" != "$expected" ] || [ "$count" -ne 7 ]; then
+            echo "schema:generate: {{.SCHEMA_TARGET}} does not report exactly the 7 schemas; nothing written. cquery reported:" >&2
+            printf '%s\n' "$files" >&2
+            exit 1
+          fi
+          for src in $files; do
+            [ -f "$src" ] || { echo "schema:generate: bazel reports $src, which is not a file" >&2; exit 1; }
+          done
+          # Stage all seven before renaming any, so a failed copy publishes nothing.
+          for src in $files; do
+            dst="{{.SCHEMA_DIR}}/${src##*/bin/crates/ocx_schema/schemas/}"
+            mkdir -p "$(dirname "$dst")"
+            cp "$src" "$dst.new"
+            chmod 0644 "$dst.new"
+          done
+          for src in $files; do
+            dst="{{.SCHEMA_DIR}}/${src##*/bin/crates/ocx_schema/schemas/}"
+            mv "$dst.new" "$dst"
+          done
 
   specs:refresh:
     desc: >-
@@ -164,9 +164,3 @@ tasks:
     desc: Generate all schemas
     cmds:
       - task: generate
-      - task: generate-config
-      - task: generate-project
-      - task: generate-project-lock
-      - task: generate-patch
-      - task: generate-reports
-      - task: generate-execution-record

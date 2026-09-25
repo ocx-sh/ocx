@@ -511,7 +511,9 @@ jobs:
         run: task rust:test:doc
       # Kept as a check that the generator runs; nothing in this workflow
       # consumes the output any more (the schema tests are outside the smoke
-      # tier, and `verify-deep.yml`'s acceptance job ships its own).
+      # tier, and `verify-deep.yml`'s acceptance job ships its own). It is the
+      # `//crates/ocx_schema:schemas` genrule, so it sits inside the credential
+      # window above and reads the shared cache like the gates do.
       - name: Generate Schema
         run: task schema:generate
       # `Publish Unit Test Results` and `Push unit test timings` stood here and
@@ -622,12 +624,30 @@ jobs:
           # Default-off for the reason the workflow-lint job states: a restored
           # object store is runner-executable content.
           cache: false
+      # `task test:smoke` reaches `test:build`, whose `:website:schema:default`
+      # is a Bazel build of `//crates/ocx_schema:schemas`, so this job carries
+      # the `smoke` job's Bazel setup: the read credential (never the write
+      # one, on any trigger — this job uploads nothing) and lld, for the reason
+      # the `smoke` job's `Install lld` gives. The artifact download above
+      # covers `ocx` only.
+      - name: Bazel cache credential
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+      - name: Install lld
+        run: sudo apt-get update && sudo apt-get install -y lld
       - name: Run Smoke Tier
         # The JUnit report is not asked for here any more: the task writes
         # `test/results/junit-smoke.xml` on every run, local ones included, so
         # one flag in one place (test/taskfile.yml `SMOKE_JUNIT_XML`) feeds
         # both the check below and the timings a developer's run pushes.
         run: task test:smoke
+      # C-015's caller half, as in the `smoke` job.
+      - name: Remove the Bazel cache credential
+        if: always()
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          cleanup: 'true'
       - name: Publish Smoke Results
         if: ${{ !cancelled() }}
         uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
