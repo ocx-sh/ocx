@@ -697,6 +697,19 @@ tasks:
     # toolchain accident rather than a property of this repository.
     cmd: cargo nextest run -p ocx_test_support --test workspace_structure --release --locked --no-tests=fail deps_direction
 
+  test:workspace-structure:
+    desc: Every workspace-structure guard, including the ones `bazel:test:unit` skips
+    summary: |
+      Runs all of crates/ocx_test_support/tests/workspace_structure.rs under
+      nextest. The Bazel target `--skip`s 23 of its cases because they walk
+      `crates/*/src` of crates it does not depend on (see that BUILD file), so
+      on Linux this step is the only thing in `task verify` that runs them —
+      the ocx_util consumer scan, deps_direction, the SSRF and mint ratchets.
+      Without it they ran on verify-deep's macOS and Windows legs alone.
+    deps:
+      - install:nextest
+    cmd: cargo nextest run -p ocx_test_support --test workspace_structure --locked --no-tests=fail
+
   test:loop-guard:
     desc: No test holds a loop whose body can neither fail nor be observed
     summary: |
@@ -708,8 +721,8 @@ tasks:
       the keyword — the shape WP-10's in-place strip left behind thirteen
       times, which compiled and passed.
 
-      Reachable without this entry (`test:unit` runs the whole workspace and
-      the `verify:scoped` manifest route runs this target), so it gates
+      Reachable without this entry (`test:workspace-structure` runs the whole
+      target in `task verify`, and so does the `verify:scoped` manifest route), so it gates
       nothing on its own; it exists because the crate-split batches want the
       guard alone, in seconds, between moves.
     deps:

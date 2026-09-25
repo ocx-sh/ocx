@@ -666,6 +666,11 @@ _BUILD_TEST_ELSEWHERE = {
     # deliberately not the home for it — that workflow is the fast PR gate and
     # the acceptance suite is the deep one's long half.
     "bazel:test:accept": ("verify-deep.yml", "task bazel:test:accept"),
+    # The workspace_structure cases the Bazel target skips. The deep workflow's
+    # macOS and Windows legs run the whole workspace under nextest, these
+    # included — which is where the uncovered ocx_util `pub` that added this
+    # step to `task verify` went red.
+    "rust:test:workspace-structure": ("verify-deep.yml", "cargo nextest run --workspace"),
 }
 
 
