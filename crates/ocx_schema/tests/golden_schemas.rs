@@ -3,8 +3,8 @@
 
 //! The seven published schemas are pinned byte-for-byte to committed goldens.
 //!
-//! `website/schema.taskfile.yml` writes each kind with
-//! `cargo run -p ocx_schema --release -- <kind> > …/v1.json`; this test runs
+//! `website/schema.taskfile.yml` writes each kind through the
+//! `//crates/ocx_schema:schemas` Bazel genrule (`task schema:generate`); this test runs
 //! the same [`ocx_schema::schema_for`] in-process and compares the bytes to
 //! `tests/golden/<kind>.json`. Anything that changes the output — a field, a
 //! `$defs` key, `$defs` *order* (schemars registers definitions in the order

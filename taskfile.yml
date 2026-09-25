@@ -193,7 +193,7 @@ tasks:
                    would catch a `[features]` edit that breaks the build
                    (D40)
         scoped   → the routed checks, cargo check --workspace, per changed
-                   crate clippy and doc tests, one bazel:test:unit (cached, so
+                   crate clippy, one bazel:test:unit (cached, so
                    it executes the changed crates' reverse dependents and
                    serves the rest), the workspace rust:doc:ratchet, then
                    test:smoke and test:scoped over the plan's acceptance_globs
@@ -202,7 +202,7 @@ tasks:
                    lanes (`.verify:scoped:lanes`): the lint tier and the
                    Bazel unit run (`--jobs=4`) beside one cargo lane that
                    builds the acceptance binaries first, then runs the
-                   pytest legs beside check, clippy and doc tests — one
+                   pytest legs beside check and clippy — one
                    cargo compile at a time; the doc ratchet follows the unit
                    run in the Bazel lane at the same `--jobs=4`, so the arm
                    peaks at 12 + 4 compiler jobs
@@ -337,7 +337,7 @@ tasks:
     internal: true
     desc: The scoped arm's Bazel lane — the unit run, then the doc ratchet, each at --jobs=4
     # One after the other: the Bazel server runs one command at a time, and
-    # the doc ratchet reads the rmetas the unit run just built. Workspace-wide
+    # the doc ratchet reads the rlibs the unit run just built. Workspace-wide
     # rather than per-crate because the baseline is keyed by file and a
     # partial stream reads as a decrease; cached, so it costs what changed.
     # ponytail: a fixed 4 — derive it from cargo's `jobs` if that cap moves.
