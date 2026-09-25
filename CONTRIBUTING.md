@@ -75,7 +75,7 @@ suite's test packages.
 
 ```sh
 cargo fmt              # format (max_width=120, see rustfmt.toml)
-cargo clippy --workspace
+task rust:clippy:check # Bazel clippy aspect, ratcheted against clippy-warn-baseline.json (Linux only)
 ```
 
 Format before every commit. CI enforces both.

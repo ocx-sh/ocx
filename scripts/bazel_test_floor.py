@@ -177,7 +177,7 @@ PASSING_STATUS = frozenset({"PASSED", "FLAKY"})
 #: bazel 9.2.0, which spells a `rust_test` as `rust_test rule`. The skip ceiling
 #: leaves these targets out (plan_bazel_cargo_port.md C-034): an `ignore` fence is
 #: documentation that rustdoc reports as `ignored`, not a `#[ignore]`d test or a
-#: `--skip` filter, which are what `crates/NEXTEST_SKIP_CEILING` bounds. The set of
+#: `--skip` filter, which are what `crates/NEXTEST_SKIP_CEILING` bounds. The
 #: standing guard against a doctest going quiet is the per-target `executed`
 #: floor above: turning a runnable doctest into an `ignore` fence drops
 #: `executed`, which `floor_findings` catches like any other shrink. C-031 was

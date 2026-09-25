@@ -271,7 +271,7 @@ tasks:
             --build_event_json_file='{{.BEP}}' || status=$?
           if [ "$status" -ne 0 ]; then
             echo "rustdoc: bazel build failed (compile, loading or fetch error), exit $status — lints are capped at warn, so no lint fails it; the ratchet does not read a partial build event stream" >&2
-            echo "rustdoc: a failed RustdocDiagnostics action shows only its exit code — its stderr went to the <crate>.rustdoc.diagnostics file. For the error text run: cargo doc -p <crate> --no-deps --locked" >&2
+            echo "rustdoc: unless the log above names crate_features, a failed RustdocDiagnostics action shows only its exit code — its stderr went to the <crate>.rustdoc.diagnostics file. For the error text run: cargo doc -p <crate> --no-deps --locked" >&2
             exit "$status"
           fi
           if [ ! -s '{{.BEP}}' ]; then
