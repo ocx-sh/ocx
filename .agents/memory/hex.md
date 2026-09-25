@@ -103,6 +103,10 @@ research-axes:
 
 ## Memory
 
+- **Active plan (goat, 2026-09-25): `.claude/artifacts/plan_bazel_cargo_port.md`** — port the
+  remaining `task verify` cargo compiles (schema, clippy, doc ratchet, doctests) to cached Bazel
+  actions on `refactor/bazel-test-binary` (PR [ocx-sh/ocx#527](https://github.com/ocx-sh/ocx/pull/527)).
+  `/hex-execute` high, 4 serial WPs run in place on the branch; pointer in `.claude/state/current_plan.md`.
 - **Plan `plan_test_speed_tiers.md` executed 2026-09-22…24 (goat checkout, `hex/test-speed-tiers`)** —
   14 WPs merged, `State: review`, `Next: /hex-review`. Lessons: (1) a *resumed* subagent's final
   report is delivered to the session lead, not to the sub-orchestrator that resumed it — ask every
