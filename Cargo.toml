@@ -10,7 +10,7 @@ members = ["crates/*"]
 exclude = ["external/rust-oci-client", "external/docker_credential", "external/sigstore-rs"]
 
 [workspace.package]
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 # Equal to rust-toolchain.toml's channel by policy (rust-cargo.md TOOL-02):
 # this project ships binaries, so the floor is the pinned compiler.

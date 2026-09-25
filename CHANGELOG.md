@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-09-25
+
+### Added
+
+- Ocx package exec --rm removes the package once the command finishes *(exec)*
+- The local index drops the dispatch objects a moved pin abandoned, on every update *(index)*
+- Announce refuses a root whose name disagrees with the identifier on the command line *(announce)* **BREAKING**
+- Ocx update reports which bindings moved, with -v for the unchanged rows and the list on --check *(update)* **BREAKING**
+- Every announce removes the index objects the new root no longer references, description blobs included *(announce)*
+- Claiming an already-claimed package adds the caller's owners instead of exiting 65 *(claim)* **BREAKING**
+- A claim writes the package description the registry serves, and a re-claim refreshes it *(claim)*
+- --env NAME with no value passes the invoking shell's NAME through to the child, including under --clean *(exec)*
+- Drive the unit suite and six graph gates from task *(bazel)*
+- Export Bazel build events to otel.ocx.sh as OTLP traces *(telemetry)*
+- Run the acceptance suite as cached Bazel targets in verify and CI *(bazel)*
+- Expose PUSH_CHUNK_SIZE, REGISTRY_CONNECT_TIMEOUT and default_threads *(oci,util)*
+- Add ocx_python ecosystem crate (PEP 751 lock translation) *(python)*
+- Promote the global --format/--json options into ocx_console *(console)*
+- Tiered verification with cached concurrent acceptance targets *(test)*
+
+### Changed
+
+- Dissolve ocx_lib into 17 responsibility-derived crates **BREAKING**
+- The workspace structure guards read the tree once, not ten times *(test)*
+- The forge commit payload can express a file deletion *(announce)*
+- Ocx.toml and ocx.lock are published by one rename helper, so both carry the same crash and Windows semantics *(project)*
+- The disk-touching add_binding/remove_binding are gone; tests drive the MutationGuard path *(project)*
+- Announce and claim build their SSRF-guarded publisher through one Context helper *(cli)*
+- Read registries only where the index routes a name, refusing names the index does not hold (exit 79) *(oci)* **BREAKING**
+- Rename the package identifier types to PackageRef and PinnedPackageRef
+
+### Documentation
+
+- Name the 1 MB single-line ceiling on the JUnit report telemetry reads *(ci)*
+- No span carries the count a telemetry run could be checked against *(ci)*
+- Describe the #477–#494 batch — re-claim, claim descriptions, self-cleaning index, update report, exec --rm, ocx.toml rename-publish
+- Tell a contributor how the second build graph works *(bazel)*
+- Describe Bazel as the clippy, rustdoc, doctest and schema path *(contributing)*
+
+### Fixed
+
+- Acceptance runs stop stealing the terminal and clear their own leftovers *(test)*
+- The suite refuses a registry that answers reads and fails writes *(test)*
+- The acceptance suite generates the schemas it reads *(test)*
+- Every test of a run reaches Tempo, not the 31% two OTel defaults allowed *(ci)*
+- The index drift gate follows the fixture that moved crates *(test)*
+- A test/ file a taskfile runs is tooling, not a frozen asset *(test)*
+- The dead-path sweep does not judge vendored upstream data *(test)*
+- The walk floors are pub(crate), not pub *(test)*
+- The duration budget is hard on CI and advisory on a shared machine *(test)*
+- The shell zoo builds only the binary it mounts, not the schemas *(test)*
+- A concurrent reader of the docker config never sees a torn file *(auth)*
+- The docker config write is atomic on Windows too, not only on Unix *(auth)*
+- Ocx.toml is published by rename, so a concurrent reader never sees a torn manifest *(project)*
+- --refresh on a claimed, unreleased package refreshes the description instead of exiting 64 *(announce)*
+- Adding a binding that is already in ocx.toml is a no-op instead of exit 64, and re-locks or re-pulls what is missing *(add)*
+- The project walk no longer adopts $OCX_HOME/ocx.toml as a project *(config)*
+- A --clean child lands in the same OCX_HOME its parent resolved, so entrypoint launchers re-enter the right home *(exec)*
+- A partially failed local refresh still sweeps the dispatch objects its committed pins abandoned *(index)*
+- OCX_NO_PROJECT, OCX_DEFAULT_REGISTRY, OCX_INSECURE_REGISTRIES and OCX_NO_CONFIG_REFRESH reach every child ocx, --clean included *(env)*
+- Publish unit-test results to the pull request again, named per test *(ci)*
+- Keep an index-routed base on its package name during slug recovery *(patch)*
+- Verify dependency pins at the registry the index routes them to *(package)*
+- A closed stdout no longer panics while printing the JSON error envelope *(cli)*
+- Route description pull, description push --from, package copy source and package test layers through the index
+- Resolve a copied or provenance-checked version through its index before reading it *(package)*
+- Refuse an index-owned name with no recorded location under --offline (exit 81) only when it must be fetched
+- Keep the `--` separator when calling ocx through the PowerShell integration *(shell)*
+- Detect compressors by magic, decode every gzip/xz member *(compression)*
+
 ## [0.6.2] - 2026-09-15
 
 ### Added
@@ -62,6 +132,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Help text and project errors name bindings, packages and binaries instead of "tool" *(cli)*
 - Error::InternalFile's message names its io cause, so every `to_string()` reason and warn line says why a file operation failed *(error)*
 - `ocx self activate` says why it refused an undetectable shell instead of exiting 64 in silence *(cli)*
+
+### Release
+
+- V0.6.2
 
 ## [0.6.1] - 2026-09-08
 
@@ -1126,6 +1200,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.6.3]: https://github.com/ocx-sh/ocx/compare/v0.6.2..v0.6.3
 [0.6.2]: https://github.com/ocx-sh/ocx/compare/v0.6.1..v0.6.2
 [0.6.1]: https://github.com/ocx-sh/ocx/compare/v0.6.0..v0.6.1
 [0.6.0]: https://github.com/ocx-sh/ocx/compare/v0.5.8..v0.6.0
