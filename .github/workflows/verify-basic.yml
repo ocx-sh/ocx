@@ -191,10 +191,6 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Lint tier
         run: task test:lint:structure
-      - name: Doc ratchet
-        id: docratchet
-        run: task rust:doc:ratchet
-        continue-on-error: true
       # The C-021 parity matrix drives all nine hook shells, but no runner image
       # carries elvish, nushell or fish — and an arm that never runs is a green
       # indistinguishable from an absent test (#349). ocx packages all three, so
@@ -382,6 +378,13 @@ jobs:
       - name: Clippy
         id: clippy
         run: task rust:clippy:check
+        continue-on-error: true
+      # rustdoc over //crates/... as `.bazelrc`'s second aspect, ratcheted
+      # against rustdoc-warn-baseline.json off this run's build event stream —
+      # a Bazel build like Clippy, so here beside it for the same reasons.
+      - name: Doc ratchet
+        id: docratchet
+        run: task rust:doc:ratchet
         continue-on-error: true
       # The acceptance binary, built where a later job needs it:
       # `smoke-acceptance` below `needs: smoke` and downloads `ocx-binary`, so

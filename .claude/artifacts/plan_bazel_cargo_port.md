@@ -8,7 +8,7 @@
 - Updated: 2026-09-25
 - Next:    /hex-execute .claude/artifacts/plan_bazel_cargo_port.md
 - **Plan:** plan_bazel_cargo_port
-- **Active phase:** 4 — WP-3 rustdoc ratchet aspect (spike)
+- **Active phase:** 5 — final verify
 - **Step:** `/hex-execute → Stub`
 - **Last update:** 2026-09-25 (after 6f23c8364: chore: tick the PR 528 inclusion in the goal file)
 - **Branch:** `refactor/bazel-test-binary` (PR [ocx-sh/ocx#527](https://github.com/ocx-sh/ocx/pull/527))
@@ -377,7 +377,7 @@ They are accepted, and a follow-up covers them.
 | WP-1 | ocx | C-001–C-004, S-001 | `crates/ocx_schema/BUILD.bazel`, `website/schema.taskfile.yml`, `.github/workflows/verify-deep.yml`, `.github/workflows/verify-basic.yml` / `deploy-website.yml` (only as C-004 requires), `.claude/rules/subsystem-taskfiles.md` (`:114,188`), `.claude/rules/subsystem-ci.md` (`:23`), `.claude/rules/subsystem-website.md` / `subsystem-metadata-schema.md` (only if they name cargo) | S | 1 | — | risk: CI workflow | scoped | merged |
 | WP-2 | ocx | C-010–C-018, S-002–S-004, S-007 | `.bazelrc`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `scripts/lint_ratchet.py`, `scripts/tests/test_lint_ratchet.py`, `clippy-warn-baseline.json`, `.github/workflows/verify-basic.yml`, `.claude/rules/subsystem-taskfiles.md`, `.claude/rules/subsystem-ci.md`, `.claude/rules/rust-cargo.md` | M | 2 | WP-1 | risk: CI workflow + gate semantics | scoped | merged |
 | WP-4 | ocx | C-030–C-035, S-006 | `crates/*/BUILD.bazel` (20), `crates/TEST_TARGET_MAP.toml`, `scripts/bazel_build_drift.py`, `scripts/bazel_gate_proofs.py`, `scripts/bazel_floor_proofs.py`, `scripts/bazel_test_floor.py`, `scripts/tests/test_bazel_test_floor.py`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `.github/workflows/verify-basic.yml`, `.claude/tests/test_workflows.py` (docstring), `.claude/rules/subsystem-taskfiles.md`, `.claude/rules/subsystem-ci.md` | M | 3 | WP-1, WP-2 | risk: floor/drift gate scripts | scoped | merged |
-| WP-3 | ocx | C-020–C-024, S-004 (rustdoc half), S-005 | new `.bzl` at repo root + `BUILD.bazel`, `.bazelrc`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `scripts/lint_ratchet.py`, `scripts/tests/test_lint_ratchet.py`, `rustdoc-warn-baseline.json`, `.github/workflows/verify-basic.yml`, `.claude/rules/subsystem-taskfiles.md` | M | 4 | WP-2, WP-4 | risk: private rules_rust API | scoped | pending |
+| WP-3 | ocx | C-020–C-024, S-004 (rustdoc half), S-005 | new `.bzl` at repo root + `BUILD.bazel`, `.bazelrc`, `taskfiles/rust.taskfile.yml`, `taskfile.yml`, `scripts/lint_ratchet.py`, `scripts/tests/test_lint_ratchet.py`, `rustdoc-warn-baseline.json`, `.github/workflows/verify-basic.yml`, `.claude/rules/subsystem-taskfiles.md` | M | 4 | WP-2, WP-4 | risk: private rules_rust API | scoped | merged |
 
 ```mermaid
 graph TD
@@ -554,3 +554,20 @@ replaced, and its baselines revert with it.
     green. The target floors rose to 78, 82, 169 and 357.
   - Deferred to the owner: the vendored `rust-quality` rules DOC-08 and TEST-22 still require a
     `cargo test --doc` step. Either upstream a `rust_doc_test` clause or record a local waiver.
+  - WP-3 spike passed on `ocx_util` in 8 minutes, inside the 2 h gate, so WP-3 was implemented in
+    full.
+  - C-022: cargo and Bazel key sets match in both directions, 147 keys and 314 diagnostics. The
+    baseline lost two stale entries (`ocx_index.rs` 2→1, `version_spec.rs` 3→0), and cargo agrees
+    with both.
+  - C-023: the second run was `1 process: 1 internal`, 0.46 s. Before the port, cargo took 70 s
+    cold and 2 s warm.
+  - C-024: a broken intra-doc link produced the red key `crate::rustdoc::broken_intra_doc_links`;
+    removing it went green.
+  - The L1 review folded in four fixes:
+    - The aspect fails at analysis on any `crate_features` other than `__testing` and
+      `__test_scaffolding`, because it cannot pass features to rustdoc. This was shown red and green.
+    - The `name` attribute comment is corrected. Aquery shows `CARGO_PKG_NAME=ocx_util`, taken from
+      `crate_info.rustc_env`.
+    - A bazel failure now names `cargo doc -p <crate> --no-deps` as the way to read the swallowed
+      stderr.
+    - The scoped-lane prose is corrected.

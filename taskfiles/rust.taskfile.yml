@@ -227,7 +227,7 @@ tasks:
           python3 {{.ROOT_DIR}}/scripts/lint_ratchet.py --by-file --bep '{{.BEP}}' {{.CLI_ARGS | default "--check"}}
 
   doc:ratchet:
-    desc: Ratchet the rustdoc backlog against rustdoc-warn-baseline.json, per (file, lint code)
+    desc: rustdoc over //crates/... as one cached Bazel aspect pass, ratcheted against rustdoc-warn-baseline.json
     summary: |
       Replaces the per-crate `-D rustdoc::broken_intra_doc_links` run this
       task used to be. That run denied a lint the workspace has a 400-entry
@@ -236,33 +236,51 @@ tasks:
       it, which is how WP-10 shipped 21 new broken links past a gate that
       exists to catch exactly that.
 
-      `cargo doc --message-format=json` emits the same `compiler-message`
-      records clippy does, so scripts/lint_ratchet.py consumes this stream
-      unchanged. `--by-file` keys each entry `<file>::<code>`: a bare per-code
-      count stays flat when one link is fixed and another appears, and across
-      a crate split that is the common case. A decrease is committed with
-      `-- --update`; a file move reds until it is.
+      `rustdoc_diagnostics_aspect` (`rustdoc_diagnostics.bzl`, registered on
+      `.bazelrc`'s bare `build` beside the clippy aspect) runs rustdoc on every
+      non-test crate with `cargo doc --no-deps`'s flags, JSON error format and
+      `--cap-lints=warn` — `[workspace.lints] warnings = "deny"` would
+      otherwise fail the action and leave no file — and writes its stderr to
+      `<name>.rustdoc.diagnostics`, a cached action output: a second run
+      executes no rustdoc action at all. `--by-file` keys each entry
+      `<file>::<code>`: a bare per-code count stays flat when one link is
+      fixed and another appears. The baseline may only hold `rustdoc::` codes
+      (C-018). A decrease is committed with `-- --update`; a file move reds
+      until it is.
 
-      `RUSTDOCFLAGS=--cap-lints warn` for the reason the clippy aspect caps
-      at warn (`clippy:check`): `[workspace.lints] warnings = "deny"` reaches
-      rustdoc too, and without the cap the walk aborts at the first crate
-      with a backlog and the stream describes nothing after it.
-
-      No `sources:`, for the reason `test:lint` gives: a fingerprint-cached
-      gate reports the verdict of an earlier run. Its own CARGO_TARGET_DIR
-      (target/docratchet) keeps the trailing rustdoc flags out of the
-      fingerprint the other cargo tasks share. Linux only, like clippy:check:
-      cfg-gated code makes the counts platform-dependent.
+      Stream handling is `clippy:check`'s, and for its reasons. Linux only,
+      like clippy:check: cfg-gated code makes the counts platform-dependent.
+      No `sources:` — Bazel is the cache, and a fingerprint-cached verdict is
+      the last tree's.
+    dir: '{{.ROOT_DIR}}'
     platforms: [linux]
+    vars:
+      BEP_DIR:
+        sh: mktemp -d -t ocx-rustdoc-bep.XXXXXXXX
+      BEP: '{{.BEP_DIR}}/rustdoc-bep.json'
+      CACHE_RC:
+        sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
     cmds:
-      - >-
-        set -o pipefail;
-        RUSTDOCFLAGS='--cap-lints warn'
-        CARGO_TARGET_DIR='{{.ROOT_DIR}}/target/docratchet'
-        cargo doc --workspace --no-deps --locked --message-format=json
-        | python3 {{.ROOT_DIR}}/scripts/lint_ratchet.py --by-file
-        --baseline '{{.ROOT_DIR}}/rustdoc-warn-baseline.json'
-        {{.CLI_ARGS | default "--check"}}
+      - defer: rm -rf '{{.BEP_DIR}}'
+      - task: :bazel:bep:mode
+        vars: {DIR: '{{.BEP_DIR}}'}
+      - task: :bazel:bootstrap
+      - cmd: |
+          status=0
+          ocx exec bazel -- bazel {{.CACHE_RC}} build {{.BAZEL_ARGS | default ""}} //crates/... --output_groups=rustdoc_diagnostics \
+            --build_event_json_file='{{.BEP}}' || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "rustdoc: bazel build failed (compile, loading or fetch error), exit $status — lints are capped at warn, so no lint fails it; the ratchet does not read a partial build event stream" >&2
+            echo "rustdoc: a failed RustdocDiagnostics action shows only its exit code — its stderr went to the <crate>.rustdoc.diagnostics file. For the error text run: cargo doc -p <crate> --no-deps --locked" >&2
+            exit "$status"
+          fi
+          if [ ! -s '{{.BEP}}' ]; then
+            echo 'rustdoc: --build_event_json_file wrote nothing to {{.BEP}}, so the ratchet has no subject and would read a clean tree. Restore the flag on the build above.' >&2
+            exit 1
+          fi
+          chmod 600 '{{.BEP}}'
+          python3 {{.ROOT_DIR}}/scripts/lint_ratchet.py --by-file --baseline '{{.ROOT_DIR}}/rustdoc-warn-baseline.json' \
+            --suffix .rustdoc.diagnostics --allow-codes 'rustdoc::' --bep '{{.BEP}}' {{.CLI_ARGS | default "--check"}}
 
   clippy:fix:
     desc: Auto-fix clippy warnings

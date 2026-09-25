@@ -112,8 +112,9 @@ tasks:
         scripts:suite-census, scripts:dead-path-sweep, rust:clippy:check
         (one cached Bazel clippy pass over //crates/..., ratcheted per file
         against clippy-warn-baseline.json — it is a build, so it runs here
-        rather than beside phase 1's other checks), rust:doc:ratchet,
-        rust:build,
+        rather than beside phase 1's other checks), rust:doc:ratchet (the
+        same shape for rustdoc: one cached Bazel aspect pass, ratcheted per
+        file against rustdoc-warn-baseline.json), rust:build,
         bazel:build:nobuild, then bazel:build:drift and bazel:tag:guard,
         which read the graph that step proves loadable, then bazel:lint
         (buildifier over every BUILD/.bzl file) and bazel:mod:check
@@ -201,9 +202,10 @@ tasks:
                    lanes (`.verify:scoped:lanes`): the lint tier and the
                    Bazel unit run (`--jobs=4`) beside one cargo lane that
                    builds the acceptance binaries first, then runs the
-                   pytest legs beside check, clippy, doc tests and the doc
-                   ratchet — one cargo compile at a time, so the arm peaks
-                   at 12 + 4 compiler jobs
+                   pytest legs beside check, clippy and doc tests — one
+                   cargo compile at a time; the doc ratchet follows the unit
+                   run in the Bazel lane at the same `--jobs=4`, so the arm
+                   peaks at 12 + 4 compiler jobs
       Ends with a *scoped* mark: the pre-commit hook accepts it for ordinary
       commits, never for a `release:` commit, a commit on main or a merge
       commit (those need `task verify`). The run's selection is appended to
@@ -303,10 +305,11 @@ tasks:
     # Compiler jobs are a RAM cap on this host, not a speed knob
     # (`.cargo/config.toml`, `.bazelrc`: 12 each). Two compiling lanes are the
     # most this task runs at once: the cargo lane — one cargo invocation at a
-    # time, 12 jobs — and the Bazel lane at 4. The doc ratchet used to be a
-    # third lane with its own target dir, which put three 12-job compilers on
-    # the host together (review-3 finding 3); it is the cargo lane's last
-    # check now.
+    # time, 12 jobs — and the Bazel lane at 4. The doc ratchet is a Bazel
+    # build now, so it runs in the Bazel lane after the unit run, under the
+    # same cap. The Bazel lane is sequential within itself, but not the only
+    # Bazel caller: the cargo lane's `test:build` runs `bazel build` for the
+    # acceptance binaries, and the two queue on the Bazel server's lock.
     deps:
       # Uncached and cheap; a sweep over the tree is exactly what a narrow
       # route cannot select.
@@ -326,11 +329,23 @@ tasks:
       # `--jobs=4` beside cargo's 12. A scoped change recompiles a chain of
       # reverse dependents, which runs one crate at a time whatever the cap,
       # and every other action is a cache hit.
-      # ponytail: a fixed 4 — derive it from cargo's `jobs` if that cap moves.
-      - task: bazel:test:unit
-        vars: { CLI_ARGS: '--jobs=4' }
+      - task: .verify:scoped:bazel
       - task: .verify:scoped:cargo
         vars: { CRATES: '{{.CRATES}}', ACCEPTANCE_GLOBS: '{{.ACCEPTANCE_GLOBS}}' }
+
+  .verify:scoped:bazel:
+    internal: true
+    desc: The scoped arm's Bazel lane — the unit run, then the doc ratchet, each at --jobs=4
+    # One after the other: the Bazel server runs one command at a time, and
+    # the doc ratchet reads the rmetas the unit run just built. Workspace-wide
+    # rather than per-crate because the baseline is keyed by file and a
+    # partial stream reads as a decrease; cached, so it costs what changed.
+    # ponytail: a fixed 4 — derive it from cargo's `jobs` if that cap moves.
+    cmds:
+      - task: bazel:test:unit
+        vars: { CLI_ARGS: '--jobs=4' }
+      - task: rust:doc:ratchet
+        vars: { BAZEL_ARGS: '--jobs=4' }
 
   .verify:scoped:cargo:
     internal: true
@@ -360,14 +375,6 @@ tasks:
       - cargo check --workspace --all-targets --locked
       - for: { var: CRATES }
         cmd: cargo clippy -p {{.ITEM}} --all-targets --locked -- -D warnings
-      # Scoped arm only here; the escalate arm reaches it through `verify`.
-      # Until WP-10 only the scoped arm ran a doc check at all, so escalating
-      # — which every batch does — *lost* the one gate that reads intra-doc
-      # links. Workspace-wide rather than per-crate because the baseline is
-      # keyed by file and a partial stream reads as a decrease. In this lane,
-      # not a lane of its own: its target/docratchet build is a third
-      # 12-job compiler otherwise (`.verify:scoped:lanes`).
-      - task: rust:doc:ratchet
 
   .verify:scoped:acceptance:
     internal: true
@@ -477,6 +484,7 @@ tasks:
       # Sibling of the clippy ratchet, added for the same reason: the rustdoc
       # backlog can only be denied wholesale, so the gate that watched it ran
       # on the scoped arm alone and no escalated work package ever saw it.
+      # A cached Bazel aspect pass too, so it sits beside clippy's.
       - task: rust:doc:ratchet
       - task: rust:build
       # The Bazel gates (plan_bazel_build_adoption.md C-010, C-011, C-014), in

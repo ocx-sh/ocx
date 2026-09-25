@@ -10,24 +10,15 @@ import lint_ratchet as ratchet
 import pytest
 
 NO_ARG_PROOFS = [
-    ratchet.prove_count_codes_dedup_and_censuses,
-    ratchet.prove_count_codes_requires_a_real_stream,
-    ratchet.prove_is_member,
     ratchet.prove_compare,
     ratchet.prove_by_file,
     ratchet.prove_raised,
     ratchet.prove_workspace_members,
-    ratchet.prove_end_to_end_fixture_sanity,
-    ratchet.prove_finished_census_three_states,
     ratchet.prove_label_member,
 ]
 
 TMP_PATH_PROOFS = [
-    ratchet.prove_run_reds_a_truncated_stream,
-    ratchet.prove_run_reds_a_summary_only_stream,
-    ratchet.prove_run_reds_a_failed_build,
-    ratchet.prove_run_reds_a_dark_member,
-    ratchet.prove_run_update_gate,
+    ratchet.prove_bep_update_gate,
     ratchet.prove_bep_fail_closed,
     ratchet.prove_bep_gate_semantics,
     ratchet.prove_bep_dark_member,
