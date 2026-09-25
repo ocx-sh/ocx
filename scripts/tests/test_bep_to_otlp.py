@@ -28,6 +28,7 @@ NO_ARG_PROOFS = [
 SCRATCH_PROOFS = [
     guard.prove_dropped_span,
     guard.prove_reader_floor,
+    guard.prove_aspect_completion,
     guard.prove_two_invocations,
     guard.prove_silent_exit,
     guard.prove_live_transport,

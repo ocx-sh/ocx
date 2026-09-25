@@ -25,6 +25,7 @@ TMP_PATH_PROOFS = [
     ratchet.prove_bep_target_coverage,
     ratchet.prove_unread_lints,
     ratchet.prove_allow_codes,
+    ratchet.prove_rustdoc_allow_codes,
 ]
 
 
