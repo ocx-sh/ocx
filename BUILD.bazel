@@ -1,4 +1,5 @@
 load("@buildifier_prebuilt//:rules.bzl", "buildifier")
+load("//:rustdoc_diagnostics.bzl", "json_error_format")
 
 # Directories buildifier must not walk. This deliberately restates part of
 # `.bazelignore` instead of reading it: the rule shells out to `find` over the
@@ -120,4 +121,14 @@ filegroup(
         allow_empty = False,
     ),
     visibility = ["//test:__pkg__"],
+)
+
+# The `--error-format` `rustdoc_diagnostics_aspect` (`rustdoc_diagnostics.bzl`)
+# hands rustdoc: rustc-native JSON lines, which `scripts/lint_ratchet.py --bep`
+# reads. Its own setting rather than `@rules_rust//rust/settings:error_format`,
+# which also drives every rustc action's console output.
+json_error_format(
+    name = "rustdoc_error_format",
+    build_setting_default = "json",
+    visibility = ["//visibility:private"],
 )

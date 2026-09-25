@@ -4,20 +4,14 @@
 """Per-lint-code ratchet over compiler diagnostics (rust-cargo.md LINT-16,
 plan_bazel_cargo_port.md C-012/C-013/C-017/C-018).
 
-Two input modes, one verdict (`judge`):
-
-  - `--bep PATH` (`task rust:clippy:check`): a Bazel build event stream. The
-    `*.clippy.diagnostics` files (`--suffix` selects another) its output-group
-    file sets name are read as rustc-native JSON lines and attributed to the
-    member whose `//crates/<member>` package produced them. One compare is both
-    the `-D warnings` gate and the backlog ratchet — any key above its entry,
-    an absent key counting as 0, fails. The baseline may hold only
-    `--allow-codes` codes (C-018), and a Cargo `[lints]` entry Bazel does not
-    read is refused (C-017).
-  - cargo JSON on stdin or `--input` (`task rust:doc:ratchet`):
-    `cargo doc --message-format=json` emits `compiler-message` records, keyed
-    `--by-file --baseline rustdoc-warn-baseline.json`. Deleted by whichever
-    work package moves the last caller to Bazel.
+Input is `--bep PATH`, a Bazel build event stream. The `*.clippy.diagnostics`
+files (`task rust:clippy:check`) or `*.rustdoc.diagnostics` files
+(`task rust:doc:ratchet`, `--suffix .rustdoc.diagnostics`) its output-group
+file sets name are read as rustc-native JSON lines and attributed to the member
+whose `//crates/<member>` package produced them. One compare is both the
+`-D warnings` gate and the backlog ratchet — any key above its entry, an absent
+key counting as 0, fails. The baseline may hold only `--allow-codes` codes
+(C-018), and a Cargo `[lints]` entry Bazel does not read is refused (C-017).
 
 Its proofs run as pytest, from `scripts/tests/test_lint_ratchet.py`.
 
@@ -43,15 +37,14 @@ is the intended prompt to look at what moved rather than a reason to loosen the
 rule. A baseline file that does not exist yet reads as `{}`, so creating one is
 itself an upward move and takes the flag once.
 
-Diagnostics from path dependencies outside `crates/` (the vendored forks
-under `external/`) are ignored — they are not under this repository's lint
-policy.
+Diagnostics files produced outside `//crates` (the vendored forks under
+`external/`) are ignored — they are not under this repository's lint policy.
 
 A stream that does not describe a **whole-workspace** run fails instead of
 reading as "every count dropped to 0". Two independent conditions, both
-fail-closed: every member `[workspace] members` selects reported at least one
-record of its own, and the stream carries cargo's terminating `build-finished`.
-Counting diagnostics alone is not enough — a run truncated after one crate's
+fail-closed: every member `[workspace] members` selects owns at least one
+diagnostics file, and the stream carries a successful `buildFinished` and its
+`lastMessage`. Counting diagnostics alone is not enough — a run truncated after one crate's
 first warning carries a diagnostic, so every *other* baseline key reads as a
 decrease, `--check` exits 0, and `--update` writes the partial payload with no
 rises and therefore without `--allow-regression`. Erasure by truncation arrives
@@ -103,34 +96,29 @@ RUSTC_SUMMARY = re.compile(r"^\d+ warnings? emitted$")
 #: `get_clippy_ready_crate_info`), compared after `-` → `_` and lower-casing.
 CLIPPY_OPT_OUT = frozenset({"no_clippy", "no_lint", "nolint", "noclippy"})
 #: The rule kinds that provide `CrateInfo` / `TestCrateInfo`, which is exactly
-#: what the aspect visits — each must leave a diagnostics file.
+#: what the clippy aspect visits — each must leave a diagnostics file.
 ASPECT_KINDS = frozenset(
     {"rust_library", "rust_binary", "rust_test", "rust_proc_macro", "rust_shared_library", "rust_static_library"}
 )
 
 
-def member_dir(package_id: str, member_prefix: str) -> str | None:
-    """The `crates/` directory `package_id` names, or `None` when it names no
-    workspace member — one that is a DIRECT child of `crates/`.
+class Aspect(NamedTuple):
+    """What the aspect writing one diagnostics suffix visits: the rule kinds
+    that must each leave a file, and the tags that make it skip a target."""
 
-    A bare `startswith` admits a path dependency vendored *inside* a member
-    (`crates/ocx_util/vendor/thing`), whose diagnostics are not under this
-    repository's lint policy any more than `external/`'s are. The manifest
-    says `members = ["crates/*"]`, one level, so the tail after the prefix
-    carries no `/`. cargo spells the id `path+file://<dir>#<name>@<version>`
-    (or `#<version>` when the directory name is the crate name), so the path
-    ends at the first `#`."""
-    if not package_id.startswith(member_prefix):
-        return None
-    tail = package_id[len(member_prefix) :].partition("#")[0]
-    return tail if tail and "/" not in tail else None
+    name: str
+    kinds: frozenset[str]
+    opt_out: frozenset[str]
 
 
-def is_member(package_id: str, member_prefix: str) -> bool:
-    """Whether `package_id` names a workspace member — see `member_dir`, which
-    the membership test and the coverage census both read, so the two cannot
-    disagree about what counts as a member."""
-    return member_dir(package_id, member_prefix) is not None
+#: Per suffix, because the two aspects cover different targets:
+#: `rustdoc_diagnostics_aspect` (`rustdoc_diagnostics.bzl`) documents non-test
+#: crates only — `cargo doc` has no test target to document — and honours no
+#: tag, so a clippy opt-out tag is not its concern.
+ASPECTS = {
+    DEFAULT_SUFFIX: Aspect("rust_clippy_aspect", ASPECT_KINDS, CLIPPY_OPT_OUT),
+    ".rustdoc.diagnostics": Aspect("rustdoc_diagnostics_aspect", ASPECT_KINDS - {"rust_test"}, frozenset()),
+}
 
 
 def workspace_members(manifest: Path = WORKSPACE_MANIFEST) -> set[str]:
@@ -186,35 +174,28 @@ class Census(NamedTuple):
     """What one stream says about the workspace.
 
     `member_records` and `diagnosing` are the same evidence at two
-    granularities — how many coded diagnostics arrived, and which members
-    they arrived for. `reported` and `finished` are the coverage claim."""
+    granularities — how many diagnostics arrived, and which members they
+    arrived for. `reported` is the coverage claim; a stream that did not
+    finish never becomes a census (`bep_census` refuses it)."""
 
     counts: Counter[str]
     member_records: int
     reported: set[str]
-    #: `None` when the stream carries no `build-finished`, `False` when cargo
-    #: reported one with `"success": false` — a build that stopped early
-    #: carries whatever diagnostics it reached and no more (B5R-11).
-    finished: bool | None
     diagnosing: set[str]
 
 
-def tally(
-    messages: Iterable[tuple[str, dict]], by_file: bool, key_uncoded: bool
-) -> tuple[Counter[str], int, set[str]]:
+def tally(messages: Iterable[tuple[str, dict]], by_file: bool) -> tuple[Counter[str], int, set[str]]:
     """Unique diagnostics per key over `(member, rustc message)` pairs, the
     number of counted records, and the members a counted record arrived for.
 
-    One path for both input modes, so cargo's stream and Bazel's diagnostics
-    files cannot disagree about dedup or keying: a diagnostic is deduplicated
-    by `(code, file, line, column)` of its primary span (the lib and its
-    `crate =` test target report the same span twice).
+    A diagnostic is deduplicated by `(code, file, line, column)` of its
+    primary span (the lib and its `crate =` test target report the same span
+    twice).
 
-    The cargo mode never counts a record with no lint code. `key_uncoded` (the
-    Bazel mode, C-013) keys every code-less warning as `UNCODED` — spanned as
+    Every code-less warning is keyed as `UNCODED` (C-013) — spanned as
     `<file>::<uncoded>`, span-less as `<no span>::<uncoded>` — so it fails like
-    any other new key, and drops only rustc's own `RUSTC_SUMMARY` line, matched
-    by its exact text rather than by its shape."""
+    any other new key; only rustc's own `RUSTC_SUMMARY` line is dropped,
+    matched by its exact text rather than by its shape."""
     seen: set[tuple] = set()
     counts: Counter[str] = Counter()
     records = 0
@@ -225,7 +206,7 @@ def tally(
         primary = next((s for s in message.get("spans", []) if s.get("is_primary")), None)
         code = (message.get("code") or {}).get("code")
         if code is None:
-            if not key_uncoded or (not primary and RUSTC_SUMMARY.match(str(message.get("message", "")))):
+            if not primary and RUSTC_SUMMARY.match(str(message.get("message", ""))):
                 continue
             code = UNCODED
         records += 1
@@ -243,59 +224,6 @@ def tally(
         else:
             counts[code] += 1
     return counts, records, diagnosing
-
-
-def count_codes(lines: Iterable[str], member_prefix: str, by_file: bool = False) -> Census:
-    """Unique diagnostics per key, for packages under `member_prefix`; the
-    number of **coded-diagnostic** records that named such a package; the
-    members that reported **any** record; whether the stream finished; and
-    the members a coded diagnostic actually arrived for.
-
-    The last two are the whole-workspace evidence `run` fails closed on. They
-    key on any record, not on a diagnostic: only four of this workspace's
-    twenty-one members carry a diagnostic at all, so a census of
-    diagnostic-bearing packages would demand coverage no clean crate can give.
-    A `compiler-artifact` for a member — cargo emits one per unit, `"fresh":
-    true` included — is evidence that unit was reached.
-
-    0 means the stream never described the workspace *as a lint run*. Counting
-    records of any kind here — the shape this replaced — let a single
-    `compiler-artifact` satisfy the guard while the stream carried no
-    diagnostic at all: every key then reads as a decrease, `--check` exits 0,
-    and an `--update` on top erases the whole backlog.
-
-    Only a record carrying a **lint code** counts (B5R-2). `compiler-message`
-    alone is one record short of evidence: rustc terminates every crate's
-    diagnostics with a summary — ``warning: `x` (lib) generated 3 warnings``,
-    `"code": null` — that a stream carrying no real diagnostic still gets. It
-    satisfied "a record that could have carried a diagnostic" and re-opened
-    the erasure the guard exists to close, straight through the guard.
-
-    A genuinely clean tree therefore also reports 0, and `run` says so in the
-    refusal: with a backlog file still committed, "nothing was scanned" and
-    "the backlog is gone" are the same bytes, and the second one is resolved
-    by deleting the baseline and moving the lint into `[workspace.lints]` —
-    which `compare`'s zero-entry rule already demands.
-
-    The key is the lint code, or `<file>::<code>` under `by_file`."""
-    reported: set[str] = set()
-    finished: bool | None = None
-    messages: list[tuple[str, dict]] = []
-    for line in lines:
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        record = json.loads(line)
-        if record.get("reason") == "build-finished":
-            finished = bool(record.get("success"))
-        member = member_dir(record.get("package_id", ""), member_prefix)
-        if member is None:
-            continue
-        reported.add(member)
-        if record.get("reason") == "compiler-message":
-            messages.append((member, record["message"]))
-    counts, member_records, diagnosing = tally(messages, by_file, key_uncoded=False)
-    return Census(counts, member_records, reported, finished, diagnosing)
 
 
 def workspace_lints(manifest: Path = WORKSPACE_MANIFEST) -> set[str]:
@@ -393,48 +321,24 @@ def read_baseline(baseline_path: Path) -> dict[str, int]:
         return {}
 
 
-def run(
-    mode: str,
-    lines: Iterable[str],
-    baseline_path: Path,
-    by_file: bool = False,
-    allow_regression: bool = False,
-) -> int:
-    """The cargo-JSON stdin mode (`task rust:doc:ratchet` until WP-3 moves it)."""
-    prefix = f"path+file://{REPO_ROOT}/crates/"
-    return judge(mode, count_codes(lines, prefix, by_file), baseline_path, by_file, allow_regression, None)
-
-
 def judge(
     mode: str,
     census: Census,
     baseline_path: Path,
     by_file: bool,
     allow_regression: bool,
-    allow_codes: list[str] | None,
+    allow_codes: list[str],
 ) -> int:
-    """The verdict over one census, shared by both input modes: coverage,
-    the zero-diagnostic and dark-member refusals, then compare or update.
-    `allow_codes` None is the cargo mode, which predates C-018."""
+    """The verdict over one census: coverage, the zero-diagnostic and
+    dark-member refusals, then compare or update."""
     live, member_records = census.counts, census.member_records
     expected = workspace_members()
     missing = sorted(expected - census.reported)
-    if missing or not census.finished:
-        reasons = []
-        if missing:
-            reasons.append(
-                f"{len(missing)} of {len(expected)} member(s) never reported (no cargo record, or no "
-                f"diagnostics file in the build event stream): {', '.join(missing)}"
-            )
-        if census.finished is None:
-            reasons.append("the stream carries no `build-finished` record")
-        elif not census.finished:
-            reasons.append(
-                "cargo's `build-finished` reports `\"success\": false` — the build stopped, so the "
-                "stream carries the diagnostics it reached and none of the ones it did not (B5R-11)"
-            )
+    if missing:
         print(
-            f"lint ratchet: the stream does not describe a whole-workspace run — {'; '.join(reasons)}. "
+            f"lint ratchet: the stream does not describe a whole-workspace run — {len(missing)} of "
+            f"{len(expected)} member(s) own no diagnostics file in the build event stream: "
+            f"{', '.join(missing)}. "
             "A run truncated after one crate leaves every other key reading as a decrease, so --check "
             "would exit 0 and --update would write the partial payload with no rises and therefore "
             "without --allow-regression, erasing the backlog. Re-run the whole gate "
@@ -479,7 +383,7 @@ def judge(
         if foreign:
             print(
                 f"lint ratchet: refusing to write {baseline_path.name} — {len(foreign)} key(s) carry a "
-                f"code outside the allow-list ({', '.join(allow_codes or [])}): {', '.join(foreign)}. "
+                f"code outside the allow-list ({', '.join(allow_codes)}): {', '.join(foreign)}. "
                 "Fix it; this code cannot be baselined, even with --allow-regression",
                 file=sys.stderr,
             )
@@ -586,10 +490,8 @@ def code_allowed(code: str, allow_codes: Iterable[str]) -> bool:
     return any(code == entry or (entry.endswith("::") and code.startswith(entry)) for entry in allow_codes)
 
 
-def foreign_keys(keys: Iterable[str], by_file: bool, allow_codes: list[str] | None) -> list[str]:
-    """The keys whose code is outside `allow_codes`; none when there is no list."""
-    if allow_codes is None:
-        return []
+def foreign_keys(keys: Iterable[str], by_file: bool, allow_codes: list[str]) -> list[str]:
+    """The keys whose code is outside `allow_codes`."""
     return sorted(key for key in keys if not code_allowed(code_of(key, by_file), allow_codes))
 
 
@@ -609,7 +511,7 @@ def bep_census(bep: Path, suffix: str = DEFAULT_SUFFIX, by_file: bool = False) -
 
     Fails closed (`Refusal`) on: an unreadable stream, a line that is not JSON,
     no successful `buildFinished` or no `lastMessage` (the stream was cut
-    short — this replaces cargo's `build-finished` guard), a file set it
+    short), a file set it
     references but never declares, no matching file, a named file missing on
     disk, and a diagnostics line that is not JSON. Coverage (every member owns
     a file) is `judge`'s census check, through `Census.reported`."""
@@ -690,20 +592,21 @@ def bep_census(bep: Path, suffix: str = DEFAULT_SUFFIX, by_file: bool = False) -
     # member still counted as covered. `manual` targets never reach this stream
     # (`//crates/...` does not expand them); that residual is named in the WP-2
     # report, not guarded here.
+    aspect = ASPECTS[suffix]
     crate_targets = {label: shape for label, shape in configured.items() if label_member(label)}
     opted_out = sorted(
         f"{label} ({tag})"
         for label, (_, tags) in crate_targets.items()
         for tag in tags
-        if tag.replace("-", "_").lower() in CLIPPY_OPT_OUT
+        if tag.replace("-", "_").lower() in aspect.opt_out
     )
     if opted_out:
         raise Refusal(
-            f"{', '.join(opted_out)} carry a clippy opt-out tag, so rust_clippy_aspect skips them and "
+            f"{', '.join(opted_out)} carry an opt-out tag, so {aspect.name} skips them and "
             "their sources are not linted — remove the tag; a lint exemption belongs in an "
             "`#[allow]` the suppression cap counts, not in BUILD metadata"
         )
-    expected = {label for label, (kind, _) in crate_targets.items() if kind in ASPECT_KINDS}
+    expected = {label for label, (kind, _) in crate_targets.items() if kind in aspect.kinds}
     if not expected:
         raise Refusal(
             f"{bep} carries no `targetConfigured` event for a //crates Rust target, so the per-target "
@@ -733,8 +636,8 @@ def bep_census(bep: Path, suffix: str = DEFAULT_SUFFIX, by_file: bool = False) -
                 ) from error
             if isinstance(record, dict) and record.get("$message_type") == "diagnostic":
                 messages.append((member, record))
-    counts, records, diagnosing = tally(messages, by_file, key_uncoded=True)
-    return Census(counts, records, set(files.values()), True, diagnosing)
+    counts, records, diagnosing = tally(messages, by_file)
+    return Census(counts, records, set(files.values()), diagnosing)
 
 
 def run_bep(
@@ -748,8 +651,8 @@ def run_bep(
     allow_codes: Iterable[str] = DEFAULT_ALLOW_CODES,
     root: Path = REPO_ROOT,
 ) -> int:
-    """The Bazel input mode: C-017's guard, then the BEP census, then the same
-    verdict the cargo mode reaches, restricted to `allow_codes` (C-018)."""
+    """C-017's guard, then the BEP census, then the verdict, restricted to
+    `allow_codes` (C-018)."""
     try:
         unread = unread_lints(root)
         if unread:
@@ -765,130 +668,11 @@ def run_bep(
         return 1
     return judge(mode, census, baseline_path, by_file, allow_regression, list(allow_codes))
 
-_SYNTHETIC_PREFIX = "path+file:///w/crates/"
-
-
-def _message(package: str, code: str | None, file: str, line: int, target: str = "lib") -> str:
-    """A synthetic `compiler-message` record, for the proofs below."""
-    return json.dumps(
-        {
-            "reason": "compiler-message",
-            "package_id": f"{package}#0.1.0",
-            "target": {"kind": [target]},
-            "message": {
-                "code": {"code": code} if code else None,
-                "level": "warning",
-                "spans": [
-                    {"is_primary": True, "file_name": file, "line_start": line, "column_start": 1}
-                ],
-                "rendered": f"{code} at {file}:{line}",
-            },
-        }
-    )
-
-
-def _real_prefix() -> str:
-    """`run`'s member prefix, built off `REPO_ROOT` rather than a synthetic
-    one: `run` derives it the same way, so a proof using anything else would
-    fail every case with "no record for a workspace member" for the wrong
-    reason."""
-    return f"path+file://{REPO_ROOT}/crates/"
-
-
-def _covered(members: set[str], real: str, *records: str) -> list[str]:
-    """`records` inside what a whole-workspace cargo run emits around them: one
-    `compiler-artifact` per member, and the terminating `build-finished`. Every
-    end-to-end proof below is built through this, so a case that *omits*
-    coverage is visibly doing so."""
-    return [
-        json.dumps({"reason": "compiler-artifact", "package_id": f"{real}{name}#0.1.0"})
-        for name in sorted(members)
-    ] + [*records, '{"reason":"build-finished","success":true}']
-
-
-def _real_diagnostics(real: str) -> list[str]:
-    return [
-        _message(real + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "lib"),
-        _message(real + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "test"),
-        _message(real + "ocx_util", "unreachable_pub", "crates/ocx_util/src/b.rs", 9),
-    ]
-
-
 # ---------------------------------------------------------------------------
 # Proofs. Every mutation below is checked to have landed before its result is
 # trusted (`scripts/tests/test_lint_ratchet.py`), the same discipline the
 # module docstring asks of the ratchet itself.
 # ---------------------------------------------------------------------------
-
-
-def prove_count_codes_dedup_and_censuses() -> int:
-    """Dedup by primary span (the lib and lib-test targets report the same
-    span twice), the diagnosing/coverage censuses, and the code-less summary
-    record (`"code": null`), which must not count as a diagnostic."""
-    prefix = _SYNTHETIC_PREFIX
-    stream = [
-        '{"reason":"compiler-artifact","package_id":"x"}',
-        "   Compiling foo",
-        _message(prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "lib"),
-        _message(prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "test"),
-        _message(prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/b.rs", 9),
-        _message("path+file:///w/external/fork", "dead_code", "external/fork/src/x.rs", 1),
-        _message(prefix + "ocx_util", None, "crates/ocx_util/src/a.rs", 1),
-    ]
-    live, member_records, reported, finished, diagnosing = count_codes(stream, prefix)
-    assert live == Counter({"unreachable_pub": 2}), f"grouping wrong: {live}"
-    # Three member `compiler-message` records carry a lint code (two of them
-    # sharing a span); the artifact record, the `external/` fork and the
-    # code-less summary do not. The summary is B5R-2: counting it made a
-    # stream with no real diagnostic look like a stream that had been linted.
-    assert member_records == 3, f"member records wrong: {member_records}"
-    assert diagnosing == {"ocx_util"}, f"diagnosing census wrong: {diagnosing}"
-    assert reported == {"ocx_util"} and not finished, f"coverage census wrong: {(reported, finished)}"
-    return 1
-
-
-def prove_count_codes_requires_a_real_stream() -> int:
-    """An empty stream, a non-member-only stream, and an artifact-only stream
-    (THE BLOCK, B5R-2) must all report 0 diagnostics — while an artifact-only
-    stream still counts as coverage for the member it names, which is the
-    other census."""
-    prefix = _SYNTHETIC_PREFIX
-    artifact_x = '{"reason":"compiler-artifact","package_id":"x"}'
-    non_member = _message("path+file:///w/external/fork", "dead_code", "external/fork/src/x.rs", 1)
-    artifact_only = [
-        f'{{"reason":"compiler-artifact","package_id":"{prefix}ocx_util#0.1.0"}}',
-        '{"reason":"build-finished","success":true}',
-    ]
-    assert count_codes([], prefix) == (Counter(), 0, set(), None, set()), (
-        "an empty stream must report 0 member records"
-    )
-    assert count_codes([artifact_x, non_member], prefix) == (Counter(), 0, set(), None, set()), (
-        "a stream naming only non-members must report 0 member records"
-    )
-    assert count_codes(artifact_only, prefix) == (Counter(), 0, {"ocx_util"}, True, set()), (
-        "an artifact-only stream carries no diagnostic and must report 0 — while still counting as "
-        "coverage for the member it names, which is the other census"
-    )
-    return 1
-
-
-def prove_is_member() -> int:
-    """A path dependency vendored INSIDE a member is not a member: the
-    manifest says `members = ["crates/*"]`, one level deep."""
-    prefix = _SYNTHETIC_PREFIX
-    assert is_member(prefix + "ocx_util#0.1.0", prefix) and is_member(
-        prefix + "ocx_util#ocx_util@0.6.2", prefix
-    ), "both cargo package-id spellings must read as a member"
-    assert not is_member(prefix + "ocx_util/vendor/thing#0.1.0", prefix), (
-        "a path dep nested under a member must not read as a member"
-    )
-    assert not is_member(prefix + "#0.1.0", prefix) and not is_member(
-        "path+file:///w/external/f#1", prefix
-    ), "an empty tail and a non-member path must both be refused"
-    assert count_codes(
-        [_message(prefix + "ocx_util/vendor/thing", "unreachable_pub", "v/src/a.rs", 1)], prefix
-    ) == (Counter(), 0, set(), None, set()), "a nested path dep's diagnostics must not enter the count"
-    return 1
 
 
 def prove_compare() -> int:
@@ -922,13 +706,12 @@ def prove_by_file() -> int:
     between files reds even though the bare per-code census stays blind to it
     — that blindness is what `--by-file` buys out — and `code_of` / LINT-16
     both still work on the finer key."""
-    prefix = _SYNTHETIC_PREFIX
-    stream = [
-        _message(prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "lib"),
-        _message(prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/a.rs", 4, "test"),
-        _message(prefix + "ocx_util", "unreachable_pub", "crates/ocx_util/src/b.rs", 9),
+    messages = [
+        ("ocx_util", json.loads(_diag("unreachable_pub", "crates/ocx_util/src/a.rs", 4))),
+        ("ocx_util", json.loads(_diag("unreachable_pub", "crates/ocx_util/src/a.rs", 4))),
+        ("ocx_util", json.loads(_diag("unreachable_pub", "crates/ocx_util/src/b.rs", 9))),
     ]
-    per_file, *_ = count_codes(stream, prefix, by_file=True)
+    per_file, *_ = tally(messages, by_file=True)
     assert per_file == Counter(
         {
             "crates/ocx_util/src/a.rs::unreachable_pub": 1,
@@ -1002,239 +785,48 @@ def prove_workspace_members() -> int:
     return 1
 
 
-def prove_end_to_end_fixture_sanity() -> int:
-    """The end-to-end fixture the proofs below share carries exactly the 2
-    diagnostics they assume, over full coverage."""
-    real = _real_prefix()
-    members = workspace_members()
-    real_stream = _covered(members, real, *_real_diagnostics(real))
-    counts, _, reported, finished, _diagnosing = count_codes(real_stream, real)
-    assert counts == Counter({"unreachable_pub": 2}) and reported == members and finished, (
-        "the end-to-end fixture must carry exactly the 2 the cases below assume, over full coverage"
-    )
-    return 1
-
-
-def prove_finished_census_three_states() -> int:
-    """Absent, failed and succeeded are three distinct states — `not finished`
-    must not be satisfiable by the field's mere absence (B5R-11)."""
-    real = _real_prefix()
-    assert (
-        count_codes(['{"reason":"build-finished","success":true}'], real).finished is True
-        and count_codes(['{"reason":"build-finished","success":false}'], real).finished is False
-        and count_codes([], real).finished is None
-    ), "absent, failed and succeeded must be three states, not two"
-    return 1
-
-
-def prove_run_reds_a_truncated_stream(tmp_path: Path) -> int:
-    """A stream cut short after one member's first diagnostic (THE OTHER
-    BLOCK, B3-3 / B2-7) must red on both --check and --update — its erasure
-    arrives as decreases, which the upward-move gate cannot see — and must
-    leave the baseline byte-identical either way."""
-    real = _real_prefix()
-    members = workspace_members()
-    diagnostics = _real_diagnostics(real)
-    truncated = [
-        json.dumps({"reason": "compiler-artifact", "package_id": f"{real}ocx_util#0.1.0"}),
-        diagnostics[0],
-    ]
-    backlog = tmp_path / "backlog.json"
-    payload = json.dumps({"unreachable_pub": 2, "dead_code": 7}) + "\n"
-    backlog.write_text(payload, encoding="utf-8")
-    assert run("check", truncated, backlog) == 1, "a truncated stream must red on --check"
-    assert run("update", truncated, backlog) == 1, (
-        "a truncated stream must red on --update too — its erasure arrives as decreases, which "
-        "the --allow-regression gate cannot see"
-    )
-    assert backlog.read_text(encoding="utf-8") == payload, (
-        "the refusal must leave the backlog byte-identical — this is the erasure it prevents"
-    )
-    # The green half, on the same records: only the coverage differs.
-    whole = _covered(
-        members, real, *diagnostics, _message(real + "ocx_util", "dead_code", "crates/ocx_util/src/d.rs", 3)
-    )
-    assert run("check", whole, backlog) == 0, (
-        "the same diagnostics over a whole-workspace stream must pass — otherwise the red above "
-        "says nothing about truncation"
-    )
-    # One member short of the whole is a truncation too, even carrying every
-    # diagnostic: coverage is the claim, not the diagnostic count.
-    short = [line for line in whole if f"{real}ocx_util#" not in line]
-    assert run("check", short, backlog) == 1, "a stream missing one member must red"
-    assert run("check", [line for line in whole if "build-finished" not in line], backlog) == 1, (
-        "a stream that never finished must red"
-    )
-    return 1
-
-
-def prove_run_reds_a_summary_only_stream(tmp_path: Path) -> int:
-    """A whole-workspace stream whose only member record is the code-less
-    summary (THE THIRD BLOCK, B5R-2) must red on both --check and --update —
-    the exact shape that satisfied the old census."""
-    real = _real_prefix()
-    members = workspace_members()
-    summary_only = _covered(members, real, _message(real + "ocx_util", None, "crates/ocx_util/src/a.rs", 1))
-    backlog = tmp_path / "backlog.json"
-    payload = json.dumps({"unreachable_pub": 2, "dead_code": 7}) + "\n"
-    backlog.write_text(payload, encoding="utf-8")
-    for mode in ("check", "update"):
-        assert run(mode, summary_only, backlog) == 1, (
-            f"--{mode} must refuse a stream whose only member record is the code-less summary"
-        )
-    assert backlog.read_text(encoding="utf-8") == payload, (
-        "the refusal must leave the backlog byte-identical — this is the 198-to-0 erasure"
-    )
-    # The green half: one real diagnostic beside the same summary passes.
-    diagnostics = _real_diagnostics(real)
-    assert run("check", _covered(members, real, *diagnostics, summary_only[-2]), backlog) == 0, (
-        "a coded diagnostic beside the summary must pass — else the red above says nothing "
-        "about the summary"
-    )
-    return 1
-
-
-def prove_run_reds_a_failed_build(tmp_path: Path) -> int:
-    """`build-finished` is read for its VERDICT, not merely its presence
-    (B5R-11): a failed build must not erase the backlog the way a truncated
-    one does."""
-    real = _real_prefix()
-    members = workspace_members()
-    diagnostics = _real_diagnostics(real)
-    real_stream = _covered(members, real, *diagnostics)
-    backlog = tmp_path / "backlog.json"
-    payload = json.dumps({"unreachable_pub": 2}) + "\n"
-    backlog.write_text(payload, encoding="utf-8")
-    failed = [
-        '{"reason":"build-finished","success":false}' if "build-finished" in line else line
-        for line in real_stream
-    ]
-    assert any('"success":false' in line for line in failed), "the fixture must actually carry the failed verdict"
-    for mode in ("check", "update"):
-        assert run(mode, failed, backlog) == 1, f"--{mode} must refuse a failed build"
-    assert backlog.read_text(encoding="utf-8") == payload, "the refusal must leave the backlog byte-identical"
-    assert run("check", real_stream, backlog) == 0, "the same records under success:true pass"
-    return 1
-
-
-def prove_run_reds_a_dark_member(tmp_path: Path) -> int:
-    """A member the baseline attributes keys to that produced no diagnostic
-    here (the dark-member rule) must red rather than silently drop to 0 — and
-    a per-code baseline, which names no member, must not fire the rule."""
-    real = _real_prefix()
-    members = workspace_members()
-    diagnostics = _real_diagnostics(real)
-    real_stream = _covered(members, real, *diagnostics)
-    per_file = tmp_path / "dark.json"
-    payload = (
-        json.dumps(
-            {
-                "crates/ocx_util/src/a.rs::unreachable_pub": 2,
-                "crates/ocx_util/src/b.rs::unreachable_pub": 1,
-                "crates/ocx_console/src/z.rs::unreachable_pub": 1,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    )
-    per_file.write_text(payload, encoding="utf-8")
-    for mode in ("check", "update"):
-        assert run(mode, real_stream, per_file, by_file=True) == 1, (
-            f"--{mode} must refuse a stream in which ocx_console went quiet"
-        )
-    assert per_file.read_text(encoding="utf-8") == payload, (
-        "the refusal must leave the baseline byte-identical — this is the 198-to-36 drop"
-    )
-    assert run("update", real_stream, per_file, by_file=True, allow_regression=True) == 0, (
-        "--allow-regression must record the drop deliberately"
-    )
-    assert "crates/ocx_console/src/z.rs::unreachable_pub" not in json.loads(
-        per_file.read_text(encoding="utf-8")
-    ), "the flagged update must actually drop the quiet member's key"
-    # The green half: the same stream with a diagnostic for ocx_console too.
-    per_file.write_text(payload, encoding="utf-8")
-    speaking = _covered(
-        members,
-        real,
-        *diagnostics,
-        _message(real + "ocx_console", "unreachable_pub", "crates/ocx_console/src/z.rs", 1),
-    )
-    assert run("check", speaking, per_file, by_file=True) == 0, (
-        "no member is quiet here, so the same baseline passes — else the red says nothing"
-    )
-    # And a per-code baseline attributes nothing, so the rule cannot fire on
-    # the clippy ratchet and refuse a run it knows nothing about.
-    per_code = tmp_path / "per-code.json"
-    per_code.write_text(json.dumps({"unreachable_pub": 2}) + "\n", encoding="utf-8")
-    assert run("check", real_stream, per_code) == 0, (
-        "a per-code baseline names no member, so the quiet-member rule must not fire"
-    )
-    assert (
-        member_of("crates/ocx_util/src/a.rs::unreachable_pub") == "ocx_util"
-        and member_of("unreachable_pub") is None
-        and member_of("external/fork/src/x.rs::dead_code") is None
-    ), "member_of must read a member out of a by-file key and out of nothing else"
-    return 1
-
-
-def prove_run_update_gate(tmp_path: Path) -> int:
+def prove_bep_update_gate(tmp_path: Path) -> int:
     """--update refuses a raise without --allow-regression, accepts a decrease
     unflagged on both the per-code and --by-file paths — identical, which is
     the whole of "both ratchets behave the same" — and creating a baseline
     that does not exist yet is itself an upward move."""
-    real = _real_prefix()
-    members = workspace_members()
-    diagnostics = _real_diagnostics(real)
-    real_stream = _covered(members, real, *diagnostics)
+    b_rs = "crates/ocx_util/src/b.rs"
+    two = [_diag("unreachable_pub", _UTIL_A, 4), _diag("unreachable_pub", b_rs, 9)]
+    stream = _bep_fixture(tmp_path / "two", {"ocx_util": two})
+    raising = _bep_fixture(tmp_path / "three", {"ocx_util": [*two, _diag("unreachable_pub", "crates/ocx_util/src/c.rs")]})
     path = tmp_path / "baseline.json"
     path.write_text(json.dumps({"unreachable_pub": 2}) + "\n", encoding="utf-8")
     before = path.read_text(encoding="utf-8")
-    # The stream carries 2; a third hit is a raise.
-    raising = _covered(
-        members, real, *diagnostics, _message(real + "ocx_util", "unreachable_pub", "crates/ocx_util/src/c.rs", 1)
-    )
-    assert run("update", raising, path) == 1, "--update must refuse a raise"
+    assert run_bep("update", raising, path) == 1, "--update must refuse a raise"
     assert path.read_text(encoding="utf-8") == before, (
         "the refusal must leave the baseline byte-identical — a message is not a gate"
     )
-    assert run("update", raising, path, allow_regression=True) == 0, (
-        "--allow-regression must let the raise through"
-    )
+    assert run_bep("update", raising, path, allow_regression=True) == 0, "--allow-regression must let the raise through"
     assert json.loads(path.read_text(encoding="utf-8")) == {"unreachable_pub": 3}, (
         f"the raised baseline was not written: {path.read_text(encoding='utf-8')}"
     )
     # A downward move still needs no flag: locking in an improvement is the
     # point of the ratchet.
-    assert run("update", real_stream, path) == 0, "--update must accept a decrease unflagged"
+    assert run_bep("update", stream, path) == 0, "--update must accept a decrease unflagged"
     assert json.loads(path.read_text(encoding="utf-8")) == {"unreachable_pub": 2}, "the decrease was not written"
-    # Identical on the `--by-file` path the rustdoc ratchet drives.
+    # Identical on the `--by-file` path both tasks drive.
     per_file_path = tmp_path / "by-file.json"
-    per_file_path.write_text(
-        json.dumps({"crates/ocx_util/src/a.rs::unreachable_pub": 1}) + "\n", encoding="utf-8"
-    )
+    per_file_path.write_text(json.dumps({f"{_UTIL_A}::unreachable_pub": 1}) + "\n", encoding="utf-8")
     before = per_file_path.read_text(encoding="utf-8")
-    assert run("update", real_stream, per_file_path, by_file=True) == 1, (
+    assert run_bep("update", stream, per_file_path, by_file=True) == 1, (
         "--by-file --update must refuse a raise too (b.rs is new to this baseline)"
     )
-    assert per_file_path.read_text(encoding="utf-8") == before, (
-        "--by-file refusal must leave the baseline byte-identical"
-    )
-    assert run("update", real_stream, per_file_path, by_file=True, allow_regression=True) == 0, (
+    assert per_file_path.read_text(encoding="utf-8") == before, "--by-file refusal must leave the baseline byte-identical"
+    assert run_bep("update", stream, per_file_path, by_file=True, allow_regression=True) == 0, (
         "--by-file --allow-regression must let the raise through"
     )
     # A baseline that does not exist yet reads as `{}`, so creating one is
     # itself a raise and takes the flag once.
     fresh = tmp_path / "absent.json"
-    assert run("update", real_stream, fresh) == 1, "creating a baseline is an upward move"
+    assert run_bep("update", stream, fresh) == 1, "creating a baseline is an upward move"
     assert not fresh.exists(), "the refusal must not create the file"
-    assert run("update", real_stream, fresh, allow_regression=True) == 0, "the flag creates it"
+    assert run_bep("update", stream, fresh, allow_regression=True) == 0, "the flag creates it"
     return 1
-
-
-
-# --- Bazel input mode (C-012/C-013/C-017/C-018) -----------------------------
-
 
 def _diag(code: str | None, file: str | None, line: int = 1, level: str = "warning", text: str | None = None) -> str:
     """A rustc-native diagnostic line, as the clippy aspect writes it. `file`
@@ -1363,7 +955,7 @@ def prove_bep_fail_closed(tmp_path: Path) -> int:
     whole = _bep_fixture(tmp_path / "whole", {"ocx_util": [_diag("unreachable_pub", _UTIL_A)]})
     census = bep_census(whole, by_file=True)
     assert census.counts == Counter({f"{_UTIL_A}::unreachable_pub": 1}), f"green fixture wrong: {census}"
-    assert census.reported == workspace_members() and census.finished, "every member must own a file"
+    assert census.reported == workspace_members(), "every member must own a file"
     _refusal(tmp_path / "no-such.json", "unreadable")
     garbage = tmp_path / "garbage.json"
     garbage.write_text(whole.read_text(encoding="utf-8") + "not json\n", encoding="utf-8")
@@ -1416,6 +1008,13 @@ def prove_bep_gate_semantics(tmp_path: Path) -> int:
     assert run_bep("check", bare, baseline, by_file=True) == 1, "a span-less non-summary warning must red"
     raised_count = _bep_fixture(tmp_path / "raised", {"ocx_util": [*at_count, _diag("unreachable_pub", _UTIL_A, 8)]})
     assert run_bep("check", raised_count, baseline, by_file=True) == 1, "a key above its count must red"
+    # Every member's file holding only rustc's summary is a stream that linted
+    # nothing: both modes refuse it and the baseline is untouched (B5R-2).
+    summary_only = _bep_fixture(tmp_path / "summary", {"ocx_util": at_count[1:]})
+    payload = baseline.read_text(encoding="utf-8")
+    for mode in ("check", "update"):
+        assert run_bep(mode, summary_only, baseline, by_file=True) == 1, f"--{mode} must refuse a summary-only stream"
+    assert baseline.read_text(encoding="utf-8") == payload, "the refusal must leave the baseline byte-identical"
     return 1
 
 
@@ -1439,6 +1038,16 @@ def prove_bep_dark_member(tmp_path: Path) -> int:
         members=workspace_members() - {"ocx_exit"},
     )
     assert run_bep("check", uncovered, baseline, by_file=True) == 1, "a member with no diagnostics file must red"
+    # A per-code baseline attributes nothing, so the quiet-member rule cannot
+    # fire on it and refuse a run it knows nothing about.
+    per_code = tmp_path / "per-code.json"
+    per_code.write_text(json.dumps({"unreachable_pub": 1}) + "\n", encoding="utf-8")
+    assert run_bep("check", dark, per_code) == 0, "a per-code baseline names no member, so the rule must not fire"
+    assert (
+        member_of(f"{_UTIL_A}::unreachable_pub") == "ocx_util"
+        and member_of("unreachable_pub") is None
+        and member_of("external/fork/src/x.rs::dead_code") is None
+    ), "member_of must read a member out of a by-file key and out of nothing else"
     return 1
 
 
@@ -1465,6 +1074,15 @@ def prove_bep_target_coverage(tmp_path: Path) -> int:
     baseline.write_text(json.dumps({f"{_UTIL_A}::unreachable_pub": 1}) + "\n", encoding="utf-8")
     assert run_bep("check", tmp_path / "opt-no-clippy" / "bep.json", baseline, by_file=True) == 1
     assert run_bep("check", tmp_path / "green" / "bep.json", baseline, by_file=True) == 0
+    # Scoped per suffix: rustdoc documents no test target and honours no tag,
+    # so a test with no `.rustdoc.diagnostics` and a clippy opt-out tag both
+    # pass there — while a binary with no file still reds.
+    doc = ".rustdoc.diagnostics"
+    test = (("//crates/ocx_util:ocx_util_test", "rust_test"),)
+    assert bep_census(_bep_fixture(tmp_path / "doc-test", util, suffix=doc, extra_targets=test), doc, by_file=True).counts
+    assert bep_census(_bep_fixture(tmp_path / "doc-tag", util, suffix=doc, tags={"ocx_exit": ["no-clippy"]}), doc).counts
+    binary = (("//crates/ocx_cli:ocx", "rust_binary"),)
+    _refusal(_bep_fixture(tmp_path / "doc-bin", util, suffix=doc, extra_targets=binary), "//crates/ocx_cli:ocx", suffix=doc)
     return 1
 
 
@@ -1531,22 +1149,22 @@ def main() -> int:
     mode.add_argument(
         "--update", action="store_true", help="rewrite the baseline from the stream"
     )
-    source = parser.add_mutually_exclusive_group()
-    source.add_argument("--input", type=Path, help="cargo JSON lines (default: stdin)")
-    source.add_argument(
+    parser.add_argument(
         "--bep",
         type=Path,
+        required=True,
         help="a Bazel build event stream (--build_event_json_file); reads the diagnostics files it names",
     )
     parser.add_argument(
         "--suffix",
         default=DEFAULT_SUFFIX,
-        help=f"--bep only: the diagnostics file suffix (default {DEFAULT_SUFFIX})",
+        choices=sorted(ASPECTS),
+        help=f"the diagnostics file suffix (default {DEFAULT_SUFFIX})",
     )
     parser.add_argument(
         "--allow-codes",
         default=",".join(DEFAULT_ALLOW_CODES),
-        help="--bep only: comma-separated codes a baseline may hold; an entry ending `::` is a prefix",
+        help="comma-separated codes a baseline may hold; an entry ending `::` is a prefix",
     )
     parser.add_argument("--baseline", type=Path, default=BASELINE)
     parser.add_argument(
@@ -1560,26 +1178,14 @@ def main() -> int:
         help="let --update raise an entry; prints every key it raises",
     )
     args = parser.parse_args()
-    if args.bep:
-        return run_bep(
-            "update" if args.update else "check",
-            args.bep,
-            args.baseline,
-            suffix=args.suffix,
-            by_file=args.by_file,
-            allow_regression=args.allow_regression,
-            allow_codes=[code for code in args.allow_codes.split(",") if code],
-        )
-    if args.input:
-        lines = args.input.read_text(encoding="utf-8").splitlines()
-    else:
-        lines = sys.stdin.read().splitlines()
-    return run(
+    return run_bep(
         "update" if args.update else "check",
-        lines,
+        args.bep,
         args.baseline,
-        args.by_file,
-        args.allow_regression,
+        suffix=args.suffix,
+        by_file=args.by_file,
+        allow_regression=args.allow_regression,
+        allow_codes=[code for code in args.allow_codes.split(",") if code],
     )
 
 

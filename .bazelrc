@@ -83,6 +83,16 @@ build --@rules_rust//rust/settings:clippy_output_diagnostics=true
 build --@rules_rust//rust/settings:clippy_error_format=json
 build --@rules_rust//rust/settings:clippy_flag=-Wunreachable_pub
 
+# rustdoc — one cached pass, read by `task rust:doc:ratchet`.
+#
+# `rustdoc_diagnostics.bzl`'s aspect, beside clippy's for the same reason:
+# registered here it costs a build that does not request
+# `--output_groups=rustdoc_diagnostics` analysis of the top-level targets only.
+# `--aspects` accumulates across lines (a second line adds, it does not
+# replace), so both aspects apply — measured on 9.2.0, where an analysis error
+# names `[rust_clippy_aspect, rustdoc_diagnostics_aspect]` together.
+build --aspects=//:rustdoc_diagnostics.bzl%rustdoc_diagnostics_aspect
+
 # ---------------------------------------------------------------------------
 # Remote cache — read-only everywhere this file reaches.
 # ---------------------------------------------------------------------------
