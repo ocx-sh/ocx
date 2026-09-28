@@ -1,60 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Content-addressed store for the embedded `ocx-shim` executable blob
-//! (ADR Contract 3 / [#301](https://github.com/ocx-sh/ocx/issues/301)).
-//!
-//! Every generated Windows entrypoint launcher hardlinks its `<name>.exe`
-//! from the single blob this store publishes, instead of each entry writing
-//! its own byte-for-byte copy — one inode, one Authenticode signature, one
-//! Defender scan regardless of how many tool names a package declares.
-//!
-//! Layout: `{root}/<sha256-hex>.exe` — **flat**, never sharded via
-//! [`super::cas_shard_path`]. At most two blobs (one per Windows arch, see
-//! [`crate::shim`]) ever live here, so sharding a two-entry directory is
-//! pure overhead. `<sha256-hex>` is the bare lowercase hex of the blob's
-//! SHA-256 ([`ocx_oci::Digest::hex`]), no `sha256:` prefix; the `.exe`
-//! suffix is unconditional on every host platform building `ocx` — the blob
-//! it names is always a Windows PE, regardless of whether it is generated
-//! from a Linux, macOS, or Windows host.
-//!
-//! `FileStructure`'s `shim_bin` field roots this store at
-//! `$OCX_HOME/.bin/ocx-shim/`, outside the three GC tiers (`blobs/`,
-//! `layers/`, `packages/`) — never walked or collected by `ocx clean` (plan
-//! decision D4). A shim binary changes only on an `ocx` version bump, at
-//! which point its digest changes too and a new blob is written under a new
-//! name; the superseded blob is orphaned litter accepted by design, the same
-//! way `locks/` litter is accepted (`utility/fs/scoped_lock.rs`).
+//! The embedded `ocx-shim` blob every Windows launcher hardlinks: one inode, one signature, one Defender scan.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// [`Result`](std::result::Result) over the one failure this tier's file
-/// operations can raise. `From<FileError>` for the crate-wide error yields
-/// exactly `InternalFile(path, cause)`, which is what every one of these
-/// functions used to return one conversion later.
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
-/// Test-only seam (`arch-principles.md` "Test-only seams") forcing
-/// [`ShimBinStore::ensure`] down the leg a caller takes when it loses the
-/// publish race. Its value is the store root it applies to, so an armed seam
-/// reaches exactly one store even though the variable is process-global.
+/// Forces [`ShimBinStore::ensure`] down its lost-race leg; valued by store root so it reaches exactly one store.
 #[cfg(any(test, feature = "__testing"))]
 const LOST_PUBLISH_RACE_SEAM: &str = "__OCX_TESTING_SHIM_LOST_PUBLISH_RACE";
 
-/// SHA-256 of the embedded shim blob ([`crate::shim::SHIM_BYTES`]), hashed
-/// once per process.
-///
-/// The bytes are hashed rather than [`crate::shim::SHIM_SHA256`] being read:
-/// that constant is `""` off Windows, where no blob is embedded, and an empty
-/// string is not a digest — reading it would leave `ensure()` unable to name a
-/// file at all on Linux and macOS. Hashing is also simply what content
-/// addressing means here. `SHIM_SHA256` keeps its existing role as the
-/// corruption canary (`shim.rs`), and the two are bound by the assertion
-/// below wherever that constant carries a value, so the derivation is checked
-/// against it instead of quietly diverging from it. The assertion is a
-/// `debug_assert!` because a library must not panic a release binary over a
-/// build-time invariant the `shim.rs` canary test already gates.
+/// Hashes [`crate::shim::SHIM_BYTES`] rather than reading `SHIM_SHA256`, which is `""` off Windows and names no file.
 fn shim_digest() -> &'static ocx_oci::Digest {
     static SHIM_DIGEST: OnceLock<ocx_oci::Digest> = OnceLock::new();
     SHIM_DIGEST.get_or_init(|| {
@@ -67,14 +25,7 @@ fn shim_digest() -> &'static ocx_oci::Digest {
     })
 }
 
-/// Whether this `ensure()` call must behave as one that lost the publish race:
-/// its pre-check found nothing and its rename then failed. Always `false` in a
-/// release build — the env read is not compiled in there at all.
-///
-/// No black-box input produces that state, because the pre-check and the
-/// re-check test the same condition (target present): whatever makes the
-/// re-check succeed also makes the pre-check short-circuit, and only a real
-/// interleaving separates them.
+/// A seam because no black-box input reaches the lost-race leg: pre-check and re-check test the same condition.
 #[cfg(any(test, feature = "__testing"))]
 fn simulated_lost_race(root: &Path) -> bool {
     std::env::var_os(LOST_PUBLISH_RACE_SEAM).is_some_and(|armed| Path::new(&armed) == root)
@@ -85,26 +36,16 @@ fn simulated_lost_race(_root: &Path) -> bool {
     false
 }
 
-/// What [`ShimBinStore::ensure`]'s pre-check found, and therefore what its
-/// publish is allowed to do to a file already sitting at the target.
+/// What [`ShimBinStore::ensure`]'s publish may do to a file already at the target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Publish {
-    /// The pre-check found nothing readable. Any file at the target by rename
-    /// time is a concurrent winner carrying byte-identical content, and
-    /// replacing it would swap in a fresh file record — orphaning the one every
-    /// `<name>.exe` that winner already hardlinked points at, which is exactly
-    /// the shared inode #301 exists to guarantee. Publish only if still absent.
+    /// Never replace a concurrent winner: its hardlinked launchers would be orphaned from the store's inode.
     OnlyIfAbsent,
-    /// The pre-check found a blob whose length is not the embedded one. This
-    /// call has positive evidence the file there is wrong, so it replaces it —
-    /// the one case where losing the winner's record is the point.
+    /// The pre-check saw a wrong-length blob, so replacing it is the point.
     OverTornBlob,
 }
 
-/// Atomically publishes the staged blob, or — when the seam above is armed —
-/// discards it and reports the failure a lost race produces. Twinned rather
-/// than branched inline so a release build carries no simulated-failure path
-/// at all.
+/// Twinned by `cfg`, never branched inline, so a release build carries no simulated-failure path.
 #[cfg(any(test, feature = "__testing"))]
 fn publish_staged(
     temp: tempfile::NamedTempFile,
@@ -113,8 +54,7 @@ fn publish_staged(
     publish: Publish,
 ) -> std::io::Result<()> {
     if lost_race {
-        // Drop the staged temp first: a genuine failed persist consumes and
-        // drops it too, so the seam leaves the same filesystem state behind.
+        // Drop first, as a real failed persist does, so the seam leaves the same filesystem state.
         drop(temp);
         return Err(std::io::Error::other(format!(
             "{LOST_PUBLISH_RACE_SEAM}: simulated publish failure"
@@ -140,81 +80,37 @@ fn publish_with(temp: tempfile::NamedTempFile, target: &Path, publish: Publish) 
     }
 }
 
-/// Content-addressed store for the embedded `ocx-shim` executable blob.
-///
-/// See the module docs for the layout and GC-exemption rationale.
+/// Flat `{root}/<sha256-hex>.exe`; outside the GC tiers, so a superseded blob stays as accepted litter.
 #[derive(Debug, Clone)]
 pub struct ShimBinStore {
     root: PathBuf,
 }
 
 impl ShimBinStore {
-    /// Creates a `ShimBinStore` rooted at `root` (conventionally
-    /// `$OCX_HOME/.bin/ocx-shim`, wired by [`super::FileStructure::with_root`]).
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
-    /// The root directory of the store.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Returns the path for the blob identified by `digest`.
-    ///
-    /// Flat layout — `{root}/<sha256-hex>.exe`, never sharded via
-    /// [`super::cas_shard_path`] (see module docs for why). `digest` is
-    /// expected to be a SHA-256 digest; its bare lowercase hex
-    /// ([`ocx_oci::Digest::hex`]) forms the filename, with no `sha256:` prefix.
+    /// `.exe` on every host: the blob is always a Windows PE.
     pub fn path(&self, digest: &ocx_oci::Digest) -> PathBuf {
         self.root.join(format!("{}.exe", digest.hex()))
     }
 
-    /// Publishes the embedded shim blob for the running target's
-    /// architecture ([`crate::shim::SHIM_BYTES`]) and returns its path,
-    /// writing it only when absent.
-    ///
-    /// Idempotent and safe under concurrent callers: the blob is
-    /// content-addressed by its own SHA-256 (see `shim_digest`), so every
-    /// writer publishes the same bytes to the same path — a losing concurrent
-    /// writer converges on the winner's file rather than corrupting it.
-    ///
-    /// Convergence is the caller's job, not the publish primitive's: the dance
-    /// `finalize_layer_dir` (`package_manager/tasks/layer_staging.rs`) runs for
-    /// layer directories applies verbatim — pre-check the target, publish, and
-    /// on a publish failure re-check: present ⇒ the race was lost and the
-    /// winner's file is byte-identical, absent ⇒ propagate. It takes no lock;
-    /// two writers of the same bytes need no mutual exclusion.
-    ///
-    /// A pre-check that found **nothing** publishes through
-    /// [`ocx_util::fs::persist_temp_file_if_absent`], not the replacing
-    /// form. Identical bytes are not enough here: `persist`'s rename swaps in a
-    /// fresh file record, so a loser replacing the winner's blob orphans the
-    /// record every `<name>.exe` hardlinked from it, and mutating the store's
-    /// blob afterwards (an `ocx` upgrade, a re-sign) would no longer reach
-    /// them — one inode per name instead of one inode per store, which is the
-    /// #301 property inverted. `generate()` publishes one launcher per declared
-    /// name concurrently, so this is the ordinary path, not an edge case.
+    /// Publishes the embedded blob when absent or torn and returns its path; idempotent and lock-free.
     ///
     /// # Errors
     ///
-    /// Returns an error if creating the store's root directory, staging the
-    /// blob, or atomically publishing it fails with the target still absent.
+    /// Creating the root, staging, or publishing fails with the target still absent.
     pub async fn ensure(&self) -> Result<PathBuf> {
         let target = self.path(shim_digest());
         let lost_race = simulated_lost_race(&self.root);
         let mut publish = Publish::OnlyIfAbsent;
 
-        // Pre-check: the blob is content-addressed, so a file already at this
-        // path is the file this call would write — provided it is whole.
-        // Publishing "only when absent" is what keeps N launcher generations
-        // down to one write; C-001 narrows "absent" to "absent or torn",
-        // because existence alone cannot tell a healthy blob from one a crashed
-        // earlier run left created-but-unwritten, and on Windows that blob is
-        // what every hardlinked `<name>.exe` actually executes. The length
-        // comparison lives in `crate::shim::published_blob_is_intact`, whose
-        // empty-`embedded` clause keeps this existence-only on hosts that embed
-        // no blob.
+        // Length, not existence: a crash can leave a torn blob that every hardlinked `<name>.exe` would run.
         if !lost_race {
             match tokio::fs::metadata(&target).await {
                 Ok(metadata) if crate::shim::published_blob_is_intact(metadata.len(), crate::shim::SHIM_BYTES) => {
@@ -229,9 +125,6 @@ impl ShimBinStore {
                     );
                     publish = Publish::OverTornBlob;
                 }
-                // Same lossy contract the previous existence probe had: an
-                // unreadable target is treated as absent and the publish below
-                // decides. A genuine I/O fault resurfaces there with context.
                 Err(error) => log::debug!(
                     "Cannot stat published shim blob {} ({error}); treating it as absent.",
                     target.display()
@@ -245,8 +138,6 @@ impl ShimBinStore {
 
         let root = self.root.clone();
         let published = target.clone();
-        // `persist_temp_file` is blocking (`NamedTempFile` is synchronous), so
-        // the whole stage-and-publish runs on a blocking thread.
         tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             let mut temp = tempfile::NamedTempFile::new_in(&root)?;
             std::io::Write::write_all(&mut temp, crate::shim::SHIM_BYTES)?;
@@ -254,18 +145,7 @@ impl ShimBinStore {
 
             match publish_staged(temp, &published, lost_race, publish) {
                 Ok(()) => Ok(()),
-                // A concurrent `ensure()` published between this call's
-                // pre-check and its rename. Its file carries the same
-                // `SHIM_BYTES` this call staged, so the winner's blob is this
-                // call's answer too; the staged temp is already gone with the
-                // failed publish, leaving no litter behind.
-                //
-                // Only the absent-publish path may converge this way. A failed
-                // `OverTornBlob` replace must NOT report success: the file at
-                // `published` is then the torn blob this call set out to
-                // repair, still there, and every `<name>.exe` hardlinked from
-                // it executes a truncated PE. Existence is evidence of a
-                // winner only when this call had no evidence the file was wrong.
+                // Only `OnlyIfAbsent` may converge on a winner: after a failed `OverTornBlob` the file is still the torn PE.
                 Err(error) if publish == Publish::OnlyIfAbsent && published.exists() => {
                     log::debug!(
                         "Shim blob {} was published concurrently ({error}); keeping the winner's file.",

@@ -3,42 +3,16 @@
 
 //! Forge client for `ocx package announce` and `ocx package claim`.
 //!
-//! Copy-and-own port of grimoire's forge module (`src/catalog/forge.rs`, same
-//! owner), owned by OCX — no shared crate, no cross-repo dependency (design
-//! register S5). GitLab, dropped from the first cut, is back as a peer
-//! implementation rather than a branch inside one client.
+//! [`Forge`] is implemented by [`GitHubForge`] and [`GitLabForge`], selected by
+//! [`ForgeKind`]. Writes go over REST, or `git` push options for a GitLab CI job
+//! token, which cannot open a merge request over REST.
 //!
-//! **Two write transports, one trait.** REST is the default and is what every
-//! existing announce uses. A second, `git`, exists for the one credential shape
-//! REST refuses — a GitLab CI job token, which can push over HTTP but cannot
-//! open a merge request — and creates the request through push options carried
-//! on the push itself. Which transport a client was built for is chosen once, by
-//! [`ForgeKind::client`], and is invisible to the caller: the same trait answers
-//! either way. The per-operation differences are on the [`Forge`] signatures.
-//!
-//! The operation set announce drives is [`Forge`]; the public vocabulary types
-//! name no forge and expose no forge-specific flag grammar (design register S7).
-//! [`GitHubForge`] and [`GitLabForge`] are its two implementations, each
-//! covering both its canonical host and self-hosted instances of it, selected by
-//! [`ForgeKind`]. The test seam stays the HTTP base-URL override
-//! (`with_base_url` + `__OCX_TESTING_FORGE_BASE_URL`), which the acceptance fake
-//! forge substitutes against — the trait carries a second *forge*, it is not a
-//! mocking seam for the first one.
-//!
-//! Security invariants (design register X5) are owed by **every** implementation
-//! and re-proved in each: no-redirect client (the credential is never replayed
-//! on a cross-host 3xx), credential via header only, fork parent verified
-//! against the upstream, fork identity built only from API response bodies, and
-//! a bounded fork-readiness wait.
+//! Every implementation owes a no-redirect client (a cross-host 3xx would replay the
+//! credential), header-only credentials, a verified fork parent, fork identity from
+//! response bodies only, and a bounded fork wait.
 
-// Every submodule is private and only the vocabulary a caller outside `forge`
-// speaks is re-exported below. The git-transport modules therefore reach each
-// other as `super::<module>::…` rather than through a qualified-visibility
-// marker, and nothing that handles a secret — the redactor, the workspace —
-// appears on this crate's public surface. `Redacted` is the one git-transport
-// type that does, and it is the opposite of a leak: it names a guarantee two
-// `ForgeError` variants carry, and it can hold nothing the redactor has not
-// already masked.
+// Private submodules, or a secret-handling type (the redactor, the workspace) reaches
+// the public surface; `Redacted` is safe to export, it holds only masked text.
 mod api;
 mod credentials;
 mod error;
@@ -58,23 +32,14 @@ pub use api::{
     Mergeability, PushAccess, RefUpdate,
 };
 pub use credentials::{ForgeCredentials, GitPushCredential};
-// `is_server_fault` is the 5xx rung of the exit-code ladder, which lives in
-// the binary; two spellings of `500..=599` would be two rules free to drift.
 pub use error::{ForgeError, is_server_fault};
-// `redact` is the sole constructor of `Redacted` - no `From`, no `new`, no
-// public field - and the exit-code table that builds a `GitCommandFailed`
-// lives in the binary now, so the table needs the constructor. Exporting it
-// keeps the single-constructor invariant exactly as it was.
 pub use git_command::{GitBinary, GitVersion, Redacted, probe_git_binary, redact};
 pub use github::GitHubForge;
 pub use gitlab::GitLabForge;
 pub use kind::{ForgeKind, WriteTransport};
 
-/// Announce credential, sourced from `OCX_ANNOUNCE_TOKEN`.
-///
-/// The secret is only ever sent as a bearer header — never logged, never placed
-/// in a URL, never in argv. `Debug` is redacted so it cannot leak into logs or
-/// error chains (design register X6).
+/// Forge credential: sent only in a request header, never in a URL or argv;
+/// `Debug` is redacted so it cannot leak into logs or error chains.
 #[derive(Clone)]
 pub struct ForgeToken(String);
 
@@ -100,17 +65,8 @@ impl std::fmt::Debug for ForgeToken {
 
 /// A forge repository coordinate: `[HOST/]NAMESPACE/PROJECT`.
 ///
-/// The namespace may itself hold slashes. GitHub's namespace is always one
-/// segment, but GitLab nests groups arbitrarily deep
-/// (`acme/platform/tooling/index`), and a coordinate type that cannot spell that
-/// makes a whole class of GitLab index repositories unaddressable. The type is
-/// therefore forge-neutral and permissive; a forge that does not nest rejects a
-/// multi-segment namespace itself, where the rule actually belongs.
-///
-/// `host` is `None` for the forge's canonical host, `Some` for a self-hosted
-/// instance. Whether a leading segment is a host is decided by the same rule
-/// OCI identifiers use ([`ocx_oci::package_ref::segment_is_host`]) — one
-/// spelling of "that looks like a host", not a second one that can drift.
+/// The namespace may hold slashes (GitLab nests groups); a forge that does not
+/// nest rejects a multi-segment namespace itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepoCoordinate {
     /// The forge host, or `None` for the forge's canonical host.
@@ -128,16 +84,14 @@ impl RepoCoordinate {
         format!("{}/{}", self.namespace, self.project)
     }
 
-    /// The first namespace segment — the account or top-level group that owns
-    /// the path. This is the unit a fork lives under and the unit an ownership
-    /// check compares, on both forges.
+    /// The first namespace segment: the account or top-level group a fork lives
+    /// under and an ownership check compares.
     #[must_use]
     pub fn namespace_root(&self) -> &str {
         self.namespace.split('/').next().unwrap_or(&self.namespace)
     }
 
-    /// The same coordinate under a different `namespace`, keeping the host and
-    /// project — how a fork's conventional location is named.
+    /// The same coordinate under a different `namespace`.
     #[must_use]
     pub fn with_namespace(&self, namespace: impl Into<String>) -> Self {
         Self {
@@ -150,19 +104,15 @@ impl RepoCoordinate {
 
 /// Whether a coordinate segment is a well-formed `host` or `host:port`.
 ///
-/// Deliberately narrower than [`ocx_oci::package_ref::segment_is_host`], which
-/// only answers "does this look like a host" for the *shape* of an identifier.
-/// This one guards a different thing: the value ends up in the API base URL the
-/// credential is sent to, so anything that could shift the URL's authority —
-/// userinfo (`@`), a query or fragment, a nested path, an IPv6 literal — is
-/// rejected rather than interpreted.
+/// Stricter than [`ocx_oci::package_ref::segment_is_host`]: the value becomes the
+/// credential's API base URL, so anything that could shift its authority (userinfo,
+/// query, fragment, path, IPv6 literal) is rejected.
 fn is_valid_host(segment: &str) -> bool {
     let (name, port) = match segment.split_once(':') {
         Some((name, port)) => (name, Some(port)),
         None => (segment, None),
     };
-    // `u16::from_str` also rejects a sign, whitespace and an out-of-range value
-    // such as `80443`, which a digits-only length check would wave through.
+    // Digits-only rejects the `+` sign `u16::from_str` accepts; the parse rejects `80443`.
     if let Some(port) = port
         && !(port.bytes().all(|byte| byte.is_ascii_digit()) && port.parse::<u16>().is_ok())
     {
@@ -182,14 +132,8 @@ fn is_valid_host(segment: &str) -> bool {
 
 /// Whether a namespace or project segment is a legal forge path segment.
 ///
-/// Both forges restrict a namespace and a project path to letters, digits, `_`,
-/// `-` and `.`, so this rejects nothing either forge would accept. It is a
-/// *security* check as much as a validation one: the GitHub client interpolates
-/// `full_path()` into a URL raw (GitLab percent-encodes it), so a segment
-/// carrying `?`, `#` or `/` would silently retarget the request —
-/// `acme?x=1/index` becomes a call to `/repos/acme` with the rest as a query
-/// string. Refusing the character is one check for both clients; encoding at
-/// sixteen GitHub call sites is sixteen chances to miss one.
+/// The GitHub client interpolates `full_path()` into URLs raw, so admitting `?`,
+/// `#` or `/` would retarget the request (`acme?x=1/index` calls `/repos/acme`).
 fn is_valid_path_segment(segment: &str) -> bool {
     !segment.is_empty()
         && segment != "."
@@ -210,17 +154,9 @@ impl std::str::FromStr for RepoCoordinate {
         if segments.iter().any(|segment| segment.is_empty()) {
             return Err(invalid());
         }
-        // A leading host is only recognised when something is left to be a
-        // `namespace/project` after it — `acme/index` is a two-segment path, never
-        // a host with a bare project.
         let host = if segments.len() >= 3 && ocx_oci::package_ref::segment_is_host(segments[0]) {
-            // A segment that looks like a host but is not a well-formed one is
-            // REFUSED, never demoted to a namespace segment: the host is
-            // interpolated straight into the API base URL that carries the
-            // announce credential, so `gitlab.com@evil.example` would put
-            // `gitlab.com` in the userinfo and send the token to
-            // `evil.example`. Fail closed at the parse boundary (design
-            // register X6).
+            // The host becomes the credential's API base URL: admitting
+            // `gitlab.com@evil.example` would send the token to `evil.example`.
             if !is_valid_host(segments[0]) {
                 return Err(invalid());
             }
@@ -231,8 +167,6 @@ impl std::str::FromStr for RepoCoordinate {
         if segments.len() < 2 {
             return Err(invalid());
         }
-        // Every remaining segment is a namespace or project name and lands in a
-        // request URL. Checked here, once, for both forges.
         if !segments.iter().all(|segment| is_valid_path_segment(segment)) {
             return Err(invalid());
         }
@@ -254,12 +188,9 @@ impl std::fmt::Display for RepoCoordinate {
     }
 }
 
-/// A verified fork identity.
-///
-/// Every field is read from a forge API **response body** — never composed from
-/// `{login}/{basename}` — so a renamed fork resolves to its real name (design
-/// register X5). Callers rebuild every subsequent endpoint from this identity,
-/// never from an API-returned URL.
+/// A verified fork identity, read from a forge API response body, never composed
+/// from `{login}/{basename}`, so a renamed fork resolves to its real name.
+/// Build later endpoints from it, never from an API-returned URL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForkIdentity {
     /// The fork's canonical `namespace/project` path.
@@ -268,15 +199,12 @@ pub struct ForkIdentity {
     pub namespace: String,
     /// The fork's repository/project name.
     pub project: String,
-    /// The forge's own opaque handle for the fork, where it has one that is
-    /// cheaper or more precise than the path — GitLab's numeric project id.
-    /// `None` on a forge addressed purely by path.
+    /// GitLab's numeric project id; `None` on a forge addressed purely by path.
     pub id: Option<u64>,
 }
 
 impl ForkIdentity {
-    /// The fork as a [`RepoCoordinate`] for building endpoints, carrying
-    /// `upstream`'s host so a self-hosted fork stays on its own instance.
+    /// The fork as a [`RepoCoordinate`] on `upstream`'s host.
     #[must_use]
     pub fn coordinate(&self, upstream: &RepoCoordinate) -> RepoCoordinate {
         RepoCoordinate {
@@ -300,8 +228,7 @@ pub struct PullRequest {
     pub number: u64,
     /// The pull-request web URL, reported to the user.
     pub html_url: String,
-    /// True when an existing open pull request was reused, false when freshly
-    /// opened.
+    /// True when an existing open pull request was reused.
     pub updated: bool,
 }
 

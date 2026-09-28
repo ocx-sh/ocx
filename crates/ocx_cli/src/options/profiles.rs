@@ -5,23 +5,6 @@ use std::path::PathBuf;
 
 /// The `--profile` / `--no-profile` tier of `ocx self setup`'s profile-target
 /// resolution.
-///
-/// Flatten into `ocx self setup` with `#[clap(flatten)]` to add both flags.
-/// The two use POSIX last-wins semantics (`overrides_with`) — combining them
-/// is not an error (the git `--[no-]verify` idiom), the same shape as
-/// [`super::Pinned`] and [`super::Consent`]. Resolve through
-/// [`Profiles::explicit`] — never read either field at a call site.
-///
-/// # Why the return is `Option<Vec<PathBuf>>`, not `Vec<PathBuf>`
-///
-/// Absence and an explicitly empty list are different answers here, in the
-/// same way `Consent::explicit`'s `None` differs from a `false` nobody typed:
-/// omitting both flags means "auto-detect the usual profile files", which is
-/// a resolution this type does not perform — that is the config rung's job.
-/// `--no-profile` means "write no profile blocks at all", which is a
-/// *decision*, not an absence of one. Collapsing `--no-profile` to `None`
-/// would make it indistinguishable from typing nothing, and the setup writer
-/// would fall through to auto-detection instead of honoring the refusal.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Profiles {
     /// Target an explicit profile file. Repeatable.
@@ -47,15 +30,10 @@ pub struct Profiles {
 }
 
 impl Profiles {
-    /// Resolves the paired flags to the CLI tier of the profile-target
-    /// ladder.
+    /// Resolves the paired flags to the CLI tier of the profile-target ladder.
     ///
-    /// `None` means neither flag was given, so the config rung's
-    /// auto-detection still applies. `Some(vec![])` is `--no-profile` having
-    /// won — an explicit refusal, never `None`'s "nothing was said". POSIX
-    /// last-wins with both flags: `overrides_with` guarantees at most one of
-    /// `no_profile` and a non-empty `profile` survives parsing, so checking
-    /// `no_profile` first is enough to read the winner off either field.
+    /// `None` leaves auto-detection to the config rung; `Some(vec![])` is `--no-profile`, a refusal that must not
+    /// collapse to `None`, or setup auto-detects instead.
     #[must_use]
     pub fn explicit(&self) -> Option<Vec<PathBuf>> {
         if self.no_profile {

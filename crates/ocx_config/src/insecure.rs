@@ -3,95 +3,16 @@
 
 //! The one answer to "may this registry be contacted over plain HTTP?".
 //!
-//! Two sources declare it — an `insecure = true` entry under
-//! `[registries."<name>"]`, and the `OCX_INSECURE_REGISTRIES` env list — and
-//! they are a **union** in the permissive direction: a host named by either is
-//! plaintext-eligible, so "config says secure, env says insecure" is not a
-//! conflict anyone has to resolve and the answer never depends on which source
-//! was consulted last.
-//!
-//! There is exactly one subtraction, and only the system scope can make it —
-//! see [`insecure_hosts`]. The union is computed once and handed to every gate
-//! that needs it (the OCI client's protocol choice, the mirror-role gate, the
-//! index base URL, and `ocx login`'s ping), because a host that is insecure for
-//! one of them and secure for another is a bug, not a feature.
+//! Every gate (OCI client, mirror role, index URL, `ocx login` ping) must take this one
+//! union, or a host is insecure for one gate and secure for another.
 
 use crate::Config;
 
-/// The deduped union of config-declared and env-declared plain-HTTP hosts,
-/// less any host the system scope has explicitly locked shut.
+/// The deduped union of config- and env-declared plain-HTTP hosts, less any host a
+/// system-locked entry states `insecure = false` for (else one env var defeats the lock).
 ///
-/// # The one subtraction
-///
-/// A `[registries."<name>"]` entry resolved from the SYSTEM scope
-/// (`/etc/ocx/config.toml`, so `system_locked`) that *states* `insecure = false`
-/// removes that name from the result — `OCX_INSECURE_REGISTRIES` included.
-/// `Some(false)` is a decision; `None` is silence and subtracts nothing, which
-/// is exactly the distinction the `Option<bool>` already carries. Without this,
-/// the per-entry lock [`RegistryConfig::merge`](crate::RegistryConfig::merge)
-/// enforces against lower config tiers would be defeated by one env var, and
-/// the platform engineer hardening a fleet would have no lever at all.
-///
-/// Everything else is additive: a *non*-system tier saying `insecure = false`
-/// revokes nothing.
-///
-/// # What "matched exactly" means, and against what
-///
-/// Names are compared with plain string equality, `host[:port]` together,
-/// because that is what the transport does: `oci_client`'s
-/// `ClientProtocol::HttpsExcept` tests the resolved registry string for
-/// membership. An entry for `registry.corp` therefore does not cover
-/// `registry.corp:5001`, and case matters.
-///
-/// The *subject* of that comparison is each gate's own resolved host string,
-/// and they are not all the same string. The transport and the mirror gate
-/// both compare `Reference::resolve_registry()`; the index gate compares the
-/// index base URL's host; `ocx login` compares
-/// [`canonicalize_registry`](ocx_oci::auth::registry_url::canonicalize_registry)'s
-/// output. For `host[:port]` names all four agree. Docker Hub is the one name
-/// they do not: `docker.io` resolves to `index.docker.io` for the transport and
-/// to `https://index.docker.io/v1/` for login, so no spelling of it can be
-/// granted a plaintext allowance here. That is deliberate — Docker Hub is not
-/// served over plain HTTP — and pinned by the `protocol_for` tests in
-/// [`ocx_oci::auth::login`].
-///
-/// # Spelling: exact to grant, normalised to revoke
-///
-/// The two directions want opposite normalisation, so they get it.
-///
-/// **Granting stays byte-exact**, case included, because that is the comparison
-/// the transport makes and being stricter than the transport fails *closed*: a
-/// mis-cased `[registries."Registry.Corp"]` grants nothing, which is the safe
-/// outcome. Pinned by `host_and_port_are_one_opaque_name`.
-///
-/// **Revoking normalises**, because being stricter there fails *open*. Two axes,
-/// both of which let a differently-spelled name reach the same socket:
-///
-/// - **ASCII case.** Hostnames are case-insensitive (RFC 4343) and DNS resolves
-///   every spelling to the same address, so an exact-match revoke lets
-///   `OCX_INSECURE_REGISTRIES=Registry.Corp:5000` — or a lower-tier
-///   `[registries."Registry.Corp:5000"]`, a different map key that therefore
-///   never meets the locked entry in
-///   [`RegistryConfig::merge`](crate::RegistryConfig::merge) — walk past
-///   a lock on `registry.corp:5000`.
-/// - **Port spelling.** `url` parses a port numerically before dialling, so
-///   `http://registry.corp:05000/` opens TCP 5000. An exact-match revoke lets
-///   `OCX_INSECURE_REGISTRIES=registry.corp:05000` take the session plaintext to
-///   the port the operator locked shut, by adding one character.
-///
-/// Either bypass is CWE-319/CWE-522. `same_registry_name` is the one place
-/// both normalisations live.
-///
-/// The asymmetry is not a wart: the strict side is the one where strictness is
-/// safe, and both sides are the *conservative* reading of an ambiguous name.
-///
-/// # Known residual: default-port elision
-///
-/// A lock on `registry.corp` does not reach a declaration of `registry.corp:80`,
-/// nor the reverse. Closing it needs the scheme's default port, and this one
-/// list gates four consumers across both schemes — so any constant filled in
-/// here would be wrong for some of them. Left open deliberately rather than
-/// guessed.
+/// Granting matches `host[:port]` byte-exact, failing closed; revoking folds case and
+/// port spelling, since strictness there fails open (`adr_managed_config_tier.md` § Rationale from code: ocx_config).
 pub fn insecure_hosts(config: &Config, env: &[String]) -> Vec<String> {
     let mut hosts: Vec<String> = config
         .registries
@@ -112,14 +33,7 @@ pub fn insecure_hosts(config: &Config, env: &[String]) -> Vec<String> {
 
 /// Whether the system scope declared this name plaintext-forbidden.
 ///
-/// Both halves of the entry are required: an unlocked `insecure = false` is an
-/// ordinary lower-tier default and revokes nothing, and a locked entry that
-/// never states `insecure` has said nothing about transport.
-///
-/// The name comparison folds ASCII case — see [`insecure_hosts`] for why this
-/// one direction does. A linear scan rather than a `HashMap` lookup for the
-/// same reason; the map is keyed on the TOML name verbatim, and this runs once
-/// per process over a handful of entries.
+/// A linear scan, not a map lookup: the map is keyed on the verbatim name and this match folds case.
 fn system_locked_shut(config: &Config, host: &str) -> bool {
     config
         .registries
@@ -128,26 +42,11 @@ fn system_locked_shut(config: &Config, host: &str) -> bool {
         .any(|(name, entry)| entry.system_locked && entry.insecure == Some(false) && same_registry_name(name, host))
 }
 
-/// Whether two `host[:port]` names denote the same socket, for the revoking
-/// side only.
+/// Whether two `host[:port]` names denote the same socket (revoking side only): case folded,
+/// numeric port re-rendered, since `url` dials `:05000` on TCP 5000.
 ///
-/// ASCII case folded (hostnames are case-insensitive) and a numeric port
-/// re-rendered from its parsed value, because `url` canonicalizes the port
-/// before the socket is opened: `http://registry.corp:05000/` dials TCP 5000,
-/// so a lock on `registry.corp:5000` must reach the `:05000` spelling too.
-/// Pinned by `a_zero_padded_port_is_the_same_socket_as_the_bare_one`.
-///
-/// A port that is not a `u16` — non-numeric, or out of range — is **not**
-/// normalised: the whole name falls back to the case-folded string, so it
-/// matches its own spelling and nothing else. Silently treating it as portless
-/// would make `registry.corp:99999` revoke `registry.corp`, i.e. one unparseable
-/// name subtracting a different host.
-///
-/// Deliberately no default-port fill. The elision axis (`registry.corp` versus
-/// `registry.corp:443`, or `:80`) is a known residual: the right default is the
-/// scheme's, and this predicate feeds four gates on two schemes, so any constant
-/// here is wrong for some of them. Over-subtracting fails closed, but guessing
-/// which port an operator meant is not something a comparison can do.
+/// A non-`u16` port is not normalised, or `registry.corp:99999` would revoke `registry.corp`.
+/// No default-port fill: the four gates span two schemes, so any default is wrong for some.
 fn same_registry_name(left: &str, right: &str) -> bool {
     fn normalize(name: &str) -> String {
         match name.rsplit_once(':') {

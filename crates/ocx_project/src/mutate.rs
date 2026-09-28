@@ -1,19 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Mutating writes to the project's on-disk files. Every write publishes the
-//! whole file by atomic rename, under the scoped mutation lock
-//! ([`crate::acquire_project_lock_for_file`]).
-//!
-//! `publish_by_rename` is that one publish, and it writes **both** project
-//! files: `ocx.toml` from the mutators here, `ocx.lock` from
-//! [`crate::lock::ProjectLock::save`].
-//!
-//! Public mutation helpers ([`init_project`], [`set_activate`]) take the
-//! **resolved config file path** — typically `<project_root>/ocx.toml` but may
-//! be `<project_root>/<custom>.toml` when the caller passed
-//! `--project=<custom>.toml`. The lock is keyed by that path, never hard-coded
-//! to `ocx.toml`, and lives under `$OCX_HOME/locks`.
+//! Mutating writes to the project's files, each published whole by atomic
+//! rename under the scoped mutation lock. Helpers take the resolved config
+//! path (`ocx.toml` or a `--project` name); the lock is keyed by it.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -24,54 +14,12 @@ use crate::mutation::ManifestSnapshot;
 use crate::project_lock::acquire_project_lock_for_file;
 use ocx_oci::PackageRef;
 
-/// Publish `bytes` as the entire contents of `path` by atomic rename: a
-/// tempfile in the same directory, the existing file's Unix mode carried onto
-/// it, [`ocx_util::fs::persist_temp_file`], then a parent-directory fsync so
-/// the rename entry is durable.
-///
-/// **The one writer of both project files.** `ocx.toml` and `ocx.lock` sit in
-/// one directory, are rewritten by one command (`ocx add` publishes both inside
-/// a single [`crate::MutationGuard`] commit) and are read by the same unlocked
-/// readers — so they get one publish policy instead of two that drift. Until
-/// this was one function they had drifted three ways: the lock file persisted
-/// through a bare `NamedTempFile::persist` with no Windows transient-lock
-/// retry, took the mode through `metadata` (which follows a symlink) and capped
-/// it at `0o644`, while the manifest beside it swallowed a failed parent fsync.
-///
-/// Rename-publish is what lets the unlocked readers — `ocx status`, the
-/// per-prompt reconciler, direnv, git, an editor — never observe a short or
-/// spliced document: a reader that has the file open keeps reading the inode it
-/// opened, where an in-place truncate-and-write would splice the tail of the
-/// new document onto the head of the old one it had already buffered (ocx#494,
-/// and ocx#441 for the same bug in `config.json`).
-///
-/// **Not `ocx_util::fs::write_bytes_atomic`**: that one publishes `0o600`,
-/// which is right for a credential file and wrong for a VCS-committed project
-/// file, and it neither creates the parent nor syncs anything. The existing
-/// file's mode is carried over instead, so a `0644` `ocx.toml` stays `0644` —
-/// applied with `fchmod` on the open temp file rather than at create time,
-/// which `umask` would clip. An absent file gets the `tempfile` default
-/// (`0600`): unchanged for `ocx init`, which always staged through a temp file;
-/// for `set_activate` on a fresh `$OCX_HOME` the create case moves from
-/// umask-derived to `0600`, the same mode the global manifest's sibling state
-/// files carry.
-///
-/// **The mode is carried whole, never capped.** `ocx.lock` used to mask the
-/// mode it found with `0o644`. That cap closed nothing — it fired only when the
-/// lock happened to be rewritten, and never on the `ocx.toml` beside it, which
-/// anyone able to rewrite one file could rewrite anyway — while it did break
-/// the umask-002 shared-group checkout, where the group-write bit is what lets
-/// the *next* developer run `ocx lock` at all.
-///
-/// **A failed parent fsync is an error, not a shrug.** The manifest writer used
-/// to discard it; a publish reported as landed but not durable is the one
-/// outcome a crash-safety contract cannot tolerate.
-///
-/// Blocking: call [`publish_by_rename_async`] from an async context.
+/// Publish `bytes` as the whole of `path` by atomic rename, carrying the
+/// existing mode, then fsync the parent. Blocking; async code uses [`publish_by_rename_async`].
+/// Rename, so unlocked readers never see a spliced document; not
+/// `write_bytes_atomic`, whose `0o600` is wrong for a committed file.
+/// The mode is carried whole: a `0o644` cap breaks umask-002 shared checkouts.
 pub(crate) fn publish_by_rename(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    // `Path::parent` is `Some("")` for a bare relative filename and `None` only
-    // for a root; both name the current directory, and neither reaches here
-    // from a caller — every one resolves a config-file path first.
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -92,11 +40,7 @@ pub(crate) fn publish_by_rename(path: &Path, bytes: &[u8]) -> Result<(), Error> 
     fsync_parent(parent)
 }
 
-/// Fsync `parent` so the rename entry itself is durable across a crash.
-///
-/// Unix only: opening a directory as a [`std::fs::File`] is unsupported on
-/// Windows, so there is no handle to sync through and the call is a no-op
-/// there.
+/// Fsync `parent` so the rename itself survives a crash.
 #[cfg(unix)]
 fn fsync_parent(parent: &Path) -> Result<(), Error> {
     let dir =
@@ -106,23 +50,16 @@ fn fsync_parent(parent: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// No-op off Unix — see the Unix arm.
+/// No-op off Unix: Windows cannot open a directory as a `File`.
 #[cfg(not(unix))]
 fn fsync_parent(_parent: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Carry the mode of the file currently at `path` onto `tmp`, so publishing
-/// the replacement does not silently change the file's permissions.
-///
-/// `symlink_metadata` deliberately does not follow: a symlink at the config
-/// path is refused by the lock acquire, and its own `0o777` mode is not what a
-/// published project file should wear even if one slipped through. An absent
-/// file leaves the `tempfile` default in place.
-///
-/// `set_permissions` on the *open* temp file is `fchmod(2)`, which is not
-/// clipped by `umask` — passing the mode to `tempfile::Builder` would be, and
-/// a `0664` group-writable file would come back `0644`.
+/// Carry the mode of the file at `path` onto `tmp`; an absent file keeps the default.
+/// `symlink_metadata`: a symlink's own `0o777` is not the project file's mode.
+/// Set on the open file (`fchmod`), which `umask` does not clip; passing it to
+/// `tempfile::Builder` would turn `0664` into `0644`.
 #[cfg(unix)]
 fn carry_existing_mode(path: &Path, tmp: &tempfile::NamedTempFile) -> Result<(), Error> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -133,8 +70,7 @@ fn carry_existing_mode(path: &Path, tmp: &tempfile::NamedTempFile) -> Result<(),
     if !metadata.is_file() {
         return Ok(());
     }
-    // Permission bits only: setuid/setgid/sticky confer nothing on a manifest
-    // or lock file, so they are not carried.
+    // Permission bits only; setuid/setgid/sticky are not carried.
     let mode = metadata.permissions().mode() & 0o0777;
     tmp.as_file()
         .set_permissions(std::fs::Permissions::from_mode(mode))
@@ -142,15 +78,13 @@ fn carry_existing_mode(path: &Path, tmp: &tempfile::NamedTempFile) -> Result<(),
     Ok(())
 }
 
-/// No-op off Unix: Windows ACLs are inherited from the parent directory by the
-/// temp file already, and there is no mode to carry.
+/// No-op off Unix: the temp file inherits the parent's ACLs.
 #[cfg(not(unix))]
 fn carry_existing_mode(_path: &Path, _tmp: &tempfile::NamedTempFile) -> Result<(), Error> {
     Ok(())
 }
 
-/// [`publish_by_rename`] from an async caller: the blocking publish goes to the
-/// pool rather than stalling the runtime.
+/// [`publish_by_rename`] on the blocking pool.
 pub(crate) async fn publish_by_rename_async(path: &Path, bytes: Vec<u8>) -> Result<(), Error> {
     let target = path.to_path_buf();
     let error_path = path.to_path_buf();
@@ -167,14 +101,8 @@ pub(crate) async fn publish_by_rename_async(path: &Path, bytes: Vec<u8>) -> Resu
 
 // ── read-modify-write helpers ─────────────────────────────────────────────
 
-/// Derive the binding key (TOML map key) from an identifier.
-///
-/// Per the `ocx.toml` schema, the binding key is the repository basename —
-/// the last `/`-separated segment of the repository path.  For example,
-/// `ghcr.io/acme/cmake` → `"cmake"`, `ocx.sh/shellcheck` → `"shellcheck"`.
-///
-/// Promoted to `pub` so CLI commands (`add.rs`, `remove.rs`) in `ocx_cli`
-/// can reuse the same derivation instead of duplicating it inline.
+/// The binding key for an identifier: its repository basename
+/// (`ghcr.io/acme/cmake` → `cmake`).
 pub fn binding_key(identifier: &PackageRef) -> String {
     identifier
         .repository()
@@ -184,36 +112,12 @@ pub fn binding_key(identifier: &PackageRef) -> String {
         .to_owned()
 }
 
-/// Validate the `[tools]` key `ocx add` is about to write — the explicit name
-/// from the `NAME=IDENTIFIER` form, or the key [`binding_key`] derived from
-/// the identifier.
-///
-/// Both go through [`super::config::validate_toolchain_name`], the one grammar
-/// the **reader** applies to every `[tools]` key, `[group.<g>].tools` key and
-/// `[group.<g>]` name. The derived key is not the safer input of the two — it
-/// comes from an identifier nobody spelled a name for, so an over-long or
-/// off-charset repository basename reaches the file unexamined, and before
-/// this guard existed nothing looked at it at all.
-///
-/// **What this buys, stated exactly.** It does not stop an unloadable file:
-/// `super::document::render_preserving` re-parses the text it renders through
-/// the same reader, so a refused name was already refused — late, with
-/// [`ProjectErrorKind::ManifestEditDiverged`], which names neither the
-/// offending key nor the rule it broke, and only after the lock was taken and
-/// the lock file resolved. What this buys is the reader's own diagnosis, at
-/// the first door, before any of that. The `my.tools` direction is the one
-/// where behaviour genuinely changes: the old hand-rolled group charset
-/// refused names the reader accepts.
-///
-/// `scope` matches the reader's own vocabulary so one string appears in the
-/// diagnostic whichever door the name came through: `"tools"` for the default
-/// group, `"group.<g>.tools"` for a named one.
+/// Validate the `[tools]` key `ocx add` writes, typed or derived, with the
+/// reader's grammar, so the user gets its diagnosis, not a late `ManifestEditDiverged`.
 ///
 /// # Errors
 ///
-/// [`ProjectErrorKind::InvalidToolchainNameCharset`] — the reader's own
-/// variant, so the message a user gets from `ocx add` is the message they
-/// would get from the file.
+/// [`ProjectErrorKind::InvalidToolchainNameCharset`].
 fn validate_tool_key(key: &str, group: Option<&str>, path: &Path) -> Result<(), Error> {
     let scope = match group {
         None => "tools".to_owned(),
@@ -222,42 +126,12 @@ fn validate_tool_key(key: &str, group: Option<&str>, path: &Path) -> Result<(), 
     super::config::validate_toolchain_name(&scope, key, path)
 }
 
-/// Validate a group name supplied via `--group`.
-///
-/// Two rules, in the reader's own order:
-///
-/// 1. The reserved selectors `default` and `all`, compared **ASCII
-///    case-folded** — `[group.Default]` silently coexisting with the `default`
-///    group is exactly the collision the reservation exists to stop, and the
-///    reader folds case for the same comparison.
-/// 2. Everything else is [`super::config::validate_toolchain_name`]: the same
-///    charset and the same 64-byte cap the reader applies to a `[group.<g>]`
-///    name.
-///
-/// Rule 2 replaces a hand-rolled `is_alphanumeric()` test that was wrong in
-/// both directions: `is_alphanumeric` is **Unicode**, so it admitted `café`,
-/// which the reader refuses; and it excluded `.`, so it refused `my.tools`,
-/// which the reader accepts.
-///
-/// # The charset refusal is a **usage** fault here, not a config one (RUL-73)
-///
-/// Rule 2 applies the *reader's* charset to a value nobody put in a file, and
-/// the reader's [`ProjectErrorKind::InvalidToolchainNameCharset`] classifies as
-/// `ConfigError` (78) — the right answer for what an `ocx.toml` contains and
-/// the wrong one for what a user typed. `ocx add --group '../../etc'` exited 64
-/// through [`ProjectErrorKind::InvalidGroupName`] until C-014's shared
-/// validator silently reclassified it, so the charset arm is re-attributed
-/// back here, at the one door a command-line group name comes through.
-/// `project/config.rs`'s parse-time validator is untouched and still answers 78
-/// for the identical name read out of a file.
-///
+/// Validate a `--group` name: the reserved `default`/`all` (ASCII
+/// case-folded), then the reader's charset and length.
 /// # Errors
 ///
-/// [`ProjectErrorKind::InvalidGroupName`] for a reserved selector or a name
-/// outside the toolchain charset — both usage faults in `--group`, exit 64.
-/// The `_ => error` arm below is defensive rather than reachable: since C-073
-/// deleted the `bin` reservation, the charset refusal is the only variant the
-/// reader's validator still produces.
+/// [`ProjectErrorKind::InvalidGroupName`], exit 64: a charset refusal is
+/// re-attributed from the reader's `ConfigError` (78), since the user typed it.
 fn validate_group_name(name: &str, path: &Path) -> Result<(), Error> {
     if name.eq_ignore_ascii_case(super::internal::DEFAULT_GROUP)
         || name.eq_ignore_ascii_case(super::internal::ALL_GROUP)
@@ -265,10 +139,7 @@ fn validate_group_name(name: &str, path: &Path) -> Result<(), Error> {
         return Err(invalid_group_name(name, path));
     }
     super::config::validate_toolchain_name("group", name, path).map_err(|error| match &error {
-        // The reader's charset diagnosis is not carried through:
-        // `InvalidGroupName` holds only a name. That is the trade RUL-73 makes
-        // — a precise sentence at the wrong exit code is worse than a general
-        // one at the right code, because only the code is machine-readable.
+        // The charset diagnosis is dropped: the right exit code beats a precise sentence.
         Error::Project(project_error)
             if matches!(project_error.kind, ProjectErrorKind::InvalidToolchainNameCharset { .. }) =>
         {
@@ -288,28 +159,13 @@ fn invalid_group_name(name: &str, path: &Path) -> Error {
 
 // ── public API ────────────────────────────────────────────────────────────
 
-/// Read the project config file at `config_path` into a
-/// [`ManifestSnapshot`]: the parsed configuration and the verbatim text it
-/// came from.
-///
-/// An ordinary bounded read — no lock handle. The mutation lock is a scoped
-/// entry under `$OCX_HOME/locks` and the file is published by rename, so
-/// there is no lock-owning descriptor to route through and (on Windows) no
-/// `ERROR_LOCK_VIOLATION` for a second handle to hit. Callers that intend to
-/// write hold [`crate::acquire_project_lock_for_file`] across this read and
-/// the publish that follows it.
-///
-/// The text travels with the parsed form because the write-back path edits
-/// that document rather than re-serializing the parsed config, so the user's
-/// comments and declaration order survive the mutation.
-///
-/// **An absent file reads as an empty document.** That is the create case for
-/// [`set_activate`] on a machine with no `$OCX_HOME/ocx.toml`, and for the
-/// bootstrapping mutators; every other read error is real and surfaces.
+/// Read the config at `config_path` into a [`ManifestSnapshot`], taking no
+/// lock: writers hold [`crate::acquire_project_lock_for_file`] across this read
+/// and the publish. An absent file reads as an empty document.
 ///
 /// # Errors
 ///
-/// - [`ProjectErrorKind::FileTooLarge`] — over the 64 KiB `FILE_SIZE_LIMIT_BYTES`.
+/// - [`ProjectErrorKind::FileTooLarge`] — over `FILE_SIZE_LIMIT_BYTES`.
 /// - [`ProjectErrorKind::Io`] — unreadable, not a regular file, or not UTF-8.
 /// - [`ProjectErrorKind::TomlParse`] — the text is not a project config.
 pub async fn read_manifest_snapshot(config_path: &Path) -> Result<ManifestSnapshot, Error> {
@@ -318,12 +174,9 @@ pub async fn read_manifest_snapshot(config_path: &Path) -> Result<ManifestSnapsh
     let limit = crate::internal::FILE_SIZE_LIMIT_BYTES;
     let bytes = match ocx_util::fs::read_bounded_async(config_path, limit).await {
         Ok(bytes) => bytes,
-        // The create case: nothing on disk is an empty document, not a failure.
         Err(BoundedReadError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(BoundedReadError::TooLarge { cap, .. }) => {
-            // `read_bounded` refuses without reporting how far over the file
-            // is; the refusal itself establishes the floor, and the exact
-            // size only ever reaches a message.
+            // `read_bounded` does not report the size; the refusal proves `cap + 1`.
             let size = tokio::fs::metadata(config_path)
                 .await
                 .map(|metadata| metadata.len())
@@ -352,38 +205,16 @@ pub async fn read_manifest_snapshot(config_path: &Path) -> Result<ManifestSnapsh
     Ok(ManifestSnapshot { config, text })
 }
 
-/// Apply an `add` binding mutation to a [`crate::config::ProjectConfig`]
-/// in memory.
-///
-/// Pure: validates inputs, mutates `config` in place, returns the derived
-/// binding key on success. Performs NO filesystem I/O — lock acquisition and
-/// the rename publish belong to [`crate::MutationGuard`], the one transactional
-/// commit path, which every `ocx add` goes through.
-///
-/// `path` is used solely for error context (`ProjectError::new(path, ...)`)
-/// when surfacing structured errors; it is NOT read from or written to.
-///
-/// `name` is the explicit binding key from the `NAME=IDENTIFIER` form of
-/// `ocx add`; when `None` the key is derived with [`binding_key`] (the
-/// repository basename). An explicit name lets two packages that share a
-/// basename — `gitlab/cli` and `github/cli` — coexist in one group.
+/// Apply an `add` binding to `config` in memory, returning the key; no I/O,
+/// `path` is error context. `name` is the explicit key, else [`binding_key`].
 ///
 /// # Errors
 ///
-/// The binding-specific refusals only — the I/O, parse and lock variants
-/// (`Io`, `FileTooLarge`, `TomlParse`, `TomlSerialize`, `Locked`) belong to
-/// the guard that reads and publishes the file, not to this:
-///
-/// - [`ProjectErrorKind::InvalidGroupName`] — `group` is a reserved selector
-///   (`default` or `all`, ASCII-case-folded).
-/// - [`ProjectErrorKind::InvalidToolchainNameCharset`] — `group`, or the key
-///   this mutation would write, is not a name the reader accepts. The key is
-///   checked whether it was typed or derived (R-W21).
-/// - [`ProjectErrorKind::BindingAlreadyExists`] — the key already exists in
-///   the target group. Raised whatever the occupying identifier is: the
-///   library refuses every duplicate key, and the *command* decides which
-///   duplicates are worth asking about (`ocx add` treats an identical re-add
-///   as a no-op and never calls this for it).
+/// - [`ProjectErrorKind::InvalidGroupName`] — `group` is a reserved selector.
+/// - [`ProjectErrorKind::InvalidToolchainNameCharset`] — `group` or the key,
+///   typed or derived, is not a name the reader accepts.
+/// - [`ProjectErrorKind::BindingAlreadyExists`] — the key is taken in the target
+///   group, whatever its identifier; the command decides which re-adds are no-ops.
 pub fn add_binding_in_memory(
     config: &mut crate::config::ProjectConfig,
     path: &Path,
@@ -395,16 +226,12 @@ pub fn add_binding_in_memory(
         validate_group_name(group_name, path)?;
     }
 
-    // One guard for both doors: the explicit `NAME=IDENTIFIER` key and the one
-    // `binding_key` derives. Validating only the typed name is what let a
-    // derived key carry a name the reader refuses all the way to the write and
-    // fail there with a diagnosis naming neither the key nor the rule.
+    // Validated whether typed or derived, or a bad derived key fails late at
+    // the write with a diagnosis naming neither key nor rule.
     let key = name.map_or_else(|| binding_key(identifier), str::to_owned);
     validate_tool_key(&key, group, path)?;
 
-    // Duplicate check: scoped to the target group only. The occupant is read
-    // out rather than probed for, because the refusal names it — a message
-    // saying only that the key is taken leaves the user to go and look.
+    // Scoped to the target group; the occupant is read so the refusal names it.
     match group {
         None => {
             if let Some(existing) = config.tools.get(&key) {
@@ -441,31 +268,19 @@ pub fn add_binding_in_memory(
         }
     }
 
-    // Cache coherence: the in-place mutation invalidates any previously cached
-    // declaration hash on `config`. Mutators that call this helper must NOT
-    // reuse a stale cached hash for downstream gates.
+    // The mutation stales any cached declaration hash.
     config.invalidate_declaration_hash_cache();
     Ok(key)
 }
 
-/// Apply a `remove` binding mutation to a [`crate::config::ProjectConfig`]
-/// in memory.
-///
-/// The `remove` sibling of [`add_binding_in_memory`] — mutates `config` in
-/// place, performs NO filesystem I/O. `path` is used only for error context.
-/// See that function for the full library/CLI split rationale.
-///
-/// `name` is the binding key **verbatim** — the TOML `[tools]` key. Callers
-/// holding an identifier derive it with [`binding_key`]; deriving it here would
-/// make a binding added under an explicit `NAME=IDENTIFIER` alias unremovable
-/// by its own name.
+/// Apply a `remove` binding to `config` in memory; no I/O. `name` is the key
+/// verbatim: deriving it would make an explicit-alias binding unremovable by its own name.
 ///
 /// # Errors
 ///
-/// - [`ProjectErrorKind::BindingNotFound`] — `name` was not found in the
-///   targeted group (or any group when `group` is `None`).
-/// - [`ProjectErrorKind::BindingAmbiguous`] — `group` is `None` and the
-///   binding appears in more than one group.
+/// - [`ProjectErrorKind::BindingNotFound`] — not in the targeted group (or any,
+///   when `group` is `None`).
+/// - [`ProjectErrorKind::BindingAmbiguous`] — `group` is `None` and several groups hold it.
 pub fn remove_binding_in_memory(
     config: &mut crate::config::ProjectConfig,
     path: &Path,
@@ -475,7 +290,6 @@ pub fn remove_binding_in_memory(
     let key = name.to_owned();
 
     match group {
-        // ── explicit group: remove from that group only ───────────────────
         Some("default") => {
             if config.tools.remove(&key).is_none() {
                 return Err(Error::Project(ProjectError::new(
@@ -495,7 +309,6 @@ pub fn remove_binding_in_memory(
                 )));
             }
         }
-        // ── no group specified: search all ────────────────────────────────
         None => {
             let mut hits: Vec<String> = Vec::new();
             if config.tools.contains_key(&key) {
@@ -541,43 +354,22 @@ pub fn remove_binding_in_memory(
         }
     }
 
-    // Cache coherence: see `add_binding_in_memory` — any successful path
-    // through this function mutated `config` and must drop the cached hash.
+    // Any successful path mutated `config`: drop the cached hash.
     config.invalidate_declaration_hash_cache();
     Ok(())
 }
 
-/// Create a minimal project config file at `config_path`. Idempotent
-/// failure: returns an error variant if a file already exists. The
-/// default content is a schema directive and an empty `[tools]` table —
-/// non-interactive, backend-first per
-/// `.claude/artifacts/research_cli_package_manager_conventions.md`
-/// section 6.
-///
-/// `config_path` must be the **full path** to the config file (typically
-/// `<project_root>/ocx.toml` but may be a custom name when the caller
-/// intends `--project=<custom>.toml` end-to-end). Returns the same path
-/// back on success so callers can confirm what was written.
-///
-/// For the bare-directory bootstrap case (no custom config name), use
-/// [`init_project_at_default`] which appends `ocx.toml` to the directory.
+/// Create a minimal config (schema directive plus empty `[tools]`) at
+/// `config_path` and return the path; fails if one exists.
 ///
 /// # Errors
 ///
-/// - [`ProjectErrorKind::ConfigAlreadyExists`] — the config file already
-///   exists at the target path (or a dangling symlink points to that path —
-///   both cases are blocked to prevent inadvertent writes through a symlink).
-/// - [`ProjectErrorKind::Io`] — the target path could not be written.
-/// - [`ProjectErrorKind::TomlSerialize`] — internal serialisation error (should
-///   not occur with the static template content).
+/// - [`ProjectErrorKind::ConfigAlreadyExists`] — anything is at the path, a
+///   dangling symlink included.
+/// - [`ProjectErrorKind::Io`] — the path could not be written.
 pub fn init_project(config_path: &Path) -> Result<PathBuf, Error> {
-    // SAFETY: `symlink_metadata` is used instead of `exists()` so that a
-    // dangling symlink at the target path is treated as "already exists" and
-    // blocked. `exists()` follows symlinks and returns `false` for a dangling
-    // symlink, which would silently overwrite the symlink target — a TOCTOU
-    // risk when a malicious symlink is placed at the config file path between
-    // the check and the write. `symlink_metadata().is_ok()` returns `true` for
-    // both valid files and dangling symlinks, preventing writes in both cases.
+    // SAFETY: `symlink_metadata`, not `exists()`, which is `false` for a dangling
+    // symlink, so a planted link would be written through.
     if config_path.symlink_metadata().is_ok() {
         return Err(Error::Project(ProjectError::new(
             config_path.to_path_buf(),
@@ -587,17 +379,8 @@ pub fn init_project(config_path: &Path) -> Result<PathBuf, Error> {
         )));
     }
 
-    // Minimal non-interactive content: schema-server hint + empty `[tools]`
-    // table. The first-line comment is recognized by the YAML/TOML language
-    // servers (`taplo`, `yaml-language-server`) and IDE plugins (VS Code, Zed)
-    // as a pointer to the canonical JSON Schema at the published URL — gives
-    // schema-aware autocompletion and validation out of the box.
-    // Intentionally kept under 10 non-blank lines per research §6.4.
-    //
-    // No `registry` hint: `ocx.toml` has no such key (`RawProjectConfig` is
-    // `deny_unknown_fields`), so the commented form used to be a line that
-    // broke the file the moment anyone uncommented it. The default registry is
-    // `[registry] default` in `config.toml` (`ocx_config`).
+    // No `registry` hint: `ocx.toml` has no such key, and `deny_unknown_fields`
+    // rejects it once uncommented.
     let content = "\
 #:schema https://ocx.sh/schemas/project/v1.json
 # OCX project toolchain — managed by `ocx add` / `ocx remove`
@@ -609,56 +392,18 @@ pub fn init_project(config_path: &Path) -> Result<PathBuf, Error> {
     Ok(config_path.to_path_buf())
 }
 
-/// Convenience wrapper for the bare-directory bootstrap case: creates
-/// `<project_root>/ocx.toml` via [`init_project`].
-///
-/// Use this when the caller has a project directory and wants the
-/// canonical `ocx.toml` filename. Use [`init_project`] directly when
-/// the caller has a resolved config-file path that may be a custom name.
-///
-/// # Errors
-///
-/// Same as [`init_project`].
+/// [`init_project`] for `<project_root>/ocx.toml`, with its errors.
 pub fn init_project_at_default(project_root: &Path) -> Result<PathBuf, Error> {
     init_project(&project_root.join("ocx.toml"))
 }
 
-/// Persist the toolchain `activate` mode as the top-level `activate` key of
-/// the config file at `config_path`.
-///
-/// The writer behind `ocx self setup --toolchain-activate`, whose target is
-/// always the **global** `$OCX_HOME/ocx.toml`. Omitting the flag calls nothing,
-/// so a run that does not ask for the key leaves the file byte-identical —
-/// the same contract the `[shell]` toggles keep for `config.toml`.
-///
-/// **Creates the file when absent, carrying only this key.** A machine that
-/// has never run `ocx --global add` has no `$OCX_HOME/ocx.toml`, and the
-/// alternative — refusing, or writing [`init_project`]'s `[tools]` template —
-/// would either make the flag conditional on unrelated state or invent
-/// declarations the user did not make.
-///
-/// Every write goes through [`acquire_project_lock_for_file`] and the shared
-/// format-preserving render, exactly as a [`crate::MutationGuard`] commit does.
-/// There is no
-/// second `toml_edit` site: a comment, a key order or a spacing convention
-/// that survives `ocx add` must survive this too, and two editors of one file
-/// format is how that stops being true.
-///
-/// **The create-when-absent case needs no branch.** [`read_manifest_snapshot`]
-/// reads an absent file as empty text, and the render inserts one scalar into
-/// an empty document — no `[tools]` table, no template, only the key; the
-/// publish then creates the file by rename. The acquire also runs the shipped
-/// symlink refusal, so a symlink planted at the path is refused rather than
-/// followed.
-///
-/// **This does not stale `ocx.lock`.** [`super::declaration_hash`] covers
-/// `tools` and `group.*.tools` only, so writing `activate` cannot force a
-/// re-lock — and the cached hash on `config` stays valid, which is why this is
-/// the one mutator here that does not invalidate it.
+/// Persist the top-level `activate` key, the writer behind `ocx self setup
+/// --toolchain-activate`. An absent file is created with only this key, never
+/// the `[tools]` template. Rendered like a guard commit: a second `toml_edit`
+/// site would drop the comments `ocx add` keeps.
 ///
 /// # Errors
 ///
-/// The read-modify-write set, minus the binding-specific variants:
 /// [`ProjectErrorKind::Io`], [`ProjectErrorKind::FileTooLarge`],
 /// [`ProjectErrorKind::TomlParse`], [`ProjectErrorKind::ManifestEditParse`],
 /// [`ProjectErrorKind::ManifestEditDiverged`], [`ProjectErrorKind::Locked`].
@@ -674,10 +419,10 @@ pub async fn set_activate(
         text: original,
     } = read_manifest_snapshot(config_path).await?;
     if config.activate == Some(mode) {
-        // Already what was asked for: leave the bytes alone rather than
-        // re-render them, so a re-run cannot disturb decor or mtime.
+        // Already set: leave the bytes alone so a re-run cannot disturb decor or mtime.
         return Ok(());
     }
+    // No cache invalidation: `activate` is outside `declaration_hash`.
     config.activate = Some(mode);
 
     let serialized = super::document::render_preserving(&original, &config, config_path)?;

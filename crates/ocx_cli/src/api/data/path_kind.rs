@@ -3,18 +3,12 @@
 
 use serde::Serialize;
 
+// One definition for `ocx pull` and `ocx package which`: never re-spell it in either.
 /// What kind of directory a reported `path` names.
 ///
 /// A tool composed lazily has no package directory until its first invocation
-/// materializes one — what exists on disk is its generated shim tree. Reporting
-/// the package directory for it would be a lie in a machine-read field, and
-/// reporting the shim directory without saying so would be a silent change of
-/// meaning. The discriminator is what lets a consumer tell the two apart.
-///
-/// **One definition, two consumers.** `ocx pull` (this crate's `command/pull.rs`)
-/// and `ocx package which` both answer "where is this tool on disk", and both
-/// answer it with the same two-value vocabulary — so it lives here rather than
-/// being re-spelled in either report type.
+/// materializes one — what exists on disk is its generated shim tree. `ocx pull`
+/// and `ocx package which` both report this same two-value vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PathKind {

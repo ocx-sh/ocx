@@ -1,25 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx patch publish` — publish a `__ocx.patch` descriptor to the patch registry.
-//!
-//! This module implements Phase 6A of the infrastructure-patches feature
-//! (`adr_infrastructure_patches.md`, milestone #111, issue #117).
-//!
-//! ## Responsibility
-//!
-//! [`PackageManager::publish_patch_descriptor`] validates an authored descriptor,
-//! requires an online client, and pushes the descriptor manifest to the patch
-//! registry under the `__ocx.patch` internal tag of `patch_repo_id`. The CLI
-//! computes `patch_repo_id` (global root vs package-specific sub-path) via the
-//! discovery helpers in [`super::patch_discovery`]; this method stays
-//! identifier-agnostic.
-//!
-//! ## Companions are out of scope
-//!
-//! A patch descriptor only *references* companion packages by identifier. The
-//! maintainer publishes companions separately with `ocx package push`. This
-//! method pushes the descriptor manifest only.
+//! `ocx patch publish`: push a `__ocx.patch` descriptor to the patch registry
+//! (`adr_infrastructure_patches.md § Patch maintainer workflow`).
 
 use crate::patch::PatchDescriptor;
 use ocx_oci::{
@@ -31,44 +14,23 @@ use super::super::{PackageManager, error::PackageErrorKind};
 
 // ── The `__ocx.patch` wire shape ──────────────────────────────────────────────
 
-/// Pushes a `__ocx.patch` descriptor artifact to the patch registry.
-///
-/// Builds an OCI ImageManifest with `artifactType` set to
-/// [`crate::patch::PATCH_MANIFEST_ARTIFACT_TYPE`], an empty `{}` config blob,
-/// and a single layer carrying the descriptor JSON
-/// ([`crate::patch::PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE`]). The artifact is
-/// pushed to the `__ocx.patch` internal tag on `patch_repo_id`.
-///
-/// `descriptor_bytes` is validated by parsing it as a [`PatchDescriptor`]
-/// before any network call — a malformed descriptor is rejected up front rather
-/// than published.
-///
-/// A free function over [`ocx_oci::Client`], not a method on it: the `__ocx.patch`
-/// artifact's shape is the patch tier's vocabulary, and the client supplies
-/// only blob and manifest primitives.
-///
-/// Returns the manifest digest of the pushed `__ocx.patch` artifact.
+/// Pushes a `__ocx.patch` artifact (empty config, one descriptor-JSON layer) and returns its manifest digest.
 ///
 /// # Errors
 ///
-/// - [`ClientError::InvalidManifest`] — `descriptor_bytes` is not a valid
-///   patch descriptor, or manifest assembly failed.
-/// - [`ClientError::Authentication`] / [`ClientError::Registry`] — auth or a
-///   blob/manifest push failed.
+/// - [`ClientError::InvalidManifest`] — not a valid patch descriptor, or manifest assembly failed.
+/// - [`ClientError::Authentication`] / [`ClientError::Registry`] — auth or a push failed.
 async fn push_patch_descriptor(
     client: &ocx_oci::Client,
     patch_repo_id: &PackageRef,
     descriptor_bytes: &[u8],
 ) -> crate::Result<ocx_oci::Digest> {
-    // Validate the descriptor parses before pushing — reject malformed input.
+    // Before any network call, so a malformed descriptor is never published.
     PatchDescriptor::from_json_bytes(descriptor_bytes)
         .map_err(|e| ClientError::InvalidManifest(format!("invalid patch descriptor: {e}")))?;
 
-    // The patch registry is the one `[patches]` names, written as named: a
-    // descriptor is not a package, and no index serves one.
+    // Passthrough: a descriptor is not a package, so no index routes it.
     let patch_identifier = ocx_oci::OciIdentifier::passthrough(patch_repo_id).clone_with_tag(InternalTag::PATCH_TAG);
-    // Push stays canonical (mirror-free): remote/proxy mirrors are read-only —
-    // `ensure_auth` routes a `Push` scope to the canonical host for that reason.
     client
         .ensure_auth(&patch_identifier, ocx_oci::RegistryOperation::Push)
         .await?;
@@ -105,12 +67,10 @@ async fn push_patch_descriptor(
         .config_bytes(MEDIA_TYPE_OCI_EMPTY_CONFIG, b"{}".to_vec())
         .layers(layers)
         .build()?;
-    // Sanity: the empty-config blob digest computed by the builder must
-    // match the one we already pushed above.
     debug_assert_eq!(parts.config_digest.to_string(), config_digest.to_string());
     let manifest_digest = parts.manifest_digest.clone();
 
-    // Push to the tag reference directly (not by digest) so the tag is created.
+    // By tag, not digest, or the tag is never created.
     client
         .push_manifest_raw(&patch_identifier, parts.manifest_bytes, MEDIA_TYPE_OCI_IMAGE_MANIFEST)
         .await?;
@@ -126,62 +86,38 @@ async fn push_patch_descriptor(
 // ── Public report type ────────────────────────────────────────────────────────
 
 /// Summary of a completed [`PackageManager::publish_patch_descriptor`] run.
-///
-/// Carries the published patch repo reference, the manifest digest of the
-/// pushed `__ocx.patch` artifact, and the descriptor's rule count.
 #[derive(Debug, Clone)]
 pub struct PatchPublishReport {
-    /// Canonical reference of the patch repo the descriptor was published to
-    /// (`registry/repository:__ocx.patch`).
+    /// `registry/repository:__ocx.patch`.
     pub patch_reference: String,
-    /// Manifest digest of the pushed `__ocx.patch` artifact.
     pub manifest_digest: ocx_oci::Digest,
-    /// Number of rules in the published descriptor.
     pub rule_count: usize,
 }
 
 // ── PackageManager::publish_patch_descriptor ──────────────────────────────────
 
 impl PackageManager {
-    /// Publish a validated patch descriptor to `patch_repo_id`'s `__ocx.patch` tag.
-    ///
-    /// Steps:
-    ///
-    /// 1. Parse and validate `descriptor_bytes` as a [`PatchDescriptor`]
-    ///    (rejects malformed input before any network call).
-    /// 2. Require an online client (`require_client`; offline → `OfflineMode`).
-    /// 3. Push the descriptor manifest via `push_patch_descriptor` (private to
-    ///    this module, hence not a link).
-    /// 4. Return the published reference, manifest digest, and rule count.
-    ///
-    /// `patch_repo_id` is the patch-registry repository (global root or
-    /// package-specific sub-path) WITHOUT the `__ocx.patch` tag — the push
-    /// applies the internal tag.
+    /// Publishes a validated patch descriptor to `patch_repo_id`, which must not carry the `__ocx.patch` tag.
     ///
     /// # Errors
     ///
-    /// - `PackageErrorKind::PatchDiscovery` — the descriptor bytes are not a
-    ///   valid patch descriptor.
+    /// - `PackageErrorKind::PatchDiscovery` — not a valid patch descriptor.
     /// - `PackageErrorKind::Internal` — offline mode, or a registry push error.
     pub async fn publish_patch_descriptor(
         &self,
         patch_repo_id: &PackageRef,
         descriptor_bytes: &[u8],
     ) -> Result<PatchPublishReport, PackageErrorKind> {
-        // Step 1: Validate the descriptor parses; capture the rule count for the report.
         let descriptor =
             PatchDescriptor::from_json_bytes(descriptor_bytes).map_err(PackageErrorKind::PatchDiscovery)?;
         let rule_count = descriptor.rules.len();
 
-        // Step 2: Require an online client.
         let client = self.require_client().map_err(PackageErrorKind::Internal)?;
 
-        // Step 3: Push the descriptor manifest.
         let manifest_digest = push_patch_descriptor(client, patch_repo_id, descriptor_bytes)
             .await
             .map_err(PackageErrorKind::Internal)?;
 
-        // Step 4: Build the report.
         let patch_reference = patch_repo_id
             .clone_with_tag(ocx_oci::tag::InternalTag::PATCH_TAG)
             .to_string();

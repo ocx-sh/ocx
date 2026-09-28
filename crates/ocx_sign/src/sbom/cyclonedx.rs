@@ -2,35 +2,21 @@
 // Copyright 2026 The OCX Authors
 
 //! CycloneDX 1.5-1.7 parsing and summarization.
-//!
-//! Probes `specVersion` first, then dispatches (DATA-FMT-02 shape): a direct
-//! typed parse of the whole document would turn "this predates the fields we
-//! read" into an opaque field-level `serde_json` error somewhere mid-document,
-//! instead of a version refusal naming the version and the accepted range.
 
 use serde::Deserialize;
 use serde_json::Value;
 
 use super::{SbomError, SbomSummary};
 
-/// CycloneDX minor versions this reader understands. `pub(super)`: also the
-/// single source for the accepted-range text in `SbomError::UnsupportedSpecVersion`'s
-/// message (`sbom.rs`), so the two never drift apart.
+/// CycloneDX minor versions this reader understands.
 pub(super) const ACCEPTED_SPEC_VERSIONS: [&str; 3] = ["1.5", "1.6", "1.7"];
 
-/// The fields this reader extracts, once `specVersion` is in the accepted
-/// range. Unknown fields are ignored (no `deny_unknown_fields`): the
-/// document was produced by a third party, possibly a newer CycloneDX minor
-/// version than this reader knows about (DATA-FMT-04, tolerant).
+/// The fields this reader extracts; no `deny_unknown_fields`, as producers may write a newer minor.
 #[derive(Deserialize)]
 struct CycloneDxDocument {
     #[serde(rename = "serialNumber")]
     serial_number: Option<String>,
-    // Option, not Vec + #[serde(default)]: #[serde(default)] only covers an
-    // ABSENT field, so an explicit `"components": null` would otherwise fail
-    // to deserialize into Vec<_> while every other optional field tolerates
-    // it. Option<Vec<_>> treats absent and null identically (both -> None)
-    // and still errs on a wrong-shaped value, e.g. a string.
+    // `Option`, not `#[serde(default)]`: the default covers only an absent field, so `"components": null` would fail.
     components: Option<Vec<ComponentEntry>>,
     metadata: Option<DocumentMetadata>,
 }
@@ -45,25 +31,16 @@ struct ComponentEntry {
     name: Option<String>,
 }
 
-/// Parses CycloneDX 1.5, 1.6 and 1.7. Any other document — including a
-/// CycloneDX outside that range — is an explicit refusal, never an empty
-/// summary.
+/// Summarizes a CycloneDX 1.5-1.7 document; any other document is a refusal, never an empty summary.
 ///
 /// # Errors
-/// [`SbomError::NotJson`] when `document` is not valid JSON;
-/// [`SbomError::NotAnObject`] when the JSON root is not an object;
-/// [`SbomError::MissingSpecVersion`] when `specVersion` is absent or not a
-/// string; [`SbomError::UnsupportedSpecVersion`] when it names a version
-/// outside 1.5-1.7; [`SbomError::MalformedDocument`] when an accepted
-/// version otherwise fails to parse.
+///
+/// Every [`SbomError`] variant, one per failed stage.
 pub fn summarize_cyclonedx(document: &[u8]) -> Result<SbomSummary, SbomError> {
-    // serde_json's default recursion limit (128) applies here — unbounded_depth
-    // is not a crate feature we enable, so a hostile, deeply nested document
-    // returns this Err rather than overflowing the stack.
+    // Never enable serde_json's `unbounded_depth`: its 128 limit is what stops a nested document overflowing the stack.
     let value: Value = serde_json::from_slice(document).map_err(SbomError::NotJson)?;
 
-    // Probe: read specVersion and nothing else. Extra/unknown top-level
-    // fields never block reaching the version-refusal or dispatch arm.
+    // Probe `specVersion` before the typed parse, or an old version surfaces as an opaque field error.
     let Some(root) = value.as_object() else {
         return Err(SbomError::NotAnObject);
     };
@@ -75,7 +52,6 @@ pub fn summarize_cyclonedx(document: &[u8]) -> Result<SbomSummary, SbomError> {
         return Err(SbomError::UnsupportedSpecVersion { found: spec_version });
     }
 
-    // Dispatch: specVersion is accepted, now parse the fields the summary needs.
     let document: CycloneDxDocument = serde_json::from_value(value).map_err(|source| SbomError::MalformedDocument {
         spec_version: spec_version.clone(),
         source,

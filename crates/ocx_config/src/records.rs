@@ -2,26 +2,13 @@
 // Copyright 2026 The OCX Authors
 
 //! The `[records]` configuration section, and the shape every tier folds in.
-//!
-//! One type serves all three tiers — config file, environment, CLI flags — so
-//! the fold in `record::policy::resolve_records` is a merge of like with like
-//! rather than three bespoke conversions. That fold lives above this module and
-//! is named in prose rather than linked: this is `ocx_config`, and an intra-doc
-//! link into `ocx_package_manager` is the very reach the split removes.
-//!
-//! The section lives here rather than under `record/` because the crate-private
-//! `config::Config` carries it as a field: owning the type where the
-//! config file is parsed is what keeps `ocx_config` from depending on the
-//! recording subsystem it merely configures.
 
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
 /// Where and how execution records are written.
-///
-/// No `deny_unknown_fields`: this is a fleet-read config surface, and a section
-/// written for a newer ocx must not brick an older binary reading the same file.
+// No `deny_unknown_fields`: a section written for a newer ocx must not brick an older binary.
 #[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
 pub struct RecordsOptions {
     /// Directory records are written to. Absent → recording is off.
@@ -36,45 +23,22 @@ pub struct RecordsOptions {
     /// Fail posture when a record cannot be written.
     ///
     /// `true` aborts the launch; `false` warns and proceeds. **Config-file only
-    /// at every tier** — never settable from the environment or a flag, so a
-    /// developer who fat-fingers `--records-dir` gets a warning rather than a
-    /// dead build. Defaults `false` unlocked, `true` when SYSTEM-locked.
+    /// at every tier** — never settable from the environment or a flag.
+    /// Defaults `false` unlocked, `true` when SYSTEM-locked.
+    // No env or flag source for this: a fat-fingered `--records-dir` would then kill the build.
     pub required: Option<bool>,
 
-    /// Runtime provenance marker: this section was declared at the SYSTEM config
-    /// scope (`/etc/ocx/config.toml`), so no lower tier can redirect or disable
-    /// it.
-    ///
-    /// Never serialized — set by the loader after parsing the system-scope file,
-    /// not read from disk.
+    /// Set by the loader when declared at SYSTEM scope; no lower tier can redirect or disable it.
     #[serde(skip)]
     #[schemars(skip)]
     pub system_locked: bool,
 }
 
 impl RecordsOptions {
-    /// Reads the environment tier of the `[records]` fold —
-    /// [`OCX_RECORDS_DIR`](crate::env::keys::OCX_RECORDS_DIR) and
-    /// [`OCX_RECORDS_NAME`](crate::env::keys::OCX_RECORDS_NAME) — into the same
-    /// shape the config file and the CLI flags produce, so
-    /// `record::policy::resolve_records` merges like with like.
+    /// Reads the environment tier (`OCX_RECORDS_DIR`, `OCX_RECORDS_NAME`); `required` never
+    /// comes from it.
     ///
-    /// An absent **or empty** value is unset, following
-    /// [`OCX_MANAGED_CONFIG`](crate::env::keys::OCX_MANAGED_CONFIG) and
-    /// [`OCX_CONFIG`](crate::env::keys::OCX_CONFIG): an exported-but-empty
-    /// variable is how a shell spells "no value", and reading
-    /// `OCX_RECORDS_DIR=""` as a sink would scatter records across whatever
-    /// directory each tool happened to run in.
-    ///
-    /// Infallible by construction — the two values are a path and a template
-    /// string, so there is nothing to reject here. A malformed *template* is a
-    /// resolve-time error raised by `record::NameTemplate::parse`, which sees
-    /// the merged value and can therefore name the tier that won.
-    ///
-    /// `required` is never populated from this tier. There is no
-    /// `OCX_RECORDS_REQUIRED` env var, and the fold refuses the field from a
-    /// non-config tier regardless of the shape it receives — recording posture
-    /// is an operator decision, not a per-invocation one.
+    /// An empty value is unset, or `OCX_RECORDS_DIR=""` scatters records across each tool's cwd.
     pub fn from_env() -> Self {
         use crate::env::keys;
         use ocx_util::env::var;
@@ -89,17 +53,9 @@ impl RecordsOptions {
         }
     }
 
-    /// Merge `other` into `self`; `other` has higher precedence.
-    ///
-    /// Early-returns when `self` is SYSTEM-locked, which is what makes the
-    /// clamp free for every file tier.
+    /// Merge `other` into `self`; `other` wins unless `self` is SYSTEM-locked.
     pub fn merge(&mut self, other: RecordsOptions) {
-        // The clamp is binary and per-block: with no operator policy the sink is
-        // the caller's, filename pattern included; the moment one is declared at
-        // SYSTEM scope the whole block is theirs, because a collector downstream
-        // now depends on all of it. The loader folds the system tier in first as
-        // the accumulator base, so `self` is the system tier when locked — and
-        // every file tier gets the clamp for free from this one return.
+        // The system tier is the fold's accumulator base, so this one return clamps every file tier.
         if self.system_locked {
             return;
         }
@@ -112,8 +68,7 @@ impl RecordsOptions {
         if other.required.is_some() {
             self.required = other.required;
         }
-        // `other.system_locked` is deliberately not folded in: only the loader
-        // locks, and only for the system-scope file.
+        // `other.system_locked` is not adopted: only the loader locks, and only the system file.
     }
 
     /// Mark this section as declared at SYSTEM scope.
@@ -408,7 +363,7 @@ mod env_tier_tests {
         assert!(parsed.required.is_none(), "no posture rides along");
     }
 
-    /// D-007: the relocated reader answers what the contract names, field by
+    /// The relocated reader answers what the contract names, field by
     /// field.
     ///
     /// Each of the four fields is compared against a literal expectation rather

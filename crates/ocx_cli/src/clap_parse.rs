@@ -1,38 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Clap parse boundary — single helper that drives `try_get_matches` and maps
-//! every clap failure to an [`ExitCode`], so argv rejection reaches the caller
-//! on the same typed ladder as everything else the process can exit on.
+//! Clap parse boundary: every clap failure mapped to an [`ExitCode`].
 //!
-//! Named `clap_parse` rather than `clap`: a crate-root module called `clap`
-//! makes every `use clap::…` in this crate ambiguous with the crate of that
-//! name.
+//! Named `clap_parse`, not `clap`: a crate-root `clap` module makes every `use clap::…` ambiguous.
 
 use clap_builder::error::ErrorKind as ClapErrorKind;
 use clap_builder::{ArgMatches, Command};
 
 use ocx_exit::ExitCode;
 
-/// Drive [`Command::try_get_matches_from`] over `argv` (program name first —
-/// the process's own `args_os()` in production) and classify any failure into
-/// an [`ExitCode`].
-///
-/// - Help / version / `DisplayHelpOnMissingArgumentOrSubcommand` paths
-///   delegate to clap's renderer via [`clap_builder::Error::exit`], which
-///   prints to stdout and terminates the process with code `0`. Those
-///   branches diverge — the function does not return.
-/// - Every other clap error (unknown flag, value-validation failure from a
-///   field's `FromStr`, missing required argument) is printed to stderr
-///   preserving clap's color and suggestion formatting, then surfaced as
-///   `Err(ExitCode::UsageError)` (`64`). The caller's top-level handler
-///   should return this code without logging an additional generic error
-///   line — clap's message is the complete user-facing diagnostic.
-///
-/// Adopting this helper lets command structs use typed positional fields
-/// (e.g. `Vec<Identifier>`) backed by `FromStr` instead of receiving
-/// `Vec<String>` and re-parsing in the body. Validation failures still reach
-/// users with the `EX_USAGE` (64) code expected by sysexits-aligned tooling.
+/// Parse `argv` (program name first). Help and version print and exit the process; any other
+/// clap error prints to stderr and returns `Err(ExitCode::UsageError)`, which the caller must not
+/// log again — clap's message is the complete diagnostic.
 pub fn parse(cmd: Command, argv: &[std::ffi::OsString]) -> Result<ArgMatches, ExitCode> {
     match cmd.try_get_matches_from(argv) {
         Ok(matches) => Ok(matches),

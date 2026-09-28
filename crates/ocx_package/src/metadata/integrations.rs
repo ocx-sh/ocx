@@ -1,19 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Vendor-namespaced configuration blocks for tools OCX does not model — an
-//! editor extension list, a devcontainer fragment, a JetBrains plugin set.
+//! Vendor-namespaced configuration blocks for tools OCX does not model, such as
+//! an editor extension list or a devcontainer fragment.
 //!
-//! A publisher writes one block per vendor, keyed by a namespace (reverse-DNS
-//! by convention, **not** enforced). OCX validates the container — the key
-//! grammar, the map's size, and the well-formedness of its own interpolation
-//! tokens inside a string leaf — and never the contents. It also never merges:
-//! two packages declaring one namespace produce two composed rows, and the
-//! consuming application adjudicates — where `devcontainer.json`'s closest
-//! analogue, `customizations`, merges every Feature's contribution into one
-//! object per tool.
-//!
-//! ADR: `adr_package_integrations.md`.
+//! OCX validates the container (key grammar, size, its own `${…}` tokens), never
+//! the payload, and never merges two packages' blocks. ADR: `adr_package_integrations.md`.
 
 use crate::error::Error as PackageError;
 use std::collections::BTreeMap;
@@ -25,60 +17,27 @@ use serde::{Deserialize, Serialize};
 use super::template::{AllowedTokens, TemplateError, TemplateResolver};
 
 /// Maximum compact-serialized size of one namespace's payload.
-///
-/// Raise-only: the cap sits on the metadata **read** path, so lowering it
-/// would un-resolve an already-published package.
+// Raise-only: the cap is on the read path, so lowering it un-resolves published packages.
 pub const MAX_INTEGRATION_NAMESPACE_BYTES: usize = 8 * 1024;
 
-/// Maximum compact-serialized size of the whole `integrations` map, keys and
-/// punctuation included. Raise-only, for the same reason as
-/// [`MAX_INTEGRATION_NAMESPACE_BYTES`].
+/// Maximum compact-serialized size of the whole `integrations` map, keys included.
+// Raise-only, like `MAX_INTEGRATION_NAMESPACE_BYTES`.
 pub const MAX_INTEGRATIONS_BYTES: usize = 32 * 1024;
 
 /// Maximum byte length of one namespace key.
 pub(super) const MAX_NAMESPACE_BYTES: usize = 128;
 
-/// Every codepoint that renders as nothing — the union of general category
-/// `Cf` and the `Default_Ignorable_Code_Point` property — refused in a
-/// namespace key.
-///
-/// A key is printed verbatim into the plain-text availability hint, so a
-/// character that renders as nothing — or reorders what follows it — lets a key
-/// *display* as a namespace it is not (Trojan Source, CWE-451 / CWE-1007). The
-/// JSON path fails closed on its own — an exact-match consumer never matches a
-/// spoofed key — so this is a display-only exposure, fixed here because the
-/// grammar sits on the read path and can only ever be loosened afterwards.
-///
-/// The **union**, because neither property contains the other and `Cf` alone is
-/// not the one that means "invisible": U+3164 HANGUL FILLER — the canonical
-/// blank-character spoof — is category `Lo`, default-ignorable and not `Cf`,
-/// while U+0600 ARABIC NUMBER SIGN is `Cf` and deliberately excluded from
-/// `Default_Ignorable_Code_Point`. Two whole properties, not an enumeration:
-/// the bidi overrides are one corner of `Cf`, and `com.microsoft\u{200B}.vscode`
-/// spoofs exactly as well as `com.evil\u{202E}txt.moc`. `regex`'s Unicode
-/// tables are the maintained source (`quality-core.md`, "Don't Own Non-Domain
-/// Code") — a hand-listed set of codepoints goes stale against every Unicode
-/// release, and this grammar cannot be tightened once a package publishes.
-///
-/// U+2800 BRAILLE PATTERN BLANK (`So`) is in neither property and is knowingly
-/// accepted: it renders blank in most fonts, but it is a legitimate Braille
-/// character, so refusing it would be a taste call rather than a category rule.
+/// Codepoints that render as nothing, refused in a namespace key: a key prints verbatim
+/// into the availability hint, where one would display as another namespace (CWE-451).
+// Both properties, since neither contains the other (U+3164 is only default-ignorable,
+// U+0600 only `Cf`). U+2800 BRAILLE BLANK is in neither and knowingly accepted.
 static INVISIBLE_CHARACTER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\p{Cf}\p{Default_Ignorable_Code_Point}]").expect("valid invisible-character regex"));
 
-/// The token classes an integrations payload may carry.
-///
-/// `${deps.*}` is the point of the feature — a digest-derived path no human can
-/// hand-write. `${self.env.*}` is refused: a payload is resolved by a
-/// `TemplateResolver` carrying no self-env scope, so the token names a payload
-/// declared `private` on a surface that ships as JSON to any consumer.
-///
-/// One constant, because the publish gate (`validate_integration_tokens`) and
-/// the compose-time resolvers (`package_manager::composer`) must decide the
-/// same thing: a hostile registry never runs the publish gate, so compose
-/// carries the only copy of this rule that a published package meets. An
-/// [`AllowedTokens`] literal rather than a `Usage` variant, because that pair of
-/// booleans is the whole of the difference from `Usage::Environment`.
+/// The token classes an integrations payload may carry: `${deps.*}`, never `${self.env.*}`,
+/// which would ship a `private` var's value to every consumer.
+// Shared with the compose-time resolvers: a hostile registry skips the publish gate, so
+// compose is the only check a published package meets.
 pub const INTEGRATION_TOKENS: AllowedTokens = AllowedTokens {
     deps: true,
     self_env: false,
@@ -86,13 +45,10 @@ pub const INTEGRATION_TOKENS: AllowedTokens = AllowedTokens {
 
 /// A package's declared `integrations` map: namespace key → opaque payload.
 ///
-/// Keys iterate in lexicographic order ([`BTreeMap`]), so every derived
-/// ordering — composed rows, cap-violation reporting, closure namespace lists
-/// — is deterministic across runs and platforms.
-///
-/// Absent on the wire and empty are the **same** state (deliberately not
-/// `binaries`' `Option` tri-state): nothing distinguishes "declares none" from
-/// "did not say".
+/// Absent on the wire and empty are the **same** state: nothing distinguishes
+/// "declares none" from "did not say".
+// Keys must iterate in lexicographic order, or composed rows, cap-violation reports and closure
+// namespace lists stop being deterministic across runs and platforms.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Integrations(BTreeMap<String, serde_json::Value>);
 
@@ -102,8 +58,7 @@ impl Integrations {
         self.0.is_empty()
     }
 
-    /// Declared namespaces and their raw (uninterpolated) payloads, in
-    /// lexicographic namespace order.
+    /// Namespaces and raw payloads, in lexicographic namespace order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &serde_json::Value)> + use<'_> {
         self.0.iter().map(|(namespace, payload)| (namespace.as_str(), payload))
     }
@@ -113,17 +68,13 @@ impl Integrations {
         self.0.get(namespace)
     }
 
-    /// Resolves every namespace's payload for one package.
-    ///
-    /// `resolver` carries the DECLARING package's own `${installPath}` and its
-    /// own direct-dependency context map — a payload never resolves against
-    /// the consuming root's paths.
+    /// Resolves every payload; `resolver` must carry the declaring package's paths, never
+    /// the consuming root's.
     ///
     /// # Errors
     ///
-    /// [`crate::error::Error::IntegrationInterpolation`] when a
-    /// payload's string leaf fails to interpolate, naming the offending
-    /// namespace.
+    /// [`crate::error::Error::IntegrationInterpolation`], naming the namespace whose
+    /// string leaf failed.
     pub fn resolve(&self, resolver: &TemplateResolver<'_>) -> Result<Vec<IntegrationEntry>, PackageError> {
         self.iter()
             .map(|(namespace, payload)| {
@@ -141,37 +92,21 @@ impl Integrations {
     }
 }
 
-/// One resolved integration contribution: the namespace and its interpolated
-/// payload.
-///
-/// Attribution to the declaring package is carried by the pair this appears in,
-/// not by the struct — the same shape `inspect::Surface::env` uses for
-/// `ClosureEnvVar`.
+/// One resolved integration: the namespace and its interpolated payload; the declaring
+/// package travels in the enclosing pair.
 #[derive(Debug, Clone)]
 pub struct IntegrationEntry {
     pub namespace: String,
     pub payload: serde_json::Value,
 }
 
-/// Refuses a namespace key that is unusable as a map key or as terminal
-/// output.
-///
-/// Rejects exactly five shapes — empty, over [`MAX_NAMESPACE_BYTES`], any
-/// Unicode control character (C0, DEL **and** C1), any invisible codepoint
-/// ([`INVISIBLE_CHARACTER`]), any Unicode whitespace. Everything else is legal:
-/// `vscode`, `VSCode`, `com.微软`, `a`, `x/y` and `123` all pass, because
-/// reverse-DNS is documented, not validated. Case is preserved and two
-/// case-distinct keys are two distinct namespaces.
+/// Refuses an empty or over-long key, or one holding a control, invisible or whitespace
+/// character; reverse-DNS is convention only, and case-distinct keys are distinct.
 ///
 /// # Errors
 ///
-/// [`crate::error::Error::IntegrationNamespaceInvalid`], naming the
-/// key with `{:?}` so an unprintable byte cannot forge a log line (CWE-117).
-// Both error types this file returns unboxed are large by construction — the
-// package `Error` carries a `TemplateError`, which carries `PinnedPackageRef`s.
-// Error paths are cold, so boxing to satisfy `result_large_err` would only add
-// an allocation on the hot Ok return. Same call, same reason, as the hoisted
-// allow on `TemplateResolver`'s impl block (`template.rs`).
+/// [`crate::error::Error::IntegrationNamespaceInvalid`].
+// Error paths are cold, so boxing for `result_large_err` would only allocate on the hot `Ok`.
 #[allow(clippy::result_large_err)]
 pub(super) fn validate_namespace(namespace: &str) -> Result<(), crate::error::Error> {
     use crate::error::Error;
@@ -189,17 +124,10 @@ pub(super) fn validate_namespace(namespace: &str) -> Result<(), crate::error::Er
     if namespace.len() > MAX_NAMESPACE_BYTES {
         return refuse("longer than 128 bytes");
     }
-    // Control before whitespace: U+0085 (NEL) is both a C1 control and Unicode
-    // whitespace, and "control character" is the reading that names what is
-    // actually wrong with it.
+    // Control before whitespace: U+0085 is both, and "control character" is the accurate reason.
     if namespace.chars().any(char::is_control) {
         return refuse("contains a control character");
     }
-    // Every invisible codepoint, not just the bidi corner of `Cf` — and named
-    // for what it is, since neither a ZWSP nor a HANGUL FILLER is any kind of
-    // bidirectional control, and the filler is not even a format character.
-    // Order against whitespace is free: no `Cf` codepoint carries White_Space,
-    // and `Default_Ignorable_Code_Point` subtracts it by definition.
     if INVISIBLE_CHARACTER.is_match(namespace) {
         return refuse("contains an invisible character");
     }
@@ -210,13 +138,7 @@ pub(super) fn validate_namespace(namespace: &str) -> Result<(), crate::error::Er
     Ok(())
 }
 
-/// Every string leaf of `payload`, in document order.
-///
-/// The read-only sibling of [`interpolate`]: object keys, numbers, booleans and
-/// nulls are not leaves this yields, so a check driven by it can never fire on a
-/// position interpolation would not touch either. Recursion is bounded by
-/// `serde_json`'s own deserializer nesting limit — no payload this walks was
-/// parsed any deeper.
+/// Every string leaf of `payload` in document order: exactly the positions [`interpolate`] touches.
 pub(super) fn string_leaves(payload: &serde_json::Value) -> Vec<&str> {
     let mut leaves = Vec::new();
     collect_string_leaves(payload, &mut leaves);
@@ -232,18 +154,13 @@ fn collect_string_leaves<'a>(payload: &'a serde_json::Value, leaves: &mut Vec<&'
     }
 }
 
-/// Resolves the engine's tokens in every string LEAF of `payload`, recursively.
-///
-/// Object keys, numbers, booleans and nulls pass through untouched. The result
-/// is built by in-place substitution into `serde_json::Value::String` leaves —
-/// the output is never re-parsed as JSON, so the payload's structure (key set,
-/// array lengths, payload types) is invariant under interpolation.
+/// Resolves tokens in every string leaf of `payload`; keys and scalars pass through.
 ///
 /// # Errors
 ///
-/// The underlying [`TemplateError`], unwrapped — [`Integrations::resolve`]
-/// attaches the namespace.
-// `result_large_err`: see the rationale on `validate_namespace` above.
+/// The bare [`TemplateError`]; [`Integrations::resolve`] attaches the namespace.
+// Substituted in place, never re-parsed as JSON, or a resolved path could change the structure.
+// `result_large_err`: see `validate_namespace`.
 #[allow(clippy::result_large_err)]
 fn interpolate(
     payload: &serde_json::Value,
@@ -257,14 +174,13 @@ fn interpolate(
                 .map(|item| interpolate(item, resolver))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        // Keys are cloned, never resolved (D11) — only the payload recurses.
+        // Keys are cloned, never resolved: only the payload recurses.
         serde_json::Value::Object(members) => serde_json::Value::Object(
             members
                 .iter()
                 .map(|(key, member)| Ok((key.clone(), interpolate(member, resolver)?)))
                 .collect::<Result<serde_json::Map<_, _>, _>>()?,
         ),
-        // Numbers, booleans and nulls have no string leaf to resolve.
         scalar => scalar.clone(),
     })
 }

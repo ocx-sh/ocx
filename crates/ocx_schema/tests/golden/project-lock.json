@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ProjectLock",
-  "description": "Top-level `ocx.lock` document — both the in-memory model and the on-disk\nwire shape (the `tool` TOML array name is the only difference, via\n`#[serde(rename = \"tool\")]`).\n\nAll locked tools are sorted by `(group, name)` at write time for\nbyte-stable output; [`Self::to_toml_string`] serializes through a\nborrowed, pre-sorted view rather than cloning the whole document.\n[`Self::from_str_with_path`] is the version-peek read path: it rejects any\n`lock_version` other than [`SUPPORTED_LOCK_VERSION`] before attempting the\nfull deserialize, and validates the bare-`repository` and\ncanonical-platform-key invariants (D3) on every tool afterward.",
+  "description": "Top-level `ocx.lock` document.\n\nTools are sorted by `(group, name)` at write time for byte-stable output.\nOnly `lock_version` `3` is accepted, every tool's `repository` must be bare\nand every platform key canonical.",
   "type": "object",
   "properties": {
     "metadata": {
@@ -31,14 +31,14 @@
           "$ref": "#/$defs/LockVersion"
         },
         "declaration_hash_version": {
-          "description": "Canonicalization contract version for [`Self::declaration_hash`].\nCurrently always `1` — see [`super::DECLARATION_HASH_VERSION`].",
+          "description": "Canonicalization contract version for `declaration_hash`. Currently\nalways `1`.",
           "type": "integer",
           "format": "uint8",
           "minimum": 0,
           "maximum": 255
         },
         "declaration_hash": {
-          "description": "`sha256:<hex>` of the RFC 8785 JCS-canonicalized declaration\n(see `super::hash`).",
+          "description": "`sha256:<hex>` of the RFC 8785 JCS-canonicalized declaration.",
           "type": "string"
         },
         "generated_by": {
@@ -67,7 +67,7 @@
       ]
     },
     "LockedTool": {
-      "description": "One locked tool entry — identified by the local binding `(group, name)`.\n\n`name` is the TOML key used in the developer's `ocx.toml` (the local\nbinding); `group` is `\"default\"` for entries from the top-level `[tools]`\ntable or the named `[group.<name>]` key. `repository` is the bare\nregistry/repo coordinate (no tag, no digest) shared by every platform\nleaf — the outer image-index digest is intentionally not stored (the lock\nunit is the platform-manifest digest, uniform with dependency pins); the\nper-platform pull id is reconstructed as `repository.clone_with_digest(leaf)`.\n`platforms` records one leaf digest per shipped platform, keyed by the\ncanonical grammar string ([`Platform`] `Display` — D2); a platform the\npublisher does not ship is encoded by absence of its key.",
+      "description": "One locked tool entry, identified by the local binding `(group, name)`.\n\n`name` is the key in the developer's `ocx.toml`; `group` is `\"default\"` for\nthe top-level `[tools]` table, else the `[group.<name>]` key. `repository`\nis the bare registry/repo coordinate (no tag, no digest) shared by every\nplatform leaf. `platforms` records one leaf digest per shipped platform,\nkeyed by the canonical platform string; a platform the publisher does not\nship has no key.",
       "type": "object",
       "properties": {
         "name": {
@@ -83,7 +83,7 @@
           "$ref": "#/$defs/PackageRef"
         },
         "platforms": {
-          "description": "Available-only per-platform leaf digests, keyed by the canonical\ngrammar [`Platform`] string. `BTreeMap` for byte-stable output\nwithout requiring `Ord` on `Platform`.",
+          "description": "Available-only per-platform leaf digests, keyed by the canonical\nplatform string (`os/arch[/variant][+feature,...]` or `any`).",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/Digest"

@@ -1,55 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The Windows session-PATH writer: a direct `HKCU\Environment\Path` write.
+//! The Windows session-PATH writer: a direct `HKCU\Environment\Path` write, never `setx`, which
+//! truncates silently at 1024 characters.
 //!
-//! **Never `setx`.** It truncates silently at 1024 characters and has
-//! corrupted real users' PATH in shipped installers
-//! ([desktop/desktop#18176](https://github.com/desktop/desktop/issues/18176)).
-//!
-//! **Registration** writes `REG_EXPAND_SZ` **unconditionally**; the existing
-//! type is read only to decide how to merge. rustup shipped `REG_SZ` here and
-//! broke `%VAR%` expansion for every *other* entry already on PATH
-//! ([rust-lang/rustup#261](https://github.com/rust-lang/rustup/issues/261)).
-//! **Deregistration keeps the type it read**, because converting a value on
-//! the way out changes the machine in a way removal never promised: a
-//! surviving foreign segment holding a literal `%` would start expanding the
-//! moment ocx took its own entries away.
-//!
-//! Neither directory reaches an already-open terminal or IDE, and neither can
-//! win against an entry on the **System** PATH — Windows resolves System
-//! before User and no write order changes that. Both limits are stated to the
-//! user rather than worked around.
-//!
-//! # The read-modify-write race, and why it is left open
-//!
-//! Both writers below read the value, compose a new one, and write it back
-//! with no lock and no revision check. Another installer editing `Path` inside
-//! that window has its edit erased. That is a real defect, not an oversight,
-//! and it is left open deliberately:
-//!
-//! - **Windows offers no compare-and-swap for a registry value.**
-//!   `RegSetValueExW` overwrites unconditionally. The only primitive that would
-//!   make the sequence atomic is the Kernel Transaction Manager
-//!   (`RegCreateKeyTransacted`), which Microsoft deprecated and advises against
-//!   building on. There is no correct version of this function to write.
-//! - **A re-read-and-retry would narrow the window, not close it.** Writing,
-//!   reading back, and recomposing on a mismatch moves the loss window from
-//!   read→write to write→verify; a concurrent writer landing in the new window
-//!   is erased exactly as before. That is a genuine reduction, but it reads
-//!   like a fix, and a mitigation mistaken for a fix is worse than a documented
-//!   hazard.
-//! - **It cannot be shown to work.** This module is `#[cfg(windows)]`, the
-//!   racing half is the syscall wrapper (`read_user_path` / `write_user_path`),
-//!   which has no injectable seam, and no test leg can drive two writers at it.
-//!   A retry loop here could only ever be shipped green without having been
-//!   seen red.
-//!
-//! Scale for the reader who has to weigh it: the window is one string
-//! composition wide (tens of microseconds), it opens only during `ocx self
-//! setup` and the post-`self update` refresh, and rustup carries the identical
-//! race. Revisit if a supported atomic primitive appears, or if a seam is
-//! introduced for another reason and makes the retry testable.
+//! Registration always writes `REG_EXPAND_SZ`: `REG_SZ` breaks `%VAR%` expansion for every other entry.
 
 use std::path::Path;
 #[cfg(windows)]
@@ -59,27 +14,10 @@ use std::path::PathBuf;
 use super::SessionPathOutcome;
 use super::{SessionPathError, SessionPathFormat};
 
-/// The location this writer owns, reported as the outcome pair's key.
-///
-/// A registry path, not a filesystem path — see
-/// [`super::session_path_stores`] for why the pair is keyed by `PathBuf`
-/// anyway.
+/// The location this writer owns, reported as the outcome pair's key; a registry path, not a file.
 pub const REGISTRY_LOCATION: &str = r"HKCU\Environment\Path";
 
-/// Characters `REG_EXPAND_SZ` cannot carry in a PATH value, checked in this
-/// order (the first match is the one the refusal names).
-///
-/// - `%` — `REG_EXPAND_SZ` expands `%…%` pairs at read time and has **no
-///   escape**, so `C:\100%real\bin` cannot be represented at all.
-/// - `;` — the list delimiter. A segment containing one is two segments to
-///   every reader, including this module's own merge.
-/// - `\0` — the value is written as a NUL-terminated wide string, so an
-///   embedded NUL would silently truncate the whole PATH.
-///
-/// `%` is the contracted refusal; the other two are widenings on the same
-/// ground (unrepresentable in the target grammar, no escape available). Every
-/// character here is legal in a Windows path except `\0`, so none of the three
-/// is a hypothetical.
+/// Characters a `REG_EXPAND_SZ` PATH value cannot carry, in the order the refusal names them.
 pub const REFUSED: &[(char, &str)] = &[
     ('%', "and REG_EXPAND_SZ has no escape for it"),
     (';', "which is the PATH delimiter and would split the entry in two"),
@@ -107,23 +45,12 @@ pub fn encode(directory: &Path) -> Result<&str, SessionPathError> {
     }
 }
 
-/// The spellings of `directory` that name the same directory but differ from it
-/// by a single trailing separator (E-W10).
+/// The spellings of `directory` that name the same directory but differ from it by a single trailing
+/// separator.
 ///
-/// `C:\foo\` and `C:\foo` are one directory to Windows and two segments to
-/// [`ocx_util::path::move_to_front`], which is segment-exact by contract
-/// — deliberately, so that it agrees byte for byte with the shell snippets
-/// `Shell::export_path` emits. Rather than loosen that shared rule for every
-/// caller, the merge and the subtraction here drop the twins first, so a user
-/// whose PATH already carries the other spelling ends with one entry rather
-/// than two, and the value stops growing by one segment per run.
-///
-/// A drive root yields nothing: `C:\` is not the trailing-separator spelling of
-/// `C:`, which names the drive's *current directory* instead.
-///
-/// Pure and host-independent on purpose — the rule is a property of the
-/// grammar, so its red state is reachable on every CI leg rather than only on
-/// the Windows one.
+/// The merge and subtraction drop these first: `move_to_front` is segment-exact, so the value would
+/// otherwise grow by one segment per run. A drive root yields nothing, since `C:` is the drive's
+/// current directory, not `C:\`.
 pub fn trailing_separator_twins(directory: &str) -> Vec<String> {
     let bare = directory.strip_suffix(['\\', '/']).unwrap_or(directory);
     if bare.is_empty() || bare.ends_with(':') {
@@ -136,9 +63,6 @@ pub fn trailing_separator_twins(directory: &str) -> Vec<String> {
 }
 
 /// Drop every trailing-separator twin of `directories` from `existing`.
-///
-/// The shared first step of [`merged_value`] and [`subtracted_value`], so the
-/// two cannot disagree about which spellings name the same directory.
 #[cfg(windows)]
 fn drop_trailing_separator_twins(existing: &str, directories: &[&str]) -> std::ffi::OsString {
     let mut value = std::ffi::OsString::from(existing);
@@ -150,9 +74,7 @@ fn drop_trailing_separator_twins(existing: &str, directories: &[&str]) -> std::f
     value
 }
 
-/// A registry PATH value assembled from `&str` inputs is UTF-8 by construction;
-/// the lossy arm exists so this function is total rather than because it can be
-/// reached.
+/// Back to `String`; the lossy arm is unreachable, since every input was `&str`.
 #[cfg(windows)]
 fn into_value(composed: std::ffi::OsString) -> String {
     composed
@@ -160,44 +82,21 @@ fn into_value(composed: std::ffi::OsString) -> String {
         .unwrap_or_else(|raw| raw.to_string_lossy().into_owned())
 }
 
-/// The merged value for `HKCU\Environment\Path`: `directories` in order,
-/// then every surviving segment of `existing`.
-///
-/// Idempotent by presence test, never by append — split on `;`, drop empty
-/// segments, drop any existing occurrence of either directory
-/// (ASCII-case-insensitively, as Windows paths are), then prepend the two in
-/// order and rejoin. A second `ocx self setup` is a no-op and the value does
-/// not grow.
-///
-/// Implemented by folding [`ocx_util::path::move_to_front`] over
-/// `directories` **in reverse**, so the last one moved to the front is
-/// `directories[0]`. That function is the shipped implementation of exactly
-/// this rule — same empty-segment drop, same segment-exact comparison, same
-/// ASCII case fold on Windows — and reusing it is what keeps the registry
-/// value and the in-process PATH from drifting apart. Do not re-roll it here.
-///
-/// `cfg(windows)` because `move_to_front` keys its separator and its case fold
-/// on `cfg!(windows)` at compile time: off Windows it would apply the POSIX
-/// rule to a Windows value, and a unit test of that would assert the wrong
-/// contract. The Windows test leg is where this is exercised.
+/// The merged value for `HKCU\Environment\Path`: `directories` in order, then every surviving segment
+/// of `existing`.
+// `move_to_front` is reused so the registry value and the in-process PATH cannot drift; `cfg(windows)`
+// because its separator and case fold are the host's.
 #[cfg(windows)]
 pub fn merged_value(existing: &str, directories: &[&str]) -> String {
     let mut value = drop_trailing_separator_twins(existing, directories);
-    // In reverse, so the last one moved to the front is `directories[0]` —
-    // C-060's front-to-back order.
+    // Reversed, so `directories[0]` ends up in front.
     for directory in directories.iter().rev() {
         value = ocx_util::path::move_to_front(&value, std::ffi::OsStr::new(directory));
     }
     into_value(value)
 }
 
-/// The value for `HKCU\Environment\Path` with `directories` subtracted and
-/// nothing else changed.
-///
-/// The same remove-then-rejoin arithmetic [`merged_value`] uses, run without
-/// the prepend — [`ocx_util::path::remove_segment`] folded over
-/// `directories`. A foreign segment planted before `ocx self setup` ran
-/// survives; the variable is never cleared.
+/// The value for `HKCU\Environment\Path` with `directories` subtracted and nothing else changed.
 #[cfg(windows)]
 pub fn subtracted_value(existing: &str, directories: &[&str]) -> String {
     let mut value = drop_trailing_separator_twins(existing, directories);
@@ -207,12 +106,7 @@ pub fn subtracted_value(existing: &str, directories: &[&str]) -> String {
     into_value(value)
 }
 
-/// The registry key and value this writer owns.
-///
-/// Spelled apart from [`REGISTRY_LOCATION`] because the API wants the subkey
-/// and the value name separately, and one `HKCU\Environment\Path` literal cut
-/// into pieces at the call site is a spelling that can drift from the one the
-/// run summary prints.
+/// The registry subkey holding the user PATH.
 #[cfg(windows)]
 const ENVIRONMENT_SUBKEY: &str = "Environment";
 /// The value under [`ENVIRONMENT_SUBKEY`] that holds the user PATH.
@@ -227,23 +121,9 @@ fn wide(value: &str) -> Vec<u16> {
 
 /// Read `HKCU\Environment\Path` unexpanded, with its type.
 ///
-/// Uses `RegGetValueW` with `RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND`, never
-/// `RegQueryValueExW`: the latter does not guarantee the returned buffer is
-/// NUL-terminated, and its `lpcbData` is a **byte** count that reads as a
-/// wchar count to anyone who does not check — two ways to build a value that
-/// is wrong by one character and looks right in a debugger. `RRF_NOEXPAND` is
-/// what keeps `%LOCALAPPDATA%` in a *foreign* entry from being flattened into
-/// its expanded spelling by our own read-modify-write.
-///
-/// `RRF_RT_REG_SZ` rides along with the expand form because the restriction
-/// mask decides whether the read *succeeds at all*: rustup shipped `REG_SZ`
-/// here and those values are still on real machines, and a read that refused
-/// them would report the PATH absent and then overwrite it. The type comes
-/// back so the caller can rewrite a `REG_SZ` value as `REG_EXPAND_SZ` even
-/// when its text already merges to itself.
-///
-/// `Ok(None)` when the value does not exist — a fresh user profile — which is
-/// an empty PATH to merge into, not a failure.
+/// `Ok(None)` when the value does not exist (a fresh profile).
+// `RegGetValueW`, never `RegQueryValueExW`, which does not guarantee a NUL-terminated buffer.
+// `RRF_NOEXPAND`, or a foreign `%LOCALAPPDATA%` entry is flattened by our read-modify-write.
 #[cfg(windows)]
 fn read_user_path() -> std::io::Result<Option<(String, u32)>> {
     use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
@@ -253,18 +133,13 @@ fn read_user_path() -> std::io::Result<Option<(String, u32)>> {
 
     let subkey = wide(ENVIRONMENT_SUBKEY);
     let name = wide(PATH_VALUE_NAME);
-    // `RRF_RT_REG_SZ` beside the expand type, not instead of it: the mask
-    // decides whether the read succeeds at all, and a stock or rustup-era
-    // `REG_SZ` PATH answers `ERROR_UNSUPPORTED_TYPE` under the expand-only
-    // mask. `RRF_NOEXPAND` still applies, so a foreign `%LOCALAPPDATA%` comes
-    // back unflattened.
+    // `RRF_RT_REG_SZ` too, or a `REG_SZ` PATH fails the read with `ERROR_UNSUPPORTED_TYPE`.
     let flags = RRF_RT_REG_EXPAND_SZ | RRF_RT_REG_SZ | RRF_NOEXPAND;
     let mut kind: u32 = 0;
     let mut bytes: u32 = 0;
 
-    // SAFETY: `subkey` and `name` are NUL-terminated UTF-16 buffers that
-    // outlive the call; the two out-parameters point at live locals; a null
-    // data pointer with a zero size is the documented size-probe form.
+    // SAFETY: `subkey` and `name` are NUL-terminated and outlive the call, the out-parameters are
+    // live locals, and a null data pointer with zero size is the documented size probe.
     let probed = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
@@ -283,12 +158,10 @@ fn read_user_path() -> std::io::Result<Option<(String, u32)>> {
         return Err(std::io::Error::from_raw_os_error(probed as i32));
     }
 
-    // `bytes`, not code units: the API counts bytes, and sizing a `u16` buffer
-    // with that number directly is the off-by-half this comment exists to stop.
+    // `bytes` counts bytes, not `u16` units; sizing the buffer with it directly is off by half.
     let mut buffer: Vec<u16> = vec![0; (bytes as usize).div_ceil(2)];
     let mut written = bytes;
-    // SAFETY: as above, plus `buffer` is at least `written` bytes of writable,
-    // `u16`-aligned storage for the whole call.
+    // SAFETY: as above, and `buffer` holds at least `written` bytes of writable, `u16`-aligned storage.
     let read = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
@@ -307,9 +180,7 @@ fn read_user_path() -> std::io::Result<Option<(String, u32)>> {
         return Err(std::io::Error::from_raw_os_error(read as i32));
     }
 
-    // Truncate at the code-unit boundary — an odd byte count must drop the
-    // half unit rather than slice into one — and trim the terminator without
-    // relying on one being there.
+    // An odd byte count drops the half unit; the terminator is trimmed without assuming one exists.
     let units = ((written as usize) / 2).min(buffer.len());
     let value = &buffer[..units];
     let value = match value.iter().rposition(|unit| *unit != 0) {
@@ -317,21 +188,14 @@ fn read_user_path() -> std::io::Result<Option<(String, u32)>> {
         None => &[][..],
     };
     let text = String::from_utf16(value).map_err(|error| {
-        // Not lossy: `to_string_lossy` would substitute U+FFFD into somebody
-        // else's PATH segment and then write the corrupted value back.
+        // Not lossy: U+FFFD would be written back into another tool's segment.
         std::io::Error::new(std::io::ErrorKind::InvalidData, error)
     })?;
     Ok(Some((text, kind)))
 }
 
 /// Write `value` to `HKCU\Environment\Path` under `kind`.
-///
-/// The register path passes `REG_EXPAND_SZ` unconditionally (C-038); the
-/// subtract path passes the type it read back, because converting a value on
-/// the way *out* would leave the machine changed in a way deregistration never
-/// promised — a surviving foreign segment holding a literal `%` starts
-/// expanding the moment ocx removes itself, which is the opposite of S-014's
-/// "only OCX's two segments are gone".
+// Deregistration passes the type it read, or a surviving foreign `%` segment starts expanding.
 #[cfg(windows)]
 fn write_user_path(value: &str, kind: u32) -> std::io::Result<()> {
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
@@ -353,9 +217,8 @@ fn write_user_path(value: &str, kind: u32) -> std::io::Result<()> {
         return Err(std::io::Error::from_raw_os_error(opened as i32));
     }
 
-    // SAFETY: `key` is open for the whole call; `name` and `data` are
-    // NUL-terminated UTF-16 buffers that outlive it; `size` is `data`'s length
-    // in bytes.
+    // SAFETY: `key` is open for the whole call, `name` and `data` are NUL-terminated and outlive it,
+    // and `size` is `data`'s length in bytes.
     let written = unsafe { RegSetValueExW(key, name.as_ptr(), 0, kind, data.as_ptr().cast(), size) };
     // SAFETY: `key` was opened above and is not used afterwards.
     unsafe { RegCloseKey(key) };
@@ -368,14 +231,9 @@ fn write_user_path(value: &str, kind: u32) -> std::io::Result<()> {
 
 /// Tell already-running processes that the environment block changed.
 ///
-/// `SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, "Environment",
-/// SMTO_ABORTIFHUNG, 5000, …)`. The timeout flag is **not optional**: a
-/// blocking `SendMessage` to `HWND_BROADCAST` wedges on any hung top-level
-/// window on the desktop, and `ocx self setup` would hang with no output.
-///
-/// Best-effort by contract — a failed broadcast leaves a correct registry
-/// value that new processes pick up anyway, so it never downgrades the
-/// outcome.
+/// Best-effort: a failed broadcast never downgrades the outcome.
+// The timeout and `SMTO_ABORTIFHUNG` are required: a blocking broadcast wedges on any hung window
+// and setup hangs silently.
 #[cfg(windows)]
 fn broadcast_environment_change() {
     use windows_sys::Win32::Foundation::{LPARAM, WPARAM};
@@ -385,11 +243,8 @@ fn broadcast_environment_change() {
 
     let subject = wide(ENVIRONMENT_SUBKEY);
     let mut ignored: usize = 0;
-    // SAFETY: `subject` is a NUL-terminated UTF-16 buffer that outlives the
-    // call, `ignored` is a live local, and the timeout plus `SMTO_ABORTIFHUNG`
-    // bound the call rather than letting a hung window hold it forever. The
-    // result is deliberately discarded: the registry write already landed, so
-    // a failed broadcast costs a user nothing but a new terminal.
+    // SAFETY: `subject` is NUL-terminated and outlives the call, and `ignored` is a live local.
+    // The result is discarded: the registry write already landed.
     unsafe {
         SendMessageTimeoutW(
             HWND_BROADCAST,
@@ -403,22 +258,17 @@ fn broadcast_environment_change() {
     };
 }
 
-/// Register `directories` in `HKCU\Environment\Path`.
-///
-/// Every directory is refused-or-encoded before the key is read, so a refused
-/// run performs no registry access at all.
+/// Register `directories` in `HKCU\Environment\Path`; a refused run touches no registry.
 ///
 /// # Errors
 ///
-/// [`SessionPathError`] from [`encode`]. A registry failure is
-/// [`SessionPathOutcome::Failed`], never an error.
+/// [`SessionPathError`] from [`encode`]; a registry failure is [`SessionPathOutcome::Failed`].
 #[cfg(windows)]
 pub(crate) fn register(
     directories: &[PathBuf],
     dry_run: bool,
 ) -> Result<(PathBuf, SessionPathOutcome), SessionPathError> {
-    // The one `?` on this path, and it runs before the key is opened: from
-    // here down every failure is an outcome (C-036).
+    // The only `?`, before the key is opened: every later failure must be an outcome, never an error.
     let mut encoded = Vec::with_capacity(directories.len());
     for directory in directories {
         encoded.push(encode(directory)?);
@@ -427,8 +277,6 @@ pub(crate) fn register(
     let outcome = match merge_into_registry(&encoded, dry_run) {
         Ok(outcome) => outcome,
         Err(error) => {
-            // Reported, not swallowed: the user-facing half is the caller's
-            // warning, and this is the cause behind it.
             tracing::debug!(%error, "user PATH registry write failed");
             SessionPathOutcome::Failed
         }
@@ -436,17 +284,16 @@ pub(crate) fn register(
     Ok((location, outcome))
 }
 
-/// Read, merge, and write back — the body [`register`] maps to an outcome.
+/// Read, merge, and write back: the body [`register`] maps to an outcome.
+// ponytail: unlocked read-modify-write, so a concurrent `Path` edit is lost; the registry has no
+// compare-and-swap, and rustup carries the same race.
 #[cfg(windows)]
 fn merge_into_registry(directories: &[&str], dry_run: bool) -> std::io::Result<SessionPathOutcome> {
     use windows_sys::Win32::System::Registry::REG_EXPAND_SZ;
 
     let existing = match read_user_path() {
         Ok(existing) => existing,
-        // A dry run never reports `Failed` — nothing was attempted. A store it
-        // could not even read is one the real run would have to rewrite, which
-        // is the prediction its siblings make too: `linux::register` and
-        // `macos::register` both treat an unreadable store as not-current.
+        // A dry run never reports `Failed`; an unreadable store is one the real run would rewrite.
         Err(error) if dry_run => {
             tracing::debug!(%error, "user PATH registry read failed during a dry run");
             return Ok(SessionPathOutcome::Written);
@@ -455,9 +302,7 @@ fn merge_into_registry(directories: &[&str], dry_run: bool) -> std::io::Result<S
     };
     let text = existing.as_ref().map_or("", |(text, _)| text.as_str());
     let composed = merged_value(text, directories);
-    // A `REG_SZ` value whose text already merges to itself still has to be
-    // rewritten: the type is the half rustup got wrong, and leaving it breaks
-    // `%VAR%` expansion for every *other* entry on the PATH.
+    // A current-text `REG_SZ` is still rewritten, or `%VAR%` expansion stays broken for other entries.
     let type_is_current = existing.as_ref().is_none_or(|(_, kind)| *kind == REG_EXPAND_SZ);
     if composed == text && type_is_current {
         return Ok(SessionPathOutcome::Unchanged);
@@ -481,7 +326,7 @@ pub(crate) fn deregister(
     directories: &[PathBuf],
     dry_run: bool,
 ) -> Result<(PathBuf, SessionPathOutcome), SessionPathError> {
-    // The one `?` on this path, and it runs before the key is opened.
+    // The only `?`, before the key is opened.
     let mut encoded = Vec::with_capacity(directories.len());
     for directory in directories {
         encoded.push(encode(directory)?);
@@ -497,17 +342,14 @@ pub(crate) fn deregister(
     Ok((location, outcome))
 }
 
-/// Read, subtract, and write back — the body [`deregister`] maps to an outcome.
+/// Read, subtract, and write back: the body [`deregister`] maps to an outcome.
 ///
-/// Keyed on content alone, unlike [`merge_into_registry`]: a foreign `REG_SZ`
-/// value we are not otherwise touching is left at the type its owner chose.
+/// Keyed on content alone: a foreign `REG_SZ` value keeps the type its owner chose.
 #[cfg(windows)]
 fn subtract_from_registry(directories: &[&str], dry_run: bool) -> std::io::Result<SessionPathOutcome> {
     let current = match read_user_path() {
         Ok(current) => current,
-        // A dry run never reports `Failed` — nothing was attempted. A store it
-        // could not even read is one it cannot claim it would take anything
-        // away from, so the prediction is `Unchanged`.
+        // A dry run never reports `Failed`; an unreadable store predicts nothing removed.
         Err(error) if dry_run => {
             tracing::debug!(%error, "user PATH registry read failed during a dry run");
             return Ok(SessionPathOutcome::Unchanged);

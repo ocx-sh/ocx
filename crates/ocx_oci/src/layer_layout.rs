@@ -3,39 +3,22 @@
 
 //! Per-layer placement config carried in a manifest layer descriptor's
 //! `annotations` (`sh.ocx.layer.*`).
-//!
-//! This is the OCI read/write boundary for per-layer strip + output prefix.
-//! It resolves an untrusted set of annotations into the utility-local
-//! [`LayerPlacement`] that the assembler consumes, so `file_structure` never
-//! depends on `oci` (DIP — see `arch-principles.md`). The reverse direction —
-//! [`LayerLayoutSpec::to_annotations`] — emits keys **only** when the publisher
-//! explicitly set a field, keeping the default publish path byte-identical
-//! (BC2).
 
 use std::collections::BTreeMap;
 
 use ocx_util::fs::path::{LayerPlacement, PathEscapeError, RelativePath};
 
-/// Publish-side layout spec. Remembers which fields the publisher set so
-/// [`to_annotations`](Self::to_annotations) emits only those keys — a package
-/// published with no layout produces `descriptor.annotations = None`, hence a
-/// byte-identical default manifest (BC2).
+/// Publish-side layout spec; `None` fields emit no annotation key.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LayerLayoutSpec {
-    /// Leading path components to strip from this layer at assemble time.
     pub strip: Option<u8>,
-    /// Output prefix under which this layer is placed (bounded, non-escaping).
     pub prefix: Option<RelativePath>,
 }
 
 impl LayerLayoutSpec {
-    /// Renders this spec as a deterministic annotation map, or `None` when no
-    /// field is set.
+    /// Renders this spec as an annotation map, or `None` when no field is set.
     ///
-    /// Emits `sh.ocx.layer.strip-components` (decimal) only when `strip` is
-    /// `Some`, and `sh.ocx.layer.prefix` only when `prefix` is `Some`. Both
-    /// unset ⇒ `None`, which drives `descriptor.annotations = None` — the
-    /// default publish path stays byte-identical (BC2).
+    /// Emits only the keys set, or a default publish stops producing a byte-identical manifest.
     pub fn to_annotations(&self) -> Option<BTreeMap<String, String>> {
         if self.strip.is_none() && self.prefix.is_none() {
             return None;
@@ -53,7 +36,6 @@ impl LayerLayoutSpec {
         Some(map)
     }
 
-    /// Returns `true` when no layout field is set (the default spec).
     pub fn is_empty(&self) -> bool {
         self.strip.is_none() && self.prefix.is_none()
     }
@@ -64,24 +46,15 @@ impl LayerLayoutSpec {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LayerLayoutError {
-    /// The `sh.ocx.layer.strip-components` annotation is not a valid `u8`.
     #[error("layer strip-components annotation is not a u8: {0}")]
     BadStrip(String),
-    /// The `sh.ocx.layer.prefix` annotation is not a valid bounded relative
-    /// path.
     #[error("layer prefix annotation is invalid")]
     BadPrefix(#[source] PathEscapeError),
 }
 
-/// Maximum length of an untrusted annotation value echoed into an error message.
 const MAX_ECHOED_ANNOTATION_CHARS: usize = 32;
 
-/// Sanitizes an untrusted annotation value for safe inclusion in an error
-/// message that reaches logs (CWE-117).
-///
-/// The manifest is third-party-writable, so a raw value could carry newlines
-/// (log-injection) or be arbitrarily long (log bloat). Control characters are
-/// dropped and the result is truncated to [`MAX_ECHOED_ANNOTATION_CHARS`].
+/// Strips control characters and truncates, or a third-party manifest injects lines into logs (CWE-117).
 fn sanitize_annotation_value(raw: &str) -> String {
     raw.chars()
         .filter(|c| !c.is_control())
@@ -89,26 +62,19 @@ fn sanitize_annotation_value(raw: &str) -> String {
         .collect()
 }
 
-/// Resolves per-layer placement from a layer descriptor's annotations, applying
-/// the fallback chain `annotation → bundle default → 0` for strip and
-/// `annotation → "" (root)` for prefix (BC1).
-///
-/// Registries are third-party-writable, so the prefix annotation is re-validated
-/// here (D10) rather than trusted. Returns the store-local [`LayerPlacement`]
-/// so no `oci` type crosses into `utility/fs` (W2).
+/// Resolves per-layer placement from a layer descriptor's annotations: strip
+/// falls back to `bundle_default` then 0, prefix to the root.
 ///
 /// # Errors
 ///
-/// Returns [`LayerLayoutError`] when the strip annotation is not a `u8`
-/// ([`LayerLayoutError::BadStrip`]) or the prefix annotation escapes / is
-/// over-long ([`LayerLayoutError::BadPrefix`]).
+/// [`LayerLayoutError::BadStrip`] when the strip annotation is not a `u8`;
+/// [`LayerLayoutError::BadPrefix`] when the prefix escapes or is over-long.
 pub fn resolve_layer_placement(
     annotations: Option<&BTreeMap<String, String>>,
     bundle_default: Option<u8>,
 ) -> Result<LayerPlacement, LayerLayoutError> {
-    // strip = annotation ?? bundle default ?? 0. An annotation that is present
-    // but not a valid `u8` is a hard error (registries are untrusted, D10) —
-    // it does not silently fall back to the bundle default.
+    // A present-but-invalid annotation errors rather than falling back, or a
+    // tampered manifest silently changes the extracted layout.
     let strip = match annotations.and_then(|a| a.get(super::annotations::LAYER_STRIP_COMPONENTS)) {
         Some(raw) => raw
             .parse::<u8>()
@@ -116,9 +82,8 @@ pub fn resolve_layer_placement(
         None => bundle_default.unwrap_or(0),
     };
 
-    // prefix = annotation ?? "" (root). The annotation is re-validated here even
-    // though publish also validated it — the manifest is third-party-writable
-    // (D10). Unknown `sh.ocx.layer.*` keys are ignored (OQ2 forward-compat).
+    // Re-validated although publish validated it: the registry copy is
+    // third-party-writable, and an unchecked prefix escapes the package root.
     let prefix = match annotations.and_then(|a| a.get(super::annotations::LAYER_PREFIX)) {
         Some(raw) => RelativePath::parse(raw).map_err(LayerLayoutError::BadPrefix)?,
         None => RelativePath::default(),

@@ -3,27 +3,9 @@
 
 //! The index half of what a sign, attest or verify run acts on.
 //!
-//! The three pipelines no longer hold an `&Index` (ADR 1.9): `ocx_sign` sits
-//! below `ocx_index` in the crate map, so the subsystem that signs cannot be
-//! the one that resolves. What is left in each pipeline is the *decision* —
-//! [`sign_target_from_resolution`] and [`verify_target_from_resolution`], the
-//! shared `--platform` rule and each verb's taxonomy — and what moved here is
-//! the *I/O* around it: one manifest fetch through the index chain, and the
-//! index-indirection pointer lookup that follows it.
-//!
-//! **Order is the contract, not a side effect** (plan DEC-17). Each pipeline
-//! invokes the closure exactly where it invoked `resolve_platform_target`, so
-//! an argument error still precedes a network one — `AttestPipeline::run_inner`
-//! rejects an unsupported predicate before anything resolves, and
-//! `test_package_attest.py`'s argument-error cases are the oracle for that.
-//! Inside the closure the order is the one the pipelines had: fetch, apply the
-//! rule, apply the sha256 floor on the signing side, *then* look the pointer
-//! up. A floor moved past the lookup would answer a non-sha256 subject with
-//! whatever the lookup raised.
-//!
-//! Resolution goes **through the index chain**, never the registry transport:
-//! the transport path bypasses `guard_local_physical` and the mirror map, and
-//! would break `--offline`.
+//! The sha256 floor runs before the pointer lookup, or a non-sha256 subject is answered with the lookup's error.
+//! Resolve through the index chain only: the registry transport bypasses `guard_local_physical` and the
+//! mirror map, and breaks `--offline`.
 
 use ocx_index::{Index, IndexOperation};
 use ocx_oci::resolve_target::ResolvedSubject;
@@ -33,35 +15,23 @@ use ocx_sign::sign::pipeline::{SubjectResolver, sign_target_from_resolution};
 use ocx_sign::verify::VerifyErrorKind;
 use ocx_sign::verify::pipeline::{VerifySubjectResolver, verify_target_from_resolution};
 
-/// Follow the index-indirection pointer for `subject`.
+/// Follows the index-indirection pointer for `subject` via [`Index::route`].
 ///
-/// [`Index::route`]: the location a rewrite names, or `subject`'s own
-/// coordinates when nothing rewrites it. The SSRF floor on whatever comes
-/// back is enforced upstream in the shared index choke point
-/// (`ChainedIndex::guard_local_physical`) and again at the dial site, by the
-/// pipeline, through its `DialPolicy`.
+/// The SSRF floor is enforced by `ChainedIndex::guard_local_physical` and the pipeline's `DialPolicy`, not here.
 async fn physical_of(index: &Index, subject: &PackageRef) -> ocx_index::error::Result<ocx_oci::OciIdentifier> {
     index.route(subject).await
 }
 
 /// The resolution the sign and attest pipelines take.
 ///
-/// `pre_resolved` is the answer the caller already has, when it has one: a
-/// `--tags` sweep asks the chain what each tag names in order to skip bare
-/// manifests, and re-asking cost every sweep a second fetch per tag (#373). It
-/// is the *same* question or nothing — the pair must be what
-/// `Index::fetch_manifest(identifier, IndexOperation::Resolve)` answered for
-/// this exact identifier, or the subject digest stops being what the reference
-/// names. `None` fetches.
+/// `pre_resolved` must be what `Index::fetch_manifest(identifier, IndexOperation::Resolve)` answered for this
+/// exact identifier, or the subject digest stops being what the reference names; `None` fetches.
 pub(crate) fn sign_resolver<'a>(
     index: &'a Index,
     pre_resolved: Option<&'a (Digest, Manifest)>,
 ) -> Box<SubjectResolver<'a>> {
     Box::new(move |identifier, platform| {
         Box::pin(async move {
-            // The caller's resolution when it had one, this closure's
-            // otherwise. `fetched` is declared out here so the borrow taken
-            // inside the arm can outlive the match.
             let fetched;
             let resolution = match pre_resolved {
                 Some(pair) => Some(pair),
@@ -80,8 +50,7 @@ pub(crate) fn sign_resolver<'a>(
                 .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
             Ok(ResolvedSubject {
                 target,
-                // Sign and attest never read it; the membership test is
-                // verify's alone.
+                // Only verify reads the membership list.
                 index_members: Vec::new(),
                 physical,
             })
@@ -91,11 +60,8 @@ pub(crate) fn sign_resolver<'a>(
 
 /// The resolution the verify pipeline takes.
 ///
-/// One fetch answers three questions at once: which digest the reference names,
-/// whether that object is an index, and — when it is — which children and which
-/// members it lists. Before C-008 the children were fetched inside
-/// `Index::select` and thrown away, which is why an index signature could not be
-/// attributed to a pinned platform manifest at all.
+/// One fetch yields digest, index-ness and members; fetching children separately would leave an index
+/// signature unattributable to a pinned platform manifest.
 pub(crate) fn verify_resolver<'a>(index: &'a Index) -> Box<VerifySubjectResolver<'a>> {
     Box::new(move |identifier, platform| {
         Box::pin(async move {

@@ -15,7 +15,7 @@ use crate::api::Printable;
 /// The `path` field holds the symlink that was created or updated (candidate
 /// for install, current for select), or `None` when no host symlink was written
 /// — a foreign-platform install populates the object store but writes neither
-/// host pointer (issue #179).
+/// host pointer.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct InstallEntry {
     pub identifier: ocx_oci::PackageRef,
@@ -38,8 +38,7 @@ pub struct Installs {
 
 impl Installs {
     pub fn new(packages: HashMap<String, InstallEntry>) -> Self {
-        // Collect into a `BTreeMap` so the table and JSON outputs key packages
-        // in a reproducible order regardless of the incoming hash order.
+        // `BTreeMap`, or output order follows the incoming hash order.
         Self {
             packages: packages.into_iter().collect(),
         }
@@ -52,9 +51,7 @@ impl Printable for Installs {
         let mut rows: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for (package, entry) in &self.packages {
             rows[0].push(package.clone());
-            // `PackageRef::Display` always appends `@sha256:<64hex>`, which alone
-            // is 71 columns — it widens every row of the most-run command for a
-            // value the user already pinned. JSON keeps the full form.
+            // Digest dropped: it adds 71 columns to every row of the most-run command; JSON keeps it.
             rows[1].push(crate::api::data::ink_identifier(
                 &theme,
                 &entry.identifier.without_digest(),

@@ -2,11 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! Starlark evaluation driver + terminal-error classification.
-//!
-//! ALL `starlark*` symbols stay inside the firewall directory. This module
-//! builds the globals, parses + evaluates the script, and classifies the
-//! terminal Starlark error into the engine-neutral
-//! [`super::ScriptOutcomeKind`]. No Starlark concept escapes the firewall.
 
 use starlark::environment::{Globals, GlobalsBuilder, LibraryExtension, Module};
 use starlark::eval::Evaluator;
@@ -16,13 +11,7 @@ use starlark::{Error as StarlarkError, ErrorKind};
 use super::host::{self, HostState};
 use super::{ScriptError, ScriptLimits, ScriptLocation, ScriptOutcome, ScriptOutcomeKind};
 
-/// Deterministic stdlib extensions enabled for OCX test scripts.
-///
-/// All are pure/deterministic (no host network/time/random — the sandbox
-/// guarantee is unaffected). `Breakpoint` (interactive console) and `Internal`
-/// (explicitly "not for production use") are deliberately excluded. Without an
-/// explicit set, `GlobalsBuilder::standard()` lacks `print`/`json`/`map`/etc.,
-/// which test scripts routinely use.
+/// Stdlib extensions enabled for OCX test scripts; each must stay free of host network, time and randomness.
 pub(super) const SCRIPT_EXTENSIONS: &[LibraryExtension] = &[
     LibraryExtension::StructType,
     LibraryExtension::RecordType,
@@ -40,8 +29,6 @@ pub(super) const SCRIPT_EXTENSIONS: &[LibraryExtension] = &[
     LibraryExtension::SetType,
 ];
 
-/// Builds the script globals: the Starlark standard library + the curated
-/// deterministic extensions + the two host modules (`ocx.*`, `expect.*`).
 fn build_globals() -> Globals {
     GlobalsBuilder::extended_by(SCRIPT_EXTENSIONS)
         .with(super::ocx_module::ocx_module)
@@ -49,8 +36,7 @@ fn build_globals() -> Globals {
         .build()
 }
 
-/// The dialect for OCX test scripts: standard Starlark with `load()` disabled
-/// (scripts are single-file by contract).
+/// Standard Starlark with `load()` disabled: scripts are single-file.
 fn dialect() -> Dialect {
     Dialect {
         enable_load: false,
@@ -58,8 +44,7 @@ fn dialect() -> Dialect {
     }
 }
 
-/// Parses + evaluates `source` with `state` installed, classifying the
-/// terminal error into an engine-neutral outcome.
+/// Parses and evaluates `source` with `state` installed; script failures are outcomes, never `Err`.
 pub(super) fn evaluate(
     source: &str,
     source_label: &str,
@@ -69,17 +54,10 @@ pub(super) fn evaluate(
     let dialect = dialect();
     let ast = match AstModule::parse(source_label, source.to_owned(), &dialect) {
         Ok(ast) => ast,
-        // Parse failure is a script-source error (syntax). Classify and return
-        // as an outcome — never a host `Err`.
         Err(e) => return Ok(ScriptOutcome { kind: classify(&e) }),
     };
 
-    // Install per-run host state BEFORE building globals. The
-    // `ocx.target_platform` attribute is materialized as a frozen value at
-    // globals-build time via `host::try_with`; with no host scope installed
-    // yet it would fall back to `Platform::Any` and report `is_any == true`
-    // even when the run targets a concrete `-p` platform. The RAII guard
-    // clears the state on drop so a reused worker thread never sees stale data.
+    // Before `build_globals`, or `ocx.target_platform` freezes as `Platform::Any` on a `-p` run.
     let _scope = host::scoped(state);
 
     let globals = build_globals();
@@ -87,8 +65,6 @@ pub(super) fn evaluate(
 
     let outcome = {
         let mut eval = Evaluator::new(&module);
-        // The ONLY in-process bound starlark 0.13.0 exposes (recursion depth).
-        // A `HostSetup` error here is an unrecoverable host failure.
         eval.set_max_callstack_size(limits.max_callstack_size)
             .map_err(|e| ScriptError::HostSetup(e.to_string()))?;
 
@@ -100,77 +76,49 @@ pub(super) fn evaluate(
         }
     };
 
-    // Capture the surfaced `ocx.run` result before the scope drops so the
-    // report layer can read it after evaluation.
+    // Before the scope drops, or the report loses the last `ocx.run` result.
     host::stash_last_run(host::with(|s| s.last_run.clone()));
     drop(_scope);
 
     Ok(outcome)
 }
 
-/// Maps a terminal Starlark error to the engine-neutral outcome kind.
-///
-/// This is the SOLE place Starlark `ErrorKind` variant names appear. The match
-/// is exhaustive over the real 0.13.0 variant set (probed by
-/// [`tests::error_kind_variants_compile`]); `#[non_exhaustive]` upstream forces
-/// the wildcard arm, mapped to `Failed` (no exit code `2` is invented).
+/// Maps a terminal Starlark error to the engine-neutral outcome kind; the only place naming `ErrorKind` variants.
 fn classify(error: &StarlarkError) -> ScriptOutcomeKind {
     use super::AssertionKind;
     let message = error.to_string();
-    // `Display` already renders the location, but as multi-line diagnostic
-    // prose with a call-stack trace — right for a failure BODY, useless as a
-    // structured `file`/`line`. Read the span instead; regexing the location
-    // back out of non-stable prose is exactly what this avoids.
     let location = source_location(error);
-    // Codex C4: a child killed on the per-`ocx.run` wall-clock deadline raises
-    // a host (`fail()`) error that would otherwise collapse into `Failed`,
-    // leaving the documented `Timeout` outcome unreachable. The kill branch
-    // records a typed flag; surface it here so the JSON envelope/status can
-    // report a timeout. (Timeout→exit-code mapping is unchanged: a separately
-    // deferred decision.)
+    // First, or a deadline kill classifies as the host `fail()` error it raised.
     if host::timed_out() {
         return ScriptOutcomeKind::Timeout;
     }
-    // The `expect.*` host fns record their identity before returning a
-    // host-fn error; read it back to attribute the failure (plan C5 stable
-    // `kind`). The builtin `fail()` (ErrorKind::Fail) does not flow through an
-    // `expect.*` fn — default it to `Fail`.
     let recorded = host::last_assertion();
     match error.kind() {
-        // Builtin `fail()` → failure (exit 1). Attribute to the recorded
-        // assertion if `expect.fail` set one, else the bare `Fail` builtin.
         ErrorKind::Fail(_) => ScriptOutcomeKind::Failed {
             kind: Some(recorded.unwrap_or(AssertionKind::Fail)),
             message,
             location,
         },
-        // Recursion past `max_callstack_size` → failure (exit 1). Not
-        // attributable to a single assertion.
         ErrorKind::StackOverflow(_) => ScriptOutcomeKind::Failed {
             kind: None,
             message,
             location,
         },
-        // Syntax / arity / type errors → script error (exit 65).
+        // Syntax, arity and type errors: exit 65, not 1.
         ErrorKind::Parser(_) | ErrorKind::Function(_) | ErrorKind::Value(_) | ErrorKind::Scope(_) => {
             ScriptOutcomeKind::ScriptError { message, location }
         }
-        // Host-fn failures → failure (exit 1). `expect.*` records its kind; a
-        // non-assertion host failure (sandbox rejection) records nothing → `Other`.
         ErrorKind::Native(_) => ScriptOutcomeKind::Failed {
             kind: Some(recorded.unwrap_or(AssertionKind::Other)),
             message,
             location,
         },
-        // Engine internals / freeze / fallback → failure (exit 1; no code 2).
-        // Not attributable to a single assertion.
         ErrorKind::Internal(_) | ErrorKind::Freeze(_) | ErrorKind::Other(_) => ScriptOutcomeKind::Failed {
             kind: None,
             message,
             location,
         },
-        // `ErrorKind` is `#[non_exhaustive]` upstream — unclassified variants
-        // map to `Failed` (locked here, never silently to a new code).
+        // A future upstream variant maps to `Failed`, never to a new exit code.
         _ => ScriptOutcomeKind::Failed {
             kind: None,
             message,
@@ -179,12 +127,7 @@ fn classify(error: &StarlarkError) -> ScriptOutcomeKind {
     }
 }
 
-/// Lifts the terminal error's source span into the engine-neutral
-/// [`ScriptLocation`].
-///
-/// `FileSpan::resolve()` reports 0-indexed line/column (starlark's `Display`
-/// adds one before printing); this returns the 1-indexed form every editor and
-/// CI annotator expects, so the conversion lives here and not at each consumer.
+/// Lifts the terminal error's span into a 1-indexed [`ScriptLocation`]; starlark resolves 0-indexed.
 fn source_location(error: &StarlarkError) -> Option<ScriptLocation> {
     let resolved = error.span()?.resolve();
     Some(ScriptLocation {

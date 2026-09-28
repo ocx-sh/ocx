@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Capability probe + cache for the OCI Referrers API.
-//!
-//! A registry either supports the Referrers API (`/v2/<name>/referrers/<digest>`)
-//! or it does not. OCX probes the endpoint once and caches the result per
-//! registry. The cache is consulted before each referrer operation; TTL is
-//! 6 hours.
+//! Capability probe + per-registry cache for the OCI Referrers API.
 //!
 //! See [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md)
 //! §"Capability cache".
@@ -21,70 +16,36 @@ use crate::client::OciTransport;
 use crate::client::error::ClientError;
 use crate::{Digest, native};
 
-/// Cache TTL: 6 hours.
 const TTL_SECS: u64 = 6 * 3600;
 
 /// Referrers-API support state for a given registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReferrersSupport {
-    /// Registry returned 200 on `/v2/<name>/referrers/<digest>`.
     Supported,
-    /// Registry returned 404/405 on the referrers endpoint.
     Unsupported,
 }
 
-/// Cached probe result for a single registry.
-///
-/// Stored at `{ocx_home}/state/referrers/{registry_slug}.json`. The
-/// cache is advisory and fail-open: a corrupt file is treated as a cache miss.
+/// Cached probe result for a single registry; fail-open, a corrupt file is a miss.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferrersApiCapability {
-    /// Registry hostname (e.g., `ghcr.io`) this capability applies to.
     pub registry: String,
 
-    /// Support state from the last probe.
     pub supported: ReferrersSupport,
 
-    /// Wall-clock time of the probe (UTC).
     pub probed_at: SystemTime,
 
-    /// TTL in seconds, clamped to `TTL_SECS` on read; the reader compares
-    /// `probed_at + min(ttl, TTL_SECS)` against now.
+    /// Clamped to `TTL_SECS` on read.
     pub ttl_seconds: u64,
 }
 
 impl ReferrersApiCapability {
-    /// Probe the registry's Referrers API support.
+    /// Probe the registry's Referrers API support via [`OciTransport::list_referrers`].
     ///
-    /// Issues `GET /v2/{repo}/referrers/{digest}` via the transport by calling
-    /// [`OciTransport::list_referrers`]:
-    ///
-    /// - `Ok(_)` (including an empty list) → [`ReferrersSupport::Supported`]
-    /// - [`ClientError::ReferrersUnsupported`] → [`ReferrersSupport::Unsupported`]
-    /// - Any other error → propagated to the caller
-    ///
-    /// `image` names the host whose support is in question, and the caller
-    /// chooses which one that is: verify probes the host it READS signatures
-    /// from (`Client::transport_reference` — the mirror, when configured),
-    /// sign probes the host it WRITES the referrer manifest to
-    /// (`Client::transport_write_reference` — always canonical, ADR Q5). A
-    /// mirror's referrers support says nothing about the upstream's, so the
-    /// two must not share an answer. `resolve_registry()` of this reference
-    /// becomes the cache key, which keeps the two verdicts in separate
-    /// entries by construction.
-    ///
-    /// A zero-value or otherwise known digest is acceptable — the response
-    /// body is ignored; only the HTTP status matters.
-    ///
-    /// # Probe digest caveat
-    ///
-    /// Callers that pass a synthetic all-zero digest (`sha256:000…0`) should
-    /// expect some registries to validate digest format before dispatch and
-    /// return 400 rather than 200 or 404. That path currently surfaces as a
-    /// non-`ReferrersUnsupported` `ClientError` — the caller decides whether
-    /// to treat the probe as inconclusive. Prefer passing the subject
-    /// manifest's real digest when available.
+    /// Only [`ClientError::ReferrersUnsupported`] means unsupported; any other
+    /// error (a synthetic digest can 400) propagates, or a false `Unsupported`
+    /// gets cached. Keyed on `image`'s resolved registry, so a mirror and its
+    /// canonical host keep separate verdicts.
     pub async fn probe(
         transport: &dyn OciTransport,
         image: &native::Reference,
@@ -104,19 +65,8 @@ impl ReferrersApiCapability {
         })
     }
 
-    /// Persist the capability record atomically to `path`.
-    ///
-    /// `path` is the caller's — `StateStore::referrers_capability_file`'s value
-    /// for [`Self::registry`] at every call site. The layout under the state
-    /// root belongs to the store and the record's *format* belongs here, so
-    /// only the format does (ADR 1.14).
-    ///
-    /// Writes a `0o600` temp file in the same directory, then publishes it via
-    /// [`ocx_util::fs::persist_temp_file`] — the shared atomic-publish
-    /// primitive (replace-existing on every platform, with the Windows
-    /// transient-lock retry). So a concurrent reader never sees a
-    /// partially-written file and repeated writes for the same registry
-    /// overwrite the previous cache atomically.
+    /// Persist the capability record atomically (`0o600`) to `path`
+    /// (`adr_crate_split_workspace.md` § Phase 1).
     pub async fn write_cache(&self, path: &Path) -> io::Result<()> {
         let target = path.to_path_buf();
         let dir = target
@@ -127,8 +77,6 @@ impl ReferrersApiCapability {
 
         let bytes = serde_json::to_vec(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-        // The temp write + atomic publish are blocking; run them on a blocking
-        // thread. `write_bytes_atomic` creates the temp `0o600` (private cache).
         tokio::task::spawn_blocking(move || ocx_util::fs::write_bytes_atomic(&target, &bytes))
             .await
             .map_err(|e| io::Error::other(format!("write_cache tempfile+rename panicked: {e}")))??;
@@ -137,19 +85,8 @@ impl ReferrersApiCapability {
 
     /// Read a cached capability from `path` without probing.
     ///
-    /// `registry` is still required, and is not derivable from `path`: it is
-    /// what the stored record's own `registry` field is checked against, so a
-    /// file that belongs to another host reads as a miss rather than as that
-    /// host's verdict.
-    ///
-    /// Returns `Ok(None)` when the cache file is missing, expired, or
-    /// corrupt (fail-open). Returns `Ok(Some(_))` when a fresh entry is
-    /// available.
-    ///
-    /// Fail-open on corrupt/invalid content is deliberate: a corrupt cache
-    /// should never turn into a signing/verification failure. The caller
-    /// falls back to probe, the probe overwrites the corrupt file, the next
-    /// call reads the freshly written one.
+    /// `Ok(None)` on missing, expired, corrupt, or another registry's record:
+    /// a bad cache must never become a signing or verification failure.
     pub async fn from_cache(registry: &str, path: &Path) -> io::Result<Option<Self>> {
         let bytes = match tokio::fs::read(path).await {
             Ok(bytes) => bytes,
@@ -161,8 +98,6 @@ impl ReferrersApiCapability {
             Err(_) => return Ok(None),
         };
         if capability.registry != registry {
-            // Cache file says it belongs to a different registry (corrupt or
-            // relocated path). Treat as miss so the caller reprobes.
             return Ok(None);
         }
         if !capability.is_fresh() {
@@ -173,12 +108,9 @@ impl ReferrersApiCapability {
 
     /// Returns `true` if the cached probe is still within TTL.
     ///
-    /// Both halves of the lifetime come off disk, so neither is trusted. A
-    /// rewound wall clock puts `probed_at` in the future, the subtraction
-    /// errors, and the entry is stale. The file's own `ttl_seconds` is clamped
-    /// to `TTL_SECS` — otherwise one write declaring `u64::MAX` pins a verdict
-    /// for the life of the machine: a planted `Unsupported` fails every sign
-    /// and verify against that registry with exit 84 and never reprobes.
+    /// A future `probed_at` (rewound clock) is stale; the on-disk `ttl_seconds`
+    /// is clamped, or a planted `u64::MAX` `Unsupported` fails every sign and
+    /// verify against that registry with exit 84 forever.
     pub fn is_fresh(&self) -> bool {
         match SystemTime::now().duration_since(self.probed_at) {
             Ok(elapsed) => elapsed < Duration::from_secs(self.ttl_seconds.min(TTL_SECS)),

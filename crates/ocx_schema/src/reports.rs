@@ -1,36 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The published `--format json` report contract.
-//!
-//! Every type in [`ocx::api::data`] that implements `Printable` is a root of
-//! the JSON a command writes to stdout. This module emits one document
-//! describing all of them, generated from the same definitions the CLI
-//! serializes — so an SDK can pin its parsers against the wire format instead
-//! of against a fixture somebody typed by hand.
-//!
-//! # Why the raw schemars output is post-processed
-//!
-//! schemars derives its `required` set from the Rust type, and serde derives
-//! the emitted keys from its attributes. For `Option<T>` the two disagree, and
-//! the disagreement is the whole contract a parser needs:
-//!
-//! | Rust | serde emits | raw schemars | corrected |
-//! |---|---|---|---|
-//! | `T` | always, non-null | required | unchanged |
-//! | `Option<T>` | always, `null` when `None` | **not required**, nullable | **required**, nullable |
-//! | `Option<T>` + `skip_serializing_if` | absent when `None`, never null | not required, **nullable** | not required, **non-null** |
-//! | `U` + `skip_serializing_if` | absent when empty | **required** | not required |
-//!
-//! schemars renders rows two and three identically, so the raw output cannot
-//! tell a key that is *sometimes absent* from one that is *always present and
-//! sometimes null* — the exact distinction a parser gets wrong silently. Every
-//! `skip_serializing_if` field therefore carries a
-//! `#[schemars(extend("x-ocx-absent-when-none" = true))]` marker; [`normalize`]
-//! consumes it, fixes `required` and nullability in both directions, and strips
-//! the marker from the published document. `reports_roots_are_complete` and the
-//! `every_skip_serializing_if_field_is_marked` test in `ocx` keep the markers
-//! and this root list from drifting away from the source.
+//! The published `--format json` report contract over every `Printable` root in [`ocx::api::data`].
 
 use schemars::generate::SchemaSettings;
 use serde_json::{Map, Value};
@@ -41,14 +12,10 @@ pub const REPORTS_ID: &str = "https://ocx.sh/schemas/reports/v1.json";
 const REPORTS_COMMENT: &str =
     "machine-generated from the CLI's own report types; `reports` maps each --format json root to its definition";
 
-/// Field marker meaning "serde omits this key instead of writing `null`".
+/// Marks a field serde omits instead of writing `null`; an unmarked `skip_serializing_if` field publishes as nullable.
 const ABSENT_WHEN_NONE: &str = "x-ocx-absent-when-none";
 
-/// Every `--format json` root, in `impl Printable for …` order per module.
-///
-/// A plain path is published under its own last segment. A generic root has no
-/// single name to take, so it is spelled `<type> as "<name>"` and published
-/// under the name given — one entry per instantiation the CLI actually prints.
+/// Every `--format json` root, published under its last path segment or, for a generic root, `as "<name>"`.
 macro_rules! report_roots {
     ($generator:expr, $($path:ty $(as $alias:literal)?),* $(,)?) => {{
         let mut roots = Map::new();
@@ -120,8 +87,7 @@ pub fn reports_schema() -> String {
         ocx::api::data::shell_state::VerboseShellState,
         ocx::api::data::signature::SignatureReport,
         ocx::api::data::status::StatusReport,
-        // `SweepReport<R>` has a generic `Printable` impl; the CLI prints exactly
-        // these two instantiations, from `package sign` and `package attest`.
+        // The CLI prints exactly these two instantiations, from `package sign` and `package attest`.
         ocx::api::data::sweep::SweepReport<ocx::api::data::signature::SignatureReport>
             as "SweepReport<SignatureReport>",
         ocx::api::data::sweep::SweepReport<ocx::api::data::attestation::AttestationReport>
@@ -152,19 +118,10 @@ pub fn reports_schema() -> String {
         .expect("a serde_json::Value is always serializable to a JSON string")
 }
 
-/// Rewrite `required` and nullability to match what serde actually emits.
+/// Rewrite `required` and nullability to match what serde emits: a plain `Option<T>` (written as `null`)
+/// becomes required, an [`ABSENT_WHEN_NONE`] field becomes optional and non-null.
 ///
-/// Walks the whole document: any object carrying `properties` has its own
-/// `required` corrected, then every child is visited so nested and inline
-/// object schemas are corrected too.
-///
-/// Not report-specific despite living here: the correction is driven entirely
-/// by the [`ABSENT_WHEN_NONE`] marker each `skip_serializing_if` field carries,
-/// so it applies to any schema generated from a type ocx **serializes**. The
-/// execution record is the second such family and uses it through
-/// [`crate::schema_for`]. It must NOT be run over the schemas ocx *reads*
-/// (`config`, `metadata`, `project`) — there an absent key is an input the
-/// deserializer defaults, and `required` already means the right thing.
+/// Only for schemas ocx writes; on one it reads (`config`, `metadata`, `project`) raw `required` is already right.
 pub fn normalize(node: &mut Value) {
     match node {
         Value::Array(items) => {
@@ -206,12 +163,9 @@ fn correct_required(map: &mut Map<String, Value>) {
             if let Value::Object(object) = property {
                 object.remove(ABSENT_WHEN_NONE);
             }
-            // serde omits the key entirely rather than writing `null`, so the
-            // nullable rendering schemars produced for `Option<T>` is wrong.
             strip_null(property);
             required.retain(|name| name != key);
         } else if is_nullable(property) && !required.iter().any(|name| name == key) {
-            // A plain `Option<T>` is always written — as `null` when `None`.
             required.push(key.clone());
         }
     }
@@ -257,8 +211,6 @@ fn strip_null(property: &mut Value) {
             continue;
         };
         branches.retain(|branch| !is_null_branch(branch));
-        // A one-branch anyOf is just that branch; inline it so the published
-        // shape reads the same as a field that was never optional.
         if let [only] = branches.as_slice() {
             let only = only.clone();
             map.remove(key);

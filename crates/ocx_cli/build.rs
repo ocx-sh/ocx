@@ -1,52 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Build script for `ocx_cli`.
+//! Bakes git, build and CI provenance into the binary via `cargo:rustc-env`; each
+//! variable is optional, so a tarball build without `.git/` still compiles.
 //!
-//! Bakes git + build + CI provenance into the binary via
-//! `cargo:rustc-env` instructions. The CLI side reads them through
-//! `option_env!()` from `crate::app::build_info` so a `cargo build` from
-//! a tarball without a `.git/` directory produces a binary that still
-//! compiles — every emitted variable is optional at consumer-side.
-//!
-//! Three groups of env vars are exposed to the binary:
-//!
-//! 1. `VERGEN_*` — git, build, rustc, cargo metadata (via `vergen-gix`).
-//! 2. `__OCX_BUILD_VERSION` / `__OCX_BUILD_CHANNEL` — implementation-detail
-//!    pass-throughs (the double-underscore prefix marks them internal: not
-//!    a public CLI/contract surface, just the seam dev-deploy uses to
-//!    override the embedded version string).
-//! 3. `GITHUB_*` — GitHub Actions context (server URL, repository, run id,
-//!    workflow, ref, sha). Used to derive the `ci.run_url` JSON field.
-//!
-//! All groups are best-effort: if the source env var is absent at build
-//! time, the corresponding compile-time `option_env!()` resolves to `None`
-//! and the binary omits the field from `ocx version --format json`.
-//!
-//! ## Test builds (`--features ocx/__testing`)
-//!
-//! The acceptance binary must be a function of source and toolchain only, so
-//! its bytes — and every cache key hashed over them — do not churn per
-//! commit, per dirty state or per CI run. Under the `__testing` feature the
-//! script therefore reads no git state and no `CI`/`GITHUB_*` variable, and
-//! bakes the fixed [`TESTING_PLACEHOLDERS`] instead (ADR
-//! `adr_test_speed_tiers.md` § C-PROV). Every placeholder is detectable — a
-//! string marker, the all-zero SHA or `dirty = true` — which is what the ADR's
-//! release provenance check keys on to refuse a test build posing as a release.
+//! Under `__testing` the binary depends on source and toolchain only, so its bytes
+//! never churn per commit or CI run (`adr_test_speed_tiers.md` § C-PROV).
 
 use std::env;
 
 use vergen_gix::{BuildBuilder, CargoBuilder, Emitter, GixBuilder, RustcBuilder};
 
-/// Fixed provenance baked into every `__testing` build, in place of the git,
-/// build-time and CI values a release build reads. One row per compile-time
-/// variable `app::build_info` consumes, except `__OCX_BUILD_VERSION`: that one
-/// stays a pass-through because it feeds `app::version()` (lock
-/// `generated_by`, update-check semver parsing) and no test build sets it.
-///
-/// Bazel never runs this script: `crates/ocx_cli/BUILD.bazel`'s
-/// `_TESTING_PROVENANCE` carries the same rows for the Bazel-built acceptance
-/// binary, so an edit here is an edit there too.
+/// Provenance a `__testing` build bakes instead of git and CI state; every value stays
+/// detectable, or the release provenance check cannot refuse a test build posing as a release.
+/// `crates/ocx_cli/BUILD.bazel`'s `_TESTING_PROVENANCE` mirrors these rows, so edit both.
 const TESTING_PLACEHOLDERS: &[(&str, &str)] = &[
     ("VERGEN_GIT_SHA", "0000000000000000000000000000000000000000"),
     ("VERGEN_GIT_DESCRIBE", "placeholder-g00000000"),
@@ -63,21 +30,12 @@ const TESTING_PLACEHOLDERS: &[(&str, &str)] = &[
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Cargo sets `CARGO_FEATURE_<NAME>` for every enabled feature of this
-    // package, uppercased with `-` → `_`, so `__testing` → `___TESTING`.
+    // `CARGO_FEATURE_` + `__TESTING`: the triple underscore is correct.
     if env::var_os("CARGO_FEATURE___TESTING").is_some() {
         return emit_testing_provenance();
     }
 
-    // ── 1. Vergen-gix git + build + rustc + cargo metadata ──────────────
-    //
-    // Failure here is non-fatal: a tarball checkout without `.git/` will
-    // fail the gix step. We log and proceed so the build still succeeds.
-    // build_timestamp(true) emits the current UTC time every invocation,
-    // changing VERGEN_BUILD_TIMESTAMP and forcing a relink of ocx_cli on
-    // every `cargo build`. Only enable under CI where the artifact is
-    // published and needs an authentic bake-time. Local builds opt out so
-    // incremental builds stay incremental.
+    // `build_timestamp` only in CI: it changes every run and would force a relink per local build.
     let in_ci = std::env::var_os("CI").is_some();
     println!("cargo:rerun-if-env-changed=CI");
     let build = BuildBuilder::default().build_timestamp(in_ci).build()?;
@@ -90,18 +48,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_instructions(&cargo)?
         .add_instructions(&rustc)?;
 
-    // Gix metadata is the only step that can fail on a tarball build.
-    // Build it separately so we can degrade gracefully.
+    // Non-fatal: a tarball build without `.git/` warns and continues.
     match GixBuilder::default()
         .sha(false) // long SHA — short variant derived in build_info.rs
         .describe(true, true, None) // dirty marker + tags
-        // `false` = do NOT count untracked files as dirty. The release job
-        // runs `dist build … > dist-manifest.json`, and the shell creates
-        // that redirect target at the repo root *before* cargo runs — an
-        // untracked file every published binary would otherwise self-report
-        // as a dirty build. Tracked-file modification is the predicate that
-        // `describe`'s `-dirty` suffix already uses; keeping both on the
-        // same predicate stops the two fields from contradicting each other.
+        // Tracked-only: the release job writes an untracked `dist-manifest.json` first, which
+        // would mark every published binary dirty.
         .dirty(false)
         .commit_timestamp(true)
         .build()
@@ -116,15 +68,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     emitter.emit()?;
 
-    // ── 2. OCX build-time overrides (implementation detail) ─────────────
-    //
-    // Double-underscore prefix marks these as internal seams, not a
-    // documented CLI contract surface. dev-deploy CI sets them so the
-    // binary self-reports the artifact tag it was published as.
+    // Set by dev-deploy CI so the binary reports the tag it was published as.
     pass_through_env("__OCX_BUILD_VERSION");
     pass_through_env("__OCX_BUILD_CHANNEL");
 
-    // ── 3. GitHub Actions context — used for `ci.run_url` in JSON ───────
+    // GitHub Actions context for `ci.run_url`.
     for var in [
         "GITHUB_SERVER_URL",
         "GITHUB_REPOSITORY",
@@ -139,11 +87,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The `__testing` branch: toolchain-derived metadata only, then the fixed
-/// placeholder table. No `GixBuilder` (it would emit `rerun-if-changed` on
-/// `.git/` and bake the commit), no `BuildBuilder` (its timestamp is a
-/// placeholder here), and no read of `CI` or `GITHUB_*` — so nothing about the
-/// checkout or the CI run reaches the binary or re-runs this script.
+/// Toolchain metadata, the placeholder table and the `__OCX_BUILD_VERSION` pass-through (it feeds
+/// `app::version()`, so never a placeholder); a `GixBuilder` or `CI`/`GITHUB_*` read here would
+/// bake checkout or CI state and re-run this script per commit.
 fn emit_testing_provenance() -> Result<(), Box<dyn std::error::Error>> {
     let cargo = CargoBuilder::default().target_triple(true).debug(true).build()?;
     let rustc = RustcBuilder::default().semver(true).build()?;
@@ -160,17 +106,11 @@ fn emit_testing_provenance() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Pass a build-time env var through to the binary as a compile-time
-/// constant readable by `option_env!()`. If the source var is absent, the
-/// consumer's `option_env!()` resolves to `None` and the field is omitted
-/// from JSON output.
+/// Forwards a build-time env var to the binary's `option_env!()`; absent stays `None`.
 fn pass_through_env(name: &str) {
     println!("cargo:rerun-if-env-changed={name}");
     if let Ok(value) = env::var(name) {
-        // Guard against cargo:rustc-env instruction injection via
-        // newline in the env value. Today's callers (dev-deploy CI +
-        // GitHub Actions runner) cannot produce one, but the guard
-        // keeps `pass_through_env` safe to extend.
+        // A newline would inject a further `cargo:` instruction.
         if value.contains('\n') || value.contains('\r') {
             println!("cargo:warning=skipping {name}: value contains newline");
             return;

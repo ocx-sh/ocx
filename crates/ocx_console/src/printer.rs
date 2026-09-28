@@ -4,14 +4,9 @@
 use std::io::Write as _;
 use std::ops::Deref;
 
-/// The single write point for the CLI. Owns the per-stream color decision.
+/// The single write point for the CLI, owning the per-stream color decision.
 ///
-/// Callers never call `console::Style::apply_to` themselves and never branch
-/// on color. They build a line through the fluent [`Line`] builder returned
-/// by [`Printer::cout`] / [`Printer::cerr`], declaring each segment's text
-/// and intended [`Style`]; the builder applies color only when the target
-/// stream's color is enabled — but layout (alignment / margin) is *always*
-/// applied so columns line up identically with and without color.
+/// Callers declare each segment's [`Style`] on a [`Line`] and never branch on color themselves.
 ///
 /// ```ignore
 /// printer.cerr()
@@ -19,13 +14,6 @@ use std::ops::Deref;
 ///     .plain(" disk almost full")          // never colored
 ///     .end_line();                          // emit with trailing '\n'
 /// ```
-///
-/// `push_style` / `pop_style` layer an extra color (e.g. a background) over
-/// every following segment until popped. Because `console::Style` values do
-/// not merge, layering is done by nesting (`pushed.apply_to(seg.apply_to(t))`):
-/// fine for a backdrop, but two conflicting attributes resolve to the inner.
-/// Layout on a pushed style is ignored — only [`Line::render`]'s own `style`
-/// argument drives alignment.
 #[derive(Clone, Copy, Debug)]
 pub struct Printer {
     stdout_color: bool,
@@ -40,9 +28,7 @@ impl Printer {
         }
     }
 
-    /// Whether stdout color is enabled. Exposed only for the rare caller that
-    /// must compute display width before writing (e.g. `info` logo layout),
-    /// where ANSI in the measured string would break alignment.
+    /// Whether stdout color is enabled, for callers measuring display width before writing.
     pub fn stdout_color(&self) -> bool {
         self.stdout_color
     }
@@ -58,8 +44,7 @@ impl Printer {
     }
 }
 
-/// Horizontal alignment used by [`Style::apply`] when a [`Style::margin`] is
-/// set and the text is narrower than the margin.
+/// Horizontal alignment [`Style::apply`] pads by when text is narrower than the [`Style::margin`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Alignment {
     #[default]
@@ -68,21 +53,9 @@ pub enum Alignment {
     Center,
 }
 
-/// A CLI cell style: a `console::Style` plus layout (alignment + margin).
+/// A CLI cell style: a `console::Style` (through [`Deref`]) plus layout, alignment and margin.
 ///
-/// `Style` [`Deref`]s to the inner [`console::Style`], so it is a drop-in
-/// where a `console::Style` was used for coloring (`style.apply_to(x)`,
-/// `style.force_styling(..)`, …). The added [`Style::apply`] pads the text to
-/// [`Style::margin`] columns per [`Style::alignment`] — letting tables and
-/// trees align by margin instead of `format!("{:width$}")` plus a separate
-/// coloring pass, which double-counts ANSI bytes and breaks alignment under
-/// color.
-///
-/// Layout is color-independent: [`Line::render`] always calls [`Style::apply`]
-/// and only conditionally applies color, so a column is the same width with
-/// `--color never` and `--color always`.
-///
-/// Built with `const fn` builders so `STYLE_*` items stay `const`:
+/// Pad through [`Style::apply`], never `format!("{:width$}")`, which counts a styled string's ANSI bytes as width.
 ///
 /// ```ignore
 /// const HDR: Style = Style::new()
@@ -97,8 +70,7 @@ pub struct Style {
 }
 
 impl Style {
-    /// An unstyled, zero-margin, left-aligned style. `const` so call sites
-    /// can declare `const STYLE_X: Style = Style::new()...;`.
+    /// An unstyled, zero-margin, left-aligned style.
     pub const fn new() -> Self {
         Self {
             alignment: Alignment::Left,
@@ -119,8 +91,7 @@ impl Style {
         self
     }
 
-    /// Minimum column width. [`Self::apply`] pads narrower text to this many
-    /// display columns; `0` (default) disables padding entirely.
+    /// Minimum column width [`Self::apply`] pads to; `0` (default) disables padding.
     pub const fn margin(mut self, margin: usize) -> Self {
         self.margin = margin;
         self
@@ -140,21 +111,15 @@ impl Style {
         self
     }
 
-    /// `margin(margin)` + center alignment (pad both sides, extra space on
-    /// the right when the padding is odd).
+    /// `margin(margin)` + center alignment (odd padding puts the extra space on the right).
     pub const fn margin_center(mut self, margin: usize) -> Self {
         self.margin = margin;
         self.alignment = Alignment::Center;
         self
     }
 
-    /// Pad `text` with spaces to [`Self::margin`] display columns per
-    /// [`Self::alignment`]. Returns `text` unchanged when it is already at
-    /// least `margin` wide (never truncates) or when `margin == 0`.
-    ///
-    /// This is the layout half of a style; the color half is the inner
-    /// `console::Style` reached through [`Deref`]. Width is measured with
-    /// `console::measure_text_width`, so already-styled input still aligns.
+    /// Pad `text` with spaces to [`Self::margin`] display columns per [`Self::alignment`], never truncating;
+    /// ANSI escapes do not count toward the width.
     pub fn apply(&self, text: &str) -> String {
         let width = console::measure_text_width(text);
         if width >= self.margin {
@@ -192,11 +157,8 @@ enum Target {
     Stderr,
 }
 
-/// Fluent single-line builder. Every chainable method returns `self`; the
-/// line is written only by [`Line::end`] (no newline) or [`Line::end_line`].
-/// Color is decided once (the originating stream's setting): when off, every
-/// `render` / `push_style` is a no-op color-wise — but [`Style`] layout
-/// (alignment / margin) is still applied so output stays aligned.
+/// Fluent single-line builder, written only by [`Line::end`] or [`Line::end_line`]; with the stream's color
+/// off, styles still lay out but never color.
 pub struct Line {
     target: Target,
     color: bool,
@@ -214,8 +176,7 @@ impl Line {
         }
     }
 
-    /// Apply the active pushed-style stack (outermost first) over `s`. Color
-    /// only — pushed styles never re-align.
+    /// Apply the pushed-style stack (outermost first) over `s`, color only.
     fn layer(&self, s: String) -> String {
         if !self.color {
             return s;
@@ -227,9 +188,7 @@ impl Line {
         acc
     }
 
-    /// Append `text`: always laid out per `style` ([`Style::apply`]), then
-    /// colored with `style` **iff** the target stream's color is enabled,
-    /// then any pushed styles layered on top.
+    /// Append `text` laid out per `style`, colored by it iff the stream's color is on, under any pushed styles.
     pub fn render(mut self, text: impl std::fmt::Display, style: &Style) -> Self {
         let aligned = style.apply(&text.to_string());
         let painted = if self.color {
@@ -241,8 +200,7 @@ impl Line {
         self
     }
 
-    /// Append `text` verbatim — never colored, never padded (still subject to
-    /// pushed styles).
+    /// Append `text` verbatim: never colored or padded, but still under pushed styles.
     pub fn plain(mut self, text: impl std::fmt::Display) -> Self {
         let s = self.layer(text.to_string());
         self.buf.push_str(&s);
@@ -263,9 +221,7 @@ impl Line {
         self
     }
 
-    /// Push an extra color applied to every following segment until
-    /// [`Line::pop_style`]. Only the color layer is used; any margin /
-    /// alignment on `style` is ignored. No-op when color is disabled.
+    /// Push a color over every following segment until [`Line::pop_style`]; `style`'s layout is ignored.
     pub fn push_style(mut self, style: Style) -> Self {
         self.style_stack.push(style.style);
         self

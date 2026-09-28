@@ -9,14 +9,7 @@ use ocx_util::error::SerializationError;
 
 use crate::{Alignment, Printer, Style, Theme};
 
-// All data-rendering styles (entity colours + table/tree chrome) live in
-// `cli::Theme`, obtained via `DataInterface::theme()`. Nothing styles here
-// inline — swap the theme to restyle every surface.
-
-/// A single annotation on a tree node.
-///
-/// Each annotation carries text and an optional [`Style`].  When no style is
-/// provided, the printer falls back to its default annotation style.
+/// A single annotation on a tree node; without a `style` its text is emitted verbatim.
 #[derive(Clone)]
 pub struct Annotation {
     pub text: Cow<'static, str>,
@@ -24,7 +17,7 @@ pub struct Annotation {
 }
 
 impl Annotation {
-    /// Creates an annotation with the printer's default style.
+    /// Creates an unstyled annotation.
     pub fn new(text: impl Into<Cow<'static, str>>) -> Self {
         Self {
             text: text.into(),
@@ -39,14 +32,7 @@ impl Annotation {
     }
 }
 
-/// A table column: header text plus an optional default cell [`Style`] and
-/// alignment.
-///
-/// The style is the *fallback* for every cell in the column; an individual
-/// [`Cell`] may override it. Alignment governs how cells (and the header) are
-/// padded to the column width. Construct from a string for the common
-/// unstyled, left-aligned case (`"Digest".into()`) or refine with the
-/// builders.
+/// A table column: header text, an optional default cell [`Style`] a [`Cell`] may override, and alignment.
 pub struct Column {
     header: Cow<'static, str>,
     style: Option<Style>,
@@ -63,8 +49,7 @@ impl Column {
         }
     }
 
-    /// Sets the default style applied to every cell in this column (unless a
-    /// cell overrides it).
+    /// Sets the default style for every cell in this column.
     pub fn with_style(mut self, style: Style) -> Self {
         self.style = Some(style);
         self
@@ -89,12 +74,7 @@ impl From<String> for Column {
     }
 }
 
-/// A single table cell: text plus an optional [`Style`] that overrides the
-/// owning [`Column`]'s default.
-///
-/// Use the `From` conversions for plain cells (`"value".into()`) and
-/// [`Cell::with_style`] for per-value colouring (e.g. a visibility tag whose
-/// colour depends on the value, mirroring tree [`Annotation`] styling).
+/// A single table cell: text plus an optional [`Style`] overriding its [`Column`]'s default.
 pub struct Cell {
     text: Cow<'static, str>,
     style: Option<Style>,
@@ -130,31 +110,21 @@ impl From<&'static str> for Cell {
 
 /// Trait for types that can be rendered as a tree.
 pub trait TreeItem {
-    /// The primary display text for this node. Receives the active
-    /// [`Theme`] so the node can compose a coloured label (e.g.
-    /// `ink_identifier(theme, &identifier)`); the printer emits it verbatim.
+    /// The node's label, emitted verbatim, so it may be pre-coloured with the active [`Theme`].
     fn label(&self, theme: &Theme) -> String;
     /// Child nodes.
     fn children(&self) -> &[Self]
     where
         Self: Sized;
-    /// Annotations appended after the label, separated by `·`. Receives the
-    /// active [`Theme`] so the node can pre-ink each annotation; an
-    /// annotation with no explicit style is emitted verbatim.
+    /// Annotations appended after the label, separated by `·`.
     fn annotations(&self, theme: &Theme) -> Vec<Annotation> {
         let _ = theme;
         Vec::new()
     }
 }
 
-/// Stdout structured data interface that carries the resolved stdout color setting.
-///
-/// Used by `ocx_cli`'s `api::Printable` implementations to format plain-text
-/// tables, trees, hints, JSON output, and step chains. Table presentation
-/// depends on the resolved stdout colour setting — see [`Self::print_table`].
-///
-/// The trait is named as plain text, not as an intra-doc link: it lives in the
-/// crate *above* this one, which this one cannot name.
+/// Stdout structured data interface carrying the resolved stdout color setting; `ocx_cli`'s
+/// `api::Printable` impls render tables, trees, hints, JSON and step chains through it.
 #[derive(Clone, Copy, Debug)]
 pub struct DataInterface {
     printer: Printer,
@@ -167,33 +137,21 @@ impl DataInterface {
         Self { printer }
     }
 
-    /// Whether stdout color is enabled. Delegates to the owning [`Printer`];
-    /// exposed only for callers that must measure display width before
-    /// writing (ANSI would break alignment) — see `command/info.rs` logo.
+    /// Whether stdout color is enabled, for callers measuring display width before writing.
     pub fn color(&self) -> bool {
         self.printer.stdout_color()
     }
 
-    /// The resolved colour theme for stdout. Cheap to build (a handful of
-    /// `console::Style` values), so it is created on demand and the
-    /// interface stays `Copy`. `Printable` impls call this to colour data
-    /// entities (`ink_identifier(theme, &identifier)`, `theme.visibility(..)`, …).
+    /// The stdout colour theme, built on demand so the interface stays `Copy`.
     pub fn theme(&self) -> Theme {
         Theme::new(self.printer.stdout_color())
     }
 
-    /// Serializes `value` as pretty-printed JSON, syntax-highlighted iff
-    /// stdout color is enabled (the `Printer` owns that decision; JSON
-    /// highlighting is `colored_json`, not `console::Style`, so it is
-    /// gated here rather than via `paint_out`).
+    /// Serializes `value` as pretty-printed JSON, syntax-highlighted iff stdout color is enabled.
     ///
     /// # Errors
     ///
-    /// [`SerializationError`] when the value does not serialize. Every one of
-    /// the three fallible calls below raises `serde_json::Error` —
-    /// `colored_json` returns `serde_json::Result` too — so the console needs
-    /// no error type of its own for this, and the one it borrows renders and
-    /// chains exactly as the crate-wide variant it replaces.
+    /// [`SerializationError`] when the value does not serialize.
     pub fn print_json(&self, value: &impl Serialize) -> Result<(), SerializationError> {
         let rendered = if self.printer.stdout_color() {
             let json_value = serde_json::to_value(value)?;
@@ -205,21 +163,10 @@ impl DataInterface {
         Ok(())
     }
 
-    /// Prints a table to stdout.
+    /// Prints a table to stdout; `rows` is column-major (`rows[c]` holds column `c`'s cells).
     ///
-    /// Two presentations, chosen by the resolved stdout colour setting:
-    ///
-    /// - **Colour on** (interactive): a decorated table — bold+underlined
-    ///   header (no rule line, no `│` separators), columns spaced by `GAP`,
-    ///   per-column / per-cell colouring, and a dim zebra stripe on odd data
-    ///   rows.
-    /// - **Colour off** (piped, `--color never`, `NO_COLOR`): plain
-    ///   space-aligned columns separated by `GAP`, no glyphs and no rule,
-    ///   so machine consumers parsing stdout keep a stable, simple layout.
-    ///
-    /// `rows` is column-major: `rows[c]` holds the cells of column `c`,
-    /// aligned with `columns[c]`. Cell text wider than its header sets the
-    /// column width; a [`Cell`] style overrides its [`Column`]'s default.
+    /// Colour off (piped, `--color never`, `NO_COLOR`) prints plain padded columns and no glyphs, so machine
+    /// consumers keep a stable layout.
     pub fn print_table(&self, columns: &[Column], rows: &[Vec<Cell>]) {
         let widths = Self::column_widths(columns, rows);
         let max_rows = rows.iter().map(|r| r.len()).max().unwrap_or(0);
@@ -231,9 +178,7 @@ impl DataInterface {
         }
     }
 
-    /// Builds a layout [`Style`] padding to `width` per `alignment`, carrying
-    /// `color`'s attributes when present. Layout is applied even with colour
-    /// off so both presentations align identically.
+    /// A layout [`Style`] padding to `width`, carrying `color` when present; applied with colour off too.
     fn cell_style(width: usize, alignment: Alignment, color: Option<&Style>) -> Style {
         let base = Style::new().margin(width).alignment(alignment);
         match color {
@@ -242,26 +187,17 @@ impl DataInterface {
         }
     }
 
-    /// Decorated presentation (colour on) — see [`Self::print_table`].
-    ///
-    /// Underlined-header variant: no vertical `│` separators and no rule
-    /// line — the header is underlined instead; columns are spaced by
-    /// [`GAP`]; odd data rows keep the dim zebra for row separation.
+    /// Colour-on presentation: underlined header, no `│` or rule line, a dim zebra on odd rows.
     fn print_table_decorated(&self, columns: &[Column], rows: &[Vec<Cell>], widths: &[usize], max_rows: usize) {
         let theme = self.theme();
         let mut header = self.printer.cout();
         for (c, col) in columns.iter().enumerate() {
             if c > 0 {
-                // Underline the gap too so the header reads as one
-                // continuous line, not per-column segments.
+                // Underline the gap too, so the header reads as one line.
                 header = header.render(GAP, theme.header());
             }
             let style = Self::cell_style(widths[c], col.alignment, Some(theme.header()));
-            // `&*` and not `.as_ref()`: these fields are `Cow<'_, str>`, and
-            // `typed-path` (via tough, via sigstore's `sigstore-trust-root`)
-            // adds a second `AsRef` impl for `Cow<'_, str>`, so the target
-            // type stops being inferable. Trait impls are global -- nothing
-            // here imports typed-path and the ambiguity still lands.
+            // `&*`, not `.as_ref()`: `typed-path` (via sigstore) adds a second `AsRef` for `Cow<str>`.
             header = header.render(&*col.header, &style);
         }
         header.end_line();
@@ -269,8 +205,7 @@ impl DataInterface {
         for r in 0..max_rows {
             let mut line = self.printer.cout();
             if r % 2 == 1 {
-                // Additive: pushed onto the line's style stack so it layers
-                // *over* each cell's own colour rather than replacing it.
+                // Pushed onto the style stack, so it layers over each cell's colour instead of replacing it.
                 line = line.push_style(theme.row_accent().clone());
             }
             for (c, col) in columns.iter().enumerate() {
@@ -287,8 +222,7 @@ impl DataInterface {
         }
     }
 
-    /// Plain presentation (colour off) — see [`Self::print_table`]. Output is
-    /// byte-stable for piped consumers: padded columns joined by [`GAP`].
+    /// Colour-off presentation: byte-stable padded columns joined by [`GAP`].
     fn print_table_plain(&self, columns: &[Column], rows: &[Vec<Cell>], widths: &[usize], max_rows: usize) {
         let mut buf = String::new();
         for (c, col) in columns.iter().enumerate() {
@@ -316,17 +250,13 @@ impl DataInterface {
         }
     }
 
-    /// Prints a hint or informational message (dim, italic, underlined).
+    /// Prints a hint or informational message in the theme's hint style.
     pub fn print_hint(&self, text: &str) {
         let theme = self.theme();
         self.printer.cout().render(text, theme.hint()).end_line();
     }
 
-    /// Prints a chain of steps connected by `→` with dim connectors.
-    ///
-    /// Steps are emitted verbatim (`plain`) so a caller that pre-coloured
-    /// them via the theme keeps that styling; the arrows use the
-    /// theme's chrome.
+    /// Prints steps joined by `→`, each emitted verbatim so pre-coloured text keeps its styling.
     pub fn print_steps(&self, steps: &[impl std::fmt::Display]) {
         let theme = self.theme();
         let mut line = self.printer.cout();
@@ -356,9 +286,7 @@ impl DataInterface {
         let theme = self.theme();
         let annotations = node.annotations(&theme);
 
-        // Label is emitted `plain` because it may already be a composed,
-        // multi-part coloured string from `ink_identifier(..)`; wrapping it in an
-        // outer style would be cut by the parts' own resets.
+        // `plain`: an outer style would be cut by a pre-coloured label's own resets.
         let mut line = self
             .printer
             .cout()
@@ -366,10 +294,7 @@ impl DataInterface {
             .render(connector, theme.chrome())
             .plain(node.label(&theme));
         for ann in &annotations {
-            // An annotation with an explicit style is rendered with it;
-            // otherwise the text is already theme-inked and is emitted
-            // verbatim (re-styling would double-wrap and the parts' resets
-            // would cut the outer style).
+            // An unstyled annotation is already theme-inked; re-styling it would be cut by its resets.
             line = line.plain(" ").render("·", theme.chrome()).plain(" ");
             line = match &ann.style {
                 Some(style) => line.render(&*ann.text, style),
@@ -393,9 +318,7 @@ impl DataInterface {
         }
     }
 
-    /// Per-column display width: the widest of the header and its cells.
-    /// Measured with `console::measure_text_width` so already-styled text
-    /// (ANSI escapes) does not inflate the width.
+    /// Per-column display width, the widest of header and cells, not counting ANSI escapes.
     fn column_widths(columns: &[Column], rows: &[Vec<Cell>]) -> Vec<usize> {
         let num_cols = columns.len().max(rows.len());
         let mut widths = Vec::with_capacity(num_cols);

@@ -2,14 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! Report type for `ocx package verify` output.
-//!
-//! Renders the verified subject + referrer digests and the certificate identity
-//! and issuer that the signature attests. The flat shape is the slice-1
-//! acceptance contract (`test/tests/test_verify.py`): a single verified
-//! signature per invocation, and those top-level fields stay exactly as they
-//! are. The multi-signature slice arrives beside them as [`SignatureEntry`]
-//! rows under `signatures`, which is **absent** until a discovery pipeline
-//! populates it — an array that always rendered `[]` would claim we looked.
 
 use ocx_console::Cell;
 use ocx_sign::sign::SignatureFormat;
@@ -20,32 +12,13 @@ use serde::Serialize;
 use crate::api::Printable;
 use crate::api::data::sanitize_for_terminal;
 
+// A plain rendering must sanitize every field: a registry-served SAN can carry an OSC 52
+// clipboard write (CWE-150). JSON-only today; `serde_json` escapes control characters.
 /// One discovered, verified signature.
 ///
-/// The per-signature view of what the flat [`VerificationReport`] fields
-/// describe for a single signature, plus the three things only a
-/// multi-signature listing has to state: which wire shape carried it, how it
-/// was found, and what produced it. The enum-valued fields reuse the library
-/// vocabularies verbatim (`SignatureFormat`, `DiscoveryMethod`,
-/// `KeyBackendKind`), so their frozen serde slugs are the wire spelling here
-/// and one word cannot mean two things across the two crates.
-///
-/// # Rendering these rows in plain text requires `sanitize_for_terminal`
-///
-/// [`certificate_identity`](Self::certificate_identity) and
-/// [`certificate_oidc_issuer`](Self::certificate_oidc_issuer) are read out of a
-/// Fulcio certificate carried in a bundle a **registry** served, so they are
-/// attacker input by construction — the same reason
-/// `VerificationReport::plain_fields` routes its flat certificate fields
-/// through [`sanitize_for_terminal`]. Nothing here is exposed today: this array
-/// is JSON-only, and `serde_json` escapes C0 controls. The moment a row of this
-/// struct reaches a plain-text table, **every** value in that row MUST go
-/// through [`sanitize_for_terminal`] first — per field, not per row, and
-/// including the typed ones, for the reason `plain_fields` states: a filter
-/// applied selectively has to be re-argued for every field added later, and the
-/// neutralization is identity on a digest, a slug and an ISO-8601 stamp.
-/// Without it a SAN embedding `\x1b]52;c;<b64>\x07` sets the operator's
-/// clipboard (CWE-150).
+/// The per-signature view of the flat `VerificationReport` fields, plus which
+/// wire shape carried it, how it was found, and what produced it.
+// Enum values reuse the signing library's serde slugs, so one word never means two things.
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SignatureEntry {
     /// Which cosign wire shape carried this signature.
@@ -58,27 +31,23 @@ pub struct SignatureEntry {
     pub referrer_digest: ocx_oci::Digest,
     /// Certificate SAN (identity) embedded in the Fulcio cert. Absent under a
     /// key — a legal shape, not malformed input. Registry-served, so it is
-    /// attacker input: see the struct note before rendering it in plain text.
+    /// untrusted input.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_identity: Option<String>,
     /// Certificate OIDC issuer embedded in the Fulcio cert. Absent under a key.
-    /// Registry-served, so it is attacker input: see the struct note before
-    /// rendering it in plain text.
+    /// Registry-served, so it is untrusted input.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_oidc_issuer: Option<String>,
     /// Rekor `integratedTime`, ISO-8601 UTC.
     ///
-    /// **Certificate validity is judged against this instant, never against
-    /// wall-clock now.** A Fulcio certificate is valid for about ten minutes;
-    /// the transparency-log timestamp is the only proof the signature happened
-    /// inside that window. A keyless fixture captured today carries a
-    /// certificate that has already expired — a wall-clock check makes it, and
-    /// every keyless fixture after it, rot within the hour.
-    ///
-    /// Absent when no transparency record exists (key mode without a Rekor
-    /// upload), which is legal and must be visible rather than inferred.
+    /// Certificate validity is judged against this instant, never against
+    /// wall-clock now: a Fulcio certificate is valid for about ten minutes, and
+    /// this timestamp is the only proof the signature happened inside that
+    /// window. Absent when no transparency record exists (key mode without a
+    /// Rekor upload), which is legal and must be visible rather than inferred.
+    // A wall-clock check fails every captured keyless fixture: its certificate has expired.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub signed_at: Option<String>,
@@ -90,15 +59,10 @@ pub struct SignatureEntry {
 
 /// Summary of a successful Sigstore verification.
 ///
-/// Plain format: single "Field | Value" table listing the subject digest,
-/// referrer digest, cert identity, cert OIDC issuer, and signed-at timestamp.
-/// `subject_digest` is the answer (what was verified) and renders full;
-/// `referrer_digest` shortens to 12 hex — a full `sha256:<64hex>` earns its
-/// row only once per view. Both stay full in JSON.
-///
-/// JSON format: `{ subject_digest, referrer_digest, certificate_identity,
+/// JSON: `{ subject_digest, referrer_digest, certificate_identity,
 /// certificate_oidc_issuer, signed_at }`, plus `signatures` once a discovery
-/// pipeline populates it.
+/// pipeline populates it. Digests are always full in JSON; plain output
+/// shortens `referrer_digest` to 12 hex.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct VerificationReport {
     /// Digest of the subject manifest whose signature was verified.
@@ -106,13 +70,11 @@ pub struct VerificationReport {
     /// What carried the verified signature — **not always a manifest**.
     ///
     /// The OCI referrer manifest's digest for a Sigstore bundle; the **layer**
-    /// blob's digest for a cosign simplesigning signature, whichever door found
-    /// it, because there one layer is one signature and the manifest digest
-    /// would name all of them at once. The discriminator is
-    /// `signatures[].signature_format`, never the discovery method — a
-    /// simplesigning sidecar reached through the Referrers API reports a layer
-    /// digest while `discovery_method` reads `referrers_api`. So this is
-    /// addressable as `GET /v2/<name>/manifests/<digest>` only under
+    /// blob's digest for a cosign simplesigning signature, however it was
+    /// found (one layer is one signature). Discriminate on
+    /// `signatures[].signature_format`, never `discovery_method`: a
+    /// simplesigning sidecar found via the Referrers API still reports a layer
+    /// digest. Addressable as `GET /v2/<name>/manifests/<digest>` only under
     /// `signature_format == "bundle"`.
     pub referrer_digest: ocx_oci::Digest,
     /// Certificate SAN (identity) embedded in the Fulcio cert.
@@ -123,22 +85,15 @@ pub struct VerificationReport {
     pub signed_at: String,
     /// Every signature discovered for the subject.
     ///
-    /// **Absent** while empty, rather than rendered as `[]`: a key that always
-    /// renders an empty array is a wire promise of behaviour that does not
-    /// exist — a consumer reading `"signatures": []` learns "we looked and
-    /// found none", which is not what happened. Contrast `sbom[].shadowed`,
-    /// which is emitted unconditionally because `false` there is a true
-    /// statement.
+    /// **Absent** while empty, never `[]`: absence does not mean discovery
+    /// looked and found none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub signatures: Vec<SignatureEntry>,
 }
 
 impl VerificationReport {
-    /// Construct a verification report.
-    ///
-    /// `signatures` starts empty and is therefore omitted from JSON; a
-    /// discovery pipeline fills it in place, so no call site changes.
+    /// Construct a verification report with `signatures` empty (omitted from JSON).
     pub fn new(
         subject_digest: ocx_oci::Digest,
         referrer_digest: ocx_oci::Digest,
@@ -158,23 +113,10 @@ impl VerificationReport {
 }
 
 impl VerificationReport {
-    /// The (label, value) pairs `print_plain` renders, in display order.
+    /// The (label, value) rows `print_plain` renders; only `subject_digest` stays a full digest.
     ///
-    /// Extracted from `print_plain` so the digest-shortening contract can be
-    /// pinned by a unit test: `Printer` writes directly to the real process
-    /// stdout with no injectable writer (see `data_interface.rs`), so
-    /// `print_plain`'s rendered bytes cannot be captured in-process. This pure
-    /// helper carries the same field list with no `Printer` dependency.
-    /// Every value is neutralized for the terminal (CWE-150), not only the two
-    /// obviously-foreign ones. `certificate_identity` and
-    /// `certificate_oidc_issuer` are read out of a Fulcio certificate carried
-    /// in a bundle a *registry* served, so on the verify path they are attacker
-    /// input by construction — a SAN embedding `\x1b]52;c;<b64>\x07` sets the
-    /// operator's clipboard. The digests and the timestamp are typed values
-    /// that cannot carry a control character, and are routed anyway: a filter
-    /// applied per field has to be re-argued for every field added later, and
-    /// the neutralization is identity on hex and on an ISO-8601 stamp — pinned
-    /// by `ordinary_values_pass_through_verbatim`.
+    /// Split out because `Printer` has no injectable writer, so tests pin the rows here.
+    /// Every value is sanitized: the certificate fields are registry-served attacker input (CWE-150).
     fn plain_fields(&self) -> [(&'static str, String); 5] {
         [
             (
@@ -200,10 +142,6 @@ impl VerificationReport {
 
 impl Printable for VerificationReport {
     fn print_plain(&self, data: &ocx_console::DataInterface) {
-        // `subject_digest` is the answer (what was verified) and stays full;
-        // `referrer_digest` shortens to 12 hex so only one full
-        // sha256:<64hex> earns its row (subsystem-cli-api.md "Plain-Mode
-        // Column Budget"). Both remain full in JSON.
         let mut rows: [Vec<Cell>; 2] = [Vec::new(), Vec::new()];
         for (label, value) in self.plain_fields() {
             rows[0].push(Cell::from(label.to_string()));
@@ -212,8 +150,7 @@ impl Printable for VerificationReport {
         data.print_table(&["Field".into(), "Value".into()], &rows);
     }
 
-    /// Emit a success envelope:
-    /// `{"schema_version":1,"command":"package verify","exit_code":0,"data":{...}}`.
+    /// Emit the success envelope (`exit_code` 0).
     fn print_json(&self, data: &ocx_console::DataInterface) -> anyhow::Result<()>
     where
         Self: Sized,

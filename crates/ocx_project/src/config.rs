@@ -20,58 +20,42 @@ use ocx_package::metadata::slug::SLUG_MAX_LEN;
 
 /// A named group's body: `[group.<name>.tools]` and `[group.<name>.env]`.
 ///
-/// Exactly two optional sub-tables, nothing else. A tool binding written
-/// directly under `[group.<name>]` is a parse error
-/// ([`ProjectErrorKind::GroupHoldsDirectBinding`]) — one place bindings can
-/// live, so nothing merges and nothing can collide across spellings.
-///
-/// A tool literally named `env` or `tools` needs no special handling: it is
-/// just a key inside [`Self::tools`], which is a plain map.
+/// Exactly two optional sub-tables, nothing else: a tool binding written
+/// directly under `[group.<name>]` is a parse error. A tool may still be named
+/// `env` or `tools`; it is just a key inside `tools`.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Group {
-    /// Tool bindings for this group. Values are fully-qualified
-    /// [`PackageRef`]s, validated on the second parse pass exactly as
-    /// `[tools]` is.
+    /// Tool bindings for this group. Values are fully-qualified package
+    /// references, validated exactly as `[tools]` is.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, PackageRef>,
 
     /// Environment variables applied when this group is selected.
-    ///
-    /// Skipped when empty so `ocx add -g ci` never writes a bare
-    /// `[group.ci.env]` into a file that declares none.
+    // Skipped when empty, or `ocx add -g ci` writes a bare `[group.ci.env]` into a file declaring none.
     #[serde(default, skip_serializing_if = "ProjectEnv::is_empty")]
     pub env: ProjectEnv,
 
-    /// Group-tier override of the `lazy-mode` resolution ladder
-    /// (`plan_lazy_package_loading.md` C-006). `None` means inherit from the
-    /// toolchain tier, never [`LazyMode::Never`]. Excluded from
-    /// [`super::declaration_hash`] — resolve-time policy, not a tool
-    /// binding.
+    /// Group-tier `lazy-mode` override: outranks the toolchain tier and is
+    /// outranked by `[package."<id>"]` and the CLI flag. Absent inherits from
+    /// the toolchain tier; it does not mean `never`. An edit never invalidates
+    /// `ocx.lock`.
+    // Precedence: adr_lazy_package_loading.md.
     #[serde(default, rename = "lazy-mode", skip_serializing_if = "Option::is_none")]
     pub lazy_mode: Option<LazyMode>,
-    // There is deliberately no group-tier `lazy-report`. `lazy-mode` is decided
-    // while composing, where the selected group is known; `lazy-report` is
-    // decided inside `ocx launcher shim`, a separate process that receives a
-    // pinned identifier and a basename and has no way to learn which group
-    // composed the tool. A settable-but-unreadable tier is the defect
-    // `plan_lazy_package_loading.md` C-006 (i) exists to prevent, so the field
-    // is absent rather than ignored. See [`PackageSettings::lazy_report`] and
-    // [`ProjectConfig::lazy_report`] for the tiers that do apply.
+    // No group-tier `lazy-report`: it is read in `ocx launcher shim`, which cannot
+    // learn the group, so the tier would be settable but never read.
 }
 
-/// Per-package resolve-time settings declared in `ocx.toml` under
-/// `[package."<registry/repo[:tag]>"]`.
+/// Per-package resolve-time settings: `[package."<registry/repo[:tag]>"]`.
 ///
-/// Currently carries a single opt-out: `no-patches = true` declines the
-/// site-tier companion overlay for that base — EXCEPT a system-required patch
-/// still applies (enforcement beats opt-out, C7). The opt-out is
-/// version-independent: it keys on canonical `registry/repository` and applies
-/// to every installed version.
-///
-/// `#[serde(deny_unknown_fields)]` so a typo in a `[package.*]` key's body
-/// surfaces as a parse error rather than a silent no-op.
+/// `no-patches = true` declines the site-tier companion overlay for that base,
+/// except that a system-required patch still applies (enforcement beats
+/// opt-out). The opt-out is version-independent: it keys on canonical
+/// `registry/repository` and applies to every installed version. Unknown keys
+/// are a parse error.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+// Without `deny_unknown_fields`, a typo in a `[package.*]` body is a silent no-op.
 #[serde(deny_unknown_fields)]
 pub struct PackageSettings {
     /// Decline the site-tier companion overlay for this base.
@@ -80,161 +64,106 @@ pub struct PackageSettings {
     #[serde(default, rename = "no-patches")]
     pub no_patches: bool,
 
-    /// Package-tier override of the `lazy-mode` resolution ladder
-    /// (`plan_lazy_package_loading.md` C-006) — the most specific config
-    /// tier, only outranked by the CLI flag. `None` means inherit from the
-    /// group/toolchain tiers, never [`LazyMode::Never`]. Excluded from
-    /// [`super::declaration_hash`] — resolve-time policy, not a tool
-    /// binding.
+    /// Package-tier `lazy-mode` override, the most specific config tier: only
+    /// the CLI flag outranks it. Absent inherits from the group and toolchain
+    /// tiers; it does not mean `never`. An edit never invalidates `ocx.lock`.
     #[serde(default, rename = "lazy-mode", skip_serializing_if = "Option::is_none")]
     pub lazy_mode: Option<LazyMode>,
 
-    /// Package-tier override of the `lazy-report` setting. `None` means
-    /// inherit from the group/toolchain tiers. Excluded from
-    /// [`super::declaration_hash`].
+    /// Package-tier `lazy-report` override. Absent inherits from the toolchain
+    /// tier. An edit never invalidates `ocx.lock`.
     #[serde(default, rename = "lazy-report", skip_serializing_if = "Option::is_none")]
     pub lazy_report: Option<LazyReport>,
 }
 
 /// Project-tier configuration parsed from `ocx.toml`.
 ///
-/// Schema follows ADR "Project-Level Toolchain Config" decision 1A:
-/// flat `[tools]` table as the implicit default group, plus additive
-/// `[group.<name>]` tables for optional named groups. Values are
-/// registry-qualified [`PackageRef`] strings of the form
-/// `registry/repo[:tag][@digest]`. Bare-tag forms (no registry, e.g.
-/// `cmake = "3.28"`) are rejected with
-/// [`super::error::ProjectErrorKind::ToolValueMissingRegistry`].
-///
-/// Bare-repo entries with no tag and no digest (e.g.
-/// `cmake = "ocx.sh/cmake"`) parse with `:latest` injected at the
-/// schema boundary — see [`parse_tool_value`] for the contract. The
-/// default does not apply to digest-pinned entries
-/// (`tool = "ghcr.io/acme/tool@sha256:..."`); the digest is the
-/// canonical pin.
-///
-/// `#[serde(deny_unknown_fields)]` is enforced at the struct level so
-/// schema drift in consumer `ocx.toml` files surfaces as a parse error
-/// rather than silent ignore.
-///
-/// Phase 2.1 NOTE: the `platforms` field is removed in this revision.
-/// The effective platform set is sourced ambient from the project tier
-/// (currently the canonical five-platform set) until ADR-driven
-/// per-tool platform overrides land.
+/// A flat `[tools]` table is the implicit default group; `[group.<name>]`
+/// tables add optional named groups. Values are registry-qualified package
+/// references, `registry/repo[:tag][@digest]`; a bare tag with no registry
+/// (`cmake = "3.28"`) is rejected. A bare repository with no tag and no digest
+/// (`cmake = "ocx.sh/cmake"`) parses as `:latest`; a digest-pinned entry gets
+/// no default tag, since the digest is the canonical pin. Unknown keys are a
+/// parse error.
+// Schema shape: adr_project_toolchain_config.md.
+// Only the tool maps feed `declaration_hash`: hashing any other field forces a
+// needless re-lock on every edit.
 #[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
+// Without `deny_unknown_fields`, schema drift in a consumer's `ocx.toml` is silently ignored.
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
-    /// Tools in the reserved `default` group (the top-level `[tools]`
-    /// table in `ocx.toml`). Values are fully-qualified
-    /// [`PackageRef`]s.
+    /// Tools in the reserved `default` group (the top-level `[tools]` table in
+    /// `ocx.toml`). Values are fully-qualified package references.
     #[serde(default)]
     pub tools: BTreeMap<String, PackageRef>,
 
     /// Environment variables for the default group; `[env]` in TOML.
     ///
-    /// Standing in the same relation to `[group.<name>.env]` that `[tools]`
-    /// does to `[group.<name>.tools]`. Excluded from
-    /// [`super::declaration_hash`] — it does not change *which* packages
-    /// resolve, so an env edit must not force a re-lock.
+    /// Stands to `[group.<name>.env]` as `[tools]` does to
+    /// `[group.<name>.tools]`. It does not change which packages resolve, so an
+    /// edit never forces a re-lock.
     #[serde(default, skip_serializing_if = "ProjectEnv::is_empty")]
     pub env: ProjectEnv,
 
-    /// Named additive groups; `[group.<name>]` in TOML. `default` is
-    /// reserved — a literal `[group.default]` declaration is a parse
-    /// error (enforced at parse time, not at the serde layer).
-    ///
-    /// The Rust field is plural, the TOML table singular: `[group.<name>]`
-    /// is what users write. Do not rename the wire key.
+    /// Named additive groups; `[group.<name>]` in TOML. `default` is reserved:
+    /// a literal `[group.default]` declaration is a parse error.
+    // Renaming the wire key breaks every `ocx.toml` that declares a group.
     #[serde(default, rename = "group")]
     pub groups: BTreeMap<String, Group>,
 
-    /// Per-package resolve-time settings; `[package."<id>"]` in TOML. Keyed by
-    /// the canonical author string (registry/repo[:tag]) so Serialize
-    /// round-trips byte-faithfully. Currently carries the `no-patches` opt-out.
+    /// Per-package resolve-time settings; `[package."<id>"]` in TOML, keyed by
+    /// the canonical author string `registry/repo[:tag]`.
     ///
-    /// This is RESOLVE-TIME POLICY, not a tool-binding declaration: it is
-    /// deliberately excluded from [`super::declaration_hash`] (a `no-patches`
-    /// edit must not invalidate `ocx.lock`).
+    /// Resolve-time policy, not a tool binding: a `no-patches` edit never
+    /// invalidates `ocx.lock`.
+    // Keyed by the author string so Serialize round-trips byte-faithfully.
     #[serde(default, rename = "package")]
     pub packages: BTreeMap<String, PackageSettings>,
 
-    /// Toolchain-tier `lazy-mode` (`plan_lazy_package_loading.md` C-006) —
-    /// the least specific tier of the resolution ladder, only outranked by
-    /// `[group.<g>]`, `[package."<id>"]`, and the CLI flag. `None` means
-    /// fall through to `OCX_LAZY_MODE`, never [`LazyMode::Never`] — only the
-    /// ladder's own floor applies that default.
-    ///
-    /// The FIRST bare scalar fields on this struct — every other field is a
-    /// collection. This is RESOLVE-TIME POLICY, not a tool-binding
-    /// declaration: deliberately excluded from [`super::declaration_hash`]
-    /// (same rationale as `env` and `packages`).
+    /// Toolchain-tier `lazy-mode`, the least specific config tier: outranked by
+    /// `[group.<g>]`, `[package."<id>"]` and the CLI flag. Absent falls through
+    /// to `OCX_LAZY_MODE`; it does not mean `never`. An edit never invalidates
+    /// `ocx.lock`.
+    // Precedence: adr_lazy_package_loading.md.
     #[serde(default, rename = "lazy-mode", skip_serializing_if = "Option::is_none")]
     pub lazy_mode: Option<LazyMode>,
 
-    /// Toolchain-tier `lazy-report`. `None` means fall through to the
-    /// built-in default. Excluded from [`super::declaration_hash`].
+    /// Toolchain-tier `lazy-report`. Absent falls through to `OCX_LAZY_REPORT`,
+    /// then to `silent`. An edit never invalidates `ocx.lock`.
     #[serde(default, rename = "lazy-report", skip_serializing_if = "Option::is_none")]
     pub lazy_report: Option<LazyReport>,
 
-    /// Toolchain-tier `activate` mode (`plan_toolchain_activation.md`
-    /// C-006 / C-012) — whether a project's rendered toolchain reaches a
-    /// shell via per-prompt environment composition (`env`, the ladder's
-    /// floor), a `PATH` entry for `<home>/toolchain/active/bin` (`bin`), or
-    /// neither (`none`). `None` means fall through to
-    /// `OCX_TOOLCHAIN_ACTIVATE`, never [`crate::activate::ACTIVATE_FLOOR`]
-    /// directly — only the ladder's own floor applies that default.
-    /// [`ActivateMode`]'s own `Deserialize` already rejects an unrecognized
-    /// wire value (exit 78, C-012) — the same "no second validation pass"
-    /// shape [`Self::lazy_mode`] uses.
-    ///
-    /// RESOLVE-TIME POLICY, not a tool-binding declaration: excluded from
-    /// [`super::declaration_hash`] by omission (same rationale as
-    /// `lazy-mode`).
+    /// Toolchain-tier `activate` mode: how a project's rendered toolchain
+    /// reaches a shell — per-prompt environment composition (`env`, the
+    /// default), a `PATH` entry for `<home>/toolchain/active/bin` (`bin`), or
+    /// neither (`none`). Absent falls through to `OCX_TOOLCHAIN_ACTIVATE`, then
+    /// to `env`. An unrecognized value is a parse error (exit 78). An edit
+    /// never invalidates `ocx.lock`.
+    // Ladders for `activate` and `pinned`: adr_toolchain_activation.md § Resolution ladders.
+    // Never default to `ACTIVATE_FLOOR` here, or the `OCX_TOOLCHAIN_ACTIVATE` tier is skipped.
     #[serde(default, rename = "activate", skip_serializing_if = "Option::is_none")]
     pub activate: Option<ActivateMode>,
 
-    /// Toolchain-tier `pinned` setting (`plan_toolchain_activation.md`
-    /// C-007 / C-012) — whether composed paths follow the rendered
-    /// `links/<group>/<entry>` links (`false`, the ladder's floor) or pin to
-    /// digest roots (`true`). `None` means fall through to
-    /// `OCX_TOOLCHAIN_PINNED`; "unset" and "explicitly false" stay
-    /// distinguishable all the way down the ladder, which is why this is
-    /// `Option<bool>` rather than a bare `bool`.
-    ///
-    /// RESOLVE-TIME POLICY, not a tool-binding declaration: excluded from
-    /// [`super::declaration_hash`] by omission (same rationale as
-    /// `lazy-mode`).
+    /// Toolchain-tier `pinned`: whether composed paths follow the rendered
+    /// `links/<group>/<entry>` links (`false`, the default) or pin to digest
+    /// roots (`true`). Absent falls through to `OCX_TOOLCHAIN_PINNED`. An edit
+    /// never invalidates `ocx.lock`.
+    // `Option<bool>`: a bare `false` default would shadow `OCX_TOOLCHAIN_PINNED`.
     #[serde(default, rename = "pinned", skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
 
     /// Identity-pinned verification policies; `[[trust.policy]]` in TOML.
     ///
-    /// Like [`Self::packages`], this is resolve-time policy — NOT a tool
-    /// binding — so it is excluded from [`super::declaration_hash`] (a policy
-    /// edit must not invalidate `ocx.lock`). Consumed by `ocx package verify`,
-    /// where it pools (array-append) with the `config.toml` tiers. See
-    /// `ocx_trust`.
+    /// Consumed by `ocx package verify`, where it pools (array-append) with the
+    /// `config.toml` tiers. Resolve-time policy, not a tool binding: a policy
+    /// edit never invalidates `ocx.lock`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust: Option<ocx_trust::TrustConfig>,
 
     /// Lazily-cached canonical declaration hash (RFC 8785 JCS + SHA-256).
-    ///
-    /// Populated on first call to [`Self::declaration_hash_cached`]. Mutators
-    /// in [`crate::mutate`] / [`crate::mutation`] that
-    /// modify `tools` / `groups` in place must call
-    /// [`Self::invalidate_declaration_hash_cache`] (or replace the whole
-    /// `ProjectConfig` from a fresh disk load) to keep the cache coherent.
-    ///
-    /// `OnceLock` (not `OnceCell`) so the type stays `Send + Sync` —
-    /// `resolve_lock` clones the `Index` but borrows the config from the
-    /// surrounding scope; future call sites that move `&ProjectConfig` into
-    /// async tasks do not need a manual `Sync` audit.
-    ///
-    /// Excluded from `PartialEq` / `Eq` / `Serialize` / `Deserialize` /
-    /// `JsonSchema` — those traits speak to the on-disk identity of the
-    /// config, not its runtime cache state.
     #[serde(skip)]
     #[schemars(skip)]
+    // `OnceLock`, not `OnceCell`: `ProjectConfig` must stay `Sync` for async callers.
     declaration_hash_cache: OnceLock<String>,
 }
 
@@ -242,13 +171,8 @@ pub struct ProjectConfig {
 
 impl Clone for ProjectConfig {
     fn clone(&self) -> Self {
-        // Fresh `OnceLock` on clone: cloning a `ProjectConfig` (e.g. for
-        // staging a candidate config in `MutationGuard::stage`) means the
-        // clone may be mutated independently. Sharing the cached hash with
-        // the original would silently leak the original's hash through to
-        // the mutated clone, defeating the whole point of the gate. The
-        // recompute on first access against the clone is what the cache is
-        // designed to amortise.
+        // Fresh cache: a staged clone is mutated independently, and a shared hash
+        // would defeat the staleness gate.
         Self {
             tools: self.tools.clone(),
             env: self.env.clone(),
@@ -266,9 +190,7 @@ impl Clone for ProjectConfig {
 
 impl PartialEq for ProjectConfig {
     fn eq(&self, other: &Self) -> bool {
-        // The cache is a derived datum; comparing it would conflate "same
-        // declaration" with "both cached" / "neither cached". Equality
-        // speaks to the declared content only.
+        // The cache is derived state; comparing it would make equal declarations unequal.
         self.tools == other.tools
             && self.env == other.env
             && self.groups == other.groups
@@ -283,99 +205,58 @@ impl PartialEq for ProjectConfig {
 
 impl Eq for ProjectConfig {}
 
-/// Raw on-disk shape used as the first deserialization pass.
+/// Raw on-disk shape for the first deserialization pass.
 ///
-/// Step 2 walks this and validates each value with [`PackageRef::parse`]
-/// (strict — no `OCX_DEFAULT_REGISTRY` fallback), mapping
-/// [`ocx_oci::package_ref::error::IdentifierErrorKind::MissingRegistry`]
-/// to [`super::error::ProjectErrorKind::ToolValueMissingRegistry`] and
-/// other identifier failures to
-/// [`super::error::ProjectErrorKind::ToolValueInvalid`]. Two-pass form
-/// is required so the diagnostic carries both the binding name (map
-/// key) and the offending value (map value); a value-position visitor
-/// alone can't access the key.
+/// Two passes so a tool-value diagnostic names both the binding (map key) and
+/// the value; a value-position visitor cannot see the key.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawProjectConfig {
     #[serde(default)]
     tools: BTreeMap<String, String>,
 
-    /// Raw `[env]` table. Held as a [`toml::Table`] rather than a
-    /// [`ProjectEnv`] so [`parse_project_env`] can attach the scope string
-    /// every env diagnostic needs — a value-position deserializer cannot see
-    /// which table it is inside.
+    /// Raw `[env]` table: a [`toml::Table`], not a [`ProjectEnv`], so
+    /// [`parse_project_env`] can attach the scope every env diagnostic needs.
     #[serde(default)]
     env: toml::Table,
 
-    /// Raw `[group.*]` bodies, each still an untyped table.
-    ///
-    /// Value-first, following the [`ocx_config::mirror`] precedent: a
-    /// typed struct with `deny_unknown_fields` would reject a stray key, but
-    /// serde's message cannot name the enclosing group (it is the outer map
-    /// key, invisible from inside the value) and so cannot carry the
-    /// migration instruction. [`parse_group`] walks the table with the group
-    /// name in hand instead.
+    /// Raw `[group.*]` bodies, untyped so [`parse_group`] can name the group in
+    /// every diagnostic; serde's own message cannot see the outer map key.
     #[serde(default, rename = "group")]
     groups: BTreeMap<String, toml::Table>,
 
-    /// Per-package settings. `PackageSettings` deserializes directly — the
-    /// map KEY is validated as a strict [`PackageRef`] in
-    /// [`ProjectConfig::from_str_with_path`], not at the serde layer.
+    /// Keys are validated as strict [`PackageRef`]s in
+    /// [`ProjectConfig::from_str_with_path`], not by serde.
     #[serde(default, rename = "package")]
     package: BTreeMap<String, PackageSettings>,
 
-    /// Toolchain-tier `lazy-mode`. `LazyMode`'s own `Deserialize` already
-    /// rejects an unrecognized wire value, so — unlike `tools` — no second
-    /// validation pass is needed; [`ProjectConfig::from_str_with_path`]
-    /// copies this straight through.
     #[serde(default, rename = "lazy-mode")]
     lazy_mode: Option<LazyMode>,
 
-    /// Toolchain-tier `lazy-report`. Same direct-deserialize rationale as
-    /// [`Self::lazy_mode`].
     #[serde(default, rename = "lazy-report")]
     lazy_report: Option<LazyReport>,
 
-    /// Toolchain-tier `activate` mode. [`ActivateMode`]'s own `Deserialize`
-    /// already rejects an unrecognized wire value — same direct-deserialize
-    /// rationale as [`Self::lazy_mode`], no second validation pass needed.
     #[serde(default, rename = "activate")]
     activate: Option<ActivateMode>,
 
-    /// Toolchain-tier `pinned` setting. A bare `bool`, so TOML's own type
-    /// check rejects a non-boolean value at the same first pass.
     #[serde(default, rename = "pinned")]
     pinned: Option<bool>,
 
-    /// Trust policies (`[[trust.policy]]`). Parsed directly (no per-entry
-    /// identifier validation — the scope is a prefix pattern, not an
-    /// [`PackageRef`]).
     #[serde(default)]
     trust: Option<ocx_trust::TrustConfig>,
 
-    /// `[shell]`, declared only to be refused by name.
-    ///
-    /// Held as an untyped [`toml::Table`] so the refusal fires on the section's
-    /// presence rather than on its contents — a `[shell]` block that happens to
-    /// be well-formed for `config.toml` is no more acceptable here than a
-    /// malformed one. Without this field the section would still be rejected,
-    /// but by `deny_unknown_fields`, whose message reads as "unknown key" and
-    /// names no remedy.
+    /// `[shell]`, declared only to be refused by name: without it
+    /// `deny_unknown_fields` rejects the section with no remedy in the message.
     #[serde(default)]
     shell: Option<toml::Table>,
 }
 
 impl ProjectConfig {
-    /// Constructor for in-test fixtures and programmatic construction sites
-    /// that need to bypass the TOML round-trip in `from_toml_str`. Initialises
-    /// the private declaration-hash cache as empty so the first call to
-    /// [`Self::declaration_hash_cached`] computes the canonical value.
+    /// Build a config from tool maps without a TOML round-trip; every other
+    /// setting starts unset.
     ///
-    /// Takes groups as plain tool maps rather than [`Group`] values: this
-    /// constructor exists for the tool dimension, and wrapping here keeps
-    /// every fixture that predates `[group.<name>.env]` compiling unchanged
-    /// — which is also what pins the frozen declaration-hash corpus.
-    /// Fixtures needing group env parse TOML through [`Self::from_toml_str`].
+    /// Groups carry tools only; a fixture needing group env parses TOML through
+    /// [`Self::from_toml_str`].
     pub fn from_parts(
         tools: BTreeMap<String, PackageRef>,
         groups: BTreeMap<String, BTreeMap<String, PackageRef>>,
@@ -396,15 +277,9 @@ impl ProjectConfig {
                     )
                 })
                 .collect(),
-            // `packages` is resolve-time policy, not a tool binding; the
-            // programmatic constructor starts with no opt-outs declared.
             packages: BTreeMap::new(),
-            // Toolchain-tier lazy config is likewise resolve-time policy;
-            // the programmatic constructor starts with nothing declared.
             lazy_mode: None,
             lazy_report: None,
-            // Toolchain activation settings are resolve-time policy too;
-            // the programmatic constructor starts with nothing declared.
             activate: None,
             pinned: None,
             trust: None,
@@ -419,48 +294,26 @@ impl ProjectConfig {
         self.trust.as_ref().map_or(&[], |trust| trust.policy.as_slice())
     }
 
-    /// Lazily cached canonical declaration hash for this config.
-    ///
-    /// First call computes the hash via [`super::declaration_hash`] (RFC 8785
-    /// JCS canonicalization + SHA-256). Subsequent calls return the cached
-    /// `&str` for free. Mutators that change `tools` / `groups` in place must
-    /// call [`Self::invalidate_declaration_hash_cache`] to keep the cache
-    /// coherent; rebuilding a fresh `ProjectConfig` from disk also resets
-    /// the cache (a fresh `Default::default()` `OnceLock` is empty by
-    /// construction).
+    /// Canonical declaration hash ([`super::declaration_hash`]), computed on first
+    /// call and cached until [`Self::invalidate_declaration_hash_cache`].
     pub fn declaration_hash_cached(&self) -> &str {
         self.declaration_hash_cache
             .get_or_init(|| super::declaration_hash(self))
     }
 
-    /// Drop any cached declaration hash so the next call to
-    /// [`Self::declaration_hash_cached`] recomputes from current state.
+    /// Drop the cached declaration hash so the next
+    /// [`Self::declaration_hash_cached`] call recomputes it.
     ///
-    /// Mutators that modify `tools` / `groups` in place (e.g.
-    /// `mutate::add_binding_in_memory`, `mutate::remove_binding_in_memory`,
-    /// `MutationGuard::stage`'s closure) MUST call this after the change
-    /// or the staleness gate will compare the lock's hash against the
-    /// pre-mutation cached hash and silently accept a divergent state.
-    ///
-    /// `&mut self` is sufficient because `OnceLock` provides interior-
-    /// mutability methods (`take`) that move the cached value out without
-    /// requiring outer ownership.
+    /// Every in-place mutator of `tools` / `groups` must call this, or the
+    /// staleness gate compares the lock against the pre-mutation hash and accepts
+    /// a divergent state.
     pub fn invalidate_declaration_hash_cache(&mut self) {
         self.declaration_hash_cache.take();
     }
 
-    /// Set of canonical `"registry/repository"` strings for every
-    /// `[package."<id>"]` entry whose `no-patches == true`.
-    ///
-    /// Tag/digest are EXCLUDED: the opt-out is version-independent — opting a
-    /// package out applies to every installed version. Keys were validated as
-    /// fully-qualified [`PackageRef`]s at parse time, so `PackageRef::parse`
-    /// here cannot fail for a well-formed config; a key that somehow fails to
-    /// re-parse is silently skipped (it could not match a base anyway).
-    ///
-    /// Consumed by the resolver's site-patch boundary
-    /// (`build_site_patch_set`) to skip the companion overlay for opted-out
-    /// bases — EXCEPT a system-required patch, which still applies.
+    /// Canonical `registry/repository` of every `[package."<id>"]` entry with
+    /// `no-patches = true`; tag and digest are excluded, so the opt-out spans all
+    /// versions. A key that fails to re-parse is skipped.
     pub fn no_patches_repositories(&self) -> std::collections::BTreeSet<String> {
         self.packages
             .iter()
@@ -469,18 +322,10 @@ impl ProjectConfig {
             .collect()
     }
 
-    /// The `[package."<id>"]` settings for `identifier`, or `None` when no
-    /// entry names its repository.
+    /// The `[package."<id>"]` settings whose key names `identifier`'s repository.
     ///
-    /// Matched on `registry/repository` with tag and digest EXCLUDED, the same
-    /// version-independent rule [`Self::no_patches_repositories`] follows — and
-    /// the only rule the wire permits for a shim: the invoked shim carries one
-    /// pinned identifier and the config author cannot know its digest.
-    ///
-    /// Consumed by `ocx launcher shim` for the `lazy-report` ladder's package
-    /// tier. A key that fails to re-parse is skipped; keys were validated as
-    /// fully-qualified [`PackageRef`]s at parse time, and one that somehow
-    /// fails here could not match a package anyway.
+    /// Tag and digest are excluded: a shim carries one pinned identifier whose
+    /// digest the config author cannot know. A key that fails to re-parse is skipped.
     pub fn package_settings(&self, identifier: &PackageRef) -> Option<&PackageSettings> {
         let wanted = repository_key(identifier);
         self.packages
@@ -491,61 +336,31 @@ impl ProjectConfig {
 
     /// Path to the global tier's manifest: `<ocx_home>/ocx.toml`.
     ///
-    /// One spelling for the sites that need the global `ocx.toml` path —
-    /// this `resolve`'s `global` branch, `ocx --global env`'s pinned-env
-    /// lookup, `ocx self activate`'s per-prompt read, and `ocx shell
-    /// state`'s global-scope path. Distinct from the CWD-walk's project-file
-    /// name (`config::loader::PROJECT_FILE_NAME`): this fixes the tier
-    /// (`ocx_home`), that fixes the filename.
-    ///
-    /// Not used by the per-prompt watch-set fingerprint
-    /// ([`ocx_shell::shell::reconcile::fingerprint::watch_paths`]): `shell/` must
-    /// never import `crate` (addendum A-45, guarded by
-    /// `shell_does_not_import_project`), so that site keeps its own literal.
+    /// The shell watch-set fingerprint keeps its own literal: `ocx_shell` cannot
+    /// depend on this crate.
     pub fn global_manifest_path(ocx_home: &Path) -> PathBuf {
         ocx_home.join("ocx.toml")
     }
 
-    /// Resolve the project-tier `ocx.toml` and adjacent lock paths.
+    /// Resolve the project-tier `ocx.toml` and its lock path.
     ///
-    /// Precedence: `--global`/`OCX_GLOBAL` (exclusive with `--project`) >
-    /// explicit `--project` > `OCX_PROJECT` > CWD walk > **None**. There
-    /// is no implicit `$OCX_HOME/ocx.toml` fallback — the global toolchain
-    /// is reachable *only* via the explicit `global` selector, never
-    /// discovered implicitly (adr_global_toolchain_tier.md §Decision 1).
-    /// Returns `None` when no source produces a path or `OCX_NO_PROJECT=1`
-    /// prunes discovery.
-    ///
-    /// When `global` is set, the in-effect project file is
-    /// `<ocx_home>/ocx.toml` with its sibling `<ocx_home>/ocx.lock`,
-    /// bypassing the CWD walk entirely (peer to the explicit `--project`
-    /// branch). `ocx_home` is the caller's `$OCX_HOME` root.
-    ///
-    /// Lock path is derived via [`super::lock::lock_path_for`] as
-    /// `<parent>/ocx.lock`, independent of the config file's extension.
+    /// Precedence: `global` (`<ocx_home>/ocx.toml`) > `explicit` > `OCX_PROJECT` >
+    /// CWD walk > `None`. No implicit `$OCX_HOME/ocx.toml` fallback
+    /// (`adr_global_toolchain_tier.md` § Decision 1). `None` also when
+    /// `OCX_NO_PROJECT=1` prunes discovery.
     ///
     /// # Errors
-    /// Propagates [`ocx_config::error::Error`] from the underlying
-    /// loader: `FileNotFound` (exit 79) when an explicit source names a
-    /// missing file, `Io` (exit 74) for other I/O failures.
+    /// [`ocx_config::error::Error`]: `FileNotFound` (exit 79) when an explicit
+    /// source names a missing file or `global` has no `ocx_home`, `Io` (exit 74)
+    /// for other I/O failures.
     pub async fn resolve(
         cwd: Option<&Path>,
         explicit: Option<&Path>,
         ocx_home: Option<&Path>,
         global: bool,
     ) -> std::result::Result<Option<(PathBuf, PathBuf)>, ocx_config::error::Error> {
-        // Global selector: explicit, exclusive with `--project` (clap
-        // `conflicts_with` enforces the exclusion at parse time). Selects
-        // `<ocx_home>/ocx.toml` directly and bypasses the CWD walk. This
-        // branch is a peer of the explicit `--project` branch — never an
-        // implicit fallback (adr_global_toolchain_tier.md §Decision 1/2).
+        // No `ocx_home` is a hard error: `--global` cannot name a file without a root.
         if global {
-            // Peer of the explicit `--project` branch: select
-            // `<ocx_home>/ocx.toml` directly and bypass the CWD walk.
-            // `ocx_home` is the caller's `$OCX_HOME` root (plumbed by
-            // every project-tier prologue). Absence of an `ocx_home`
-            // (no `$OCX_HOME`, no home dir) is a hard config error —
-            // `--global` cannot name a file without a root.
             let home = ocx_home.ok_or_else(|| ocx_config::error::Error::FileNotFound {
                 path: PathBuf::from("ocx.toml"),
                 tier: ocx_config::error::ConfigSource::Project,
@@ -555,8 +370,6 @@ impl ProjectConfig {
             return Ok(Some((config_path, lock)));
         }
 
-        // Steps 1-3: delegate to ConfigLoader (explicit flag > env > CWD
-        // walk). No home-tier fallback: a CWD-walk miss is a hard `None`.
         let walk_result = ocx_config::loader::ConfigLoader::project_path(cwd, explicit).await?;
 
         if let Some(p) = walk_result {
@@ -569,26 +382,15 @@ impl ProjectConfig {
 
     /// Parse a [`ProjectConfig`] from a TOML string.
     ///
-    /// Validates that `[group.default]` is not declared (reserved name).
-    /// Validates that every value parses as a fully-qualified [`PackageRef`]
-    /// — bare-tag forms are rejected with
-    /// [`super::error::ProjectErrorKind::ToolValueMissingRegistry`].
-    ///
-    /// Same-name bindings across different groups (e.g. `cmake` in both
-    /// `[tools]` and `[group.ci]`) are allowed at parse time; the runtime
-    /// conflict check fires at compose time via
-    /// [`super::error::ProjectErrorKind::DuplicateToolAcrossSelectedGroups`].
+    /// Refuses reserved group names and any tool value that is not a
+    /// fully-qualified [`PackageRef`]. Same-name bindings across groups parse;
+    /// they conflict only at compose time.
     pub fn from_toml_str(s: &str) -> Result<Self, super::Error> {
         Self::from_str_with_path(s, PathBuf::new())
     }
 
-    /// Parse a [`ProjectConfig`] from pre-read bytes attributed to `path`.
-    ///
-    /// Used by callers that already hold the bytes — the mutation path's
-    /// `read_manifest_snapshot` (a bounded read taken under the scoped
-    /// mutation lock) and the toolchain exec path. Enforces the same 64 KiB
-    /// size cap as [`Self::from_path`] and surfaces the same structured
-    /// errors.
+    /// Parse pre-read bytes attributed to `path`, under the same 64 KiB cap and
+    /// errors as [`Self::from_path`].
     pub fn from_toml_bytes_with_path(bytes: &[u8], path: PathBuf) -> Result<Self, super::Error> {
         let limit = super::internal::FILE_SIZE_LIMIT_BYTES;
         if bytes.len() as u64 > limit {
@@ -610,10 +412,7 @@ impl ProjectConfig {
         Self::from_str_with_path(content, path)
     }
 
-    /// Load and parse a [`ProjectConfig`] from a filesystem path.
-    ///
-    /// Enforces a 64 KiB size cap (`super::internal::FILE_SIZE_LIMIT_BYTES`)
-    /// before reading; oversized files surface as a structured
+    /// Load and parse a [`ProjectConfig`] from `path`; a file over 64 KiB is
     /// [`super::error::ProjectErrorKind::FileTooLarge`].
     pub async fn from_path(path: &Path) -> Result<Self, super::Error> {
         use tokio::io::AsyncReadExt;
@@ -622,11 +421,8 @@ impl ProjectConfig {
         let file = tokio::fs::File::open(path)
             .await
             .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::Io(e)))?;
-        // `metadata.len()` fast-paths normal oversized files without reading
-        // any bytes; the bounded `take(limit + 1)` below guards synthetic
-        // files (e.g. procfs, pipes) whose metadata reports 0 but whose read
-        // is unbounded. Mirrors the ambient config loader's
-        // `ConfigLoader::load_and_merge` pattern.
+        // `metadata.len()` fast-paths ordinary files; the bounded `take` below is the
+        // real cap for procfs and pipes, whose length reads 0.
         let metadata = file
             .metadata()
             .await
@@ -662,29 +458,18 @@ impl ProjectConfig {
     }
 
     fn from_str_with_path(s: &str, path: PathBuf) -> Result<Self, super::Error> {
-        // First pass: deserialize the on-disk shape with raw string values.
-        // Second pass (below) walks every entry through `PackageRef::parse`
-        // so the binding name (map key) and offending value (map value) can
-        // both reach the diagnostic — a value-position visitor cannot see
-        // the key.
         let raw: RawProjectConfig =
             toml::from_str(s).map_err(|e| ProjectError::new(path.clone(), ProjectErrorKind::TomlParse(e)))?;
 
-        // Schema-level: `[shell]` is a `config.toml` section and is refused
-        // here by name (C-033). The whitelist it carries is what gates project
-        // activation, so reading it from the project tier would let a
+        // `[shell]` carries the activation whitelist: accepting it here would let a
         // checked-in file consent to itself.
         if raw.shell.is_some() {
             return Err(ProjectError::new(path, ProjectErrorKind::ShellSectionInProject).into());
         }
 
-        // Schema-level: `[group.default]` (any ASCII case — C-015/RUL-1: a
-        // `[group.Default]` silently coexisting with the `default` group is
-        // exactly the collision this reservation exists to stop) is reserved
-        // for the implicit top-level `[tools]` table. A folded scan over the
-        // keys, not `contains_key`, so the fold applies; `found` preserves
-        // the as-written casing for the message. Reject before identifier
-        // validation so the user sees the actionable schema error first.
+        // Case-folded, not `contains_key`: `[group.Default]` beside the default group
+        // is the collision this reservation stops. Checked before identifier
+        // validation so the schema error comes first.
         if let Some(found) = raw
             .groups
             .keys()
@@ -700,10 +485,7 @@ impl ProjectConfig {
             .into());
         }
 
-        // Schema-level: `[group.all]` (any ASCII case, same C-015/RUL-1 rule
-        // as `default` above) is reserved as the CLI expansion keyword that
-        // selects every declared group. Rejected here before identifier
-        // validation so the user sees the actionable schema error first.
+        // `all` is the CLI keyword selecting every group; case-folded like `default`.
         if let Some(found) = raw
             .groups
             .keys()
@@ -719,25 +501,15 @@ impl ProjectConfig {
             .into());
         }
 
-        // Per-entry identifier validation across `[tools]` and every
-        // `[group.*]` table, plus the env key/value grammar per scope.
         let tools = parse_tool_map("tools", &raw.tools, &path)?;
         let env = parse_project_env(super::env::DEFAULT_ENV_SCOPE, &raw.env, &path)?;
         let mut groups: BTreeMap<String, Group> = BTreeMap::new();
         for (group_name, group_body) in raw.groups {
-            // C-014: every `[group.<g>]` name goes through the same charset
-            // validator the `[tools]` / `[group.<g>].tools` keys use, beside
-            // the `default`/`all` reserved-keyword checks above.
             validate_toolchain_name("group", &group_name, &path)?;
             let parsed = parse_group(&group_name, &group_body, &path)?;
             groups.insert(group_name, parsed);
         }
 
-        // Validate every `[package."<key>"]` key as a strict, fully-qualified
-        // [`PackageRef`] (same path as `[tools]` values: no default-registry
-        // fallback). A bare key without a registry is an error. The validated
-        // map is keyed by the ORIGINAL author string so Serialize round-trips
-        // byte-faithfully; validation here is for early, actionable errors only.
         let packages = validate_package_keys(raw.package, &path)?;
 
         Ok(Self {
@@ -745,9 +517,6 @@ impl ProjectConfig {
             env,
             groups,
             packages,
-            // `LazyMode`/`LazyReport` reject an unrecognized wire value in
-            // their own `Deserialize`, so `raw`'s first pass already
-            // validated these — no second pass needed, unlike `tools`.
             lazy_mode: raw.lazy_mode,
             lazy_report: raw.lazy_report,
             activate: raw.activate,
@@ -760,48 +529,24 @@ impl ProjectConfig {
 
 /// Parse one `[group.<name>]` body into a [`Group`].
 ///
-/// Walks the raw table key by key: `tools`, `env` and `lazy-mode` are the three
-/// recognized keys. Among unrecognized keys, a
-/// **string**-valued one is the removed flat binding form and raises
-/// [`ProjectErrorKind::GroupHoldsDirectBinding`] naming the group and
-/// pointing at `[group.<name>.tools]`; anything else raises
-/// [`ProjectErrorKind::UnknownGroupSection`] naming the offending key.
-///
-/// Key-first, not value-first: `lazy-mode` is itself
-/// string-valued (`lazy-mode = "always"`), so a value-shape check run before
-/// the key match would misclassify it as the removed flat binding form.
-/// Recognizing the key first, and reserving the string-shape check for the
-/// fallback arm, keeps both diagnoses correct.
-///
-/// Value-first rather than a `deny_unknown_fields` derive: the group name is
-/// the outer map key and is unreachable from inside a value deserializer, so
-/// a derive cannot produce either diagnostic. Same reason
-/// [`ocx_config::mirror::parse_mirror_value`] is hand-rolled.
+/// Hand-walked rather than `deny_unknown_fields`: the group name is the outer
+/// map key, unreachable from a value deserializer, and every diagnostic names it.
 ///
 /// # Errors
 ///
-/// [`ProjectErrorKind::GroupHoldsDirectBinding`],
-/// [`ProjectErrorKind::UnknownGroupSection`], or any error from
-/// [`parse_tool_map`] / [`parse_project_env`] on the recognized sub-tables.
+/// [`ProjectErrorKind::GroupHoldsDirectBinding`] for a string under an
+/// unrecognized key, [`ProjectErrorKind::UnknownGroupSection`] for any other
+/// unrecognized key, or any error from [`parse_tool_map`] / [`parse_project_env`].
 fn parse_group(name: &str, raw: &toml::Table, path: &Path) -> Result<Group, super::Error> {
-    // `[group.<name>]` with neither sub-table is a declared-but-empty group.
     if raw.is_empty() {
         return Ok(Group::default());
     }
 
     let mut group = Group::default();
     for (key, value) in raw {
-        // Value shape decides before key name, except for the scalar
-        // settings: a string under a key that names a *sub-table* is a tool
-        // binding in the removed flat form whatever it is called, so
-        // `tools = "ocx.sh/tools:1"` and `bar = "ocx.sh/bar:1"` both get the
-        // migration message rather than a TOML type error or a bogus
-        // "unknown section". `lazy-mode` is exempt because its value is
-        // legitimately a string. `lazy-report` is exempt for a different
-        // reason: it is a *removed* group-tier key, and routing it here would
-        // tell the user to move it under `[group.<name>.tools]`, where it is
-        // not a valid tool binding at all. Falling through to the `_` arm
-        // reports it as the unknown key it is.
+        // Value shape before key name: any string outside the scalar settings is the
+        // removed flat binding form and gets the migration message. `lazy-report` is
+        // not a group key, so it falls through to the unknown-key arm.
         if value.is_str() && !matches!(key.as_str(), "lazy-mode" | "lazy-report") {
             return Err(ProjectError::new(
                 path.to_path_buf(),
@@ -849,48 +594,29 @@ fn parse_group(name: &str, raw: &toml::Table, path: &Path) -> Result<Group, supe
     Ok(group)
 }
 
-/// Parse a raw `[env]` / `[group.<name>.env]` table, attaching `scope` to
-/// every diagnostic and `path` for file context.
-///
-/// Thin adapter over [`super::env::ProjectEnv::from_table`] — it exists to
-/// wrap the returned [`ProjectErrorKind`] in a path-bearing
-/// [`ProjectError`], which is the shape every other parse helper here
-/// returns.
+/// Parse a raw `[env]` / `[group.<name>.env]` table, attaching `scope` and
+/// `path` to every diagnostic.
 ///
 /// # Errors
 ///
-/// Propagates the key-policy and value-grammar errors documented on
+/// The key-policy and value-grammar errors of
 /// [`super::env::ProjectEnv::from_table`].
 fn parse_project_env(scope: &str, raw: &toml::Table, path: &Path) -> Result<ProjectEnv, super::Error> {
-    // Every `ocx.toml` reaches here, the overwhelming majority declaring no
-    // `[env]` at all. Short-circuit the absent case so the unimplemented
-    // grammar below is reachable only from a file that actually declares one.
     if raw.is_empty() {
         return Ok(ProjectEnv::default());
     }
     ProjectEnv::from_table(scope, raw).map_err(|kind| ProjectError::new(path.to_path_buf(), kind).into())
 }
 
-/// Parse one `[tools]` value into the [`PackageRef`] the schema boundary
-/// promises.
+/// Parse one `[tools]` value; a bare `registry/repo` gets `:latest`.
 ///
-/// Bare identifiers — registry + repository, no tag and no digest
-/// (e.g. `"ocx.sh/cmake"`) — get `:latest` injected here so resolution always
-/// has an advisory tag to look up. The default is applied at this boundary,
-/// not on [`PackageRef`] itself, so CLI args without a tag still surface as
-/// `tag = None`. Digest-pinned entries (`@sha256:...`) keep `tag = None`; the
-/// digest is the canonical pin.
-///
-/// Named rather than inlined into [`parse_tool_map`] because it is the only
-/// definition of "what this text means": the format-preserving renderer
-/// ([`super::document`]) asks it whether a line on disk already says what the
-/// candidate says, and a text comparison would call the injected `:latest` a
-/// change and rewrite a line the mutation never targeted.
+/// Injected here, not in [`PackageRef`], so a tagless CLI argument keeps
+/// `tag = None`, as does a digest-pinned entry. [`super::document`] calls it to
+/// tell whether a line on disk already says what the candidate says.
 ///
 /// # Errors
 ///
-/// Propagates [`PackageRef::parse`] verbatim — callers map the kinds onto
-/// their own diagnostics.
+/// Propagates [`PackageRef::parse`] verbatim.
 pub(super) fn parse_tool_value(value: &str) -> Result<PackageRef, IdentifierError> {
     let identifier = PackageRef::parse(value)?;
     if identifier.tag().is_none() && identifier.digest().is_none() {
@@ -899,20 +625,9 @@ pub(super) fn parse_tool_value(value: &str) -> Result<PackageRef, IdentifierErro
     Ok(identifier)
 }
 
-/// Walk a raw `(name → value)` map and validate every value as a
-/// fully-qualified [`PackageRef`] via [`parse_tool_value`]. Splits
-/// [`IdentifierErrorKind::MissingRegistry`] from other identifier
-/// failures so the project-tier diagnostic can name the offending
-/// binding without losing the underlying [`IdentifierError`]
-/// for non-registry failures.
-///
-/// Also validates every KEY against [`validate_toolchain_name`] (C-013 /
-/// C-014) — the "key side is new" half the value-only validation here used
-/// to lack. `scope` names the enclosing table for the diagnostic
-/// (`"tools"` for the top-level table, `"group.<g>.tools"` for a named
-/// group's sub-table) and is threaded straight through, the same
-/// convention [`parse_project_env`] already uses for its own `scope`
-/// parameter.
+/// Validate every key with [`validate_toolchain_name`] and every value as a
+/// fully-qualified [`PackageRef`] via [`parse_tool_value`]. `scope` names the
+/// enclosing table in diagnostics.
 fn parse_tool_map(
     scope: &str,
     raw: &BTreeMap<String, String>,
@@ -920,9 +635,7 @@ fn parse_tool_map(
 ) -> Result<BTreeMap<String, PackageRef>, super::Error> {
     let mut out: BTreeMap<String, PackageRef> = BTreeMap::new();
     for (name, value) in raw {
-        // Reject before identifier validation so the user sees the
-        // actionable schema error first — same ordering rule the
-        // `default`/`all` reserved-group checks already follow.
+        // Before identifier validation, so the schema error comes first.
         validate_toolchain_name(scope, name, path)?;
         match parse_tool_value(value) {
             Ok(id) => {
@@ -954,69 +667,34 @@ fn parse_tool_map(
     Ok(out)
 }
 
-/// Charset for a `[tools]` key, a `[group.<g>].tools` key, or a
-/// `[group.<g>]` name — plan contract C-014 (`plan_toolchain_activation.md`).
+/// Charset for a `[tools]` key, a `[group.<g>].tools` key, or a group name.
 ///
-/// Deliberately **wider** than
-/// [`ocx_package::metadata::slug::SLUG_PATTERN_STR`] by uppercase and
-/// `.`, because these keys name existing user-authored bindings
-/// (`MSBuild`, `python3.13`) rather than an OCX-generated slug.
-/// [`SLUG_MAX_LEN`] (64 bytes) is reused verbatim for the length cap —
-/// see [`validate_toolchain_name`].
+/// Wider than [`ocx_package::metadata::slug::SLUG_PATTERN_STR`] by uppercase
+/// and `.`: these keys name user-authored bindings (`MSBuild`, `python3.13`).
 const TOOLCHAIN_NAME_PATTERN_STR: &str = r"^[A-Za-z0-9][A-Za-z0-9._-]*$";
 
-/// Compiled sibling of [`TOOLCHAIN_NAME_PATTERN_STR`] (RUL-21 — a hand-rolled
-/// `chars().all(…)` loop would leave the constant unread anywhere, making it
-/// dead code under `-D dead-code` and free to drift from the enforced rule).
-/// Mirrors the shipped [`ocx_package::metadata::slug::SLUG_PATTERN`]
-/// shape. Neither `^` nor `$` is given the multi-line flag, so `$` anchors to
-/// the end of the haystack rather than to the position before a trailing
-/// `\n` as PCRE does — the property `c014_charset_refuses_a_separator_space_control_byte_or_nul`
-/// pins for `"abc\n"`.
+/// Compiled [`TOOLCHAIN_NAME_PATTERN_STR`]; a hand-rolled check would leave the
+/// constant free to drift from the enforced rule. `$` matches only at the end
+/// of the haystack, so `"abc\n"` is refused.
 static TOOLCHAIN_NAME_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(TOOLCHAIN_NAME_PATTERN_STR).expect("valid toolchain name regex"));
 
-/// The one ASCII-case-folding rule this file applies to every reserved-name
-/// comparison (C-015 / RUL-1): `name` is reserved when it case-folds to
-/// `reserved`, so `Default`, `DEFAULT` and `default` are the same
-/// reservation. Its two callers are the `default` and `all` group-keyword
-/// checks above — the only reservations left, both of them CLI selectors
-/// rather than tree names.
+/// `name` is reserved when it ASCII-case-folds to `reserved`, so `Default`
+/// and `default` are one reservation.
 fn is_reserved_toolchain_name(name: &str, reserved: &str) -> bool {
     name.eq_ignore_ascii_case(reserved)
 }
 
-/// Charset validator (C-014) for a `[tools]` key, a `[group.<g>].tools` key,
-/// or a `[group.<g>]` name — called identically at every site so none of them
-/// can diverge from the others.
+/// Validate a `[tools]` key, a `[group.<g>].tools` key, or a group name against
+/// [`TOOLCHAIN_NAME_PATTERN_STR`] and [`SLUG_MAX_LEN`].
 ///
-/// It carried a second rule until C-073: `bin` was refused here as both a
-/// group and a tool name, to hold the name for a per-group launcher
-/// directory. The rendered tree no longer puts any user-supplied name at
-/// depth 1 (C-071), so `bin` collides with nothing and the reservation is
-/// deleted rather than reworded — there is no remaining refusal for its
-/// message to describe.
-///
-/// `pub(super)` for the **writer** side (R-W21): the three call sites below
-/// are this file's reader, and [`crate::mutate`] validates the names
-/// `ocx add` is about to write against the very same function. A second
-/// implementation of this grammar one module over is the drift the
-/// single-validator argument exists to refuse — and it had already drifted,
-/// in both directions, before the writer was routed here.
-///
-/// `scope` names the call site for the diagnostic (`"tools"`,
-/// `"group.<g>.tools"`, or `"group"` — see
-/// [`ProjectErrorKind::InvalidToolchainNameCharset`]). `name` is the
-/// as-written string, checked against [`TOOLCHAIN_NAME_PATTERN_STR`] and
-/// [`SLUG_MAX_LEN`].
+/// Shared with [`crate::mutate`], so the reader and the `ocx add` writer cannot
+/// drift apart. `scope` names the call site in diagnostics.
 ///
 /// # Errors
 ///
-/// [`ProjectErrorKind::InvalidToolchainNameCharset`] when `name` fails the
-/// charset or the [`SLUG_MAX_LEN`] cap. The two causes share one variant — a
-/// charset failure and an over-length name are both "this string cannot
-/// become a path component", and no caller has ever needed to tell them
-/// apart.
+/// [`ProjectErrorKind::InvalidToolchainNameCharset`] for either a charset or a
+/// length failure.
 pub(super) fn validate_toolchain_name(scope: &str, name: &str, path: &Path) -> Result<(), super::Error> {
     if name.len() > SLUG_MAX_LEN || !TOOLCHAIN_NAME_PATTERN.is_match(name) {
         return Err(ProjectError::new(
@@ -1031,21 +709,11 @@ pub(super) fn validate_toolchain_name(scope: &str, name: &str, path: &Path) -> R
     Ok(())
 }
 
-/// Names which half of [`ProjectErrorKind::InvalidToolchainNameCharset`]'s
-/// merged rule `name` actually broke — the charset, the length cap, or both
-/// (review W-2: the variant stays merged, per the two-open-items decision
-/// in the WP-3 brief, but the message must still say which check failed).
+/// Which half of [`validate_toolchain_name`]'s rule `name` broke: charset,
+/// length, or both.
 ///
-/// `pub(super)` so [`super::error`]'s `#[error(...)]` template can call it
-/// directly; lives beside [`TOOLCHAIN_NAME_PATTERN`] and [`SLUG_MAX_LEN`] so
-/// the diagnosis can never drift from what [`validate_toolchain_name`]
-/// itself enforces — a second, hand-copied charset check here would be
-/// exactly the drift RUL-21/RUL-23 exist to close, one function over.
-///
-/// [`validate_toolchain_name`] is the only real-world constructor and never
-/// builds this variant for a `name` that passes both checks, but this stays
-/// total (no panic) rather than assume that: several tests build the variant
-/// directly with an arbitrary `name` to exercise the message shape alone.
+/// Total for a name that passes both: tests build the error variant with an
+/// arbitrary `name`.
 pub(super) fn describe_toolchain_name_charset_violation(name: &str) -> &'static str {
     let bad_charset = !TOOLCHAIN_NAME_PATTERN.is_match(name);
     let too_long = name.len() > SLUG_MAX_LEN;
@@ -1058,15 +726,8 @@ pub(super) fn describe_toolchain_name_charset_violation(name: &str) -> &'static 
 }
 
 /// Validate every `[package."<key>"]` key as a strict, fully-qualified
-/// [`PackageRef`], returning the map re-keyed by the ORIGINAL author string so
-/// Serialize round-trips byte-faithfully.
-///
-/// Mirrors [`parse_tool_map`]'s error-mapping style: a key missing a registry
-/// maps to [`ProjectErrorKind::PackageKeyMissingRegistry`]; any other identifier
-/// failure maps to [`ProjectErrorKind::PackageKeyInvalid`] (carrying the
-/// underlying [`ocx_oci::package_ref::error::IdentifierError`] via `#[source]`).
-/// Validation is for early, actionable errors only — the parsed identifier is
-/// discarded; the original key string is retained as the map key.
+/// [`PackageRef`]; the map keeps the original key strings so Serialize
+/// round-trips byte-faithfully.
 fn validate_package_keys(
     raw: BTreeMap<String, PackageSettings>,
     path: &Path,
@@ -1096,41 +757,21 @@ fn validate_package_keys(
     Ok(raw)
 }
 
-/// The version-independent key a `[package."<id>"]` entry is matched on:
-/// `registry/repository`, tag and digest excluded.
+/// The version-independent `registry/repository` key a `[package."<id>"]`
+/// entry matches on.
 ///
-/// One function rather than two `format!`s so the `no-patches` opt-out and the
-/// `lazy-report` package tier cannot drift into matching on different things.
+/// One function so the `no-patches` opt-out and the `lazy-report` package tier
+/// cannot drift apart.
 fn repository_key(identifier: &PackageRef) -> String {
     format!("{}/{}", identifier.registry(), identifier.repository())
 }
 
-/// Fill the **project-tier** `lazy-mode` ladder for one tool (plan contract
-/// C-006, [#302](https://github.com/ocx-sh/ocx/issues/302)) — the five tiers
+/// Fill the project-tier `lazy-mode` ladder for one tool, unresolved:
 /// `--lazy-mode` ▸ `[package."<id>"]` ▸ `[group.<g>]` ▸ toolchain ▸
-/// `OCX_LAZY_MODE`, unresolved.
+/// `OCX_LAZY_MODE`. `None` means inherit; the `Never` floor lives in
+/// [`LazyModeLadder::resolve`].
 ///
-/// Every tier is an `Option`, and `None` means *inherit*, never `Never`: the
-/// floor lives in [`LazyModeLadder::resolve`] and nowhere else.
-///
-/// `group` is the selected group the binding came from (`Origin::Group(name)`);
-/// `None` for a positional package, which has no group tier. `cli` is the
-/// parsed `--lazy-mode`, which no library type can see for itself — hence a
-/// caller-supplied argument rather than another config read.
-///
-/// The package tier is matched on `registry/repository` with tag and digest
-/// excluded ([`ProjectConfig::package_settings`]) — the only rule the wire
-/// permits, since a config author cannot know the digest a lock pins.
-///
-/// Split from [`lazy_mode_for_tool`] so which-config-tier-feeds-which-slot is
-/// assertable independently of any host-specific floor: `resolve_for_host` is
-/// the one host-aware entry point in the ladder, and it applies **no** floor
-/// today — plan contract C-027 removed the Windows one in the same change that
-/// gave Windows a deferred-shim producer (C-026), and the method stays in case
-/// a future platform needs a floor of its own. A test asserting tier wiring
-/// through the pure `resolve()` form here cannot be perturbed by whatever a
-/// host floor does or doesn't do — the same reason [`LazyModeLadder::resolve`]
-/// is split from [`LazyModeLadder::resolve_for_host`] one layer down.
+/// `group` is `None` for a positional package, which has no group tier.
 pub fn lazy_mode_ladder_for_tool(
     config: &ProjectConfig,
     identifier: &PackageRef,
@@ -1146,20 +787,8 @@ pub fn lazy_mode_ladder_for_tool(
     }
 }
 
-/// Resolve the `lazy-mode` ladder for one **project-tier** tool — the form
-/// every production caller uses.
-///
-/// [`lazy_mode_ladder_for_tool`] fills the tiers; resolution goes through
-/// [`LazyModeLadder::resolve_for_host`], which is a plain passthrough to
-/// [`LazyModeLadder::resolve`] — the five tiers' answer is never overridden by
-/// the host. It once floored `Always` to `LazyMode::Never` on Windows, because
-/// nothing wrote the Windows half of a deferred tool's shim slot; C-026's
-/// producer landed and plan contract C-027 removed the floor with it.
-///
-/// Lives here, with the config it reads, because this contract makes
-/// `ProjectConfig` the owner of tiers 2-4. The OCI-tier sibling —
-/// `lazy_mode_for_package`
-/// — reads no `ocx.toml` at any tier and therefore stays with its caller.
+/// Resolve the `lazy-mode` ladder for one project-tier tool; the form every
+/// production caller uses.
 pub fn lazy_mode_for_tool(
     config: &ProjectConfig,
     identifier: &PackageRef,

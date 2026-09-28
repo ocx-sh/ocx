@@ -1,20 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Registry-to-registry transfer of an already-published package.
+//! Registry-to-registry transfer of an already-published package (`adr_package_copy.md`).
 //!
-//! The unit of transfer is a **leaf platform manifest**: its bytes, the blobs it
-//! references, and the referrer manifests anchored to it. The leaf is copied
-//! verbatim — never rebuilt — because its digest is load-bearing twice over. A
-//! Sigstore bundle's subject *is* that digest (`oci/sign/pipeline.rs`), and a
-//! V2/V3 `ocx.lock` pins it (`adr_lock_records_physical_address.md`), so a
-//! promotion that re-serialised the manifest would orphan every signature and
-//! invalidate every downstream pin while looking like it had worked.
-//!
-//! Index merging, rolling tags and canonical tags are deliberately *not* here:
-//! an index is a mutable per-platform set, not content, and merging it is
-//! [`Client::merge_platform_into_index`]'s job. This module only ever adds
-//! content the target did not have. See `adr_package_copy.md`.
+//! A leaf platform manifest and its blobs and referrers are copied verbatim, never rebuilt: a re-serialised
+//! manifest orphans every signature and `ocx.lock` pin on its digest.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -27,48 +17,22 @@ use super::client::hashing_reader::HashingAsyncReader;
 use super::client::{ReadAddressing, no_progress};
 use super::{Client, Digest, OciIdentifier};
 
-/// Concurrent blob transfers per leaf.
-///
-/// Each in-flight transfer holds one spooled file, not the blob's bytes, so the
-/// bound is on registry connections and disk, not memory. Matched to the pull
-/// path's own layer concurrency rather than tuned independently.
+/// Concurrent blob transfers per leaf; each holds a spooled file, not the blob's bytes.
 const MAX_CONCURRENT_BLOB_TRANSFERS: usize = 4;
 
-/// How far a referrer chain is followed. A signature over an SBOM is a referrer
-/// of a referrer, which is depth 2; beyond a handful of levels the chain is a
-/// hostile registry's construction rather than a real attestation graph.
+/// How far a referrer chain is followed; a signature over an SBOM is depth 2.
 const MAX_REFERRER_DEPTH: usize = 8;
 
 /// Ceiling on referrer manifests copied per leaf, across the whole chain.
 const MAX_REFERRERS_PER_LEAF: usize = 256;
 
-/// Distinct blobs one manifest may name — its config plus its layers.
-///
-/// The OCI spec sets no ceiling, so a source can name hundreds of thousands of
-/// descriptors inside the 32 MiB manifest cap and buy one HEAD against the
-/// target for each. 512 is two orders above anything ocx publishes; a manifest
-/// past it is not a package, so this is not configurable (PKG-06).
+/// Distinct blobs one manifest may name, or a hostile source buys a target HEAD per descriptor.
 const MAX_BLOBS_PER_MANIFEST: usize = 512;
 
-/// Largest blob a copy will spool to disk, taken from its own declared size.
-///
-/// The real bound is the byte count actually written, which is what catches a
-/// source that lies downward. This one refuses a source that lies *upward*
-/// before a single byte is fetched, so an absurd declared size costs nothing
-/// (PKG-07). 8 GiB is an order above the largest toolchain layer ocx ships.
+/// Largest declared blob size a copy accepts, refusing an upward lie before any byte is fetched.
 const MAX_COPIED_BLOB_BYTES: u64 = 8 << 30;
 
-/// One blob to move, with the size its descriptor declared.
-///
-/// The size travels with the digest rather than being re-derived: it is the
-/// ceiling the spooled write is bounded by, and dropping it is what left the
-/// spool unbounded.
-///
-/// `size` is already clamped against [`MAX_COPIED_BLOB_BYTES`]. The only
-/// constructor is [`blob_set`], which is where the descriptor is read, so an
-/// absurd declaration is refused there — before any blob in the set has been
-/// HEADed, let alone fetched — rather than per-blob inside a fan-out whose
-/// siblings have already started uploading.
+/// One blob to move, with its declared size already clamped by [`blob_set`].
 #[derive(Debug, Clone)]
 struct BlobRef {
     digest: Digest,
@@ -114,8 +78,7 @@ enum BlobOutcome {
 /// The result of copying one leaf.
 #[derive(Debug)]
 pub struct LeafCopy {
-    /// The leaf's digest — unchanged by construction, returned so the caller can
-    /// merge it into the target's index without re-reading it.
+    /// The leaf's digest, unchanged by construction.
     pub digest: Digest,
     /// The leaf manifest's size in bytes, for the index entry's descriptor.
     pub size: i64,
@@ -128,52 +91,28 @@ pub struct LeafCopy {
 
 /// What became of the three cosign `<algorithm>-<hex>.{sig,att,sbom}` tags.
 ///
-/// `conflicts` is data rather than an error on purpose (C-098). A destination
-/// tag holding a *different* manifest is a conflict local to one sidecar — the
-/// source view is perfectly coherent — and failing the whole copy there would
-/// block the legitimate case the guard exists to protect: re-promoting onto a
-/// destination that merely holds more signatures than the source. So the leaf
-/// and every other sidecar still land, and the caller turns a non-empty list
-/// into a non-zero exit.
+/// `conflicts` is data, not an error, or re-promoting onto a target holding more signatures fails the whole
+/// copy; the caller turns a non-empty list into a non-zero exit.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SidecarCopy {
-    /// Sidecar manifests written to the target, or already there under the same
-    /// digest.
+    /// Sidecar manifests written to the target, or already there under the same digest.
     pub copied: usize,
-    /// Tags left exactly as they were, because the target already holds a
-    /// different manifest under them. Named so the caller can print them.
+    /// Tags left untouched because the target holds a different manifest under them.
     pub conflicts: Vec<String>,
 }
 
-/// Copies one leaf platform manifest, its blobs and its referrers.
+/// Copies one leaf platform manifest, its blobs and its referrers, addressed by digest on both ends.
 ///
-/// `source` and `target` are repository identifiers; any tag they carry is
-/// ignored, because a leaf is addressed by digest on both ends.
-///
-/// # Addressing
-///
-/// Every source read asks for [`ReadAddressing::Canonical`]. A copy's read
-/// *becomes* the bytes written to the target, which is exactly the case
-/// `subsystem-oci.md` invariant #5 names: deciding from a mirror and applying to
-/// the canonical registry is CWE-345/367. Here it is sharper still — a poisoned
-/// mirror would be choosing what lands in production under a promoted tag.
-///
-/// `scratch_root` is the directory the blob spool is created under, and it is
-/// deliberately not optional. `$TMPDIR` is memory-backed on most Linux hosts,
-/// so a caller allowed to leave this unset would silently defeat the bound the
-/// spool exists to enforce — the cap bounds the file, not the medium it lands
-/// in. Tests pass `scratch_dir().path()`.
+/// Every source read is [`ReadAddressing::Canonical`]: the read becomes the bytes written, so a poisoned
+/// mirror would choose what lands under a promoted tag (CWE-345/367). `scratch_root` is required because
+/// `$TMPDIR` is often memory-backed, which defeats the spool's bound.
 ///
 /// # Errors
 ///
-/// [`ClientError::DigestMismatch`] when the source serves bytes that do not hash
-/// to the digest asked for, or a manifest filed under a digest other than the
-/// one requested; [`ClientError::ManifestNotFound`] when the leaf is absent at
-/// the source; [`ClientError::ReferrersUnsupported`] when referrers were
-/// requested and either registry lacks the OCI 1.1 Referrers API;
-/// [`ClientError::TraversalLimitExceeded`] when the source's blob set or
-/// referrer graph is larger than this copy will traverse; and any transport
-/// error from the underlying registry calls.
+/// [`ClientError::DigestMismatch`] when the source serves bytes that do not hash to the digest asked for;
+/// [`ClientError::ManifestNotFound`] when the leaf is absent at the source; [`ClientError::ReferrersUnsupported`]
+/// when referrers were requested and the target lacks the Referrers API; [`ClientError::TraversalLimitExceeded`]
+/// when the source's blob set or referrer graph exceeds the limits; and any transport error.
 pub async fn copy_leaf(
     client: &Client,
     source: &OciIdentifier,
@@ -198,19 +137,8 @@ pub async fn copy_leaf(
         .fetch_manifest_raw_bytes_addressed(&source_leaf, ReadAddressing::Canonical)
         .await?
         .ok_or_else(|| ClientError::ManifestNotFound(source_leaf.to_string()))?;
-    // The fetch checks the bytes against the digest the registry claims for
-    // them, which is self-consistency, not identity. Comparing against the
-    // digest actually asked for is what stops a source answering a request for
-    // A with a coherent manifest for B: B would be pushed to the target while
-    // the caller merges A into the target's index, leaving an index entry
-    // naming a manifest nobody uploaded, reported as success (CWE-345).
-    //
-    // A backstop, not a second independent control: `source_leaf` pins
-    // `leaf_digest`, and `fetch_manifest_raw_bytes_addressed` already refuses a
-    // served digest that differs from a pinned one, so this branch is unreachable
-    // as wired. It is kept against a refactor that stops pinning here, or that
-    // relaxes the client-layer check — do not read its always-green state as
-    // tested coverage.
+    // Backstop against a source answering request A with a coherent manifest for B (CWE-345); the fetch
+    // already refuses this, so its green state is not coverage.
     if &digest != leaf_digest {
         return Err(ClientError::DigestMismatch {
             expected: leaf_digest.to_string(),
@@ -218,11 +146,7 @@ pub async fn copy_leaf(
         });
     }
 
-    // A promoted artifact is one *platform*, so an index here means the caller
-    // handed us a dispatch object rather than content. Refusing is not a
-    // convenience: merging an index is a per-platform decision the caller has to
-    // make against the target's current entries, and byte-copying one would
-    // silently delete every target platform the source lacks.
+    // Refused: byte-copying an index would delete every target platform the source lacks.
     let super::Manifest::Image(image) = &manifest else {
         return Err(ClientError::InvalidManifest(format!(
             "{source_leaf} is an image index, not a platform manifest"
@@ -231,10 +155,7 @@ pub async fn copy_leaf(
 
     let blobs = transfer.copy_blobs(&blob_set(image, &source_leaf)?).await?;
 
-    // The manifest PUT is digest-addressed, so a spec-compliant registry stores
-    // these exact bytes under this exact digest or rejects the request outright.
-    // That is the integrity guarantee — `push_manifest_raw` answers with the
-    // pullable manifest URL, not a digest, so there is nothing here to compare.
+    // Digest-addressed PUT: the registry stores these exact bytes under this digest or refuses.
     let target_leaf = client.transport_write_reference(&target.without_tag().clone_with_digest(digest.clone()));
     client
         .transport()
@@ -246,13 +167,7 @@ pub async fn copy_leaf(
         .await?;
     log::debug!("Copied leaf manifest {digest} to {target_leaf}");
 
-    // Before `ensure_target_serves_referrers`, and the position is the contract
-    // (C-091). That gate refuses a target without the OCI 1.1 Referrers API,
-    // which is backwards for a mechanism that exists *for* registries lacking
-    // it: placed after it, this sweep could never run against a `registry:2`
-    // destination, and the scenario asserting sidecars still land there would
-    // pass only because it never executed. `--no-referrers` skips it (C-096) —
-    // one flag governs everything anchored to the leaf.
+    // Before the Referrers gate, which refuses registries lacking the API, the ones sidecars exist for.
     let sidecars = if include_referrers {
         transfer.copy_sidecar_tags(&digest).await?
     } else {
@@ -260,17 +175,8 @@ pub async fn copy_leaf(
     };
 
     let referrers = if include_referrers {
-        // Probed here rather than up front: a registry answers the referrers
-        // endpoint for a subject it holds, and until the line above the target
-        // did not hold this one. The leaf is a pure addition — digest-addressed,
-        // untagged, invisible until a tag names it — so refusing at this point
-        // still leaves every tag the target publishes exactly as it was.
-        //
-        // Probed even when the source turns out to carry nothing: a registry
-        // without the OCI 1.1 Referrers API accepts a referrer manifest as an
-        // ordinary PUT and then never lists it, so the loss is silent, and
-        // making the refusal depend on whether this particular package happens
-        // to be signed is the least predictable contract available.
+        // Probed after the leaf lands (an untagged addition, so refusal moves no tag), and even with nothing to
+        // copy: without Referrers support a PUT is accepted and never listed.
         transfer.ensure_target_serves_referrers(&digest).await?;
         let mut seen = BTreeSet::new();
         transfer.copy_referrers(&digest, 0, &mut seen).await?
@@ -292,8 +198,8 @@ pub async fn copy_leaf(
 
 /// The two endpoints and the scratch directory one leaf copy works between.
 ///
-/// Five functions threaded `(client, source, target, …, scratch)` in that order
-/// (ARCH-01). `source` and `target` are the same type, so transposing them is a
+/// Five functions threaded `(client, source, target, …, scratch)` in that order.
+/// `source` and `target` are the same type, so transposing them is a
 /// one-token edit with no compiler objection behind it — a copy that reads from
 /// the target and writes to the source. Binding them once, in the one function
 /// that knows which is which, makes the transposition unrepresentable.
@@ -310,8 +216,6 @@ impl Transfer<'_> {
         use super::referrer::{ReferrersApiCapability, ReferrersSupport};
 
         let image = self.client.transport_write_reference(self.target);
-        // Not cached: the capability cache lives in the state store, which this
-        // layer does not hold, and one probe per promotion is not a hot path.
         match ReferrersApiCapability::probe(self.client.transport(), &image, subject)
             .await?
             .supported
@@ -323,36 +227,12 @@ impl Transfer<'_> {
         }
     }
 
-    /// Copies cosign's `<algorithm>-<hex>.{sig,att,sbom}` sidecar tags, verbatim.
+    /// Copies cosign's `<algorithm>-<hex>.{sig,att,sbom}` sidecar tags verbatim, under the same tag: re-homing
+    /// reconstructs the manifest, which corrupts signatures
+    /// ([cosign#4207](https://github.com/sigstore/cosign/issues/4207)).
     ///
-    /// A cosign sidecar is not a referrer: its manifest declares neither
-    /// `artifactType` nor `subject`, so nothing lists it and the tag name is the
-    /// only way in. That is also why it is copied under the *same* tag name and
-    /// never re-homed as a proper referrer — re-homing means reconstructing the
-    /// manifest, and reconstruction is what corrupts signatures
-    /// ([cosign#4207](https://github.com/sigstore/cosign/issues/4207)). Same
-    /// bytes, same digest, same tag, or nothing.
-    ///
-    /// All three tags are probed **unconditionally**, with `HEAD`
-    /// ([`OciTransport::fetch_manifest_digest`](super::client::transport::OciTransport::fetch_manifest_digest)),
-    /// never only when the Referrers API came back empty. A repository
-    /// mid-migration carries an OCX referrer *and* a cosign `.sig`; under a
-    /// probe-when-empty rule the signature is dropped and the copy exits 0,
-    /// which is the silent loss `copy_referrers` refuses by name (PKG-11). Three
-    /// round-trips of headers answer the cost question without trading
-    /// correctness for it.
-    ///
-    /// # What fails the whole copy, and what does not
-    ///
-    /// A tag that HEADs and then cannot be fetched fails the copy, exactly as a
-    /// listed-but-unservable referrer does: the *source* view is incoherent, so
-    /// nothing this run writes is trustworthy. An index-shaped sidecar fails it
-    /// too, before any push — [`blob_set`] takes an `&ImageManifest` and cannot
-    /// see an index's children, so pushing one would publish a manifest at the
-    /// target naming children that were never transferred.
-    ///
-    /// A destination tag already holding a *different* manifest is the opposite
-    /// case and is returned as data, not an error: see [`SidecarCopy`].
+    /// HEADed unconditionally, not only when Referrers came back empty, or a mid-migration `.sig` is dropped.
+    /// A different manifest at the destination is data ([`SidecarCopy`]), not an error.
     async fn copy_sidecar_tags(&self, subject: &Digest) -> Result<SidecarCopy, ClientError> {
         let transport = self.client.transport();
         let source_image = self.client.read_reference(self.source, ReadAddressing::Canonical);
@@ -364,8 +244,6 @@ impl Transfer<'_> {
             let source_tag = super::client::sibling_tag_reference(&source_image, tag.clone());
             let served = match transport.fetch_manifest_digest(&source_tag).await {
                 Ok(digest) => digest,
-                // No such attachment. The overwhelmingly common answer, and the
-                // one thing here that is not a fault.
                 Err(ClientError::ManifestNotFound(_)) => continue,
                 Err(other) => return Err(other),
             };
@@ -373,18 +251,12 @@ impl Transfer<'_> {
 
             let target_tag = super::client::sibling_tag_reference(&target_image, tag.clone());
             match transport.fetch_manifest_digest(&target_tag).await {
-                // Same manifest already there: the copy has nothing to do and
-                // counts it, because the target does serve it.
                 Ok(existing) if existing == served.to_string() => {
                     outcome.copied = outcome.copied.saturating_add(1);
                     continue;
                 }
-                // A `.sig`/`.att` manifest accumulates signatures as layers
-                // *within itself*, so a verbatim PUT over a different manifest
-                // silently destroys every signature the target holds and the
-                // source does not. Merging the two layer sets is not the answer
-                // either — merging is reconstruction (cosign#4207). Refuse this
-                // one tag, name it, carry on.
+                // A verbatim PUT over a different `.sig`/`.att` destroys the target's own signatures, and merging is
+                // reconstruction (cosign#4207): refuse this tag.
                 Ok(_) => {
                     outcome.conflicts.push(tag);
                     continue;
@@ -393,10 +265,7 @@ impl Transfer<'_> {
                 Err(other) => return Err(other),
             }
 
-            // Addressed by the digest the HEAD answered with, never by the tag:
-            // the identity check inside the fetch then covers this read too, and
-            // a tag that moves between the two calls cannot substitute a
-            // manifest for the one whose absence at the target was just checked.
+            // By the HEAD's digest, never the tag, or a tag moved in between substitutes an unchecked manifest.
             let sidecar_id = self.source.without_tag().clone_with_digest(served.clone());
             let Some((bytes, digest, manifest)) = self
                 .client
@@ -414,11 +283,7 @@ impl Transfer<'_> {
                     "sidecar {tag} of {subject} is an image index; its children are not copied"
                 )));
             };
-            // The signed payload is a blob, not an annotation: only the
-            // verification material (signature, certificate, chain, Rekor
-            // bundle) rides in annotations, and the payload the signature is
-            // over is the layer. Pushing the manifest alone would publish a
-            // sidecar at the target naming a blob nobody transferred.
+            // The signed payload is a layer blob; pushing the manifest alone names a blob nobody transferred.
             self.copy_blobs(&blob_set(image, &sidecar_id)?).await?;
 
             transport
@@ -428,14 +293,7 @@ impl Transfer<'_> {
                 .push_manifest_raw(&target_tag, bytes, manifest.content_type())
                 .await?;
 
-            // There is no conditional manifest PUT anywhere in the OCI
-            // distribution spec, so the check above is optimistic, not atomic:
-            // a second `ocx package copy` can observe the same absent tag and
-            // land its own PUT after ours. Reading the tag back and demanding
-            // *our* digest is what turns that into a reported conflict instead
-            // of the silent accumulation loss this guard exists to prevent —
-            // the same read-back `push_referrer_fallback_index` documents, and
-            // with the same limit: two writers converge, three need not.
+            // No conditional PUT exists: the read-back turns a concurrent copy's overwrite into a reported conflict.
             match transport.fetch_manifest_digest(&target_tag).await {
                 Ok(landed) if landed == digest.to_string() => {
                     outcome.copied = outcome.copied.saturating_add(1);
@@ -447,14 +305,9 @@ impl Transfer<'_> {
         Ok(outcome)
     }
 
-    /// Transfers every blob that is not already at the target, bounded.
+    /// Transfers every blob not already at the target, bounded.
     ///
-    /// Fail-fast on the *report*, run-to-completion on the *work* (PKG-23): the
-    /// first error is returned and the leaf is never pushed, but the tasks
-    /// `buffer_unordered` already admitted finish rather than being dropped
-    /// mid-upload. Cancelling a push abandons an open upload session at the
-    /// target, and nothing the survivors do is wasted — a blob that landed is
-    /// one the caller's next attempt finds already present.
+    /// Admitted transfers run to completion even after an error, since cancelling abandons an open upload session.
     async fn copy_blobs(&self, blobs: &[BlobRef]) -> Result<BlobTransfers, ClientError> {
         let outcomes: Vec<Result<BlobOutcome, ClientError>> = futures::stream::iter(blobs)
             .map(|blob| self.copy_blob(blob))
@@ -482,9 +335,7 @@ impl Transfer<'_> {
             return Ok(BlobOutcome::Present);
         }
 
-        // Cross-repository mount is same-registry only: the registry copies the blob
-        // internally and nothing crosses this process at all. Across registries it is
-        // not applicable, so do not even ask.
+        // Mount is same-registry only.
         if self.source.registry() == self.target.registry()
             && matches!(
                 transport
@@ -504,30 +355,15 @@ impl Transfer<'_> {
         transport
             .push_blob_from_path(&target_image, &spooled, digest, no_progress())
             .await?;
-        // The spool is scratch, not a cache: the next leaf's copy re-HEADs the target
-        // and finds the blob present, so nothing here is worth keeping.
         let _ = tokio::fs::remove_file(&spooled).await; // best-effort; the TempDir sweeps it regardless
         Ok(BlobOutcome::Uploaded)
     }
 
-    /// Streams one blob to `scratch/<hex>`, bounded and hashed in the same pass.
+    /// Streams one blob to `scratch/<hex>`, bounded by its declared size and hashed in the same pass.
     ///
-    /// Spooling through a file rather than a buffer is the point: a toolchain
-    /// layer is routinely 100-200 MB and several are in flight, so holding them
-    /// in RAM is the unbounded allocation PKG-04 exists to stop.
-    ///
-    /// The read is bounded by the descriptor's own declared size, which is what
-    /// stops a source that under-declares a layer from filling the scratch
-    /// filesystem (PKG-05, PKG-07). The hash runs over the same pass rather than
-    /// in a second one: re-opening the file to re-hash it checks exactly the
-    /// property this pass already established, and doubles the disk I/O of every
-    /// promoted layer to do it.
-    ///
-    /// Verifying here rather than letting the target's own digest check catch it
-    /// names the source registry — the party that actually served the wrong
-    /// bytes — and does it before the upload rather than after (CWE-345).
+    /// A file, not a buffer, since several 100-200 MB layers are in flight; verified here so a mismatch names the
+    /// source registry (CWE-345).
     async fn spool(&self, blob: &BlobRef) -> Result<std::path::PathBuf, ClientError> {
-        // Already clamped by `blob_set`, which is where the descriptor was read.
         let declared = blob.size;
 
         let source_image = self.client.read_reference(self.source, ReadAddressing::Canonical);
@@ -544,9 +380,7 @@ impl Transfer<'_> {
         })?;
 
         let stream = transport.pull_blob_streaming(&source_image, &blob.digest).await?;
-        // One byte past the declaration: an over-long body then reaches the
-        // digest check as a genuine mismatch instead of being silently truncated
-        // to the cap and hashed as if it were the whole blob.
+        // One byte past the declaration, or an over-long body is truncated and hashed as if whole.
         let mut hashing = HashingAsyncReader::new(stream.take(declared.saturating_add(1)), blob.digest.algorithm());
         tokio::io::copy(&mut hashing, &mut file)
             .await
@@ -561,12 +395,7 @@ impl Transfer<'_> {
         drop(file);
 
         let (actual, read) = hashing.finalize();
-        // Completeness before content, the ordering `Client::pull_layer`
-        // documents: a prefix cannot hash to the whole, so every truncated
-        // transfer also fails the digest check and would otherwise be reported
-        // as the source serving wrong bytes. An over-long body needs no arm of
-        // its own — the extra byte admitted above lands it in the digest check,
-        // which attributes it correctly.
+        // Completeness before content, or a truncated transfer misattributes as wrong bytes served.
         if read < declared {
             return Err(ClientError::ShortBlobRead {
                 expected: declared,
@@ -582,17 +411,10 @@ impl Transfer<'_> {
         Ok(path)
     }
 
-    /// Copies every referrer anchored to `subject`, then recurses into each one.
+    /// Copies every referrer anchored to `subject`, then recurses into each one; `seen` stops cycles.
     ///
-    /// `seen` spans the whole chain, so a registry answering with a cycle — a
-    /// referrer that is its own ancestor — terminates instead of recursing forever.
-    ///
-    /// Both caps are errors rather than warnings, and so is a referrer the source
-    /// lists but cannot serve. A promotion that logged "stopping here" and then
-    /// exited zero would leave the target holding an artifact whose signature was
-    /// silently dropped: verifiable at the source, unverifiable at the target, and
-    /// reported as a success (PKG-11). Nothing on this path may `continue` past a
-    /// referrer it failed to copy.
+    /// Caps and unservable referrers are errors: skipping one reports success for a target whose signature
+    /// stayed behind. Nothing here may `continue` past a referrer it failed to copy.
     async fn copy_referrers(
         &self,
         subject: &Digest,
@@ -611,15 +433,8 @@ impl Transfer<'_> {
         let source_image = self.client.read_reference(self.source, ReadAddressing::Canonical);
         let target_image = self.client.transport_write_reference(self.target);
 
-        // `_with_fallback`, never the verdict-shaped `list_referrers`: this is a
-        // READ of the source, and a source that serves no Referrers API is not a
-        // failed copy — it is a source whose referrers live on the
-        // `<algorithm>-<encoded>` fallback tag, which is exactly what OCX's own
-        // sign/attest write there. The verdict belongs to
-        // `ensure_target_serves_referrers` above, on the target, which is the
-        // side that has to hold what it is handed; raising it here reported 84
-        // naming the SOURCE, contradicting the documented split and dropping
-        // every fallback-tag signature on the floor.
+        // `_with_fallback`: the source's referrers may live on the fallback tag, and a verdict here would
+        // misattribute exit 84 to the source.
         let descriptors = transport
             .list_referrers_with_fallback(&source_image, subject, None)
             .await?
@@ -644,11 +459,6 @@ impl Transfer<'_> {
                 .fetch_manifest_raw_bytes_addressed(&referrer_id, ReadAddressing::Canonical)
                 .await?
             else {
-                // Listed but absent: the source's referrers index and its manifest
-                // store disagree. Skipping it with a warning is what the caps above
-                // exist to rule out — the target would end up holding an artifact
-                // whose signature stayed behind, reported as a complete promotion
-                // and visible only in a log line `--quiet` suppresses (PKG-11).
                 return Err(ClientError::InvalidManifest(format!(
                     "referrer {} is listed for {subject} but the source cannot serve it; \
                      re-run the copy, and if it persists the source registry's referrers \
@@ -656,12 +466,7 @@ impl Transfer<'_> {
                     descriptor.digest
                 )));
             };
-            // The same identity check the leaf gets: the fetch proves the bytes
-            // hash to the digest the registry filed them under, not that it is
-            // the digest the referrers listing named. Backstop only, for the same
-            // reason the leaf's check is: `referrer_id` pins `referrer_digest`, so
-            // the client layer refuses the mismatch first and this branch is
-            // unreachable as wired.
+            // Backstop like the leaf's: the fetch already refuses a digest other than `referrer_id` pins.
             if digest != referrer_digest {
                 return Err(ClientError::DigestMismatch {
                     expected: referrer_digest.to_string(),
@@ -673,11 +478,7 @@ impl Transfer<'_> {
                 super::Manifest::Image(image) => {
                     self.copy_blobs(&blob_set(image, &referrer_id)?).await?;
                 }
-                // An index here names child manifests this copy never walks, so
-                // pushing it would attach a referrer that resolves to nothing at
-                // the target — a signature or SBOM present in a listing and
-                // unfetchable behind it. Nothing in the wild produces one, which
-                // is exactly why it would go unnoticed.
+                // Refused: this copy never walks an index's children, so the target would list an unfetchable referrer.
                 super::Manifest::ImageIndex(_) => {
                     return Err(ClientError::InvalidManifest(format!(
                         "referrer {digest} of {subject} is an image index; its children are not copied"
@@ -702,12 +503,9 @@ fn parse_descriptor_digest(digest: &str) -> Result<Digest, ClientError> {
     Digest::try_from(digest).map_err(|e| ClientError::InvalidManifest(format!("{e}")))
 }
 
-/// The distinct blobs one image manifest names — its config plus its layers.
+/// The distinct blobs one image manifest names, its config plus its layers.
 ///
-/// Deduplicated because a manifest may legitimately name one digest twice (an
-/// empty config reused as a layer is the common shape), and every entry spools
-/// to `scratch/<hex>`: two concurrent tasks for one digest write and delete the
-/// same path, so one truncates the file the other is still uploading.
+/// Deduplicated, or two tasks spool the same `scratch/<hex>` and one truncates the other's upload.
 fn blob_set(image: &super::ImageManifest, subject: &OciIdentifier) -> Result<Vec<BlobRef>, ClientError> {
     let declared = image.layers.len().saturating_add(1);
     if declared > MAX_BLOBS_PER_MANIFEST {
@@ -719,14 +517,11 @@ fn blob_set(image: &super::ImageManifest, subject: &OciIdentifier) -> Result<Vec
         });
     }
 
-    // Sized from the already-clamped count, never from the raw declaration (PKG-04).
     let mut blobs = Vec::with_capacity(declared);
     let mut seen = BTreeSet::new();
     for descriptor in std::iter::once(&image.config).chain(image.layers.iter()) {
         let digest = parse_descriptor_digest(&descriptor.digest)?;
-        // A declared size is a claim by the source, clamped here — the one place
-        // the descriptor is read — so a set containing one absurd declaration is
-        // refused whole, before any of its siblings starts transferring (PKG-07).
+        // Clamped here, so one absurd declaration refuses the whole set before any sibling transfers.
         let size = u64::try_from(descriptor.size)
             .ok()
             .filter(|size| *size <= MAX_COPIED_BLOB_BYTES)
@@ -1327,7 +1122,7 @@ mod tests {
     }
 
     /// The read-back after the PUT (`transport.rs`'s
-    /// `push_referrer_fallback_index` documents the same pattern and the same
+    /// `append_referrer_fallback_index` documents the same pattern and the same
     /// limit): there is **no conditional manifest PUT anywhere in the OCI
     /// distribution spec**, so the pre-push absence check is optimistic, not
     /// atomic. Two concurrent copies can both see the tag absent, and the later

@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
 
-/// This tier's own result (E1, plan DEC-27).
 type Result<T> = std::result::Result<T, Error>;
 
 pub mod build_meta;
@@ -16,20 +15,15 @@ type MinorRest = Option<(u32, PatchRest)>;
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct Version {
-    /// Optional variant prefix (e.g., "debug", "pgo.lto"). None = default variant.
+    /// `None` is the default variant.
     variant: Option<String>,
-    /// major version, always present, consequently there is no representation of a 'latest' version
     major: u32,
-    /// tuple of (minor, tuple of (patch, (build, prerelease))), ensuring that minor is only present if patch is present, and patch is only present if prerelease is present
+    /// `(minor, (patch, (build, prerelease)))`, nested so no part exists without its parent.
     rest: Option<(u32, MinorRest)>,
 }
 
-/// Close to semver version, but with rolling parent versions and no build info.
-/// Prereleases are not supported for rolling versions, ie. '1-alpha' is not a valid version.
-///
-/// Optionally carries a variant prefix (e.g., `debug-3.12.5`). Variants define
-/// how a binary was built (optimization profile, feature set) and are orthogonal
-/// to platform (which defines where it runs). See `adr_variants.md`.
+/// Semver-like version with rolling parents (`3`, `3.28`) and an optional variant prefix
+/// (`debug-3.12.5`, see `adr_variants.md`).
 impl Version {
     pub fn new_major(major: u32) -> Self {
         Self {
@@ -85,8 +79,7 @@ impl Version {
         }
     }
 
-    /// Returns the parent version, or None if this version is a major version with no minor version.
-    /// The variant is preserved through the parent chain.
+    /// Returns the parent version with the variant kept, or `None` for a bare major.
     pub fn parent(&self) -> Option<Self> {
         if let Some((minor, patch)) = &self.rest {
             if let Some((patch, (build, prerelease))) = patch {
@@ -177,17 +170,14 @@ impl Version {
         !matches!(&self.rest, Some((_, Some((_, (Some(_), _))))))
     }
 
-    /// Returns the variant name, if any (e.g., `Some("debug")`, `Some("pgo.lto")`).
     pub fn variant(&self) -> Option<&str> {
         self.variant.as_deref()
     }
 
-    /// Returns true if this version has a variant prefix.
     pub fn has_variant(&self) -> bool {
         self.variant.is_some()
     }
 
-    /// Returns a copy of this version with the given variant prefix.
     pub fn with_variant(mut self, variant: impl Into<String>) -> Self {
         self.variant = Some(variant.into());
         self
@@ -195,9 +185,9 @@ impl Version {
 
     /// Returns a copy of this version with the given build-metadata segment.
     ///
-    /// The build segment is rendered with `_` per OCI tag rules
-    /// (see the underscore-build-separator ADR). Errors if the version has
-    /// no `X.Y.Z` core or already carries build metadata.
+    /// # Errors
+    ///
+    /// If the version has no `X.Y.Z` core or already carries build metadata.
     pub fn with_build(self, build: impl Into<String>) -> std::result::Result<Self, build_meta::BuildMetaError> {
         if !self.has_patch() {
             return Err(build_meta::BuildMetaError::NoPatch(self.to_string()));
@@ -216,7 +206,6 @@ impl Version {
         })
     }
 
-    /// Returns a copy of this version with the variant stripped.
     pub fn without_variant(&self) -> Version {
         Version {
             variant: None,
@@ -224,16 +213,8 @@ impl Version {
         }
     }
 
-    /// Parses a version string, optionally with a variant prefix.
-    ///
-    /// Variant format: `<variant>-<version>` where variant matches `[a-z][a-z0-9.]*`
-    /// and the boundary is the first `-` followed by a digit.
-    ///
-    /// Examples:
-    /// - `"3.12.5"` → Version { variant: None, major: 3, ... }
-    /// - `"debug-3.12.5"` → Version { variant: Some("debug"), major: 3, ... }
-    /// - `"pgo.lto-3.12.5_b1"` → Version { variant: Some("pgo.lto"), major: 3, build: "b1" }
-    /// - `"debug"` → None (bare variant name, no version — falls into Tag::Other)
+    /// Parses `[<variant>-]<version>`, e.g. `"pgo.lto-3.12.5_b1"`; a bare variant name
+    /// (`"debug"`) is `None`.
     pub fn parse(value: &str) -> Option<Self> {
         use regex::Regex;
         use std::sync::LazyLock;
@@ -307,25 +288,10 @@ impl Version {
     }
 }
 
-/// The distinct variant names observed across `tags`, sorted and deduplicated.
-///
-/// A tag contributes a variant only when [`Version::parse`] accepts it *and*
-/// the parsed version carries a prefix, so `latest`, an unprefixed `3.28.1`,
-/// and any tag that is not a version at all contribute nothing. The default
-/// variant is the *absence* of a prefix and therefore has no name here —
-/// `ocx index list --variants` renders it with its own empty-string
-/// placeholder, which is a display artifact and never reaches the wire.
-///
-/// A bare rolling tag (`slim`) is invisible here: it is not a version. Reading
-/// it as a variant pointer because a versioned `slim-*` sibling exists is a
-/// second-pass display inference, not part of this derivation.
-///
-/// This is the **one** implementation of the rule. `ocx index list --variants`
-/// and the `variants` field `ocx package announce` records on an index root
-/// both call it, so the CLI and a published root cannot disagree about what a
-/// tag set means. Its cross-language counterpart is the index bot's
-/// `core/version_order.py::variant_names`, pinned to this function by the
-/// vendored `with-variants.json` conformance vector.
+/// The distinct variant names across `tags`, sorted; unprefixed and non-version tags
+/// contribute nothing.
+// The index bot's `core/version_order.py::variant_names` must match this; the vendored
+// `with-variants.json` vector pins the two together.
 pub fn variant_names<'a>(tags: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     tags.into_iter()
         .filter_map(Version::parse)
@@ -341,8 +307,7 @@ impl Ord for Version {
 
         let lhs = self;
 
-        // Variant sorts: Some("debug") < Some("pgo.lto") < None
-        // None (default) sorts last so it appears first in reverse-sorted listings.
+        // The default variant sorts last, so it lists first in reverse-sorted listings.
         match (&lhs.variant, &rhs.variant) {
             (None, None) => {}
             (None, Some(_)) => return Ordering::Greater,
@@ -353,13 +318,11 @@ impl Ord for Version {
             },
         }
 
-        // major
         match lhs.major.cmp(&rhs.major) {
             Ordering::Equal => {}
             ordering => return ordering,
         };
 
-        // minor
         let (lhs_minor, lhs_rest) = match lhs.rest.as_ref() {
             Some(minor) => minor,
             None => {
@@ -379,7 +342,6 @@ impl Ord for Version {
             ordering => return ordering,
         };
 
-        // patch
         let (lhs_patch, lhs_rest) = match lhs_rest {
             Some(patch) => patch,
             None => {
@@ -399,7 +361,6 @@ impl Ord for Version {
             ordering => return ordering,
         };
 
-        // prerelease & build
         let (lhs_build, lhs_prerelease) = lhs_rest;
         let (rhs_build, rhs_prerelease) = rhs_rest;
 
@@ -484,12 +445,8 @@ impl Serialize for Version {
     }
 }
 
-// `Serialize` renders a `Version` as its `Display` string, so the published
-// schema says `string` rather than exposing the parsed field layout.
-//
-// The name is qualified because schemars keys `$defs` by it: a hand-written
-// impl gets no module prefix, and `metadata::bundle::Version` (the integer
-// format version) shares the same document through `package inspect`.
+// Not `Version`: schemars keys `$defs` by name, and `metadata::bundle::Version` shares
+// the `package inspect` schema document.
 impl schemars::JsonSchema for Version {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "PackageVersion".into()

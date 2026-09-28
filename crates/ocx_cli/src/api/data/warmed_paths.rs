@@ -10,19 +10,16 @@ use crate::api::Printable;
 use crate::api::data::env::LazyAdvisoryReport;
 use crate::api::data::path_kind::PathKind;
 
-/// The one JSON key of [`WarmedPaths`] that is not a pulled identifier.
-///
-/// Safe as a reserved key because every key beside it is a pinned identifier —
-/// `registry/repository@sha256:…` — and no such string is a bare word.
+/// Reserved JSON key of [`WarmedPaths`]; safe because no pinned identifier beside it is a bare word.
 const ADVISORIES_KEY: &str = "advisories";
 
 /// One pre-warmed tool: what `ocx pull` put on disk for it, and which kind of
 /// directory that is.
 ///
 /// A tool pre-warmed eagerly yields its package root; a tool whose `lazy-mode`
-/// resolved to `always` yields its generated shim directory instead, because
-/// that is what the run created — its package directory does not exist yet and
-/// naming one would be a lie in a machine-read field.
+/// resolved to `always` yields its generated shim directory instead: its
+/// package directory does not exist yet.
+// Never name the package directory for a lazy tool: a machine-read field would point at nothing.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct WarmedPath {
     #[serde(skip)]
@@ -31,29 +28,12 @@ pub struct WarmedPath {
     pub kind: PathKind,
 }
 
-/// Ordered list of pre-warmed tools, one per locked tool in scope.
+/// Pre-warmed tools, one per locked tool in scope, keyed by pulled identifier in lock order.
 ///
-/// Plain format: three-column table (Package | Kind | Path).
-///
-/// JSON format: object keyed by the pulled identifier, preserving lock order;
-/// each value is `{"path": "...", "kind": "package"|"shim"}`. One reserved
-/// sibling key, `"advisories"`, carries the deferred-tool advisories as an
-/// array — always present, empty when nothing was deferred.
-///
-/// The advisories are a top-level sibling and not a per-row field so that one
-/// `jq '.advisories'` reads the same payload here as it does off `ocx env` /
-/// `ocx package env`, which publish the identical [`LazyAdvisoryReport`]
-/// projection (C-015). Nesting them per package would have been the tidier map
-/// but a second shape for the same fact.
-///
-/// Deliberately not [`super::paths::Paths`], which `ocx package which` and
-/// `ocx package pull` share: those answer where an installed package *is*, and
-/// their value is a bare path string. Widening that shape for every OCI-tier
-/// consumer is a separate decision from this command's.
+/// JSON adds one reserved top-level `advisories` key, always present, in the shape `ocx env` emits.
 pub struct WarmedPaths {
     pub entries: Vec<WarmedPath>,
-    /// Advisories raised for the **deferred** tools this run pre-warmed —
-    /// warning-only, and also written to stderr for the plain channel.
+    /// Advisories for the deferred tools this run pre-warmed; also written to stderr.
     pub advisories: Vec<LazyAdvisoryReport>,
 }
 
@@ -65,10 +45,6 @@ impl WarmedPaths {
         }
     }
 
-    /// Attaches the deferred-composition advisories, returning `self` for
-    /// chaining after [`new`](Self::new) — the same seam
-    /// [`EnvVars::with_advisories`](super::env::EnvVars::with_advisories) uses,
-    /// so the two producers of C-015's payload stay one shape.
     #[must_use]
     pub fn with_advisories(mut self, advisories: Vec<LazyAdvisoryReport>) -> Self {
         self.advisories = advisories;
@@ -103,8 +79,7 @@ impl Printable for WarmedPaths {
     }
 }
 
-// The `Serialize` impl above writes a map keyed by package name, not the struct's
-// own fields, so the schema is hand-written to match it.
+// Hand-written: `Serialize` emits a map keyed by package, not the struct's fields.
 impl schemars::JsonSchema for WarmedPaths {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "WarmedPaths".into()
@@ -113,9 +88,7 @@ impl schemars::JsonSchema for WarmedPaths {
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "object",
-            // One reserved key sits beside the per-package entries. A package
-            // literally named `advisories` would collide with it; the wire
-            // format has no escape for that, so it is documented, not fixed.
+            // A package named `advisories` would collide with this key; the wire format has no escape.
             "properties": {
                 ADVISORIES_KEY: generator.subschema_for::<Vec<LazyAdvisoryReport>>(),
             },

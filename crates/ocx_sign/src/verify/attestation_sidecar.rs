@@ -1,109 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Reading cosign's `sha256-<hex>.att` sidecar — the attestation half of
-//! spec §WP5, and the *only* spelling `.att` has.
+//! Reads cosign's `sha256-<hex>.att` sidecar, the tag-only attestation shape.
 //!
-//! # Why there is no `.att` artifact type to discover by
-//!
-//! Measured against cosign v3.1.1, not inferred (`generate.py`'s
-//! `_capture_attestation_sidecar` and `ATT_CERTIFICATE_GAP` record the
-//! commands):
-//!
-//! * `cosign attest` against a Referrers-API registry writes an OCI 1.1
-//!   referrer whose `artifactType` is
-//!   [`SIGSTORE_BUNDLE_V03`](ocx_oci::referrer::media_types::SIGSTORE_BUNDLE_V03) —
-//!   the **same** type a signature referrer carries. An attestation is told from
-//!   a signature by the `dev.sigstore.bundle.content: dsse-envelope` annotation
-//!   and its `predicateType` sibling, never by a distinct artifact type. That
-//!   shape is already discovered by [`super::pipeline`]'s bundle scan.
-//! * Against a registry without one it writes the `sha256-<hex>` fallback
-//!   *index*, again with `SIGSTORE_BUNDLE_V03` children — not a `.att` tag.
-//! * `--registry-referrers-mode` is not a flag on `attest` at all (it exists on
-//!   `attach sbom`, which is where
-//!   [`COSIGN_SBOM_ARTIFACT_TYPE`](ocx_oci::referrer::media_types::COSIGN_SBOM_ARTIFACT_TYPE)
-//!   was captured), so the
-//!   `application/vnd.dev.cosign.artifact.%s.v1+json` template the binary
-//!   carries is never instantiated for an attestation.
-//! * The `.att` manifest cosign writes carries **neither** `artifactType`
-//!   **nor** `subject`, so it is invisible to the Referrers API by
-//!   construction. `attestation_sidecar_key_manifest.json` pins both absences.
-//!
-//! So `.att` is a tag-only shape, and this module is its reader. G1 froze the
-//! artifact-type set completely after all: there is no third constant.
-//!
-//! # A different layer shape, the same trust gate
-//!
-//! An `.att` layer is a [`DSSE_ENVELOPE_MEDIA_TYPE`] envelope, not a
-//! [`SIMPLESIGNING_MEDIA_TYPE`](ocx_oci::referrer::media_types::SIMPLESIGNING_MEDIA_TYPE)
-//! claim — which is why [`super::simplesigning_read::read_sidecar_manifest`]
-//! returns an empty scan when aimed at this tag, and why this module exists
-//! beside it rather than inside it. What it does **not** do is parse the
-//! envelope a second time: the structural half is
-//! [`super::dsse::verify_envelope`], the same function the bundle path runs, and
-//! the keyless gate is the same [`Verifier`] both other doors use.
-//!
-//! Three shapes, exactly as the simplesigning sidecar has, and none of them is
-//! malformed input:
-//!
-//! * **Key mode** — no certificate annotation. The signature lives *inside* the
-//!   envelope, so nothing is carried in annotations at all; it is checked over
-//!   the PAE against a key the trust policy named
-//!   ([`identity::matching_key_policies`]), which is the same arm
-//!   [`super::pipeline`] runs for a key-mode bundle. The shape cosign v3.1.1's
-//!   `attach attestation` writes, and the shape the golden fixture pins.
-//! * **Keyless** — [`ANNOTATION_COSIGN_CERTIFICATE`] carries the Fulcio leaf and
-//!   [`ANNOTATION_COSIGN_BUNDLE`] the offline Rekor bundle; the shape cosign 2.x's
-//!   `attest` wrote, and the shape OCX's own writer emits
-//!   (`oci::sign::simplesigning_write`'s `SidecarLayer::attestation`, which sets
-//!   both annotations). The identical keyless gate runs, and it is six steps
-//!   rather than four: chain to the trust root, embedded SCT, DSSE signature over
-//!   the PAE, SAN + OIDC issuer, the trust policy's `builder` pin (#103), the
-//!   logged body bound to *this* envelope, and the certificate's validity window
-//!   against the entry's own `integratedTime`.
-//! * **Keyless with no transparency material** — **refused**
-//!   ([`VerifyErrorKind::SignatureInvalid`]) unless the caller passes
-//!   `--allow-unlogged-signature`; see [`verify_keyless`] for the ordering and
-//!   the reasoning, which is its sibling's verbatim.
-//!
-//! # Transparency-log evidence is the keyless gate
-//!
-//! A keyless signature's certificate lives about ten minutes. *When* it was used
-//! is therefore the only thing separating a live signature from a stale
-//! certificate replayed for ever, and the transparency log is the only place
-//! that answer comes from. So on the keyless arm the [`ANNOTATION_COSIGN_BUNDLE`]
-//! annotation is **required and checked**, by the sibling's own
-//! [`logged_entry`] — payload-agnostic, and called from here rather than copied:
-//! its Signed Entry Timestamp is verified against the log's own public key, its
-//! logged `dsse:0.0.1` body is bound to this envelope
-//! ([`dsse::verify_tlog_binding`], the identical call the bundle path makes),
-//! and only then does its `integratedTime` become the instant both this module
-//! and `sigstore` judge the certificate's window against.
-//!
-//! `signed_at` and `rekor_log_index` are reported from that entry, and only from
-//! it — never from the entry [`sidecar_bundle`] synthesises so `sigstore`'s
-//! `CheckedBundle` has the one it demands.
-//!
-//! # Gaps, carried from `simplesigning_read`
-//!
-//! * **The key arm does not read [`ANNOTATION_COSIGN_BUNDLE`].** `ocx package
-//!   sign --key` uploads to Rekor only when asked (D10), and a key signature's
-//!   trust story is a committed public key rather than a signing instant. The
-//!   keyless arm is where the entry is *required*, which is where reading it has
-//!   to be right.
-//! * **No online Rekor lookup.** Evidence comes from the offline annotation or
-//!   not at all.
-//! * **The keyless `.att` shape is not capturable from cosign v3.1.1.**
-//!   `attach attestation` takes no `--certificate`, and `attest` no longer
-//!   writes the tag. The keyless arm is covered by unit tests built from the
-//!   cosign-authored `keyless_bundle.json` instead — cosign's own certificate,
-//!   cosign's own envelope and that bundle's own `dsse:0.0.1` log entry,
-//!   packaged into the layer shape measured above.
-//!
-//! [`DSSE_ENVELOPE_MEDIA_TYPE`]: ocx_oci::referrer::media_types::DSSE_ENVELOPE_MEDIA_TYPE
-//! [`ANNOTATION_COSIGN_CERTIFICATE`]: ocx_oci::referrer::media_types::ANNOTATION_COSIGN_CERTIFICATE
-//! [`ANNOTATION_COSIGN_BUNDLE`]: ocx_oci::referrer::media_types::ANNOTATION_COSIGN_BUNDLE
-//! [`logged_entry`]: super::simplesigning_read::logged_entry
+//! The `.att` manifest carries neither `artifactType` nor `subject` (`attestation_sidecar_key_manifest.json` pins both
+//! absences), so the Referrers API never lists it; `cosign attest` referrers are found by [`super::pipeline`]'s bundle
+//! scan. Structure is checked by [`super::dsse::verify_envelope`] and trust by the `Verifier` both other doors use.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -139,67 +41,43 @@ use ocx_trust::key_ref::KeyBackendKind;
 
 /// What one `.att` sidecar yielded.
 ///
-/// Matches and refusals travel together for the reason
-/// [`super::pipeline::AttestationScan`] gives: one malformed layer must not be
-/// able to hide every valid attestation beside it.
+/// Matches and refusals travel together so one malformed layer cannot hide every valid attestation beside it.
 #[derive(Debug, Default)]
 pub(super) struct AttestationSidecarScan {
     /// Every DSSE layer that verified, in manifest order.
     pub matches: Vec<SidecarAttestation>,
-    /// Every DSSE layer that was examined and refused, in manifest order.
-    /// `referrer_digest` is the **layer** digest: one layer is one attestation.
+    /// Every refused DSSE layer; `referrer_digest` is the **layer** digest, since one layer is one attestation.
     pub refused: Vec<RefusedCandidate>,
-    /// Bytes actually read — the manifest plus every envelope pulled — so the
-    /// caller charges its cross-candidate budget from reads rather than from
-    /// declared sizes, exactly as the bundle loop does.
+    /// Bytes actually read, so the caller charges its cross-candidate budget from reads, not declared sizes.
     pub bytes_read: u64,
-    /// The bound that stopped the walk short of the sidecar's DSSE layers, when
-    /// one did.
+    /// The bound that cut the walk short, if one did.
     ///
-    /// The caller records it on the shared budget, which is what makes
-    /// `finish_scan`'s fail-closed attestation arm fire: a truncated scan has
-    /// looked at fewer attestations than the sidecar carries, so the partial
-    /// list below is **not** an answer to "every attestation on this subject".
+    /// The caller records it on the shared budget so `finish_scan` fails closed: a truncated list does not answer
+    /// "every attestation on this subject".
     pub stop: Option<ScanStop>,
 }
 
-/// One verified `.att` layer, in the shape the caller's dedup pass takes.
+/// One verified `.att` layer.
 ///
-/// [`VerifiedSignature`] rather than a bare [`VerifyResult`], because D6's
-/// dedup key falls back on the signature bytes whenever no transparency-log
-/// index is credited — which is every key-mode `.att` layer, the shape cosign
-/// v3.1.1 actually writes. The pair mirrors the bundle path's
-/// `CandidateOutcome::Verified` exactly, so both doors dedup against one
-/// `SignatureKey` set.
+/// [`VerifiedSignature`] rather than a bare [`VerifyResult`]: the dedup key falls back on the signature bytes whenever
+/// no log index is credited, which is every key-mode `.att` layer.
 #[derive(Debug)]
 pub(super) struct SidecarAttestation {
     /// The verification facts, plus the bytes the dedup key falls back on.
     pub verified: VerifiedSignature,
-    /// The attestation this layer carried.
     pub attestation: VerifiedAttestation,
 }
 
 /// Fetch the `sha256-<hex>.att` tag and verify every DSSE layer it carries.
 ///
-/// `Ok(None)` means the tag does not exist — "no legacy attestation", the
-/// overwhelmingly common case, never an error.
-///
-/// `predicate_type` narrows exactly as it does on the bundle path: `None`
-/// accepts any signed predicateType, `Some` skips a layer whose signed type is
-/// something else without recording a refusal (S-017).
-///
-/// `byte_budget` is what the caller has left of its cross-candidate allowance.
-/// A sidecar's layers are read against it and the scan stops when it is gone —
-/// without that, `MAX_ATTESTATION_CANDIDATES` envelopes at
-/// [`MAX_ATTESTATION_ENVELOPE_BYTES`] each would be an unbounded read behind a
-/// single candidate slot (CWE-400).
+/// `Ok(None)` means the tag does not exist. `predicate_type` narrows as on the bundle path: a layer of another type is
+/// skipped without a refusal. The scan stops once `byte_budget` is spent, or the envelope reads behind one candidate
+/// slot are unbounded (CWE-400).
 ///
 /// # Errors
 ///
-/// [`VerifyErrorKind`] when the registry fails for any reason other than a
-/// missing manifest, or when the sidecar manifest is over-cap or does not
-/// parse. A *layer* failure is never an error here — it lands in
-/// [`AttestationSidecarScan::refused`].
+/// [`VerifyErrorKind`] when the registry fails other than on a missing manifest, or the manifest is over-cap or does
+/// not parse; a layer failure lands in [`AttestationSidecarScan::refused`].
 pub(super) async fn read_attestation_sidecar_tag(
     transport: &dyn OciTransport,
     image: &native::Reference,
@@ -238,16 +116,11 @@ pub(super) async fn read_attestation_sidecar_tag(
     })
 }
 
-/// Verify every DSSE layer of an already-fetched `.att` manifest.
-///
-/// A layer whose media type is not [`DSSE_ENVELOPE_MEDIA_TYPE`] is **skipped**,
-/// not refused — the same tolerance the simplesigning reader applies for the
-/// same reason: a sidecar legitimately carries other layers.
+/// Verify every DSSE layer of an already-fetched `.att` manifest; other layers are skipped, not refused.
 ///
 /// # Errors
 ///
-/// [`VerifyErrorKind::BundleParseFailed`] when the manifest does not parse as an
-/// OCI image manifest.
+/// [`VerifyErrorKind::BundleParseFailed`] when the manifest does not parse.
 #[expect(
     clippy::too_many_arguments,
     reason = "one sidecar, its two subjects, and the run-scoped material"
@@ -272,12 +145,8 @@ async fn read_attestation_sidecar_manifest(
         .filter(|layer| layer.media_type == DSSE_ENVELOPE_MEDIA_TYPE)
         .collect();
     if layers.len() > MAX_ATTESTATION_CANDIDATES {
-        // Recorded, not merely logged. A debug line is invisible to the caller,
-        // and the caller is the only party that can refuse: collect-all is the
-        // mode that cares, and a truncated walk has looked at fewer
-        // attestations than the sidecar carries. Left as a log, a manifest
-        // listing one genuine layer descriptor 32 times and the real
-        // attestation as the 33rd exits 0 having never fetched it.
+        // Recorded, not only logged: otherwise a manifest listing one layer 32 times with the real attestation 33rd
+        // exits 0 without ever fetching it.
         tracing::debug!(
             "`.att` sidecar carries {} DSSE layers; examining the first {MAX_ATTESTATION_CANDIDATES}",
             layers.len()
@@ -286,9 +155,6 @@ async fn read_attestation_sidecar_manifest(
     }
     for layer in layers.into_iter().take(MAX_ATTESTATION_CANDIDATES) {
         if scan.bytes_read >= byte_budget {
-            // The other truncation, reported the same way and for the same
-            // reason: the partial result carries the bytes that were spent
-            // getting it, and the bound that ended it.
             tracing::debug!("`.att` sidecar scan stopped: the cross-candidate byte budget is spent");
             scan.stop.get_or_insert(ScanStop::ByteBudget);
             break;
@@ -314,9 +180,7 @@ async fn read_attestation_sidecar_manifest(
         .await
         {
             Ok(Some(found)) => scan.matches.push(found),
-            // A narrowing miss: this layer is sound, it simply is not the
-            // document that was asked for. Records no refusal, so a scan that
-            // finds only these still reports not-found.
+            // A narrowing miss records no refusal, so a scan of only these still reports not-found.
             Ok(None) => {}
             Err(reason) => scan.refused.push(RefusedCandidate {
                 referrer_digest: layer.digest.clone(),
@@ -327,22 +191,10 @@ async fn read_attestation_sidecar_manifest(
     Ok(scan)
 }
 
-/// Pull one DSSE envelope under [`MAX_ATTESTATION_ENVELOPE_BYTES`], charging
-/// `bytes_read` for what the attempt actually cost.
+/// Pull one DSSE envelope under [`MAX_ATTESTATION_ENVELOPE_BYTES`], charging `bytes_read` for what the attempt cost.
 ///
-/// The declared descriptor size is untrusted, so it is only a cheap pre-fetch
-/// reject; the read itself is bounded independently (CWE-400).
-///
-/// # What each outcome costs
-///
-/// The two refusals above the fetch are decided from the descriptor alone,
-/// before a connection is opened, so they are charged **nothing** — the shape
-/// [`super::pipeline`] uses at both of its own capped pulls. Charging the cap for
-/// them would be CWE-400 in reverse: two zero-cost descriptors (a negative size,
-/// an unparseable digest) would exhaust a 64 MiB run budget for free and let a
-/// hostile registry truncate the scan without serving a byte. A refusal *past*
-/// the fetch is charged the cap, because the bounded read stops at cap + 1
-/// rather than at zero.
+/// The declared size is untrusted, so the read is bounded independently (CWE-400). The descriptor-only refusals charge
+/// nothing, or two zero-cost descriptors could exhaust the run budget; a refusal past the fetch charges the cap.
 async fn pull_envelope(
     transport: &dyn OciTransport,
     image: &native::Reference,
@@ -367,8 +219,9 @@ async fn pull_envelope(
 
 /// Verify one `.att` layer against `subject_digest`.
 ///
-/// `Ok(None)` is the narrowing miss — a sound attestation of another
-/// predicateType — and is the one outcome that is neither a match nor a defect.
+/// `Ok(None)` is the narrowing miss: a sound attestation of another predicateType. Keyless carries a Fulcio leaf plus
+/// an offline Rekor bundle annotation; keyless with no transparency material is refused unless
+/// `--allow-unlogged-signature` (see [`verify_keyless`]).
 async fn verify_layer(
     layer: &Descriptor,
     envelope_bytes: &[u8],
@@ -379,14 +232,8 @@ async fn verify_layer(
 ) -> Result<Option<SidecarAttestation>, VerifyErrorKind> {
     let layer_digest = Digest::try_from(layer.digest.as_str()).map_err(|_| VerifyErrorKind::BundleParseFailed)?;
 
-    // Rows 3, 8 and 16 — the payload-type check, the one-signature rule and the
-    // decoded-payload cap — all belong to this parser, not to a second copy of
-    // them here.
     let envelope = DsseEnvelope::parse(envelope_bytes)?;
-    // Unreachable rather than a check: `DsseEnvelope::parse` refuses every
-    // signature count but exactly one (`MultipleSignatures { count }`), so this
-    // is the defensive floor the bundle path's key arm keeps for the same
-    // reason — there is no second source of signature bytes to fall back on.
+    // Unreachable: `DsseEnvelope::parse` refuses any signature count but one; a defensive floor.
     let signature = envelope
         .signatures
         .first()
@@ -394,19 +241,10 @@ async fn verify_layer(
         .sig
         .clone();
 
-    // OCX's own structural checks run BEFORE anything else, exactly as the
-    // simplesigning door's `check_claim` does, and for two reasons neither of
-    // which is style. A layer that should be an `Ok(None)` narrowing miss under
-    // `--type X` must not be able to land in `refused` instead: a registry
-    // could otherwise flip `attestation_not_found` into `bundle_parse_failed`
-    // or `rekor_set_invalid` by corrupting the annotation of a document nobody
-    // asked for (S-017). And a layer bound to *another* subject must not cost a
-    // Rekor public-key resolution before it is refused.
-    //
-    // The bundle built here carries no verification material — none is needed,
-    // `verify_envelope` reads only the envelope — so the keyless work below
-    // rebuilds it once the material is in hand.
+    // No verification material yet: `verify_envelope` reads only the envelope.
     let structural = sidecar_bundle(&envelope, None, &signature)?;
+    // Structural checks run first: a narrowing miss must not land in `refused`, or a registry could flip
+    // `attestation_not_found` into a hard error by corrupting a document nobody asked for.
     let verified = match dsse::verify_envelope(&structural, subject_digest, predicate_type) {
         Ok(verified) => verified,
         Err(VerifyErrorKind::PredicateTypeMismatch { .. }) if predicate_type.is_some() => return Ok(None),
@@ -414,22 +252,15 @@ async fn verify_layer(
     };
 
     let signer = match layer_certificate(layer)? {
-        // The keyless material is gathered BEFORE the bundle it travels in is
-        // built, because the entry that bundle carries must hold the log's own
-        // `integratedTime`: `sigstore` anchors both its chain build and its
-        // certificate-expiry check on that field, so the certificate's own
-        // `notBefore` there would have the library judge the certificate
-        // against its own answer (`super::signing_instant`).
+        // Gather keyless material before building the bundle: its entry must hold the log's `integratedTime`, or `sigstore`
+        // judges the certificate against its own `notBefore` (`super::signing_instant`).
         Some(leaf_der) => {
             let keyless = gather_keyless(layer, leaf_der, verify).await?;
             let bundle = sidecar_bundle(&envelope, Some(&keyless), &signature)?;
             verify_keyless(keyless, subject_bytes, bundle, verify, &verified).await?
         }
-        // Key mode. The PAE, never the bare payload: a signature checked over
-        // the payload alone is forgeable across payload types, which is DSSE's
-        // whole reason for the encoding. `DsseEnvelope::parse` already refused
-        // any `payloadType` but this one, so the constant is the envelope's own
-        // declared type and not an assumption.
+        // Key mode verifies the PAE, never the bare payload, which is forgeable across payload types.
+        // `DsseEnvelope::parse` refused any other `payloadType`, so the constant is the envelope's own.
         None => {
             let pae = pae(DSSE_PAYLOAD_TYPE, &verified.attestation.payload);
             let matched = identity::matching_key_policies(&pae, &signature, verify.policies)?;
@@ -438,6 +269,7 @@ async fn verify_layer(
                 key_backend: KeyBackendKind::File,
                 certificate_identity: None,
                 certificate_oidc_issuer: None,
+                // A key signature's trust is a committed key, not a signing instant, so this arm never reads the bundle annotation.
                 logged: None,
             }
         }
@@ -451,36 +283,27 @@ async fn verify_layer(
                 key_backend: signer.key_backend,
                 certificate_identity: signer.certificate_identity,
                 certificate_oidc_issuer: signer.certificate_oidc_issuer,
-                // Only ever from an entry whose SET verified against the log's own
-                // key and whose logged body was bound to this envelope. `None` is
-                // the key-mode arm and the `--allow-unlogged-signature` arm, where
-                // nothing proved a signing time and reporting one would invent it.
+                // Only from an entry whose SET verified and whose body is bound to this envelope; `None` otherwise, since
+                // nothing proved a signing time.
                 signed_at: signer
                     .logged
                     .as_ref()
                     .and_then(|entry| u64::try_from(entry.integrated_time()).ok()),
                 signature_format: SignatureFormat::Simplesigning,
                 discovery_method: DiscoveryMethod::SidecarTag,
-                // The *annotation's* index, and only after `logged_entry` verified
-                // it. The entry `sidecar_bundle` synthesises for `sigstore`'s
-                // `CheckedBundle` carries `log_index: 0` and is never checked, so
-                // its index must never reach here — it would name a log position
-                // nothing proved and key the caller's dedup on a constant.
+                // The verified annotation's index only: the synthesised entry's unchecked `log_index: 0` would key the
+                // caller's dedup on a constant.
                 rekor_log_index: signer.logged.as_ref().map(LoggedEntry::log_index),
             },
-            // The DSSE signature this layer carried, kept beside the result so
-            // the caller's dedup key has the material it falls back on whenever
-            // no transparency-log index was credited — the key-mode arm, which
-            // is every `.att` sidecar cosign v3.1.1 writes.
+            // Kept for the dedup key's fallback when no log index was credited.
             signature,
         },
         attestation: verified.attestation,
     }))
 }
 
-/// The facts the two key models establish differently — the `.att` twin of the
-/// split both other doors keep, so a swap of two adjacent `Option<String>`s
-/// cannot type-check silently.
+/// The facts the two key models establish differently, typed so a swap of two adjacent `Option<String>`s cannot
+/// type-check silently.
 #[derive(Debug)]
 struct VerifiedSigner {
     key_backend: KeyBackendKind,
@@ -490,45 +313,32 @@ struct VerifiedSigner {
     logged: Option<LoggedEntry>,
 }
 
-/// Everything the keyless arm needs, read once and in one place.
+/// Everything the keyless arm needs, read once.
 ///
-/// It exists because the transparency entry has to be in hand *before* the
-/// bundle is built — [`Self::anchor`] is what the synthesised entry carries —
-/// while the leaf, the chain and the parsed certificate are all read from the
-/// same annotations in the same pass. Threading four values through
-/// [`sidecar_bundle`] and [`verify_keyless`] separately is the missing type
-/// ARCH-01 names.
+/// The log entry must be in hand before the bundle is built, because [`Self::anchor`] is what the synthesised entry
+/// carries.
 struct KeylessMaterial {
     /// The leaf certificate annotation, as DER.
     leaf_der: Vec<u8>,
-    /// The same leaf, parsed once: the window check, the identity read-back and
-    /// the bundle's PEM all use it, so a second parse could only disagree.
+    /// The same leaf, parsed once so the window check, identity read-back and bundle PEM cannot disagree.
     cert: x509_cert::Certificate,
     /// The intermediate chain annotation as DER, empty when absent.
     chain_ders: Vec<Vec<u8>>,
     /// The verified transparency-log entry, when the layer carried one.
     logged: Option<LoggedEntry>,
-    /// The instant the synthesised entry carries, and therefore the one
-    /// `sigstore` anchors its chain build and its certificate-expiry check on:
-    /// the entry's own `integratedTime` whenever one exists.
+    /// The instant `sigstore` anchors its chain build and expiry check on: the entry's `integratedTime` when one exists.
     ///
-    /// Under `--allow-unlogged-signature` there is no entry, `sigstore` still
-    /// demands one to hold a bundle together, and the leaf's own `notBefore`
-    /// stands in — which makes that library check vacuous. That vacuity is
-    /// precisely what the opt-out buys, is reachable no other way, and is why
-    /// this is a bare `i64` rather than a [`SigningInstant`]: the type exists to
-    /// stop a value nothing proved from being *called* a signing instant.
+    /// Under `--allow-unlogged-signature` the leaf's `notBefore` stands in, making that check vacuous by the opt-out's
+    /// design; hence a bare `i64`, since a [`SigningInstant`] must never name a value nothing proved.
     anchor: i64,
 }
 
-/// Read one keyless `.att` layer's annotations, and its log entry with them.
+/// Read one keyless `.att` layer's annotations and its log entry; there is no online Rekor lookup.
 ///
 /// # Errors
 ///
-/// [`VerifyErrorKind::CertChainInvalid`] when the leaf or the chain annotation
-/// does not parse, plus everything [`logged_entry`] refuses: a malformed
-/// annotation, a SET that does not hold, or a log key that can be neither
-/// pinned nor fetched.
+/// [`VerifyErrorKind::CertChainInvalid`] when the leaf or chain annotation does not parse, plus everything
+/// [`logged_entry`] refuses.
 async fn gather_keyless(
     layer: &Descriptor,
     leaf_der: Vec<u8>,
@@ -537,8 +347,7 @@ async fn gather_keyless(
     let cert = parse_certificate(&leaf_der)?;
     let chain_ders = layer_chain(layer)?;
     let logged = logged_entry(layer, verify).await?;
-    // Read the sibling's identical fold: the entry's own instant whenever one
-    // exists, and only otherwise the leaf's `notBefore`.
+    // The sibling door's fold: the entry's instant, else the leaf's `notBefore`.
     let anchor = logged.as_ref().map_or_else(
         || i64::try_from(cert.tbs_certificate.validity.not_before.to_unix_duration().as_secs()).unwrap_or(i64::MAX),
         LoggedEntry::integrated_time,
@@ -552,41 +361,14 @@ async fn gather_keyless(
     })
 }
 
-/// The full keyless gate over an annotation certificate.
+/// The full keyless gate over an annotation certificate; nothing is relaxed for arriving in annotations.
 ///
-/// Chain, SCT and the DSSE signature are `sigstore`'s, reached through the same
-/// [`Verifier`](sigstore::bundle::verify::Verifier) the bundle path uses;
-/// identity and issuer are [`matching_policies`]; the `builder` pin is
-/// [`dsse::enforce_builder_pin`], the same call both bundle-path arms and this
-/// module's own key arm make; the logged body is bound by
-/// [`dsse::verify_tlog_binding`]; and the certificate-validity window is
-/// [`tlog::verify_integrated_time_within_certificate`], anchored on the log
-/// entry's `integratedTime`. Nothing is relaxed because the material arrived in
-/// annotations rather than in a bundle blob.
+/// Chain, SCT and signature are `sigstore`'s [`Verifier`](sigstore::bundle::verify::Verifier); identity and issuer are
+/// [`matching_policies`]; the `builder` pin is [`dsse::enforce_builder_pin`]; the body binding is
+/// [`dsse::verify_tlog_binding`]; the window is [`tlog::verify_integrated_time_within_certificate`].
 ///
-/// # Transparency-log evidence is required, and the ordering says why
-///
-/// `logged` is `None` when the layer carried no [`ANNOTATION_COSIGN_BUNDLE`]
-/// annotation. A keyless signature with nothing in the transparency log has no
-/// provable signing instant: its Fulcio leaf lived about ten minutes and expired
-/// long before anyone verifies, so *when* it was used is the only question that
-/// separates a live signature from a stale certificate replayed for ever.
-/// Without an entry the refusal is [`VerifyErrorKind::SignatureInvalid`] — the
-/// signature could not be established, which is what 65 says — unless
-/// `allow_unlogged` was passed.
-///
-/// That refusal comes **last**, after chain, SCT, signature, identity and the
-/// `builder` pin, and deliberately: an attestation signed by the wrong identity
-/// must still report `identity_mismatch`, which is the more actionable verdict
-/// and the one an operator can fix. Only an artifact that is right in every
-/// other respect gets told the thing that is missing is the log entry.
-///
-/// The ordering claim is about the **missing-entry** refusal and only it. A
-/// layer carrying an annotation that is malformed, whose base64 or SET does not
-/// hold, or whose log key cannot be resolved is judged by [`logged_entry`] in
-/// [`gather_keyless`], before this function is entered at all.
-///
-/// [`ANNOTATION_COSIGN_BUNDLE`]: ocx_oci::referrer::media_types::ANNOTATION_COSIGN_BUNDLE
+/// With no log entry a replayed ten-minute Fulcio leaf would verify for ever, so that is refused as
+/// [`VerifyErrorKind::SignatureInvalid`] unless `allow_unlogged`.
 async fn verify_keyless(
     keyless: KeylessMaterial,
     subject_bytes: &[u8],
@@ -598,16 +380,9 @@ async fn verify_keyless(
         leaf_der, cert, logged, ..
     } = keyless;
 
-    // `verify` over the subject bytes, not `verify_digest`: the digest variant
-    // takes `sigstore`'s own `sha2::Sha256` value and that crate resolves a
-    // different `sha2` semver line than `ocx_lib` does. Handing it the subject
-    // slice has it compute the same SHA-256 internally — which for DSSE content
-    // is compared against the Statement's own subject digest, closing the
-    // cross-subject splice a second time.
-    //
-    // `offline: true` because the entry, when there is one, arrived in the
-    // annotation and was checked by `logged_entry` before this call; see
-    // `sidecar_bundle` for what the synthesised entry does and does not decide.
+    // `verify` over the subject bytes, not `verify_digest`, which takes `sigstore`'s `sha2` type from a different semver
+    // line; the digest is compared against the Statement's subject, closing the cross-subject splice. `offline: true`
+    // because `logged_entry` already checked the entry.
     if let Err(error) = verify
         .verifier
         .verify(subject_bytes, bundle, &PolicyDeferredToOcx, true)
@@ -616,58 +391,32 @@ async fn verify_keyless(
         return Err(map_verification_error(error));
     }
 
-    // Identity + issuer against the resolved trust policies (ANY-of), read back
-    // off the leaf that just passed the chain, the SCT and the signature. The
-    // matched subset, not a boolean: the `builder` pin below is ANDed within a
-    // policy and ORed across the set, so it is decided from the policies this
-    // certificate actually satisfied.
+    // The matched subset, not a boolean: the `builder` pin is decided from the policies this certificate satisfied.
     let matched = matching_policies(&leaf_der, verify.policies)?;
 
-    // #103, on the arm that carries SLSA provenance most often. Discarding the
-    // matched set here — which this module did — left a `builder`-pinned trust
-    // policy silently unenforced for a keyless `.att`, while the key arm beside
-    // it and both bundle-path arms enforced it.
+    // Enforced here too, or a `builder`-pinned policy is silently unenforced for a keyless `.att`.
     dsse::enforce_builder_pin(&matched, &verified.attestation)?;
 
     match logged.as_ref() {
+        // The bundle path's binder judges this body; its `verifier` PEM is not compared, since no round trip guarantees
+        // cosign's exact bytes.
         Some(entry) => {
-            // The binding, and it runs HERE rather than beside the SET check
-            // that produced this entry. Both orders refuse a tampered
-            // signature — every check has to pass — but only this one refuses
-            // it as `signature_invalid`. Checked beside the SET, a flipped
-            // envelope signature would report a tlog binding mismatch, which
-            // points at the log for a fault that is entirely in the bytes
-            // beside it. What reaches this line is a signature that already
-            // verified under a chained, SCT-checked, identity-matched
-            // certificate, so a mismatch here really is a spliced entry.
-            //
-            // The bundle path's own binder, not a second copy: the body is the
-            // same `dsse:0.0.1` shape `oci::sign::rekor`'s `dsse_proposal_body`
-            // uploads, and its `verifier` field is deliberately not compared —
-            // that would mean re-deriving byte-for-byte the PEM cosign uploaded,
-            // which no round trip guarantees, and it buys nothing (the
-            // certificate is independently chained, SCT-checked and
-            // identity-matched, and the Statement is bound to the subject).
+            // Bind here, after the certificate checks, so a tampered signature reports `signature_invalid` rather than a
+            // tlog mismatch that blames the log.
             dsse::verify_tlog_binding(entry.body(), &verified.attestation.payload, &verified.signatures)?;
-            // Row 13 (CVE-2024-55655), re-asserted here as it is on both other
-            // doors, and now against real evidence: the entry's
-            // `integratedTime`, SET-checked and, one line above, bound to this
-            // envelope.
+            // Re-asserted as on both other doors (CVE-2024-55655), against the SET-checked, bound `integratedTime`.
             tlog::verify_integrated_time_within_certificate(
                 SigningInstant::TransparencyLog(entry.integrated_time()),
                 &cert,
             )?;
         }
-        // The opt-out. The window check is SKIPPED rather than fed the
-        // certificate's own `notBefore`: a check that asks the certificate when
-        // it was valid and then judges the certificate against that answer can
-        // never fail, and a call that can never fail reads as a gate while being
-        // none. The caller said they accept a signature nothing timestamps.
+        // The opt-out skips the window check: fed the leaf's own `notBefore` it could never fail.
         None if verify.allow_unlogged => {
             tracing::debug!(
                 "accepting a keyless `.att` sidecar with no transparency-log evidence (--allow-unlogged-signature)"
             );
         }
+        // Refused last, so a wrong-identity attestation still reports `identity_mismatch`, the verdict an operator can fix.
         None => return Err(VerifyErrorKind::SignatureInvalid),
     }
 
@@ -679,39 +428,12 @@ async fn verify_keyless(
     })
 }
 
-/// The Sigstore bundle an `.att` layer's material describes.
+/// The Sigstore bundle an `.att` layer describes, so the keyless gate is the code the bundle path runs. Under a key it
+/// carries no verification material, only the envelope for the structural check.
 ///
-/// Built so the keyless gate is **the same code** the bundle path runs rather
-/// than a second implementation of chain building and SCT verification, exactly
-/// as [`super::simplesigning_read`]'s twin is — and so the structural half
-/// ([`dsse::verify_envelope`]) has the one input shape it takes.
-///
-/// Under a key there is no verification material to build: nothing on that arm
-/// is handed to `sigstore`, and the bundle exists only to carry the envelope to
-/// the structural check.
-///
-/// # The transparency-log entry, and what it does and does not decide
-///
-/// `sigstore`'s `CheckedBundle` requires exactly one entry, so one is supplied:
-/// the Rekor `dsse` v0.0.1 body this envelope *would* be logged under, derived
-/// from the envelope and the certificate. Its *body* is not evidence and is
-/// never treated as any — the inclusion promise is empty, `sigstore` 0.14
-/// verifies neither the SET nor the Merkle proof, and its only consumer is that
-/// library's consistency comparison against the same four values it re-derives.
-/// The **real** entry, the one the layer's `dev.sigstore.cosign/bundle`
-/// annotation carried, is SET-checked by [`logged_entry`] and bound to this
-/// envelope by [`dsse::verify_tlog_binding`]; keeping the synthesised body here
-/// rather than substituting the logged one is deliberate, because feeding
-/// `sigstore` the log's body would compare a `verifier` PEM byte-for-byte
-/// against a round-tripped one, which nothing guarantees.
-///
-/// What the synthesised entry *does* decide is time. [`KeylessMaterial::anchor`]
-/// becomes its `integrated_time`, and `sigstore` anchors both its chain build
-/// and its certificate-expiry check on that field — so the anchor is the logged
-/// `integratedTime` whenever there is one, and the leaf's own `notBefore` only
-/// under `--allow-unlogged-signature`, where that library check is vacuous by
-/// construction. Passing `notBefore` unconditionally, as this module once did,
-/// made it vacuous always: a ten-minute Fulcio leaf verified for ever.
+/// `CheckedBundle` requires exactly one tlog entry, so one is synthesised; its body is never evidence, since `sigstore`
+/// 0.14 verifies neither the SET nor the Merkle proof. The real entry is SET-checked by [`logged_entry`] and bound by
+/// [`dsse::verify_tlog_binding`].
 fn sidecar_bundle(
     envelope: &DsseEnvelope,
     keyless: Option<&KeylessMaterial>,
@@ -737,11 +459,9 @@ fn sidecar_bundle(
                 .cert
                 .to_pem(x509_cert::der::pem::LineEnding::LF)
                 .map_err(|_| VerifyErrorKind::CertChainInvalid)?;
-            // The exact bytes `CheckedBundle` hashes for `envelopeHash`:
-            // `serde_json::to_vec` over the same protobuf value it will
-            // serialize itself, so the two agree by construction rather than by
-            // a transcribed field order.
+            // The exact bytes `CheckedBundle` hashes for `envelopeHash`, serialized from the same protobuf value.
             let envelope_json = serde_json::to_vec(&proto).map_err(|e| VerifyErrorKind::Internal(Box::new(e)))?;
+            // Keep the synthesised body: the log's would compare a `verifier` PEM byte-for-byte against a round-tripped one.
             let body = serde_json::json!({
                 "kind": "dsse",
                 "apiVersion": "0.0.1",
@@ -776,6 +496,8 @@ fn sidecar_bundle(
                     log_index: 0,
                     log_id: None,
                     kind_version: None,
+                    // Passing `notBefore` unconditionally would make `sigstore`'s expiry check vacuous: a ten-minute Fulcio leaf
+                    // verified for ever.
                     integrated_time: keyless.anchor,
                     inclusion_promise: Some(InclusionPromise {
                         signed_entry_timestamp: Vec::new(),
@@ -791,8 +513,7 @@ fn sidecar_bundle(
     };
 
     Ok(Bundle {
-        // The 0.1 profile: the one whose structural check an entry with no
-        // Merkle proof satisfies, which is the shape a sidecar has.
+        // The 0.1 profile: its structural check accepts an entry with no Merkle proof, the shape a sidecar has.
         media_type: SIGSTORE_BUNDLE_V01_MEDIA_TYPE.to_owned(),
         verification_material,
         content: Some(bundle::Content::DsseEnvelope(proto)),

@@ -18,8 +18,7 @@ pub struct PackageReceiptCommand {
 
 impl PackageReceiptCommand {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // The single-bundle twin of `push`/`test`'s layer-list resolution: one
-        // path, so an unparseable one is a usage error rather than "no receipt".
+        // An unparseable bundle path is an error here, not "no receipt".
         let path = crate::conventions::infer_receipt_file(&self.bundle)?;
         match crate::build_receipt::read(&path).await? {
             Some(receipt) => {

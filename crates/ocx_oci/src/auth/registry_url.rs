@@ -1,36 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Registry URL canonicalization shared by read (auth.rs) and write (auth/store.rs) paths.
-//!
-//! Both paths MUST go through `canonicalize_registry` so a credential written under
-//! key `"ghcr.io"` by `ocx login https://ghcr.io/v1/` is found by a subsequent read
-//! for `ghcr.io`. Single source of truth — prevents drift between the
-//! (upstream-crate-owned) read path and the (in-house) write path.
+//! Registry URL canonicalization; the credential read and write paths must both use it, or a stored login is
+//! never found.
 
-/// Canonicalize a user-supplied registry argument into the key form used by
-/// `~/.docker/config.json` `auths` / `credHelpers` / `credsStore` lookups.
+/// Canonicalize a registry argument into the `~/.docker/config.json` key form.
 ///
-/// Algorithm (matches `docker/cli/cli/command/registry/login.go::normalizeRegistry`):
-/// 1. Strip leading `http://` or `https://` scheme.
-/// 2. Strip trailing `/v\d+/?` API-version suffix.
-/// 3. Strip trailing `/`.
-/// 4. Special case: `docker.io` and `index.docker.io` → `https://index.docker.io/v1/`
-///    (preserved for round-trip with `docker login`).
+/// Matches docker's `normalizeRegistry`, including the `https://index.docker.io/v1/` key for Docker Hub.
 pub fn canonicalize_registry(input: &str) -> String {
-    // 1. Strip leading scheme.
     let stripped = input
         .strip_prefix("https://")
         .or_else(|| input.strip_prefix("http://"))
         .unwrap_or(input);
 
-    // 2. Strip trailing /vN or /vN/.
     let trimmed = strip_trailing_api_version(stripped);
 
-    // 3. Strip trailing /.
     let trimmed = trimmed.trim_end_matches('/');
 
-    // 4. Special-case the docker.io aliases for round-trip with `docker login`.
     if trimmed == "docker.io" || trimmed == "index.docker.io" {
         return "https://index.docker.io/v1/".to_string();
     }
@@ -40,7 +26,6 @@ pub fn canonicalize_registry(input: &str) -> String {
 
 /// Strip a trailing `/vN` or `/vN/` segment where N is one or more digits.
 fn strip_trailing_api_version(s: &str) -> &str {
-    // Walk backwards: optionally consume trailing '/', then digits, then 'v', then '/'.
     let bytes = s.as_bytes();
     let mut end = bytes.len();
     if end == 0 {
@@ -55,7 +40,6 @@ fn strip_trailing_api_version(s: &str) -> &str {
         cursor -= 1;
     }
     if cursor == digits_end {
-        // No digits — not a /vN suffix.
         return s;
     }
     if cursor == 0 || bytes[cursor - 1] != b'v' {

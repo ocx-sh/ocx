@@ -1,19 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Result envelope for `ocx package test --script`.
-//!
-//! Reported through the existing global `--format json|plain` path
-//! (`Printable` + `Api::report`) — same as every other command, NOT a parallel
-//! reporting path. The exit code remains the PRIMARY machine signal (R3); this
-//! JSON envelope is the structured detail emitted alongside, not a substitute.
-//!
-//! Plain format: short human status line(s) on stdout.
-//!
-//! JSON format: `{"status": "...", "assertion": {...}|null, "run": {...}|null}`
-//! on stdout. The envelope FIELDS are stable v1 contract; only the exact
-//! human-readable *prose* of an assertion-failure message is non-stable
-//! (tooling parses fields, never prose).
+//! Result envelope for `ocx package test --script`, detail beside the exit code, which stays the
+//! primary signal. Its fields are a stable contract; an assertion message's prose is not.
 
 use serde::Serialize;
 
@@ -113,13 +102,11 @@ pub struct ScriptRunReport {
 }
 
 impl ScriptRunReport {
-    /// Builds the envelope from its parts.
     pub fn new(status: ScriptStatus, assertion: Option<AssertionRecord>, run: Option<RunSummary>) -> Self {
         Self { status, assertion, run }
     }
 
-    /// Builds the envelope from an engine-neutral [`ScriptOutcome`] plus the
-    /// surfaced terminal `ocx.run` result (if any).
+    /// Builds the envelope from a [`ScriptOutcome`] plus the terminal `ocx.run` result, if any.
     pub fn from_outcome(outcome: &ocx_script::ScriptOutcome, run: Option<ocx_script::RunSummary>) -> Self {
         use ocx_script::ScriptOutcomeKind as K;
         let (status, assertion) = match &outcome.kind {
@@ -131,11 +118,7 @@ impl ScriptRunReport {
             } => (
                 ScriptStatus::Failed,
                 Some(AssertionRecord {
-                    // Plan C5 stable contract: the failing `expect.*` (or
-                    // `fail()`) identity, surfaced verbatim so tooling can
-                    // branch on *which* assertion failed without parsing the
-                    // (non-stable) prose message. `None` (unattributable
-                    // terminal error such as a stack overflow) → `unknown`.
+                    // Stable: tooling branches on which assertion failed; unattributable is `unknown`.
                     kind: kind.map_or("unknown", |k| k.as_str()).to_string(),
                     message: message.clone(),
                     location: location.as_ref().map(SourceLocation::from),
@@ -166,7 +149,6 @@ impl ScriptRunReport {
                 }),
             ),
             K::Timeout => (ScriptStatus::Timeout, None),
-            // `ScriptOutcomeKind` is `#[non_exhaustive]` — unknown → failed.
             _ => (ScriptStatus::Failed, None),
         };
         let run = run.map(|r| RunSummary {
@@ -182,7 +164,6 @@ impl ScriptRunReport {
 
 impl Printable for ScriptRunReport {
     fn print_plain(&self, data: &ocx_console::DataInterface) {
-        // Single-table rule: one table, status + detail columns.
         let status = match self.status {
             ScriptStatus::Passed => "passed",
             ScriptStatus::Failed => "failed",
@@ -203,10 +184,10 @@ impl Printable for ScriptRunReport {
 mod tests {
     use super::*;
 
-    // ── ScriptRunReport — STABLE JSON envelope shape (C6 / R3 / U21 / U22) ───
+    // ── ScriptRunReport — STABLE JSON envelope shape ────────────────────────
     //
-    // Spec source: plan_package_test_scripting.md C6 "R3 — result envelope is
-    // Printable" + U21/U22 + script_run.rs module doc. The contract is the
+    // Spec source: `adr_package_test_scripting.md` ("result envelope is
+    // Printable") + the script_run.rs module doc. The contract is the
     // FIELD SHAPE: top-level `status` / `assertion` / `run`, the
     // `AssertionRecord` `{kind, message}` shape, and `RunSummary` fields. The
     // exact human-readable assertion *prose* is explicitly NON-stable and is

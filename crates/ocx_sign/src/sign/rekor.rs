@@ -3,14 +3,7 @@
 
 //! Rekor v1 transparency-log client — `POST /api/v1/log/entries`.
 //!
-//! Uploads a `hashedrekord:0.0.1` entry for the signature and returns the log
-//! entry plus its Signed Entry Timestamp (SET). Rekor v2 (RFC 3161 TSA) is not
-//! supported — deferred to #107 pending a sigstore-rs v2 client
-//! (`research_sigstore_rs_spike.md`).
-//!
-//! The wire calls are hand-rolled (`reqwest`); nothing about the *verification*
-//! format is ours — the SET and the Merkle proof are checked by `sigstore-rs`
-//! (`oci::verify::tlog`).
+//! Rekor v2 is not supported: ocx-sh/ocx#107.
 
 use std::collections::BTreeMap;
 
@@ -25,19 +18,12 @@ use crate::attest::TLOG_KIND_WRITTEN;
 pub(super) struct RekorEntry {
     pub(super) log_index: u64,
     pub(super) integrated_time: u64,
-    /// Hex-encoded Rekor log identifier (SHA-256 of the log's public key).
     pub(super) log_id: String,
-    /// The Signed Entry Timestamp (raw signature bytes).
     pub(super) signed_entry_timestamp: Vec<u8>,
-    /// The canonicalized log-entry body **as Rekor persisted it** — the `body`
-    /// field of the log-entry response, not the proposal bytes we uploaded.
-    /// Rekor re-canonicalizes the entry it stores, so the two differ in key
-    /// order; the SET is signed over, and the Merkle leaf hashed from, Rekor's
-    /// bytes. Embedded in the bundle's `canonicalizedBody`.
+    /// The log-entry body as Rekor persisted it, never our proposal bytes: Rekor
+    /// re-canonicalizes, and the SET and Merkle leaf cover its bytes.
     pub(super) canonicalized_body: Vec<u8>,
-    /// The Merkle inclusion proof and its signed checkpoint, when the log
-    /// returned one inline. Rekor v1 does for an integrated entry; a log that
-    /// omits it leaves the bundle with the SET as its only evidence.
+    /// The Merkle inclusion proof, when the log returned one inline.
     pub(super) inclusion_proof: Option<RekorInclusionProof>,
 }
 
@@ -45,8 +31,6 @@ pub(super) struct RekorEntry {
 pub(super) struct RekorClient {
     url: Url,
 }
-
-// ── hashedrekord proposal (uploaded body) ────────────────────────────────────
 
 #[derive(Serialize)]
 struct HashedRekordProposal<'a> {
@@ -85,8 +69,6 @@ struct RekorHash<'a> {
     value: &'a str,
 }
 
-// ── dsse proposal (uploaded body) ────────────────────────────────────────────
-
 #[derive(Serialize)]
 struct DsseProposal<'a> {
     kind: &'a str,
@@ -103,20 +85,13 @@ struct DsseSpec<'a> {
 
 #[derive(Serialize)]
 struct DsseProposedContent<'a> {
-    /// The envelope as a JSON *string*, not a nested object — `dsse:0.0.1`
-    /// takes the stringified envelope so the log hashes exactly the bytes the
-    /// signer produced.
+    /// A JSON string, not a nested object: the log hashes exactly the bytes the signer produced.
     envelope: &'a str,
-    /// A fixed-size array rather than a `Vec`: cosign uploads exactly one
-    /// verifier (the leaf PEM), and the type is where that is said.
     verifiers: [String; 1],
 }
 
-// ── Rekor v1 response (subset) ───────────────────────────────────────────────
-
 #[derive(Deserialize)]
 struct RekorLogEntry {
-    /// Base64 of the canonical entry body Rekor persisted.
     body: String,
     #[serde(rename = "logIndex")]
     log_index: u64,
@@ -131,8 +106,6 @@ struct RekorLogEntry {
 struct RekorVerification {
     #[serde(rename = "signedEntryTimestamp")]
     signed_entry_timestamp: String,
-    /// Deserialized into `sigstore-rs`'s own API struct so the hex and Signed
-    /// Note decoding stays that crate's code all the way to verification.
     #[serde(rename = "inclusionProof")]
     inclusion_proof: Option<RekorInclusionProof>,
 }
@@ -142,12 +115,8 @@ impl RekorClient {
         Self { url }
     }
 
-    /// Upload a `hashedrekord` entry for `signature` over `payload_digest_hex`,
+    /// Upload a `hashedrekord` entry for `signature_der` over `payload_digest_hex` (lowercase hex SHA-256),
     /// returning the log entry + SET.
-    ///
-    /// `signature_der` is the DER-encoded ECDSA signature; `cert_pem` is the
-    /// leaf certificate PEM; `payload_digest_hex` is the lowercase hex of the
-    /// SHA-256 subject digest.
     pub(super) async fn upload_entry(
         &self,
         signature_der: &[u8],
@@ -181,30 +150,17 @@ impl RekorClient {
 
     /// Upload a `dsse:0.0.1` entry for `envelope_json`, returning the log entry.
     ///
-    /// `envelope_json` is the exact serialized DSSE envelope handed to the log
-    /// — the same bytes the sign-side `envelopeHash` self-check runs over,
-    /// never a re-serialization of a parsed envelope. `leaf_pem` is the Fulcio
-    /// leaf certificate, uploaded as the entry's single verifier.
-    ///
-    /// The returned `canonicalized_body` is the server's, verbatim; the sign
-    /// side never reconstructs one locally.
+    /// `envelope_json` must be the exact serialized envelope, never a re-serialization of a parsed one.
     pub(super) async fn upload_dsse_entry(
         &self,
         envelope_json: &[u8],
         leaf_pem: &str,
     ) -> Result<RekorEntry, SignErrorKind> {
-        // `proposedContent.envelope` is a JSON *string*, so the bytes have to
-        // be text. They always are — this side serialized them — which is why
-        // the failure arm is `Internal` rather than a wire error.
         let envelope = std::str::from_utf8(envelope_json).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
         self.post_proposal(dsse_proposal_body(envelope, leaf_pem)?).await
     }
 
     /// POST a proposed entry and decode the log's answer.
-    ///
-    /// Shared by both entry kinds: the endpoint, the status classification and
-    /// the capped read are properties of the Rekor API, not of what is being
-    /// logged, and a second copy would be a second place for them to drift.
     async fn post_proposal(&self, body: Vec<u8>) -> Result<RekorEntry, SignErrorKind> {
         let endpoint = self
             .url
@@ -223,8 +179,7 @@ impl RekorClient {
             return Err(classify_upload_status(status));
         }
 
-        // Capped: a log entry is kilobytes, and nothing in the Rekor API bounds
-        // what the endpoint actually returns.
+        // Capped: nothing in the Rekor API bounds what the endpoint returns.
         let raw = ocx_oci::endpoint::read_body_capped(response)
             .await
             .ok_or(SignErrorKind::RekorSetMalformed)?;
@@ -233,10 +188,6 @@ impl RekorClient {
 }
 
 /// The `dsse:0.0.1` proposed-entry body for `envelope_json` and `leaf_pem`.
-///
-/// Split out of [`RekorClient::upload_dsse_entry`] because the exact field
-/// spelling is the part of this entry kind that a round trip cannot check
-/// cheaply and a typo in silently changes what the log records (ARCH-12).
 fn dsse_proposal_body(envelope_json: &str, leaf_pem: &str) -> Result<Vec<u8>, SignErrorKind> {
     use base64::Engine as _;
     let (kind, api_version) = TLOG_KIND_WRITTEN;
@@ -256,15 +207,7 @@ fn dsse_proposal_body(envelope_json: &str, leaf_pem: &str) -> Result<Vec<u8>, Si
 
 /// Which failure a non-2xx upload response is.
 ///
-/// The two outcomes carry different exit codes and opposite remediations —
-/// `TransparencyLogUnavailable` is exit 83 and means retry, `RekorSetMalformed` is exit
-/// 65 and means file a bug — so classifying a throttle as a malformed request
-/// tells an operator to report a bug for a log that was merely busy. 429 is
-/// grouped with 5xx deliberately: it is not a server error by status class,
-/// but it is the same "come back later" for the caller.
-///
-/// Split out of [`RekorClient::upload_entry`] so the classification is
-/// reachable without an HTTP round trip (ARCH-12).
+/// 429 groups with 5xx as retryable, or a throttled log sends the operator to file a bug.
 fn classify_upload_status(status: reqwest::StatusCode) -> SignErrorKind {
     if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         SignErrorKind::TransparencyLogUnavailable
@@ -273,28 +216,18 @@ fn classify_upload_status(status: reqwest::StatusCode) -> SignErrorKind {
     }
 }
 
-/// Decode a Rekor `POST /api/v1/log/entries` body into the entry it describes.
-///
-/// Every failure here is `RekorSetMalformed` rather than `TransparencyLogUnavailable`:
-/// the log answered 2xx, so it is reachable, and what came back is unusable.
-///
-/// Split out of [`RekorClient::upload_entry`] so the decoding is reachable
-/// from a test over already-fetched bytes (ARCH-12) — the base64 arms are
-/// otherwise only exercised by a live log that never emits them.
+/// Decode a Rekor upload response; every failure is `RekorSetMalformed`, as the log answered 2xx.
 fn parse_upload_response(raw: &[u8]) -> Result<RekorEntry, SignErrorKind> {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD;
 
     let entries: BTreeMap<String, RekorLogEntry> =
         serde_json::from_slice(raw).map_err(|_| SignErrorKind::RekorSetMalformed)?;
-    // The response is a map keyed by entry UUID and we uploaded exactly one, so
-    // the first value is that entry. An empty map is a 2xx that recorded
-    // nothing — unusable, not retryable.
+    // Keyed by entry UUID; we uploaded one, and an empty map recorded nothing.
     let entry = entries.into_values().next().ok_or(SignErrorKind::RekorSetMalformed)?;
     let set = b64
         .decode(entry.verification.signed_entry_timestamp.as_bytes())
         .map_err(|_| SignErrorKind::RekorSetMalformed)?;
-    // Rekor's own bytes, never ours — see `RekorEntry::canonicalized_body`.
     let canonicalized_body = b64
         .decode(entry.body.as_bytes())
         .map_err(|_| SignErrorKind::RekorSetMalformed)?;

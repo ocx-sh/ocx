@@ -33,49 +33,7 @@ pub use toolchain_store::{
     DEFAULT_SHELL, TREE_OWN_DEPTH1_NAMES, ToolchainHome, ToolchainPathComponent, ToolchainPathError, ToolchainStore,
 };
 
-/// Root layout of the local OCX data directory.
-///
-/// `FileStructure` is a thin composite that provides typed, well-named access
-/// to ten top-level stores:
-///
-/// - **`blobs`**    — content-addressed raw blob store
-/// - **`layers`**   — content-addressed extracted layer store
-/// - **`packages`** — content-addressed package store (content, metadata, refs)
-/// - **`index`**    — self-contained index collection at the default machine-local
-///   home (`index/`), reached through
-///   `IndexStore::machine_local`
-///   rather than owned as a field (the index sits above the store in the crate
-///   map): a first-class store sibling to `blobs/`/`layers/`/`packages/`,
-///   one index per source — `<source>/{config.json,c/,p/}` holding the hosted
-///   wire grammar (root documents + dispatch-object CAS, A2) plus a flat
-///   opaque-blob CAS for content that is not a package manifest (config
-///   blobs, managed-config payloads). Redirected wholesale by `--index` /
-///   `OCX_INDEX` at the CLI seam (`adr_index_indirection.md` A1)
-/// - **`symlinks`** — install symlinks (candidate / current)
-/// - **`state`**    — persistent runtime state (update-check timestamps, etc.)
-/// - **`temp`**     — temporary staging directories for in-progress downloads
-/// - **`shim_bin`** — content-addressed store for the embedded `ocx-shim`
-///   executable blob (`.bin/ocx-shim/`), hardlinked by every generated
-///   Windows launcher; outside the GC graph, never walked by `ocx clean`
-///   (see the `shim_bin_store` module docs)
-/// - **`shims`** — identity-keyed store for generated shim directories
-///   (`shims/`), the on-disk form of a deferred tool: launchers under `bin/`,
-///   with `digest` and `refs/` as siblings. Unlike the three CAS tiers the
-///   repository IS part of its path, and its GC liveness is rooted directly in
-///   the lock pins (see the `shim_store` module docs)
-/// - **`toolchain`** — the global rendered toolchain home (`toolchain/`):
-///   launcher trampolines under `shells/default/bin` and one
-///   `links/<group>/<entry>` directory link per locked tool. Outside the GC graph, never walked by `ocx clean`,
-///   and a wrapper over one `ToolchainHome` so the global tier and a project
-///   tier share one grammar (see the `toolchain_store` module docs)
-///
-/// plus one non-store path:
-///
-/// - **`locks`**    — machine-global cross-process lock directory
-///   (`$OCX_HOME/locks`); sharded, content-keyed advisory lock files, outside
-///   the GC graph, kept out of the (possibly redirected/read-only) index home
-///
-/// Default root: `~/.ocx` (resolved via [`ocx_config::home::default_ocx_root`]).
+/// Root layout of the local OCX data directory; the index lives in `IndexStore`, above this crate.
 #[derive(Debug, Clone)]
 pub struct FileStructure {
     root: std::path::PathBuf,
@@ -85,35 +43,13 @@ pub struct FileStructure {
     pub symlinks: SymlinkStore,
     pub state: StateStore,
     pub temp: TempStore,
-    /// Content-addressed store for the embedded `ocx-shim` executable blob
-    /// (`$OCX_HOME/.bin/ocx-shim/`), hardlinked by every generated Windows
-    /// entrypoint launcher. Outside the three GC tiers — never walked by
-    /// `ocx clean` (plan decision D4). See the `shim_bin_store` module docs.
+    /// Outside the GC tiers — never walked by `ocx clean`.
     pub shim_bin: ShimBinStore,
-    /// Identity-keyed store for generated shim directories
-    /// (`$OCX_HOME/shims/`) — the on-disk form of a deferred tool. Keyed by
-    /// registry + repository + digest (the repository IS in the path, unlike
-    /// [`PackageStore`]), with launchers under `bin/`. Walked by `ocx clean`,
-    /// but rooted directly in the lock pins rather than reachable from a
-    /// package. See the `shim_store` module docs.
+    /// Deferred tools; walked by `ocx clean`, rooted in the lock pins rather than reachable from a package.
     pub shims: ShimStore,
-    /// The **global** rendered toolchain home (`$OCX_HOME/toolchain/`) —
-    /// launcher trampolines under `shells/default/bin`,
-    /// `links/<group>/<entry>` directory links to package roots, the `active`
-    /// link that puts them on `PATH`, and the `.gitignore` that hides the tree
-    /// (C-001).
-    /// Outside the three GC tiers, never walked by `ocx clean`, exactly as
-    /// [`ShimBinStore`] is. A project's home is the same grammar at a
-    /// different root and is deliberately NOT a field here: it depends on
-    /// which project is in scope, so it is resolved per call by
-    /// `resolve_toolchain_home`
-    /// (C-002). See the `toolchain_store` module docs.
+    /// The global toolchain home; outside the GC tiers — never walked by `ocx clean`.
     pub toolchain: ToolchainStore,
-    /// Machine-global cross-process lock directory (`$OCX_HOME/locks`). Not a
-    /// CAS store and never in the GC graph — sharded, content-keyed advisory
-    /// lock files written by [`ocx_util::fs::lock_scoped`]. Kept out of
-    /// the index home so a redirected (`--index`) or read-only shipped index
-    /// copy never accumulates lock litter.
+    /// Cross-process lock directory; outside the index home so a redirected or read-only index gathers no lock files.
     pub locks: std::path::PathBuf,
 }
 
@@ -140,37 +76,19 @@ impl FileStructure {
             symlinks: SymlinkStore::new(root.join("symlinks")),
             state: StateStore::new(root.join("state")),
             temp: TempStore::new(root.join("temp")),
-            // `.bin/ocx-shim/` — a sibling namespace to the three CAS tiers
-            // above, not nested under any of them; see the `shim_bin_store`
-            // module docs for why it stays outside the GC graph.
             shim_bin: ShimBinStore::new(root.join(".bin").join("ocx-shim")),
-            // `shims/` — a sibling namespace to the three CAS tiers, holding
-            // the deferred form of a tool. Present exactly when the matching
-            // `packages/` entry is absent.
             shims: ShimStore::new(root.join("shims")),
-            // `toolchain/` — the global rendered home. A sibling namespace to
-            // the three CAS tiers, built once here so no caller re-derives the
-            // tree location by a literal join (C-001).
             toolchain: ToolchainStore::new(root.join("toolchain")),
             locks,
             root,
         }
     }
 
-    /// Returns the root directory of this file structure (e.g., `~/.ocx`).
     pub fn root(&self) -> &std::path::Path {
         &self.root
     }
 
-    /// Machine-local path holding the patch-descriptor discovery state
-    /// (the `__ocx.patch` three-state record — a `BTreeMap<String, String>`
-    /// tag→digest map) for `identifier`.
-    ///
-    /// Layout: `{root}/state/patch-descriptors/{registry_slug}/{repo}.json`.
-    /// This is a per-machine cache of "did we look for a patch descriptor at
-    /// this (registry, repo) pair", NOT the committed reproducibility index
-    /// snapshot — so it lives under `state/`, never in the redirectable index
-    /// home, and never carries `--index` / `OCX_INDEX` redirection.
+    /// Machine-local patch-descriptor discovery state for `identifier`; never follows `--index` redirection.
     pub fn patch_descriptor_path(&self, identifier: &ocx_oci::PackageRef) -> PathBuf {
         self.root
             .join("state")
@@ -180,17 +98,9 @@ impl FileStructure {
             .with_added_extension("json")
     }
 
-    /// Machine-local path holding the patch tier's own companion pins for
-    /// `identifier`'s repository — a `BTreeMap<String, String>` tag→digest map
-    /// recording the top (image-index) digest each companion tag was last
-    /// resolved to.
+    /// Machine-local companion pins for `identifier`'s repository; never follows `--index` redirection.
     ///
-    /// Layout: `{root}/state/patch-companions/{registry_slug}/{repo}.json`.
-    /// A companion is a package the user never named, so its tag→digest
-    /// binding is patch-tier state and must never become a package-tier pin in
-    /// the local index (`subsystem-oci`: a pin moves only when named). Like
-    /// [`patch_descriptor_path`](Self::patch_descriptor_path) it lives under
-    /// `state/` and never carries `--index` / `OCX_INDEX` redirection.
+    /// Kept out of the local index: a companion was never named, so writing it there would move a package-tier pin.
     pub fn patch_companion_path(&self, identifier: &ocx_oci::PackageRef) -> PathBuf {
         self.root
             .join("state")
@@ -200,19 +110,9 @@ impl FileStructure {
             .with_added_extension("json")
     }
 
-    /// `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin` — the directory the
-    /// installed `ocx` itself resolves from.
+    /// The directory the installed `ocx` itself resolves from.
     ///
-    /// Derived from the symlink store and [`ocx_oci::ocx_cli_identifier`], never
-    /// joined from a literal: the identifier honours the `__OCX_SELF_IMAGE` seam,
-    /// so a hand-spelled `ocx.sh/ocx/cli` would be right on a developer machine and
-    /// wrong under every test that moves it.
-    ///
-    /// It lives here rather than beside `ocx self setup`, which writes it: this
-    /// is a derivation over [`Self::symlinks`]' own layout, and the three tiers
-    /// that read it — the session PATH fingerprint, the launcher generator and
-    /// the per-prompt activation sequencer — all sit *below* the installer, so
-    /// asking it for the path was the one edge that pointed upward at `setup`.
+    /// Derived from [`ocx_oci::ocx_cli_identifier`], never a literal, or `__OCX_SELF_IMAGE` stops moving it under test.
     pub fn ocx_install_bin_path(&self) -> PathBuf {
         self.symlinks
             .current(&ocx_oci::ocx_cli_identifier())
@@ -225,26 +125,16 @@ use std::path::PathBuf;
 
 use ocx_util::prelude::StringExt;
 
-/// Convert an OCI identifier component (registry, repository, tag) into a
-/// filesystem-safe path segment using [`StringExt::to_relaxed_slug`].
+/// Converts an OCI identifier component into a filesystem-safe path segment.
 ///
-/// `pub` because it is not merely an internal detail: it is the key
-/// `IndexStore` addresses a source's subtree
-/// by, so two configured namespaces
-/// differing only in a non-`[a-zA-Z0-9._-]` character share one directory. A
-/// caller validating a source name against configuration has to compare on this
-/// form, or its verdict applies to a different subtree than the one written —
-/// see `ocx index regenerate`'s published-only guard.
+/// Lossy: a caller validating a source name must compare on this form, or its verdict applies to a different subtree.
 pub fn slugify(value: &str) -> String {
     value.to_relaxed_slug()
 }
 
 /// Converts an OCI repository name into a relative path with OS-native separators.
 ///
-/// Repository names can contain `/` for nested repos (e.g. `org/project/tool`).
-/// Each segment becomes a separate path component, ensuring native separators
-/// on all platforms — `PathBuf::join("a/b")` embeds the literal `/` which
-/// produces mixed separators on Windows.
+/// Split per segment: `PathBuf::join("a/b")` would leave mixed separators on Windows.
 pub fn repository_path(repository: &str) -> PathBuf {
     repository.split('/').collect()
 }

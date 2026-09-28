@@ -1,24 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! OCX's own layer around the delegated Sigstore verification of a DSSE
-//! attestation.
+//! OCX's own checks around the delegated Sigstore verification of a DSSE attestation (`adr_sbom_attestations.md §
+//! D-d`).
 //!
-//! Nothing here builds a certificate chain, checks an SCT, or verifies a
-//! signature — that is `verifier.verify(subject_bytes, bundle, …)` in
-//! [`super::pipeline`], which runs unchanged for both content modes. This
-//! module is defence in depth *around* that call, split by what each half
-//! needs (`adr_sbom_attestations.md` D-d):
-//!
-//! | Half | Runs | Why there |
-//! |---|---|---|
-//! | [`verify_envelope`] | **before** the delegated call | its precise error kinds are the ones a user sees; the delegated refusal becomes redundancy rather than the only report |
-//! | [`verify_tlog_binding`] | **after** the delegated call | it consumes log-entry material that call has already SET/Merkle-checked |
-//!
-//! It takes no verifying key. An earlier draft passed one, which implied this
-//! module *replaced* the delegated call rather than layering over it — the
-//! reading under which an attestation would silently lose the chain, SCT and
-//! validity-window checks `ocx package verify` already performs.
+//! No verifying key is taken here: chain, SCT and signature checks stay in `verifier.verify` ([`super::pipeline`]), or
+//! an attestation silently loses them.
+//! [`verify_envelope`] runs before that call so its precise refusals are what the user sees;
+//! [`verify_tlog_binding`] runs after it, because it consumes log material that call already SET/Merkle-checked.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -32,16 +21,13 @@ use crate::attest::{ACCEPTED_TLOG_KINDS, statement};
 use crate::verify::VerifyErrorKind;
 use ocx_oci::{Algorithm, Digest};
 
-/// One attestation that passed every check, carried forward to the report.
+/// One attestation that passed every check.
 ///
-/// The payload and the predicate travel as the bytes that were signed, never a
-/// re-serialization (checklist row 2): `ocx package sbom --output` writes
-/// [`Self::predicate`] verbatim, so what reaches the user is what the publisher
-/// signed.
+/// Payload and predicate are the signed bytes, never re-serialized: `ocx package sbom --output` writes
+/// [`Self::predicate`] verbatim.
 #[derive(Debug, Clone)]
 pub struct VerifiedAttestation {
-    /// predicateType read from the **signed** payload, never an annotation
-    /// (checklist row 7 / CVE-2022-35929).
+    /// predicateType read from the **signed** payload, never an annotation (CVE-2022-35929).
     pub predicate_type: String,
     /// The decoded in-toto Statement bytes the signature covers.
     pub payload: Vec<u8>,
@@ -51,53 +37,32 @@ pub struct VerifiedAttestation {
     pub subject_digest: Digest,
 }
 
-/// [`verify_envelope`]'s output: the attestation, plus what the tlog half needs.
-///
-/// The signatures travel separately because `verifier.verify` takes the bundle
-/// **by value** — by the time [`verify_tlog_binding`] runs, the envelope they
-/// came from no longer exists.
+/// [`verify_envelope`]'s output; the signatures travel separately because `verifier.verify` consumes the bundle before
+/// [`verify_tlog_binding`] runs.
 pub(super) struct VerifiedEnvelope {
-    /// The verified attestation, as the report DTO consumes it.
     pub attestation: VerifiedAttestation,
     /// The envelope's signatures, exactly as received.
     pub signatures: Vec<DsseSignature>,
 }
 
-/// The structural half: everything provable without a verifying key.
-///
-/// Runs **before** the delegated call. Rows 3, 8 and 16 live in
-/// [`DsseEnvelope::parse`] and row 18 in
-/// [`crate::attest::statement::parse`]; this function is what surrounds
-/// them — the caps custody, the subject binding (rows 4–6), and the
-/// predicateType comparison (row 7).
+/// The structural half: everything provable without a verifying key, run before the delegated call.
 ///
 /// # Errors
 ///
-/// Every refusal is one candidate's verdict, which the ANY-of scan merges:
-/// a non-DSSE bundle, a malformed or over-cap envelope, an unaccepted `_type`,
-/// a Statement that binds no subject or another artifact, or a signed
-/// predicateType other than the one requested.
+/// One candidate's verdict, merged by the ANY-of scan: a non-DSSE bundle, a malformed or over-cap envelope,
+/// an unaccepted `_type`, a Statement binding no subject or another artifact, or a signed predicateType other than the
+/// requested one.
 pub(super) fn verify_envelope(
     bundle: &Bundle,
     target_digest: &Digest,
     expected_predicate_type: Option<&PredicateType>,
 ) -> Result<VerifiedEnvelope, VerifyErrorKind> {
-    // The caller bounded the bundle blob's read (row 15) and the envelope
-    // travels inside it, so nothing here goes back to the wire for bytes.
     let Some(bundle::Content::DsseEnvelope(envelope)) = bundle.content.as_ref() else {
         return Err(VerifyErrorKind::NoUsableBundle);
     };
 
-    // Rows 3, 8 and 16 belong to `DsseEnvelope::parse`, which takes JSON; the
-    // bundle carries the same envelope already decoded into a protobuf
-    // message. Re-serializing through WP4's own `Serialize` impl and handing
-    // it back to that parser keeps one implementation of those rules — written
-    // a second time here, the two would diverge on the first fix.
-    //
-    // Lossless, and the impl matters: it always emits all three fields, where
-    // prost-reflect's `skip_default_fields` would drop an empty `payloadType`,
-    // which is precisely the case row 3 exists to refuse. `sigstore`'s own
-    // `CheckedBundle` does the identical `serde_json::to_vec(&dsse)`.
+    // Serialize through `DsseEnvelope`, not prost-reflect: `skip_default_fields` would drop an empty `payloadType` that
+    // `parse` must refuse.
     let envelope_json = serde_json::to_vec(&DsseEnvelope {
         payload: envelope.payload.clone(),
         payload_type: envelope.payload_type.clone(),
@@ -113,16 +78,10 @@ pub(super) fn verify_envelope(
     .map_err(|_| VerifyErrorKind::BundleParseFailed)?;
     let envelope = DsseEnvelope::parse(&envelope_json)?;
 
-    // Row 18 and rows 4/5/6, both delegated: the `_type` allowlist is
-    // `statement::parse`'s, the every-subject binding is `binds_subject`'s.
-    // This function is what surrounds them, not a second copy of them.
     let statement = statement::parse(&envelope.payload)?;
     statement::binds_subject(&statement, target_digest)?;
 
-    // Row 7 / CVE-2022-35929: read from the signed payload, never from an
-    // annotation. A requested type this Statement does not carry is a
-    // narrowing miss the caller turns into not-found (S-017) — the annotation
-    // direction is the caller's cross-check, and that one is a refusal.
+    // Compare against the signed payload, never an annotation (CVE-2022-35929).
     if let Some(expected) = expected_predicate_type
         && statement.predicate_type != expected.uri()
     {
@@ -143,19 +102,8 @@ pub(super) fn verify_envelope(
     })
 }
 
-/// The tlog half: checklist row 12, over the **received** bytes.
-///
-/// The canonicalized `dsse:0.0.1` body must commit to the signature actually
-/// presented, never to a payload hash alone — GHSA-8gw7-4j42-w388, regressed as
-/// CVE-2026-22703 in January 2026, which is why this stays OCX's own check
-/// rather than the library's.
-///
-/// `payloadHash` is `sha256` over the **decoded payload**, which is what rekor's
-/// `dsse:0.0.1` hashes. `envelopeHash` is deliberately **not** recomputed here
-/// (D-g): the delegated bundle verifier already reconstructs the envelope from
-/// the bundle's proto3 JSON (empty fields omitted — the sign side matches that
-/// spelling by contract) and fails closed on a mismatch, so a second
-/// reconstruction here would duplicate the same comparison.
+/// The tlog half: the log entry must commit to the **received** signature, not a payload hash alone
+/// (GHSA-8gw7-4j42-w388, regressed as CVE-2026-22703), so this stays OCX's own check.
 ///
 /// # Errors
 ///
@@ -168,10 +116,7 @@ pub(super) fn verify_tlog_binding(
     payload: &[u8],
     signatures: &[DsseSignature],
 ) -> Result<(), VerifyErrorKind> {
-    // Probe the kind before reading the spec: each kind canonicalizes its spec
-    // differently, so deserializing a `hashedrekord` body into the dsse shape
-    // would report a binding mismatch for what is really an unsupported entry
-    // kind — the wrong diagnosis, and the wrong remedy for whoever reads it.
+    // Probe the kind first, or a `hashedrekord` body reports a binding mismatch instead of an unsupported kind.
     let probe: TlogKind =
         serde_json::from_slice(canonicalized_body).map_err(|_| VerifyErrorKind::TlogBindingMismatch)?;
     if !ACCEPTED_TLOG_KINDS
@@ -187,18 +132,8 @@ pub(super) fn verify_tlog_binding(
     let body: TlogBody =
         serde_json::from_slice(canonicalized_body).map_err(|_| VerifyErrorKind::TlogBindingMismatch)?;
 
-    // `payloadHash` is sha256 over the DECODED payload — rekor's `dsse:0.0.1`
-    // rule. Hashing the PAE is `hashedrekord:0.0.2`'s rule, and comparing
-    // against that here would mean no genuine entry could ever match.
-    //
-    // `envelopeHash` is deliberately NOT recomputed here (D-g): the delegated
-    // bundle verifier reconstructs the envelope from proto3 JSON (empty fields
-    // omitted, which the sign side matches by contract) and fails closed on a
-    // mismatch, so recomputing it here would duplicate that comparison.
-    //
-    // Hex compared case-insensitively: it is a hash value, so the comparison
-    // stays injective on the bytes either way, and rekor's own casing is not
-    // something to fail closed on.
+    // sha256 over the DECODED payload, rekor's `dsse:0.0.1` rule; hashing the PAE instead would match no genuine entry.
+    // Case-insensitive, so rekor's hex casing never fails a genuine entry.
     let expected = Algorithm::Sha256.hash(payload);
     if !body.spec.payload_hash.algorithm.eq_ignore_ascii_case("sha256")
         || !body.spec.payload_hash.value.eq_ignore_ascii_case(expected.hex())
@@ -206,11 +141,8 @@ pub(super) fn verify_tlog_binding(
         return Err(VerifyErrorKind::TlogBindingMismatch);
     }
 
-    // GHSA-8gw7-4j42-w388, regressed as CVE-2026-22703: the entry must commit
-    // to the signature actually presented, not merely to its payload. Equal
-    // length as well as containment — a body naming an extra signature
-    // describes a two-signature envelope, which is not the one received, and
-    // `DsseEnvelope::parse` already refused that shape on the envelope side.
+    // Equal length as well as containment: a body naming an extra signature describes an envelope other than the
+    // received one.
     if body.spec.signatures.len() != signatures.len() {
         return Err(VerifyErrorKind::TlogBindingMismatch);
     }
@@ -227,27 +159,12 @@ pub(super) fn verify_tlog_binding(
     Ok(())
 }
 
-/// Whether this envelope carries cosign's **image-signature** Statement.
+/// Whether this envelope carries cosign v3's **image-signature** Statement
+/// ([`COSIGN_SIGN_PREDICATE_TYPE`][crate::attest::COSIGN_SIGN_PREDICATE_TYPE]).
 ///
-/// cosign v3 signs an image with a DSSE in-toto Statement whose predicate is
-/// empty and whose `predicateType` is
-/// [`COSIGN_SIGN_PREDICATE_TYPE`][crate::attest::COSIGN_SIGN_PREDICATE_TYPE],
-/// so the bundle's `content` oneof no longer separates a signature from an
-/// attestation — this predicateType is what does.
-///
-/// **Tolerant on purpose.** It decides which *question* a candidate answers,
-/// never whether the candidate is well-formed: an unreadable payload is simply
-/// "not an image signature", which routes it to the attestation question, where
-/// [`verify_envelope`] gives it the precise refusal it has earned. Answering
-/// "malformed" here would turn every broken attestation into a non-consuming
-/// skip and lose the report entirely.
-///
-/// The strict reading still happens — [`verify_envelope`] parses the same field
-/// through [`statement::parse`], with its `_type` allowlist — so this probe is
-/// a router, not the gate.
+/// Tolerant: an unreadable payload answers `false` and reaches [`verify_envelope`]'s precise refusal;
+/// answering "malformed" here would turn every broken attestation into a silent skip.
 pub(super) fn is_cosign_image_signature(envelope: &sigstore_protobuf_specs::io::intoto::Envelope) -> bool {
-    /// The one field the routing decision reads. Tolerant of everything else,
-    /// the same way [`TlogKind`] probes a rekor body before its spec.
     #[derive(Deserialize)]
     struct PredicateTypeProbe {
         #[serde(rename = "predicateType")]
@@ -258,7 +175,7 @@ pub(super) fn is_cosign_image_signature(envelope: &sigstore_protobuf_specs::io::
         .is_ok_and(|probe| probe.predicate_type == crate::attest::COSIGN_SIGN_PREDICATE_TYPE)
 }
 
-/// The `kind`/`apiVersion` probe, read before the spec (DATA-FMT-02's shape).
+/// The `kind`/`apiVersion` probe, read before the spec.
 #[derive(Deserialize)]
 struct TlogKind {
     kind: String,
@@ -266,10 +183,8 @@ struct TlogKind {
     api_version: String,
 }
 
-/// A rekor `dsse:0.0.1` canonicalized body, narrowed to what row 12 compares.
-///
-/// Tolerant by intent: rekor owns this format and may add fields, so unknown
-/// ones are ignored rather than refused. Nothing is re-serialized from it.
+/// A rekor `dsse:0.0.1` canonicalized body, narrowed to what the binding check compares.
+// No `deny_unknown_fields`: rekor owns this format, and a field it adds would fail every verify.
 #[derive(Deserialize)]
 struct TlogBody {
     spec: TlogSpec,
@@ -294,44 +209,23 @@ struct TlogSignature {
     signature: String,
 }
 
-/// Enforces a trust policy's `builder` pin against a verified attestation (#103).
+/// Enforces a trust policy's `builder` pin against a verified attestation; only SLSA provenance is checked.
 ///
-/// ANDed within a policy and ORed across the ANY-of set, so a matched policy
-/// carrying no pin leaves the set unconstrained — the weakening `system_locked`
-/// exists to contain (D-j).
-///
-/// Scoped to SLSA provenance: `builder` pins a *forward configuration* — which
-/// builder this policy will accept output from — and only provenance carries a
-/// builder identity to compare against. An SBOM or a custom predicate under a
-/// builder-pinned policy therefore passes the pin untouched rather than being
-/// refused for lacking a field its schema never had.
+/// ORed across the matched set, so one matched policy without a pin leaves the set unconstrained.
 ///
 /// # Errors
 ///
-/// [`VerifyErrorKind::BuilderMismatch`] when the predicate *is* provenance,
-/// every matched policy pins a builder, and the provenance names a different
-/// one or none that can be read. Within that scope a pin that cannot be
-/// evaluated is a refusal, never a skip: passing an unpinnable provenance is how
-/// a policy stops being a policy, and it is the v0.2-through-v1 schema hazard
-/// the refusal exists for.
+/// [`VerifyErrorKind::BuilderMismatch`] when the predicate is provenance, every matched policy pins a builder,
+/// and the provenance names another builder or none that can be read.
 pub(super) fn enforce_builder_pin(
     matched: &[&ocx_trust::CompiledPolicy],
     attestation: &VerifiedAttestation,
 ) -> Result<(), VerifyErrorKind> {
-    // Out of scope before anything is read: `builder` constrains where a build
-    // came from, so it has nothing to say about an SBOM or a custom predicate.
-    // Dispatched on the resolved URI, so a Statement spelling the provenance URI
-    // in full is provenance here too.
     let predicate_type = PredicateType::Uri(attestation.predicate_type.clone());
     if !predicate::is_provenance(&predicate_type) {
         return Ok(());
     }
 
-    // ORed across the matched set, so one satisfied policy satisfies the set —
-    // and a matched policy carrying no pin therefore satisfies it for free,
-    // leaving the set unconstrained. That weakening is the decision (D-j), and
-    // it is what `system_locked` exists to contain. An empty set falls out here
-    // too: nothing matched, nothing pinned, nothing to enforce.
     let mut pins = Vec::with_capacity(matched.len());
     for policy in matched {
         match policy.builder.as_deref() {
@@ -343,10 +237,6 @@ pub(super) fn enforce_builder_pin(
         return Ok(());
     };
 
-    // Read once, from the signed predicate. `builder_id` dispatches on the
-    // resolved provenance version — v0.2 and v1 share no path — so a v0.2-shaped
-    // body under a v1 `predicateType` reads as absent rather than matching a
-    // field the declared schema does not have.
     let predicate: serde_json::Value =
         serde_json::from_str(attestation.predicate.get()).map_err(|_| VerifyErrorKind::BundleParseFailed)?;
     let found = predicate::builder_id(&predicate_type, &predicate);
@@ -357,11 +247,7 @@ pub(super) fn enforce_builder_pin(
         return Ok(());
     }
 
-    // A pin that cannot be evaluated is a refusal, never a skip: silently
-    // passing an unpinnable provenance is how a policy stops being a policy.
-    // `found: None` is provenance carrying no readable `builder.id` — including
-    // a body whose shape belongs to the other schema version, which is the
-    // v0.2-through-v1 hazard this refusal exists for.
+    // An unreadable `builder.id` (incl. a v0.2 body under a v1 type) refuses, never skips, or the pin stops binding.
     Err(VerifyErrorKind::BuilderMismatch {
         expected: (*first).to_owned(),
         found: found.map(str::to_owned),

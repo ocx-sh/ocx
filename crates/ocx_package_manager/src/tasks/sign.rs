@@ -3,15 +3,7 @@
 
 //! `sign_one` — package-manager task that signs a single target manifest.
 //!
-//! Wraps [`ocx_sign::sign::SignPipeline`] (C-S1-3 pipeline with injection
-//! seams) in the three-layer error model: the client / index come from the
-//! [`PackageManager`] facade, the pipeline's [`SignResult`] becomes a
-//! [`SignReport`], and any failure is wrapped in a [`PackageError`] tagged with
-//! the target identifier.
-//!
-//! Per [`subsystem-package-manager.md`](../../../../../.claude/rules/subsystem-package-manager.md)
-//! and Spec A10 — tasks live in `package_manager/tasks/`; the aggregator is
-//! `package_manager/tasks.rs` (not `tasks/mod.rs`).
+//! See [`subsystem-package-manager.md`](../../../../../.claude/rules/subsystem-package-manager.md).
 
 use url::Url;
 use zeroize::Zeroizing;
@@ -30,85 +22,41 @@ use ocx_sign::sign::{
 
 use super::super::PackageManager;
 
-/// Options forwarded from the CLI to [`PackageManager::sign_one`].
-///
-/// `fulcio_url` / `rekor_url` are the validated Sigstore endpoints (C-S1-3
-/// injection seams — default to the public Fulcio/Rekor URLs, overridden by
-/// tests). The CLI performs SSRF validation at its boundary and hands over the
-/// parsed [`Url`]s.
-///
-/// `identity_token` is the precedence-resolved override token from the CLI
-/// layer (`--identity-token-file` > `--identity-token-stdin` > env), held under
-/// [`Zeroizing`] so the cleartext is scrubbed on drop. When `None`, the
-/// dispatching token provider falls back to ambient detection (GHA, GitLab,
-/// CircleCI, …) then optionally to a browser OAuth flow when `no_tty` is
-/// `false`. See C-S1-4.
-///
-/// `Clone` because a `--tags` / `--tags-file` sweep signs N references from one
-/// parsed option set, and every field is plain data — the token stays under
-/// [`Zeroizing`], so a clone is scrubbed on drop exactly like the original.
+/// Options forwarded from the CLI to [`PackageManager::sign_one`]; the caller SSRF-validates both URLs.
 #[derive(Clone)]
 pub struct SignOptions {
     /// Fulcio CA endpoint (validated by the CLI). Default: `https://fulcio.sigstore.dev`.
     pub fulcio_url: Url,
     /// Rekor transparency log endpoint (validated by the CLI). Default: `https://rekor.sigstore.dev`.
     pub rekor_url: Url,
-    /// OIDC override token (file / stdin / env, resolved by the CLI layer).
+    /// OIDC override token; `None` falls back to ambient CI detection, then a browser OAuth flow unless `no_tty`.
     pub identity_token: Option<Zeroizing<String>>,
     /// Bypass the referrers-capability cache for this invocation.
     pub no_cache: bool,
     /// When true, suppress the browser OAuth fallback (CI / headless).
     pub no_tty: bool,
-    /// Selects key mode. `None` is keyless — the default and the differentiator
-    /// (spec D10); key mode is added, never substituted.
+    /// Selects key mode; `None` is keyless.
     pub key: Option<ocx_trust::key_ref::KeyRef>,
-    /// Which wire shape(s) to write. `Bundle` by default (spec D8); `Both`
-    /// emits each, at the cost of a second Fulcio certificate and a second
-    /// Rekor entry.
+    /// Which wire shape(s) to write; `Both` costs a second Fulcio certificate and a second Rekor entry.
     pub format: ocx_sign::sign::SignatureFormat,
-    /// Whether a transparency-log entry is uploaded.
-    ///
-    /// Resolved by the CLI through `RekorUploadOpt::enabled`, which encodes the
-    /// asymmetry: keyless always uploads and `--no-rekor-upload` is an error
-    /// there; key mode is off unless opted in.
+    /// Whether a transparency-log entry is uploaded, resolved by the CLI through `RekorUploadOpt::enabled`.
     pub rekor_upload: bool,
 }
 
 /// Success payload returned by [`PackageManager::sign_one`].
-///
-/// Thin wrapper over [`SignResult`] so the package-manager layer owns the
-/// report type and the CLI `Printable` impl lives in `ocx_cli::api::data`.
 pub struct SignReport {
     /// Raw pipeline result (subject digest, referrer descriptor, cert identity).
     pub result: SignResult,
 }
 
 impl PackageManager {
-    /// Sign what `package` resolves to, publishing a Sigstore bundle v0.3
-    /// referrer manifest to the registry.
+    /// Sign what `package` resolves to, publishing a Sigstore referrer to the registry; a `Some` platform
+    /// narrows into an index and signs that child.
     ///
-    /// `platform` is a **narrowing modifier**, not a selector: `None` signs the
-    /// resolved object as-is (an image index is then the subject itself),
-    /// `Some` narrows into an index and signs that child. It is an error when
-    /// the resolution is a bare manifest.
+    /// # Errors
     ///
-    /// The pipeline is:
-    /// resolve subject digest → pre-check OIDC (keyless only) → obtain signing
-    /// material → sign → optional Rekor upload → bundle build → push bundle
-    /// blob → push referrer manifest, naming it in the OCI tag-schema fallback
-    /// index when the registry serves no Referrers API. Under
-    /// `--signature-format simplesigning|both` a second, independent signature
-    /// is written to the cosign `sha256-<hex>.sig` sidecar. Emits a
-    /// [`SignReport`] on success — one leg per shape, best-effort per leg.
-    ///
-    /// The registry client comes from the facade ([`require_client`][Self::require_client]);
-    /// signing requires network access, so an offline manager fails with
-    /// `OfflineMode` (exit 81). (`ocx package sign` refuses `--offline` earlier
-    /// with a dedicated policy error.)
-    ///
-    /// Returns [`PackageError`] tagged with `package` on any failure —
-    /// exit-code classification routes via
-    /// [`ocx_sign::sign::SignErrorKind`].
+    /// [`PackageError`] tagged with `package`, classified via [`ocx_sign::sign::SignErrorKind`]; an offline
+    /// manager fails with `OfflineMode` (exit 81).
     pub async fn sign_one(
         &self,
         package: &ocx_oci::PackageRef,
@@ -146,44 +94,20 @@ impl PackageManager {
     }
 }
 
-/// What a `--tags` / `--tags-file` sweep did to one tag.
-///
-/// Generic over the per-reference report so `sign` and `attest` sweep through
-/// one type rather than two identical ones — the outcome vocabulary is the
-/// spec's, and it is the same vocabulary for both verbs.
+/// What a `--tags` / `--tags-file` sweep did to one tag, generic over the `sign` or `attest` report.
 #[derive(Debug)]
 pub enum SweptOutcome<R> {
     /// The tag's index was signed (or attested); this is that run's report.
     Done(R),
-    /// The tag resolved to a bare manifest, so the sweep left it alone.
-    ///
-    /// Not a failure: `push` already signed each platform manifest inline, and
-    /// a tag list mixing single-platform and multi-platform packages is the
-    /// normal case for a repository that publishes both.
+    /// The tag resolved to a bare manifest, which `push` already signed; not a failure.
     SkippedBareManifest,
-    /// The tag names the index another tag in this same sweep already acted
-    /// on; the payload is that tag.
+    /// The tag names the index another tag in this sweep already acted on; the payload is that tag.
     ///
-    /// A signature — and an attestation — is a referrer of the **subject
-    /// digest**, never of the tag. A cascade release points several tags at one
-    /// index, so acting per tag files N identical referrers against one
-    /// subject, and a second sweep over that unchanged index files N more.
-    /// `ocx package verify` reads at most `MAX_SIGNATURE_CANDIDATES` (8) of
-    /// them, so re-sweeping a five-tag release stops verifying on the second
-    /// run. One referrer per distinct subject is what the in-process publish
-    /// path already writes; this makes the sweep agree with it. Signing
-    /// deliberately **appends** — a second identity's signature must be able to
-    /// join the first — so a re-sweep still adds one referrer per distinct
-    /// index. What it must never add is one per tag.
-    ///
-    /// Recorded only for a digest whose run **completed**: a tag whose pipeline
-    /// failed published nothing, so the next tag naming that index tries again
-    /// rather than reporting itself covered by a failure.
+    /// Acting per tag would file identical referrers, and past `MAX_SIGNATURE_CANDIDATES` (8) on one digest
+    /// `ocx package verify` stops finding them.
+    /// Recorded only for a completed run, so a tag after a failed one retries instead of reporting covered.
     CoveredBy(String),
-    /// This tag's own failure. The sweep records it and carries on to the rest.
-    ///
-    /// Boxed because `PackageError` dwarfs every other variant, and a sweep
-    /// holds one of these per tag.
+    /// This tag's own failure; the sweep records it and carries on.
     Failed(Box<PackageError>),
 }
 
@@ -192,41 +116,20 @@ pub enum SweptOutcome<R> {
 pub struct SweptTag<R> {
     /// The tag as the caller spelled it, so a report names what was asked for.
     pub tag: String,
-    /// What happened to it.
     pub outcome: SweptOutcome<R>,
 }
 
 impl PackageManager {
-    /// Sign the index each of `tags` resolves to, in the repository `package`
-    /// names.
+    /// Sign the index each of `tags` resolves to, in `package`.
     ///
-    /// This is the index sweep the spec's division of labour asks for: `push`
-    /// signed each platform manifest inline, and the enclosing index is only
-    /// final once the last platform has landed, so a later sweep signs the
-    /// index each recorded tag now points at. The manifests underneath are
-    /// already signed and are **not** revisited — nothing here narrows into an
-    /// index, which is why `--platform` is refused alongside `--tags`.
-    ///
-    /// **One signature per distinct subject digest, not per tag.** A cascade
-    /// release points `3`, `3.7`, `3.7.0` and `latest` at one index; tags after
-    /// the first to name a given digest are reported
-    /// [`CoveredBy`](SweptOutcome::CoveredBy) rather than signed again, so a
-    /// re-sweep costs one referrer rather than N.
-    ///
-    /// Never returns `Err`: a sweep's whole purpose is to survive a per-tag
-    /// failure, so every outcome — signed, skipped, failed — is a row in the
-    /// returned vector, in the order the tags were given. Aborting at the first
-    /// failure of twenty would leave the operator with no idea which of the
-    /// remaining nineteen succeeded. The caller decides the exit code from each
-    /// row's [`SweptOutcome`].
+    /// Never fails: every outcome is a row, in tag order, and the caller derives the exit code from the rows.
     pub async fn sign_tags(
         &self,
         package: &ocx_oci::PackageRef,
         tags: &[String],
         opts: &SignOptions,
     ) -> Vec<SweptTag<SignReport>> {
-        // Subject digest -> the tag whose run signed it. The sweep iterates
-        // tags but signs digests: see [`SweptOutcome::CoveredBy`].
+        // Subject digest -> the tag whose run signed it.
         let mut signed: HashMap<ocx_oci::Digest, String> = HashMap::new();
         let mut swept = Vec::with_capacity(tags.len());
         for tag in tags {
@@ -237,14 +140,6 @@ impl PackageManager {
                     log::warn!("Skipping '{identifier}': it resolves to a single manifest, which push already signed.");
                     SweptOutcome::SkippedBareManifest
                 }
-                // `None` for the platform, always: a sweep acts on the index
-                // itself, and clap refuses `--platform` alongside `--tags`.
-                //
-                // The resolution travels with it: this loop just asked the
-                // index chain what the tag names, and the pipeline would
-                // otherwise ask the identical question one call later (#373).
-                //
-                // `.cloned()` ends the borrow before the `None` arm inserts.
                 Ok(Some(resolved)) => match signed.get(&resolved.0).cloned() {
                     Some(first) => {
                         log::warn!(
@@ -270,29 +165,14 @@ impl PackageManager {
         swept
     }
 
-    /// The image index `identifier` resolves to — the only thing a sweep acts
-    /// on — or `None` when it resolves to a bare manifest and the sweep must
-    /// skip it.
+    /// The image index `identifier` resolves to, or `None` for a bare manifest.
     ///
-    /// Resolution goes through the index chain, the same route
-    /// [`resolve_platform_target`](ocx_sign::sign::pipeline::resolve_platform_target)
-    /// takes, so `--offline` and the mirror map answer here exactly as they do
-    /// one call later. The branch is on what resolution **returned**, never on
-    /// the reference's form: OCX supports bare-manifest tags, so a tag implies
-    /// nothing about the shape underneath it.
-    ///
-    /// The resolution is **returned, not discarded**, because the pipeline asks
-    /// the index the identical question about the identical identifier
-    /// immediately afterwards — a sweep that threw this answer away paid two
-    /// manifest fetches per tag (#373). Handing it on also closes the window
-    /// where a tag moved between the two calls and the sweep signed something
-    /// other than what it inspected.
+    /// Callers hand the answer on to the pipeline, or the tag can move between two resolutions and the
+    /// sweep signs something it never inspected.
     ///
     /// # Errors
     ///
-    /// The chain's own failure, and [`SignErrorKind::TargetNotFound`] when the
-    /// tag resolves to nothing — a tag naming no object is this tag's failure,
-    /// not a reason to skip it silently.
+    /// The chain's own failure, and [`SignErrorKind::TargetNotFound`] when the tag resolves to nothing.
     ///
     /// [`SignErrorKind::TargetNotFound`]: ocx_sign::sign::SignErrorKind::TargetNotFound
     pub(super) async fn resolve_swept_index(
@@ -321,25 +201,9 @@ impl PackageManager {
 }
 
 impl PackageManager {
-    /// Sign each platform manifest a push landed on, by digest.
+    /// Sign each platform manifest a push landed on, by digest; the index is [`sign_tags`](Self::sign_tags)'s job.
     ///
-    /// This is the other half of the spec's division of labour: `push` signs
-    /// the platform manifests inline because their digests are final the
-    /// moment they are pushed, while the enclosing index is only final once the
-    /// last platform has landed and is swept later by
-    /// [`sign_tags`](Self::sign_tags). The index is never signed here.
-    ///
-    /// `platforms` is a push outcome's `platform_digests` verbatim. Each
-    /// reference is **pinned to the recorded digest with the tag dropped**, so
-    /// the signature binds the immutable object the push wrote rather than
-    /// whatever the tag resolves to now — `push_manifest_and_merge_tags`
-    /// rewrites the tag's index on every platform merge, and a tagged
-    /// reference would re-resolve to it. `--platform` narrowing is `None` for
-    /// the same reason: the pinned reference already *is* the child, so there
-    /// is nothing left to narrow into.
-    ///
-    /// Never returns `Err`: like the tag sweep, every platform gets a row so a
-    /// caller learns which ones landed. The caller decides the exit code.
+    /// Never fails: every platform gets a row, and the caller derives the exit code from them.
     pub async fn sign_platforms(
         &self,
         package: &ocx_oci::PackageRef,
@@ -348,10 +212,8 @@ impl PackageManager {
     ) -> Vec<(ocx_oci::Platform, Result<SignReport, PackageError>)> {
         let mut signed = Vec::with_capacity(platforms.len());
         for (platform, digest) in platforms {
+            // Tag dropped: a later platform merge rewrites the tag's index, so a tagged reference re-resolves wrong.
             let pinned = package.clone_with_digest(digest.clone()).without_tag();
-            // `None`: nothing was pre-resolved here. The reference is already
-            // pinned to the digest the push wrote, so the pipeline's own
-            // resolution is the only one this path ever performs.
             let outcome = self.sign_one(&pinned, None, opts.clone(), None).await;
             signed.push((platform.clone(), outcome));
         }
@@ -359,18 +221,12 @@ impl PackageManager {
     }
 }
 
-/// Build the signer the options select: keyless by default, key mode under
-/// `--key`.
-///
-/// Shared with `attest_one`, which faces the identical choice — a second copy
-/// would be a second place for the Rekor-upload asymmetry to drift.
+/// Build the signer the options select: keyless by default, key mode under `--key`.
 ///
 /// # Errors
 ///
-/// The key backend's own error class when the key cannot be read or decrypted
-/// (see [`ocx_sign::sign::KeyBackendError`]), and
-/// [`SignErrorKind::UnsupportedKeyBackend`](ocx_sign::sign::SignErrorKind)
-/// for a recognised scheme with no implementation.
+/// The key backend's error when the key cannot be read or decrypted, and
+/// [`SignErrorKind::UnsupportedKeyBackend`](ocx_sign::sign::SignErrorKind) for a scheme with no implementation.
 pub(super) fn build_signer(
     key: Option<&ocx_trust::key_ref::KeyRef>,
     rekor_upload: bool,
@@ -379,10 +235,8 @@ pub(super) fn build_signer(
     let Some(key) = key else {
         return Ok(Box::new(KeylessSigner::new()));
     };
-    // One accessor per implemented scheme, and both are `Some` for exactly
-    // one: a reference that answers neither is a backend OCX has not built,
-    // and it is refused by name here rather than as "no such file or
-    // directory" — or, worse for `env://`, as a file named after a variable.
+    // A scheme neither accessor answers is refused by name, not as "no such file" (for `env://`,
+    // a file named after a variable).
     let backend = if let Some(path) = key.as_path() {
         PemKeyBackend::open(path)?
     } else if let Some(variable) = key.as_env_var() {
@@ -390,9 +244,8 @@ pub(super) fn build_signer(
     } else {
         return Err(ocx_sign::sign::KeyBackendError::Unsupported { scheme: key.scheme() }.into());
     };
-    // The URL travels only when it will be dialled, so the signer's own
-    // `uploads_to_transparency_log` cannot disagree with what the pipeline
-    // guards.
+    // The URL travels only when uploading, so the signer's `uploads_to_transparency_log` cannot
+    // disagree with the pipeline.
     let upload_to = rekor_upload.then(|| rekor_url.clone());
     Ok(Box::new(KeySigner::new(Arc::new(backend), upload_to)))
 }
@@ -578,7 +431,7 @@ mod tests {
         }
     }
 
-    /// **S-011 / C-040.** A `--tags` sweep of N tags resolves N times, not 2N.
+    /// A `--tags` sweep of N tags resolves N times, not 2N.
     ///
     /// The sweep asks the index chain what each tag names so it can skip bare
     /// manifests; the pipeline then asked the identical question about the

@@ -1,133 +1,78 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Site-tier patch registry configuration.
-//!
-//! Home for all `[patches]` settings. The patch tier is the execution-env twin
-//! of the mirror tier: where `[mirrors]` adapts *where bytes come from*,
-//! `[patches]` adapts *what environment a tool runs in* — layering
-//! operator-controlled companion packages (corp CA bundles, proxy/mirror URLs,
-//! license server endpoints) onto unmodified upstream packages.
-//!
-//! See `adr_infrastructure_patches.md` §"Configuration (`[patches]`)" and
-//! §"Config forwarding (C5)".
+//! Site-tier patch registry configuration (`[patches]`): operator companion packages layered
+//! onto unmodified upstream packages. See `adr_infrastructure_patches.md`.
 
 use serde::Deserialize;
 
+// No `deny_unknown_fields`, for the fleet forward-compat reason stated on `crate::Config`.
 /// Configuration for the `[patches]` tier.
 ///
-/// Structural twin of [`MirrorConfig`](crate::mirror::MirrorConfig) +
-/// re-exported from [`crate`] as `PatchConfig`. No
-/// `deny_unknown_fields` (forward compat with descriptor fields added by later
-/// phases).
-///
-/// All fields are `Option` so [`Default`] and tier merge work correctly; absent
-/// fields fall back to their defaults in [`resolve_patch_config`].
+/// Unknown keys are ignored, like in every other `config.toml` table.
 #[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
 pub struct PatchConfig {
     /// OCI registry hosting patch descriptors, e.g.
     /// `"internal.company.com/ocx-patches"`.
     ///
-    /// Required at resolve time; absent → `resolve_patch_config` returns `None`
-    /// (no patch tier configured).
+    /// Absent → no patch tier configured.
     pub registry: Option<String>,
 
-    /// Path-template for per-package patch repositories. Placeholders:
-    /// - `{registry}` — slugified (via [`to_relaxed_slug`]) registry portion of
-    ///   the base identifier's registry host.
-    /// - `{repository}` — the base identifier's repository path.
+    /// Path-template for per-package patch repositories. Default: `"{registry}/{repository}"`.
     ///
-    /// Default: `"{registry}/{repository}"`.
-    ///
-    /// The template always produces a two-or-more-segment sub-path, which never
-    /// collides with the reserved single-segment `global` repository that holds
-    /// the global descriptor (`<registry>/global:__ocx.patch`).
-    ///
-    /// [`to_relaxed_slug`]: ocx_util::string_ext::StringExt::to_relaxed_slug
+    /// Placeholders: `{registry}` — the base identifier's registry host, slugified (characters
+    /// outside `[a-zA-Z0-9._-]` become `_`); `{repository}` — the base identifier's repository path.
+    // The expansion must stay two-or-more segments, or it collides with the reserved single-segment
+    // `global` repository holding the global descriptor (`<registry>/global:__ocx.patch`).
     pub path: Option<String>,
 
     /// Fail posture when a matched companion is unavailable.
     ///
     /// - `true` (default) — fail closed: abort launch if a required companion
-    ///   cannot be resolved (C7 enforcement; a tool that runs without its CA
-    ///   overlay does TLS to untrusted endpoints, strictly worse than refusing).
+    ///   cannot be resolved.
     /// - `false` — fail open: skip with a warning (suitable for non-security
     ///   companions like a license-server URL or metrics endpoint).
+    // Default stays fail-closed: a tool run without its CA overlay does TLS to untrusted endpoints.
     pub required: Option<bool>,
 
-    /// Runtime provenance marker: this tier was declared at the SYSTEM config
-    /// scope (`/etc/ocx/config.toml`) AND declared `required = true`, so it is
-    /// NON-OVERRIDABLE by any lower tier (C7 enforcement).
-    ///
-    /// Never serialized — it is set by the loader via [`Self::lock_as_system`]
-    /// after parsing the system-scope file, not read from disk. A lower tier
-    /// (user / `$OCX_HOME` / `OCX_CONFIG` / `--config`) cannot remove the tier,
-    /// flip `required` to false, or redirect its registry/path while this flag
-    /// is set on the accumulator.
+    /// Set by the loader on a SYSTEM-scope tier whose effective `required` is true; no lower tier
+    /// can then remove, relax or redirect it.
     #[serde(skip)]
     #[schemars(skip)]
     pub system_locked: bool,
 }
 
-/// Fully resolved form of [`PatchConfig`] with defaults applied.
-///
-/// Produced by [`resolve_patch_config`]. Carried in
-/// [`OcxConfigView`](crate::env::OcxConfigView)(crate::env::OcxConfigView) and forwarded to child
-/// processes via [`crate::env::keys::OCX_PATCHES`] (JSON) so launchers apply
-/// the same patch tier (C5 across process boundaries).
+/// Fully resolved [`PatchConfig`], forwarded to child processes as
+/// [`crate::env::keys::OCX_PATCHES`] JSON so launchers apply the same patch tier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPatchConfig {
     /// The patch registry (e.g. `"internal.company.com/ocx-patches"`).
     pub registry: String,
 
-    /// The expanded path template with placeholder tokens (not yet expanded
-    /// against a specific identifier; expansion happens in
-    /// [`expand_patch_path`]).
+    /// The path template, not yet expanded (see [`expand_patch_path`]).
     pub path_template: String,
 
-    /// Whether missing companions fail closed (`true`) or warn-and-skip
-    /// (`false`).
+    /// Whether missing companions fail closed (`true`) or warn-and-skip (`false`).
     pub required: bool,
 
-    /// Whether this tier originates at the SYSTEM scope as a non-overridable
-    /// required tier (C7 enforcement).
-    ///
-    /// Distinct from [`Self::required`] (the fail posture): `system_required`
-    /// marks the non-overridable system origin and is what the per-package
-    /// no-patches opt-out exception keys on — a system-required tier still
-    /// applies even when a project opts a base out. Carried across the process
-    /// boundary in the `OCX_PATCHES` wire format so child launchers keep the
-    /// same C7 posture (C5).
+    /// Whether this is a non-overridable SYSTEM-scope required tier, which still applies to a
+    /// base a project opted out via `no-patches`.
     pub system_required: bool,
 
-    /// The forwarded project `no-patches` opt-out: canonical
-    /// `registry/repository` keys whose base gets NO companion overlay unless
-    /// the tier is system-required.
-    ///
-    /// Empty for a plain config-file tier — the opt-out is a project-toolchain
-    /// concern (`crate::project::ProjectConfig::no_patches_repositories`) that
-    /// only the command layer holds. `ocx exec` injects it into the forwarding
-    /// view so a generated launcher's re-entry (`ocx launcher exec`) honours the
-    /// same opt-out that suppressed the parent's exported vars — closing the gap
-    /// where the launcher re-injected an opted-out companion. Carried across the
-    /// process boundary in the `OCX_PATCHES` wire format (C5).
+    /// The project `no-patches` opt-out (canonical `registry/repository` keys), empty unless
+    /// `ocx exec` injects it, so a launcher re-entry does not re-inject an opted-out companion.
     pub no_patches: std::collections::BTreeSet<String>,
 }
 
-/// Error variants raised while resolving [`PatchConfig`] or expanding the path
-/// template.
+/// Error raised while resolving [`PatchConfig`] or decoding `OCX_PATCHES`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PatchConfigError {
-    /// The `registry` field is present but empty — a no-op patch tier that
-    /// would silently skip all companions (equivalent footgun to a mirror with
-    /// an empty `url`).
+    /// The `registry` field is present but empty, a no-op tier that would skip every companion.
     #[error("patch registry is empty")]
     EmptyRegistry,
 
-    /// The forwarded `OCX_PATCHES` env value was not valid JSON. A malformed
-    /// forwarded config is a hard error: silently dropping it would run entry
-    /// points without their operator-mandated companion env (violates C7).
+    /// The forwarded `OCX_PATCHES` value is not valid JSON.
     #[error("malformed OCX_PATCHES env value")]
     MalformedEnvJson {
         /// The underlying JSON parse failure.
@@ -135,53 +80,31 @@ pub enum PatchConfigError {
         source: serde_json::Error,
     },
 
-    /// The `OCX_PATCHES` value was valid JSON but the `registry` field is
-    /// absent or not a string. A value not produced by `encode_patches` is
-    /// treated as corrupted or externally injected — a hard error matching the
-    /// `MirrorConfigError::NonStringRoleValue`/`InvalidShape` precedent in
-    /// `config/mirror.rs`.
+    /// The `OCX_PATCHES` JSON has no string `registry`, so `encode_patches` did not produce it.
     #[error("OCX_PATCHES 'registry' field is absent or not a string")]
     MissingRegistryField,
 }
 
 impl PatchConfig {
-    /// Default path template, applied by [`resolve_patch_config`] when
-    /// `path` is absent.
+    /// Default path template when `path` is absent.
     pub const DEFAULT_PATH_TEMPLATE: &'static str = "{registry}/{repository}";
 
-    /// Default `required` value (fail-closed, C7).
+    /// Default `required` value (fail-closed).
     pub const DEFAULT_REQUIRED: bool = true;
 
-    /// Mark this tier as system-locked — non-overridable by lower tiers — when
-    /// it is `required` (the C7 default is `required = true`).
+    /// Mark this tier as system-locked when its effective `required` is true, explicit or defaulted.
     ///
-    /// Called by the config loader on the system-scope file
-    /// (`/etc/ocx/config.toml`) after parsing and before folding higher tiers
-    /// in. The lock fires when `required` resolves to true, which is the case
-    /// both when `required = true` is explicit AND when `required` is omitted
-    /// (it defaults to [`Self::DEFAULT_REQUIRED`] = `true`, fail-closed). A
-    /// system tier that explicitly opts out with `required = false` is NOT
-    /// locked: normal last-wins merge applies to it so a lower tier may still
-    /// override a non-enforced system patch.
-    ///
-    /// SECURITY (C7): keying the lock off the *effective* `required` (not the
-    /// literal `Some(true)`) closes the hole where a corporate
-    /// `/etc/ocx/config.toml` that just sets `registry = "…"` (relying on the
-    /// fail-closed default) could be suppressed or redirected by a user tier.
+    /// Keying on a literal `Some(true)` would let a user tier redirect a system file relying on the
+    /// fail-closed default.
     pub fn lock_as_system(&mut self) {
         if self.required.unwrap_or(Self::DEFAULT_REQUIRED) {
             self.system_locked = true;
         }
     }
 
-    /// Merge `other` into `self` field-by-field. `other`'s `Some` values
-    /// override `self`'s; `other`'s `None` values do not clobber `self`.
+    /// Merge `other` into `self`: `other`'s `Some` values win, unless `self` is system-locked.
     ///
-    /// A system-locked tier (`self.system_locked`) ignores ALL lower-tier
-    /// overrides (registry/path/required): a system-required `[patches]` tier is
-    /// non-overridable (C7 enforcement). The locked flag stays on `self`
-    /// (sticky). The loader folds the system tier in FIRST as the accumulator
-    /// base, so `self` is the system tier when locked.
+    /// The lock is not adopted from `other`: the loader folds the system tier first, as the base.
     pub fn merge(&mut self, other: PatchConfig) {
         if self.system_locked {
             return;
@@ -198,31 +121,19 @@ impl PatchConfig {
     }
 }
 
-/// Resolves the `[patches]` config into a [`ResolvedPatchConfig`], applying
-/// defaults and validating required fields.
-///
-/// Returns `None` when no `registry` is configured (no patch tier active) —
-/// matching the "patches are optional / opt-in" invariant. An **empty** registry
-/// string is a hard error (same footgun as a mirror with `url = ""`).
-///
-/// Mirrors [`resolve_mirror_map`](crate::mirror::resolve_mirror_map)
-/// in structure: owned by the config layer, called at `Context` construction,
-/// result passed down to consumers — no config reads inside leaf subsystems.
+/// Resolves `[patches]` with defaults applied; `None` when no `registry` is configured.
 ///
 /// # Errors
 ///
 /// Returns [`PatchConfigError::EmptyRegistry`] when `registry` is present but
 /// empty.
 pub fn resolve_patch_config(config: &crate::Config) -> Result<Option<ResolvedPatchConfig>, PatchConfigError> {
-    // No [patches] section or no registry configured → no patch tier active.
     let Some(patch_config) = config.patches.as_ref() else {
         return Ok(None);
     };
     let Some(registry) = patch_config.registry.as_ref() else {
         return Ok(None);
     };
-    // An empty registry is the same footgun as a mirror with url = "" — fail loud
-    // so the operator can fix the config rather than silently skipping all companions.
     if registry.is_empty() {
         return Err(PatchConfigError::EmptyRegistry);
     }
@@ -235,53 +146,22 @@ pub fn resolve_patch_config(config: &crate::Config) -> Result<Option<ResolvedPat
         registry: registry.clone(),
         path_template,
         required,
-        // Carry the system-origin marker into the resolved form: a tier locked
-        // by the loader (system scope + required=true) is non-overridable and
-        // the per-package opt-out exception keys on this flag.
         system_required: patch_config.system_locked,
-        // Empty at config-file resolve time: the opt-out is a project-toolchain
-        // concern threaded in by the command layer (see the struct field doc),
-        // not a `[patches]` config field.
         no_patches: std::collections::BTreeSet::new(),
     }))
 }
 
-/// Expands the path template for a given base identifier.
+/// Expands the path template: `{registry}` becomes the slugified host (`localhost:5000` →
+/// `localhost_5000`), `{repository}` the repository verbatim; never empty.
 ///
-/// Substitutes the `{registry}` and `{repository}` tokens from the canonical
-/// base identifier (e.g. `ghcr.io/acme/cli:v1`):
-///
-/// - `{registry}` — the registry host slugified via
-///   [`to_relaxed_slug`](ocx_util::string_ext::StringExt::to_relaxed_slug)
-///   (e.g. `"ghcr.io"` → `"ghcr.io"`, `"localhost:5000"` → `"localhost_5000"`).
-/// - `{repository}` — the repository path verbatim (e.g. `"acme/cli"`).
-///
-/// Returns the verbatim template expansion (never empty — see the guard
-/// below). This is a pure string substitution: it does NOT enforce the
-/// reserved-name reservation. The default template `"{registry}/{repository}"`
-/// always expands to two or more segments, so it can never equal the reserved
-/// single-segment `global` repository; a custom template, however, could
-/// (e.g. `path = "global"`). Collision-safety against the global slot is
-/// enforced one layer up, in
-/// `patch_descriptor_id`,
-/// which rewrites any expansion that collapses onto the reserved name.
-///
-/// Used by `SitePatchResolver` (Phase 3+) to compute the per-package patch
-/// repo address from the configured template.
+/// Does not enforce the reserved `global` name; `patch_descriptor_id` rewrites a colliding result.
 pub fn expand_patch_path(template: &str, registry_host: &str, repository: &str) -> String {
     use ocx_util::string_ext::StringExt;
 
-    // `{registry}` expands to the slugified registry host so that characters
-    // such as `:` (port separators, e.g. `localhost:5000` → `localhost_5000`)
-    // are safe in a filesystem or OCI repository path component.
     let slugified_registry = registry_host.to_relaxed_slug();
     let expanded = template
         .replace("{registry}", &slugified_registry)
         .replace("{repository}", repository);
-    // Guard: the expanded result must never be empty. The default template
-    // always produces a non-empty sub-path for well-formed identifiers, but
-    // a custom template could theoretically produce one. Fall back to a
-    // combination that is always non-empty.
     if expanded.is_empty() {
         format!("{slugified_registry}/{repository}")
     } else {
@@ -289,20 +169,11 @@ pub fn expand_patch_path(template: &str, registry_host: &str, repository: &str) 
     }
 }
 
-/// Serialises a [`ResolvedPatchConfig`] into the JSON string written to
-/// [`crate::env::keys::OCX_PATCHES`].
-///
-/// Returns `None` for `None` input so
-/// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config)(crate::env::Env::apply_ocx_config) removes any
-/// inherited value rather than setting a null.
+/// Serialises a [`ResolvedPatchConfig`] into the [`crate::env::keys::OCX_PATCHES`] JSON; `None`
+/// for `None`, so [`crate::env::Env::apply_ocx_config`] removes an inherited value.
 pub(crate) fn encode_patches(patches: Option<&ResolvedPatchConfig>) -> Option<String> {
     let config = patches?;
-    // Serialise as a flat JSON object with the resolved fields.
-    // Field names are stable — this is the wire format of OCX_PATCHES.
-    // `system_required` carries the C7 non-overridable origin across the
-    // process boundary (C5) so child launchers keep the same posture.
-    // `no_patches` forwards the project opt-out so a launcher's re-entry
-    // honours the same suppression (BTreeSet iterates sorted → stable array).
+    // The field names are the `OCX_PATCHES` wire format a child ocx of another version reads.
     let object = serde_json::json!({
         "registry":         config.registry,
         "path_template":    config.path_template,
@@ -319,18 +190,13 @@ pub(crate) fn encode_patches(patches: Option<&ResolvedPatchConfig>) -> Option<St
     }
 }
 
-/// Parses [`crate::env::keys::OCX_PATCHES`] (a JSON object) back into a
-/// [`ResolvedPatchConfig`].
-///
-/// An absent or empty value yields `Ok(None)`. A present-but-broken value is a
-/// hard error: silently dropping a forwarded `OCX_PATCHES` would run entry
-/// points without their operator-mandated companion env (C7).
+/// Parses [`crate::env::keys::OCX_PATCHES`] back; an absent or empty value is `Ok(None)`.
 ///
 /// # Errors
 ///
-/// Returns [`PatchConfigError::MalformedEnvJson`] when the value is present but
-/// not valid JSON. Returns [`PatchConfigError::MissingRegistryField`] when the
-/// value is valid JSON but the `registry` field is absent or not a string.
+/// A broken value is an error, never dropped, or entry points run without their mandated
+/// companion env: [`PatchConfigError::MalformedEnvJson`] or
+/// [`PatchConfigError::MissingRegistryField`].
 pub fn patches_from_env() -> Result<Option<ResolvedPatchConfig>, PatchConfigError> {
     let Some(raw) = ocx_util::env::var(crate::env::keys::OCX_PATCHES) else {
         return Ok(None);
@@ -341,14 +207,6 @@ pub fn patches_from_env() -> Result<Option<ResolvedPatchConfig>, PatchConfigErro
     let map = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
         .map_err(|source| PatchConfigError::MalformedEnvJson { source })?;
 
-    // `registry` is the only mandatory field in the wire format — produced by
-    // `encode_patches` as a stable triple `{registry, path_template, required}`.
-    // A missing or non-string `registry` means the value was not produced by
-    // `encode_patches` (i.e. externally injected / corrupted). Treat that as a
-    // hard error: silently dropping a forwarded `OCX_PATCHES` would run entry
-    // points without their operator-mandated companion env (C7). Mirrors the
-    // `MirrorConfigError::NonStringRoleValue`/`InvalidShape` fail-closed
-    // contract in `config/mirror.rs`.
     let registry = map
         .get("registry")
         .and_then(|v| v.as_str())
@@ -363,15 +221,9 @@ pub fn patches_from_env() -> Result<Option<ResolvedPatchConfig>, PatchConfigErro
         .get("required")
         .and_then(|v| v.as_bool())
         .unwrap_or(PatchConfig::DEFAULT_REQUIRED);
-    // Backward-compatible: absent → false (a forwarded value produced by an
-    // older ocx had no `system_required` key). A forwarded system-required tier
-    // stays system-required in child launchers, preserving C7 across the process
-    // boundary (C5).
+    // Absent → false: an older ocx wrote no `system_required` key.
     let system_required = map.get("system_required").and_then(|v| v.as_bool()).unwrap_or(false);
-    // Backward-compatible: absent → empty set (a value produced by an older ocx
-    // has no `no_patches` key). This carries the project opt-out to a launcher
-    // re-entry so an opted-out base is not re-injected its companion (unless the
-    // tier is system-required). Unlike `registry`, absence is NOT a hard error.
+    // Absent → empty: an older ocx wrote no `no_patches` key, so absence is not an error.
     let no_patches = map
         .get("no_patches")
         .and_then(|v| v.as_array())

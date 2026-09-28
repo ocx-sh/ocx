@@ -3,19 +3,9 @@
 
 //! `sbom_one` — list every verified attestation a package carries.
 //!
-//! The attestation twin of [`super::verify`]: same pipeline, same trust
-//! material, different arity. [`ocx_sign::verify::VerifyPipeline::run`] is
-//! ANY-of because *is this artifact signed* has one answer;
-//! [`ocx_sign::verify::VerifyPipeline::run_attestations`] is collect-all
-//! because *which SBOMs does this carry* does not — letting the registry's
-//! listing order pick one of several verified documents would be the defect
-//! (`adr_sbom_attestations.md` D-e).
-//!
-//! Verification is unconditional and there is no `--no-verify`: an unverified
-//! listing is registry-controlled text presented as fact (SEC-32).
-//!
-//! Per [`subsystem-package-manager.md`](../../../../../.claude/rules/subsystem-package-manager.md)
-//! and Spec A10 — the aggregator is `package_manager/tasks.rs`.
+//! Collect-all via [`ocx_sign::verify::VerifyPipeline::run_attestations`], never ANY-of, or the registry's
+//! listing order picks one of several verified documents (`adr_sbom_attestations.md` D-e).
+//! See [`subsystem-package-manager.md`](../../../../../.claude/rules/subsystem-package-manager.md).
 
 use std::collections::BTreeSet;
 
@@ -35,92 +25,59 @@ use super::super::PackageManager;
 use super::verify::map_verify_error;
 
 /// External dependencies forwarded to [`PackageManager::sbom_one`].
-///
-/// Mirrors [`VerifyOptions`](super::verify::VerifyOptions) field for field,
-/// plus the `--type` narrowing. The content mode is not a field: this task
-/// verifies attestations by definition, so a `Signature` mode here would be an
-/// unrepresentable request rather than a configurable one.
 pub struct SbomOptions<'a> {
-    /// Resolved ANY-of policies the signing certificate must satisfy. Empty
-    /// under [`VerificationMode::Permissive`], where nothing is verified.
+    /// Resolved ANY-of policies; empty under [`VerificationMode::Permissive`], where nothing is verified.
     pub policies: &'a [CompiledPolicy],
-    /// Whether this run demands verification, resolved at the CLI boundary
-    /// from the flags and the trust policies.
+    /// Whether this run demands verification, resolved at the CLI boundary.
     pub verification: VerificationMode,
-    /// Registry client (always available, unlike the manager's offline client).
+    /// Registry client, present even under `--offline`.
     pub client: &'a ocx_oci::Client,
-    /// Trust root (Fulcio CA + optional pinned Rekor key); #196 seam.
+    /// Trust root (Fulcio CA + optional pinned Rekor key).
     pub trust_root: &'a TrustRoot,
     /// Rekor transparency-log endpoint (default public Rekor).
     pub rekor_url: &'a Url,
-    /// When true, no Sigstore-trust-services network — the Rekor key must come
-    /// from pinned/cached trust material.
+    /// No Sigstore trust-service network; the Rekor key must come from pinned or cached trust material.
     pub offline: bool,
     /// State store owning the referrers-capability and trust-root cache layouts.
     pub state: &'a StateStore,
     /// Bypass the referrers-capability cache for this invocation.
     pub no_cache: bool,
-    /// `--type` narrowing; `None` lists every verified attestation. Narrowing
-    /// is applied to the **signed** predicateType after fetch-and-parse —
-    /// annotations never exclude a candidate (D-e).
+    /// `--type` narrowing on the signed predicateType, never on annotations; `None` lists every attestation.
     pub predicate_type: Option<PredicateType>,
     /// The cosign wire shape this run pins (`--signature-format`).
     pub signature_format: Option<ocx_sign::sign::SignatureFormat>,
 }
 
-/// Success payload returned by [`PackageManager::sbom_one`].
-///
-/// Carries the refusals beside the matches. A scan that returns matches has
-/// usually also looked at candidates that failed, and dropping those makes
-/// "3 attestations" indistinguishable from "3 attestations, 2 refused" — the
-/// second is the one worth acting on, so the caller reports both (WP6 ruling).
+/// Success payload returned by [`PackageManager::sbom_one`]; refusals ride beside the matches so the
+/// caller can report both.
 pub struct SbomReport {
     /// Every attestation that verified, in listing order.
     pub attestations: Vec<AttestationMatch>,
-    /// Every SBOM attached **without** a signature, in digest order. Carried
-    /// separately so a caller cannot present one as the other.
+    /// Every SBOM attached without a signature, in digest order, kept apart so a caller cannot present
+    /// one as the other.
     pub unverified: Vec<UnverifiedSbom>,
     /// Every candidate that was examined and refused, in listing order.
     pub refused: Vec<RefusedCandidate>,
-    /// Referrer digests of the documents a platform-level SBOM of the **same**
-    /// predicateType supersedes (**C-011**).
+    /// Referrer digests of the documents a platform-level SBOM of the same predicateType supersedes.
     ///
-    /// A membership set rather than a flag on each document: nothing is dropped
-    /// or reordered, so `--format json` still lists every entry and only the
-    /// human-readable rendering collapses. Keyed on the referrer manifest digest
-    /// because that is unique per document — a referrer manifest embeds the
-    /// subject it is attached to, so the same bytes attached to two subjects are
-    /// two distinct referrers.
+    /// Keyed on the referrer digest, the one per-document key: the same bytes on two subjects are two referrers.
     pub shadowed: BTreeSet<ocx_oci::Digest>,
 }
 
 impl PackageManager {
-    /// List every verified attestation on `package` for `platform`, narrowed to
-    /// `opts.predicate_type` when set.
-    ///
-    /// `platform` carries C-010's optionality, exactly as on
-    /// [`verify_one`](Self::verify_one): `None` acts on whatever the reference
-    /// resolved to, `Some(..)` narrows into an index.
-    ///
-    /// Read-only: routes through [`read_only_view`](Self::read_only_view) like
-    /// [`verify_one`](Self::verify_one), so reading an SBOM never grows the
-    /// permanent local index.
+    /// List every verified attestation on `package` for `platform` (as on [`verify_one`](Self::verify_one)),
+    /// narrowed to `opts.predicate_type` when set.
     ///
     /// # Errors
-    /// Returns [`PackageError`] tagged with `package` on any failure —
-    /// exit-code classification routes via
-    /// [`ocx_sign::verify::VerifyErrorKind`]. A scan that ends with no match
-    /// is `AttestationNotFound` (79), including the `--type` narrowing miss.
+    /// A [`PackageError`] tagged with `package`; a scan with no match, `--type` miss included, is
+    /// `AttestationNotFound` (79).
     pub async fn sbom_one(
         &self,
         package: &ocx_oci::PackageRef,
         platform: Option<&ocx_oci::Platform>,
         opts: SbomOptions<'_>,
     ) -> Result<SbomReport, PackageError> {
-        // Read-only, for the same reason `verify_one` is: reading what a
-        // package carries must never grow the permanent local index
-        // (`adr_index_indirection.md`). Content still warms the GC-able blob
-        // cache.
+        // Read-only view: reading must never grow the permanent local index (`adr_index_indirection.md`).
         let mgr = self.read_only_view();
         let resolve = super::resolve_subject::verify_resolver(mgr.index());
         let state = ocx_sign::sign::state::SigningStatePaths::new(opts.state.root());
@@ -140,26 +97,8 @@ impl PackageManager {
             },
             verification: opts.verification,
             signature_format: opts.signature_format,
-            // NOT inert, and deliberately `false`: since the `.att` sidecar
-            // reader landed, this reaches a consumer under
-            // `VerifyContentMode::Attestation` too, so `ocx package sbom`
-            // hard-refuses a keyless `sha256-<hex>.att` layer that carries no
-            // transparency-log evidence (exit 65). That is the contract the
-            // `.sig` door already carries and the one a keyless signature has
-            // to carry: a Fulcio leaf lives ten minutes, so with nothing
-            // logged there is no provable signing instant and the document is
-            // a stale certificate replayed. No producer writes that shape —
-            // cosign v3.1.1's `attach attestation` takes no `--certificate`,
-            // and ocx's own writer sets both annotations — so there is no
-            // legitimate flow to unblock. An operator who genuinely holds one
-            // reads it through `ocx package verify --attestation
-            // --allow-unlogged-signature`, which is where the opt-out belongs;
-            // `sbom` grows no flag for a shape nothing emits.
+            // Not inert: gates a keyless `.att` like a `.sig`, and `sbom` has no opt-out flag.
             allow_unlogged_signature: false,
-            // Inert here: the attestation scan is collect-all by construction
-            // (first-match is the wrong answer to "which SBOMs does this
-            // carry"). Set anyway so the two entry points state the same
-            // intent rather than one relying on the other's default.
             report_all: true,
         };
         let scan = VerifyPipeline::run_attestations(opts.client, context)
@@ -170,13 +109,8 @@ impl PackageManager {
 }
 
 /// Carry a finished scan into the report shape, refusals included.
-///
-/// Named rather than inlined so the "refusals are never dropped" contract has
-/// one place to assert against: a scan is expensive to reach through the
-/// pipeline, and this is the step that could silently lose half of it.
 fn report_from(scan: AttestationScan) -> SbomReport {
-    // Destructured, not field-read: a fourth field on `AttestationScan` must
-    // break this build rather than be dropped on the floor here.
+    // Destructured so a new `AttestationScan` field breaks this build instead of being dropped.
     let AttestationScan {
         matches,
         unverified,
@@ -192,25 +126,8 @@ fn report_from(scan: AttestationScan) -> SbomReport {
     }
 }
 
-/// **C-011.** Which documents a platform-level SBOM supersedes.
-///
-/// One rule, and its scoping is the whole contract: a platform-level document
-/// shadows an index-level one **only within the same `predicateType`**. A
-/// platform CycloneDX and an index-level SPDX are not substitutes — they are
-/// different documents for different consumers — so hiding the SPDX behind the
-/// CycloneDX would be data loss wearing a preference's clothes.
-///
-/// Three things it deliberately does **not** do:
-///
-/// - It never shadows when `platform_subject` is `None`. Nothing was narrowed,
-///   so one subject was read and no document can supersede another.
-/// - It never shadows a document on the platform subject itself. Two SBOMs of
-///   one predicateType on **one** subject are both real answers — different
-///   formats, lifecycle phases, rescans — and there is no disambiguation
-///   convention beyond `org.opencontainers.image.created`, so the existing
-///   `MultipleAttestations` behaviour stands and neither shadows the other.
-/// - It never drops or reorders anything. The answer is a set the caller reads;
-///   `--format json` still lists every document, marked.
+/// Which documents a platform-level SBOM supersedes, per `predicateType`, or a platform CycloneDX hides an
+/// index-level SPDX.
 fn shadowed_documents(
     platform_subject: Option<&ocx_oci::Digest>,
     matches: &[AttestationMatch],
@@ -219,10 +136,8 @@ fn shadowed_documents(
     let Some(platform_subject) = platform_subject else {
         return BTreeSet::new();
     };
-    // Every document, on one vocabulary, so the two trust classes shadow each
-    // other's types symmetrically: `verify.subject_digest` is the subject the
-    // scan read the referrer from — the one `platform_subject` is comparable to
-    // — rather than the statement's own claim about itself.
+    // `verify.subject_digest` is where the scan found the referrer, comparable to `platform_subject`; the
+    // statement's claim about itself is not.
     let documents = matches
         .iter()
         .map(|candidate| {
@@ -242,9 +157,6 @@ fn shadowed_documents(
 
     let (platform_level, index_level): (Vec<_>, Vec<_>) =
         documents.partition(|(subject, ..)| *subject == platform_subject);
-    // The predicateTypes the platform manifest answers for. A type absent here
-    // shadows nothing, which is exactly how an index-level SPDX survives a
-    // platform CycloneDX.
     let superseding: BTreeSet<&str> = platform_level
         .into_iter()
         .map(|(_, predicate_type, _)| predicate_type)
@@ -326,7 +238,7 @@ mod tests {
         }
     }
 
-    // ── C-011 shadowing ─────────────────────────────────────────────────────
+    // ── Shadowing ────────────────────────────────────────────────────────────
 
     const CYCLONEDX: &str = "https://cyclonedx.org/bom";
     const SPDX: &str = "https://spdx.dev/Document";
@@ -370,7 +282,7 @@ mod tests {
         }
     }
 
-    /// The three documents S-010 puts on one package, and the one assertion the
+    /// The three documents this fixture puts on one package, and the one assertion the
     /// whole contract exists for.
     fn three_documents_across_two_subjects() -> Vec<AttestationMatch> {
         vec![
@@ -380,7 +292,7 @@ mod tests {
         ]
     }
 
-    /// **S-010 / C-011.** A platform-level CycloneDX supersedes the index-level
+    /// A platform-level CycloneDX supersedes the index-level
     /// CycloneDX and **must not touch** the index-level SPDX.
     ///
     /// Dropping the predicateType from the shadowing key is the whole difference
@@ -415,7 +327,7 @@ mod tests {
         );
     }
 
-    /// **C-011 rule 3.** Nothing was narrowed, so nothing is superseded — even
+    /// Nothing was narrowed, so nothing is superseded — even
     /// with the identical document set.
     ///
     /// The discriminating control for the test above: the two differ **only** in
@@ -431,7 +343,7 @@ mod tests {
         );
     }
 
-    /// **C-011 edge.** Two documents of one predicateType on the **same**
+    /// Two documents of one predicateType on the **same**
     /// subject shadow neither. Multiple SBOMs per package is normal — different
     /// formats, lifecycle phases, rescans — and there is no disambiguation
     /// convention beyond `org.opencontainers.image.created`, so the existing
@@ -488,7 +400,7 @@ mod tests {
         );
     }
 
-    /// S-006: the listing is ALL verified attestations, in listing order —
+    /// The listing is ALL verified attestations, in listing order —
     /// and the refusals travel with them. Dropping either half makes
     /// "2 attestations" indistinguishable from "2 attestations, 2 refused",
     /// which is the one worth acting on (WP6 ruling).
@@ -555,7 +467,7 @@ mod tests {
         assert!(report.refused.is_empty());
     }
 
-    /// S-007/S-019: the predicate a match carries is the verbatim signed
+    /// The predicate a match carries is the verbatim signed
     /// sub-slice, so it feeds `crate::tasks::sbom` directly. This is the seam the
     /// CLI's `--summary` and `--output` both stand on — if `AttestationMatch`
     /// ever carried a re-serialization, `--output` would stop being
@@ -585,7 +497,7 @@ mod tests {
         );
     }
 
-    /// S-017: a scan that ends with no match — including the `--type`
+    /// A scan that ends with no match — including the `--type`
     /// narrowing miss — is `AttestationNotFound`, and the task's error wrapper
     /// must carry that all the way to exit 79. A wrapper that flattened the
     /// kind would classify as a generic failure and every `case $?` in a

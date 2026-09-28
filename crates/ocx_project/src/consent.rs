@@ -1,22 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Project activation consent: the per-project stamp and the predicate that
-//! decides whether a project's environment may be applied at all.
-//!
-//! **Projects only (A-44).** The ocx home toolchain — `$OCX_HOME/ocx.toml`, its
-//! `[env]`, and every package it locks — is always consented and never reaches
-//! this module. It is the user's own file, on the user's own machine; consent
-//! exists to gate *someone else's* checkout. Nothing here may be made to apply
-//! to the global tier.
-//!
-//! **Consent gates the parse, not merely the apply** (C-028). The only
-//! project-supplied bytes read before consent is established are the CWD walk's
-//! `stat` calls and the `ocx.lock` parse the source-set predicate requires;
-//! `ProjectConfig` deserialization happens *after*. "Zero env change" is
-//! satisfiable by compose-then-discard, which would already have deserialized
-//! the untrusted `ocx.toml` — the mise CVE is a lesson about ordering, and
-//! ordering is cheap to state once.
+//! Project activation consent: the per-project stamp and the predicate for
+//! whether a project's environment may apply. Projects only: the ocx home is
+//! always consented. Consent gates the parse, not just the apply: only `stat`s
+//! and the `ocx.lock` parse run before it, never the untrusted `ocx.toml`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -32,98 +20,49 @@ use ocx_shell::shell::reconcile::ScopeId;
 use ocx_store::file_structure::StateStore;
 use ocx_store::reference_manager::ReferenceManager;
 
-/// The only stamp schema version this binary writes or accepts (A-25).
+/// The only stamp schema version this binary writes or accepts.
 const STAMP_VERSION: u8 = 1;
 
-/// A recorded consent grant for one project (C-024).
-///
-/// Lives at `state/projects/<key>/consent.json`, written through
-/// `utility::fs::write_bytes_atomic` and **replaced, never edited in place**
-/// (C-022) — so a future multi-writer surface here uses `lock_scoped` into
-/// `$OCX_HOME/locks`, never a sidecar.
-///
-/// A-25 — `deny_unknown_fields` with **all four fields required**: no
-/// `#[serde(default)]` on `sources` or `project_dir`, so a truncated stamp can
-/// never deserialize into a valid-looking one.
+/// A recorded consent grant at `state/projects/<key>/consent.json`, replaced
+/// whole, never edited in place. All four fields required (no
+/// `#[serde(default)]`), so a truncated stamp never deserializes as valid.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsentStamp {
-    /// Stamp schema version. A `v` this binary does not recognise makes the
-    /// stamp unusable, which is the same as absent (A-25).
+    /// Schema version; an unrecognised one makes the stamp absent.
     pub v: u8,
 
-    /// The canonical project directory this stamp consents to.
-    ///
-    /// [`evaluate`] compares this, not just the key: `name_for_path` is
-    /// SHA-256 truncated to 8 bytes, so the key is a lookup index and the path
-    /// is the identity.
+    /// The canonical project directory: the identity, since the 8-byte key is
+    /// only a lookup index.
     pub project_dir: PathBuf,
 
-    /// The normalized source set consented to (C-026).
+    /// The normalized source set consented to.
     pub sources: BTreeSet<String>,
 
     /// RFC 3339 UTC instant the stamp was written.
     pub stamped_at: String,
 }
 
-/// The activation predicate's answer (C-025).
+/// The activation predicate's answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
-    /// The project activates — naming the clause that granted, because the
-    /// three clauses do not authorize the same channels (see [`Grant`]).
+    /// Activates, naming the clause: the clauses grant different channels.
     Activate(Grant),
     /// Zero env change, one hint line. A fresh clone is inert.
     Inert(Reason),
 }
 
-/// Which clause of [`evaluate_with_stamp`] granted, and therefore **how much**
-/// it granted.
+/// Which consent clause granted activation, and therefore how much it granted.
 ///
-/// The distinction is a trust boundary, not bookkeeping. `ocx.lock` is text the
-/// project itself authors: an attacker writes `ocx.sh/<granted-org>/anything`
-/// into a lock, and the named package need not exist, be pullable or be signed.
-/// **That text authorizes nothing on its own.** Clause 2 therefore does not
-/// quantify over the lock's claim at all — it quantifies over
-/// [`verified_sources`], the store's own record of which logical repository
-/// this host resolved and materialized digest-verified content for
-/// (`refs/origins/`). The claim is satisfiable by text a clone's author writes;
-/// the record only by an act of pulling on this host under that name. That is
-/// where the record is evidence and the claim is not — and it is the whole of
-/// the difference, no more: on a cold store the pull must fetch the bytes over
-/// the wire under that name, which needs that namespace's publish credential,
-/// but on a warm one it need not. See [`verified_sources`] for the write gate
-/// as shipped and for the residual that leaves.
-///
-/// That record exists only for the **package** channel. The project-file
-/// `[env]` channel has no publisher at all — a relative `type = "path"` value
-/// resolves against the project root, so one line of `ocx.toml` puts
-/// `<clone>/bin` in front of `PATH` — and it is therefore authorized only by
-/// clauses 1 and 3, the two clauses that stand on a human's own gesture rather
-/// than on text a clone ships.
-///
-/// **Clause 3's gesture names a directory or a tree, and a tree is still the
-/// gesture.** A `paths` entry is one exact directory, or — written with a
-/// trailing `/*` — that directory and everything beneath it
-/// ([`consent_path_matches`]). A subtree entry therefore opens the `[env]`
-/// channel for every project under it, **including ones that do not exist
-/// yet**: a clone dropped into a granted tree tomorrow activates on its first
-/// prompt, its own `ocx.toml` `[env]` included. That is the deliberate reading
-/// of the form, not a leak it tolerates — it is the devcontainer and CI-image
-/// case the form exists for, where the workspace root is written down once in
-/// an image and the checkouts arrive later. It is the reach `git`'s own
-/// `safe.directory = /w/acme/*` has, widened by one directory: git's form
-/// covers only what is nested *under* the named directory, ours covers that
-/// directory too (measured, git 2.54). The operator's gesture remains
-/// the whole bound: it is spelled in a `config.toml` tier or `OCX_CONSENT_PATHS`
-/// and never in project bytes, it is component-bounded so a sibling
-/// `/w/acme-evil` is outside it, and no `*` spelling reaches the filesystem
-/// root. What clause 3 does not do is *narrow* to a leaf — an operator who
-/// means one directory writes one directory.
-///
-/// The near-exact precedent is mise's trust bypass, CVE-2026-35533 /
-/// GHSA-436v-8fw5-4mj8. The borrowed-digest variant clause 2 used to admit is
-/// [ocx-sh/ocx#344](https://github.com/ocx-sh/ocx/issues/344).
+/// `stamp` and `path` authorize both the tool channel and the project's own
+/// `[env]` channel; `namespace` authorizes tools only.
+/// A `paths` entry `/w/acme/*` grants `/w/acme` and every project beneath it,
+/// including ones that do not exist yet, but not the sibling `/w/acme-evil`;
+/// no `*` spelling reaches the filesystem root.
+// Clause 2 reads `verified_sources`, never the lock's claim: anyone can write
+// `ocx.sh/<granted-org>/anything` (mise: GHSA-436v-8fw5-4mj8).
+// Argument: adr_shell_env_overhaul.md § Decision 4 — Consent and the activation whitelist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Grant {
@@ -131,51 +70,47 @@ pub enum Grant {
     /// lock's. A human ran one of the stamp-writing commands here.
     Stamp,
     /// Clause 2 — every repository the store recorded for the lock's tools
-    /// resolves to a source matching `[shell.consent] namespaces`. A fleet-wide
-    /// auto-enabler, bounded by what this host actually pulled under that name
-    /// rather than by what the lock claims.
+    /// resolves to a source matching `[shell.consent] namespaces`, bounded by
+    /// what this host actually pulled under that name rather than by what the
+    /// lock claims.
+    // A warm-store pull mints the origin record without fetching, so it proves
+    // no publish credential; see `verified_sources`.
     Namespace,
     /// Clause 3 — the canonical directory is covered by `[shell.consent]
     /// paths`: by an entry naming it exactly, or by a trailing-`/*` entry
-    /// naming it or an ancestor of it and granting that whole subtree. An
-    /// operator or the user wrote this directory — or a tree holding it —
-    /// down, which is why this grant opens the project `[env]` channel for a
-    /// checkout the entry never named.
+    /// naming it or an ancestor of it and granting that whole subtree. Opens
+    /// the project `[env]` channel, also for a checkout the entry never named.
+    // A `/*` entry opens `[env]` for every project beneath it, future clones
+    // included; bounded by the operator's `config.toml`, never project bytes.
     Path,
 }
 
 impl Grant {
-    /// Whether this grant authorizes the project-file `[env]` channel.
-    ///
-    /// `false` for [`Grant::Namespace`] alone. A namespace-granted project
-    /// still composes its **tools**; only `ocx.toml`'s own `[env]` is withheld.
+    /// Whether this grant opens the project-file `[env]` channel; `false` for
+    /// `Namespace`, which still composes tools.
     #[must_use]
     pub fn authorizes_project_env(self) -> bool {
         match self {
             Grant::Stamp | Grant::Path => true,
+            // `[env]` has no publisher: a relative path value fronts `PATH` with
+            // `<clone>/bin`, so only a human's own gesture opens it.
             Grant::Namespace => false,
         }
     }
 }
 
 /// Why a shell is not active — the enumerated set `ocx shell state` renders.
-///
-/// This enumeration is `ocx shell state`'s reason to exist (C-050): each
-/// variant must be individually reachable and individually tested.
-///
-/// [`Reason::HookDisabled`] and [`Reason::YieldedTo`] are decided *outside*
-/// [`evaluate`] and constructed by the deciding call site — Decision 10
-/// enumerates them in one list as "the reason the shell is not active", and a
-/// single enum is what makes the report total.
+// Each variant must be individually reachable and tested: `ocx shell state`
+// exists to report them all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "reason")]
 pub enum Reason {
     /// No valid stamp and no matching grant — with the project's derived source
     /// set and the grants it was tested against, so the user can see what to
-    /// add. A-28 also surfaces a `paths` **near-miss** here: an entry differing
-    /// from the canonical directory only by ASCII case.
+    /// add. Also surfaces a `paths` **near-miss**: an entry differing from the
+    /// canonical directory only by ASCII case.
     NoStampNoGrant {
-        /// The source set derived from `ocx.lock` (C-026).
+        /// The source set derived from `ocx.lock`.
         derived_sources: BTreeSet<String>,
         /// The `paths` entries compared against the canonical directory.
         paths_tested: Vec<PathBuf>,
@@ -189,48 +124,41 @@ pub enum Reason {
         new_sources: BTreeSet<String>,
     },
     /// Every source the lock *claims* matches `[shell.consent] namespaces`, but
-    /// the package store's own record of where the locked digests came from
-    /// does not corroborate the claim — so clause 2 refuses.
+    /// the package store's record of where the locked digests came from does
+    /// not corroborate it, so clause 2 refuses.
     ///
-    /// The two payloads are the whole diagnosis, and their difference is the
-    /// point: `claimed_sources` is what `ocx.lock` says, `verified_sources` is
-    /// what `refs/origins/` proves. `None` there means nothing could be
-    /// verified at all — a tool that resolves no host leaf, is not
-    /// materialized, or predates origin recording — which is the ordinary
-    /// first-encounter state and clears at the next `ocx pull`, *except* for
-    /// the one case that never clears: a digest already materialized under
-    /// another repository is a store hit, so no further pull ever mints a
-    /// marker for the repository this lock names (see [`verified_sources`]). A
-    /// `Some` that disagrees is the interesting one: a digest in the store came
-    /// from a repository outside the granted namespace.
+    /// `claimed_sources` is what `ocx.lock` says, `verified_sources` what
+    /// `refs/origins/` proves. `None` means nothing could be verified (no host
+    /// leaf, not materialized, or predating origin recording) and clears at the
+    /// next `ocx pull` — except for a digest already materialized under another
+    /// repository, which never clears. A `Some` that disagrees means a stored
+    /// digest came from a repository outside the granted namespace.
+    // It never clears: a store hit mints no marker for the lock's repository.
     UncorroboratedNamespace {
-        /// The source set derived from `ocx.lock`'s repository fields (C-026).
+        /// The source set derived from `ocx.lock`'s repository fields.
         claimed_sources: BTreeSet<String>,
         /// The source set derived from the store's recorded pull origins, or
         /// `None` when no complete record exists.
         verified_sources: Option<BTreeSet<String>>,
     },
-    /// The hook is disabled — naming which of C-038's five rungs decided it and
-    /// the tier that set it, including the managed tier winning over a user's
-    /// own file (A-32: the tier that **actually** decided, never a hard-coded
-    /// "managed").
-    ///
-    /// Rendered names rather than typed values: the rung enum lives on
-    /// `ocx_cli::options::hook::Hook` (C-038) and `ocx_lib` cannot name it.
+    /// The hook is disabled — naming which of the five enablement rungs decided
+    /// it and the tier that set it, including the managed tier winning over a
+    /// user's own file.
+    // Name the tier that actually decided, never a hard-coded "managed".
+    // Rendered names: the rung enum is `ocx_cli`'s `Hook`, a dependency cycle away.
     HookDisabled {
         /// The deciding rung, rendered (`--no-hook`, `OCX_NO_HOOK`, `[shell] hook`, …).
         rung: String,
         /// The config tier that set it, when rung 4 decided.
         tier: Option<String>,
     },
-    /// Yielded to another live per-prompt hook (C-049) — naming the **live
-    /// signal observed**, because a user staring at an `.envrc` will guess the
-    /// wrong cause. A-37: one row per observed tool.
+    /// Yielded to another live per-prompt hook — naming the **live signal
+    /// observed**. One row per observed tool.
+    // Name the observed signal: a user staring at an `.envrc` guesses the wrong cause.
     YieldedTo(Observation),
     /// The ledger's payload exceeded the 16 KiB cap and this scope was
-    /// abandoned — read from the `over_cap` **marker** the carrier still
-    /// carries (C-004, A-01), never inferred from an absent carrier. The one
-    /// degradation that loses information rather than repairing it.
+    /// abandoned, its record lost rather than repaired.
+    // Read from the carrier's `over_cap` marker, never inferred from an absent carrier.
     LedgerOverCap {
         /// The scope whose payload was dropped.
         scope: ScopeId,
@@ -238,40 +166,22 @@ pub enum Reason {
     /// The carrier is absent, truncated, or carries an unrecognised envelope
     /// tag — **distinguishing** the first prompt of a shell (nothing applied,
     /// nothing to repair) from a corrupt carrier (a scope was applied and its
-    /// record is gone). C-006 makes that distinction normative.
+    /// record is gone).
     LedgerUnreadable {
         /// `true` for the ordinary first-prompt absence.
         first_prompt: bool,
     },
-    /// `ocx.lock` is absent, unreadable or unparseable — all three share one
-    /// outcome, because all three leave the source-set predicate with nothing
-    /// to quantify over.
+    /// `ocx.lock` is absent, unreadable or unparseable.
     LockUnavailable,
 }
 
 /// The consent source of one locked coordinate: `<registry>/<first path
-/// segment>`, lowercased host, port preserved, default registry spelled out
-/// (C-026).
-///
-/// Derived from the **logical** coordinate the lock records — never from a
-/// re-derived physical address. Pinning consent to routing is the failure
-/// `adr_lock_records_physical_address.md` was rejected for. The store marker
-/// [`verified_sources`] reads is logical for the same reason
-/// ([`ocx_store::file_structure::record_origin`]), so under an operator's
-/// `[mirrors]` entry or an index indirection the bytes travelled over an
-/// address neither set names. That residual — an operator-configured redirect,
-/// serving digest-verified content, under a standing grant — is answered by
-/// `[[trust.policy]]` plus signature verification, not by re-shaping this.
-///
-/// This is the same string `[shell.consent] namespaces` matches against — one
-/// normalization, two surfaces.
+/// segment>`, host lowercased, port kept. Logical, never the routed address
+/// (`adr_lock_records_physical_address.md`); the `[mirrors]` residual is
+/// answered by `[[trust.policy]]` plus signature verification.
 #[must_use]
 pub fn source_of(identifier: &PackageRef) -> String {
-    // `PackageRef` always carries an explicit registry (the project tier
-    // refuses a registry-less `[tools]` value), so the default registry is
-    // spelled `ocx.sh/…` here without a fallback branch. The host is
-    // lowercased; the port, when present, is part of `registry()` and is
-    // therefore preserved untouched.
+    // Every `PackageRef` here carries an explicit registry: no default fallback.
     format!(
         "{}/{}",
         identifier.registry().to_ascii_lowercase(),
@@ -279,96 +189,19 @@ pub fn source_of(identifier: &PackageRef) -> String {
     )
 }
 
-/// The normalized source set of `lock` — one entry per distinct
-/// `<registry>/<org>` its tools **claim** to resolve from (C-026).
-///
-/// This is the project's own assertion and authorizes nothing by itself; see
-/// [`verified_sources`] for the corroborated counterpart clause 2 quantifies
-/// over.
+/// The `<registry>/<org>` set `lock`'s tools **claim**; it authorizes nothing
+/// alone (see [`verified_sources`]).
 #[must_use]
 pub fn lock_sources(lock: &ProjectLock) -> BTreeSet<String> {
     lock.tools.iter().map(|tool| source_of(&tool.repository)).collect()
 }
 
-/// The source set the **package store** corroborates for `lock` on `platform`,
-/// or `None` when it cannot corroborate the whole lock.
-///
-/// # Why this exists
-///
-/// The package store is addressed by `(registry, digest)` only — the repository
-/// is deliberately absent from the path so identical content deduplicates
-/// across repositories. Composition resolves a locked tool to
-/// `repository.clone_with_digest(leaf)` and then looks the directory up by
-/// registry and digest alone, so **the lock's repository field never has to be
-/// true for the content to be found**. A lock pairing a granted org's name with
-/// the digest of content that came from an entirely different repository on the
-/// same registry would satisfy a claim-based clause 2 and put that borrowed
-/// content's `entrypoints/` on `PATH`
-/// ([ocx-sh/ocx#344](https://github.com/ocx-sh/ocx/issues/344)).
-///
-/// So this reads `refs/origins/` — the only record of which **logical**
-/// repository this host resolved and materialized digest-verified content for
-/// ([`ocx_store::file_structure::record_origin`]) — and maps each recorded origin
-/// through [`source_of`], the same normalization the whitelist matches
-/// against. Logical, because consent has one identity: see [`source_of`] for
-/// why, and for the redirect residual that leaves.
-///
-/// # What a marker is, and is not, evidence of
-///
-/// It is evidence that **this host** ran a fetching pull — anything but
-/// `pull_local` — which materialized digest-verified content and bound it to
-/// the logical repository the identifier spelled. It is **not** evidence that a
-/// registry vouched for that binding. The write gate is one predicate,
-/// `from_registry = provided_metadata.is_none()`, which excludes the
-/// local-tarball path and nothing else; the two store-hit early returns it sits
-/// past are each conditional on `check_install_status`, so an absent or not-OK
-/// package directory falls through into the fetching branch, and that branch
-/// needs no network — the layer cache short-circuits the fetch whenever
-/// `layers/{digest}/content/` is present, and a digest-addressed manifest read
-/// is local-first in every chain mode. Since the package path is
-/// `(registry, digest)` only, a pull naming **any** logical repository on a
-/// registry whose layers are already cached mints that repository's marker with
-/// no registry contact and no credential anywhere.
-///
-/// What survives is still the whole of the improvement over [`lock_sources`]:
-/// the claim is satisfiable by text a clone's author writes, the record only by
-/// an act of pulling on this host under that name. On a cold store the two
-/// coincide and the publish-credential bound is real; on a warm one clause 2
-/// bounds local action instead, and because a marker is a fact about the
-/// package rather than about any project, an unrelated clone carrying nothing
-/// but a lock inherits it. Tightening the write gate to observe wire contact is
-/// tracked as <https://github.com/ocx-sh/ocx/issues/348>; until it lands, this
-/// is the strength of the grant, and the ADR (`adr_shell_env_overhaul.md`
-/// Decision 4) and addendum A-39 say the same in the same terms.
-///
-/// # Fail closed, and it self-heals
-///
-/// `None` the moment **any** tool cannot be corroborated: no host leaf for this
-/// platform, not materialized, or materialized with no recorded origin. One
-/// unverifiable tool poisons the whole grant, mirroring clause 2's existing
-/// all-quantifier — a partial answer would let an attacker suppress the
-/// disqualifying half by deleting a package directory.
-///
-/// A store populated before origins were recorded therefore has none, and
-/// clause 2 is inert for it until the next `ocx pull`. That is intentional and
-/// costs nothing: `ocx pull` is one of the stamp-writing commands, so the
-/// project gains a clause-1 stamp at the same moment it gains its origin
-/// records.
-///
-/// One refusal persists for as long as the store hit holds: a digest already
-/// materialized under repository A is a store hit for a lock naming repository
-/// B at the same digest, and `setup_owned_impl` returns before
-/// [`ocx_store::file_structure::record_origin`], so that pull mints no B marker.
-/// That is the correct direction — a store hit is not evidence a registry
-/// served the digest under B, and minting one there is exactly the forgery this
-/// record exists to prevent — so such a project needs a stamp or a `paths`
-/// entry, and re-pulling will not change that while the hit holds. It is not
-/// unconditional: both early returns are gated on `check_install_status`, so a
-/// package directory that is removed, or left partial or not-OK, falls through
-/// into the fetching branch and does mint B's marker — see the residual above.
-///
-/// Blocking: one `read_dir` over a tiny directory per locked tool. No network,
-/// and no project-supplied bytes beyond the already-parsed lock (C-028).
+/// The source set the package store corroborates for `lock` on `platform`,
+/// from `refs/origins/`; `None` if any tool lacks a host leaf, materialization
+/// or origin, so deleting a package cannot hide the disqualifying half.
+/// Residual: with layers cached, a registry pull naming any repository on the
+/// registry mints its marker with no registry contact (ocx-sh/ocx#348);
+/// `pull_local` and store hits mint none.
 #[must_use]
 pub fn verified_sources(
     lock: &ProjectLock,
@@ -412,13 +245,8 @@ pub fn verified_sources(
     Some(verified)
 }
 
-/// The consent source of one recorded origin string.
-///
-/// The marker holds the full `<registry>/<repository-path>` coordinate, so the
-/// truncation to `<registry>/<org>` happens here — routed back through
-/// [`source_of`] rather than re-implemented, so the store's record and the
-/// lock's claim are normalized by exactly one function. A malformed marker
-/// yields `None`, which fails the whole grant closed.
+/// The consent source of one recorded origin, through [`source_of`] so claim
+/// and record normalize alike; a malformed marker yields `None`, failing closed.
 fn source_of_origin(origin: &str) -> Option<String> {
     let (registry, repository) = origin.split_once('/')?;
     if registry.is_empty() || repository.is_empty() {
@@ -427,31 +255,16 @@ fn source_of_origin(origin: &str) -> Option<String> {
     Some(source_of(&PackageRef::new_registry(repository, registry)))
 }
 
-/// The one project identity: canonicalize the resolved **config file**, then
-/// take its parent, then canonicalize that (A-30).
-///
-/// That order, not the reverse. `resolve_explicit_project_path` follows
-/// symlinks by design and returns an un-canonicalized path, so a symlinked
-/// `ocx.toml` would otherwise yield a different directory — and a different
-/// 16-hex key — than the same project reached directly. Canonicalizing is also
-/// the safer direction: a `paths`-granted `/w/fake` whose `ocx.toml` symlinks
-/// into `/attacker` resolves to `/attacker`, which is not granted.
-///
-/// The result is the input to `name_for_path`, to [`ConsentStamp::project_dir`]
-/// and to the `paths` compare — one derivation, three consumers.
-///
-/// Blocking: two filesystem resolutions. Async callers wrap it in
-/// `spawn_blocking`.
+/// The one project identity: canonicalize the config file, then its parent.
+/// That order, so a symlinked `ocx.toml` keys as its real directory: a granted
+/// `/w/fake` linking into `/attacker` resolves to the ungranted `/attacker`.
 ///
 /// # Errors
 ///
-/// The canonicalization's own I/O error, or `InvalidInput` when the canonical
-/// config path has no parent.
+/// The canonicalization's I/O error, or `InvalidInput` for a parentless path.
 pub fn canonical_project_dir(config_path: &Path) -> std::io::Result<PathBuf> {
-    // Two calls, deliberately: `std::fs::canonicalize` and `dunce::canonicalize`
-    // do not produce the same string on Windows, and the shipped project ledger
-    // keys on the second form (`registry.rs`'s `register`). A single
-    // `dunce::canonicalize` of the file would key on the first.
+    // `std` for the file, `dunce` for the parent: the project ledger keys on the
+    // `dunce` form, which differs on Windows.
     let canonical_config = std::fs::canonicalize(config_path)?;
     let parent = canonical_config.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -462,40 +275,24 @@ pub fn canonical_project_dir(config_path: &Path) -> std::io::Result<PathBuf> {
     dunce::canonicalize(parent)
 }
 
-/// Read the stamp for `key`, or `None` if there is not a usable one (A-25).
-///
-/// Returns `None` on **every** failure — I/O error, JSON parse error, unknown
-/// field, or a `v` this binary does not recognise — logged at debug and never
-/// warned. An **unusable stamp is an absent stamp**: clause 1 of [`evaluate`]
-/// simply fails while clauses 2 and 3 still evaluate.
-///
-/// `key` is `ReferenceManager::name_for_path` of the canonical project
-/// directory; the file is
-/// [`StateStore::consent_stamp_file`](ocx_store::file_structure::StateStore::consent_stamp_file).
+/// Read the stamp for `key`, or `None` on any failure (logged at debug): an
+/// unusable stamp is an absent one, and clauses 2 and 3 still evaluate.
 #[must_use]
 pub fn load(key: &str) -> Option<ConsentStamp> {
     load_from(state_store().as_ref()?, key)
 }
 
-/// What [`record`] did — the distinction `ocx shell allow` refuses on.
-///
-/// Both variants are a success: A-44 makes the ocx home always consented, so
-/// declining to stamp it is the correct outcome, not a failure. It is still
-/// not what an explicit `ocx shell allow` was asked to do, which is why the
-/// two are told apart here rather than collapsed into `()`.
+/// What [`record`] did. Both are success; `ocx shell allow` refuses on the
+/// ocx-home case, so they stay distinct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recorded {
     /// A stamp was written for `project_dir`.
     Stamped,
-    /// `project_dir` is the ocx home. It is always consented and never carries
-    /// a stamp (A-44); nothing was written.
+    /// `project_dir` is the ocx home, always consented; nothing was written.
     OcxHomeNeedsNoStamp,
 }
 
-/// What [`revoke`] did.
-///
-/// [`Revoked::Absent`] is not an error: revoking a project that was never
-/// stamped leaves exactly the state the caller asked for.
+/// What [`revoke`] did; [`Revoked::Absent`] is not an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Revoked {
     /// A stamp existed and was removed.
@@ -504,49 +301,18 @@ pub enum Revoked {
     Absent,
 }
 
-/// Record consent for `project_dir` over `sources` (C-024).
-///
-/// # The write seam is a closed allowlist, stated as a negative contract
-///
-/// A-29 — the **only** writers are the seven explicit project-scoped
-/// commands: `add`, `remove`, `lock`, `update`, `pull`, `exec`, and `init`,
-/// which consents to the project it creates. Every other command —
-/// explicitly including `ocx env`, `ocx inspect`, `ocx shell state`,
-/// `ocx self activate` (with and without `--reconcile`), `ocx list`,
-/// `ocx direnv export` and `ocx completions` — MUST NOT create or modify
-/// `state/projects/<key>/`. Enforcement is the acceptance test, not
-/// visibility: the seven callers live in `ocx_cli`, so this cannot be
-/// `pub(crate)` as A-29 words it and still compile.
-///
-/// The seam is **per-caller opt-in**, never a hook in the shared loader:
-/// `load_project_with_lock` has four further callers (`inspect`,
-/// `patch freeze`, `ocx env`, and `ocx lock --check`), so a blanket stamp
-/// there would auto-grant consent on read-only commands — silently widening a
-/// security control beyond its stated set.
-///
-/// Membership is **suppressible, not conditional** (ocx-sh/ocx#400). Those
-/// seven resolve a flag/`OCX_NO_CONSENT` ladder in
-/// `app::project_context::record_activation_consent_over` and may reach an
-/// invocation where they write nothing. That narrows the allowlist's effect,
-/// never widens it, so A-29 is unchanged: it constrains which commands *may*
-/// write, and no eighth one gained the ability. The gate deliberately does
-/// **not** live in this function — `ocx shell allow` calls it directly, and it
-/// is the explicit human gesture the variable exists to distinguish machine
-/// invocation *from*.
-///
-/// A-26 — **grants do not stamp.** Nothing on the activation path writes here.
-///
-/// `project_dir` must be the canonical directory [`canonical_project_dir`]
-/// derives.
-///
-/// Returns [`Recorded::OcxHomeNeedsNoStamp`] when `project_dir` is the ocx
-/// home, which A-44 keeps permanently outside this control.
+/// Record consent for `project_dir` over `sources`. Only the seven
+/// project-scoped commands (`add`, `remove`, `lock`, `update`, `pull`, `exec`,
+/// `init`) may call it: a stamp from a shared loader would auto-grant consent.
+/// `project_dir` must come from [`canonical_project_dir`], or the stamp keys as
+/// another directory.
 ///
 /// # Errors
 ///
-/// Propagates the atomic write's I/O failure, and the failure to resolve an
-/// OCX home to write under.
+/// The atomic write's I/O failure, or no resolvable OCX home.
 pub fn record(project_dir: &Path, sources: &BTreeSet<String>) -> crate::Result<Recorded> {
+    // The allowlist is enforced by the acceptance test. Callers resolve
+    // `OCX_NO_CONSENT`: `ocx shell allow` is the human gesture it exempts.
     let store = state_store().ok_or_else(|| {
         io_error(
             project_dir,
@@ -559,70 +325,14 @@ pub fn record(project_dir: &Path, sources: &BTreeSet<String>) -> crate::Result<R
     record_in(&store, project_dir, sources)
 }
 
-/// The activation predicate (C-025).
-///
-/// Activation is permitted **iff any of**:
-///
-/// 1. a valid stamp exists for this project **and** the current lock's claimed
-///    source set ⊆ the stamped source set; **or**
-/// 2. the **verified** source set is present, **non-empty**, and every source
-///    in it matches the namespace whitelist; **or**
-/// 3. the project's canonical directory is in the path whitelist.
-///
-/// Otherwise: zero env change, one hint line.
-///
-/// **Every clause quantifies over a project, and that is the whole scope
-/// (A-44).** The ocx home toolchain — `$OCX_HOME/ocx.toml`, its `[env]`, and
-/// every package it locks — is always consented and is *deliberately* absent
-/// from all three clauses: there is no global grant, no global stamp, and no
-/// tier selector on this function. `$OCX_HOME` is controlled by the user by
-/// definition, so consent has nothing to decide about it; the control exists to
-/// gate someone else's checkout. The absence is a decision, not an oversight —
-/// do not add a clause, a parameter or a caller that puts the global tier in
-/// front of this predicate. `record` enforces the write half by refusing to
-/// stamp the ocx root at all.
-///
-/// **Clause 2 never reads the lock's claim.** `ocx.lock`'s repository field is
-/// project-authored text and the package store is addressed by
-/// `(registry, digest)` alone, so a lock can pair a granted org's name with a
-/// digest that came from any repository on that registry. `verified_sources`
-/// is the store's own record of what this host pulled under each name, and
-/// clause 2 quantifies over that and nothing else — see there for how much it
-/// attests and how much it does not. When the claim would have granted but
-/// the record does not corroborate it, the refusal is
-/// [`Reason::UncorroboratedNamespace`], carrying both sets so `ocx shell state`
-/// can show the gap.
-///
-/// Clause 1 keeps using the **claimed** set on purpose: a stamp is an explicit
-/// per-directory gesture recording what the lock said at the time, and its
-/// drift detection is a comparison against that same claim.
-///
-/// **Non-vacuity is normative.** Without the non-empty requirement in clause 2,
-/// an *empty* source set satisfies "every source matches" for any user, with no
-/// stamp and no whitelist entry — and the project that produces an empty source
-/// set is precisely the one this decision exists to stop. A clone carrying
-/// `[env] PATH = { type = "path", value = "bin" }` and **no `ocx.lock` at all**
-/// would otherwise activate and put `<clone>/bin` PATH-front on `cd`. Clause 1
-/// is unaffected: a stamp with an empty `sources` set is still consent.
-///
-/// **The two grants are independent and OR'd**, and neither constrains the
-/// other. An absent or empty grant grants nothing; it never means "everything
-/// allowed". A-26 — clause 3 grants activation directly and unconditionally,
-/// every prompt, writing no stamp, so revoking a `paths` grant is immediately
-/// effective; clause 2 stays drift-sensitive by its own quantifier.
-///
-/// **Project `[env]` is gated by clause 1 or clause 3, never by clause 2.**
-/// Nothing sourced from `ocx.toml` is applied unless this returns
-/// [`Decision::Activate`], and the project-file `[env]` channel additionally
-/// requires the granting [`Grant`] to satisfy [`Grant::authorizes_project_env`].
-/// Clause 2 authorizes the package/tool channel and nothing else — a published
-/// package is the only thing its evidence can vouch for.
-///
-/// `project_dir` must already be canonical (C-022), and clause 3 **fails
-/// closed** when it is not: a directory carrying a `..` is granted by no
-/// `paths` entry. `lock_sources` is `None` when the lock is absent, unreadable
-/// or unparseable — one outcome for all three. `verified` is [`verified_sources`] for the **same** parsed lock;
-/// `None` there is a corroboration failure, never an absent lock.
+/// The activation predicate: activate **iff any of** (1) a valid stamp exists and
+/// the lock's claimed sources ⊆ the stamped set; (2) the **verified** source set
+/// is present, **non-empty** and every source matches the namespace whitelist;
+/// (3) the canonical `project_dir` is in the path whitelist. Else zero env change.
+/// `lock_sources` is `None` for an unusable lock. `verified` must be
+/// [`verified_sources`] over the **same** lock, or it grants on evidence this
+/// lock never earned. The ocx home is absent by design: add nothing that puts the
+/// global tier before this predicate (`adr_shell_env_overhaul.md` Decision 4).
 #[must_use]
 pub fn evaluate(
     project_dir: &Path,
@@ -635,11 +345,7 @@ pub fn evaluate(
     evaluate_with_stamp(project_dir, stamp.as_ref(), lock_sources, verified, whitelist)
 }
 
-/// [`evaluate`] over an already-read stamp — the whole predicate, minus the
-/// single file read clause 1 needs.
-///
-/// `stamp` is `None` both when no stamp exists and when the one on disk is
-/// unusable (A-25); the two are indistinguishable here by design.
+/// [`evaluate`] over an already-read stamp; `None` covers absent and unusable alike.
 #[must_use]
 pub fn evaluate_with_stamp(
     project_dir: &Path,
@@ -648,9 +354,8 @@ pub fn evaluate_with_stamp(
     verified: Option<&BTreeSet<String>>,
     whitelist: &ShellConsent,
 ) -> Decision {
-    // Clause 3 first, and before the lock is even consulted: a `paths` grant is
-    // the deliberate exception to "an unavailable lock means inert", and it is
-    // the only clause that holds for a project whose lock cannot be read.
+    // Clause 3 before the lock: a `paths` grant is the one clause that holds
+    // when the lock is unreadable.
     if path_granted(project_dir, whitelist) {
         return Decision::Activate(Grant::Path);
     }
@@ -659,31 +364,20 @@ pub fn evaluate_with_stamp(
         return Decision::Inert(Reason::LockUnavailable);
     };
 
-    // Clause 1 before clause 2, and the order is now load-bearing rather than
-    // cosmetic: the two clauses grant different amounts (see `Grant`), so when
-    // both hold the answer must be the *stronger* one. A stamped project that
-    // also sits inside a granted namespace keeps its `[env]`.
-    //
-    // The stamp's own `project_dir` is the identity; the key is only a lookup
-    // index, so a stamp filed under this key for another directory is not
-    // consent for this one.
+    // Clause 1 before 2, since it also grants `[env]`; it checks the claim, which
+    // is what the stamp recorded. The stamp's own `project_dir` is the identity:
+    // one filed under this key for another directory is not consent here.
     if stamp.is_some_and(|stamp| stamp.project_dir == project_dir && sources.is_subset(&stamp.sources)) {
         return Decision::Activate(Grant::Stamp);
     }
 
-    // Clause 2, over the store's record and never over the lock's claim. The
-    // lock's repository field is what an attacker writes; `verified` is what
-    // this host resolved and materialized under that name. Not the same as
-    // "what a registry served" — an earlier spelling of this comment said that,
-    // and `verified_sources`' docs give the write gate and the residual.
+    // Clause 2 reads only the store's record, never the claim an attacker writes.
     if verified.is_some_and(|verified| namespace_granted(verified, whitelist)) {
         return Decision::Activate(Grant::Namespace);
     }
 
-    // The claim would have granted and the record did not corroborate it. This
-    // outranks the stamp-drift refusal below because it names the clause that
-    // was about to grant — a drifted stamp is true too, but it is not why this
-    // project stayed inert.
+    // The claim would have granted but the record did not corroborate it:
+    // report that clause, ahead of stamp drift.
     if namespace_granted(sources, whitelist) {
         return Decision::Inert(Reason::UncorroboratedNamespace {
             claimed_sources: sources.clone(),
@@ -691,9 +385,6 @@ pub fn evaluate_with_stamp(
         });
     }
 
-    // Neither grant held. The stamp still decides *which* refusal is reported:
-    // a stamp that exists but has drifted earns the specific `SourceSetDrift`
-    // reason naming the new source.
     match stamp.filter(|stamp| stamp.project_dir == project_dir) {
         Some(stamp) => Decision::Inert(Reason::SourceSetDrift {
             new_sources: sources.difference(&stamp.sources).cloned().collect(),
@@ -710,13 +401,8 @@ pub fn evaluate_with_stamp(
     }
 }
 
-/// Whether `project_dir` is named by `[shell.consent] paths` (C-025 clause 3).
-///
-/// One entry's semantics live in [`consent_path_matches`] — exact directory, or
-/// a component-bounded subtree when the entry ends in `/*`, with a leading `~`
-/// expanded there and nowhere else. A `project_dir` that is **not** canonical —
-/// one carrying a `..` — is matched by no entry at all: the subtree form is a
-/// containment test, and a `..` escapes the tree it appears to sit in.
+/// Whether `[shell.consent] paths` names `project_dir` (clause 3). A
+/// non-canonical dir with `..` matches nothing: `..` escapes the subtree it sits in.
 fn path_granted(project_dir: &Path, whitelist: &ShellConsent) -> bool {
     whitelist
         .paths
@@ -724,13 +410,8 @@ fn path_granted(project_dir: &Path, whitelist: &ShellConsent) -> bool {
         .any(|entry| consent_path_matches(entry, project_dir))
 }
 
-/// Whether every source in `sources` matches `[shell.consent] namespaces`, and
-/// `sources` is non-empty (C-025 clause 2).
-///
-/// Pure set-vs-whitelist predicate — it does not know or care whether `sources`
-/// is the lock's claim or the store's record. `evaluate_with_stamp` decides
-/// which one may *grant* (only the record) and which one merely selects the
-/// refusal wording (the claim).
+/// Clause 2: `sources` is non-empty and every one matches `namespaces`. The
+/// caller decides whether it may grant (the record) or only word a refusal (the claim).
 fn namespace_granted(sources: &BTreeSet<String>, whitelist: &ShellConsent) -> bool {
     let Some(namespaces) = whitelist.namespaces.as_ref() else {
         return false;
@@ -738,11 +419,7 @@ fn namespace_granted(sources: &BTreeSet<String>, whitelist: &ShellConsent) -> bo
     !sources.is_empty() && sources.iter().all(|source| namespaces.matches(source))
 }
 
-/// The state store consent stamps live under, or `None` when no OCX home
-/// resolves.
-///
-/// Built through `FileStructure::with_root` rather than a second
-/// `root.join("state")` so the layout has one definition.
+/// The state store consent stamps live under; `None` without an OCX home.
 fn state_store() -> Option<StateStore> {
     let root = ocx_config::home::default_ocx_root()?;
     Some(ocx_store::file_structure::FileStructure::with_root(root).state)
@@ -758,10 +435,7 @@ fn load_at(path: &Path) -> Option<ConsentStamp> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) => {
-            // Absence is the overwhelmingly common state (every unstamped
-            // project, every prompt), so even a genuine read failure stays at
-            // debug: the outcome is identical and a WARN here would fire on
-            // the ordinary case.
+            // Absence is the common case (every unstamped prompt): debug, never WARN.
             log::debug!("No usable consent stamp at '{}': {e}", path.display());
             return None;
         }
@@ -789,22 +463,8 @@ fn load_at(path: &Path) -> Option<ConsentStamp> {
 
 /// [`record`] against an explicit store.
 fn record_in(store: &StateStore, project_dir: &Path, sources: &BTreeSet<String>) -> crate::Result<Recorded> {
-    // A-44 — the ocx home toolchain is always consented, so `$OCX_HOME` is
-    // never a consent subject and must never own a stamp. Every one of the seven
-    // writers reaches here with `project_dir == $OCX_HOME` when invoked
-    // `--global`; without this guard `ocx --global lock` writes
-    // `state/projects/<key-for-$OCX_HOME>/consent.json`, which falsifies the
-    // "nothing ever writes that directory" invariant Decision 2 leans on to
-    // delete the global-tier sweep carve-out. Skipping is a success, not an
-    // error: there is no consent to record for a tier that needs none.
-    //
-    // The guard lives here rather than at each caller because `record` is the
-    // one point every stamp write routes through. Identity is device+inode,
-    // never path bytes — same reason and same helper as the project ledger's
-    // no-self-link guard (`registry.rs`, ARCH-1b): on a case-insensitive or
-    // normalizing filesystem the same directory has differing path bytes. A
-    // probe failure means "not the same directory, proceed", so an ordinary
-    // project still stamps when the probe cannot answer.
+    // `$OCX_HOME` never owns a stamp (`ocx --global lock` would write one);
+    // guarded where every write routes. Device+inode identity; a probe failure proceeds.
     let ocx_home = store.root().parent().unwrap_or_else(|| store.root());
     if ocx_util::fs::same_dir(project_dir, ocx_home).unwrap_or(false) {
         return Ok(Recorded::OcxHomeNeedsNoStamp);
@@ -815,22 +475,12 @@ fn record_in(store: &StateStore, project_dir: &Path, sources: &BTreeSet<String>)
     Ok(Recorded::Stamped)
 }
 
-/// Delete the consent stamp for `project_dir`, if it has one.
-///
-/// The inverse of [`record`], and the only remover besides `ocx clean`'s
-/// liveness sweep. Revoking is immediately effective: clause 1 reads the file
-/// on every prompt, so the next one is inert unless a `paths` or `namespaces`
-/// grant still covers the project — which this cannot touch, because those
-/// live in `config.toml` and are revoked by editing it.
-///
-/// **`$OCX_HOME` needs no guard here.** [`record_in`] refuses to stamp it, so
-/// there is nothing to remove and the answer is [`Revoked::Absent`] by
-/// construction rather than by a second copy of A-44's predicate.
+/// Delete the consent stamp for `project_dir`; the next prompt is inert unless
+/// a `paths` or `namespaces` grant still covers it.
 ///
 /// # Errors
 ///
-/// The removal's own I/O failure, and the failure to resolve an OCX home. An
-/// absent stamp is [`Revoked::Absent`], never an error.
+/// The removal's I/O failure, or no resolvable OCX home.
 pub fn revoke(project_dir: &Path) -> crate::Result<Revoked> {
     let store = state_store().ok_or_else(|| {
         io_error(
@@ -865,8 +515,7 @@ fn record_at(target: &Path, project_dir: &Path, sources: &BTreeSet<String>) -> c
     };
     let bytes = serde_json::to_vec_pretty(&stamp).map_err(|e| io_error(target, std::io::Error::other(e)))?;
 
-    // `write_bytes_atomic` stages its temp file in the target's parent, so the
-    // per-project directory has to exist first.
+    // `write_bytes_atomic` stages beside the target, so the directory must exist.
     let parent = target.parent().ok_or_else(|| {
         io_error(
             target,

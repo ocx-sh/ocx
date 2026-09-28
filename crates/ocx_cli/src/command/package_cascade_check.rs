@@ -10,20 +10,18 @@ use clap::Parser;
 use crate::options;
 
 /// Report where a package's rolling tags disagree with its versions.
-///
-/// Reads every version tag the registry holds for each package, folds them
-/// into the rolling-tag state the cascade rules imply, and reports each
-/// difference: a rolling tag missing a platform, one pointing at outdated
-/// content, one that was never created, and any entry nothing accounts for.
-/// For an `ocx.sh/...` package it also compares the live public index with the
-/// registry, so an entry that is stale there is reported too.
-///
-/// Read-only. It authenticates for pull only and never writes anything. Give a
-/// tag (`cmake:3.28`) to narrow the audit to that part of the graph.
-///
-/// Exits 0 when everything agrees, 65 when anything does not, and 64 when a
-/// package names a digest or a tag that is not a version.
 #[derive(Parser)]
+#[command(long_about = "\
+    Report where a package's rolling tags disagree with its versions.\n\n\
+    Reads every version tag the registry holds for each package, folds them into the rolling-tag \
+    state the cascade rules imply, and reports each difference: a rolling tag missing a platform, \
+    one pointing at outdated content, one that was never created, and any entry nothing accounts \
+    for. For an `ocx.sh/...` package it also compares the live public index with the registry, so \
+    an entry that is stale there is reported too.\n\n\
+    Read-only. It authenticates for pull only and never writes anything. Give a tag (`cmake:3.28`) \
+    to narrow the audit to that part of the graph.\n\n\
+    Exits 0 when everything agrees, 65 when anything does not, and 64 when a package names a digest \
+    or a tag that is not a version.")]
 pub struct PackageCascadeCheck {
     /// Packages to audit.
     #[arg(required = true, num_args = 1..)]

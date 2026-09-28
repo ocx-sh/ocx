@@ -1,17 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Report type for a `--tags` / `--tags-file` index sweep.
-//!
-//! Generic over the per-reference report — [`SignatureReport`] for
-//! `ocx package sign`, [`AttestationReport`] for `ocx package attest` — because
-//! the sweep adds nothing to what either already says about one reference. It
-//! **aggregates** them: each swept tag carries that tag's own report verbatim,
-//! so a consumer parsing a single-reference run parses a swept one with the
-//! same code, one level down.
-//!
-//! [`SignatureReport`]: crate::api::data::signature::SignatureReport
-//! [`AttestationReport`]: crate::api::data::attestation::AttestationReport
+//! Report type for a `--tags` / `--tags-file` index sweep: each swept tag carries its
+//! per-reference report (sign or attest) verbatim, so one parser reads both shapes.
 
 use ocx_console::Cell;
 use ocx_exit::ExitCode;
@@ -20,12 +11,8 @@ use serde::Serialize;
 use crate::api::Printable;
 use crate::api::data::sanitize_for_terminal;
 
-/// What the sweep did to one tag.
-///
-/// One vocabulary for both verbs. `completed` rather than `signed` on purpose:
-/// `ocx package attest` can attach an unsigned statement when the run has no
-/// signing material at all, and a status that claimed `signed` there would
-/// contradict the very report it sits next to.
+/// What the sweep did to one tag; one vocabulary for both verbs.
+// `completed`, never `signed`: `attest` can attach an unsigned statement, which `signed` would contradict.
 #[derive(Serialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SweptStatus {
@@ -43,10 +30,8 @@ pub enum SweptStatus {
     ///
     /// Not a failure, and it does not make the run exit non-zero: the tag *is*
     /// signed (or attested), by the referrer the covering tag's row reports.
-    /// `message` names that tag. A cascade release points several tags at one
-    /// index, and a referrer is filed against the subject digest, never against
-    /// a tag — so acting once per tag would publish N identical referrers, and
-    /// a second sweep N more.
+    /// `message` names that tag.
+    // Acting once per tag would publish N identical referrers: a referrer is filed against the digest, not a tag.
     Covered,
     /// This tag failed. The sweep carried on to the rest and the run exits
     /// non-zero at the end.
@@ -54,8 +39,7 @@ pub enum SweptStatus {
 }
 
 impl SweptStatus {
-    /// The word the plain table prints — the same word the JSON carries, so a
-    /// reader meets one vocabulary in both renderings.
+    /// The word the plain table prints — the same one the JSON carries.
     fn label(self) -> &'static str {
         match self {
             Self::Completed => "completed",
@@ -67,12 +51,7 @@ impl SweptStatus {
 }
 
 /// One swept tag's row.
-///
-/// Deliberately flat rather than an internally-tagged enum: `report` is itself
-/// a struct that would have to be `flatten`ed into the variant, and serde's
-/// `flatten` inside a tagged enum inside a `flatten` is a shape that silently
-/// changes as those attributes compose. A `status` field plus three optionals
-/// is the same information with none of that.
+// Flat, not an internally-tagged enum: `flatten` inside a tagged enum inside a `flatten` changes shape silently.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SweptTagReport<R> {
     /// The tag as the caller spelled it, so the report names what was asked
@@ -88,11 +67,9 @@ pub struct SweptTagReport<R> {
     pub report: Option<R>,
     /// The JSON error envelope's per-variant slug for this tag's failure,
     /// falling back to its frozen category for errors outside the sign and
-    /// verify taxonomies. Present exactly when `status` is `failed`.
-    ///
-    /// Lifted out of the envelope this error would have rendered on its own,
-    /// so the value a script reads here is the value it reads there — the same
-    /// rule `push --sbom`'s failed attestation follows.
+    /// verify taxonomies. Present exactly when `status` is `failed`; the same
+    /// value the error's own JSON envelope would carry.
+    // Lifted out of that envelope, the same rule `push --sbom`'s failed attestation follows.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub kind: Option<String>,
@@ -116,11 +93,7 @@ impl<R> SweptTagReport<R> {
         }
     }
 
-    /// A tag whose index another tag in the same sweep already acted on.
-    ///
-    /// `signed_as` is that tag. Reported rather than dropped: a caller who
-    /// passed five tags must still see what became of all five, and the row
-    /// points at the one carrying the referrer.
+    /// A tag whose index another tag in the same sweep, `signed_as`, already acted on.
     pub fn covered(tag: String, signed_as: String) -> Self {
         Self {
             tag,
@@ -142,13 +115,9 @@ impl<R> SweptTagReport<R> {
         }
     }
 
-    /// A tag that failed, described the way the error envelope would describe
-    /// it.
+    /// A tag that failed, described the way the error envelope would describe it.
     ///
-    /// `report` is `Some` for a run that produced one and still failed — a
-    /// `--signature-format both` tag that lost one leg. Hiding the leg that
-    /// landed behind the leg that did not would leave the operator re-signing
-    /// what is already published.
+    /// `report` is `Some` for a run that produced one and still failed (a `both` tag that lost a leg).
     pub fn failed(tag: String, report: Option<R>, kind: String, message: String) -> Self {
         Self {
             tag,
@@ -205,8 +174,6 @@ impl<R> SweepReport<R> {
 
 impl<R: Serialize> Printable for SweepReport<R> {
     fn print_plain(&self, data: &ocx_console::DataInterface) {
-        // Column-major, like every other `print_table` caller: one `Vec<Cell>`
-        // per column.
         let mut rows: [Vec<Cell>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.tags {
             rows[0].push(Cell::from(sanitize_for_terminal(&entry.tag)));

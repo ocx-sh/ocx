@@ -9,7 +9,6 @@ pub struct DropFile {
 }
 
 impl DropFile {
-    /// Creates a new DropFile for the given path.
     pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
         Self {
             path: Some(path.into()),
@@ -21,7 +20,7 @@ impl DropFile {
         self.path = None;
     }
 
-    /// Deletes the file or directory if it exists.
+    /// Deletes the file or directory now, unless retained.
     pub fn unlink(&mut self) -> Result<(), FileError> {
         let path = match &self.path {
             Some(path) => path,

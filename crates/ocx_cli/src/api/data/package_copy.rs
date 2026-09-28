@@ -11,10 +11,6 @@ use crate::api::Printable;
 use crate::api::data::sanitize_for_terminal;
 
 /// Whether this run copied or only planned.
-///
-/// Typed rather than a pre-formatted `String`, so `Serialize` emits a token a
-/// script matches on while `Display` and [`CopyStatus::action`] stay free to
-/// read like English (`subsystem-cli-api.md`, "Typed Enums Over Strings").
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CopyStatus {
@@ -43,10 +39,8 @@ impl fmt::Display for CopyStatus {
 
 /// What became of the repository description.
 ///
-/// Reported rather than left to a stderr warning: `--format json` is how a CI
-/// job finds out whether the catalog page travelled, and a warning is not a
-/// field. `None` — the flag was not passed — serializes as `null`, so the key
-/// is always there to branch on.
+/// Reported as a field so a CI job reading `--format json` finds out whether
+/// the catalog page travelled; a stderr warning is not a field.
 #[derive(Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum DescriptionOutcome {
@@ -69,29 +63,11 @@ impl fmt::Display for DescriptionOutcome {
     }
 }
 
+// Plain stdout is the per-platform rows only: they tell a one-platform promotion from a mistake.
 /// Result of `ocx package copy`.
 ///
-/// Plain format: one table, one row per platform — what the target now offers
-/// and how it got there — and a single stderr status line for the receipt
-/// (tags written, blob traffic, description). The per-platform breakdown is the
-/// point and the only thing on stdout: a promotion that moved one platform into
-/// a target offering three is a legitimate outcome and a serious mistake, and
-/// only the row list tells them apart.
-///
-/// **The `Digest` column means two things, and the `Result` column says which.**
-/// On an `added`, `replaced` or `unchanged` row it is the digest this copy put
-/// there. On a `kept (not in source)` row it is the digest the target already
-/// had and this copy never touched.
-///
-/// Under `--dry-run` the rows read `would add` / `would replace` in plain
-/// output only. The JSON `disposition` keeps its stable slug either way, and
-/// the top-level `status` is what distinguishes a plan from a promotion.
-///
-/// JSON format:
-/// `{ "source", "target", "status", "platforms": [{ "platform", "digest",
-/// "disposition" }], "cascade_tags_written", "keep_tags_written",
-/// "referrers_copied", "sidecars_copied", "sidecar_conflicts",
-/// "blobs": { "present", "mounted", "uploaded" }, "description" }`.
+/// `status` distinguishes a plan (`planned`, under `--dry-run`) from a
+/// promotion; each row's `disposition` keeps its stable slug either way.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct CopyReport {
     /// The source reference as given.
@@ -182,13 +158,7 @@ impl CopyReport {
         self.status.action()
     }
 
-    /// The receipt: what this copy wrote and what it moved.
-    ///
-    /// stderr, not stdout — a receipt is a step-along-the-way diagnostic, and
-    /// the single-table rule leaves stdout to the per-platform rows. Every
-    /// interpolated value except the counts came off a wire document (the
-    /// target's own tag list supplies the rolling tags), so the whole line is
-    /// neutralized before it reaches a terminal.
+    /// The stderr receipt: what this copy wrote and moved, neutralized since its tags come off the wire.
     pub fn summary(&self) -> String {
         let cascade = if self.cascade_tags_written.is_empty() {
             "no cascade tags".to_string()
@@ -216,9 +186,7 @@ impl CopyReport {
         if let Some(description) = self.description {
             line.push_str(&format!("; description {description}"));
         }
-        // Named, not counted. A conflict is the one outcome here the operator
-        // has to act on, and "1 sidecar conflict" does not say which tag to go
-        // look at.
+        // Named, not counted: the operator has to know which tag to act on.
         if !self.sidecar_conflicts.is_empty() {
             line.push_str(&format!(
                 "; REFUSED {} sidecar tag(s) already at the target under a different manifest: {}",
@@ -233,14 +201,7 @@ impl CopyReport {
         line
     }
 
-    /// The prose for one row's `Result` cell.
-    ///
-    /// A plan has not added or replaced anything, and `added` is indicative past
-    /// tense — so under `Planned` the two write dispositions become `would add`
-    /// and `would replace`. `unchanged` and `kept (not in source)` describe the
-    /// target as it already is and read correctly either way.
-    ///
-    /// Plain output only. The JSON `disposition` slug never changes.
+    /// One row's plain `Result` cell: `would add`/`would replace` under `Planned`; JSON's slug never changes.
     fn result_cell(&self, disposition: Disposition) -> String {
         match (self.status, disposition) {
             (CopyStatus::Planned, Disposition::Added) => "would add".to_string(),
@@ -249,11 +210,7 @@ impl CopyReport {
         }
     }
 
-    /// The three plain columns, exactly as `print_table` will write them.
-    ///
-    /// Split out from [`Printable::print_plain`] so the neutralization and the
-    /// dry-run vocabulary are assertable without a terminal — the same seam
-    /// `api/data/index.rs` uses.
+    /// The three plain columns as `print_table` writes them, assertable without a terminal.
     fn plain_rows(&self) -> [Vec<String>; 3] {
         [
             self.platforms

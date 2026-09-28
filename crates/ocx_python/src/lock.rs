@@ -2,39 +2,24 @@
 // Copyright 2026 The OCX Authors
 
 //! PEP 751 `pylock.toml` parser (wheels-only, hash-required subset).
-//!
-//! Parses the fields `ocx_python` needs to select and mirror wheels and
-//! rejects locks it cannot faithfully translate: an entry with no wheels
-//! (sdist-only) or a wheel missing its `sha256` hash is a hard
-//! [`LockError`], because both would force either a build step (out of scope —
-//! wheels only) or an unverifiable mirror.
 
 /// A parsed PEP 751 lock, reduced to the wheels-only subset.
-///
-/// Only the fields relevant to wheel selection and mirroring are retained;
-/// unknown keys in the source TOML are ignored so a newer `pylock.toml` still
-/// parses as long as its required subset is intact.
 #[derive(Debug, Clone)]
 pub struct Pylock {
     /// The `lock-version` field (PEP 751), e.g. `"1.0"`.
     pub lock_version: String,
     /// The `requires-python` specifier, when present (e.g. `">=3.9"`).
     pub requires_python: Option<String>,
-    /// The lock's top-level `extras` key: the set of extras the lock was
-    /// resolved with. Drives extras-gated entrypoint synthesis in `compose`;
-    /// `EnvSpec::requested_extras` is validated against this set.
+    /// The extras the lock was resolved with; `EnvSpec::requested_extras` must be a subset.
     pub extras: Vec<String>,
     /// The locked packages, in lock order.
     pub packages: Vec<LockedPackage>,
 }
 
 impl Pylock {
-    /// The first locked package, in lock order, whose PEP 503-normalised name
-    /// equals [`normalize_package_name(name)`](crate::normalize_package_name).
+    /// The first locked package whose normalised name matches `name`.
     ///
-    /// A lock may hold several entries per name (PEP 751 version/marker
-    /// forks); markers are not evaluated — filter [`packages`](Self::packages)
-    /// to see all.
+    /// Markers are not evaluated, so of several forks for one name only the first is returned.
     #[must_use]
     pub fn find_package(&self, name: &str) -> Option<&LockedPackage> {
         let wanted = crate::normalize_package_name(name);
@@ -47,39 +32,28 @@ impl Pylock {
 /// A single locked package with its candidate wheels.
 #[derive(Debug, Clone)]
 pub struct LockedPackage {
-    /// Distribution name as written in the lock (e.g. `"charset-normalizer"`).
-    /// PEP 751 asks for the normalised form but it is not enforced here —
-    /// compare via [`normalize_package_name`](crate::normalize_package_name).
+    /// Distribution name as written in the lock, not necessarily normalised.
     pub name: String,
     /// The pinned project version (e.g. `"3.4.0"`).
     pub version: String,
-    /// The package's PEP 508 environment marker, when present
-    /// (e.g. `sys_platform == "win32"`). Evaluated during selection.
+    /// The package's PEP 508 environment marker, when present.
     pub marker: Option<String>,
-    /// The candidate wheels for this package (never empty — a package with
-    /// only sdists is rejected at parse time as [`LockError::SdistOnly`]).
+    /// The candidate wheels for this package; never empty.
     pub wheels: Vec<LockedWheel>,
 }
 
 /// A single wheel candidate for a [`LockedPackage`].
 #[derive(Debug, Clone)]
 pub struct LockedWheel {
-    /// The wheel filename (e.g. `numpy-2.1.3-cp313-cp313-manylinux_2_28_x86_64.whl`).
-    ///
-    /// Honors the explicit `name` field of the wheel table when present,
-    /// falling back to the URL-derived basename otherwise — PEP 751 permits
-    /// both, and the explicit field wins.
+    /// The wheel filename: the table's `name` field, else the URL basename.
     pub filename: String,
-    /// The wheel's download URL, when the lock provides one. Absent for
-    /// path-based locks; the consumer owns fetching.
+    /// The wheel's download URL; absent for path-based locks.
     pub url: Option<String>,
-    /// The wheel's `sha256` hash (hex, no `sha256:` prefix). Required — a
-    /// wheel table without it is rejected as [`LockError::MissingHash`].
+    /// The wheel's `sha256` hash (hex, no `sha256:` prefix).
     pub sha256: String,
 }
 
-/// Parses a PEP 751 `pylock.toml` document into the wheels-only [`Pylock`]
-/// subset.
+/// Parses a PEP 751 `pylock.toml` document into the wheels-only [`Pylock`] subset.
 ///
 /// # Errors
 ///
@@ -103,9 +77,6 @@ pub fn parse_pylock(input: &str) -> Result<Pylock, LockError> {
     })
 }
 
-/// Converts a raw package table, rejecting a package that ships no wheels
-/// (sdist-only) — whether or not the source TOML also carries an `[sdist]`
-/// table is irrelevant to this wheels-only subset.
 fn convert_package(raw: RawPackage) -> Result<LockedPackage, LockError> {
     let RawPackage {
         name,
@@ -130,10 +101,6 @@ fn convert_package(raw: RawPackage) -> Result<LockedPackage, LockError> {
     })
 }
 
-/// Converts a raw wheel table, resolving its filename (explicit `name` field
-/// takes precedence over the URL-derived basename — PEP 751 errata, March
-/// 2026) before that filename is used anywhere, including in a
-/// [`LockError::MissingHash`] message.
 fn convert_wheel(package: &str, wheel: RawWheel) -> Result<LockedWheel, LockError> {
     let filename = wheel
         .name
@@ -160,8 +127,6 @@ fn convert_wheel(package: &str, wheel: RawWheel) -> Result<LockedWheel, LockErro
     })
 }
 
-/// The last `/`-separated segment of a wheel URL, or `None` for an empty
-/// segment (e.g. a URL ending in `/`).
 fn url_basename(url: &str) -> Option<String> {
     url.rsplit('/')
         .next()
@@ -169,9 +134,7 @@ fn url_basename(url: &str) -> Option<String> {
         .filter(|segment| !segment.is_empty())
 }
 
-/// Raw `pylock.toml` document shape for `toml`/`serde` deserialization.
-/// Unknown keys are ignored (no `deny_unknown_fields`), so newer lock fields
-/// this crate doesn't need still parse.
+// No `deny_unknown_fields`, or a newer `pylock.toml` stops parsing.
 #[derive(serde::Deserialize)]
 struct RawPylock {
     #[serde(rename = "lock-version")]
@@ -205,11 +168,10 @@ struct RawWheel {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LockError {
-    /// The TOML is malformed or a required field is missing/ill-typed.
+    /// The TOML is malformed or a required field is missing or ill-typed.
     #[error("invalid pylock.toml")]
     Parse(#[source] toml::de::Error),
-    /// A locked package ships no wheels (sdist-only). Building from source is
-    /// out of scope — the lock must resolve to wheels.
+    /// A locked package ships no wheels (sdist-only).
     #[error("package '{package}' has no wheels (sdist-only)")]
     SdistOnly {
         /// The offending package name.

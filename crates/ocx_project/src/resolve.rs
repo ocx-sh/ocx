@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Resolve advisory tags in a [`ProjectConfig`] to pinned digests and
-//! assemble a fresh [`ProjectLock`].
-//!
-//! The resolution is fully transactional: if any tool fails to resolve
-//! (tag not found, registry unreachable, auth failure, timeout) the
-//! function returns an error and no lock is produced.
-//!
-//! Tuning knobs (per-tool timeout, retry attempts, initial backoff)
-//! default to conservative values tuned for transactional resolution.
+//! Resolve advisory tags in a [`ProjectConfig`] to pinned digests and assemble
+//! a fresh [`ProjectLock`]; all or nothing, so any failure produces no lock.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -36,10 +29,6 @@ pub const DEFAULT_RETRY_ATTEMPTS: u8 = 2;
 pub const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Tuning knobs for [`resolve_lock`].
-///
-/// Per-tool timeout wraps the full retry chain. `retry_attempts` counts
-/// additional retries after the initial attempt (so `2` means up to 3
-/// total attempts). `initial_backoff` is doubled on each retry.
 #[derive(Debug, Clone)]
 pub struct ResolveLockOptions {
     /// Timeout wrapping the entire retry chain for a single tool.
@@ -60,57 +49,32 @@ impl Default for ResolveLockOptions {
     }
 }
 
-/// Resolve every tool in `config` to a pinned identifier and assemble a
-/// fresh [`ProjectLock`].
-///
-/// Fully transactional — either every tool resolves or the function
-/// returns an error and no lock is produced.
-///
-/// Group selection: when `groups` is empty, every `[tools]` and
-/// `[group.*]` entry is resolved. Otherwise only the named groups are
-/// resolved; the reserved name `"default"` selects the top-level
-/// `[tools]` table.
+/// Resolve every tool in `config`, or only the named `groups` (`default` is the
+/// top-level `[tools]`), into a fresh [`ProjectLock`]; all or nothing.
 ///
 /// # Errors
-/// Returns [`super::Error`] on configuration validation failures, tag
-/// resolution failures, registry I/O errors, authentication failures,
-/// and timeouts.
+/// Config validation, tag resolution, registry I/O, auth and timeout failures.
 pub async fn resolve_lock(
     config: &ProjectConfig,
     index: &Index,
     groups: &[String],
     options: ResolveLockOptions,
 ) -> Result<ProjectLock, super::Error> {
-    // Validate + normalize the requested group filter. Empty `groups` means
-    // "resolve every tool"; otherwise only the named groups are resolved.
     let selected = normalize_groups(groups, config)?;
 
-    // Collect (group, binding, identifier) tuples in a deterministic order.
-    // The final sort by (group, name) happens after resolution, but iterating
-    // a `BTreeMap` here already yields stable order for testability.
     let work = collect_work(config, &selected);
 
-    // Wrap the index in an `Arc` once at the top so per-task spawns share a
-    // refcount bump rather than each cloning the underlying `Box<dyn IndexImpl>`
-    // (`box_clone` is non-trivial — see `IndexImpl::box_clone` impls).
+    // One `Arc` shared by every task: cloning the boxed index per spawn is not cheap.
     let index = Arc::new(index.clone());
     let mut resolved = resolve_work(work, index, &options).await?;
 
-    // Deterministic output: sort locked tools by (group, name).
     resolved.sort_by(|a, b| (a.group.as_str(), a.name.as_str()).cmp(&(b.group.as_str(), b.name.as_str())));
 
     Ok(build_lock(resolved, config))
 }
 
-/// Run the per-tool resolver for every tuple in `work`, returning the
-/// merged set of [`LockedTool`]s in completion order.
-///
-/// `JoinSet` provides fail-fast semantics: on the first resolver error,
-/// remaining tasks are cancelled via `abort_all()` and the error is
-/// propagated. Callers are expected to apply their own deterministic
-/// sort (by `(group, name)`) before serialization — this helper does
-/// not sort, since partial-update callers compose its output with
-/// preserved entries before sorting.
+/// Resolve every tuple in `work`, failing fast on the first error. Unsorted:
+/// partial-update callers merge the output before sorting.
 async fn resolve_work(
     work: Vec<(String, String, PackageRef)>,
     index: Arc<Index>,
@@ -129,12 +93,9 @@ async fn resolve_work(
 
     let mut resolved: Vec<LockedTool> = Vec::new();
     while let Some(join) = set.join_next().await {
-        // `.expect` at the join boundary documents "a resolver task
-        // panicked" — the inner `Result` is always propagated via `?`.
         match join.expect("project::resolve resolver task panicked") {
             Ok(tool) => resolved.push(tool),
             Err(err) => {
-                // Fail fast: cancel the remaining tasks before returning.
                 set.abort_all();
                 return Err(err);
             }
@@ -144,44 +105,15 @@ async fn resolve_work(
     Ok(resolved)
 }
 
-/// Re-resolve exactly the `touched` `(group, name)` bindings and carry every
-/// other predecessor entry forward verbatim — the whole-file model's
-/// pin-preserving mutator path for `ocx add` / `ocx remove`.
+/// Re-resolve only the `touched` `(group, name)` bindings and carry every other
+/// predecessor entry forward verbatim: the pin-preserving path for `ocx add` / `ocx remove`.
 ///
-/// Two distinct config snapshots are in flight and must never be conflated
-/// (spec §3):
-///
-/// - `candidate` (post-mutation) drives the new-binding resolve and is stamped
-///   into the produced lock's `declaration_hash` via [`build_lock`].
-/// - `pre_mutation` (the `ocx.toml` snapshot taken *before* this command's
-///   staged edit) is the freshness anchor **only**: it is compared against the
-///   predecessor's `declaration_hash` so a clean `add` (whose `candidate`
-///   differs by the inserted binding) does not spuriously fail closed.
-///
-/// Contract:
-///
-/// 1. **Freshness gate (always on).** If `hash(pre_mutation)` does not equal
-///    `previous.metadata.declaration_hash`, return
-///    [`ProjectErrorKind::StaleLockOnPartial`] **before any resolve** (exit
-///    65). `current_hash` is `hash(pre_mutation)`; `previous_hash` is the
-///    lock's.
-/// 2. **Resolve exactly `touched`.** An empty set resolves nothing (the
-///    `remove` case); a single new binding resolves just it (the `add` case).
-///    This is the explicit-touched-set contract — it never falls back to
-///    "resolve everything" on an empty set.
-/// 3. **Carry forward** every predecessor entry whose `(group, name)` is not in
-///    `touched` AND is still declared in `candidate` (so a `remove`'s dropped
-///    binding falls out) — byte-identical, zero registry contact
-///    ([`merge_carry_forward`]).
-/// 4. **Stamp `hash(candidate)`** into the produced metadata.
-///
-/// Fully transactional: any resolution failure aborts before the merge,
-/// returning an error with no [`ProjectLock`] produced.
+/// `candidate` drives the resolve and the new hash; `pre_mutation` is only the
+/// freshness anchor. Swapped, every clean `add` fails closed.
 ///
 /// # Errors
-/// Returns [`super::Error`]: [`ProjectErrorKind::StaleLockOnPartial`] on a
-/// drifted pre-mutation hash (65), plus the same tag-resolution / registry /
-/// auth / policy failures as [`resolve_lock`] for the touched bindings.
+/// [`ProjectErrorKind::StaleLockOnPartial`] on a drifted or incoherent
+/// predecessor, plus [`resolve_lock`]'s failures for the touched bindings.
 pub async fn resolve_lock_touched(
     candidate: &ProjectConfig,
     pre_mutation: &ProjectConfig,
@@ -190,12 +122,8 @@ pub async fn resolve_lock_touched(
     touched: &[(String, String)],
     options: ResolveLockOptions,
 ) -> Result<ProjectLock, super::Error> {
-    // 1. Freshness gate (Codex H1) — anchored on the PRE-mutation snapshot, not
-    //    the candidate. A clean `add` differs from `pre_mutation` only by the
-    //    inserted binding, so anchoring on the candidate would always mismatch
-    //    and fail every clean add closed. Compare `hash(pre_mutation)` against
-    //    the predecessor's stamped hash; on drift, refuse before any resolve so
-    //    the carry-forward can never launder a stale lock under a fresh hash.
+    // Refuse drift before resolving, or the carry-forward launders a stale lock
+    // under a fresh hash.
     let pre_hash = pre_mutation.declaration_hash_cached();
     if previous.metadata.declaration_hash != pre_hash {
         return Err(ProjectError::new(
@@ -208,35 +136,17 @@ pub async fn resolve_lock_touched(
         .into());
     }
 
-    // 2. Structural coherence gate (Block 2): the freshness gate above only
-    //    proves the predecessor described the same CONFIG — `declaration_hash`
-    //    is over `ocx.toml`, not the lock's `[[tool]]` entries. A corrupt or
-    //    hand-edited lock with the right metadata hash but a missing / extra /
-    //    duplicated / wrong-repository entry would otherwise pass, then be
-    //    laundered by the carry-forward under a fresh candidate hash. Validate
-    //    that every declared binding is covered by exactly one of {a touched
-    //    pair} ∪ {a carried predecessor entry}, and that each carried entry's
-    //    bare repository matches the candidate's declared identifier. Any
-    //    mismatch is `StaleLockOnPartial` (65) — refuse before any resolve.
+    // The hash covers `ocx.toml`, not `[[tool]]` entries, so a hand-edited lock
+    // with the right hash must still match structurally.
     validate_predecessor_coherence(candidate, previous, touched)?;
 
-    // 3. Resolve EXACTLY the touched `(group, name)` bindings against the live
-    //    index. The empty set resolves nothing (remove); the explicit-touched-
-    //    set contract never falls back to "resolve everything". Each binding's
-    //    identifier is looked up in `candidate` (the post-mutation config); a
-    //    touched pair absent from `candidate` is a `ToolNotInConfig` (79) error
-    //    rather than a silently dropped binding (Block 4).
-    // Deduplicate touched pairs before building the work list. The coherence gate
-    // above already collapses predecessor duplicates; the work vector must too so
-    // a duplicate (group, name) in the caller's touched slice resolves at most once.
+    // Exactly the touched bindings: empty resolves nothing (remove), never
+    // everything. A touched pair `candidate` lacks is `ToolNotInConfig`.
     let mut seen: HashSet<(&str, &str)> = HashSet::new();
     let mut work: Vec<(String, String, PackageRef)> = Vec::with_capacity(touched.len());
     for (group, name) in touched {
         if !seen.insert((group.as_str(), name.as_str())) {
-            // Already queued this pair; skip before the declared_identifier lookup
-            // so a duplicate of a valid binding is dropped (resolved once), while
-            // a genuinely undeclared pair still returns ToolNotInConfig on its
-            // first occurrence.
+            // A duplicate resolves once; an undeclared pair still fails on first sight.
             continue;
         }
         let Some(identifier) = declared_identifier(candidate, group, name) else {
@@ -247,46 +157,22 @@ pub async fn resolve_lock_touched(
         work.push((group.clone(), name.clone(), identifier));
     }
 
-    // See `resolve_lock` for the rationale on wrapping `index` once in an `Arc`.
     let index = Arc::new(index.clone());
     let resolved = resolve_work(work, index, &options).await?;
 
-    // 4. Carry every untouched, still-declared predecessor entry forward
-    //    verbatim, then append + sort.
     let tools = merge_carry_forward(previous, resolved, candidate);
 
-    // 5. Stamp `hash(candidate)` into the produced metadata (`build_lock` reads
-    //    `candidate.declaration_hash_cached()`), so the commit-time coherence
-    //    gate — which compares `staged.candidate` hash vs the lock's metadata
-    //    hash — passes.
+    // Stamped with `hash(candidate)`, so the commit's coherence gate passes.
     Ok(build_lock(tools, candidate))
 }
 
-/// Carry forward every predecessor entry the caller did not (re)resolve and is
-/// still declared in `candidate`, then append `resolved` and sort.
-///
-/// Shared by the carry-forward path of [`resolve_lock_touched`]. A predecessor
-/// entry is carried iff its `(group, name)` is:
-///
-/// - **not** among the freshly `resolved` keys (those entries are produced from
-///   the live registry, not carried), and
-/// - **still declared** in `candidate` (a binding `remove` dropped from
-///   `ocx.toml` must not survive in the lock).
-///
-/// Every carried entry passes through byte-identical — zero registry contact
-/// — because [`ProjectLock::load`] rejects any lock version other than V3
-/// before `previous` ever reaches this function (D3: no bridged legacy
-/// read), so a carried entry is always already in the current shape.
+/// Carry forward each predecessor entry not just resolved and still declared in
+/// `candidate` (so a `remove` drops its binding), then append `resolved` and sort.
 fn merge_carry_forward(
     previous: &ProjectLock,
     resolved: Vec<LockedTool>,
     candidate: &ProjectConfig,
 ) -> Vec<LockedTool> {
-    // Carry forward every predecessor entry whose `(group, name)` was NOT just
-    // resolved AND is still declared in `candidate`. The "still declared"
-    // filter is what drops a `remove`'s binding (absent from `candidate`) from
-    // the new lock. The block scope on `new_keys` ends its borrow into
-    // `resolved` before `resolved` is moved into `tools` below.
     let mut tools: Vec<LockedTool> = {
         let new_keys: HashSet<(&str, &str)> = resolved.iter().map(|t| (t.group.as_str(), t.name.as_str())).collect();
         previous
@@ -299,38 +185,16 @@ fn merge_carry_forward(
     };
     tools.extend(resolved);
 
-    // Deterministic output: same `(group, name)` order as `resolve_lock`.
     tools.sort_by(|a, b| (a.group.as_str(), a.name.as_str()).cmp(&(b.group.as_str(), b.name.as_str())));
 
     tools
 }
 
-/// Validate that the `previous` lock structurally describes `candidate`'s
-/// declared bindings before any carry-forward laundering can occur (Codex
-/// Block 2).
-///
-/// The two-hash freshness gate proves the predecessor was current with the same
-/// *config* (`declaration_hash` is over `ocx.toml`, not the lock's `[[tool]]`
-/// entries). It cannot detect a corrupt or hand-edited lock that carries the
-/// right metadata hash but a missing, extra, duplicated, or wrong-repository
-/// entry. Such a lock would pass the freshness gate, then be carried forward and
-/// stamped with a fresh candidate hash — laundering the corruption.
-///
-/// This gate closes that gap. Every declared binding in `candidate` must be
-/// covered by **exactly one** of:
-///
-/// - a `touched` `(group, name)` pair (it will be resolved fresh), or
-/// - a single carried predecessor entry (it will be carried forward),
-///
-/// and each carried entry's bare `repository` must equal the bare repository of
-/// `candidate`'s declared identifier for that `(group, name)`. Any uncovered
-/// declared binding, duplicate carried entry, or repository divergence returns
-/// [`ProjectErrorKind::StaleLockOnPartial`] (exit 65) before any registry
-/// contact. Reuses the existing variant — no new error variant (KISS/YAGNI).
+/// Every binding `candidate` declares must be touched or carried exactly once,
+/// with a matching bare `repository`.
 ///
 /// # Errors
-/// Returns [`super::Error`] with [`ProjectErrorKind::StaleLockOnPartial`] on any
-/// structural incoherence between `previous` and `candidate`.
+/// [`ProjectErrorKind::StaleLockOnPartial`] on any mismatch.
 fn validate_predecessor_coherence(
     candidate: &ProjectConfig,
     previous: &ProjectLock,
@@ -349,13 +213,10 @@ fn validate_predecessor_coherence(
 
     let touched_keys: HashSet<(&str, &str)> = touched.iter().map(|(g, n)| (g.as_str(), n.as_str())).collect();
 
-    // Index the predecessor's carried entries by `(group, name)`, rejecting a
-    // duplicate key (a corrupt lock with two entries for the same binding).
+    // A duplicate carried key is a corrupt lock.
     let mut carried: BTreeMap<(&str, &str), &LockedTool> = BTreeMap::new();
     for tool in &previous.tools {
         let key = (tool.group.as_str(), tool.name.as_str());
-        // A binding that will be resolved fresh need not (and may not coherently)
-        // appear among the carried entries; only validate carry-set duplicates.
         if touched_keys.contains(&key) {
             continue;
         }
@@ -364,15 +225,12 @@ fn validate_predecessor_coherence(
         }
     }
 
-    // Every declared binding must be covered by exactly one of {touched} ∪
-    // {carried}, and carried entries must match the declared repository.
     for (group, name, declared) in collect_work(candidate, &None) {
         let key = (group.as_str(), name.as_str());
         if touched_keys.contains(&key) {
             continue;
         }
         let Some(tool) = carried.get(&key) else {
-            // Declared but neither touched nor carried — a missing entry.
             return Err(stale());
         };
         if tool.repository != declared.without_specifiers() {
@@ -383,22 +241,12 @@ fn validate_predecessor_coherence(
     Ok(())
 }
 
-/// Validate `groups` argument and return the set of group names to
-/// resolve. An empty input means "resolve every group".
-///
-/// `default` is accepted — it is the reserved name for the top-level
-/// `[tools]` table and callers may legitimately request it as a filter.
+/// The groups to resolve, `None` for all; `default` is the top-level `[tools]`.
 ///
 /// # Errors
 ///
-/// - [`ProjectErrorKind::EmptyGroupFilter`] when a group segment is
-///   empty (e.g. `-g ci,,lint` after clap's comma-split).
-/// - [`ProjectErrorKind::UnknownGroup`] when a segment names a group
-///   not declared in `ocx.toml` (and is not the reserved `default`).
-///
-/// Both cases are pre-validated by the CLI layer with a dedicated
-/// UsageError (64) exit path; the library-level variants exist as
-/// defense-in-depth for direct library consumers.
+/// - [`ProjectErrorKind::EmptyGroupFilter`] — an empty segment (`-g ci,,lint`).
+/// - [`ProjectErrorKind::UnknownGroup`] — a group `ocx.toml` does not declare.
 fn normalize_groups(groups: &[String], config: &ProjectConfig) -> Result<Option<Vec<String>>, super::Error> {
     if groups.is_empty() {
         return Ok(None);
@@ -425,12 +273,10 @@ fn normalize_groups(groups: &[String], config: &ProjectConfig) -> Result<Option<
     Ok(Some(out))
 }
 
-/// Collect the `(group, name, identifier)` tuples that should be
-/// resolved given the `selected` filter. `None` means "all groups".
+/// The `(group, name, identifier)` tuples `selected` names; `None` means all.
 fn collect_work(config: &ProjectConfig, selected: &Option<Vec<String>>) -> Vec<(String, String, PackageRef)> {
     let mut work: Vec<(String, String, PackageRef)> = Vec::new();
 
-    // Top-level `[tools]` → reserved `default` group.
     let include_default = selected
         .as_ref()
         .is_none_or(|s| s.iter().any(|g| g == super::internal::DEFAULT_GROUP));
@@ -440,7 +286,6 @@ fn collect_work(config: &ProjectConfig, selected: &Option<Vec<String>>) -> Vec<(
         }
     }
 
-    // Named groups.
     for (group_name, group) in &config.groups {
         let include = selected.as_ref().is_none_or(|s| s.iter().any(|g| g == group_name));
         if !include {
@@ -454,12 +299,7 @@ fn collect_work(config: &ProjectConfig, selected: &Option<Vec<String>>) -> Vec<(
     work
 }
 
-/// Look up the `ocx.toml` declared identifier for a `(group, name)` binding.
-///
-/// `"default"` maps to the top-level `[tools]` table; any other group maps to
-/// the matching `[group.<group>]` table. Returns `None` when the binding is no
-/// longer declared (e.g. the entry was carried forward from a lock whose
-/// `ocx.toml` declaration has since been removed).
+/// The identifier `ocx.toml` declares for `(group, name)`; `None` once undeclared.
 fn declared_identifier(config: &ProjectConfig, group: &str, name: &str) -> Option<PackageRef> {
     if group == super::internal::DEFAULT_GROUP {
         config.tools.get(name).cloned()
@@ -468,17 +308,9 @@ fn declared_identifier(config: &ProjectConfig, group: &str, name: &str) -> Optio
     }
 }
 
-/// Resolve a single `(group, name, identifier)` to a [`LockedTool`], wrapping
-/// the fetch in `tokio::time::timeout`.
-///
-/// Uses `fetch_candidates` (one entry per advertised index child): it stores
-/// the bare `repository` (`identifier` with tag and digest stripped) plus one
-/// leaf-digest entry per advertised child, keyed by the child's canonical
-/// grammar [`Platform`] string. No omitted-platform rows are synthesized and
-/// the outer index digest is discarded. A flat `Manifest::Image` package
-/// yields a single `"any"` entry. An `Option::None`/empty candidate set on a
-/// `Resolve` miss surfaces as [`ProjectErrorKind::PolicyBlocked`] / a
-/// not-found error per the active routing policy.
+/// Resolve one binding under the per-tool timeout, so a hung registry surfaces
+/// as `ResolveTimeout`. One leaf digest per advertised child, keyed by canonical
+/// platform; a flat image yields `"any"`.
 async fn resolve_one(
     index: Arc<Index>,
     group: String,
@@ -486,11 +318,6 @@ async fn resolve_one(
     identifier: PackageRef,
     options: ResolveLockOptions,
 ) -> Result<LockedTool, super::Error> {
-    // Wrap the whole resolve (retry + policy classification + candidate
-    // fan-out into the available-only `platforms` map) in the per-tool
-    // timeout. `resolve_to_platforms` owns the retry/classification; the
-    // timeout here bounds the entire chain so a hung registry surfaces as
-    // `ResolveTimeout` rather than blocking the join set.
     let timeout = options.per_tool_timeout;
     let retry_chain = resolve_to_platforms(&index, identifier.clone(), options);
     let platforms = match tokio::time::timeout(timeout, retry_chain).await {
@@ -510,38 +337,25 @@ async fn resolve_one(
     Ok(LockedTool {
         name,
         group,
-        // Bare repository coordinates — the outer index digest is
-        // discarded; per-platform pull ids are reconstructed from
-        // `repository` + each leaf digest.
         repository: identifier.without_specifiers(),
         platforms,
     })
 }
 
-/// Resolve `identifier`'s advertised index children into the available-only
-/// `platforms` map, applying the retry/policy classification first.
-///
-/// The retry chain (`retry_fetch`) validates the tag resolves and produces
-/// the policy-aware error classification (offline/frozen → PolicyBlocked,
-/// auth → AuthError, etc.). Its result (the outer index digest) is discarded.
-/// `fetch_candidates(Resolve)` then fans the parent manifest into one leaf per
-/// advertised child; a `None`/empty candidate set surfaces as `TagNotFound`.
+/// Validate and classify through the retry chain, then fan the index out to its
+/// per-platform leaves.
 async fn resolve_to_platforms(
     index: &Index,
     identifier: PackageRef,
     options: ResolveLockOptions,
 ) -> Result<BTreeMap<String, Digest>, super::Error> {
-    // Validate the tag resolves + classify policy/auth/transient failures.
-    // The returned index digest is discarded — only the per-platform leaves
-    // are durable (the index digest is orphaned on the next push).
+    // The index digest is discarded: the next push orphans it; only leaves are durable.
     retry_fetch(index, identifier.clone(), options).await?;
     fan_out_candidates(index, &identifier, IndexOperation::Resolve).await
 }
 
-/// Fetch the advertised index children of `identifier` under `op` and build
-/// the available-only `platforms` map. A `None`/empty candidate set on a
-/// `Resolve` miss surfaces as [`ProjectErrorKind::TagNotFound`] — never a
-/// silent empty map.
+/// The available-only `platforms` map for `identifier`; an empty candidate set
+/// is `TagNotFound`, never an empty map.
 async fn fan_out_candidates(
     index: &Index,
     identifier: &PackageRef,
@@ -564,10 +378,8 @@ async fn fan_out_candidates(
     }
 }
 
-/// Map a `fetch_candidates` failure onto a project-tier error, preserving the
-/// policy-block classification (offline/frozen → PolicyBlocked) so a
-/// no-resolve policy refusal during the candidate fan-out is not laundered
-/// into a generic registry error.
+/// Map a `fetch_candidates` failure, keeping a policy refusal as `PolicyBlocked`
+/// rather than a generic registry error.
 fn candidate_fetch_error(err: crate::Error, identifier: PackageRef) -> super::Error {
     if let Some((policy, block)) = policy_block_label(&err) {
         return ProjectError::new(
@@ -586,22 +398,10 @@ fn candidate_fetch_error(err: crate::Error, identifier: PackageRef) -> super::Er
     })
 }
 
-/// Build the available-only `platforms` map from the advertised candidate
-/// children returned by `Index::fetch_candidates`.
-///
-/// Each entry's leaf digest is keyed by the child's canonical grammar
-/// [`Platform`] string (D2). The runtime dup-key guard ([`guard_unique_key`])
-/// fires cleanly (never silently overwrites) if two advertised children
-/// stringify to the same key — a defensive assertion that should never fire
-/// under an injective key. [`validate_canonical_platform_keys`] is run over
-/// the finished map as a write-site defense-in-depth check (D3) — every key
-/// here is already canonical by construction (it comes straight from
-/// `Platform::to_string()`), so this never fires in practice.
+/// The `platforms` map from the candidate children, keyed by canonical [`Platform`] string.
 fn build_platforms_map(candidates: Vec<(PackageRef, Platform)>) -> Result<BTreeMap<String, Digest>, super::Error> {
-    // Each child's leaf digest is inserted through `guard_unique_key` keyed
-    // by `platform.to_string()`. A candidate without a digest is skipped: the
-    // resolver always pins each child to its leaf digest via
-    // `clone_with_digest`, so this never drops an advertised leaf in practice.
+    // A digest-less candidate is skipped; the resolver pins every child to its
+    // leaf, so none is dropped in practice.
     let mut map: BTreeMap<String, Digest> = BTreeMap::new();
     for (candidate, platform) in candidates {
         let key = platform.to_string();
@@ -613,8 +413,7 @@ fn build_platforms_map(candidates: Vec<(PackageRef, Platform)>) -> Result<BTreeM
     Ok(map)
 }
 
-/// Insert `key → digest` into `map`, failing cleanly if `key` is already
-/// present (defensive dup-key guard — never a silent `BTreeMap` overwrite).
+/// Insert `key → digest`, refusing a duplicate key rather than overwriting.
 fn guard_unique_key(map: &mut BTreeMap<String, Digest>, key: String, digest: Digest) -> Result<(), super::Error> {
     if map.contains_key(&key) {
         return Err(ProjectError::new(PathBuf::new(), ProjectErrorKind::DuplicatePlatformKey { key }).into());
@@ -623,33 +422,10 @@ fn guard_unique_key(map: &mut BTreeMap<String, Digest>, key: String, digest: Dig
     Ok(())
 }
 
-/// Look up the leaf [`Digest`] compatible with `host` in a lock/pin
-/// `platforms` map (D1: `lookup_host_leaf` routes through the same
-/// `select_best` helper as fresh-resolve, closing the dual-libc silent-`None`
-/// gap the old exact-key tier walk had).
-///
-/// Parses every map key via [`Platform::from_str`], then scores each parsed
-/// candidate against `host` with [`select_best`] — the identical relation and
-/// scoring [`ocx_index::Index::select`] uses at fresh-resolve time, so
-/// lock-read and fresh-resolve give provably identical answers for the same
-/// host and candidate set. A key that fails to parse is skipped (canonical-key
-/// validation already rejects it at load/write time — see
-/// [`validate_canonical_platform_keys`] — so this is unreachable for a lock
-/// that passed that gate, but the lookup itself does not re-validate).
-///
-/// Returns the [`Selection`] verbatim — `Selection::Found` carries the
-/// winning `(digest, original map key)` pair; `Selection::Ambiguous` carries
-/// one pair per tied entry, so a caller that needs to name the tied
-/// candidates (e.g. an `AmbiguousHostLeaf` diagnostic) reads their original
-/// canonical-grammar keys directly, with no re-parse. `Selection::None` means
-/// no entry is compatible with `host` at all. Unlike the pre-D1-F2 shape
-/// (`Option<&Digest>`), `None` and `Ambiguous` are no longer conflated —
-/// `Option` could not distinguish "no compatible entry" (the publisher
-/// genuinely does not ship this platform) from "two or more entries tie at
-/// the maximum score" (e.g. a dual-libc host against separate single-libc
-/// entries with no combined entry), so callers that need to route the two to
-/// different remedies previously collapsed both to the same "no `<host>`
-/// leaf" error and the wrong one ("re-resolve") for a genuine ambiguity.
+/// The leaf compatible with `host` in a `platforms` map, through the same
+/// [`select_best`] as fresh resolution, so lock-read and resolve agree.
+/// Unparseable keys are skipped (load rejects them); `Ambiguous` and `None`
+/// are returned for the caller to route.
 pub fn lookup_host_leaf<'a>(
     platforms: &'a BTreeMap<String, Digest>,
     host: &Platform,
@@ -665,11 +441,8 @@ pub fn lookup_host_leaf<'a>(
     select_best(host, &candidates)
 }
 
-/// Run the retry chain: up to `retry_attempts` retries on any fault
-/// [`classify`] calls [`ClientFailure::Transient`] — [`ClientError::Registry`],
-/// [`ClientError::RegistryTransient`], [`ClientError::Io`] and
-/// [`ClientError::ShortBlobRead`]. `Authentication`, `Ok(None)`, and any other
-/// terminal classification returns immediately.
+/// Fetch with up to `retry_attempts` retries on [`ClientFailure::Transient`];
+/// every other outcome returns at once.
 async fn retry_fetch(
     index: &Index,
     identifier: PackageRef,
@@ -691,15 +464,9 @@ async fn retry_fetch(
                 .into());
             }
             Err(err) => {
-                // The index tier raises its own error (E1); this tier's
-                // classifiers read the crate-wide one, so it is lifted once
-                // here rather than at each of the four uses below.
                 let err: crate::Error = err.into();
-                // A no-resolve policy (offline / frozen) refused this unpinned
-                // tag at the index boundary. Terminal — no retry, no backoff —
-                // and routed to its own `ProjectErrorKind` so it classifies as
-                // PolicyBlocked (81) rather than falling through to
-                // `ClientFailure::Other` → RegistryUnreachable (69).
+                // Offline/frozen refusal: terminal and its own kind, or it exits
+                // 69 as `RegistryUnreachable` instead of 81 `PolicyBlocked`.
                 if let Some((policy, block)) = policy_block_label(&err) {
                     return Err(ProjectError::new(
                         PathBuf::new(),
@@ -720,7 +487,6 @@ async fn retry_fetch(
                         continue;
                     }
                     ClientFailure::Transient => {
-                        // Retry budget exhausted.
                         return Err(project_err_from_client(err, identifier, |id, src| {
                             ProjectErrorKind::RegistryUnreachable {
                                 identifier: Box::new(id),
@@ -746,12 +512,7 @@ async fn retry_fetch(
                         .into());
                     }
                     ClientFailure::Other => {
-                        // No structured `ClientError` classification applied —
-                        // treat as a registry-tier failure so the classification
-                        // table remains total. The fault's own classification
-                        // decides only the transient case (75); everything else
-                        // defaults to Unavailable (69), the safest answer for
-                        // "registry said no, but we don't know why."
+                        // Unclassified: `RegistryUnreachable`, the safest answer.
                         return Err(project_err_from_client(err, identifier, |id, src| {
                             ProjectErrorKind::RegistryUnreachable {
                                 identifier: Box::new(id),
@@ -777,28 +538,8 @@ enum ClientFailure {
     Other,
 }
 
-/// Walk `err`'s source chain looking for a [`ClientError`] and classify it.
-///
-/// `crate::Error::OciClient` uses `#[error(transparent)]`, which makes
-/// `source()` delegate past the `ClientError` directly to its inner
-/// `#[source]` field. A naive `source()` walk therefore never sees the
-/// `ClientError` itself. We compensate by special-casing the wrappers
-/// that carry a typed `crate::Error` payload — `OciClient` directly, and
-/// `OciIndex(SourceWalkFailed(ArcError))` for errors surfaced by the
-/// chained-index source walk — before starting the generic `source()`
-/// walk for any remaining downcast opportunities (e.g. nested via
-/// `ClientError::Internal`).
-/// Detect an index-layer no-resolve policy block in `err`.
-///
-/// Returns the lowercase policy label (`"offline"` / `"frozen"`) when the
-/// chained index refused to resolve an unpinned tag under `--offline` /
-/// `--frozen`. The error arrives as
-/// [`crate::Error::OciIndex`]`(`[`PolicyResolutionBlocked`]`)` straight from
-/// `ChainedIndex::walk_chain` — it is raised before the singleflight walk, so
-/// it is never wrapped in `SourceWalkFailed`. Terminal: the caller returns
-/// immediately without consuming the retry budget.
-///
-/// [`PolicyResolutionBlocked`]: ocx_index::error::Error::PolicyResolutionBlocked
+/// The policy label (`"offline"` / `"frozen"`) when the index refused an
+/// unpinned tag; it arrives as [`crate::Error::OciIndex`], never inside `SourceWalkFailed`.
 fn policy_block_label(err: &crate::Error) -> Option<(&'static str, ocx_index::error::PolicyBlock)> {
     if let crate::Error::OciIndex(ocx_index::error::Error::PolicyResolutionBlocked { policy, block, .. }) = err {
         return Some((policy, *block));
@@ -806,15 +547,14 @@ fn policy_block_label(err: &crate::Error) -> Option<(&'static str, ocx_index::er
     None
 }
 
+/// Find and classify a [`ClientError`] in `err`. `OciClient` is
+/// `#[error(transparent)]`, so `source()` skips it: typed wrappers match first.
 fn classify_client_error(err: &crate::Error) -> ClientFailure {
-    // Direct `crate::Error::OciClient` — the simple case.
     if let crate::Error::OciClient(client) = err {
         return classify(client);
     }
-    // Chained-index source-walk failures wrap the original typed error
-    // in an `ArcError`. Recurse into it so a `ManifestNotFound` surfaced
-    // by a source registry classifies as `NotFound` rather than
-    // `Transient` (which would trigger retry + exit 69 Unavailable).
+    // Recurse, so a source registry's `ManifestNotFound` is `NotFound`, not a
+    // retried `Transient` ending in exit 69.
     if let crate::Error::OciIndex(ocx_index::error::Error::SourceWalkFailed(arc)) = err {
         return classify_index_error(arc.as_error());
     }
@@ -828,17 +568,8 @@ fn classify_client_error(err: &crate::Error) -> ClientFailure {
     ClientFailure::Other
 }
 
-/// [`classify_client_error`] one tier down.
-///
-/// E1 gave the index tier its own root error, so a `SourceWalkFailed` now
-/// carries `ocx_index::error::Error` rather than `crate::Error` — and
-/// `ArcError::as_error` hands back a reference to a type that is not `Clone`,
-/// so there is nothing to convert. The three cases are the same ones, in the
-/// same order, against the tier's own variants: the direct client error, a
-/// nested source walk, then the generic `source()` walk for anything reachable
-/// only by downcast. Behaviour is unchanged — a `ManifestNotFound` surfaced by
-/// a source registry still classifies as `NotFound` rather than `Transient`,
-/// which is what keeps it off the retry path and out of exit 69.
+/// [`classify_client_error`] for the index tier's own error, which cannot
+/// convert to `crate::Error`.
 fn classify_index_error(err: &ocx_index::error::Error) -> ClientFailure {
     use ocx_index::error::Error as IndexError;
     if let IndexError::OciClient(client) = err {
@@ -859,28 +590,20 @@ fn classify_index_error(err: &ocx_index::error::Error) -> ClientFailure {
 
 fn classify(client: &ClientError) -> ClientFailure {
     match client {
-        // Mirror routing is provenance, not a failure kind: the retry decision
-        // belongs to whatever actually failed behind it.
+        // Mirror routing is provenance; classify what failed behind it.
         ClientError::Mirrored { source, .. } => classify(source),
-        // Transient: registry-side failures, file I/O, and an incomplete blob
-        // delivery are all retryable.
         ClientError::Registry(_)
         | ClientError::RegistryTransient(_)
         | ClientError::Io { .. }
         | ClientError::ShortBlobRead { .. } => ClientFailure::Transient,
-        // Terminal auth failure — no retry.
         ClientError::Authentication(_) => ClientFailure::Auth,
-        // 404-equivalent — no retry.
         ClientError::ManifestNotFound(_) | ClientError::BlobNotFound(_) | ClientError::RepositoryNotFound(_) => {
             ClientFailure::NotFound
         }
-        // Data errors and other structural failures — not retryable.
         ClientError::InvalidManifest(_)
         | ClientError::NotAManifest(_)
         | ClientError::InvalidImageIndex(_)
-        // A registry-named destination the transport refused is terminal by
-        // construction: retrying re-issues the request against the same
-        // hostile value.
+        // Retrying re-issues the request against the same hostile destination.
         | ClientError::UnsafeDestination(_)
         | ClientError::UnfollowedRedirect(_)
         | ClientError::DigestMismatch { .. }
@@ -893,9 +616,6 @@ fn classify(client: &ClientError) -> ClientFailure {
         | ClientError::TraversalLimitExceeded { .. }
         | ClientError::Serialization(_)
         | ClientError::InvalidEncoding(_)
-        // A malformed digest served by the registry is data, not a transient
-        // condition: the same answer the crate-wide `Digest` variant reached
-        // here before it was carried by `ClientError`.
         | ClientError::Digest(_)
         | ClientError::ReferrersUnsupported { .. }
         | ClientError::Internal(_) => ClientFailure::Other,

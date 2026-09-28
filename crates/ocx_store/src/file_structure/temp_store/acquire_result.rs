@@ -6,16 +6,7 @@ use ocx_util::fs::LockedFile;
 use super::TempStore;
 use super::temp_dir::TempDir;
 
-/// Result of acquiring a temp directory via [`TempStore::try_acquire`] or
-/// [`TempStore::acquire_with_timeout`].
-///
-/// Holds the exclusive lock for the directory's lifetime. When this value
-/// is dropped, the OS lock is released and the sibling `.lock` file is
-/// deleted (best-effort).
-///
-/// The custom `Drop` impl deletes the `.lock` file while the OS lock
-/// (`LockedFile`) is still held — field destructors run after `Drop::drop`,
-/// preventing a window where the file exists unlocked.
+/// Exclusive lock on a temp directory; dropping it releases the lock and deletes the `.lock` file.
 pub struct TempAcquireResult {
     pub lock: LockedFile,
     pub dir: TempDir,
@@ -23,6 +14,7 @@ pub struct TempAcquireResult {
     pub was_cleaned: bool,
 }
 
+// Runs before the `lock` field drops, so the `.lock` file is never on disk unlocked.
 impl Drop for TempAcquireResult {
     fn drop(&mut self) {
         let lock_path = TempStore::lock_path_for(&self.dir.dir);

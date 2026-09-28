@@ -3,22 +3,7 @@
 
 //! `verify_one` — the single lib-level keyless-Sigstore verify entry point.
 //!
-//! Given a resolved OCI identifier, a platform, and the effective ANY-of trust
-//! policy set, drive [`ocx_sign::verify::VerifyPipeline::run`] (the #194
-//! pipeline) with the #196 trust-root/offline material and wrap any
-//! [`VerifyError`](ocx_sign::verify::VerifyError) in a [`PackageError`] so the
-//! caller sees per-package diagnosis and the exit code survives the batch
-//! classifier (`PackageErrorKind::Internal` → `classify_error` →
-//! `crate::Error::Verify` → `VerifyError::classify`).
-//!
-//! Consumed by the policy-gated auto-verify hook (see
-//! [`super::auto_verify`]). The `ocx package verify` CLI command drives the
-//! pipeline directly because it layers flag-vs-policy identity resolution and
-//! flag-driven trust-root overrides on top; both ultimately run the same
-//! pipeline.
-//!
-//! Per [`subsystem-package-manager.md`](../../../../../.claude/rules/subsystem-package-manager.md)
-//! and Spec A10 — the aggregator is `package_manager/tasks.rs`.
+//! See [`subsystem-package-manager.md`](../../../../../.claude/rules/subsystem-package-manager.md).
 
 use url::Url;
 
@@ -33,47 +18,29 @@ use ocx_trust::CompiledPolicy;
 use super::super::PackageManager;
 
 /// External dependencies forwarded to [`PackageManager::verify_one`].
-///
-/// `client` is the **registry** client (present even under `--offline` — verify
-/// inherently reads the artifact + its signature referrer from the registry);
-/// the manager's own offline-gated client is not used here.
 pub struct VerifyOptions<'a> {
     /// Resolved ANY-of policies the signing certificate must satisfy.
     pub policies: &'a [CompiledPolicy],
-    /// Registry client (always available, unlike the manager's offline client).
+    /// Registry client, present even under `--offline`: verify always reads the artifact and its referrers.
     pub client: &'a ocx_oci::Client,
-    /// Trust root (Fulcio CA + optional pinned Rekor key); #196 seam.
+    /// Trust root (Fulcio CA + optional pinned Rekor key).
     pub trust_root: &'a TrustRoot,
     /// Rekor transparency-log endpoint (default public Rekor).
     pub rekor_url: &'a Url,
-    /// When true, no Sigstore-trust-services network — the Rekor key must come
-    /// from pinned/cached trust material.
+    /// No Sigstore trust-service network; the Rekor key must come from pinned or cached trust material.
     pub offline: bool,
     /// State store owning the referrers-capability and trust-root cache layouts.
     pub state: &'a StateStore,
     /// Bypass the referrers-capability cache for this invocation.
     pub no_cache: bool,
-    /// Which signed content to look for. [`VerifyContentMode::Signature`] is
-    /// what every shipped caller passes and what `ocx package verify` does
-    /// without `--attestation`; the attestation modes carry the `--type`
-    /// narrowing. Not defaulted — a verify run states what it is verifying.
+    /// Which signed content to look for; not defaulted, so a verify run states what it verifies.
     pub content: VerifyContentMode,
-    /// The cosign wire shape this run pins (`--signature-format`), or `None` to
-    /// prefer a bundle and fall back to a simplesigning sidecar when the bundle
-    /// shape is absent. A bundle that was fetched and refused is not an absence:
-    /// it fails closed with its own exit code.
+    /// The pinned cosign wire shape, or `None` to prefer a bundle and fall back to a simplesigning sidecar;
+    /// a fetched bundle that is refused fails closed rather than falling back.
     pub signature_format: Option<SignatureFormat>,
-    /// Accept a keyless simplesigning sidecar carrying no transparency-log
-    /// evidence (`--allow-unlogged-signature`). Off is the contract; the
-    /// opt-out is for air-gapped CI. See
-    /// [`VerifyContext::allow_unlogged_signature`](ocx_sign::verify::VerifyContext).
+    /// Accept a keyless simplesigning sidecar with no transparency-log evidence (`--allow-unlogged-signature`).
     pub allow_unlogged_signature: bool,
-    /// Collect every verified candidate, not just the first.
-    ///
-    /// Q3: the commands that render `signatures[]` set it; the install-time
-    /// auto-verify hook does not, because full crypto per candidate for output
-    /// nobody reads is not a cost the install path pays. It widens the report,
-    /// never the verdict.
+    /// Collect every verified candidate, not just the first; widens the report, never the verdict.
     pub report_all: bool,
 }
 
@@ -81,42 +48,23 @@ pub struct VerifyOptions<'a> {
 pub struct VerifyReport {
     /// Every signature that verified, in scan order, deduplicated.
     ///
-    /// **Never empty**, and the first element is the verdict — the same
-    /// candidate under either [`VerifyOptions::report_all`] setting, because
-    /// widening the arity appends behind the answer rather than reordering it.
-    /// One field rather than a `result` beside a list: two would be one
-    /// assignment away from disagreeing about which signature was the answer.
+    /// Never empty; the first element is the verdict under either [`VerifyOptions::report_all`] setting.
     pub signatures: Vec<VerifyResult>,
 }
 
 impl PackageManager {
-    /// Verify `package` for `platform` against `opts.trust_root`, requiring the
-    /// signing certificate to satisfy one of `opts.policies` (ANY-of).
-    ///
-    /// `platform` is `None` when the caller narrowed into nothing: the run acts
-    /// on whatever the reference resolved to, index or bare manifest (C-010).
-    /// `Some(..)` narrows into an index and is an error when the resolved
-    /// object is not one.
-    ///
-    /// The pipeline is: resolve target → list referrers (capability cache) →
-    /// pick the v0.3 bundle → verify cert chain vs trust root → bind signature
-    /// to subject digest → verify signature → verify Rekor SET → identity/issuer
-    /// match → emit [`VerifyReport`].
+    /// Verify `package` against `opts.trust_root`, requiring the signing certificate to satisfy one of
+    /// `opts.policies`; a `Some` platform requires an index, `None` acts on whatever resolved.
     ///
     /// # Errors
-    /// Returns [`PackageError`] tagged with `package` on any failure —
-    /// exit-code classification routes via
-    /// [`ocx_sign::verify::VerifyErrorKind`].
+    /// A [`PackageError`] tagged with `package`, classified via [`ocx_sign::verify::VerifyErrorKind`].
     pub async fn verify_one(
         &self,
         package: &ocx_oci::PackageRef,
         platform: Option<&ocx_oci::Platform>,
         opts: VerifyOptions<'_>,
     ) -> Result<VerifyReport, PackageError> {
-        // Read-only: verifying a package must never grow the permanent local
-        // index (same rationale as `inspect` — `adr_index_indirection.md`).
-        // Resolve through a read-only view: content warms the GC-able blob
-        // cache, the index stays untouched.
+        // Read-only view: verifying must never grow the permanent local index (`adr_index_indirection.md`).
         let mgr = self.read_only_view();
         let resolve = super::resolve_subject::verify_resolver(mgr.index());
         let state = ocx_sign::sign::state::SigningStatePaths::new(opts.state.root());
@@ -131,17 +79,10 @@ impl PackageManager {
             rekor_url: opts.rekor_url,
             state,
             offline: opts.offline,
-            // Not provable here — the mode's only observable effects (caps
-            // selection, the attestation arm of `finish_scan`) sit past the
-            // trust-root gate. Closed by S-009/S-016 (WP10b), once
-            // `--attestation` lands (WP9b).
             content: opts.content,
             signature_format: opts.signature_format,
             allow_unlogged_signature: opts.allow_unlogged_signature,
             report_all: opts.report_all,
-            // `ocx package verify` exists to verify: there is no permissive
-            // form of it, and the pipeline's ANY-of entry point never reads
-            // this field.
             verification: ocx_sign::verify::VerificationMode::Demand,
         };
         let signatures = VerifyPipeline::run(opts.client, context)
@@ -246,9 +187,9 @@ pub(crate) mod tests {
     ///
     /// It used to seed a cached "unsupported" capability record instead, so the
     /// pipeline stopped at `ensure_referrers_supported` before touching the
-    /// transport at all. D-1 deleted that gate, so the refusal has to come from
+    /// transport at all. That gate was deleted, so the refusal has to come from
     /// the transport now — and the truthful outcome is `NoSignaturesFound` (79),
-    /// not exit 84 (C-002: 84 is write-path only).
+    /// not exit 84 (84 is write-path only).
     pub(crate) fn transport_without_referrers() -> StubTransport {
         let data = StubTransportData::new();
         data.write().referrers_unsupported = true;

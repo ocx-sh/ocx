@@ -3,14 +3,8 @@
 
 //! `ocx package announce` — publish an owner-curated tag set into the index.
 //!
-//! # Where each refusal lives
-//!
-//! The write-target flags are [`options::ForgeWriteOptions`], shared verbatim
-//! with `ocx package claim`, and so are their refusals: `--out` ⟂ `--fork` is a
-//! clap `conflicts_with` declared **on the flatten** (DX-58 — this command must
-//! not re-declare it), and every value-conditional one lives in
-//! [`options::ForgeWriteOptions::validate`], which this command calls at the head
-//! of its argv-fault block exactly as claim does (DX-67).
+//! The write-target refusals live on [`options::ForgeWriteOptions`], shared with `ocx package claim`:
+//! re-declaring `--out` ⟂ `--fork` or a `validate` refusal here would let the two commands diverge.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -22,41 +16,27 @@ use ocx_announce::forge::ForgeCredentials;
 
 use crate::{api::data::announce::AnnounceReport, command::deprecated, options};
 
-/// The tag-selection flags other than `--tags`. Named once so the
-/// mutually-exclusive-and-exactly-one rule is a single list: a fifth mode added
-/// to one attribute but not the other would compile, and the gap would only
-/// show as a flag silently accepted alongside `--tags`.
+/// The tag-selection flags other than `--tags`, named once: a mode added to one attribute but not
+/// the other would be silently accepted beside `--tags`.
 const TAG_SELECTION_SIBLINGS_OF_TAGS: [&str; 3] = ["tags_file", "tags_from_registry", "refresh"];
 
-/// Observe an owner-curated set of registry tags and publish the rebuilt
-/// package entry into the index.
+/// Observe an owner-curated set of registry tags and publish the rebuilt entry into the index.
 ///
-/// Reads the currently-committed index entry, re-observes the given tags on
-/// the registry, and writes the rebuilt entry to a local directory (`--out`),
-/// or opens a pull or merge request against the index repository. The request
-/// comes from a fork with `--fork`, and from a branch on the index repository
-/// itself when `--fork` is omitted, which needs push access there. A run that
-/// changes nothing reports as unchanged and commits nothing; it opens a request
-/// only to recover one an earlier run left unopened.
+/// Reads the committed index entry, re-observes the given tags, and writes the rebuilt entry
+/// to a local directory (`--out`) or opens a pull or merge request against the index
+/// repository: from a fork with `--fork`, else from a branch on the index repository itself,
+/// which needs push access there. A run that changes nothing reports as unchanged and commits
+/// nothing; it opens a request only to recover one an earlier run left unopened.
 ///
-/// Opening a pull or merge request needs a forge credential:
-/// `OCX_ANNOUNCE_TOKEN`, or the job token under `--transport git` inside a
-/// GitLab job. Writing to `--out` works without one.
+/// A request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job token under
+/// `--transport git` inside a GitLab job. Writing to `--out` works without one.
 //
-// `override_usage` is not cosmetic and is part of C-062's contract (DX-65): a
-// **required** `ArgGroup` renders every member in the usage line regardless of
-// `Arg::hide`, and clap 4.6's `ArgGroup` carries no `hide` of its own, so
-// without this the first line of `ocx package announce --help` advertises the
-// deprecated `--package` spelling. Measured on the workspace's clap, both
-// directions. It freezes the usage line until 0.7 deletes the group with it.
+// `override_usage`: a required `ArgGroup` renders every member regardless of `Arg::hide`, so without
+// it `--help` advertises the deprecated `--package`.
 #[derive(Parser)]
 #[command(override_usage = "ocx package announce [OPTIONS] <PACKAGE>")]
-// 0.7 removal: this group exists only to admit the deprecated `--package`
-// spelling beside the canonical positional; see `command/deprecated.rs`.
-// `.required(true)` alone is exactly-one — `multiple` already defaults to
-// false, and stating it produced byte-identical outcomes when measured. Both
-// spellings together is `ArgumentConflict`, neither is
-// `MissingRequiredArgument`, and `clap_parse::parse` maps both to exit 64.
+// 0.7 removal: goes with `command/deprecated.rs`. `.required(true)` alone is exactly-one: both spellings
+// is `ArgumentConflict`, neither `MissingRequiredArgument`, both exit 64.
 #[clap(group(
     clap::ArgGroup::new("package_selector")
         .args(["package", "package_flag"])
@@ -67,19 +47,13 @@ pub struct PackageAnnounce {
     ///
     /// The positional is the canonical form; flags come before it.
     //
-    // `Option` only because the deprecated `--package` may supply it instead;
-    // the `package_selector` group is what makes one of the two required. At
-    // 0.7 this becomes a bare `options::Identifier` again.
+    // `Option` only while `--package` may supply it; the `package_selector` group makes one required.
     #[clap(value_name = "PACKAGE")]
     package: Option<options::Identifier>,
 
     /// Package to announce, as `<namespace>/<package>` (e.g. `acme/widget`).
     //
-    // 0.7 removal: this hidden `Arg` and the `package_selector` group above go
-    // with `command/deprecated.rs`. A hidden `Arg`, never a clap alias: an
-    // alias is invisible to `ArgMatches`, so nothing could warn about it.
-    // A distinct id is unavoidable — two fields cannot both be `package` — and
-    // the two are merged in `execute`, once (C-062, DV-3).
+    // 0.7 removal: a hidden `Arg`, never a clap alias: an alias is invisible to `ArgMatches`, so it could not warn.
     #[clap(long = "package", value_name = "PACKAGE", hide = true)]
     package_flag: Option<options::Identifier>,
 
@@ -117,12 +91,6 @@ pub struct PackageAnnounce {
     refresh: bool,
 
     /// Where the request is written, and how it gets there.
-    //
-    // The four flags this replaces (`--out`, `--fork`, `--index-repo`,
-    // `--forge`) were declared here verbatim, `--out` ⟂ `--fork` included.
-    // Both `conflicts_with` attributes are deleted rather than duplicated:
-    // the pair now comes from the flatten, which is the one place either
-    // write command may declare it (DX-58).
     #[command(flatten)]
     forge: options::ForgeWriteOptions,
 
@@ -141,20 +109,9 @@ pub struct PackageAnnounce {
 }
 
 impl PackageAnnounce {
-    /// The package the run announces, from whichever of the two spellings the
-    /// `package_selector` group admitted (C-062).
+    /// The package from whichever spelling the `package_selector` group admitted.
     ///
-    /// **Called exactly once**, and that is the contract, not an optimization:
-    /// the deprecated spelling warns here, and `execute` reads the package more
-    /// than once — so an accessor invoked at each read site would warn once per
-    /// read and break C-062's "once on stderr". The merge therefore happens at
-    /// the head of [`Self::execute`], whose local binding every later read uses.
-    ///
-    /// The group admits exactly one of the two, so the both-given and
-    /// neither-given cases are clap's (`ArgumentConflict` and
-    /// `MissingRequiredArgument`, both exit 64) and never reach this. The
-    /// unreachable arm is a usage error rather than a panic: an invariant this
-    /// layer does not own must not become a crash if clap's semantics change.
+    /// Call once: the deprecated spelling warns here, so a second call warns twice.
     ///
     /// # Errors
     ///
@@ -163,30 +120,18 @@ impl PackageAnnounce {
         match (&self.package, &self.package_flag) {
             (Some(positional), None) => Ok(positional),
             (None, Some(flag)) => {
-                // `ui().warn` is what keeps the notice on stderr and off
-                // stdout, so a `--format json` run stays one parseable
-                // document (S-034).
+                // `ui().warn` keeps the notice off stdout, so a `--format json` run stays one document.
                 context.ui().warn(deprecated::package_flag_notice());
                 Ok(flag)
             }
-            // Unreachable through clap: the `package_selector` group is
-            // required and non-multiple, so both-given is `ArgumentConflict`
-            // and neither-given is `MissingRequiredArgument`, each already
-            // exit 64. A usage error rather than a panic, because an invariant
-            // this layer does not own must not become a crash if clap's
-            // semantics move — and 64 is what clap would have produced anyway.
+            // Unreachable through clap; a usage error rather than a panic, in case clap's semantics move.
             _ => Err(UsageError::new("name the package once, as a positional argument").into()),
         }
     }
 
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Argv faults are diagnosed BEFORE the credential check, so a malformed
-        // command line reports what is wrong with it (exit 64) rather than
-        // reporting a missing token the operator would then go and set only to
-        // hit the real error on the next run. `validate` carries C-058's
-        // value-conditional exclusions, the `git` transport's GitHub refusal
-        // and the fork/index host agreement, and it is the single producer of
-        // the resolved forge kind the report renders.
+        // Argv faults before the credential check, so a malformed command reports exit 64, not a
+        // missing token found only after the operator fixes the command.
         let kind = self.forge.validate()?;
 
         let package = self
@@ -207,10 +152,8 @@ impl PackageAnnounce {
 
         let target = self.target();
 
-        // The SSRF escape hatch is sourced exclusively from the selected
-        // `[registries."<ns>"]` entry for the package's namespace — the same
-        // config source the index read path resolves through. There is no
-        // CLI flag to widen it (design register X2).
+        // Only the namespace's `[registries."<ns>"]` entry, as on the index read path: no CLI flag may widen
+        // the SSRF escape hatch.
         let trusted_hosts = context.trusted_hosts_for(package.registry());
 
         let request = AnnounceRequest {
@@ -222,52 +165,29 @@ impl PackageAnnounce {
             unyank: self.unyank.clone(),
             yank_reason: self.yank_reason.clone().unwrap_or_default(),
             trusted_hosts,
-            // The same allowance `Context::client_builder` passes as
-            // `plain_http_registries`, so the pre-flight decides the dial
-            // scheme — and hence which proxy variable applies (ocx#407) —
-            // from what the client will actually dial.
+            // The client's own plain-HTTP allowance, so the pre-flight picks the dial scheme, and hence the
+            // proxy variable, the client will actually use.
             insecure_hosts: context.insecure_hosts().to_vec(),
         };
 
-        // C-065 / DX-67: the `git --version` gate runs beside `validate` and
-        // BEFORE the forge is constructed, so a missing or too-old git exits 69
-        // with zero forge calls. Its result travels into the constructor as a
-        // `GitBinary` — one producer, one assembler. Flattening `--transport`
-        // without this block would ship a flag that cannot succeed:
-        // `ForgeKind::client` returns `GitUnavailable` (69) on a host where git
-        // is present and fine. Conditional on the transport, because
-        // `ForgeKind::client` raises the same 69 for an unresolved binary, so an
-        // unconditional probe would only show up as an ordinary `api` announce
-        // failing on a host that never needed git.
+        // Before the forge is built, so a missing or too-old git exits 69 with zero forge calls; gated on
+        // the transport, since an unconditional probe would fail an `api` announce on a host without git.
         let git = if self.forge.needs_git() {
             Some(ocx_announce::forge::probe_git_binary().await?)
         } else {
             None
         };
 
-        // A forge is needed for every mode (`--out` reads the committed root
-        // over the contents API too); a credential is required by every mode
-        // that writes, which is every mode except `--out`.
-        //
-        // The whole C-063 ladder lives in `resolve`, never here, and the
-        // selected transport is what opens its job-token rung, so it is passed
-        // rather than assumed. A direct `OCX_ANNOUNCE_TOKEN` read — the shape
-        // this replaces — misses that rung entirely: it refuses at exit 80 a
-        // GitLab job with an empty ocx variable and a perfectly good
-        // `CI_JOB_TOKEN`, and it reports `credential_kind: "none"` for a run
-        // that authenticated. `require_credential` owns the refusal and the
-        // `--out` carve-out (S-011).
+        // Through `resolve` with the selected transport: a direct `OCX_ANNOUNCE_TOKEN` read misses the
+        // GitLab job-token rung.
         let credentials = ForgeCredentials::resolve(self.forge.transport);
         self.forge.require_credential(&credentials)?;
 
-        // C-064: before the write, and only in the one state that surprises.
-        // The sentence, the guard and the stream all live on the shared
-        // flatten, so `ocx package claim` says the same thing for the same
-        // state — see `options::ForgeWriteOptions::warn_push_identity`.
+        // On the shared flatten, so `ocx package claim` warns identically for the same state.
         self.forge.warn_push_identity(context.ui(), &credentials);
 
-        // The merged extra-CA view (C-007): a forge dial trusts what every
-        // other client of this invocation trusts.
+        // The merged extra-CA view, so a forge dial trusts what every other client does. Without `git`,
+        // `ForgeKind::client` returns `GitUnavailable` (69) and `--transport git` could never succeed.
         let forge = kind.client(
             self.forge.transport,
             credentials.clone(),
@@ -276,22 +196,13 @@ impl PackageAnnounce {
             context.extra_roots_merged(),
         )?;
 
-        // The OCI client the `Publisher` observes tags with: the invocation's
-        // shared recipe (mirror map, plain-HTTP set, merged extra-CA view —
-        // the physical registry a curated tag is read from sits behind the
-        // same corporate proxy as everything else this invocation dials),
-        // pinned through the `ocx_oci::ssrf::GuardedResolver` seam the index
-        // read path uses, because the physical registry a curated tag resolves
-        // against is remote-controlled data (a root `repository` pointer): the
-        // connect-time pin belongs here too, not only in the pre-flight
-        // `resolve_and_validate` the announce pipeline already runs.
+        // Pinned through `ocx_oci::ssrf::GuardedResolver`: the registry a curated tag resolves against is
+        // remote-controlled data, so the connect-time pin belongs here, not only in the pre-flight.
         let publisher = context.guarded_publisher(package.registry());
 
         let outcome = announce::announce(&publisher, Some(forge.as_ref()), request).await?;
 
-        // Reserved tags are dropped, not refused — the run succeeded, so the
-        // notice is a diagnostic on stderr and the drops also ride out in the
-        // report on stdout.
+        // Dropped, not refused: the run succeeded, so this is a stderr diagnostic beside the report.
         if !outcome.reserved_tags_dropped.is_empty() {
             context.ui().warn(format!(
                 "not a version, dropped from the curated set: {}",
@@ -309,13 +220,7 @@ impl PackageAnnounce {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// The write target the flag pair selects.
-    ///
-    /// `--out` and `--fork` are mutually exclusive on the shared flatten (clap
-    /// `conflicts_with`), and neither given means the announce branch is pushed
-    /// to `--index-repo` itself. A method rather than an inline `match` so the
-    /// mapping — which decides *which repository gets written to* — is
-    /// assertable without a forge.
+    /// The write target the flag pair selects; neither flag pushes to `--index-repo` itself.
     fn target(&self) -> AnnounceTarget {
         match (&self.forge.out, &self.forge.fork) {
             (Some(directory), _) => AnnounceTarget::Out(directory.clone()),
@@ -336,13 +241,13 @@ mod tests {
     use crate::command::package_claim::PackageClaim;
     use crate::options::ForgeWriteOptions;
 
-    // ── the `--package` deprecation window (C-062, S-034) ─────────────────
+    // ── the `--package` deprecation window ─────────────────────────────
 
-    /// C-062: the positional is the canonical spelling, and the value binds to
-    /// the **positional** arg id.
+    /// The positional is the canonical spelling, and the value binds to the
+    /// **positional** arg id.
     ///
     /// "Accepts" is satisfied by any grammar that parses, which is why the
-    /// binding is asserted rather than `is_ok()` (E-01): a declaration that
+    /// binding is asserted rather than `is_ok()`: a declaration that
     /// routed the bare argument into the deprecated `package_flag` id would
     /// parse exactly as happily and then warn every caller of the canonical form
     /// to migrate to the form they already use.
@@ -364,11 +269,11 @@ mod tests {
         );
     }
 
-    /// C-062: the deprecated spelling still parses, into its **own** arg id, and
+    /// The deprecated spelling still parses, into its **own** arg id, and
     /// stays hidden from `--help`.
     ///
-    /// Renamed from the inventory's `announce_hidden_package_flag_warns_once`
-    /// (DX-69, DX-15 shape). Once-ness is **not observable at unit scope**: one
+    /// Renamed from the inventory's `announce_hidden_package_flag_warns_once`.
+    /// Once-ness is **not observable at unit scope**: one
     /// process dispatches one command, so "once" holds by construction here
     /// whatever the code does. The property that can actually break — a merge
     /// moved into an accessor `execute` reads more than once — is only visible
@@ -407,9 +312,9 @@ mod tests {
         assert!(flag.is_hide_set(), "the deprecated spelling is hidden from --help");
     }
 
-    /// S-034: both spellings together is a **conflict**, exit 64.
+    /// Both spellings together is a **conflict**, exit 64.
     ///
-    /// The `ErrorKind` is asserted, never `is_err()` (E-02): a mis-declared
+    /// The `ErrorKind` is asserted, never `is_err()`: a mis-declared
     /// group refuses this argv too, with `MissingRequiredArgument`, so
     /// `is_err()` cannot tell a working exactly-one rule from a broken one.
     /// `clap_parse::parse` maps every non-help clap error to
@@ -444,10 +349,10 @@ mod tests {
         );
     }
 
-    /// S-034: neither spelling is a **missing required argument**, exit 64.
+    /// Neither spelling is a **missing required argument**, exit 64.
     ///
     /// The sibling of the conflict above, and the half that
-    /// `.required(true)` alone defends (E-03). The existing
+    /// `.required(true)` alone defends. The existing
     /// `package_is_required` asserts only `is_err()` and therefore cannot
     /// distinguish this from the conflict; it stays as the cheaper net.
     ///
@@ -466,7 +371,7 @@ mod tests {
         );
     }
 
-    /// C-062 / DX-65: the deprecated spelling appears in **no** rendered help.
+    /// The deprecated spelling appears in **no** rendered help.
     ///
     /// A required `ArgGroup` renders every member in the usage line regardless
     /// of `Arg::hide`, and clap 4.6's `ArgGroup` carries no `hide` of its own —
@@ -510,20 +415,20 @@ mod tests {
         );
     }
 
-    /// C-059's second half: **both** write commands expose the whole shared
-    /// grammar, and neither re-declares a flag the flatten already contributes.
+    /// Both write commands expose the whole shared grammar, and neither
+    /// re-declares a flag the flatten already contributes.
     ///
-    /// Membership, never set equality (E-15): `get_arguments()` yields announce's
+    /// Membership, never set equality: `get_arguments()` yields announce's
     /// hidden `--package` too, so an exact-equality assertion over announce's
     /// longs would either fail spuriously or be "fixed" by filtering hidden args
     /// — which would equally hide a real regression. The claim-side sibling
     /// (`options/forge_write.rs::shared_forge_write_options_derived_set_matches_claim`)
     /// is membership-based for the same reason.
     ///
-    /// Counted `== 1` rather than `contains`, which is E-16: announce declared
+    /// Counted `== 1` rather than `contains`: announce declared
     /// `--index-repo`, `--forge`, `--fork` and `--out` itself before this
     /// package, and duplicating them beside the flatten rather than deleting
-    /// them (DX-58) is the likely accident. A duplicate arg id is a
+    /// them is the likely accident. A duplicate arg id is a
     /// `Command::build` panic, so it fails at runtime and not at `cargo check` —
     /// building both commands here is what makes it visible.
     ///
@@ -596,8 +501,8 @@ mod tests {
             .join(" ")
     }
 
-    /// C-059 / DX-85: the credential guidance reaches the help clap actually
-    /// renders, on **both** write commands.
+    /// The credential guidance reaches the help clap actually renders, on
+    /// **both** write commands.
     ///
     /// The defect this exists for was not wrong text — it was correct text
     /// nobody rendered. clap takes a subcommand's `about`/`long_about` from the
@@ -847,7 +752,7 @@ mod tests {
         assert_eq!(args.yank_reason.as_deref(), Some("security"));
     }
 
-    /// X2 negative test: the SSRF exemption is config-only (`[registries."<ns>"].trusted_hosts`)
+    /// Negative test: the SSRF exemption is config-only (`[registries."<ns>"].trusted_hosts`)
     /// — there must be no CLI flag that could widen a locked source's trust
     /// set. Walks the built `clap::Command` looking for a `trusted-host`
     /// long flag by name, rather than trusting a hand exhaustive `--help`

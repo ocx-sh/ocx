@@ -1,14 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx.lock` schema: the machine-written, committed lock file.
-//!
-//! Locking model: writers acquire the project mutation lock via
-//! [`crate::acquire_project_lock`] — a scoped entry under `$OCX_HOME/locks`,
-//! never a handle on the data — before mutating the project state. Readers
-//! (`load`, `from_path`, `ProjectConfig::from_path`) never take a lock:
-//! both files are published by atomic rename, so a concurrent read always
-//! sees one whole document.
+//! `ocx.lock` schema. Readers take no lock: writers publish both files by
+//! atomic rename, so a concurrent read sees one whole document.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -19,12 +13,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 use super::error::{ProjectError, ProjectErrorKind};
 use ocx_oci::{Digest, PackageRef, Platform};
 
-/// Derive the canonical `ocx.lock` data-file path for a given config file path.
-///
-/// The lock is always named `ocx.lock` and lives in the same directory as the
-/// config file, regardless of the config file's name or extension. Using the
-/// parent directory rather than `path.with_extension("lock")` avoids surprising
-/// results when the config has an unusual name or no extension at all.
+/// The `ocx.lock` beside `config_path`, whatever the config's name.
 ///
 /// # Examples
 ///
@@ -39,37 +28,16 @@ pub fn lock_path_for(config_path: &Path) -> PathBuf {
     config_path.parent().unwrap_or_else(|| Path::new(".")).join("ocx.lock")
 }
 
-/// Lock file version discriminant.
-///
-/// Serialized as a bare integer via `serde_repr`. `V3` is the only version
-/// this build accepts — a lock written by an older OCX (V1 or V2) is
-/// rejected with an actionable [`ProjectErrorKind::UnsupportedLockVersion`]
-/// error (`ocx lock` regenerates it) rather than a bridged read. Per
-/// `adr_platform_model_unification.md` D3/D5: no migration code, the
-/// regenerate hint is the entire migration story.
-///
-/// The version-peek loader ([`ProjectLock::from_str_with_path`]) reads
-/// `metadata.lock_version` as a raw integer — not through this enum's derived
-/// `Deserialize` — so it can surface the found value explicitly rather than
-/// relying on `serde_repr`'s generic "unknown variant" failure.
-///
-/// Intentionally NOT `#[non_exhaustive]` — this is an internal on-disk
-/// discriminant, not a public library enum, and the project convention
-/// omits `#[non_exhaustive]` on internal non-error enums so matches stay
-/// total across the workspace.
+/// Lock format version. `V3` is the only one accepted; older locks are rejected
+/// with [`ProjectErrorKind::UnsupportedLockVersion`], never bridged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum LockVersion {
-    /// Version 3 of the `ocx.lock` on-disk format — the only version this
-    /// build reads or writes: canonical-grammar platform keys (D2), bare
-    /// `repository` coordinates, an available-only per-platform leaf-digest
-    /// map.
+    /// The only version this build reads or writes.
     V3 = 3,
 }
 
-// `serde_repr` integer enums need a hand-written `JsonSchema` impl because
-// the derive cannot peek into the repr. Mirrors the manual impl on
-// `ocx_package::metadata::bundle::Version`.
+// Hand-written: the derive cannot see through `serde_repr`.
 impl schemars::JsonSchema for LockVersion {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Borrowed("LockVersion")
@@ -84,23 +52,18 @@ impl schemars::JsonSchema for LockVersion {
     }
 }
 
-/// Minimal header-only projection used to peek `metadata.lock_version` before
-/// committing to a full deserialize. Reads the version as a raw `u8` (not
-/// [`LockVersion`]) so an unsupported value surfaces the actionable
-/// [`ProjectErrorKind::UnsupportedLockVersion`] error naming the found value,
-/// rather than `serde_repr`'s generic "unknown variant" failure.
+/// Header-only peek reading `lock_version` as a raw `u8`, so an unsupported
+/// value is named in the error rather than `serde_repr`'s "unknown variant".
 #[derive(Debug, Clone, Deserialize)]
 struct LockVersionPeek {
     metadata: LockVersionPeekMetadata,
 }
 
-/// The single field the version peek needs from `[metadata]`.
 #[derive(Debug, Clone, Deserialize)]
 struct LockVersionPeekMetadata {
     lock_version: u8,
 }
 
-/// The only `lock_version` this build accepts.
 const SUPPORTED_LOCK_VERSION: u8 = 3;
 
 /// Lock metadata header.
@@ -110,11 +73,10 @@ pub struct LockMetadata {
     /// On-disk schema version. `V3` is the only version this build reads or
     /// writes.
     pub lock_version: LockVersion,
-    /// Canonicalization contract version for [`Self::declaration_hash`].
-    /// Currently always `1` — see [`super::DECLARATION_HASH_VERSION`].
+    /// Canonicalization contract version for `declaration_hash`. Currently
+    /// always `1`.
     pub declaration_hash_version: u8,
-    /// `sha256:<hex>` of the RFC 8785 JCS-canonicalized declaration
-    /// (see `super::hash`).
+    /// `sha256:<hex>` of the RFC 8785 JCS-canonicalized declaration.
     pub declaration_hash: String,
     /// Tooling version string that wrote the lock, e.g. `"ocx 0.3.0"`.
     pub generated_by: String,
@@ -124,17 +86,12 @@ pub struct LockMetadata {
     pub generated_at: String,
 }
 
-/// Top-level `ocx.lock` document — both the in-memory model and the on-disk
-/// wire shape (the `tool` TOML array name is the only difference, via
-/// `#[serde(rename = "tool")]`).
+/// Top-level `ocx.lock` document.
 ///
-/// All locked tools are sorted by `(group, name)` at write time for
-/// byte-stable output; [`Self::to_toml_string`] serializes through a
-/// borrowed, pre-sorted view rather than cloning the whole document.
-/// [`Self::from_str_with_path`] is the version-peek read path: it rejects any
-/// `lock_version` other than [`SUPPORTED_LOCK_VERSION`] before attempting the
-/// full deserialize, and validates the bare-`repository` and
-/// canonical-platform-key invariants (D3) on every tool afterward.
+/// Tools are sorted by `(group, name)` at write time for byte-stable output.
+/// Only `lock_version` `3` is accepted, every tool's `repository` must be bare
+/// and every platform key canonical.
+// The version check runs before the full parse, so a foreign version never surfaces as a shape error.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectLock {
@@ -147,18 +104,14 @@ pub struct ProjectLock {
     pub tools: Vec<LockedTool>,
 }
 
-/// One locked tool entry — identified by the local binding `(group, name)`.
+/// One locked tool entry, identified by the local binding `(group, name)`.
 ///
-/// `name` is the TOML key used in the developer's `ocx.toml` (the local
-/// binding); `group` is `"default"` for entries from the top-level `[tools]`
-/// table or the named `[group.<name>]` key. `repository` is the bare
-/// registry/repo coordinate (no tag, no digest) shared by every platform
-/// leaf — the outer image-index digest is intentionally not stored (the lock
-/// unit is the platform-manifest digest, uniform with dependency pins); the
-/// per-platform pull id is reconstructed as `repository.clone_with_digest(leaf)`.
-/// `platforms` records one leaf digest per shipped platform, keyed by the
-/// canonical grammar string ([`Platform`] `Display` — D2); a platform the
-/// publisher does not ship is encoded by absence of its key.
+/// `name` is the key in the developer's `ocx.toml`; `group` is `"default"` for
+/// the top-level `[tools]` table, else the `[group.<name>]` key. `repository`
+/// is the bare registry/repo coordinate (no tag, no digest) shared by every
+/// platform leaf. `platforms` records one leaf digest per shipped platform,
+/// keyed by the canonical platform string; a platform the publisher does not
+/// ship has no key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LockedTool {
@@ -170,33 +123,19 @@ pub struct LockedTool {
     /// Bare registry/repo coordinates shared by every platform leaf.
     pub repository: PackageRef,
     /// Available-only per-platform leaf digests, keyed by the canonical
-    /// grammar [`Platform`] string. `BTreeMap` for byte-stable output
-    /// without requiring `Ord` on `Platform`.
+    /// platform string (`os/arch[/variant][+feature,...]` or `any`).
+    // `BTreeMap<String, _>`: byte-stable output without `Ord` on `Platform`.
     pub platforms: BTreeMap<String, Digest>,
 }
 
-/// Content equality for two [`LockedTool`]s, ignoring `name`/`group` —
-/// `repository` and the full `platforms` map. Shared by the lock writer's
-/// `generated_at`-preservation check ([`tools_content_equal`]) and the
-/// duplicate-across-selected-groups gate in `project::compose`.
+/// Content equality ignoring `name`/`group`: `repository` and the full
+/// `platforms` map.
 pub fn locked_tool_content_equal(left: &LockedTool, right: &LockedTool) -> bool {
     left.repository == right.repository && left.platforms == right.platforms
 }
 
-/// Validates that every key in `platforms` is the canonical grammar spelling
-/// of the [`Platform`] it parses to (`Platform::from_str(key)?.to_string()
-/// == key`) — D3's canonical-key validation, applied at V3 lock load and at
-/// every platform-map write site.
-///
-/// Because [`Platform`]'s `Display` is injective (`adr_platform_model_
-/// unification.md` D2), two DISTINCT canonical keys can never parse to the
-/// same `Platform` — a second key resolving to the same `Platform` would
-/// itself have to equal the first key's canonical spelling, which `BTreeMap`
-/// key uniqueness already rules out. So this single canonicalization check
-/// also enforces D3 rule 2 (canonical-platform uniqueness) for free; no
-/// separate uniqueness pass is needed. Digest-*value* aliasing (two distinct
-/// platform keys sharing a digest — e.g. Rosetta 2) stays legal: this checks
-/// keys only, never values (R6).
+/// Every key in `platforms` must be the canonical spelling of the [`Platform`]
+/// it parses to; with an injective `Display` this also enforces uniqueness.
 pub(super) fn validate_canonical_platform_keys(platforms: &BTreeMap<String, Digest>) -> Result<(), ProjectErrorKind> {
     for key in platforms.keys() {
         let parsed: Platform = key
@@ -215,11 +154,7 @@ impl ProjectLock {
         Self::from_str_with_path(s, PathBuf::new())
     }
 
-    /// Load a [`ProjectLock`] from a filesystem path. Errors if the
-    /// file is missing.
-    ///
-    /// For "load if present, return `None` otherwise" semantics, use
-    /// [`Self::from_path`].
+    /// Load from `path`; a missing file is an error (see [`Self::from_path`]).
     pub async fn load(path: &Path) -> Result<Self, super::Error> {
         use tokio::io::AsyncReadExt;
         let limit = super::internal::FILE_SIZE_LIMIT_BYTES;
@@ -227,11 +162,8 @@ impl ProjectLock {
         let file = tokio::fs::File::open(path)
             .await
             .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::Io(e)))?;
-        // `metadata.len()` fast-paths normal oversized files without reading
-        // any bytes; the bounded `take(limit + 1)` below guards synthetic
-        // files (e.g. procfs, pipes) whose metadata reports 0 but whose read
-        // is unbounded. Mirrors the ambient config loader's
-        // `ConfigLoader::load_and_merge` pattern.
+        // `metadata.len()` fast-paths oversized files; the bounded `take` guards
+        // procfs and pipes, whose metadata reports 0.
         let metadata = file
             .metadata()
             .await
@@ -266,9 +198,7 @@ impl ProjectLock {
         Self::from_str_with_path(&content, path.to_path_buf())
     }
 
-    /// "Open or report absent" wrapper over [`Self::load`]. Returns
-    /// `Ok(None)` when the file does not exist; any other I/O error or
-    /// parse failure surfaces as `Err`.
+    /// [`Self::load`], with `Ok(None)` for a missing file.
     pub async fn from_path(path: &Path) -> Result<Option<Self>, super::Error> {
         match Self::load(path).await {
             Ok(lock) => Ok(Some(lock)),
@@ -279,16 +209,8 @@ impl ProjectLock {
         }
     }
 
-    /// Version-peek loader.
-    ///
-    /// Peeks `metadata.lock_version` as a raw integer and rejects any value
-    /// other than [`SUPPORTED_LOCK_VERSION`] with
-    /// [`ProjectErrorKind::UnsupportedLockVersion`] — an explicit,
-    /// actionable error (naming the found version and the `ocx lock`
-    /// regenerate remedy) rather than `serde_repr`'s generic "unknown
-    /// variant" failure. Only then does it commit to the full deserialize,
-    /// followed by the bare-`repository` and canonical-platform-key
-    /// invariants (D3) on every tool.
+    /// Rejects a `lock_version` other than [`SUPPORTED_LOCK_VERSION`] before the
+    /// full parse, naming the found version, then validates.
     fn from_str_with_path(s: &str, path: PathBuf) -> Result<Self, super::Error> {
         let peek: LockVersionPeek =
             toml::from_str(s).map_err(|e| ProjectError::new(path.clone(), ProjectErrorKind::TomlParse(e)))?;
@@ -305,37 +227,17 @@ impl ProjectLock {
         let lock: ProjectLock =
             toml::from_str(s).map_err(|e| ProjectError::new(path.clone(), ProjectErrorKind::TomlParse(e)))?;
 
-        // Every remaining V3 structural invariant (declaration-hash
-        // canonicalization contract version, per-tool bare-repository +
-        // canonical-platform-key) is shared with the write path — see
-        // `Self::validate`. `toml::from_str` already rejects a duplicate
-        // `[[tool]]` platform TOML key and a malformed leaf digest as
-        // parse-class errors before we reach this point.
+        // `toml::from_str` already rejects duplicate platform keys and malformed digests.
         lock.validate(&path)?;
 
         Ok(lock)
     }
 
-    /// Validates every V3 structural invariant this lock format enforces,
-    /// beyond what `toml::from_str`'s `Deserialize` impls already reject
-    /// (duplicate `[[tool]]` platform keys, malformed digests): the
-    /// declaration-hash canonicalization contract version
-    /// ([`ProjectErrorKind::UnsupportedDeclarationHashVersion`]), and per-tool
-    /// bare-`repository` ([`ProjectErrorKind::LockRepositoryNotBare`]) +
-    /// canonical-platform-key ([`validate_canonical_platform_keys`])
-    /// invariants (D3).
-    ///
-    /// Called by **both** the load path ([`Self::from_str_with_path`]) and
-    /// every write path ([`Self::to_toml_string`], transitively [`Self::save`])
-    /// — a public struct's fields can be hand-assembled by any library
-    /// caller, so validating only on read would let `save` silently write a
-    /// lock every subsequent `load` rejects. `path` is used only for error
-    /// context; `to_toml_string` (which has no path) passes an empty one.
+    /// V3 invariants beyond parsing: hash version, bare `repository`, canonical
+    /// platform keys. Runs on write too, or a hand-assembled lock is saved in a
+    /// shape every later load rejects.
     fn validate(&self, path: &Path) -> Result<(), super::Error> {
-        // Canonicalization contract gate: a lock file whose hash was
-        // produced by a newer algorithm version cannot be interpreted by
-        // this build. Refuse rather than silently compare against a hash
-        // our `declaration_hash` would compute differently.
+        // A hash from another algorithm version would compare wrong, so refuse it.
         if self.metadata.declaration_hash_version != super::hash::DECLARATION_HASH_VERSION {
             return Err(ProjectError::new(
                 path.to_path_buf(),
@@ -363,25 +265,10 @@ impl ProjectLock {
         Ok(())
     }
 
-    /// Serialize to TOML bytes. Deterministic by construction: the
-    /// `tools` vector is sorted by `(group, name)` at save time and
-    /// `toml::to_string_pretty` emits fields in struct-definition order.
+    /// Serialize to TOML, deterministically: tools sorted by `(group, name)`.
     pub fn to_toml_string(&self) -> Result<String, super::Error> {
-        // Defense-in-depth (D3 write-site validation): every invariant
-        // `Self::validate` checks must already hold for the document the
-        // writer is about to emit. In practice this never fires — every
-        // producer (`build_lock`, `build_platforms_map`) already builds a
-        // compliant document — but a caller
-        // could in principle hand-assemble a `ProjectLock`/`LockedTool` that
-        // violates one of these invariants (a tagged `repository`, a stale
-        // `declaration_hash_version`, a noncanonical platform key), and the
-        // writer must not silently persist a lock the loader would then
-        // reject.
         self.validate(Path::new(""))?;
 
-        // Sort by (group, name) for byte-stable output. Build a
-        // reference-based view (`Vec<&LockedTool>`) to sort without cloning
-        // the entire `ProjectLock` document.
         let mut sorted_refs: Vec<&LockedTool> = self.tools.iter().collect();
         sorted_refs.sort_by(|a, b| (a.group.as_str(), a.name.as_str()).cmp(&(b.group.as_str(), b.name.as_str())));
 
@@ -394,23 +281,8 @@ impl ProjectLock {
             .map_err(|e| ProjectError::new(PathBuf::new(), ProjectErrorKind::TomlSerialize(e)).into())
     }
 
-    /// Atomic save: tempfile in the same directory + `sync_data` +
-    /// rename + parent-dir fsync.
-    ///
-    /// Preserves `metadata.generated_at` from `previous` when every
-    /// tool's resolved content (repository, platforms) is unchanged;
-    /// updates it otherwise. `previous` is `None` on first write.
-    ///
-    /// Save the lock file and register its path in the per-user project registry.
-    ///
-    /// `ocx_home` is the OCX data-home directory (e.g., `~/.ocx`) used to
-    /// locate the project ledger at `$OCX_HOME/projects/` (flat symlink store,
-    /// ADR: `adr_project_gc_symlink_ledger.md`). `config_path` is the
-    /// originating project config file (typically `<dir>/ocx.toml`, but may
-    /// carry a custom name when `--project=<custom>.toml` was used) — its
-    /// parent directory is canonicalized and registered as the project dir.
-    /// Registration runs **after** the atomic rename succeeds; a registration
-    /// failure is logged at WARN and never aborts the save.
+    /// Atomic save, then best-effort GC-ledger registration of `config_path`'s
+    /// project. `generated_at` is kept from `previous` when no tool's content changed.
     pub async fn save(
         &self,
         path: &Path,
@@ -421,15 +293,9 @@ impl ProjectLock {
         let mut to_write = self.clone();
         if let Some(prev) = previous {
             if tools_content_equal(&to_write.tools, &prev.tools) {
-                // Content unchanged — freeze timestamp at previous value.
                 to_write.metadata.generated_at = prev.metadata.generated_at.clone();
             } else if to_write.metadata.generated_at <= prev.metadata.generated_at {
-                // Content changed but the freshly-minted ISO-8601 second-
-                // resolution timestamp happens to equal (or fall behind) the
-                // previous one. Two `ocx lock` runs within the same second
-                // on a fast registry is a realistic case in CI and the test
-                // suite. Monotonically bump by 1 second so downstream
-                // diffing tools see that the lock changed.
+                // Changed within the same second: bump so diff tools see the change.
                 to_write.metadata.generated_at = bump_timestamp_one_second(&prev.metadata.generated_at)
                     .unwrap_or_else(|| to_write.metadata.generated_at.clone());
             }
@@ -437,55 +303,35 @@ impl ProjectLock {
 
         let serialized = to_write.to_toml_string()?;
 
-        // One publish policy for both project files: tempfile + rename in the
-        // same directory, mode carried, parent fsynced. See
-        // [`crate::mutate::publish_by_rename`].
         crate::mutate::publish_by_rename_async(path, serialized.into_bytes()).await?;
 
-        // Register this project's directory in the per-user GC ledger so
-        // `ocx clean` can retain packages held by this project's lock file.
-        // The shared infallible helper owns the canonicalize→parent→register
-        // derivation and the WARN-on-failure silent-data-loss policy; a
-        // registration failure never aborts the save (next `ocx lock`
-        // re-registers).
         super::registry::register_project_dir_best_effort(config_path, ocx_home).await;
 
         Ok(())
     }
 }
 
-/// Restore a previously-captured `ocx.lock` to disk **byte-for-byte**, used by
-/// the [`MutationGuard`](super::mutation::MutationGuard) rollback path when a
-/// partial mutation fails after the new lock has been renamed into place.
-///
-/// Uses the same atomic tempfile + rename + parent-fsync primitive as
-/// [`ProjectLock::save`] — `publish_by_rename`, the one
-/// writer of both project files — so the restore is crash-durable.
+/// Restore a captured `ocx.lock` byte-for-byte, crash-durably, for
+/// [`MutationGuard`](super::mutation::MutationGuard) rollback.
 ///
 /// # Errors
 ///
-/// Returns the underlying I/O error from the atomic write.
+/// The atomic write's I/O error.
 pub async fn restore_lock_bytes_verbatim(path: &Path, bytes: Vec<u8>) -> Result<(), super::Error> {
     crate::mutate::publish_by_rename_async(path, bytes).await
 }
 
-/// Borrowed-view serialization wrapper used by [`ProjectLock::to_toml_string`].
-///
-/// Borrows the metadata header and a pre-sorted slice of `&LockedTool`
-/// references — this avoids cloning the entire `ProjectLock` just to produce
-/// byte-stable output.
+/// Borrowed, pre-sorted view for [`ProjectLock::to_toml_string`], avoiding a
+/// whole-document clone.
 #[derive(Serialize)]
 struct SerializableView<'a> {
     metadata: &'a LockMetadata,
-    /// Renamed to match the on-disk `tool` array name.
     #[serde(rename = "tool")]
     tools: &'a [&'a LockedTool],
 }
 
-/// Return `iso` bumped by exactly one second, preserving the canonical
-/// `%Y-%m-%dT%H:%M:%SZ` format. Returns `None` if `iso` is not in the
-/// expected format — callers fall back to their original timestamp in
-/// that case rather than silently corrupting the lock.
+/// `iso` plus one second in `%Y-%m-%dT%H:%M:%SZ`; `None` if unparseable, so
+/// callers keep their own timestamp.
 fn bump_timestamp_one_second(iso: &str) -> Option<String> {
     let parsed = chrono::DateTime::parse_from_rfc3339(iso).ok()?;
     let bumped = parsed.checked_add_signed(chrono::Duration::seconds(1))?;
@@ -497,20 +343,13 @@ fn bump_timestamp_one_second(iso: &str) -> Option<String> {
     )
 }
 
-/// Compare two [`LockedTool`] lists for "resolved content unchanged"
-/// equality: `name`, `group`, `repository`, and the full `platforms` map —
-/// `BTreeMap` equality detects key add, key remove, and value change (the
-/// platform drop/appear signal counts as content-changed and advances
-/// `generated_at`). Callers may pass tools in any order; the comparison sorts
-/// both sides by `(group, name)` before checking pairwise equality so the
-/// preservation decision is order-independent.
+/// Order-independent equality of two tool lists, `name`/`group` included; a
+/// platform added or dropped counts as changed.
 fn tools_content_equal(a: &[LockedTool], b: &[LockedTool]) -> bool {
     if a.len() != b.len() {
         return false;
     }
 
-    // Compare order-independently: sort references by (group, name) on both
-    // sides, then compare pairwise.
     let sort_key = |t: &&LockedTool| (t.group.clone(), t.name.clone());
     let mut a_sorted: Vec<&LockedTool> = a.iter().collect();
     let mut b_sorted: Vec<&LockedTool> = b.iter().collect();
@@ -522,21 +361,9 @@ fn tools_content_equal(a: &[LockedTool], b: &[LockedTool]) -> bool {
     })
 }
 
-/// Why the `ocx.lock` beside an `ocx.toml` cannot be used as it stands.
-///
-/// The two states this names were duplicated: `ProjectContextError` (the
-/// `ocx pull` / `ocx exec` prologue) and `package_manager::activation::SessionError` (the
-/// per-prompt reconciler) each carried their own `LockMissing`/`StaleLock`
-/// variant, with byte-identical `#[error]` strings and the same 78/65 mapping
-/// written out twice. A user meeting this state from a command and from a
-/// prompt must read the same sentence, and two copies of a sentence is a
-/// promise that only holds until someone edits one of them.
-///
-/// Both enums now wrap this type, so the wording and the exit codes have one
-/// home. The *control flow* deliberately stays at each site: the reconciler
-/// answers `Missing` before it parses `ocx.toml`, and hoisting the parse ahead
-/// of that check to share one function would turn "no lock, and the config is
-/// also broken" from a lock diagnosis into a parse error.
+/// Why the `ocx.lock` beside an `ocx.toml` cannot be used. Shared by the
+/// command prologue and the per-prompt reconciler, so both print one sentence
+/// and one exit code.
 #[derive(Debug, thiserror::Error)]
 pub enum LockCurrency {
     /// `ocx.toml` resolved but its sibling `ocx.lock` is absent.
@@ -555,13 +382,7 @@ pub enum LockCurrency {
     },
 }
 
-/// Whether `lock` still describes `config` — the one staleness gate.
-///
-/// Uses the cached accessor, so the JCS canonicalization and SHA-256 behind
-/// `declaration_hash` are paid once per loaded [`ProjectConfig`]: every caller
-/// here is a hot path that hits this on each invocation.
-///
-/// [`ProjectConfig`]: crate::ProjectConfig
+/// Whether `lock` still describes `config`, via the cached hash (a hot path).
 #[must_use]
 pub fn is_stale(lock: &ProjectLock, config: &crate::ProjectConfig) -> bool {
     lock.metadata.declaration_hash != config.declaration_hash_cached()

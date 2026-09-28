@@ -16,9 +16,7 @@ impl Identifier {
         )?)
     }
 
-    /// This argument as a **write target**: the registry location a publish
-    /// writes to, exactly as named. A write is never routed through an index —
-    /// only a read of a package name is (ocx#504).
+    /// This argument as a write target, exactly as named; a write is never routed through an index.
     pub fn as_target(&self, domain: impl AsRef<str>) -> Result<ocx_oci::OciIdentifier> {
         Ok(ocx_oci::OciIdentifier::parse_target(&self.raw, domain.as_ref())?)
     }
@@ -41,13 +39,9 @@ impl Identifier {
         }
     }
 
-    /// Rejects a batch that names the same package twice.
+    /// Rejects a batch that names the same package twice, with a usage error (exit 64).
     ///
-    /// Commands that emit an identifier-keyed report (`package inspect`,
-    /// `package description pull`) must not receive duplicate references: the keyed shape
-    /// would otherwise drop a result row (inspect collapses duplicates through
-    /// `drain_package_tasks`) or emit a duplicate JSON key (info). Returns a
-    /// usage error (exit 64) naming the first duplicate.
+    /// Required before an identifier-keyed report, or a duplicate drops a row or emits a duplicate JSON key.
     pub fn reject_duplicate_references(identifiers: &[ocx_oci::PackageRef]) -> anyhow::Result<()> {
         let mut seen = std::collections::HashSet::new();
         for identifier in identifiers {

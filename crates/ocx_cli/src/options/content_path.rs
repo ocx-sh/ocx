@@ -34,8 +34,7 @@ pub struct ContentPath {
 }
 
 impl ContentPath {
-    /// Returns the [`SymlinkKind`] implied by the flags, or `None` if neither
-    /// flag was set (object store path should be used).
+    /// The [`SymlinkKind`] the flags select; `None` means the object-store path.
     pub fn symlink_kind(&self) -> Option<SymlinkKind> {
         if self.candidate {
             Some(SymlinkKind::Candidate)

@@ -7,22 +7,16 @@ use ocx_config::env;
 
 use super::Context;
 
-/// Throttled background-refresh probe for the corporate managed-config tier
-/// (ADR Decision F), sibling of [`super::update_check::check_for_update`].
+/// Throttled background-refresh probe for the corporate managed-config tier, sibling of
+/// [`super::update_check::check_for_update`].
 ///
-/// Gate skeleton mirrors the update-check hook exactly: kill switch, CI
-/// detection, offline, then stderr-TTY. Suppressed when:
-/// - `OCX_NO_CONFIG_REFRESH` is truthy
-/// - `CI` is truthy (see [`ocx_util::env::is_ci`])
-/// - `OCX_OFFLINE` is truthy (or `--offline` flag)
-/// - stderr is not a terminal
-///
-/// Never fails the command — see
-/// [`ocx_package_manager::PackageManager::check_managed_config_refresh`].
-///
-/// Resolves the effective `[managed]` tier via [`ocx_config::managed::resolve_managed_target`]
-/// and, unless the tier's `refresh` posture is [`ocx_config::managed::RefreshPolicy::Manual`],
-/// hands off to `check_managed_config_refresh`.
+/// Gates in exactly the update-check hook's order, suppressed when `OCX_NO_CONFIG_REFRESH` is
+/// truthy, `CI` is truthy ([`ocx_util::env::is_ci`]), `OCX_OFFLINE` or `--offline` is set, or
+/// stderr is not a terminal. Never fails the command (see
+/// [`ocx_package_manager::PackageManager::check_managed_config_refresh`]). Resolves the effective
+/// `[managed]` tier via [`ocx_config::managed::resolve_managed_target`] and hands off to
+/// `check_managed_config_refresh` unless its `refresh` posture is
+/// [`ocx_config::managed::RefreshPolicy::Manual`].
 pub async fn check_for_managed_config_refresh(ctx: &Context) {
     if ocx_util::env::flag(env::keys::OCX_NO_CONFIG_REFRESH, false) {
         log::debug!("Managed-config refresh skipped: OCX_NO_CONFIG_REFRESH is set");

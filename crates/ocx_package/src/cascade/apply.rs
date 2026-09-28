@@ -3,25 +3,8 @@
 
 //! The write half of `ocx package cascade repair`.
 //!
-//! Takes a plan the pure core computed whole and applies it: authenticate for
-//! push once, preflight every referenced child manifest, then PUT each alias
-//! index concurrently. Batched on purpose — the entire plan exists before the
-//! first write, so an auth failure or a missing child costs zero writes rather
-//! than leaving the graph half-rewritten.
-//!
-//! Partial failure is reported, not propagated: one alias failing must not
-//! discard the outcome of the ones that succeeded, so writes collect per tag
-//! and the run reports every result in tag order rather than completion order.
-//!
-//! Known limitation: the transport has no conditional-write primitive, so a
-//! concurrent publish to the same alias is last-writer-wins. The post-write
-//! read-back detects it and warns; do not run a repair against a repository
-//! with a publish in flight.
-//!
-//! Every read here — the preflight probes and the post-write read-back alike —
-//! addresses the **canonical** registry ([`ReadAddressing::Canonical`]), the
-//! host the writes go to. A preflight answered by a mirror would gate a write
-//! on a repository the write never touches.
+//! Every read addresses the canonical registry the writes go to; a mirror-answered
+//! preflight would gate a write on a repository it never touches.
 
 use std::collections::BTreeSet;
 
@@ -33,12 +16,7 @@ use crate::error::Error as PackageError;
 type Result<T> = std::result::Result<T, PackageError>;
 use ocx_oci::client::ReadAddressing;
 
-/// How many alias indexes to work on at once.
-///
-/// Far below the gather side's read fan-out: these are writes against a single
-/// repository, and a registry that throttles will throttle them first. The
-/// preflight reads share the bound instead of taking a second knob — they are
-/// derived from the same plan and nobody would tune the two apart.
+/// How many alias indexes to work on at once; low, as registries throttle writes first.
 const CASCADE_APPLY_CONCURRENCY: usize = 8;
 
 /// What happened to one alias tag in a repair run.
@@ -58,8 +36,7 @@ pub enum WriteOutcome {
     ///
     /// `dropped` names the child digests that were removed from the planned
     /// index before it went on the wire: dead pointers backing nothing but
-    /// orphan slots. Empty for every ordinary write, which is why it is absent
-    /// from the JSON rather than an empty array on every row.
+    /// orphan slots. Absent when empty, as on every ordinary write.
     Written {
         digest: ocx_oci::Digest,
         verified: bool,
@@ -77,38 +54,26 @@ pub enum WriteOutcome {
         expected: Option<ocx_oci::Digest>,
         live: Option<ocx_oci::Digest>,
     },
-    /// The registry rejected the write. Carries the rendered cause: the
-    /// structured error is logged once at the boundary, and what a per-tag
-    /// report row needs is the sentence, not a match target.
+    /// The registry rejected the write, with the rendered cause.
     Failed { message: String },
 }
 
-/// Applies a repair plan to `identifier`, one whole index PUT per alias.
-///
-/// Returns one [`RepairOutcome`] per planned write, in tag order, so a partial
-/// failure names exactly which aliases landed and which did not. An empty plan
-/// performs no registry call at all.
+/// Applies a repair plan to `identifier`, one whole index PUT per alias, and
+/// returns one [`RepairOutcome`] per planned write in tag order.
 ///
 /// # Errors
 ///
-/// Push authentication failure, which fails the whole run before any write.
-/// Per-alias failures are reported in the returned outcomes instead.
+/// Push authentication failure, before any write; per-alias failures are outcomes.
 pub async fn apply(
     client: &ocx_oci::Client,
     identifier: &ocx_oci::OciIdentifier,
     writes: &[PlannedWrite],
 ) -> Result<Vec<RepairOutcome>> {
     if writes.is_empty() {
-        // A clean graph costs zero registry calls — not even a credential
-        // probe, which would make `repair` on a healthy package indistinguishable
-        // from one that had work to do.
         return Ok(Vec::new());
     }
 
-    // Once, up front. A credential problem is one broken run, not N broken
-    // aliases, and the per-tag failure channel below would report it as the
-    // latter — after having already written whichever aliases a partially
-    // scoped token did happen to cover.
+    // Up front, or a partially scoped token writes some aliases before the rest fail.
     client.ensure_auth(identifier, ocx_oci::RegistryOperation::Push).await?;
 
     let verdicts = preflight(client, identifier, writes).await?;
@@ -122,16 +87,9 @@ pub async fn apply(
             }
         })
         .buffer_unordered(CASCADE_APPLY_CONCURRENCY)
-        // Not `try_collect`: a single alias the registry rejected must not
-        // discard the outcome of the ones that landed. The failure travels in
-        // the row, and the run still reports the whole plan.
         .collect()
         .await;
 
-    // `buffer_unordered` yields in completion order, which is a property of the
-    // registry's latency rather than of the repair. Two runs over the same
-    // damage must produce the same report, so it sorts by the one stable key
-    // an outcome has.
     outcomes.sort_by(|left, right| left.tag.cmp(&right.tag));
 
     Ok(outcomes)
@@ -139,8 +97,7 @@ pub async fn apply(
 
 /// What preflight decided about one planned alias write.
 enum Preflight {
-    /// Write it, minus the entries naming `dropped` — dead pointers that back
-    /// orphan slots and nothing else. Empty for an untouched write.
+    /// Write it, minus the entries naming `dropped`.
     Write { dropped: BTreeSet<String> },
     /// Do not write it: applying it would publish something broken.
     Refuse(Unrepairable),
@@ -149,30 +106,16 @@ enum Preflight {
 /// What one probe learned about one referenced digest.
 enum ChildState {
     Present,
-    /// The registry no longer serves it.
     Missing,
-    /// It names a digest algorithm this build cannot address, so nothing about
-    /// it can be checked.
+    /// It names a digest algorithm this build cannot address.
     Unaddressable,
 }
 
-/// HEADs every child manifest the plan references, before any write happens.
+/// HEADs every child manifest the plan references, returning one verdict per
+/// write: a missing child backing only orphan slots is dropped, otherwise the alias is refused.
 ///
-/// Returns one verdict per planned write, in `writes` order. A child the
-/// registry no longer serves would make the planned index a dangling pointer;
-/// what that costs depends on what the child backs:
-///
-/// - Backing **only** [`SlotStatus::Orphan`] slots — a leftover from an earlier
-///   cascade whose content is now gone — the entries naming it are dropped and
-///   the alias is written. This is the orphan policy's removal half: an orphan
-///   is preserved while its child exists and removed once it provably does not.
-/// - Backing anything the fold expects, or an entry with no platform slot at
-///   all, the whole alias is refused. The repair would otherwise publish a
-///   pointer to content nobody can fetch.
-///
-/// The analysis is per **digest**, not per entry: one manifest can legitimately
-/// serve two platform keys (a Rosetta-style alias), and dropping it for the
-/// orphan half would silently delete the folded half.
+/// Per digest, not per entry: one manifest can serve two platform keys, and
+/// dropping it for the orphan half would delete the folded half.
 async fn preflight(
     client: &ocx_oci::Client,
     identifier: &ocx_oci::OciIdentifier,
@@ -187,10 +130,6 @@ async fn preflight(
 
     let probed: Vec<(usize, &String, ChildState)> = stream::iter(probes)
         .map(|(position, write, digest)| async move {
-            // An index may legitimately name a digest algorithm this build does
-            // not implement, and one that cannot be addressed cannot be
-            // checked. Refused rather than waved through — waving it through
-            // publishes a pointer nothing verified.
             let Ok(parsed) = ocx_oci::Digest::try_from(digest.as_str()) else {
                 log::warn!(
                     "Alias '{}' of {identifier} references digest '{digest}', which cannot be addressed",
@@ -198,8 +137,7 @@ async fn preflight(
                 );
                 return Ok((position, digest, ChildState::Unaddressable));
             };
-            // `clone_with_digest` keeps the tag, and the child has to be
-            // addressed by digest alone — hence stripping the tag first.
+            // `clone_with_digest` keeps the tag; the child must be addressed by digest alone.
             let child = identifier.without_tag().clone_with_digest(parsed);
             match client
                 .probe_manifest_digest_addressed(&child, ReadAddressing::Canonical)
@@ -207,10 +145,7 @@ async fn preflight(
             {
                 Ok(Some(_)) => Ok((position, digest, ChildState::Present)),
                 Ok(None) => Ok((position, digest, ChildState::Missing)),
-                // A read that failed says nothing about whether the child is
-                // there, and both guesses are destructive: assume present and
-                // the repair publishes a dangling pointer, assume gone and it
-                // drops a live platform off a rolling tag.
+                // Both guesses are destructive: a dangling pointer, or a live platform dropped.
                 Err(source) => Err(PackageError::from(source)),
             }
         })
@@ -218,10 +153,7 @@ async fn preflight(
         .try_collect()
         .await?;
 
-    // Probes finish in whatever order the registry answers them; the verdicts
-    // must not depend on that. `BTreeSet` restores digest order, which is the
-    // order `referenced_digests` already carries, so an alias with two dead
-    // children is always reported against the same one.
+    // `BTreeSet` keeps verdicts independent of probe completion order.
     let mut missing: Vec<BTreeSet<&String>> = vec![BTreeSet::new(); writes.len()];
     let mut unaddressable: Vec<BTreeSet<&String>> = vec![BTreeSet::new(); writes.len()];
     for (position, digest, state) in probed {
@@ -263,11 +195,7 @@ fn verdict(write: &PlannedWrite, missing: &BTreeSet<&String>, unaddressable: &BT
         dropped.insert((*digest).clone());
     }
 
-    // Every entry gone is worse than a stale alias, and the same refusal the
-    // pure core raises when a fold has nothing to write. Unreachable for a
-    // plan the core produced — an alias only earns a write from a missing or
-    // stale slot, and neither is an orphan — but the guard is what makes that
-    // an invariant rather than an assumption about the caller.
+    // An emptied index is worse than a stale alias.
     if !dropped.is_empty()
         && write
             .index
@@ -281,13 +209,8 @@ fn verdict(write: &PlannedWrite, missing: &BTreeSet<&String>, unaddressable: &BT
     Preflight::Write { dropped }
 }
 
-/// Whether every entry naming `digest` is a preserved orphan.
-///
-/// The plan carries its own justification in [`PlannedWrite::reasons`], which
-/// is where an orphan slot is named — an entry the fold does not expect, kept
-/// only because its child was still there. An entry with no platform slot (an
-/// attestation, or the wrap of a bare manifest found at the tag) has no row and
-/// is therefore never droppable.
+/// Whether every entry naming `digest` is an orphan slot in
+/// [`PlannedWrite::reasons`]; an entry with no platform slot never is.
 fn backs_orphans_only(write: &PlannedWrite, digest: &str) -> bool {
     write
         .index
@@ -306,9 +229,6 @@ fn backs_orphans_only(write: &PlannedWrite, digest: &str) -> bool {
 }
 
 /// Writes one alias index, or reports why it was not written.
-///
-/// Never returns an error: a rejected write is this alias's outcome, and the
-/// rest of the plan is unaffected by it.
 async fn write_alias(
     client: &ocx_oci::Client,
     identifier: &ocx_oci::OciIdentifier,
@@ -323,8 +243,6 @@ async fn write_alias(
         Preflight::Write { dropped } => dropped,
     };
 
-    // Borrowed when nothing is dropped, so the ordinary write puts the planned
-    // bytes on the wire verbatim rather than a re-serialized copy of them.
     let index = if dropped.is_empty() {
         std::borrow::Cow::Borrowed(&write.index)
     } else {
@@ -341,11 +259,7 @@ async fn write_alias(
     };
 
     let target = identifier.clone_with_tag(write.tag.to_string());
-    // Read-modify-write over a whole registry pass: the plan was computed from
-    // a gather that finished some time ago, and nothing has held the tag since.
-    // Without this the repair silently overwrites a publish that landed in
-    // between — and the read-back below then confirms the repair's own
-    // clobber as verified.
+    // Re-read first, or the repair clobbers a publish that landed since the gather.
     match client
         .probe_manifest_digest_addressed(&target, ReadAddressing::Canonical)
         .await
@@ -361,9 +275,7 @@ async fn write_alias(
             };
         }
         Ok(_) => {}
-        // Fail closed. The alternative is to write over an alias whose current
-        // content nobody established, which is the exact damage the check
-        // exists to prevent; a re-run costs one repair.
+        // Fail closed: never write over an alias whose current content is unknown.
         Err(source) => {
             log::error!(
                 "Not writing alias '{}' of {identifier}: could not read it back first: {source}",
@@ -382,8 +294,6 @@ async fn write_alias(
             dropped: dropped.into_iter().collect(),
         },
         Err(source) => {
-            // Logged once, here — the boundary that decided to carry on rather
-            // than propagate. The row keeps the sentence for the report.
             log::error!("Failed to write alias '{}' of {identifier}: {source}", write.tag);
             WriteOutcome::Failed {
                 message: source.to_string(),
@@ -392,13 +302,8 @@ async fn write_alias(
     }
 }
 
-/// Re-reads `target` and reports whether it still names what this run wrote.
-///
-/// A mismatch means a concurrent writer, not a failed write: the PUT landed,
-/// someone else's landed after it, and there is no conditional-write primitive
-/// in the transport that could have prevented it. A read that fails only means
-/// the check could not be made — neither is worth failing a completed write
-/// over.
+/// Whether `target` still names what this run wrote; a mismatch or failed read
+/// is a warning, never a failed write.
 async fn verify_write(client: &ocx_oci::Client, target: &ocx_oci::OciIdentifier, written: &ocx_oci::Digest) -> bool {
     match client
         .probe_manifest_digest_addressed(target, ReadAddressing::Canonical)
@@ -413,7 +318,7 @@ async fn verify_write(client: &ocx_oci::Client, target: &ocx_oci::OciIdentifier,
     }
 }
 
-// ── Tests (matrix G) ──────────────────────────────────────────────────────────
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

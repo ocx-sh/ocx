@@ -3,54 +3,21 @@
 
 //! Index-driven dependency pin resolution for `ocx package create`.
 //!
-//! [`pin_dependencies`] is the compile step of the create-resolves /
-//! push-gates split (`adr_dependency_manifest_pinning.md`): every tag-only
-//! dependency in an [`AuthoringMetadata`] is resolved into a per-platform
-//! **manifest** digest via the selected [`Index`] — never an image-index
-//! digest, which registry GC collects as soon as the dependency publisher
-//! pushes again. Already-pinned dependencies pass through untouched (no
-//! network).
-//!
-//! Resolution routes through [`Index::fetch_candidates`] with
-//! [`IndexOperation::Resolve`], so the `--remote` / `--offline` / `--frozen`
-//! routing matrix of `adr_index_routing_semantics.md` applies unchanged.
-//!
-//! A bundle targets exactly one platform per `create` invocation
-//! (`adr_platform_model_unification.md` D5) — `declared_platform` is that
-//! single value, which may itself be [`Platform::Any`]. Every dependency
-//! (fresh or already-pinned) is resolved against the SAME directed
-//! compatibility relation [`ocx_oci::select_best`] uses at fresh-resolve
-//! time (D1), so an `any`-targeted bundle's dependencies are structurally
-//! restricted to `any`-offered candidates: [`is_compatible`](ocx_oci::is_compatible)
-//! rule 2 says an `Any` requirement is satisfied only by an `Any` offer.
+//! Pins are **manifest** digests, never image-index digests, which registry GC
+//! collects once the dependency publisher pushes again (`adr_dependency_manifest_pinning.md`).
 
 use crate::metadata::authoring::AuthoringDependencies;
 use crate::metadata::authoring::{AuthoringDependency, AuthoringMetadata};
 use ocx_index::{Index, IndexOperation};
 use ocx_oci::{self, Platform, Selection, select_best};
 
-/// Resolve every unpinned dependency of `metadata` against `index` for the
-/// single `declared_platform` (the create `--platform` value).
-///
-/// Each unpinned dependency must advertise exactly one candidate compatible
-/// with `declared_platform` under [`select_best`]; the winning leaf's digest
-/// is attached to the dependency's identifier. An `any`-targeted bundle takes
-/// the same path — its winner can only be the dependency's own `any`-typed
-/// offer ([`is_compatible`](ocx_oci::is_compatible) rule 2), so the digest
-/// this writes is one `fetch_candidates` just confirmed to be `any`-offered.
-///
-/// Before any resolution, an `any`-targeted bundle is checked for
-/// **pre-existing** digest pins: create resolves against an index, so a
-/// digest it did not write itself carries no evidence of being `any`-offered
-/// and create has no way to acquire that evidence. See
-/// [`reject_digest_pins_in_any_target`] for why push is not held to the same
-/// rule.
+/// Pins every unpinned dependency of `metadata` to the one leaf [`select_best`]
+/// picks for `declared_platform`; already-pinned ones pass through, except under
+/// `any`, where any pre-existing digest pin is refused.
 ///
 /// # Errors
 ///
-/// See [`DependencyPinningError`]. Index-layer failures (including
-/// `--offline`/`--frozen` policy blocks) pass through transparently so exit
-/// classification reaches the underlying cause.
+/// See [`DependencyPinningError`]; index failures keep their cause reachable.
 pub async fn pin_dependencies(
     metadata: AuthoringMetadata,
     index: &Index,
@@ -77,30 +44,13 @@ pub async fn pin_dependencies(
 
     let dependencies =
         AuthoringDependencies::new(resolved).expect("re-validated entries mirror an already-validated dependency list");
-    // Mutated rather than rebuilt with `..bundle`: the retired-key rejection
-    // sentinels are private to the metadata module, and functional update
-    // syntax would need to name them.
     let mut bundle = bundle;
     bundle.dependencies = dependencies;
     Ok(AuthoringMetadata::Bundle(bundle))
 }
 
-/// D5: find a pre-existing digest pin among an `any`-targeted bundle's
-/// dependencies, if any — a leaf manifest carries no platform descriptor, so
-/// a bare `@digest` cannot be read off the sidecar as `any`-offered. Runs as
-/// its own pass over every declared dependency, including already-pinned
-/// ones, rather than being folded into the fresh-resolution loop, which only
-/// ever sees unpinned entries.
-///
-/// **Create-only, deliberately asymmetric with push.** Create's whole job is
-/// to resolve against an index, so a digest it did not write itself is
-/// unverifiable to it and it fails closed. Push has the registry in hand and
-/// checks the stronger property directly
-/// ([`verify_any_pin_provenance`](crate::publisher::publish_gate)): is this
-/// digest advertised as `any` in the dependency's own image index? That
-/// subsumes the structural rule, so push accepts a bare digest the registry
-/// vouches for and rejects one it does not — which is the question this check
-/// can only approximate.
+/// Finds a pre-existing digest pin in an `any`-targeted bundle, which create
+/// cannot verify as `any`-offered (push checks the registry instead).
 fn reject_digest_pins_in_any_target(dependencies: &AuthoringDependencies) -> Option<Box<ocx_oci::PackageRef>> {
     dependencies
         .iter()
@@ -108,10 +58,7 @@ fn reject_digest_pins_in_any_target(dependencies: &AuthoringDependencies) -> Opt
         .map(|dep| Box::new(dep.identifier.clone()))
 }
 
-/// Fetch the advertised `(leaf identifier, platform)` children for `dep`.
-///
-/// A flat `Manifest::Image` yields a single `(manifest digest, any)` child by
-/// [`Index::fetch_candidates`] construction — GC-safe pins fall out for free.
+/// Fetches the advertised `(leaf identifier, platform)` children for `dep`.
 async fn fetch_dependency_candidates(
     index: &Index,
     dep: &AuthoringDependency,
@@ -128,10 +75,7 @@ async fn fetch_dependency_candidates(
     }
 }
 
-/// Resolve a single unpinned dependency's advertised children against
-/// `declared_platform` via [`select_best`] — the same relation and scoring
-/// [`ocx_oci::Index::select`] uses at fresh-resolve time
-/// (authoring-vs-Index parity, D1).
+/// Resolves one unpinned dependency's children against `declared_platform` via [`select_best`].
 fn resolve_one(
     dep: &AuthoringDependency,
     candidates: Vec<(ocx_oci::PackageRef, Platform)>,
@@ -154,10 +98,6 @@ fn resolve_one(
     }
 }
 
-/// Map each winning leaf identifier back to its advertised platform string,
-/// for the [`DependencyPinningError::AmbiguousPlatform`] diagnostic —
-/// `select_best`'s `Ambiguous` outcome carries only the tied leaves, not
-/// their platforms.
 fn winning_platforms(winners: &[ocx_oci::PackageRef], candidates: &[(ocx_oci::PackageRef, Platform)]) -> Vec<String> {
     winners
         .iter()
@@ -170,14 +110,7 @@ fn winning_platforms(winners: &[ocx_oci::PackageRef], candidates: &[(ocx_oci::Pa
         .collect()
 }
 
-/// Collapse `dep` to a single manifest pin on `leaf`'s digest: attach the
-/// leaf digest to the identifier, preserving the advisory tag.
-///
-/// The one pin shape, for every `declared_platform` including `any`. The
-/// digest's provenance is not left to the sidecar to assert: an `any`-target
-/// winner is `any`-offered by [`select_best`]'s construction here, and push
-/// re-derives the same fact from the dependency's own image index rather than
-/// trusting anything this wrote.
+/// Attaches `leaf`'s digest to `dep`'s identifier, keeping the advisory tag.
 fn pin(dep: &AuthoringDependency, leaf: &ocx_oci::PackageRef) -> Result<AuthoringDependency, DependencyPinningError> {
     let digest = require_leaf_digest(dep, leaf)?;
     let mut pinned = dep.clone();
@@ -185,11 +118,7 @@ fn pin(dep: &AuthoringDependency, leaf: &ocx_oci::PackageRef) -> Result<Authorin
     Ok(pinned)
 }
 
-/// Extract the leaf manifest digest a candidate carries.
-///
-/// `fetch_candidates` always attaches the child digest via
-/// `clone_with_digest`, so a missing digest indicates a malformed index
-/// response rather than a user error.
+/// The leaf's manifest digest; missing only on a malformed index response.
 fn require_leaf_digest(
     dep: &AuthoringDependency,
     leaf: &ocx_oci::PackageRef,
@@ -205,10 +134,7 @@ pub enum DependencyPinningError {
     /// The dependency tag does not resolve in the selected index.
     #[error("dependency '{identifier}' not found in the selected index")]
     DependencyNotFound { identifier: Box<ocx_oci::PackageRef> },
-    /// No advertised leaf is compatible with the declared platform. For a
-    /// declared `any` platform this is D5's "the dependency offers no `any`
-    /// manifest" case — the same variant, since the underlying cause
-    /// (`select_best` found no compatible candidate) is identical.
+    /// No advertised leaf is compatible with the declared platform.
     #[error(
         "dependency '{identifier}' has no leaf compatible with platform '{platform}' (available: {}); pass --platform matching an available platform, or ask the dependency publisher to add a build for '{platform}'",
         available.join(", ")
@@ -228,30 +154,22 @@ pub enum DependencyPinningError {
         platform: String,
         candidates: Vec<String>,
     },
-    /// D5: an `any`-targeted bundle carries a direct digest pin on a
-    /// dependency. A leaf manifest carries no platform descriptor, so a
-    /// bare `@digest` pin cannot be verified to be `any`-offered — the rule
-    /// applies to already-pinned dependencies too, not only freshly
-    /// resolved ones.
+    /// An `any`-targeted bundle carries a direct digest pin on a dependency.
     #[error(
         "dependency '{identifier}' carries a direct digest pin in an `any`-targeted bundle; `any` deps must resolve through `ocx package create --platform any` (unverifiable pin provenance)"
     )]
     DirectDigestPinInAnyTarget { identifier: Box<ocx_oci::PackageRef> },
     /// Index-layer failure (network, policy block, malformed manifest).
-    ///
-    /// Not `transparent`: the chain walker must reach the inner
-    /// [`ocx_index::error::Error`] via `source()` so its own `ClassifyExitCode`
-    /// delegation fires (offline/frozen policy blocks → 81).
+    // Not `transparent`, which would hide the index error from the exit-code chain walk.
     #[error("dependency pin resolution failed")]
     Index(#[from] ocx_index::error::Error),
 }
 
-// ── Specification tests — adr_dependency_manifest_pinning.md Phase 2 ─────
+// ── Specification tests — adr_dependency_manifest_pinning.md ─────────────
 //
 // Offline harness: a seeded `LocalIndex` behind `ChainMode::Offline` (or
-// `Default` with no sources for the not-found path) exercises the full
-// `fetch_candidates` route without any network. Seeder pattern mirrors
-// `package_manager/tasks/resolve.rs` spec_tests.
+// `Default` with no sources for the not-found path) drives `fetch_candidates`
+// with no network.
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;

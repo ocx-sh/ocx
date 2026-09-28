@@ -32,10 +32,7 @@ impl Select {
 
         let platform = conventions::platform_or_default(self.platform.platform.clone());
 
-        // `select_all` resolves in parallel (via `find_all`) then wires each
-        // `current` symlink sequentially, aggregating every per-package failure
-        // into one `SelectFailed` instead of aborting on the first. Results are
-        // returned in input order, so zipping with `self.packages` is sound.
+        // The zip below relies on `select_all` returning results in input order.
         let results = context.manager().select_all(identifiers, platform).await?;
 
         let mut packages = HashMap::with_capacity(results.len());

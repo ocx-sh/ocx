@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Async read wrapper that reports cumulative transfer progress via callback.
-//!
-//! Serves both directions: the download path (`Client::pull_layer` wraps the
-//! fork's streaming reader) and the upload path
-//! (`native_transport::progress_body_stream` wraps the in-RAM blob before
-//! streaming it to the registry).
+//! Async read wrapper reporting cumulative transfer progress, for downloads and uploads.
 
 use std::io;
 use std::pin::Pin;
@@ -17,16 +12,9 @@ use tokio::io::ReadBuf;
 
 use super::transport::ProgressFn;
 
-/// An [`AsyncRead`] wrapper that calls `on_progress(bytes_read_so_far)` after
-/// every successful read.
+/// An [`AsyncRead`] wrapper calling `on_progress` with the cumulative byte count after every successful read.
 ///
-/// `ProgressReader` imposes no size cap: progress is reported on natural chunk
-/// boundaries (typically 8–64 KiB HTTP/2 frames on download, ~128 KiB
-/// `ReaderStream` frames on upload), producing smooth progress without
-/// artificial I/O fragmentation.
-///
-/// The callback is non-blocking and is invoked with the **cumulative** total of
-/// bytes read so far.
+/// The callback runs inside `poll_read`, so a blocking one stalls the transfer.
 pub(super) struct ProgressReader<R> {
     inner: R,
     on_progress: ProgressFn,
@@ -34,12 +22,7 @@ pub(super) struct ProgressReader<R> {
 }
 
 impl<R: AsyncRead + Unpin> ProgressReader<R> {
-    /// Creates a new `ProgressReader`.
-    ///
-    /// - `inner` — the underlying byte source.
-    /// - `on_progress` — called with cumulative bytes read after each
-    ///   successful read. Use [`super::transport::no_progress`] when progress
-    ///   reporting is not needed.
+    /// Wraps `inner`; pass [`super::transport::no_progress`] to report nothing.
     pub fn new(inner: R, on_progress: ProgressFn) -> Self {
         Self {
             inner,
@@ -62,10 +45,6 @@ impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
             let n = buf.filled().len() - filled_before;
             if n > 0 {
                 self.bytes_read += n as u64;
-                // Invoke the progress callback with the cumulative total.
-                // The callback is non-blocking — it must not perform any I/O
-                // or blocking work; typically it updates an atomic counter or
-                // enqueues a message.
                 (self.on_progress)(self.bytes_read);
             }
         }

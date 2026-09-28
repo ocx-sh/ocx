@@ -79,13 +79,11 @@ impl PackageDescriptionPush {
         let publisher = Publisher::new(context.remote_client()?.clone());
         publisher.ensure_auth(&identifier).await?;
 
-        // Pull existing description for merge.
         let temp_dir = std::env::temp_dir().join(format!("ocx-describe-{}", std::process::id()));
         std::fs::create_dir_all(&temp_dir).map_err(|e| anyhow::anyhow!("failed to create temp dir: {e}"))?;
         let existing = publisher.pull_description(&identifier, &temp_dir).await?;
         let _ = std::fs::remove_dir_all(&temp_dir);
 
-        // Build the merged description.
         let (readme, frontmatter) = match &self.readme {
             Some(path) => {
                 let data = tokio::fs::read(path)
@@ -117,7 +115,7 @@ impl PackageDescriptionPush {
                 }),
         };
 
-        // Merge annotations: existing → frontmatter → CLI flags.
+        // Later wins: existing, then README frontmatter, then flags.
         let mut annotations = existing.as_ref().map(|d| d.annotations.clone()).unwrap_or_default();
         Self::set_annotation(&mut annotations, ocx_oci::annotations::TITLE, &frontmatter.title);
         Self::set_annotation(
@@ -146,11 +144,7 @@ impl PackageDescriptionPush {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// Copies `source`'s published description onto `target` unchanged.
-    ///
-    /// Deliberately not a merge: the target's own description is replaced
-    /// wholesale, which is what "promote the catalog page I reviewed in staging"
-    /// means. A merge would leave the target carrying a mixture nobody wrote.
+    /// Replaces `target`'s description wholesale with `source`'s; never merges.
     async fn copy_from(
         &self,
         context: crate::app::Context,
@@ -162,16 +156,6 @@ impl PackageDescriptionPush {
         publisher.ensure_auth(target).await?;
 
         let temp_dir = tempfile::tempdir()?;
-        // An undescribed source is an expected, actionable outcome, not an
-        // unclassified failure: a bare `anyhow!` fell through the chain walk to
-        // exit 1, which the pinned table reserves for "no classification fits"
-        // (EXIT-04). The typed cause is the one `pull_description` swallowed
-        // into `Ok(None)` on the way here, and it classifies to 79.
-        //
-        // 79 covers both readings — repository absent, and repository present
-        // but never described. Telling them apart costs a second round trip
-        // (a tag listing) to change nothing the user would do differently, so
-        // the message names the tag that was missing and stops there.
         let description = publisher
             .pull_source_description(context.default_index(), &source, temp_dir.path())
             .await?
@@ -189,11 +173,7 @@ impl PackageDescriptionPush {
     }
 }
 
-/// The refusal when `--from` names a repository that publishes no description.
-///
-/// Carries the cause [`Publisher::pull_description`] swallowed into `Ok(None)`
-/// on the way here, so the chain walk reaches a classifiable error and the
-/// process exits 79 rather than the unclassified 1.
+/// The `--from` refusal for a source with no description, typed so it exits 79 rather than 1.
 fn no_description_to_copy(source: &ocx_oci::PackageRef) -> anyhow::Error {
     anyhow::Error::new(ClientError::ManifestNotFound(format!(
         "{source}:{}",

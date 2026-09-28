@@ -1,16 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Typed Starlark wrapper for [`Architecture`].
-//!
-//! Parallel to [`super::os_value::OsValue`]. Projects the internal Rust enum
-//! [`Architecture`] into the `ocx.arch.{Amd64,Arm64}` Starlark namespace. The
-//! wrapper is the only shape a `.star` script ever sees; the Rust enum stays
-//! internal.
-//!
-//! `Display` returns the OCI lowercase string (`"amd64"`, `"arm64"`). `equals`
-//! compares the inner discriminant; cross-type equality returns `false` without
-//! panicking.
+//! Typed Starlark wrapper for [`Architecture`], the `ocx.arch.*` namespace.
 
 use std::fmt;
 
@@ -24,9 +15,6 @@ use starlark::values::{
 use ocx_oci::platform::Architecture;
 
 /// Starlark-facing wrapper around an [`Architecture`] variant.
-///
-/// See [`super::os_value::OsValue`] for the rationale on a manual `Allocative`
-/// impl rather than derive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ProvidesStaticType, NoSerialize)]
 pub(super) struct ArchValue(pub(super) Architecture);
 
@@ -38,13 +26,9 @@ impl Allocative for ArchValue {
 
 impl ArchValue {
     /// Starlark type tag (the result of `type()` in a script).
-    ///
-    /// Lowercase short form (`"arch"`) — same convention as
-    /// [`super::os_value::OsValue::TYPE`].
     pub(super) const TYPE: &'static str = "arch";
 
-    /// PascalCase variant name used as the attribute in the `ocx.arch`
-    /// namespace (`Amd64`, `Arm64`). Mirrors the Rust enum variant exactly.
+    /// The attribute name in the `ocx.arch` namespace, spelled as the Rust variant.
     pub(super) fn starlark_name(self) -> &'static str {
         match self.0 {
             Architecture::Amd64 => "Amd64",
@@ -55,8 +39,6 @@ impl ArchValue {
 }
 
 impl fmt::Display for ArchValue {
-    /// Lowercase OCI string (`"amd64"`, `"arm64"`) — same as the inner
-    /// [`Architecture`]'s `Display`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.0, f)
     }

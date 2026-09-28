@@ -15,16 +15,10 @@ pub mod template;
 pub mod validation;
 pub mod visibility;
 
-// Re-export binary public API so callers can use `metadata::Binaries` etc.
 pub use binary::{Binaries, BinaryError, BinaryName};
-// Re-export integrations public API so callers can use `metadata::Integrations` etc.
 pub use integrations::{IntegrationEntry, Integrations};
-// Re-export entrypoint public API so callers can use `metadata::Entrypoint` etc.
+
 pub use entrypoint::{Entrypoint, EntrypointError, EntrypointName, Entrypoints};
-// Re-export the two validation entry points so callers reach both through
-// `metadata::` — `ValidMetadata` for structural readability on every ingress
-// path, `validate_for_publish` for the strict gate `ocx package create` /
-// `ocx package push` run on top of it (D14).
 pub use validation::{ValidMetadata, validate_for_publish};
 
 /// OCX package metadata.
@@ -50,7 +44,6 @@ impl Metadata {
         }
     }
 
-    /// The bundle metadata format version.
     pub fn version(&self) -> bundle::Version {
         match self {
             Metadata::Bundle(bundle) => bundle.version,
@@ -64,32 +57,22 @@ impl Metadata {
         }
     }
 
-    /// Returns the `entrypoints` field for bundle metadata, or `None` for non-bundle variants.
-    ///
-    /// Mirrors the pattern of `bundle_dependencies()` — returns `None` for
-    /// future non-bundle metadata types so callers can opt into entrypoint
-    /// behavior without checking the variant themselves.
+    /// The declared entrypoints; `None` for a variant without them.
     pub fn entrypoints(&self) -> Option<&entrypoint::Entrypoints> {
         match self {
             Metadata::Bundle(bundle) => Some(&bundle.entrypoints),
         }
     }
 
-    /// Returns the declared `binaries` claims for bundle metadata.
-    ///
-    /// `None` means the field is absent (legacy/unknown publisher) — distinct
-    /// from `Some` of an empty set, which is an explicit "declares none" claim.
+    /// The declared `binaries` claims; `None` (field absent) differs from an
+    /// empty set, which claims none.
     pub fn binaries(&self) -> Option<&binary::Binaries> {
         match self {
             Metadata::Bundle(bundle) => bundle.binaries.as_ref(),
         }
     }
 
-    /// The declared `integrations` map.
-    ///
-    /// Never `Option` — an empty map IS the "declares none" answer, since
-    /// absent and empty are the same wire state. Mirrors
-    /// [`Metadata::dependencies`], not [`Metadata::binaries`].
+    /// The declared `integrations` map; absent and empty are the same wire state.
     pub fn integrations(&self) -> &integrations::Integrations {
         match self {
             Metadata::Bundle(bundle) => &bundle.integrations,

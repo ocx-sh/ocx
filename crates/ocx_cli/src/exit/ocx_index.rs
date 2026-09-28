@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the OCI index error family — the `ocx_index` rung of the
-//! ladder, here rather than in that crate because classification is `ocx_cli`'s alone.
+//! Exit-code classification for the `ocx_index` error family.
 
 use ocx_exit::ExitCode;
 
@@ -13,20 +12,8 @@ use super::{ClassifyExitCode, downcast_arm};
 impl ClassifyExitCode for OciIndexError {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
-            // Both mean "nothing here to install" to a wrapper: no tags at all,
-            // or no tag that could carry a version. An exit code is a coarse
-            // contract — the message is what disambiguates the two.
-            // Same verdict, same code: the package is not installable. Keeping
-            // 79 here means the `case $?` contract is untouched by ocx#251 —
-            // what changed is the message, which now names the index that was
-            // consulted instead of leaving a bare "not found".
             Self::RemoteManifestNotFound(_) | Self::NoIndexableTag(_) | Self::NotInIndex { .. } => ExitCode::NotFound,
             Self::NestedImageIndex { .. } => ExitCode::DataError,
-            // E1 (DEC-27) gave this tier its own root error, so seven variants
-            // now stand in for variants of the crate-wide one. Each copies the
-            // code from the arm it replaced, and `STANDS_IN_FOR` in `exit.rs`
-            // names that arm by its baseline `file:line` so the pin re-checks
-            // the claim rather than trusting this comment (DEC-55 / DEC-60).
             Self::Store(error) => return error.classify(),
             Self::OciClient(error) => return error.classify(),
             Self::Digest(error) => return error.classify(),
@@ -34,29 +21,13 @@ impl ClassifyExitCode for OciIndexError {
             Self::File(error) => return error.classify(),
             Self::PathInvalid(_) => ExitCode::Failure,
             Self::SerializationFailure(_) => ExitCode::DataError,
-            // Delegate to the full chain walker on the wrapped typed error,
-            // not just a single-hop `classify()` on the inner `Error`. Mirrors
-            // the `PackageErrorKind::Internal(inner)` pattern so nested causes
-            // (e.g. a `ClientError::Authentication` inside a `ocx_lib::Error`)
-            // are resolved via the generic `try_classify` ladder.
+            // The full chain walker, not a single-hop `classify()`, or nested causes go unclassified.
             Self::SourceWalkFailed(arc) | Self::SourceFetchFailed(arc) => {
                 return Some(super::classify_library_error(arc.as_error()));
             }
-            // Yield to the chain walker rather than answering here: the variant
-            // carries the singleflight error as `#[source]`, and that type
-            // classifies itself (a broadcast leader failure defers to the
-            // leader's own typed error, a timeout is `TempFail`). Answering
-            // `Failure` here would be a terminal `Some` that ends the walk, so
-            // every waiter would exit 1 while the leader exits 80/65/69 — the
-            // same operation reporting a different code depending on whether it
-            // happened to win the singleflight race. Mirrors
-            // `PackageManagerError::SetupFailed`, which wraps the same type.
+            // `None`, not `Some(Failure)`: a `Some` ends the walk before the leader's typed source, so waiters would exit 1.
             Self::SingleflightFailed(_) => return None,
-            // A deliberate local policy (offline / frozen) refused the
-            // resolution — categorically the same as every other policy block.
             Self::PolicyResolutionBlocked { .. } => ExitCode::PolicyBlocked,
-            // Malformed / untrusted static-file index input at a trust
-            // boundary — the OCI data-error class (65).
             Self::UnsupportedIndexFormat { .. }
             | Self::DispatchObjectDigestMismatch { .. }
             | Self::WalkedDigestMismatch { .. }
@@ -66,24 +37,8 @@ impl ClassifyExitCode for OciIndexError {
             | Self::MalformedCatalogKey { .. }
             | Self::InvalidImageIndex(_)
             | Self::MalformedIndexDocument { .. } => ExitCode::DataError,
-            // A transport-layer failure reaching the static-file index — the
-            // resource is unavailable, same class as a registry outage. An
-            // absent catalog document is the same class for the same reason:
-            // the source is reachable but is not serving what a published index
-            // must serve, and every cause of it is external and retryable.
-            //
-            // Deliberately status-blind: `IndexHttpFailed::status` exists for
-            // the retry classifier, not to split this arm. Fanning it out would
-            // be a CLI-surface break for a distinction nothing asked for.
             Self::IndexHttpFailed { .. } | Self::CatalogDocumentAbsent { .. } => ExitCode::Unavailable,
-            // A misconfigured index-role traffic target — a configuration fault.
             Self::PlainHttpIndexNotAllowed { .. } | Self::InvalidIndexUrl { .. } => ExitCode::ConfigError,
-            // A forbidden target is a configuration fault (78) — the fix is
-            // `trusted_hosts` config. An unresolvable host was never reached,
-            // so no `trusted_hosts` entry can fix it; that is the "registry
-            // unreachable" class (69) every other transport failure already
-            // reports. `SsrfError::classify` already carries the right verdict
-            // for both — delegate instead of flattening to one code.
             Self::Ssrf { source, .. } => return source.classify(),
         })
     }

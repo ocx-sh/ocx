@@ -1,23 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The per-shell env shims OCX writes into `$OCX_HOME` (contract 3).
+//! The per-shell env shims OCX writes into `$OCX_HOME`.
 //!
-//! Most shims are thin loaders that delegate to `ocx self activate` at shell
-//! startup (the POSIX/fish/elvish/PowerShell families `eval`/`source`/`slurp`
-//! its output). Nushell is the exception: it has no string `eval` and `source`
-//! needs a parse-time-constant path, so [`ENV_NU`] applies activation as
-//! structured DATA (`load-env` from `ocx --format json --global env`) — see its
-//! doc comment. The bodies are **byte-identical across users** — there is NO
-//! install-time substitution; `OCX_HOME` is resolved at runtime by the shim
-//! itself (`: "${OCX_HOME:=$HOME/.ocx}"` and the per-shell equivalents). The
-//! consts below are the single source of truth.
-//!
-//! [`write_shims`] writes all five `env.*` files atomically with a diff-gate
-//! (a file whose bytes already match is left untouched). [`refresh_shims`] is
-//! the same operation under an intent-revealing name for the `ocx self update`
-//! post-swap hook (Decision 4C) — the shims are ocx-owned, so a refresh never
-//! consults user edits.
+//! Bodies are byte-identical across users: each shim resolves `OCX_HOME` at
+//! runtime, never at install time.
 
 use std::path::{Path, PathBuf};
 
@@ -25,8 +12,6 @@ use crate::error::Error;
 use ocx_util::fs::write_bytes_atomic;
 
 /// `$OCX_HOME/env.sh` — POSIX (sh/bash/zsh) shim.
-///
-/// Byte-identical to the former `install.sh` `env.sh` heredoc body.
 pub const ENV_SH: &str = r#"#!/bin/sh
 # Managed by ocx installer - do not edit.
 
@@ -101,8 +86,6 @@ unset _ocx_bin _ocx_shell _ocx_interactive
 "#;
 
 /// `$OCX_HOME/env.fish` — fish shim.
-///
-/// Byte-identical to the former `install.sh` `env.fish` heredoc body.
 pub const ENV_FISH: &str = r#"# Managed by ocx installer - do not edit.
 # No double-source guard: the emitted activation is idempotent move-to-front, so
 # re-sourcing never duplicates a PATH entry. An exported guard would leak into
@@ -127,9 +110,6 @@ end
 "#;
 
 /// `$OCX_HOME/env.ps1` — PowerShell shim.
-///
-/// Byte-identical to the former `install.sh` `env.ps1` heredoc body, which in
-/// turn matched the `install.ps1` `Create-EnvFile` here-string line-for-line.
 pub const ENV_PS1: &str = r#"# Managed by ocx installer - do not edit.
 # No double-source guard: the emitted activation is idempotent move-to-front, so
 # re-sourcing never duplicates a PATH entry. An exported guard would leak into
@@ -187,70 +167,19 @@ if (Test-Path $_ocxBin -PathType Leaf) {
 Remove-Variable _ocxBase, _ocxExe, _ocxBin, _ocxInter, _ocxArgs, _ocxActivate -ErrorAction SilentlyContinue
 "#;
 
-/// The Nushell loop that applies one `ocx --format json --global env` document to
-/// `$env`, dispatching **four ways** on each entry's modifier `type`, exactly like
-/// the shell emitters (`Shell::Nushell::export_path` / `export_list` /
-/// `export_constant`):
-///
-/// - `type == "path"` — prepend the value's segment(s) to the named key,
-///   move-to-front (drop the existing occurrence + empties via `uniq`), and store
-///   the result as a separator-joined **string**. Strings (not lists) are
-///   required because Nushell silently drops a LIST-valued non-`PATH` env var when
-///   it spawns an external; `PATH` itself round-trips fine as a string.
-/// - `type == "list"` — the unique-append fold on the entry's **effective
-///   separator** (`separator`, defaulting to `" "`): wrap the ambient in the
-///   separator, delete every `sep + value + sep` to a fixpoint, strip the leading
-///   separator, append the value. The same function
-///   [`export_list`](ocx_shell::shell::Shell::export_list) computes, so an entry
-///   applied here and one applied through an emitted stream agree byte for byte.
-/// - `type == "constant"` — replace any existing value with `load-env`.
-/// - **anything else — apply nothing.** There is no `else`. A two-way branch sent
-///   a `list` entry down the constant arm and CLOBBERED the caller's value where
-///   every other arm appends; leaving the fall-through in place would do the same
-///   to whatever modifier kind is added next. Refusing an entry no arm
-///   understands is the only safe answer a shim can give.
-///
-/// Dispatching on `type` (not `key == "PATH"`) is essential: a package may declare
-/// any key (`LD_LIBRARY_PATH`, `PKG_CONFIG_PATH`, …) as `type: path`, and that must
-/// prepend, not overwrite. The caller must bind `$_ocx_json` to the parsed record
-/// first. Shared **verbatim** between [`ENV_NU`] and the
-/// `self activate --shell=nushell` line so the two cannot drift.
-///
-/// The existing-value read uses `($_ocx_e.key in ($env | columns))` + a dynamic
-/// `get` rather than the terser `get --optional`: `get --optional` was added to
-/// Nushell *after* 0.101.0, and Nushell parses an entire file before running it,
-/// so on an older-but-supported nu the unknown flag is a PARSE error that voids
-/// the whole vendor-autoload — dropping the PATH prepend with it. The
-/// flag-free form uses only pre-0.101 stable features. Do not "simplify" it back
-/// to `get --optional` (the `nu_apply_loop_reads_env_without_the_get_optional_flag`
-/// test guards this).
+/// The Nushell loop applying the `ocx --format json --global env` document bound to
+/// `$_ocx_json` to `$env`; shared verbatim with `self activate --shell=nushell`.
+// Dispatches on entry `type`, never `key == "PATH"`, since a package may declare any key as `path`.
+// `path` stores a joined string: Nushell drops a list-valued non-`PATH` var when spawning an external.
+// `list` must agree byte for byte with `Shell::export_list`.
+// No `else` arm: routing an unknown type to `constant` clobbers the caller's value.
+// No `get --optional`: it postdates Nushell 0.101.0 and its parse error voids the whole autoload.
 pub const NU_ENV_APPLY_LOOP: &str = "for _ocx_e in ($_ocx_json.entries? | default []) { if $_ocx_e.type == \"path\" { let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { \"\" }); load-env {($_ocx_e.key): (($_ocx_e.value | split row (char esep)) ++ ($_ocx_cur | split row (char esep)) | where {|p| $p != \"\" } | uniq | str join (char esep))} } else if $_ocx_e.type == \"list\" { let _ocx_s = ($_ocx_e.separator? | default \" \"); let _ocx_cur = (if ($_ocx_e.key in ($env | columns)) { $env | get $_ocx_e.key } else { \"\" }); let _ocx_p = ($_ocx_s + $_ocx_e.value + $_ocx_s); mut _ocx_l = (if $_ocx_cur == \"\" { $_ocx_s } else { $_ocx_s + $_ocx_cur + $_ocx_s }); while ($_ocx_l | str contains $_ocx_p) { $_ocx_l = ($_ocx_l | str replace --all $_ocx_p $_ocx_s) }; load-env {($_ocx_e.key): (($_ocx_l | str replace $_ocx_s \"\") + $_ocx_e.value)} } else if $_ocx_e.type == \"constant\" { load-env {($_ocx_e.key): $_ocx_e.value} } }";
 
-/// `$OCX_HOME/env.nu` — Nushell shim.
-///
-/// Unlike the other shims, Nushell activation cannot delegate to
-/// `ocx self activate` via an `eval`/`source`: Nushell has no string `eval`, and
-/// `source` requires a **parse-time-constant** path AND reads the file at PARSE
-/// time — so the older "write `self activate` output to a temp file, then
-/// `source` it" form failed two ways (a runtime `source (expr)` is rejected as
-/// `not_a_constant`, and even with a constant path the file does not exist when
-/// `source` parses). Nushell therefore applies activation as **data**: the ocx
-/// bin dir is prepended to `$env.PATH` directly (a fixed path under `$OCX_HOME`),
-/// and the global toolchain env is read from `ocx --format json --global env` and
-/// applied by [`NU_ENV_APPLY_LOOP`] (which dispatches on each entry's modifier
-/// type). No temp file, no `source`, no subprocess `nu -c` (which would mutate
-/// only a child's env). Idempotent: every path apply is a move-to-front
-/// (`uniq`), so a re-source never duplicates a segment; the `try/catch` keeps a
-/// malformed global lock from aborting the (already-applied) bin-on-PATH step.
-///
-/// The same limitation makes this the only shim that carries its own
-/// per-directory-change hook: the other four families receive theirs inside the
-/// activation stream they `eval`. It is **appended** with `++` onto
-/// `($env.config.hooks?.env_change?.PWD? | default [])`, never assigned over,
-/// and every intermediate level is defaulted — starship owns the same slot, and
-/// an absent `hooks` key in a `nu -n` session would otherwise error and void the
-/// whole autoload. The body must run **after** the user's `config.nu`, which the
-/// `$nu.vendor-autoload-dirs` slot [`nu_autoload_body`] targets provides.
+/// `$OCX_HOME/env.nu` — Nushell shim, applying activation as data because Nushell has
+/// no string `eval` and `source` needs a parse-time-constant path.
+// The `try` keeps a malformed global lock from voiding the bin-on-PATH step.
+// Must run after the user's `config.nu`, which the vendor-autoload slot guarantees.
 pub const ENV_NU: &str = r#"# Managed by ocx installer - do not edit.
 # No double-source guard: activation is idempotent move-to-front, so re-sourcing
 # never duplicates a PATH entry. An exported guard would leak into child shells
@@ -307,8 +236,6 @@ if (($_ocx_bin | path join 'ocx') | path exists) {
 "#;
 
 /// `$OCX_HOME/env.elv` — Elvish shim.
-///
-/// Byte-identical to the former `install.sh` `env.elv` heredoc body.
 pub const ENV_ELV: &str = r#"# Managed by ocx installer - do not edit.
 # No double-source guard: the emitted activation is idempotent move-to-front, so
 # re-sourcing never duplicates a PATH entry. An exported guard would leak into
@@ -347,9 +274,6 @@ if ?(test -x $_ocx_bin) {
 "#;
 
 /// Body of the fish `conf.d/ocx.fish` autoload file.
-///
-/// Ported verbatim from the former `install.sh` `create_fish_config` heredoc.
-/// Sources `$OCX_HOME/env.fish` after resolving `OCX_HOME` at runtime.
 const FISH_CONF: &str = r#"# OCX shell environment - managed by ocx installer.
 # Sources $OCX_HOME/env.fish which evaluates the global toolchain env.
 set -l _ocx_env (string join '' (set -q OCX_HOME; and echo $OCX_HOME; or echo $HOME/.ocx) '/env.fish')
@@ -358,14 +282,8 @@ if test -f "$_ocx_env"
 end
 "#;
 
-/// The shim whose presence under `$OCX_HOME` witnesses that `ocx self setup`
-/// has run.
-///
-/// [`write_shims`] iterates the whole set unconditionally on every platform, so
-/// any one member answers "was the shell integration ever installed"; this is
-/// the member the POSIX fence sources and the one `install.sh` has always
-/// written. Exported so a diagnostic can ask the question without owning a
-/// second spelling of the filename.
+/// The shim whose presence under `$OCX_HOME` witnesses that `ocx self setup` has run.
+// A valid witness only while `write_shims` writes every shim on every platform.
 pub const WITNESS_SHIM: &str = "env.sh";
 
 /// The five `(filename, body)` shims written into `$OCX_HOME`.
@@ -377,20 +295,8 @@ const SHIMS: [(&str, &str); 5] = [
     ("env.elv", ENV_ELV),
 ];
 
-/// The Nushell vendor-autoload body that activates ocx at startup.
-///
-/// The orchestrator writes this to
-/// `${XDG_DATA_HOME:-$HOME/.local/share}/nushell/vendor/autoload/ocx.nu`
-/// (contract 5, `DedicatedFile`). The body takes no substitution.
-///
-/// It is the **full activation** ([`ENV_NU`]) rather than a one-line loader that
-/// sources `$OCX_HOME/env.nu`: fish's `conf.d/ocx.fish` can `source "$_ocx_env"`
-/// because POSIX/fish `source` accepts a runtime path, but Nushell `source`
-/// requires a parse-time-constant path — it cannot source `$OCX_HOME/env.nu`
-/// where `OCX_HOME` is only known at runtime. Inlining the activation sidesteps
-/// that limitation. `ocx self setup` re-applies this body, so it stays in sync
-/// with the binary just like the `env.*` shims — including the run `ocx self
-/// update` spawns from the newly pulled binary.
+/// The Nushell vendor-autoload body: the full [`ENV_NU`] activation, since `source`
+/// cannot take the runtime `$OCX_HOME/env.nu` path.
 #[must_use]
 pub fn nu_autoload_body() -> &'static str {
     ENV_NU
@@ -399,24 +305,15 @@ pub fn nu_autoload_body() -> &'static str {
 /// The fish `conf.d/ocx.fish` body that sources `$OCX_HOME/env.fish` at startup.
 ///
 /// The orchestrator writes this to
-/// `${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/ocx.fish`
-/// (contract 5, `DedicatedFile`). The body takes no substitution.
+/// `${XDG_CONFIG_HOME:-$HOME/.config}/fish/conf.d/ocx.fish`.
 #[must_use]
 pub fn fish_conf_body() -> &'static str {
     FISH_CONF
 }
 
-/// Write all five `env.*` shims into `ocx_home`, atomically and diff-gated.
+/// Write all five `env.*` shims into `ocx_home`, atomically, skipping any already current.
 ///
-/// Creates `ocx_home` (`mkdir -p`) if absent, then writes each shim through the
-/// private-file atomic-write helper
-/// [`write_bytes_atomic`](ocx_util::fs::write_bytes_atomic) (temp-in-parent
-/// then Windows-retry-aware publish). A file whose
-/// on-disk bytes already equal the canonical body is skipped (diff-gate), so a
-/// re-run is a no-op. Returns the paths actually (re)written, in shim order.
-///
-/// When `dry_run` is set, nothing is written: the returned vec is the
-/// would-write set (every shim whose bytes are absent or differ).
+/// Returns the paths (re)written, or with `dry_run` the would-write set.
 ///
 /// # Errors
 ///
@@ -447,13 +344,7 @@ pub fn write_shims(ocx_home: &Path, dry_run: bool) -> Result<Vec<PathBuf>, Error
     Ok(written)
 }
 
-/// Refresh the ocx-owned `env.*` shims after a `self update` binary swap
-/// (Decision 4C).
-///
-/// Identical behavior to [`write_shims`] with `dry_run = false`; it exists as a
-/// named entry point so the call from the update hook reads intentfully and can
-/// never accidentally touch user RC. Always diff-gated — only shims whose bytes
-/// drifted are rewritten.
+/// Refresh the ocx-owned `env.*` shims: [`write_shims`] without `dry_run`.
 ///
 /// # Errors
 ///
@@ -462,9 +353,7 @@ pub fn refresh_shims(ocx_home: &Path) -> Result<Vec<PathBuf>, Error> {
     write_shims(ocx_home, false)
 }
 
-/// Whether `target` must be (re)written to hold `body` — true if it is absent
-/// or its bytes differ (diff-gate). A read error other than "not found"
-/// propagates so a permission problem is not silently treated as "rewrite".
+/// Whether `target` is absent or holds other bytes than `body`; any other read error propagates.
 fn needs_write(target: &Path, body: &str) -> Result<bool, Error> {
     match std::fs::read(target) {
         Ok(existing) => Ok(existing != body.as_bytes()),

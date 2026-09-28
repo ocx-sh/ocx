@@ -3,39 +3,11 @@
 
 //! Patch descriptor types and the companion-collection algorithm.
 //!
-//! A **patch descriptor** is the JSON payload carried in a single OCI layer of
-//! the `__ocx.patch` artifact. It maps glob patterns over canonical OCI
-//! identifier strings to lists of **companion packages** that carry the site
+//! A **patch descriptor** is the JSON payload in the single OCI layer of the
+//! `__ocx.patch` artifact ([`PATCH_MANIFEST_ARTIFACT_TYPE`] manifest,
+//! [`PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE`] layer), mapping glob patterns over
+//! canonical OCI identifiers to the **companion packages** that carry the site
 //! environment overlay.
-//!
-//! This module is the **domain layer** for descriptors. Config-tier types
-//! (`PatchConfig`, `ResolvedPatchConfig`) live in `crates/ocx_config/src/patch.rs`.
-//!
-//! ## Media-type constants
-//!
-//! Two constants define the OCI artifact type and layer media type for the
-//! `__ocx.patch` artifact — used both at publish time (`ocx patch publish`,
-//! Phase 6) and at pull/verify time (Phase 2 persistence):
-//!
-//! - [`PATCH_MANIFEST_ARTIFACT_TYPE`] — the `artifactType` field on the OCI
-//!   image manifest (`application/vnd.sh.ocx.patch.v1`).
-//! - [`PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE`] — the `mediaType` of the single layer
-//!   that carries the descriptor JSON blob
-//!   (`application/vnd.sh.ocx.patch.descriptor.v1+json`).
-//!
-//! ## Descriptor version
-//!
-//! The `version` field uses [`serde_repr`] so that an unknown version value
-//! causes deserialization to fail immediately with a meaningful error. This
-//! mirrors the pattern in `package/metadata/bundle.rs` (`Version` enum).
-//!
-//! ## Companion collection
-//!
-//! [`PatchDescriptor::collect_companions`] iterates rules in order, applies the
-//! flat glob matcher from [`crate::patch::matcher`] over the base identifier's
-//! `Display` string, unions matched companion identifiers, deduplicates by
-//! identifier (first-rule wins for `required`), and carries the effective
-//! `required` flag (per-rule `required` overrides the tier default passed in).
 
 use std::fmt;
 
@@ -46,55 +18,29 @@ use ocx_oci::PackageRef;
 
 // ── Structural limits ─────────────────────────────────────────────────────────
 
-/// Maximum number of rules allowed in a single [`PatchDescriptor`].
-///
-/// Enforced by [`PatchDescriptor::from_json_bytes`] before the descriptor is
-/// used. Guards against a compromised or misconfigured registry delivering a
-/// descriptor that would cause O(rules × packages × result) dedup scan cost
-/// inside [`PatchDescriptor::collect_companions`].
+/// Maximum number of rules allowed in a single [`PatchDescriptor`]; bounds the
+/// dedup scan cost of [`PatchDescriptor::collect_companions`].
 pub const MAX_RULES: usize = 256;
 
 /// Maximum number of companion packages per rule.
-///
-/// Companion packages beyond this limit in any single rule cause
-/// [`crate::patch::error::PatchError::DescriptorTooLarge`] to be returned from
-/// [`PatchDescriptor::from_json_bytes`].
 pub const MAX_PACKAGES_PER_RULE: usize = 64;
 
-/// Maximum length (in bytes) of a single rule's `match` glob pattern.
-///
-/// The flat matcher is O(pattern × text) worst case; a registry-controlled
-/// pattern of unbounded length would let a compromised descriptor amplify match
-/// cost across every base identifier. A real glob over a `registry/repo:tag`
-/// string is far shorter than this; the cap only rejects pathological input.
+/// Maximum length (in bytes) of a single rule's `match` glob pattern; bounds the
+/// O(pattern × text) matcher against a registry-controlled pattern.
 pub const MAX_MATCH_PATTERN_LEN: usize = 512;
 
 // ── Media-type constants ──────────────────────────────────────────────────────
 
 /// OCI manifest `artifactType` for the `__ocx.patch` artifact.
-///
-/// The value `application/vnd.sh.ocx.patch.v1` identifies a manifest as a
-/// patch descriptor. Validated by [`crate::patch::persistence`] when persisting
-/// a fetched manifest and used by `ocx patch publish` when constructing the
-/// manifest.
 pub const PATCH_MANIFEST_ARTIFACT_TYPE: &str = "application/vnd.sh.ocx.patch.v1";
 
-/// OCI layer `mediaType` for the descriptor JSON blob.
-///
-/// The value `application/vnd.sh.ocx.patch.descriptor.v1+json` is set on the
-/// single layer of the `__ocx.patch` manifest. The blob itself is the UTF-8
-/// JSON encoding of [`PatchDescriptor`].
+/// OCI layer `mediaType` for the descriptor JSON blob, the UTF-8 JSON encoding
+/// of [`PatchDescriptor`].
 pub const PATCH_DESCRIPTOR_LAYER_MEDIA_TYPE: &str = "application/vnd.sh.ocx.patch.descriptor.v1+json";
 
 // ── Version enum ─────────────────────────────────────────────────────────────
 
-/// Version discriminant for the patch descriptor format.
-///
-/// Serialized as a bare integer (`1`) via `serde_repr`. An unknown discriminant
-/// — e.g. `2` from a newer OCX version — causes deserialization to fail
-/// immediately, surfacing `PatchError::UnsupportedVersion` to the caller.
-///
-/// Mirrors `package::metadata::bundle::Version`.
+/// Version discriminant for the patch descriptor format, serialized as a bare integer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(u32)]
 pub enum PatchDescriptorVersion {
@@ -124,35 +70,35 @@ impl fmt::Display for PatchDescriptorVersion {
 
 // ── PatchRule ─────────────────────────────────────────────────────────────────
 
-/// A single rule within a [`PatchDescriptor`].
+/// A single rule within a patch descriptor.
 ///
 /// Each rule declares a flat glob `match` pattern (matched over the canonical
-/// OCI identifier `Display` string) and a list of companion package identifiers
-/// to apply when the pattern matches.
+/// identifier string) and a list of companion package identifiers to apply
+/// when the pattern matches.
 ///
-/// `required` overrides the tier default (`ResolvedPatchConfig::required`) for
+/// `required` overrides the tier default (`[patches] required`) for
 /// companions produced by this rule. When absent, the tier default applies.
+// The tier default is `ResolvedPatchConfig::required`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PatchRule {
     /// Flat glob pattern matched over the base identifier's canonical
-    /// `Display` form (`registry/repository:tag[@digest]`).
+    /// form (`registry/repository:tag[@digest]`).
     ///
-    /// `*` spans any run of characters including `/`, `:`, `@`. See
-    /// [`crate::patch::matcher`] for full semantics.
+    /// `*` spans any run of characters including `/`, `:`, `@`.
+    // Full semantics: `crate::patch::matcher`.
     #[serde(rename = "match")]
     pub match_pattern: String,
 
     /// Companion packages to apply when this rule matches.
     ///
-    /// Identifiers are stored as strings on the wire and parsed on
-    /// deserialization. The project-default registry (`ocx.sh`) is used as
-    /// the fallback when no registry is present in the string.
+    /// Identifier strings; one without a registry resolves against the default
+    /// registry, `ocx.sh`.
     pub packages: Vec<PackageRef>,
 
     /// Per-rule fail posture override.
     ///
-    /// When `Some`, overrides the tier-level `required` from
-    /// `ResolvedPatchConfig`. When `None`, the tier default is used.
+    /// When set, overrides the tier-level `[patches] required`. When absent,
+    /// the tier default is used.
     ///
     /// - `true` — fail closed: abort if any companion in this rule is unavailable.
     /// - `false` — fail open: skip with a warning.
@@ -172,13 +118,11 @@ pub struct PatchRule {
 /// ] }
 /// ```
 ///
-/// Constructed by deserializing the raw bytes from the `__ocx.patch` layer.
-/// The `version` field is a [`PatchDescriptorVersion`] enum — unknown values
-/// are rejected by `serde_repr` before this struct is constructed.
+/// Unknown `version` values are rejected.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PatchDescriptor {
-    /// Descriptor format version. Only [`PatchDescriptorVersion::V1`] is
-    /// currently defined; unknown versions are rejected at deserialization.
+    /// Descriptor format version. Only `1` is currently defined; unknown
+    /// versions are rejected at deserialization.
     pub version: PatchDescriptorVersion,
 
     /// Ordered list of match rules. Rules are evaluated in order; all matching
@@ -190,27 +134,14 @@ pub struct PatchDescriptor {
 // ── Companion entry ───────────────────────────────────────────────────────────
 
 /// A resolved companion entry produced by [`PatchDescriptor::collect_companions`].
-///
-/// Carries the companion package [`PackageRef`] and the effective `required`
-/// flag after applying per-rule overrides and the tier default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompanionEntry {
     /// The companion package to load.
     pub identifier: PackageRef,
-    /// Effective fail posture for this companion.
-    ///
-    /// `true` = fail closed (abort if unavailable); `false` = fail open (warn
-    /// and skip). Derived from the matching rule's `required` field, falling
-    /// back to the `tier_required_default` passed to
-    /// [`PatchDescriptor::collect_companions`].
+    /// Effective fail posture: `true` = fail closed, `false` = warn and skip.
     pub required: bool,
-    /// The `match` glob of the rule that admitted this companion (provenance).
-    ///
-    /// Under dedup (first-match-wins by identifier) this is the pattern of the
-    /// **first** rule that produced the companion. Carried so an overlay entry
-    /// can be traced back to the descriptor rule that selected its companion —
-    /// surfaced by `--show-patches`, `ocx patch test`, and `ocx patch why`.
-    /// Descriptive only; it does not affect matching or fail posture.
+    /// The `match` glob of the **first** rule that admitted this companion;
+    /// provenance only, it does not affect matching or fail posture.
     pub rule_match: String,
 }
 
@@ -219,53 +150,34 @@ pub struct CompanionEntry {
 impl PatchDescriptor {
     /// Deserialize a [`PatchDescriptor`] from raw JSON bytes.
     ///
-    /// Two-step parse: first extracts the raw `version` integer from the JSON
-    /// value to detect unknown versions before the full struct parse runs. This
-    /// allows returning [`crate::patch::error::PatchError::UnsupportedVersion`]
-    /// with the actual numeric value rather than a generic serde error.
-    ///
-    /// After a successful version check the full struct is deserialized, and
-    /// structural limits ([`MAX_RULES`], [`MAX_PACKAGES_PER_RULE`]) are
-    /// validated to bound dedup scan cost in [`Self::collect_companions`].
-    ///
     /// # Errors
     ///
-    /// - [`crate::patch::error::PatchError::InvalidDescriptorJson`] — the bytes
-    ///   are not valid JSON, the `version` field is missing or is not a number,
-    ///   or the struct schema is otherwise invalid.
-    /// - [`crate::patch::error::PatchError::UnsupportedVersion`] — the `version`
-    ///   field holds a numeric value that does not correspond to any known
-    ///   [`PatchDescriptorVersion`] discriminant (i.e. `!= 1`).
-    /// - [`crate::patch::error::PatchError::DescriptorTooLarge`] — the rules
-    ///   count exceeds [`MAX_RULES`] or a rule's packages count exceeds
-    ///   [`MAX_PACKAGES_PER_RULE`].
+    /// - [`crate::patch::error::PatchError::InvalidDescriptorJson`] — invalid
+    ///   JSON, a missing or non-numeric `version`, or an invalid shape.
+    /// - [`crate::patch::error::PatchError::UnsupportedVersion`] — an unknown
+    ///   numeric `version`.
+    /// - [`crate::patch::error::PatchError::DescriptorTooLarge`] — a structural
+    ///   limit ([`MAX_RULES`], [`MAX_PACKAGES_PER_RULE`], [`MAX_MATCH_PATTERN_LEN`]) exceeded.
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, crate::patch::error::PatchError> {
         use crate::patch::error::PatchError;
 
-        // Step 1: Parse to a raw JSON value to extract the version integer
-        // before committing to a full struct parse. This lets us return a
-        // typed UnsupportedVersion error rather than an opaque serde error.
+        // Version read from a raw value first, or an unknown version surfaces as an opaque serde error.
         let raw: serde_json::Value =
             serde_json::from_slice(bytes).map_err(|source| PatchError::InvalidDescriptorJson { source })?;
 
-        // Step 2: Extract and validate the version integer.
         match raw.get("version").and_then(serde_json::Value::as_u64) {
             Some(v) if v == PatchDescriptorVersion::V1 as u64 => {}
             Some(v) => {
                 return Err(PatchError::UnsupportedVersion { version: v as u32 });
             }
             None => {
-                // Missing or non-integer version field — let the struct
-                // deserializer produce a descriptive error.
                 return serde_json::from_value(raw).map_err(|source| PatchError::InvalidDescriptorJson { source });
             }
         }
 
-        // Step 3: Full struct deserialize now that the version is confirmed.
         let descriptor: Self =
             serde_json::from_slice(bytes).map_err(|source| PatchError::InvalidDescriptorJson { source })?;
 
-        // Step 4: Enforce structural limits to bound dedup scan cost.
         if descriptor.rules.len() > MAX_RULES {
             return Err(PatchError::DescriptorTooLarge {
                 detail: format!("rules count {} exceeds maximum {}", descriptor.rules.len(), MAX_RULES),
@@ -293,64 +205,31 @@ impl PatchDescriptor {
         Ok(descriptor)
     }
 
-    /// Serialize this descriptor to canonical JSON bytes.
-    ///
-    /// The inverse of [`Self::from_json_bytes`]: a descriptor round-trips
-    /// through `from_json_bytes(&descriptor.to_json_bytes()?)`. Used by
-    /// `ocx patch publish` to encode an in-memory descriptor for the
-    /// `__ocx.patch` layer blob.
+    /// Serialize this descriptor to canonical JSON bytes, the inverse of
+    /// [`Self::from_json_bytes`].
     ///
     /// # Errors
     ///
-    /// - [`crate::patch::error::PatchError::InvalidDescriptorJson`] — the
-    ///   descriptor cannot be serialized to JSON (in practice unreachable for
-    ///   a well-formed descriptor, but surfaced as a typed error to keep the
-    ///   library free of panics).
+    /// [`crate::patch::error::PatchError::InvalidDescriptorJson`] if serialization fails.
     pub fn to_json_bytes(&self) -> Result<Vec<u8>, crate::patch::error::PatchError> {
         serde_json::to_vec(self).map_err(|source| crate::patch::error::PatchError::InvalidDescriptorJson { source })
     }
 
-    /// Collect all companion entries that apply to `base_identifier`.
+    /// Collect all companion entries that apply to `base_identifier`: rules in
+    /// order, matched with [`crate::patch::matcher::glob_match`], unioned and
+    /// deduplicated by identifier (the **first** matching rule wins `required`;
+    /// `tier_required_default` applies where a rule has `required: None`).
     ///
-    /// Iterates rules in order, applies the flat glob matcher from
-    /// [`crate::patch::matcher::glob_match`] over the base identifier's canonical
-    /// `Display` string, unions all matched companion identifiers, and
-    /// deduplicates by identifier (the **first** rule that matched a given
-    /// identifier wins its `required` value).
-    ///
-    /// # Match form (C7 phase consistency)
-    ///
-    /// Each rule pattern is matched against BOTH the full canonical Display
-    /// (`registry/repository:tag[@digest]`) AND the digest-excluded tag-form
-    /// (`registry/repository:tag`). This keeps install-time discovery (which sees
-    /// a tag-form base id) and compose-time overlay (which sees a tag + install
-    /// digest) matching IDENTICALLY: a tag-anchored rule such as the ADR's `*:21`
-    /// matches whether or not an install digest is present, so a `required`
-    /// overlay that matched at install can never be silently dropped at exec.
-    /// Matching against an extra form only ever ADMITS more — and a companion
-    /// admitted but absent locally still fails closed downstream — so this cannot
-    /// open a fail-open path.
-    ///
-    /// The `tier_required_default` argument supplies the fallback fail posture
-    /// from `ResolvedPatchConfig::required` — it is applied when a rule has
-    /// `required: None`.
-    ///
-    /// The caller is responsible for not reading config inside `compose` or GC
-    /// leaf paths — this is a pure function over the already-loaded descriptor.
+    /// Each pattern is matched against both the canonical form and the
+    /// digest-excluded tag form.
     pub fn collect_companions(&self, base_identifier: &PackageRef, tier_required_default: bool) -> Vec<CompanionEntry> {
         use crate::patch::matcher::glob_match;
 
         let base_str = base_identifier.to_string();
-        // Digest-excluded tag-form so tag-anchored patterns (`*:21`) match
-        // regardless of an install digest — see the "Match form" doc above.
-        // `without_digest` keeps the tag and drops the `@sha256:...` suffix; when
-        // the base carries no digest the two strings are equal (one extra cheap
-        // glob, no behaviour change).
+        // Match the tag form too, or a `required` overlay matched at install (tag-form base)
+        // is silently dropped at exec (tag + digest).
         let base_tag_form = base_identifier.without_digest().to_string();
 
-        // Accumulate companions in rule order, deduplicating by identifier.
-        // A Vec + linear scan is fine here: descriptors have O(10) rules and
-        // O(10) packages per rule — far below any allocation threshold.
         let mut result: Vec<CompanionEntry> = Vec::new();
 
         for rule in &self.rules {
@@ -358,14 +237,9 @@ impl PatchDescriptor {
                 continue;
             }
 
-            // Effective `required` for this rule: per-rule override else tier default.
             let effective_required = rule.required.unwrap_or(tier_required_default);
 
             for package_id in &rule.packages {
-                // Dedup by identifier (structural equality via PartialEq; first-match
-                // wins for the `required` value). PackageRef derives PartialEq which
-                // compares all fields — semantically identical to Display equality but
-                // without heap allocation on every comparison.
                 let already_seen = result.iter().any(|e| &e.identifier == package_id);
                 if !already_seen {
                     result.push(CompanionEntry {
@@ -374,7 +248,6 @@ impl PatchDescriptor {
                         rule_match: rule.match_pattern.clone(),
                     });
                 }
-                // If already present, skip — first rule wins (no update).
             }
         }
 
@@ -566,7 +439,7 @@ mod tests {
         );
     }
 
-    /// C7 regression (Codex final-pass BLOCK): an END-ANCHORED tag rule (the
+    /// Match-form regression: an END-ANCHORED tag rule (the
     /// ADR's `*:21` shape — no trailing glob to absorb a digest) must match a
     /// base that carries an install DIGEST, which is the form the COMPOSE-time
     /// overlay sees (the admitted set carries `registry/repo:tag@digest`). Before

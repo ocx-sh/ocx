@@ -6,28 +6,11 @@ use std::path::PathBuf;
 use ocx_util::fs::{BoundedReadError, read_bounded};
 use ocx_util::prelude::VecExt as _;
 
-/// The largest a `--tags-file` may be.
-///
-/// An OCI tag is at most 128 characters, so this is room for roughly a thousand
-/// of them with a separator each — orders of magnitude past any real cascade
-/// sweep, and it exists only to bound the read of a path an operator names.
+/// The largest a `--tags-file` may be: about a thousand 128-character tags.
 const MAX_TAGS_FILE_BYTES: u64 = 128 * 1024;
 
-/// Which tags a command sweeps over.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add `--tags` and
-/// `--tags-file`. The two are a union, not alternatives: a caller can name a
-/// few tags inline and read the rest from the file `ocx package push
-/// --tags-file` wrote. Resolve with [`TagsOpt::resolve`] and never read either
-/// field directly.
-///
-/// `--tags-file` keeps the spelling `push` and `announce` already use, and
-/// reads it with the same parser, so one file format has one reader.
-///
-/// Arg ids: `tags`, `tags_file`. A command that also takes `--platform`
-/// declares the sweep exclusivity against those ids in its own command file:
-/// a sweep is over indices by definition, and narrowing into one platform
-/// contradicts it.
+/// Which tags a command sweeps over: `--tags` and `--tags-file`, a union.
+// Arg ids: `tags`, `tags_file`; a command also taking `--platform` declares its conflict against them.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct TagsOpt {
     /// Tags to sweep. Repeatable, and accepts a comma-separated list.
@@ -42,19 +25,13 @@ pub struct TagsOpt {
     tags_file: Option<PathBuf>,
 }
 
-/// Read a `--tags-file`, bounded at [`MAX_TAGS_FILE_BYTES`] and refusing
-/// anything that is not a regular file. Unparsed, and with the refusal still
-/// typed: one caller treats an absent file as an empty set and needs to see
-/// which refusal it got.
-///
-/// Blocking, so it goes to the pool rather than an async twin of the guard:
-/// one bounded reader, not two.
+/// Read a `--tags-file` bounded at [`MAX_TAGS_FILE_BYTES`], unparsed, with the
+/// refusal still typed for the caller that treats absence as an empty set.
 async fn read_tags_bytes(path: &std::path::Path) -> Result<Vec<u8>, BoundedReadError> {
     let target = path.to_path_buf();
     match tokio::task::spawn_blocking(move || read_bounded(&target, MAX_TAGS_FILE_BYTES)).await {
         Ok(result) => result,
-        // `ErrorKind::Other`, never `NotFound`, so a panicking pool task cannot
-        // be mistaken for an absent file by the fall-through below.
+        // `Other`, never `NotFound`, or a panicked task reads as an absent file.
         Err(join) => Err(BoundedReadError::Io {
             path: path.to_path_buf(),
             source: std::io::Error::other(format!("tags-file read task panicked: {join}")),
@@ -62,10 +39,8 @@ async fn read_tags_bytes(path: &std::path::Path) -> Result<Vec<u8>, BoundedReadE
     }
 }
 
-/// One door for every way this file can be unusable — missing, a directory, or
-/// past the cap — because the frozen exit-code table already sends
-/// `--tags-file` failures to 74 and an enormous file is not a different
-/// question for the caller.
+/// Every way this file can be unusable maps to one I/O error: `--tags-file`
+/// failures are exit 74.
 fn tags_file_error(path: &std::path::Path, error: BoundedReadError) -> anyhow::Error {
     let io = match error {
         BoundedReadError::Io { source, .. } => source,
@@ -75,13 +50,7 @@ fn tags_file_error(path: &std::path::Path, error: BoundedReadError) -> anyhow::E
         .context(format!("reading tags file {}", path.display()))
 }
 
-/// Read and parse a `--tags-file`, where the file must be there.
-///
-/// The one reader for this file format's *input* side, shared by [`TagsOpt`]
-/// (`sign`, `attest`) and by `package announce`, which takes its own
-/// `--tags-file` rather than flattening `TagsOpt`. Two copies of a bounded read
-/// on an operator-typed path is how one of them ends up without the bound —
-/// `read_bounded`'s own module doc records that history.
+/// Read and parse a `--tags-file` that must exist.
 ///
 /// # Errors
 /// When the path cannot be read: missing, not a regular file, or past the cap.
@@ -89,20 +58,14 @@ pub(crate) async fn read_tags_file(path: &std::path::Path) -> anyhow::Result<Vec
     let bytes = read_tags_bytes(path)
         .await
         .map_err(|error| tags_file_error(path, error))?;
-    // The one shared parser for this file format, already used by
-    // `package announce` and `package cascade repair`.
     Ok(crate::conventions::parse_tags_file(&bytes))
 }
 
-/// The same read, for the one caller whose file may legitimately not exist yet:
-/// `package push --tags-file` appends to a file it creates, so absence is an
-/// empty set rather than a failure.
+/// The same read for `package push --tags-file`, which creates the file, so
+/// absence is an empty set.
 ///
-/// **Absence only.** `TooLarge` and `NotRegularFile` refuse a file that IS
-/// there, and treating either as "no tags yet" would let `push` overwrite an
-/// operator's tag list with just this run's tags — the same shape as the
-/// trust-root ladder's rung-4 arm, and the reason `BoundedReadError` carries no
-/// wildcard-friendly variant.
+/// Absence only: treating `TooLarge` or `NotRegularFile` as empty would let
+/// `push` overwrite an operator's tag list with this run's tags.
 ///
 /// # Errors
 /// When the path exists and cannot be read: not a regular file, or past the cap.
@@ -115,12 +78,8 @@ pub(crate) async fn read_tags_file_if_present(path: &std::path::Path) -> anyhow:
 }
 
 impl TagsOpt {
-    /// Whether any sweep input was given at all.
-    ///
-    /// Answers without reading the file, because the exclusivity question ("is
-    /// this a sweep?") must not depend on whether the file happens to be empty
-    /// or readable: an unreadable `--tags-file` is still a sweep, and reporting
-    /// it as a `--platform` conflict instead would name the wrong flag.
+    /// Whether any sweep input was given, without reading the file: an
+    /// unreadable `--tags-file` is still a sweep, not a `--platform` conflict.
     pub fn is_sweep(&self) -> bool {
         !self.tags.is_empty() || self.tags_file.is_some()
     }
@@ -136,8 +95,6 @@ impl TagsOpt {
         if let Some(path) = &self.tags_file {
             resolved.extend(read_tags_file(path).await?);
         }
-        // Keep-first dedup preserving order, so a tag named by both inputs
-        // stays at the position `--tags` gave it.
         resolved.unique();
         Ok(resolved)
     }

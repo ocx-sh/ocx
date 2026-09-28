@@ -1,82 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Package URL rendering for the `uri` field of a record descriptor.
+//! Package URL rendering for the `uri` field of a record descriptor:
+//! `pkg:oci/<name>@sha256:<hex>?repository_url=<registry>/<repository>&tag=<tag>&arch=<arch>`.
 //!
-//! `pkg:oci/<name>@sha256:<hex>?repository_url=<registry>/<repository>&tag=<tag>&arch=<arch>`
-//! — the registered `oci` purl type, never an invented `pkg:ocx`, because OCX
-//! packages *are* OCI artifacts. The semantics match with zero impedance: the
-//! purl version is the sha256 digest, and `tag` is documented as "the artifact
-//! tag that may have been associated with the digest at the time", which is
-//! exactly OCX's digest-is-identity / tag-is-advisory model.
-//!
-//! Four properties this depends on, each verified rather than assumed:
-//!
-//! - The colon in the version is emitted **unencoded** (`sha256:3f7a…`), which
-//!   is what the specification requires: ECMA-427 §5.4 says the colon shall not
-//!   be percent-encoded, and the `oci` type's official test suite gives
-//!   `sha256:` bare in every canonical form. The crate's encode set excludes
-//!   `b':'`, and the round trip holds. Documented so nobody "fixes" it.
-//! - Qualifiers serialize in **alphabetical** order, not authored order, so
-//!   `arch` precedes `repository_url` precedes `tag`. Assert on parsed
-//!   qualifiers, never on a literal string.
-//! - The name is the **last repository segment** and is already correct by
-//!   construction: repository segments are lowercase-only at the parser, so
-//!   purl's lowercasing rules need no normalization layer here.
-//! - A `tag` qualifier appears only when a tag was genuinely resolved. A
-//!   project-tier record has none — the lock stores a bare repository plus a
-//!   per-platform digest and rejects a tag at validation — and synthesising one
-//!   would be the first lie in an audit record.
-//!
-//! What this buys is **identity, not scanning**: a stable standardised string
-//! that joins across tools. Vulnerability lookup is not among them — no
-//! mainstream scanner resolves a whole-artifact `pkg:oci` to CVEs.
+//! The version colon stays unencoded, as ECMA-427 §5.4 requires; qualifiers serialize alphabetically, so assert on
+//! parsed qualifiers (`adr_exec_resolution_record.md` § "Rationale from code: launch").
 
 use packageurl::PackageUrl;
 
 use ocx_oci::{PinnedPackageRef, Platform};
 
-/// The purl type OCX packages are published under. OCX packages *are* OCI
-/// artifacts, so the registered type applies and an invented `pkg:ocx` would
-/// join with nothing.
+/// The registered purl type; OCX packages are OCI artifacts, and an invented `pkg:ocx` would join with nothing.
 const PURL_TYPE: &str = "oci";
 
-/// Repository prefix of the placeholder identifier a package-root frame mints.
-///
-/// Minted by `PackageManager::install_info_from_package_root`, which has only a
-/// content digest to work with: package directories are content-shared and
-/// deliberately do not persist the root identifier, so there is no registry or
-/// repository to recover. The prefix is the marker that an identifier is a local
-/// placeholder rather than a published identity.
+/// Repository prefix of the digest-only placeholder `PackageManager::install_info_from_package_root` mints.
 const PLACEHOLDER_REPOSITORY_PREFIX: &str = "file-url-mode/";
 
-/// Whether `identifier` names a published package rather than a locally minted
-/// content-addressed placeholder.
-///
-/// A placeholder identifier's registry is whatever default registry happened to
-/// be configured and its repository is a digest — neither is a fact about where
-/// the package came from, so nothing derived from it (a purl, an index source)
-/// may be emitted as identity.
+/// Whether `identifier` names a published package rather than a local placeholder, whose registry and repository
+/// are not facts about the package and must never be emitted as identity.
 pub fn has_logical_identity(identifier: &PinnedPackageRef) -> bool {
     !identifier.repository().starts_with(PLACEHOLDER_REPOSITORY_PREFIX)
 }
 
-/// Render a pinned identifier as a package URL, or `None` when it has no
-/// logical identity to express.
+/// Render a pinned identifier as a package URL, or `None` when it has no logical identity; `platform` contributes
+/// the `arch` qualifier.
 ///
-/// `platform` contributes the `arch` qualifier; `None` omits it.
-///
-/// `None` — rather than an error — is the honest encoding for the launcher
-/// frame, whose identifier is a synthetic content-addressed placeholder: package
-/// directories are content-shared and carry no registry or repository, so no
-/// purl can be constructed and the descriptor omits `uri` entirely. A truthful
-/// partial record beats a fabricated complete one, and the digest alone still
-/// identifies the resource.
-///
-/// A construction rejection from a well-formed identifier is unreachable by the
-/// name-and-segment invariants above; should one occur it is logged at debug and
-/// treated as absent identity, because an environmental surprise here must never
-/// fail the invocation.
+/// A construction rejection is logged at debug and treated as absent identity, never failing the invocation.
 pub fn package_url(identifier: &PinnedPackageRef, platform: Option<&Platform>) -> Option<String> {
     if !has_logical_identity(identifier) {
         return None;
@@ -90,8 +40,6 @@ pub fn package_url(identifier: &PinnedPackageRef, platform: Option<&Platform>) -
     }
 }
 
-/// Build the purl, keeping the crate's rejections in one place so the caller
-/// above can degrade rather than propagate.
 fn render(identifier: &PinnedPackageRef, platform: Option<&Platform>) -> packageurl::Result<String> {
     let mut purl = PackageUrl::new(PURL_TYPE, identifier.name())?;
     purl.with_version(identifier.digest().to_string())?;
@@ -105,16 +53,8 @@ fn render(identifier: &PinnedPackageRef, platform: Option<&Platform>) -> package
     Ok(purl.to_string())
 }
 
-/// The registry plus the **full** repository path — the spelling the `oci` purl
-/// type defines.
-///
-/// `index.ocx.sh/ocx/cmake` yields `index.ocx.sh/ocx/cmake`, repeating the name
-/// segment. That repetition is the specification's, not an oversight: the `oci`
-/// type definition and all twelve of its official test cases put the whole
-/// repository here — `docker.io/library/debian` for name `debian`,
-/// `gcr.io/distroless/static` for name `static`. Identity is name +
-/// `repository_url` + digest, so this qualifier is still what keeps `a/cli` and
-/// `b/cli` apart.
+/// Registry plus the full repository path, repeating the name segment as the `oci` purl type's own test cases do
+/// (`docker.io/library/debian` for `debian`); it is what keeps `a/cli` and `b/cli` apart.
 fn repository_url(identifier: &PinnedPackageRef) -> String {
     format!("{}/{}", identifier.registry(), identifier.repository())
 }

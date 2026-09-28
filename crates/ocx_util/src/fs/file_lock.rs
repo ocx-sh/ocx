@@ -1,27 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Low-level cross-process advisory file lock.
-//!
-//! Consumers should reach for [`super::locked_file::LockedFile`],
-//! [`super::locked_file::LockedJsonFile<T>`], or
-//! [`super::locked_file::LockedTomlFile<T>`] for the canonical async,
-//! F2-safe API. `FileLock` itself is the underlying primitive — callers
-//! that must acquire from synchronous contexts (e.g. `auth::store` inside
-//! a `spawn_blocking` body) reach it via
-//! [`FileLock::lock_exclusive_blocking_with_timeout`].
+//! Low-level cross-process advisory file lock; consumers use [`super::locked_file::LockedFile`].
 
 #[derive(Debug)]
 pub struct FileLock {
     _lock_file: std::fs::File,
 }
 
-/// Collapse an `fs4` try-lock outcome into "did we get it?".
-///
-/// `fs4` reports contention as [`fs4::TryLockError::WouldBlock`] and a genuine
-/// failure as [`fs4::TryLockError::Error`]. Every caller below needs exactly
-/// that distinction — a contended lock is a retry, an I/O failure is not — so
-/// it is decided here once rather than at each call site.
+/// Collapse an `fs4` try-lock outcome: contention is `Ok(false)`, a real I/O failure is `Err`.
 fn acquired(outcome: Result<(), fs4::TryLockError>) -> std::io::Result<bool> {
     match outcome {
         Ok(()) => Ok(true),
@@ -31,21 +18,12 @@ fn acquired(outcome: Result<(), fs4::TryLockError>) -> std::io::Result<bool> {
 }
 
 impl FileLock {
-    /// The file handle that owns the lock.
-    ///
-    /// Windows `LockFileEx` locks a byte range on a specific handle. Other
-    /// handles in the same process that touch the locked range get
-    /// `ERROR_LOCK_VIOLATION` (os error 33). In-place reads or writes against
-    /// a directly-locked file MUST go through this handle —
-    /// [`super::locked_file::LockedFile`] does so by construction.
+    /// The handle that owns the lock; in-place I/O must use it, or Windows fails with `ERROR_LOCK_VIOLATION`.
     pub(crate) fn file_mut(&mut self) -> &mut std::fs::File {
         &mut self._lock_file
     }
 
-    /// Try to acquire an exclusive lock without blocking.
-    ///
-    /// Returns `Ok(Some(guard))` if the lock was acquired, `Ok(None)` if another
-    /// process already holds it (contention), or `Err` on a real I/O error.
+    /// Try to acquire an exclusive lock without blocking; `Ok(None)` means another holder has it.
     pub fn try_exclusive(file: std::fs::File) -> std::io::Result<Option<Self>> {
         match acquired(<std::fs::File as fs4::FileExt>::try_lock(&file)) {
             Ok(true) => Ok(Some(FileLock { _lock_file: file })),
@@ -92,12 +70,7 @@ impl FileLock {
         }
     }
 
-    /// Synchronous sibling of [`Self::lock_exclusive_with_timeout`] for callers
-    /// inside `tokio::task::spawn_blocking` that cannot `.await`.
-    ///
-    /// Polls for the lock in a 25 ms tick loop until either the lock is
-    /// acquired or `timeout` elapses. Returns `io::ErrorKind::TimedOut` on
-    /// expiry.
+    /// Synchronous sibling of [`Self::lock_exclusive_with_timeout`] for callers inside `spawn_blocking`.
     pub(crate) fn lock_exclusive_blocking_with_timeout(
         file: std::fs::File,
         timeout: std::time::Duration,
@@ -118,13 +91,7 @@ impl FileLock {
         }
     }
 
-    // ── Test-only acquisition primitives ────────────────────────────────────
-    //
-    // Production callers reach the lock through `LockedFile::open_*` or
-    // `try_exclusive`. The fully-blocking acquisition variants below have no
-    // production callers — they exist to exercise the wait/wake semantics in
-    // the inline regression test. Kept `#[cfg(test)]` so they cannot drift
-    // into production paths without an explicit module-internal need.
+    // Test-only: fully-blocking variants for the inline wait/wake tests.
 
     #[cfg(test)]
     fn try_shared(file: std::fs::File) -> std::io::Result<Option<Self>> {

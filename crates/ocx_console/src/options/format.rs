@@ -3,20 +3,8 @@
 
 use clap::ValueEnum;
 
+// `overrides_with`, never `conflicts_with`: a conflict makes plain unreachable when `--json` comes from an alias.
 /// How stdout reports are rendered.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add `--format` plus its
-/// `--json` shorthand. The two are two spellings of one value, so they use
-/// POSIX last-wins semantics in both directions (`overrides_with`, the idiom
-/// `ocx_cli`'s `Pull` / `BinScan` options use too): combining them is not an error,
-/// and either can override the other. That keeps plain reachable when
-/// `--json` arrives from outside the command line — a shell alias or wrapper
-/// script — which a `conflicts_with` pair would make unexpressible. Resolve
-/// with [`Format::mode`] (or [`Format::requested`]) — never read the flags
-/// individually.
-///
-/// Lives here rather than in `ocx_cli` so every OCX binary shares one
-/// `--format` / `--json` surface: `ocx-mirror` flattens it at its root too.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Format {
     /// Output format for stdout reports: `plain` (default) or `json`.
@@ -42,18 +30,13 @@ pub enum FormatMode {
 }
 
 impl Format {
-    /// Resolves the flags to a [`FormatMode`]. Neither flag yields `Plain`;
-    /// `--json` yields `Json`; `--format` yields whatever it names. POSIX
-    /// last-wins with both — `overrides_with` guarantees clap has already
-    /// dropped the losing occurrence, so at most one is set here.
+    /// Resolves the flags to a [`FormatMode`]: `Plain` when neither is given, the last one when both are.
     pub fn mode(&self) -> FormatMode {
         self.requested().unwrap_or_default()
     }
 
-    /// The format the command line asked for, or `None` when neither flag was
-    /// given — for a binary whose commands keep a default of their own (a
-    /// per-command `--format`, or JSON when running under CI), which an
-    /// explicit `--format plain` must override and an absent flag must not.
+    /// The format the command line asked for, or `None` without a flag, for a binary whose commands keep a
+    /// default of their own that an explicit `--format plain` must override.
     pub fn requested(&self) -> Option<FormatMode> {
         self.format.or(self.json.then_some(FormatMode::Json))
     }

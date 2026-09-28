@@ -3,19 +3,8 @@
 
 //! Deterministic wheel → `tar.zst` repack with `.data` relocation.
 //!
-//! Reads a wheel zip and writes a single deterministic `tar.zst` layer
-//! (sorted entries, epoch mtimes, uid/gid 0, normalized modes, pinned zstd
-//! level — the [`REPACK_VERSION`] convention). The written layer holds the
-//! **final relocated tree** for the wheel: `purelib`/`platlib` →
-//! `lib/site-packages/`, `.data/scripts` → `bin/`, `.data/data` → the content
-//! root (`share/…`). Because one wheel spans three destination prefixes — which
-//! a single layer prefix cannot express — the layer applies at the content root
-//! with an empty [`LayerLayoutSpec`](ocx_oci::LayerLayoutSpec); the tar
-//! already carries the final paths.
-//!
-//! Extracts the RAW `[console_scripts]` object references from entry-point
-//! metadata (the `module[:attr…]` grammar is parsed later, in `compose`, next
-//! to shim synthesis) and the `RECORD` for the collision pre-check.
+//! The layer holds the final relocated tree across three prefixes (`lib/site-packages/`, `bin/`, the content root),
+//! so it must apply at the content root with an empty [`LayerLayoutSpec`](ocx_oci::LayerLayoutSpec).
 
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
@@ -23,100 +12,65 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 /// The repack-determinism grammar version, stamped as a `repack-vN` annotation.
-///
-/// Single source of truth for the deterministic-repack convention (sorted
-/// entries, epoch mtimes, uid/gid 0, normalized modes, pinned zstd level).
 pub const REPACK_VERSION: &str = "repack-v1";
 
-/// Pinned zstd compression level for the deterministic `tar.zst` layer
-/// (Convention #2) — matches the codebase-wide default pinned elsewhere
-/// (`ocx_util::compression::CompressionLevel::Default`).
+// Pinned: another level changes every layer's bytes and digest.
 const ZSTD_LEVEL: i32 = 3;
 
-/// Unix mode for a regular file in the relocated tree.
 const MODE_FILE: u32 = 0o644;
-/// Unix mode for a `.data/scripts` launcher relocated into `bin/`.
 const MODE_EXECUTABLE: u32 = 0o755;
 
-/// Total decompressed-byte budget across every entry in a wheel zip — a
-/// zip-bomb guard (CWE-409). Wheels are essentially never anywhere near this
-/// large; 1 GiB only exists to abort a malicious/corrupt zip before it can
-/// exhaust memory.
+/// Zip-bomb budget for a wheel's total decompressed bytes.
 const MAX_TOTAL_DECOMPRESSED_BYTES: u64 = 1 << 30;
 
 /// A repacked wheel layer plus the metadata `compose` and `collide` need.
 #[derive(Debug, Clone)]
 pub struct RepackedWheel {
-    /// The source wheel filename (e.g.
-    /// `numpy-2.1.3-cp313-cp313-manylinux_2_28_x86_64.whl`).
-    ///
-    /// Carried through so `collide` can cite a human-readable wheel in
-    /// [`CollisionError`](crate::collide::CollisionError) (not an opaque
-    /// sha256) and `compose` can parse the ABI tag from it for the
-    /// interpreter-consistency check.
+    /// The source wheel filename; `compose` parses its ABI tag.
     pub filename: String,
     /// Path to the written `tar.zst` layer.
     pub layer_path: PathBuf,
     /// The OCI digest of the layer (`sha256:…`).
     pub layer_digest: String,
-    /// The `sha256` of the source wheel (for content-addressed naming).
+    /// The `sha256` of the source wheel.
     pub wheel_sha256: String,
-    /// The `[console_scripts]` entry points (raw object references), for
-    /// entrypoint synthesis in `compose`.
+    /// The `[console_scripts]` entry points.
     pub entry_points: Vec<ConsoleScript>,
-    /// Every installed path from the wheel `RECORD` (post-relocation), for the
-    /// cross-wheel collision pre-check.
+    /// Every installed path from the wheel `RECORD`, post-relocation and sorted.
     pub record_paths: Vec<String>,
 }
 
 /// A `[console_scripts]` entry point, as extracted from the wheel.
-///
-/// `repack` extracts the RAW object reference verbatim; the
-/// `module[:attr[.attr…]]` grammar is parsed by `compose` when it synthesizes
-/// the `importlib.import_module` + `getattr`-walk shim (co-locating the
-/// entry-point grammar one-way-door with shim synthesis, where a malformed
-/// reference surfaces as [`ComposeError::InvalidEntryPoint`](crate::compose::ComposeError)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsoleScript {
     /// The script name (the generated launcher's invocable name).
     pub name: String,
-    /// The raw object reference `module[:attr[.attr…]]` (e.g. `"black:patched_main"`
-    /// or module-only `"flask.cli"`), unparsed — `compose` parses it.
+    /// The raw, unparsed object reference `module[:attr[.attr…]]`.
     pub reference: String,
-    /// The extras that must be requested for this script to be synthesized
-    /// (empty = always synthesized — e.g. `blackd = blackd:main [d]` gates on `d`).
+    /// The extras that must be requested for this script to be synthesized; empty means always.
     pub extras: Vec<String>,
 }
 
 /// Repacks a wheel into a deterministic `tar.zst` layer under `output_dir`.
 ///
-/// The signature is `async` as the contract; the CPU-bound zip read + tar/zstd
-/// write may run on `spawn_blocking` in the implementation.
+/// Blocks despite being `async`: the zip read and tar/zstd write run inline.
 ///
 /// # Errors
 ///
-/// Returns [`RepackError::Io`] on a filesystem failure, [`RepackError::Zip`]
-/// when the wheel is not a readable zip, and [`RepackError::WheelTooLarge`]
-/// when the wheel's cumulative decompressed content exceeds the zip-bomb
-/// safety budget (CWE-409).
+/// [`RepackError::Io`] on a filesystem failure, [`RepackError::Zip`] for an unreadable zip,
+/// [`RepackError::UnsafeEntryPath`] for an entry escaping the wheel root, and [`RepackError::WheelTooLarge`] past the
+/// zip-bomb budget.
 pub async fn repack_wheel(wheel_path: &Path, output_dir: &Path) -> Result<RepackedWheel, RepackError> {
     repack_wheel_with_budget(wheel_path, output_dir, MAX_TOTAL_DECOMPRESSED_BYTES).await
 }
 
-/// [`repack_wheel`], parameterized over the decompressed-size budget so tests
-/// can exercise the zip-bomb guard with a small cap instead of a real
-/// gigabyte-scale payload.
+/// [`repack_wheel`] with the decompressed-size budget as a parameter, for tests.
 async fn repack_wheel_with_budget(
     wheel_path: &Path,
     output_dir: &Path,
     decompressed_budget: u64,
 ) -> Result<RepackedWheel, RepackError> {
-    // ponytail: this crate declares no tokio dependency (pure-translation
-    // library boundary, no registry/network I/O — see module docs), so the
-    // zip read + tar/zstd write run inline rather than via `spawn_blocking`.
-    // A caller invoking this from inside a tokio runtime should wrap the call
-    // in its own `spawn_blocking` if repacking large wheels on a shared
-    // executor becomes a bottleneck.
+    // ponytail: runs inline, no `spawn_blocking`; a caller wraps it in its own if large wheels stall the executor.
     let filename = wheel_path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -194,10 +148,7 @@ async fn repack_wheel_with_budget(
     })
 }
 
-/// Distribution metadata extracted from a wheel's `*.dist-info/METADATA`
-/// (PEP 566 core metadata), for catalog-description autogeneration when a
-/// mirror has no hand-authored `CATALOG.md` for an env source (`pylock`/
-/// `pypi` — see `ocx-mirror`'s `pipeline describe`).
+/// Distribution metadata from a wheel's `*.dist-info/METADATA` (PEP 566 core metadata).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WheelDescription {
     /// The `Summary` header (one-line project description), when present.
@@ -208,24 +159,15 @@ pub struct WheelDescription {
     pub license: Option<String>,
 }
 
-/// Decompressed-byte budget for a single `*.dist-info/METADATA` entry (CWE-409
-/// zip-bomb guard, mirroring [`MAX_TOTAL_DECOMPRESSED_BYTES`] but scoped to
-/// one small text file rather than the whole wheel).
+/// Zip-bomb budget for one `*.dist-info/METADATA` entry.
 const MAX_METADATA_BYTES: u64 = 1 << 20;
 
-/// Reads a wheel zip and extracts its `*.dist-info/METADATA` file's
-/// `Summary`/`Keywords`/`License` header fields.
-///
-/// Performs its own minimal zip walk — reusing the same dist-info entry
-/// detection as [`repack_wheel`] — rather than a full repack, since catalog
-/// synthesis only needs three header lines, not the relocated tree,
-/// entry-points, or `RECORD`. Returns a default (all-`None`) description when
-/// the wheel carries no `METADATA` file.
+/// Reads a wheel's `METADATA` header fields; all `None` when the wheel has no `METADATA`.
 ///
 /// # Errors
 ///
-/// Returns [`RepackError::Io`] on a filesystem failure and [`RepackError::Zip`]
-/// when the wheel is not a readable zip.
+/// [`RepackError::Io`] on a filesystem failure, [`RepackError::Zip`] for an unreadable zip, and
+/// [`RepackError::WheelTooLarge`] for a `METADATA` over its zip-bomb budget.
 pub fn read_wheel_description(wheel_path: &Path) -> Result<WheelDescription, RepackError> {
     let wheel_bytes = std::fs::read(wheel_path).map_err(RepackError::Io)?;
     let mut zip = zip::ZipArchive::new(Cursor::new(wheel_bytes.as_slice())).map_err(RepackError::Zip)?;
@@ -250,16 +192,10 @@ pub fn read_wheel_description(wheel_path: &Path) -> Result<WheelDescription, Rep
     Ok(WheelDescription::default())
 }
 
-/// Parses the PEP 566 core-metadata header fields relevant to catalog
-/// synthesis: `Summary`, `Keywords`, `License`. Only single-line header
-/// values are read; the long-form `Description` body (after the blank-line
-/// header/body separator) is intentionally not parsed here. A value of
-/// `UNKNOWN` (setuptools' historical placeholder for an unset field) is
-/// treated the same as an absent header.
+/// Parses the `Summary`, `Keywords` and `License` headers; `UNKNOWN` (setuptools' placeholder) counts as absent.
 fn parse_wheel_metadata(text: &str) -> WheelDescription {
     let mut description = WheelDescription::default();
     for line in text.lines() {
-        // The blank line separates headers from the free-text description body.
         if line.is_empty() {
             break;
         }
@@ -280,10 +216,9 @@ fn parse_wheel_metadata(text: &str) -> WheelDescription {
     description
 }
 
-/// Reads a zip entry, capping actual decompressed bytes at `remaining_budget`
-/// — reading one byte over aborts as [`RepackError::WheelTooLarge`] rather
-/// than trusting the entry's declared (attacker-controlled) size, before an
-/// unbounded read can exhaust memory (CWE-409 zip-bomb guard).
+/// Reads a zip entry, capping actual decompressed bytes at `remaining_budget`.
+///
+/// Caps the bytes read, never the declared size, which is attacker-controlled.
 fn read_entry_capped<R: Read>(entry: &mut R, remaining_budget: u64, total_budget: u64) -> Result<Vec<u8>, RepackError> {
     let mut data = Vec::new();
     entry
@@ -296,25 +231,19 @@ fn read_entry_capped<R: Read>(entry: &mut R, remaining_budget: u64, total_budget
     Ok(data)
 }
 
-/// One file destined for the relocated tree: its final path, whether it must
-/// land executable (`.data/scripts` launchers), and its content.
 struct TreeEntry {
     path: String,
     executable: bool,
     data: Vec<u8>,
 }
 
-/// Splits a sanitized zip-relative path into its forward-slash components.
 fn path_components(path: &Path) -> Vec<String> {
     path.components()
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .collect()
 }
 
-/// Relocates a wheel-relative path into the final on-disk tree (Convention #3):
-/// `<dist>.data/scripts/*` → `bin/`, `<dist>.data/data/*` → the content root,
-/// everything else (purelib/platlib, `.dist-info`) → `lib/site-packages/`.
-/// Returns the relocated path and whether it must be marked executable.
+/// Relocates a wheel-relative path into the final tree; returns the path and whether it is executable.
 fn relocate(components: &[String]) -> (String, bool) {
     let Some(first) = components.first() else {
         return (String::new(), false);
@@ -324,18 +253,14 @@ fn relocate(components: &[String]) -> (String, bool) {
         return match components.get(1).map(String::as_str) {
             Some("scripts") => (format!("bin/{rest}"), true),
             Some("data") => (rest, false),
-            // ponytail: `.data/{purelib,platlib,headers}` are unused by the
-            // fixture corpus and rare in the wild; fall back to the same
-            // site-packages destination as top-level purelib/platlib content.
-            // Revisit if a real wheel needs distinct `headers` placement.
+            // ponytail: `.data/headers` also lands in site-packages; split it out when a real wheel needs it.
             _ => (format!("lib/site-packages/{rest}"), false),
         };
     }
     (format!("lib/site-packages/{}", components.join("/")), false)
 }
 
-/// Splits a RECORD path field into safe relative components, rejecting
-/// absolute paths and `..` traversal.
+/// Splits a RECORD path into relative components, rejecting absolute paths and `..` traversal.
 fn record_components(raw_path: &str) -> Result<Vec<String>, RepackError> {
     if raw_path.starts_with('/') {
         return Err(RepackError::UnsafeEntryPath(raw_path.to_string()));
@@ -351,17 +276,12 @@ fn record_components(raw_path: &str) -> Result<Vec<String>, RepackError> {
     Ok(components)
 }
 
-/// Parses PEP 376 `RECORD` (`path,hash,size` lines; hash/size may be empty)
-/// and relocates each listed path into the final tree, matching what
-/// [`write_deterministic_tar_zst`] wrote.
+/// Relocates each PEP 376 `RECORD` path the same way the layer entries were.
 fn relocate_record_paths(record_text: &str) -> Result<Vec<String>, RepackError> {
     record_text
         .lines()
         .filter_map(|line| {
-            // ponytail: naive first-field split — PEP 376 RECORD is
-            // technically CSV-quoted for paths containing commas; no fixture
-            // in the corpus exercises that, so a full CSV parser isn't
-            // justified yet.
+            // ponytail: first-field split misreads CSV-quoted paths with commas; use a CSV parser when one appears.
             let field = line.split(',').next()?.trim();
             (!field.is_empty()).then(|| field.to_string())
         })
@@ -370,9 +290,7 @@ fn relocate_record_paths(record_text: &str) -> Result<Vec<String>, RepackError> 
         .collect()
 }
 
-/// Writes `tree` as a deterministic `tar.zst`: entries sorted by path (the
-/// caller sorts `tree` before calling), epoch (0) mtimes, uid/gid 0, and
-/// normalized modes — Convention #2.
+/// Writes `tree` as a deterministic `tar.zst`; the caller must sort `tree` by path first.
 fn write_deterministic_tar_zst(tree: &[TreeEntry]) -> Result<Vec<u8>, RepackError> {
     let encoder = zstd::stream::write::Encoder::new(Vec::new(), ZSTD_LEVEL).map_err(RepackError::Io)?;
     let mut builder = tar::Builder::new(encoder);
@@ -392,9 +310,7 @@ fn write_deterministic_tar_zst(tree: &[TreeEntry]) -> Result<Vec<u8>, RepackErro
     encoder.finish().map_err(RepackError::Io)
 }
 
-/// Parses `[console_scripts]` entries from `entry_points.txt`. The raw
-/// `module[:attr…]` object reference and optional `[extra1,extra2]` gate are
-/// kept verbatim — `compose` owns the grammar parse (module doc, above).
+/// Parses `[console_scripts]` entries from `entry_points.txt`, keeping each object reference verbatim.
 fn parse_console_scripts(text: &str) -> Vec<ConsoleScript> {
     let mut scripts = Vec::new();
     let mut in_console_scripts = false;
@@ -436,8 +352,6 @@ fn parse_console_scripts(text: &str) -> Vec<ConsoleScript> {
     scripts
 }
 
-/// Hex-encodes a digest. No `hex` crate dependency is declared for this
-/// crate; this one-liner covers the only two call sites (wheel + layer digests).
 fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
     bytes.as_ref().iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -452,12 +366,10 @@ pub enum RepackError {
     /// The wheel could not be read as a zip archive.
     #[error("failed to read wheel zip")]
     Zip(#[source] zip::result::ZipError),
-    /// A wheel entry (or `RECORD` path) escapes the wheel root via an
-    /// absolute path or `..` traversal (zip-slip).
+    /// A wheel entry or `RECORD` path escapes the wheel root (zip-slip).
     #[error("unsafe path in wheel entry: {0}")]
     UnsafeEntryPath(String),
-    /// The wheel's cumulative decompressed content exceeds the `limit`-byte
-    /// safety budget (CWE-409 zip-bomb guard).
+    /// The decompressed content exceeds the `limit`-byte zip-bomb budget.
     #[error("wheel decompressed size exceeds the {limit}-byte safety budget")]
     WheelTooLarge {
         /// The decompressed-byte budget that was exceeded.

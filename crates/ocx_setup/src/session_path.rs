@@ -3,45 +3,8 @@
 
 //! Session-level PATH registration for `ocx self setup`, per platform.
 //!
-//! `ocx self setup` puts two directories on the PATH of every process started
-//! afterwards: `$OCX_HOME/toolchain/active/bin` and the ocx install `bin` directory,
-//! in that order. Only the global tier is registered — a project's
-//! `.ocx/toolchain/active/bin` never reaches a session PATH by ocx's own hand.
-//!
-//! Three properties shape every writer here, and each is a contract rather
-//! than an implementation detail:
-//!
-//! 1. **A write failure is an outcome, never an error.** A read-only home, a
-//!    foreign-owned plist, a registry key another process holds — each yields
-//!    [`SessionPathOutcome::Failed`], a warning advising a re-run of
-//!    `ocx self setup`, and exit 0. Registering a session PATH is a
-//!    convenience; failing the whole install over it is not.
-//! 2. **What cannot be encoded is refused before anything is written.** Each
-//!    of the three formats has characters it cannot represent and does not
-//!    escape, and `$OCX_HOME` is user-chosen. A refusal is a
-//!    [`SessionPathError`] naming the directory and the format, and exits 78.
-//!    That is deliberately the *opposite* rule from (1): a failed write leaves
-//!    the machine as it was, whereas a silently mangled value leaves it with a
-//!    wrong PATH nobody can diagnose.
-//! 3. **Removal is subtractive on every platform.** [`deregister_session_path`]
-//!    removes exactly the segments its sibling added and is a no-op when
-//!    neither is present. It never clears, resets or unsets a whole variable —
-//!    a foreign segment that was on PATH before `ocx self setup` ran is still
-//!    there afterwards.
-//!
-//! # Host split
-//!
-//! The three platform modules are compiled on **every** host. Only the
-//! functions that touch the registry, the filesystem or `launchctl` carry a
-//! `cfg`; every refusal predicate and every renderer is pure and host
-//! independent, so the rule each one encodes has a reachable red state on any
-//! CI leg rather than only on its own platform.
-//!
-//! The two exceptions are named at their definitions: the Windows merge and
-//! subtraction delegate to [`ocx_util::path`], whose separator and
-//! case-folding are keyed on `cfg!(windows)` at compile time, so those two are
-//! `cfg(windows)` and are exercised by the Windows test leg
-//! (`.github/workflows/verify-deep.yml`, `.github/workflows/verify-basic.yml`).
+//! Puts `$OCX_HOME/toolchain/active/bin`, then the ocx install `bin`, on every later process's PATH.
+//! Global tier only: a project's `.ocx/toolchain/active/bin` never reaches it.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -54,65 +17,31 @@ pub mod windows;
 
 /// What one session-PATH store did during a register or deregister run.
 ///
-/// One value per **store** — the location a platform owns
-/// (`HKCU\Environment\Path`, `~/.config/environment.d/ocx.conf`,
-/// `~/Library/LaunchAgents/sh.ocx.path.plist`) — not one per directory. The
-/// directories are written together or not at all, so a per-directory outcome
-/// could never disagree with its sibling, while a per-store one is what the
-/// run summary and the manual-removal recipe are both keyed by. Same shape as
-/// the shipped [`crate::ProfileOutcome`], which is also per file.
-///
-/// # `--dry-run`
-///
-/// A dry run reports **the outcome the write would have produced**:
-/// [`Self::Written`] when the stored value would change, [`Self::Unchanged`]
-/// when it would not, [`Self::Removed`] when a deregistration would take
-/// something away, [`Self::SkippedOptOut`] when C-043 suppressed the arm, and
-/// [`Self::SkippedUnsupported`] on a host with no facility.
-///
-/// It **never** reports [`Self::Failed`], because nothing was attempted — a
-/// dry run that predicted a failure would be predicting an I/O error it never
-/// issued. There is deliberately no `Would*` variant either: the enum answers
-/// "what is the state of this store", and `--dry-run`'s own distinguishing
-/// evidence is that not one byte moved, which the caller reports and the tests
-/// assert directly rather than through a second spelling of every value.
+/// A `--dry-run` reports the outcome the write would have produced, never [`Self::Failed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionPathOutcome {
-    /// The store was written: it gained the directories, or its existing value
-    /// was rewritten so they lead it.
+    /// The store was written so the directories lead it.
     Written,
-    /// The store already carried the directories in the required order;
-    /// nothing was written. Re-running `ocx self setup` lands here.
+    /// The store already carried the directories in order; nothing was written.
     Unchanged,
-    /// The store carried the directories and they were subtracted from it.
-    /// A store that never carried them reports [`Self::Unchanged`] instead —
-    /// deregistration is a no-op when neither segment is present.
+    /// The directories were subtracted; a store without them reports [`Self::Unchanged`].
     Removed,
-    /// `--no-modify-path`, or a truthy `OCX_NO_MODIFY_PATH`, suppressed the
-    /// whole session-PATH arm. Reported per store so the run summary can name
-    /// what was *not* touched; the writers are never called.
+    /// `--no-modify-path` or a truthy `OCX_NO_MODIFY_PATH` suppressed the arm; nothing was called.
     SkippedOptOut,
-    /// This host has no session-PATH facility ocx writes. Reported for a
-    /// target that is neither Windows, Linux nor macOS.
+    /// This host is neither Windows, Linux nor macOS.
     SkippedUnsupported,
-    /// The store could not be written. Warn, advise re-running
-    /// `ocx self setup`, exit 0 — never an error.
+    /// The store could not be written: a warning and exit 0, never a failed install.
     Failed,
 }
 
 /// The three session-PATH wire formats, named in an encoding refusal.
-///
-/// Carried by [`SessionPathError`] rather than inferred from the store path,
-/// because the diagnostic's whole job is to tell a user *which grammar* their
-/// `$OCX_HOME` cannot be spelled in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionPathFormat {
     /// `HKCU\Environment\Path`, written as `REG_EXPAND_SZ`: a `;`-delimited
     /// list in which `%…%` pairs expand at read time and have no escape.
     WindowsRegistry,
-    /// `~/.config/environment.d/ocx.conf`: line-structured `KEY=VALUE`, with
-    /// `${FOO}` / `${FOO:-x}` expansion, backslash escapes, and leading-
-    /// whitespace stripping all applied at session-manager read time.
+    /// `~/.config/environment.d/ocx.conf`: line-structured `KEY=VALUE`, with `${…}`
+    /// expansion, backslash escapes and leading-whitespace stripping at read time.
     EnvironmentD,
     /// `~/Library/LaunchAgents/sh.ocx.path.plist`: XML 1.0 carrying a
     /// single-quoted `/bin/sh -c` merge script.
@@ -129,26 +58,9 @@ impl fmt::Display for SessionPathFormat {
     }
 }
 
-/// A directory that cannot be encoded for a session-PATH format.
-///
-/// **This type is only ever the C-037 pre-write refusal.** No I/O error may
-/// travel this arm: from the first byte written onward every `io::Error` is
-/// mapped to [`SessionPathOutcome::Failed`] at the platform-writer boundary and
-/// carried in the `Ok`. There is deliberately no `From<io::Error>` impl, so a
-/// stray `?` on a write cannot reach here even by accident — the never-block
-/// rule is enforced by the type, not by review.
-///
-/// Raised **before** anything is written, so a refused run leaves the machine
-/// byte-identical. Classified as [`ExitCode::ConfigError`](ocx_exit::ExitCode::ConfigError)
-/// (78): `$OCX_HOME` is a configured location, and the remedy is to choose a
-/// different one. It reaches `argv` through
-/// [`crate::error::Error::SessionPath`], whose `classify` arm delegates
-/// straight back here.
-///
-/// Every message interpolates the offending path with `{path:?}`, never
-/// `Path::display`. A refusal case *is* a path that may carry a newline, so
-/// rendering it raw would forge log lines (CWE-117) at exactly the moment the
-/// value is known hostile.
+/// A directory that cannot be encoded for a session-PATH format, refused before any write (exit 78).
+// No `From<io::Error>`: a stray `?` on a write would turn a never-block failure into a refusal.
+// Messages use `{path:?}`, never `display`, since a refused path may carry a newline (CWE-117).
 #[derive(thiserror::Error, Debug)]
 pub enum SessionPathError {
     /// The directory carries a character the format cannot represent and does
@@ -159,22 +71,13 @@ pub enum SessionPathError {
         path: PathBuf,
         /// The format that cannot represent it.
         format: SessionPathFormat,
-        /// The first offending character, in the order the refusal set is
-        /// checked. One character is named rather than all of them because the
-        /// remedy — move `$OCX_HOME` — is the same for every one of them.
+        /// The first offending character, in refusal-set order.
         character: char,
-        /// Why that character is unrepresentable in this format, as a phrase
-        /// completing the message (e.g. `"and REG_EXPAND_SZ has no escape for
-        /// it"`).
+        /// Why it is unrepresentable, as a phrase completing the message.
         reason: &'static str,
     },
 
     /// The directory is not valid UTF-8.
-    ///
-    /// All three formats are text. `to_string_lossy` would substitute U+FFFD
-    /// and register a directory that does not exist, which fails later as a
-    /// bare "command not found" naming nothing — strictly worse than a refusal
-    /// that names the path.
     #[error("{path:?} is not valid UTF-8 and cannot be registered in {format}")]
     NotUtf8 {
         /// The directory that was to be registered.
@@ -184,18 +87,6 @@ pub enum SessionPathError {
     },
 
     /// The directory is relative.
-    ///
-    /// A relative segment on a session PATH resolves against **each process's
-    /// own working directory** (CWE-426), so `ocx self setup` with a relative
-    /// `$OCX_HOME` would put a per-directory, attacker-plantable lookup on the
-    /// PATH of every process the user starts from then on. Nothing upstream
-    /// refuses it — `config::home::default_ocx_root` takes `$OCX_HOME`
-    /// verbatim — and the three formats all store the value as written.
-    ///
-    /// Refused here rather than made absolute against the working directory:
-    /// the directory that happened to be current during `ocx self setup` is
-    /// not a location the user asked for, and baking it in silently would be
-    /// the same defect with a longer fuse.
     #[error("{path:?} is relative and cannot be registered in {format}: a session PATH entry must be absolute")]
     NotAbsolute {
         /// The directory that was to be registered.
@@ -205,30 +96,15 @@ pub enum SessionPathError {
     },
 }
 
-/// The session-PATH stores this host owns, in write order.
+/// The session-PATH stores this host owns, in write order; empty where there is no facility.
 ///
-/// Empty on a host with no session-PATH facility. The caller needs this to
-/// report [`SessionPathOutcome::SkippedOptOut`] per store when
-/// `--no-modify-path` suppresses the arm — the writers are not called in that
-/// case, so they cannot name their own locations — and it is the same list the
-/// manual-removal recipe in the user guide enumerates.
-///
-/// `ocx_home` is the store root; it reaches [`HomeEnv`] as the home-directory
-/// fallback for a process whose `$HOME` is unset.
-///
-/// The Windows entry is a registry location rather than a filesystem path.
-/// `PathBuf` carries it because the pair's key is a *location* — the same role
-/// [`crate::SetupOutcome::profiles`] gives it — and no other type in
-/// this signature would be shared by the three platforms.
+/// `ocx_home` is the home fallback when `$HOME` is unset; on Windows the entry is the registry location.
 pub fn session_path_stores(ocx_home: &Path) -> Vec<PathBuf> {
     let home = super::home_env_from_environment(ocx_home);
     stores_for(&home)
 }
 
-/// [`session_path_stores`] over an injectable [`HomeEnv`], so the layout is
-/// unit-testable without mutating the process environment out from under every
-/// concurrent test — the seam [`crate::profiles::detect_targets`]
-/// already uses for the same reason.
+/// [`session_path_stores`] over an injectable [`HomeEnv`].
 pub fn stores_for(home: &HomeEnv) -> Vec<PathBuf> {
     #[cfg(windows)]
     {
@@ -250,25 +126,15 @@ pub fn stores_for(home: &HomeEnv) -> Vec<PathBuf> {
     }
 }
 
-/// Register `directories` at session level, front-first.
+/// Register `directories` at session level, front-first: `directories[0]` ends up nearest the front
+/// of the resulting PATH. `ocx_home` is the home-directory fallback when `$HOME` is unset.
 ///
-/// `directories[0]` ends up nearest the front of the resulting PATH. Today's
-/// caller passes exactly two — the ocx install `bin` directory, then
-/// `$OCX_HOME/toolchain/active/bin` — but nothing here depends on the count.
-///
-/// `ocx_home` is the store root the two directories belong to; it reaches
-/// [`HomeEnv`] as the home-directory fallback when `$HOME` is unset.
-///
-/// `dry_run` computes the same outcome and writes no byte. It still performs
-/// the encoding refusal: a `--dry-run` that reported `Written` for a value the
-/// real run would refuse would be worse than useless.
+/// `dry_run` writes nothing but still applies the encoding refusal.
 ///
 /// # Errors
 ///
-/// [`SessionPathError`] when a directory cannot be encoded for this host's
-/// format (exit 78). Raised before any write, so a refused run changes
-/// nothing. A **write** failure is not an error — it is
-/// [`SessionPathOutcome::Failed`] with exit 0.
+/// [`SessionPathError`] when a directory cannot be encoded (exit 78), before any write;
+/// a write failure is [`SessionPathOutcome::Failed`], not an error.
 pub fn register_session_path(
     ocx_home: &Path,
     directories: &[PathBuf],
@@ -278,24 +144,12 @@ pub fn register_session_path(
     register_in(&home, directories, dry_run)
 }
 
-/// Apply every C-037 refusal to `directories` without reading or writing a
-/// store — the value rule ([`refuse_relative`]) and this host's grammar rule
-/// (its platform `encode`).
-///
-/// Exists so a caller can run the refusal *before* it starts writing. Property
-/// (2) of this module's contract says an unencodable directory is refused
-/// before anything is written; that is true of the session-PATH stores by
-/// construction, but [`crate::run`] writes four other things first
-/// (bootstrap, managed config, shims, profiles), so the promise a user is
-/// given — a refused run leaves the machine as it was — needs the check to
-/// happen ahead of all of them. [`crate::run`] calls this as its first
-/// act; [`register_in`] and [`deregister_in`] keep validating on their own, so
-/// a caller that skips the preflight is refused just the same.
+/// Apply every refusal to `directories` without touching a store, so [`crate::run`] can
+/// refuse before its first write of any kind.
 ///
 /// # Errors
 ///
-/// [`SessionPathError`] naming the first directory this host's format cannot
-/// spell, and the format.
+/// [`SessionPathError`] naming the first directory this host's format cannot spell.
 pub fn refuse_unencodable(directories: &[PathBuf]) -> Result<(), SessionPathError> {
     refuse_relative(directories)?;
     for directory in directories {
@@ -311,8 +165,7 @@ pub fn refuse_unencodable(directories: &[PathBuf]) -> Result<(), SessionPathErro
     Ok(())
 }
 
-/// [`register_session_path`] over an injectable [`HomeEnv`] (see
-/// [`stores_for`]).
+/// [`register_session_path`] over an injectable [`HomeEnv`].
 ///
 /// # Errors
 ///
@@ -322,9 +175,7 @@ pub fn register_in(
     directories: &[PathBuf],
     dry_run: bool,
 ) -> Result<Vec<(PathBuf, SessionPathOutcome)>, SessionPathError> {
-    // Before the cfg dispatch, so the one rule that is about the *value*
-    // rather than the grammar is applied identically on every host, and
-    // before any store is read or written.
+    // Ahead of the cfg dispatch, so every host applies it before touching a store.
     refuse_relative(directories)?;
     #[cfg(windows)]
     {
@@ -346,18 +197,11 @@ pub fn register_in(
     }
 }
 
-/// Subtract `directories` from this host's session-PATH store.
-///
-/// Removes exactly the segments [`register_session_path`] added, leaves every
-/// other segment in place, and is a no-op ([`SessionPathOutcome::Unchanged`])
-/// when neither is present. It never clears, resets or unsets a whole
-/// variable.
+/// Subtract exactly `directories` from this host's session-PATH store; never clears a whole variable.
 ///
 /// # Errors
 ///
-/// Same as [`register_session_path`]: an encoding refusal only. A directory
-/// that cannot be encoded also cannot have been written, so the refusal is
-/// reached before the store is read.
+/// Same as [`register_session_path`], raised before the store is read.
 pub fn deregister_session_path(
     ocx_home: &Path,
     directories: &[PathBuf],
@@ -367,8 +211,7 @@ pub fn deregister_session_path(
     deregister_in(&home, directories, dry_run)
 }
 
-/// [`deregister_session_path`] over an injectable [`HomeEnv`] (see
-/// [`stores_for`]).
+/// [`deregister_session_path`] over an injectable [`HomeEnv`].
 ///
 /// # Errors
 ///
@@ -378,9 +221,7 @@ pub fn deregister_in(
     directories: &[PathBuf],
     dry_run: bool,
 ) -> Result<Vec<(PathBuf, SessionPathOutcome)>, SessionPathError> {
-    // Before the cfg dispatch, so the one rule that is about the *value*
-    // rather than the grammar is applied identically on every host, and
-    // before any store is read or written.
+    // Ahead of the cfg dispatch, so every host applies it before touching a store.
     refuse_relative(directories)?;
     #[cfg(windows)]
     {
@@ -403,10 +244,6 @@ pub fn deregister_in(
 }
 
 /// The one pair a host with no session-PATH facility reports.
-///
-/// Keyed by [`UNSUPPORTED_LOCATION`] rather than by an empty path: the pair's
-/// key is rendered in the run summary, and an empty one would print as a blank
-/// column that reads like a bug.
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn unsupported() -> Vec<(PathBuf, SessionPathOutcome)> {
     vec![(
@@ -415,25 +252,12 @@ fn unsupported() -> Vec<(PathBuf, SessionPathOutcome)> {
     )]
 }
 
-/// The location key reported on a host with no session-PATH facility.
-///
-/// Not a path. Deliberately unspellable as one — angle brackets are not a
-/// filesystem convention on any of the three supported targets — so nobody
-/// reads the run summary as naming a file they could edit.
+/// The location key reported on a host with no session-PATH facility; deliberately not a path.
 pub const UNSUPPORTED_LOCATION: &str = "<no session PATH facility on this platform>";
 
-/// The UTF-8 spelling of `directory`, or a [`SessionPathError::NotUtf8`]
-/// refusal naming `format`.
+/// The UTF-8 spelling of `directory`, or a [`SessionPathError::NotUtf8`] refusal naming `format`.
 ///
-/// The one place a session-PATH directory crosses from `Path` to `str`; every
-/// refusal predicate and every renderer takes the `&str` this returns, so none
-/// of them can reach for `to_string_lossy` on its own.
-///
-/// It deliberately does **not** check absoluteness. That is a property of the
-/// value, not of the grammar, and the three `encode` functions are pure
-/// grammar so their red state is reachable on every CI leg rather than only on
-/// the host whose format they describe. [`refuse_relative`] owns the value
-/// rule, at the dispatch boundary.
+/// Grammar only: absoluteness belongs to [`refuse_relative`].
 ///
 /// # Errors
 ///
@@ -445,9 +269,7 @@ pub fn encodable_str(directory: &Path, format: SessionPathFormat) -> Result<&str
     })
 }
 
-/// The wire format this host's session-PATH store uses, or `None` where there
-/// is no store — the [`stores_for`] split, answered as a format rather than a
-/// location.
+/// The wire format of this host's session-PATH store, or `None` where there is none.
 fn host_format() -> Option<SessionPathFormat> {
     #[cfg(windows)]
     {
@@ -469,22 +291,9 @@ fn host_format() -> Option<SessionPathFormat> {
 
 /// Refuse a relative directory before any store is read or written.
 ///
-/// A relative segment on a session PATH resolves against **each process's own
-/// working directory** (CWE-426), so registering one puts a per-directory,
-/// attacker-plantable lookup on the PATH of every process the user starts from
-/// then on. Nothing upstream refuses it —
-/// [`ocx_config::home::default_ocx_root`] takes `$OCX_HOME` verbatim —
-/// and all three formats store the value exactly as written.
-///
-/// Refused rather than made absolute against the working directory: whichever
-/// directory happened to be current during `ocx self setup` is not a location
-/// the user asked for, and baking it in silently is the same defect with a
-/// longer fuse.
-///
-/// `Path::is_absolute` is host-relative on purpose. A driveless `/opt/bin` has
-/// a root but no drive prefix, so Windows answers `false` — and that is the
-/// wanted answer, because such a path resolves against the *current drive*,
-/// which is the same per-process ambiguity in a second spelling.
+/// A relative segment resolves against each process's working directory, putting a plantable lookup
+/// on every later PATH (CWE-426). `is_absolute` is host-relative on purpose: a driveless `/opt/bin`
+/// resolves against the current drive on Windows.
 ///
 /// # Errors
 ///

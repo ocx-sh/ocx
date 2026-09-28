@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the package-manager, launch, patch and record error family — the `ocx_package_manager` rung of the
-//! ladder, here rather than in that crate because classification is `ocx_cli`'s alone.
+//! Exit-code classification for the `ocx_package_manager` error family.
 
 use ocx_exit::ExitCode;
 
@@ -18,23 +17,9 @@ use super::{ClassifyExitCode, downcast_arm};
 impl ClassifyExitCode for LaunchError {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            // Defer to the wrapped `io::Error` so a permission-denied spawn
-            // still reaches 77 and everything else falls through to the generic
-            // failure — the behaviour the three exec sites already had before
-            // they were folded into this seam.
             Self::Spawn { .. } => None,
-            // A frame reached the seam with nothing to record. That is a wiring
-            // fault in ocx, not something an operator can configure their way
-            // out of, so it takes the generic code rather than a diagnostic one
-            // that would send them looking at their config.
             Self::IncompleteRecordInputs { .. } => Some(ExitCode::Failure),
-            // The same 74 an unwritable sink takes under the same posture: from
-            // a wrapper script's side both are one condition — this invocation
-            // could not be recorded and the operator said not to run it.
             Self::ExemptionRefused { .. } => Some(ExitCode::IoError),
-            // The wrapped error owns the split between 74 (unwritable sink) and
-            // 78 (malformed template), so the classification is delegated to it
-            // rather than restated here and left to drift.
             Self::Records(e) => e.classify(),
         }
     }
@@ -43,14 +28,9 @@ impl ClassifyExitCode for LaunchError {
 impl ClassifyExitCode for PatchError {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            // Network fetch failures delegate to the inner OCI client error's
-            // classification so auth (80), unavailable (69), etc. propagate.
             Self::FetchFailed { source } => source.classify(),
-            // Blob-write failures are I/O errors.
             Self::BlobWriteFailed { .. } => Some(ExitCode::IoError),
-            // A deliberate local policy refused the resolution — not a fault.
             Self::PolicyBlocked { .. } => Some(ExitCode::PolicyBlocked),
-            // Descriptor shape / version / parse issues = malformed data.
             Self::InvalidDescriptorJson { .. }
             | Self::UnsupportedVersion { .. }
             | Self::UnsupportedSnapshotVersion { .. }
@@ -68,12 +48,7 @@ impl ClassifyExitCode for PatchError {
 
 impl ClassifyExitCode for PackageManagerError {
     fn classify(&self) -> Option<ExitCode> {
-        // Batch variants wrap `Vec<PackageError>` with no `#[source]`, so the
-        // chain walker never reaches the inner `PackageErrorKind`. Classify
-        // the first package error directly — preserves per-package semantics
-        // for single-failure cases.
         match self {
-            // Box<PackageError>: deref to access kind directly.
             Self::SelfCheckFailed(pe) => pe.kind.classify(),
             Self::FindFailed(es)
             | Self::InstallFailed(es)
@@ -81,13 +56,9 @@ impl ClassifyExitCode for PackageManagerError {
             | Self::DeselectFailed(es)
             | Self::ResolveFailed(es)
             | Self::InspectFailed(es)
+            // Batch variants carry no `#[source]`, so the chain walker never reaches the inner kind.
             | Self::SelectFailed(es) => es.first().and_then(|pe| pe.kind.classify()),
-            // ── E1: the variants this tier minted at WP-34 ──────────────
-            // Each one is spelled exactly as `ocx_lib::Error`'s arm for the
-            // same name, so `STANDS_IN_FOR`'s `SameDelegation` compares equal
-            // and the exit code cannot have moved (DEC-23). Delegating arms
-            // read `e.classify()`, never `e.classify()?` — the normaliser
-            // strips a leading `return` and a binder and nothing else.
+            // Write `e.classify()`, never `e.classify()?`: `STANDS_IN_FOR`'s normaliser strips only `return` and a binder.
             Self::OfflineMode => Some(ExitCode::PolicyBlocked),
             Self::InternalFile(_, _) => Some(ExitCode::IoError),
             Self::LayerNotStaged { .. } => Some(ExitCode::Failure),
@@ -129,35 +100,19 @@ impl ClassifyExitCode for PackageErrorKind {
             | Self::DigestMissing
             | Self::EntrypointCollision { .. }
             | Self::FeatureMismatch { .. }
-            // Every shim refusal is a claim the package's own metadata makes
-            // and cannot honour, or a wire value that does not satisfy the
-            // name grammar — malformed input, never a missing package.
             | Self::ShimNamesNotEnumerable { .. }
             | Self::ShimNameInvalid(_)
             | Self::ShimNameNotClaimed(_)
             | Self::ShimClaimUnfulfilled(_) => ExitCode::DataError,
             Self::TaskPanicked => ExitCode::Failure,
-            // Required companion failure: delegate to the inner error's
-            // classification so the exit code reflects the root cause (e.g.
-            // NotFound if the companion is not published, Unavailable for
-            // network errors, etc.). The `Box<PackageErrorKind>` source
-            // implements `ClassifyExitCode` so we can recurse without walking
-            // `std::error::Error::source()`.
             Self::RequiredCompanionFailed { source, .. } => return source.classify(),
-            // Patch discovery errors delegate to the classify_error chain walker
-            // so the inner PatchError's source chain (e.g. ClientError::Authentication
-            // → AuthError, ClientError::Registry → Unavailable) is fully inspected.
+            // The full chain walker, not a single-hop `classify()`, or nested causes go unclassified.
             Self::PatchDiscovery(inner) => {
-                return Some(super::classify_library_error(inner as &(dyn std::error::Error + 'static)));
+                return Some(super::classify_library_error(
+                    inner as &(dyn std::error::Error + 'static),
+                ));
             }
-            // Delegate rather than restate 78 here: `ToolchainPathError` owns
-            // its own wildcard-free `classify`, so a variant added there
-            // compile-errors at that match and inherits whatever code its
-            // author chose — one source of truth for the code, exactly as
-            // `RequiredCompanionFailed` above defers to its source.
             Self::ToolchainPath(inner) => return inner.classify(),
-            // Internal wraps a full `ocx_lib::Error` — walk through classify_error
-            // so the inner chain is inspected via the generic entry point.
             Self::Internal(inner) => return Some(super::classify_library_error(inner)),
         })
     }
@@ -167,10 +122,7 @@ impl ClassifyExitCode for DependencyError {
     fn classify(&self) -> Option<ExitCode> {
         match self {
             Self::Conflict { .. } => Some(ExitCode::DataError),
-            // Defer to the wrapped singleflight error's source chain so the
-            // underlying classifiable variant (e.g. `EntrypointCollision`)
-            // wins over the generic "setup failed" wrapper. The chain walker
-            // re-enters `try_classify` on the next cause.
+            // `None` lets the walker reach the leader's typed cause; a `Some` would mask it.
             Self::SetupFailed(_) => None,
         }
     }
@@ -180,20 +132,10 @@ impl ClassifyExitCode for RecordsError {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
             Self::Io { .. } | Self::Serialize(_) => ExitCode::IoError,
-            // A bad template is a config parse error, not an I/O fault — the
-            // operator fixes it by editing `[records] name`, and 74 would send
-            // them looking at disk permissions instead.
             Self::TemplateUnknownPlaceholder { .. }
             | Self::TemplateNotUnique
             | Self::NameNotAFilename { .. }
-            // Same reasoning: a posture with nothing to write to is a fault in
-            // the config chain, fixed by adding a `dir` or dropping `required`.
             | Self::RequiredWithoutSink => ExitCode::ConfigError,
-            // Not `SymlinkWalkError::Ancestor`'s 64: that precedent refuses a
-            // path the user typed as an *argument*, where usage is the fault.
-            // This sink arrives from `[records] dir` / `OCX_RECORDS_DIR` /
-            // `--records-dir` — configuration, which the operator fixes by
-            // editing a file, the same as a bad template.
             Self::SinkSymlink { .. } => ExitCode::ConfigError,
         })
     }

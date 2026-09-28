@@ -3,14 +3,7 @@
 
 //! `ocx shell revoke` — withdraw a project's consent stamp.
 //!
-//! The undo half of `ocx shell allow`. Immediately effective: clause 1 of the
-//! activation predicate reads the stamp file on every prompt, so the next one
-//! is inert unless a `[shell.consent]` grant still covers the project.
-//!
-//! **Idempotent by contract.** Revoking a project that was never stamped is
-//! exit 0 with a line saying so — the requested state is the state that
-//! already held, and refusing there would put a failure on the most ordinary
-//! outcome of a command whose whole job is to make sure a stamp is gone.
+//! Idempotent by contract: revoking an unstamped project exits 0.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -21,11 +14,7 @@ use ocx_project::consent::{self, Revoked};
 
 use crate::app::project_context::resolve_project_paths;
 
-/// The `ocx shell revoke` arguments.
-///
-/// The user-facing description lives on the `Shell::Revoke` variant, which is
-/// the surface clap renders as this subcommand's help; a doc here would be
-/// rustdoc-only.
+/// The `ocx shell revoke` arguments; its help text lives on `Shell::Revoke`.
 #[derive(Parser)]
 pub struct ShellRevoke {
     /// The directory whose project to revoke (default: the current one)

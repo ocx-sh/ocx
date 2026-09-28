@@ -1,22 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The `ocx update` report (C-011) — **what moved**, not what the lock now is.
-//!
-//! `ocx lock` and `ocx add` answer "what is pinned"; only `update` can answer
-//! "what changed", because only `update` holds both the predecessor lock and
-//! the candidate at the same moment (`MutationGuard::previous_lock`).
-//!
-//! # The compared value is the pull identifier, not the digest
-//!
-//! A `LockedTool` pins `repository` (bare) plus one leaf digest per shipped
-//! platform, and the thing actually pulled is
-//! `repository.clone_with_digest(leaf)`. Comparing bare digests would report
-//! "unchanged" for a binding whose *repository* moved to a mirror holding the
-//! same bytes — a different pull, reported as no pull at all. So the diff
-//! compares the reconstructed pull identifier, which is exactly what
-//! `locked_tool_content_equal` weighs (`repository` **and** the platform map)
-//! projected onto one row per platform.
+//! The `ocx update` report — **what moved**, not what the lock now is.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,8 +12,7 @@ use serde::Serialize;
 
 use crate::api::Printable;
 
-/// The cell a `None` `from`/`to` renders as — a platform that did not exist on
-/// one side of the diff.
+/// The cell a `None` `from`/`to` renders as.
 const ABSENT: &str = "-";
 
 /// One `(group, binding, platform)` pin that moved between the predecessor
@@ -49,9 +33,7 @@ pub struct BindingChange {
     pub platform: String,
     /// The tag the declaration spells, `null` when it is digest-pinned.
     pub tag: Option<String>,
-    /// Pull identifier before the update; `null` when newly pinned. Held
-    /// typed so `Serialize` emits the full pinned form while the plain table
-    /// renders the shared short-digest abbreviation.
+    /// Pull identifier before the update; `null` when newly pinned.
     pub from: Option<PackageRef>,
     /// Pull identifier after the update; `null` when dropped.
     pub to: Option<PackageRef>,
@@ -69,7 +51,7 @@ pub struct BindingState {
     /// The tag the declaration spells, `null` when it is digest-pinned.
     pub tag: Option<String>,
     /// The unchanged pull identifier — the same
-    /// `registry/repository@sha256:<hex>` form `BindingChange::from` / `to`
+    /// `registry/repository@sha256:<hex>` form `changes[].from` / `to`
     /// carry, so the two arrays are directly comparable.
     pub digest: PackageRef,
 }
@@ -77,19 +59,9 @@ pub struct BindingState {
 /// Report emitted by `ocx update` (and by `ocx update --check` before it
 /// exits 65).
 ///
-/// Plain format: one five-column table (Binding | Group | Platform | From |
-/// To) holding the `changes` rows, where `Binding` is `name` or `name:tag`
-/// and the digest columns carry the CLI-wide short-digest abbreviation
-/// [`ocx_oci::Digest::to_short_string`] (`-` when the pin did not exist on
-/// that side). When `unchanged` is non-empty a trailing hint names the count
-/// and `--verbose`.
-///
-/// JSON format: `{ "changes": [...], "unchanged": [...], "metadata_changed":
-/// bool }`. Every `BindingChange` carries `{ name, group, platform, tag,
-/// from, to }` and every `BindingState` `{ name, group, platform, tag,
-/// digest }`, with `tag`/`from`/`to` present and `null` rather than absent.
-/// **The payload is identical with and without `--verbose`** — see
-/// [`VerboseUpdateReport`].
+/// `tag`, and in `changes` rows also `from`/`to`, are present and `null`
+/// rather than absent. **The payload is identical with and without
+/// `--verbose`**: verbosity changes the plain rendering only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct UpdateReport {
     /// Pins whose pull identifier differs between the two locks, ordered by
@@ -97,11 +69,10 @@ pub struct UpdateReport {
     pub changes: Vec<BindingChange>,
     /// Bindings this run examined and found unchanged, in the same order.
     ///
-    /// A scoped run (`-g` / positional names) examines only its own
-    /// selection; every other pin is carried forward verbatim and was never
-    /// re-resolved, so listing it as "unchanged" would claim a check that did
-    /// not happen. A whole-lock run examines everything, so nothing is
-    /// filtered out.
+    /// A scoped run (`-g` / positional names) lists only its own selection;
+    /// every other pin is carried forward verbatim, never re-resolved. A
+    /// whole-lock run examines everything.
+    // Never list a carried-forward pin: "unchanged" would claim a check that did not happen.
     pub unchanged: Vec<BindingState>,
     /// Whether the load-bearing lock metadata moved — `declaration_hash`,
     /// `declaration_hash_version` or `lock_version`. Advisory metadata
@@ -110,16 +81,14 @@ pub struct UpdateReport {
     pub metadata_changed: bool,
 }
 
-/// The compared value of one pin: its reconstructed pull identifier.
+/// The compared value of one pin: the pull identifier, not the bare digest.
+// A digest compare reports "unchanged" for a binding whose repository moved to a mirror.
 fn pull_identifier(tool: &LockedTool, leaf: &ocx_oci::Digest) -> PackageRef {
     tool.repository.clone_with_digest(leaf.clone())
 }
 
 /// Flatten a lock into `(group, name, platform) -> pull identifier`.
-///
-/// `BTreeMap` for the ordering the report and the table inherit: a lock's
-/// `tools` vector is sorted by `(group, name)` at write time but an in-memory
-/// candidate need not be.
+// `BTreeMap`, not the `tools` order: an in-memory candidate need not be sorted, and the report's order comes from here.
 fn pins(lock: &ProjectLock) -> BTreeMap<(String, String, String), PackageRef> {
     let mut out = BTreeMap::new();
     for tool in &lock.tools {
@@ -133,9 +102,7 @@ fn pins(lock: &ProjectLock) -> BTreeMap<(String, String, String), PackageRef> {
     out
 }
 
-/// The tag the declaration spells for `(group, name)`, or `None` when the
-/// binding is digest-pinned or no longer declared (a dropped binding still
-/// gets a row, and its `ocx.toml` entry is gone).
+/// The tag the declaration spells for `(group, name)`; `None` when digest-pinned or no longer declared.
 fn declared_tag(config: &ProjectConfig, group: &str, name: &str) -> Option<String> {
     let table = if group == DEFAULT_GROUP {
         &config.tools
@@ -145,23 +112,13 @@ fn declared_tag(config: &ProjectConfig, group: &str, name: &str) -> Option<Strin
     table.get(name)?.tag().map(str::to_owned)
 }
 
-/// The digest column for one pull identifier — the same `sha256:<12hex>`
-/// abbreviation `ocx package inspect`, `ocx package cascade check` and
-/// `ocx package sbom` render, so one short digest means one thing across the
-/// CLI.
-///
-/// The fallback cannot be reached through [`UpdateReport::diff`], which builds
-/// every value with `clone_with_digest`; it is the honest answer rather than a
-/// dash if some later caller hands over a tagless, digestless coordinate.
+/// The digest column for one pull identifier: the CLI-wide `sha256:<12hex>` abbreviation.
 fn short_digest(pull: &PackageRef) -> String {
     pull.digest()
         .map_or_else(|| pull.to_string(), |digest| digest.to_short_string())
 }
 
 /// `name` or `name:tag` — the binding as the user spelled it in `ocx.toml`.
-///
-/// Keeps the declared tag inside the five-column budget instead of buying a
-/// sixth column for it.
 fn binding_label(name: &str, tag: Option<&str>) -> String {
     match tag {
         Some(tag) => format!("{name}:{tag}"),
@@ -170,20 +127,10 @@ fn binding_label(name: &str, tag: Option<&str>) -> String {
 }
 
 impl UpdateReport {
-    /// Diff `previous` against `next`, keyed by `(group, name, platform)`.
+    /// Diff `previous` (`None` when no `ocx.lock` exists yet) against `next`, keyed by `(group, name, platform)`.
     ///
-    /// `previous` is an [`Option`] because bare `ocx update` in a project that
-    /// has no `ocx.lock` yet is legal (it resolves the whole file, the way
-    /// `ocx lock` does) — there every pin is newly introduced, which is what
-    /// `from: None` on every row says. The scoped and `--check` paths gate on
-    /// a predecessor themselves and always pass `Some`.
-    ///
-    /// `examined` is the `(group, name)` selection a scoped run re-resolved,
-    /// and `None` for a whole-lock run. It narrows [`Self::unchanged`] only:
-    /// a pin outside the scope was carried forward verbatim rather than
-    /// checked, so reporting it as unchanged would claim a check that never
-    /// ran. `changes` is never filtered — a scoped run cannot legitimately
-    /// move an untouched pin, and if one moves anyway the user must see it.
+    /// `examined` is a scoped run's `(group, name)` selection (`None` for a whole-lock run) and narrows
+    /// [`Self::unchanged`] only: `changes` is never filtered, so an out-of-scope pin that moves still shows.
     pub fn diff(
         previous: Option<&ProjectLock>,
         next: &ProjectLock,
@@ -238,14 +185,12 @@ impl UpdateReport {
         }
     }
 
-    /// Whether this update would move anything on disk — the `--check`
-    /// verdict, and the one place that question is answered.
+    /// Whether this update would move anything on disk — the `--check` verdict.
     pub fn moved(&self) -> bool {
         !self.changes.is_empty() || self.metadata_changed
     }
 
-    /// The shared plain rendering; `verbose` appends the `unchanged` rows
-    /// instead of the hint that names them.
+    /// The shared plain rendering; `verbose` appends the `unchanged` rows instead of a hint.
     fn render(&self, printer: &DataInterface, verbose: bool) {
         let mut rows: [Vec<Cell>; 5] = [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         let mut push = |binding: String, group: &str, platform: &str, from: String, to: String| {
@@ -291,8 +236,6 @@ impl UpdateReport {
         }
     }
 
-    /// The trailing line naming how many pins held still and the flag that
-    /// lists them.
     fn unchanged_hint(&self) -> String {
         let count = self.unchanged.len();
         let (noun, pronoun) = if count == 1 { ("pin", "it") } else { ("pins", "them") };
@@ -306,16 +249,9 @@ impl Printable for UpdateReport {
     }
 }
 
-/// [`UpdateReport`] rendered with the pins that held still — `ocx update
-/// --verbose`.
+/// [`UpdateReport`] rendered with the pins that held still — `ocx update --verbose`.
 ///
-/// Plain format: the same table, with one `From == To` row appended per
-/// `unchanged` entry and no hint.
-///
-/// JSON format: delegates to the inner [`UpdateReport`] — **identical wire
-/// shape whether verbose or not**, the contract `VerboseVersionData` and
-/// `VerboseShellState` already keep. `--verbose` is a human flag; a
-/// `--format json` consumer never sees less for its absence.
+/// JSON delegates to the inner report: the wire shape is identical with or without `--verbose`.
 pub struct VerboseUpdateReport(pub UpdateReport);
 
 impl Printable for VerboseUpdateReport {
@@ -330,8 +266,6 @@ impl Serialize for VerboseUpdateReport {
     }
 }
 
-// The `Serialize` impl above is transparent, so the published schema is the
-// inner type's. Verbosity changes the plain rendering only.
 impl schemars::JsonSchema for VerboseUpdateReport {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "VerboseUpdateReport".into()

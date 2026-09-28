@@ -3,14 +3,7 @@
 
 //! Toolchain-tier `ocx status` command.
 //!
-//! Reads `ocx.toml` and its sibling `ocx.lock` and reports what they say. No
-//! network, no advisory lock, no staleness gate, no object-store probe — the
-//! command has to answer on exactly the broken project you reach for it with,
-//! so an absent or drifted lock is payload rather than an error.
-//!
-//! Deliberately NOT routed through `load_project_with_lock`: that helper exits
-//! 78 on a missing lock and 65 on a stale one, which are the two states status
-//! exists to describe.
+//! Not routed through `load_project_with_lock`: it exits 78/65 on a missing or stale lock, the states status reports.
 
 use std::process::ExitCode;
 
@@ -23,19 +16,10 @@ use crate::api::data::status::StatusReport;
 ///
 /// Reports every declared group with its bindings and `[env]` table, each
 /// binding's locked platform digests, the `[package."<id>"]` settings, and
-/// whether the lock is still current for the declaration.
-///
-/// Offline and read-only: no registry is contacted, nothing is installed, and
-/// neither file is written. A missing or stale `ocx.lock` is reported as such
-/// and still exits 0 - use `ocx lock --check` for the CI gate that fails on
-/// exactly that condition, and `ocx inspect` for the resolved surface (what
-/// each binding resolves to on this host, and what it would put on `PATH`).
-///
-/// Takes no group or name filter: the report is a keyed object a caller can
-/// narrow itself, and a filter here would only hide rows rather than change
-/// any answer.
-///
-/// Exits 64 when no `ocx.toml` is in scope.
+/// whether the lock is still current. Offline and read-only. A missing or
+/// stale `ocx.lock` is reported and still exits 0 (`ocx lock --check` is the
+/// CI gate; `ocx inspect` the resolved surface). Exits 64 when no `ocx.toml`
+/// is in scope.
 #[derive(Parser)]
 pub struct Status {}
 
@@ -45,10 +29,7 @@ impl Status {
 
         let config = ProjectConfig::from_path(&config_path).await?;
 
-        // `from_path` yields `None` for an absent lock. A parse failure (an
-        // unsupported `lock_version`, a corrupt file) is caught rather than
-        // propagated: it is one of the states this command exists to name, and
-        // the declaration half of the report is still perfectly readable.
+        // A lock parse failure is reported, not propagated: it is one of the states status names.
         let lock = match ProjectLock::from_path(&lock_path).await {
             Ok(lock) => Ok(lock),
             Err(error) => Err(format!("{error}")),
@@ -271,7 +252,7 @@ mod seam {
     ///
     /// Partial companion of `test/tests/test_status.py::test_status_reports_drift_instead_of_refusing`,
     /// not a port: the sibling's 65 is checked through `is_stale` and a hand-built
-    /// error, not the gate `ocx pull` runs, so the acceptance case stays (WP-13 audit).
+    /// error, not the gate `ocx pull` runs, so the acceptance case stays.
     #[tokio::test]
     async fn status_reports_drift_instead_of_refusing() {
         let fixture = Fixture::new();

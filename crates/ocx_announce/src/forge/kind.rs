@@ -1,35 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Which forge a coordinate lives on, which write transport it is driven
-//! through, and how a client for the pair is built.
+//! Forge kind, write transport, and forge client construction.
 
 use super::{ForgeCredentials, ForgeError, GitBinary, GitHubForge, GitLabForge, RepoCoordinate};
 use ocx_util::tls::ExtraRoots;
 
 /// How a run writes to the index repository.
-///
-/// [`Api`](Self::Api) is the default, and the default is contracted rather than
-/// incidental: it is what makes "nothing changes for existing announce users"
-/// literally true. The value spellings are contracted for the same reason —
-/// they are a CLI flag's accepted values, so `api` and `git` are a published
-/// grammar.
-///
-/// [`Git`](Self::Git) exists for one credential shape the REST API refuses: a
-/// GitLab CI job token can push over HTTP but cannot open a merge request, so
-/// the request is created by push options carried on the push itself.
-///
-/// A closed internal enum with no `#[non_exhaustive]`, per the arch-principles
-/// convention — every match over it stays total, which is what forces a third
-/// transport to be classified everywhere the second one is.
-///
-/// The word `non_exhaustive` two lines up is deliberate prose stating the
-/// attribute's *absence*, not the attribute itself — this enum and
-/// [`ForgeKind`] must never carry it. `non_exhaustive_policy_holds` strips
-/// `//`-prefixed lines before scanning `kind.rs`'s source text, so this
-/// explanation does not trip the very denylist it documents; the same guard
-/// also asserts the positive side — the attribute on [`ForgeError`]'s own
-/// declaration, the one exempt enum in `forge` — not only a zero count here.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WriteTransport {
     /// The forge's REST API.
@@ -48,11 +25,8 @@ impl std::fmt::Display for WriteTransport {
     }
 }
 
-// Hand-written rather than `#[derive(ValueEnum)]`: this crate depends on
-// `clap_builder`, which carries the trait but not the derive macro. The
-// spellings below and `Display`'s above are the same two strings and must stay
-// that way — the flag's accepted values and the report's rendered value are one
-// vocabulary, not two.
+// These spellings must equal `Display`'s: the flag's accepted values and the
+// report's rendered value are one published vocabulary.
 impl clap_builder::ValueEnum for WriteTransport {
     fn value_variants<'a>() -> &'a [Self] {
         &[Self::Api, Self::Git]
@@ -67,16 +41,6 @@ impl clap_builder::ValueEnum for WriteTransport {
 }
 
 /// The forge implementations announce can talk to.
-///
-/// A closed internal enum with no `#[non_exhaustive]`, per the arch-principles
-/// convention: the binary is the only consumer, and every match staying total is
-/// what forces a third forge to be classified everywhere it matters — most
-/// sharply in credential handling, where a wildcard would send a mutation
-/// unauthenticated.
-///
-/// Same deliberate-prose note as [`WriteTransport`]'s doc comment: the word
-/// above is not the attribute, and `non_exhaustive_policy_holds` strips
-/// comment lines before it scans for either one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForgeKind {
     /// GitHub.com or a GitHub Enterprise Server instance.
@@ -88,13 +52,8 @@ pub enum ForgeKind {
 impl ForgeKind {
     /// The forge a canonical host belongs to, or `None` for anything else.
     ///
-    /// Only the two hosts whose forge is a fact are recognised. A self-hosted
-    /// instance is deliberately **not** guessed: no unauthenticated probe
-    /// distinguishes the forges reliably, hostnames carry no convention
-    /// (`git.example.com` is equally likely to be either), and guessing wrong
-    /// sends the announce credential to the wrong API in the wrong header. Every
-    /// surveyed tool that supports both forges makes the operator declare the
-    /// kind for a self-hosted host, and so does this.
+    /// Never guesses a self-hosted host: a wrong guess sends the announce
+    /// credential to the wrong API in the wrong header.
     #[must_use]
     pub fn from_host(host: Option<&str>) -> Option<Self> {
         match host {
@@ -110,8 +69,7 @@ impl ForgeKind {
     ///
     /// # Errors
     ///
-    /// Returns [`ForgeError::ForgeKindUnknown`] when the host is self-hosted and
-    /// nothing was declared.
+    /// Returns [`ForgeError::ForgeKindUnknown`] for a self-hosted host with nothing declared.
     pub fn resolve(declared: Option<Self>, coordinate: &RepoCoordinate) -> Result<Self, ForgeError> {
         if let Some(kind) = declared {
             return Ok(kind);
@@ -123,11 +81,8 @@ impl ForgeKind {
 
     /// The host this forge lives on when a coordinate names none.
     ///
-    /// A coordinate's `host` is `None` for the canonical host, so `None` and
-    /// `Some("github.com")` are two spellings of one instance. Anything
-    /// comparing two coordinates' hosts must resolve both through here first, or
-    /// it decides that `ocx-sh/index` and `github.com/ocx-sh/index` are on
-    /// different servers.
+    /// Resolve both sides through here before comparing hosts, or `ocx-sh/index`
+    /// and `github.com/ocx-sh/index` compare as different servers.
     #[must_use]
     pub fn canonical_host(self) -> &'static str {
         match self {
@@ -136,12 +91,8 @@ impl ForgeKind {
         }
     }
 
-    /// Whether two coordinates name the same instance of this forge.
-    ///
-    /// Case-folded, and `None` resolved to [`Self::canonical_host`] on both
-    /// sides — the same two normalisations [`Self::from_host`] and the API
-    /// base-URL builders already apply, so this cannot disagree with where the
-    /// requests actually go.
+    /// Whether two coordinates name the same instance of this forge, case-folded
+    /// with `None` resolved to [`Self::canonical_host`].
     #[must_use]
     pub fn same_host(self, left: &RepoCoordinate, right: &RepoCoordinate) -> bool {
         let resolve = |coordinate: &RepoCoordinate| {
@@ -155,17 +106,12 @@ impl ForgeKind {
 
     /// Refuse a coordinate this forge cannot express, before a request is made.
     ///
-    /// The per-operation clients already refuse a nested namespace where they
-    /// use it — but only for the *fork*, because that is the coordinate whose
-    /// namespace they interpolate. A nested `--index-repo` on GitHub reached the
-    /// wire and came back as a bare 404 reading "no such repository", which is
-    /// the misdiagnosis the flatness rule exists to prevent. This is the check
-    /// applied to every coordinate a run names, at the point they are all known.
+    /// Apply it to every coordinate a run names, not only the fork, or a nested
+    /// `--index-repo` on GitHub surfaces as a misleading 404.
     ///
     /// # Errors
     ///
-    /// Returns [`ForgeError::NestedNamespaceUnsupported`] when `coordinate` has a
-    /// nested namespace and this forge does not nest.
+    /// Returns [`ForgeError::NestedNamespaceUnsupported`] for a nested namespace on a forge that does not nest.
     pub fn validate_coordinate(self, coordinate: &RepoCoordinate) -> Result<(), ForgeError> {
         match self {
             Self::GitHub => super::github::require_flat_namespace(coordinate).map(|_| ()),
@@ -173,60 +119,30 @@ impl ForgeKind {
         }
     }
 
-    /// Refuse a write transport this forge cannot serve. Pure — no network call,
-    /// no client built.
-    ///
-    /// Called from two places on purpose and implemented once: from the CLI's
-    /// argv-fault block, so a bad combination is diagnosed before the credential
-    /// check, and from [`Self::client`], so no future caller can reach a client
-    /// by skipping the first.
-    ///
-    /// The match is wildcard-free so a third forge cannot inherit a transport
-    /// nobody decided it supports — the same reason [`ForgeKind`] itself carries
-    /// no `#[non_exhaustive]`. (Deliberate prose, per the note on
-    /// [`WriteTransport`]'s doc comment — `non_exhaustive_policy_holds` strips
-    /// comment lines before scanning.)
+    /// Refuse a write transport this forge cannot serve, before any network call.
     ///
     /// # Errors
     ///
     /// Returns [`ForgeError::TransportUnsupported`] for GitHub with
-    /// [`WriteTransport::Git`]: GitHub has no push-option merge-request
-    /// creation, so there is nothing for the second transport to do there.
+    /// [`WriteTransport::Git`], which has no push-option merge requests.
     pub fn validate_transport(self, transport: WriteTransport) -> Result<(), ForgeError> {
+        // No wildcard arm, or a new forge silently inherits a transport nobody decided it supports.
         match (self, transport) {
             (Self::GitHub, WriteTransport::Git) => Err(ForgeError::TransportUnsupported { forge: self, transport }),
             (Self::GitHub, WriteTransport::Api) | (Self::GitLab, WriteTransport::Api | WriteTransport::Git) => Ok(()),
         }
     }
 
-    /// Build the client for this forge, transport and credential pair against
-    /// `coordinate`'s host.
+    /// Build the client for this forge, transport and credential against `coordinate`'s host.
     ///
-    /// The single place a concrete forge is named. It validates the transport
-    /// itself rather than trusting a caller to have done it — and it validates
-    /// by *calling* [`Self::validate_transport`], never by repeating the rule,
-    /// so the argv-boundary refusal and this one cannot drift apart.
-    ///
-    /// `git` is the binary the argv-boundary gate already resolved and
-    /// version-checked; it is **required** whenever `transport` is
-    /// [`WriteTransport::Git`] and unused otherwise.
-    ///
-    /// `extra_roots` is the caller's merged extra-CA view (C-007) — a
-    /// [`ForgeError::ClientBuild`] surfaces if the forge's TLS client cannot
-    /// be built with it. `extra_roots` reaches the forge's REST client only:
-    /// under [`WriteTransport::Git`] the GitLab push is a spawned `git` whose
-    /// TLS trust is libcurl's, and `GIT_SSL_CAINFO` REPLACES curl's store
-    /// rather than extending it — D-2 ("extra", never a replacement) is why
-    /// the bundle is not materialised for that hop; `git_command.rs` passes
-    /// the parent environment's `GIT_SSL_CAINFO` / `SSL_CERT_FILE` through.
+    /// `extra_roots` reaches the REST client only: exporting it to the git push as
+    /// `GIT_SSL_CAINFO` would replace curl's whole trust store.
     ///
     /// # Errors
     ///
-    /// Returns [`ForgeError::TransportUnsupported`] (via
-    /// [`Self::validate_transport`]) for a transport this forge cannot serve,
-    /// [`ForgeError::GitUnavailable`] when the git transport was selected with
-    /// no resolved `git`, or [`ForgeError::ClientBuild`] when the hardened HTTP
-    /// client cannot be constructed.
+    /// Returns [`ForgeError::TransportUnsupported`] for a transport this forge cannot
+    /// serve, [`ForgeError::GitUnavailable`] for the git transport with no `git`, or
+    /// [`ForgeError::ClientBuild`] when the HTTP client cannot be built.
     pub fn client(
         self,
         transport: WriteTransport,
@@ -243,10 +159,7 @@ impl ForgeKind {
         }
         let host = coordinate.host.as_deref();
         Ok(match self {
-            // GitHub is unreachable with `WriteTransport::Git` — `validate_transport`
-            // above refuses that pair — so its client carries neither the transport
-            // nor the binary. A field it could never read would be dead by
-            // construction and would have to be suppressed forever.
+            // `validate_transport` refuses GitHub over git, so a transport or binary field there would be dead.
             Self::GitHub => Box::new(GitHubForge::new(credentials, host, extra_roots)?),
             Self::GitLab => Box::new(GitLabForge::new(credentials, transport, git, host, extra_roots)?),
         })

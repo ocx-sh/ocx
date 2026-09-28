@@ -9,11 +9,7 @@ use error::DigestError;
 
 const DIGEST_SHORT_LEN: usize = 12;
 
-/// Supported digest hash algorithms. The single source of truth for the
-/// algorithm concept: every place that hashes bytes or a file goes through
-/// one of [`Algorithm::hash`], [`Algorithm::hash_file`], or
-/// [`Algorithm::hash_file_read`], and every runtime dispatch on the
-/// algorithm identity flows through one of these methods.
+/// Supported digest hash algorithms; all hashing goes through these methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Algorithm {
     Sha256,
@@ -52,10 +48,7 @@ impl Algorithm {
         }
     }
 
-    /// Streams the file at `path` through this algorithm without loading
-    /// it into memory. The read-and-hash loop runs on
-    /// [`tokio::task::spawn_blocking`] so neither synchronous disk I/O
-    /// nor the hash state update stalls the async executor.
+    /// Streams the file at `path` through this algorithm on a blocking thread, without loading it into memory.
     pub async fn hash_file(self, path: &std::path::Path) -> std::io::Result<Digest> {
         let hex = match self {
             Self::Sha256 => hash_file_hex::<sha2::Sha256>(path.to_path_buf()).await?,
@@ -69,10 +62,7 @@ impl Algorithm {
         })
     }
 
-    /// Reads a file into memory and hashes it in a single disk pass,
-    /// returning `(bytes, digest)`. Used by the push path where the
-    /// blob body must be held in memory for upload and must also be
-    /// digested.
+    /// Reads a file into memory and hashes it in a single disk pass, returning `(bytes, digest)`.
     pub async fn hash_file_read(self, path: &std::path::Path) -> std::io::Result<(Vec<u8>, Digest)> {
         let (bytes, hex) = match self {
             Self::Sha256 => hash_file_read_hex::<sha2::Sha256>(path.to_path_buf()).await?,
@@ -94,14 +84,11 @@ impl std::fmt::Display for Algorithm {
     }
 }
 
-/// Small wrapper of the OCI digest, with some extra convenience methods.
+/// An OCI content digest.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Digest {
-    /// A SHA256 digest, which is the most common type of digest used in OCI.
     Sha256(String),
-    /// A SHA384 digest, which is less common but still supported in OCI.
     Sha384(String),
-    /// A SHA512 digest, which is the least common but supported in OCI.
     Sha512(String),
 }
 
@@ -127,23 +114,19 @@ impl Digest {
         }
     }
 
-    /// Returns the first `DIGEST_SHORT_LEN` characters of the hex string for display purposes.
+    /// The first `DIGEST_SHORT_LEN` hex characters, for display.
     pub fn short_hex(&self) -> &str {
         &self.hex()[..DIGEST_SHORT_LEN]
     }
 
-    /// Returns a truncated digest string (`algorithm:short_hex`) of `DIGEST_SHORT_LEN` hex
-    /// characters for display purposes.
+    /// `algorithm:short_hex` with `DIGEST_SHORT_LEN` hex characters, for display.
     pub fn to_short_string(&self) -> String {
         let (alg, hex) = self.parts();
         format!("{}:{}", alg, &hex[..DIGEST_SHORT_LEN])
     }
 }
 
-/// Streams a file through any `sha2::Digest` hasher in 64 KiB chunks on a
-/// blocking thread, returning the lowercase hex output. Shared across the
-/// [`Algorithm::hash_file`] variants so the read-and-hash loop is not
-/// triplicated.
+/// Streams a file through a `sha2::Digest` hasher in 64 KiB chunks on a blocking thread, returning lowercase hex.
 async fn hash_file_hex<H>(path: std::path::PathBuf) -> std::io::Result<String>
 where
     H: sha2::Digest + Send + 'static,
@@ -168,9 +151,7 @@ where
     .map_err(std::io::Error::other)?
 }
 
-/// Like [`hash_file_hex`], but also returns the file bytes. Each 64 KiB
-/// chunk is hashed as it is read, so there is no second pass over the
-/// buffer after I/O completes.
+/// Like [`hash_file_hex`], but also returns the file bytes.
 async fn hash_file_read_hex<H>(path: std::path::PathBuf) -> std::io::Result<(Vec<u8>, String)>
 where
     H: sha2::Digest + Send + 'static,
@@ -180,12 +161,7 @@ where
         use std::io::Read;
 
         let mut file = std::fs::File::open(&path)?;
-        // CAPACITY: usize::try_from guards against silent truncation on 32-bit targets.
-        // On 64-bit this is safe, but on 32-bit `u64 as usize` would silently wrap.
-        // Capacity is a hint only; Vec grows as needed if the hint is 0 (e.g. special
-        // files). Callers MUST pre-cap input size (e.g. via MAX_FILE_LAYER_BYTES) to
-        // avoid wasteful pre-allocations — hash_file_read_hex allocates the entire
-        // file content in memory.
+        // Callers must pre-cap the size: the whole file is held in memory.
         let expected_len = file
             .metadata()
             .ok()
@@ -220,12 +196,7 @@ impl TryFrom<&str> for Digest {
 
     /// Parse `<algorithm>:<hex>`, normalizing the hex to lowercase.
     ///
-    /// `is_ascii_hexdigit` accepts either case, so uppercase input parses — and
-    /// is then folded down once, here, rather than stored verbatim. Two digests
-    /// naming the same bytes must not compare unequal, and every consumer that
-    /// renders one (the `algorithm → bare lowercase hex` record map, a purl
-    /// version, a store path) publishes the lowercase form; a digest that kept
-    /// its input casing would make those disagree with each other.
+    /// Folded here, or two digests of the same bytes compare unequal and render different store paths and purls.
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         for algorithm in Algorithm::ALL {
             if let Some(hex) = value.strip_prefix(algorithm.prefix()).and_then(|s| s.strip_prefix(':')) {

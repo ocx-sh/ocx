@@ -1,84 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Read-only project-tier helper for `ocx direnv export`.
-//!
-//! [`load_project_state`] resolves the project tier, loads the matching
-//! `ocx.toml` + `ocx.lock`, and reports whether the lock is stale. The
-//! function is I/O-only — it emits no messages of its own; the caller
-//! decides how to surface stale-lock warnings and the no-project case.
-//!
-//! A pure project-tier leaf with no upward dependency on `package_manager`.
+//! Read-only project-tier loader for `ocx direnv export`; it emits no
+//! messages, the caller surfaces staleness and the no-project case.
 
 use std::path::{Path, PathBuf};
 
 use crate::{ProjectConfig, ProjectLock, declaration_hash};
 
 /// Return type of [`load_project_state`].
-///
-/// `stale` is computed once at load time so the caller does not have to
-/// recompute the declaration hash later. The two paths (`config_path`,
-/// `lock_path`) are carried so the caller can produce diagnostic messages
-/// referencing the on-disk locations.
 pub struct ProjectState {
-    /// Parsed `ocx.toml`.
     pub config: ProjectConfig,
-    /// Parsed `ocx.lock`.
     pub lock: ProjectLock,
-    /// Resolved path to `ocx.toml`.
     pub config_path: PathBuf,
-    /// Resolved path to `ocx.lock`.
     pub lock_path: PathBuf,
-    /// `true` when the lock's declaration hash does not match the current
-    /// config — caller decides UX (warn vs error). Hook commands warn and
-    /// continue with stale digests; `ocx exec` errors with exit 65.
+    /// The lock's declaration hash differs from the config; the caller
+    /// decides warn or error.
     pub stale: bool,
 }
 
-/// Reasons [`load_project_state`] returns `Ok(None)`.
-///
-/// Returned via [`MissingState`] so the caller can distinguish "no project
-/// at all" (no message) from "project exists but lock is missing"
-/// (caller emits a stderr note pointing the user at `ocx lock`).
+/// Why [`load_project_state`] found no state.
 pub enum MissingState {
-    /// No `ocx.toml` is in scope (CWD walk + home fallback both miss, or
-    /// `OCX_NO_PROJECT=1`). Caller exits silently.
+    /// No `ocx.toml` in scope, or `OCX_NO_PROJECT=1`.
     NoProject,
-    /// `ocx.toml` was found but the matching `ocx.lock` does not exist.
-    /// Caller is expected to emit a one-line stderr note pointing at
-    /// `lock_path`.
+    /// `ocx.toml` found, its `ocx.lock` missing.
     LockMissing {
-        /// Path the lock would have been at — `<config_dir>/ocx.lock`.
+        /// `<config_dir>/ocx.lock`.
         lock_path: PathBuf,
     },
 }
 
-/// Load the project tier `(ProjectConfig, ProjectLock)` for the current
-/// working directory.
-///
-/// `cwd` is the working directory the CLI saw at invocation time;
-/// `project_path_override` is the explicit `--project` / `OCX_PROJECT_FILE`
-/// path if one was supplied. There is no implicit home-tier fallback; the
-/// prompt-hook trio is project-tier only. Global-toolchain shell exposure
-/// is handled at the `NoProject` arm of `shell hook` (C2.7,
-/// adr_global_toolchain_tier.md §Decision 6), not by this resolver.
-///
-/// Returns:
-///
-/// - `Ok(Ok(state))` — both files loaded, with `state.stale` set.
-/// - `Ok(Err(MissingState::NoProject))` — no project in scope, caller emits
-///   nothing.
-/// - `Ok(Err(MissingState::LockMissing { lock_path }))` — config in scope
-///   but the lock is missing, caller emits a stderr note keyed off
-///   `lock_path`.
-/// - `Err(_)` — config or lock file failed to load; caller propagates.
+/// Load `ocx.toml` + `ocx.lock` for `cwd` or the explicit project path, with
+/// no home-tier fallback. `Ok(Err(_))` says why there is no state; `Err(_)`
+/// means a file failed to load.
 pub async fn load_project_state(
     cwd: &Path,
     project_path_override: Option<&Path>,
 ) -> crate::Result<Result<ProjectState, MissingState>> {
-    // `global: false` — the prompt-hook trio resolves the project tier
-    // only. Global-toolchain shell exposure is handled separately at the
-    // `NoProject` arm (C2.7), not via this resolver (strict isolation).
+    // `global: false`: the global tier stays isolated from this resolver.
     let resolved = ProjectConfig::resolve(Some(cwd), project_path_override, None, false).await?;
     let Some((config_path, lock_path)) = resolved else {
         return Ok(Err(MissingState::NoProject));

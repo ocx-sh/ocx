@@ -3,62 +3,20 @@
 
 //! Unified flat glob matcher for patch descriptor `match` patterns.
 //!
-//! Unlike [`glob::Pattern`] (from the `glob` crate), this matcher is
-//! **path-flat**: `*` spans any run of characters including `/`, `:`, and `@`.
-//! This is required because the match target is a canonical OCI identifier
-//! string (e.g. `ghcr.io/acme/cli:v1@sha256:…`), which contains `/` as a
-//! structural separator, `:` in registry ports and tag delimiters, and `@` in
-//! digest references. A path-aware glob that stops `*` at `/` would make it
-//! impossible to write a simple "all images on this registry" pattern like
-//! `ghcr.io/*`.
-//!
-//! ## Semantics
-//!
-//! | Token | Matches |
-//! |-------|---------|
-//! | `*`   | Any run of zero or more characters (including `/`, `:`, `@`) |
-//! | `?`   | Exactly one character (any) |
-//! | `[set]`  | Any character in the bracket class (e.g. `[abc]`, `[a-z]`) |
-//! | `[!set]` | Any character *not* in the bracket class |
-//! | anything else | The literal character |
-//!
-//! The match is case-sensitive. There is no `**` — it is treated as a `*`
-//! followed by another `*`, which collapses to the same semantics as a single
-//! `*` anyway. The empty pattern matches only the empty string.
-//!
-//! ## Edge cases
-//!
-//! - A registry **port** (`localhost:5000/repo:tag`) contains `:` as a literal;
-//!   the flat matcher treats `:` as any other character, so `localhost:5000/*`
-//!   matches `localhost:5000/repo:tag` correctly.
-//! - A **digest** reference (`@sha256:…`) contains `:` and `@` as literals;
-//!   `*@sha256:*` matches any identifier with any digest.
-//! - An **untagged** identifier (`ghcr.io/cmake`) has no `:` after the
-//!   repository; it will *not* match `*:*` by design — the author must write
-//!   `*` to match everything including untagged forms.
-//!
-//! ## Algorithm
-//!
-//! Classic `O(n·m)` worst-case backtracking glob implemented with two index
-//! pairs: the "last star" bookmark and the "restart" position in the text.
-//! On a `*` in the pattern, record the current positions; on mismatch, restore
-//! and advance the text restart position by one. This avoids recursion and
-//! keeps the implementation small and auditable. Typical OCI identifier strings
-//! are short and hit the linear-time average case, but the worst case is
-//! quadratic when the pattern contains many stars that require repeated
-//! backtracking.
+//! Unlike [`glob::Pattern`], `*` spans **any** run of characters including `/`,
+//! `:` and `@`, because the target is a canonical OCI identifier
+//! (`ghcr.io/acme/cli:v1@sha256:…`) and `ghcr.io/*` must match a whole registry.
+//! `?` matches one character, `[set]` / `[!set]` a bracket class, anything else
+//! itself; matching is case-sensitive, `**` behaves as `*`, and the empty pattern
+//! matches only the empty string. An untagged identifier does not match `*:*` by
+//! design.
 
-/// Returns `true` if `text` matches the flat glob `pattern`.
-///
-/// See module-level docs for the full semantics. The function is `O(n·m)` in
-/// the worst case but linear on typical OCI identifier strings.
+/// Returns `true` if `text` matches the flat glob `pattern` (`O(n·m)` worst case).
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     let pattern: &[u8] = pattern.as_bytes();
     let text: &[u8] = text.as_bytes();
 
-    // `pi` = index into `pattern`, `ti` = index into `text`.
-    // `star_pi` = pattern index just after the last `*` seen.
-    // `star_ti` = text index at which we last "entered" a star match.
+    // `star_pi`: pattern index after the last `*`; `star_ti`: text index where that star's match began.
     let mut pi = 0usize;
     let mut ti = 0usize;
     let mut star_pi: Option<usize> = None;
@@ -66,25 +24,21 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 
     while ti < text.len() {
         match pattern.get(pi) {
-            // `*` — record the bookmark and advance pattern only.
             Some(&b'*') => {
                 star_pi = Some(pi + 1);
                 star_ti = ti;
                 pi += 1;
             }
-            // `?` — match any single character.
             Some(&b'?') => {
                 pi += 1;
                 ti += 1;
             }
-            // `[...]` — bracket expression.
             Some(&b'[') => {
                 let (matched, consumed) = match_bracket(&pattern[pi..], text[ti]);
                 if matched {
                     pi += consumed;
                     ti += 1;
                 } else if let Some(spi) = star_pi {
-                    // Backtrack to last star.
                     star_ti += 1;
                     ti = star_ti;
                     pi = spi;
@@ -92,13 +46,11 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
                     return false;
                 }
             }
-            // Literal character match.
             Some(&pc) => {
                 if pc == text[ti] {
                     pi += 1;
                     ti += 1;
                 } else if let Some(spi) = star_pi {
-                    // Backtrack: star consumes one more character from text.
                     star_ti += 1;
                     ti = star_ti;
                     pi = spi;
@@ -106,8 +58,6 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
                     return false;
                 }
             }
-            // Pattern exhausted while text still has characters — only valid
-            // if there is a pending `*` to consume the remainder.
             None => {
                 if let Some(spi) = star_pi {
                     star_ti += 1;
@@ -120,7 +70,6 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
         }
     }
 
-    // Consume any trailing `*` tokens in the pattern.
     while pi < pattern.len() && pattern[pi] == b'*' {
         pi += 1;
     }
@@ -131,12 +80,8 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 /// Parses a `[set]` or `[!set]` bracket expression starting at `pattern[0]`
 /// (which must be `b'['`) and tests whether `ch` is matched.
 ///
-/// Returns `(matched, bytes_consumed)`. `bytes_consumed` includes the surrounding
-/// brackets.
-///
-/// If the bracket is malformed (no closing `]`), the function treats the entire
-/// token as a literal `[` match attempt for just that byte, consuming only 1
-/// byte, which effectively falls through to literal matching for the rest.
+/// Returns `(matched, bytes_consumed)`, brackets included; a bracket with no
+/// closing `]` matches a literal `[` and consumes 1 byte.
 fn match_bracket(pattern: &[u8], ch: u8) -> (bool, usize) {
     debug_assert_eq!(pattern[0], b'[');
     let negate = pattern.get(1) == Some(&b'!');
@@ -145,7 +90,6 @@ fn match_bracket(pattern: &[u8], ch: u8) -> (bool, usize) {
     let mut inner_match = false;
 
     while i < pattern.len() && pattern[i] != b']' {
-        // Range expression `a-z`.
         if i + 2 < pattern.len() && pattern[i + 1] == b'-' && pattern[i + 2] != b']' {
             if ch >= pattern[i] && ch <= pattern[i + 2] {
                 inner_match = true;
@@ -164,7 +108,6 @@ fn match_bracket(pattern: &[u8], ch: u8) -> (bool, usize) {
         let matched = if negate { !inner_match } else { inner_match };
         (matched, consumed)
     } else {
-        // Malformed bracket — treat `[` as literal.
         (pattern[0] == ch, 1)
     }
 }

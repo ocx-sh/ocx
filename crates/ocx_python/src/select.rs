@@ -2,13 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! Wheel selection: marker evaluation + tag-compatibility ranking per target.
-//!
-//! For a single `(variant, platform key)` [`PythonTarget`], selects exactly one
-//! wheel per applicable package (design spec, "Wheel selection algorithm"):
-//! filter packages by their PEP 508 marker against the derived marker
-//! environment, then rank each package's candidate wheels by tag priority from
-//! `uv-platform-tags`, tiebreaking by build tag then filename. Zero candidates
-//! for an applicable package is an actionable [`SelectError::NoCompatibleWheel`].
 
 use std::collections::BTreeSet;
 use std::str::FromStr;
@@ -23,11 +16,7 @@ use crate::platform::{
     VariantConstraints, marker_environment,
 };
 
-/// Default `manylinux` (glibc) floor when a linux target leaves it unset —
-/// matches the design spec's `default` variant (`min_manylinux: "2_28"`).
 const DEFAULT_MANYLINUX_FLOOR: &str = "2_28";
-/// Default `musllinux` floor when a musl target leaves it unset — matches the
-/// design spec's `musl` variant (`min_musllinux: "1_2"`).
 const DEFAULT_MUSLLINUX_FLOOR: &str = "1_2";
 
 /// A resolved wheel chosen for a package under a target.
@@ -45,55 +34,33 @@ pub struct WheelRef {
     pub sha256: String,
 }
 
-/// Selects one wheel per applicable package for `target`.
-///
-/// Applicability is decided by each package's PEP 508 marker evaluated against
-/// the target's derived marker environment; non-applicable packages (OS forks,
-/// implementation forks) are dropped, not failed. Wheels are matched by
-/// `uv-platform-tags` compatibility (never string equality), so `any`,
-/// `py2.py3-none-any`, and `abi3` wheels are honored through compat semantics.
+/// Selects one wheel per applicable package for `target`; packages whose marker excludes the target are dropped.
 ///
 /// # Errors
 ///
-/// Returns [`SelectError::NoCompatibleWheel`] when an applicable package has no
-/// wheel intersecting the target tag set — naming the package, triple, variant,
-/// and the platform tags that WERE available (so a no-wheel-anywhere package is
-/// distinguishable from a no-wheel-for-this-triple one). Returns
-/// [`SelectError::AbiMismatch`] when a selected binary wheel's ABI is
-/// inconsistent with the interpreter pin (`cp313` vs `cp313t`, fails closed),
-/// [`SelectError::MissingUrl`] when the chosen wheel carries no download URL and
-/// so cannot be mirrored, [`SelectError::MarkerSyntax`] when a package's marker
-/// fails to parse, and [`SelectError::TargetModel`] when the target's own axes
-/// cannot be turned into a `uv` tag model or marker environment.
+/// [`SelectError::NoCompatibleWheel`] when an applicable package has no compatible wheel,
+/// [`SelectError::AbiMismatch`] when a selected wheel's ABI contradicts the pin (`cp313` vs `cp313t`),
+/// [`SelectError::MissingUrl`] when the chosen wheel has no URL, [`SelectError::MarkerSyntax`] for an unparsable
+/// marker, and [`SelectError::TargetModel`] when the target's axes do not form a `uv` tag model.
 pub fn select_wheels(lock: &Pylock, target: &PythonTarget) -> Result<Vec<WheelRef>, SelectError> {
-    // Step 1: derive the marker environment for package filtering.
     let marker_env = build_marker_environment(target)?;
-    // Step 3: the ordered priority tag set — built once, reused across packages.
     let tags = build_target_tags(target)?;
 
     let target_label = target_label(target);
     let variant_label = variant_label(&target.variant);
     let interpreter_abi = target.effective_abi().to_string();
     let free_threaded = is_free_threaded(target);
-    // `wheel_priority` semantics: a NON-empty list is an admissibility filter
-    // + ranking — a tag-compatible wheel whose platform tags match no listed
-    // prefix is EXCLUDED, and survivors rank by first-listed-prefix-wins.
-    // Absent/empty keeps today's TagPriority-only ordering, unchanged
-    // (lib backcompat; the mirror always passes a non-empty derived filter).
     let wheel_priority = target.variant.wheel_priority.as_deref().unwrap_or(&[]);
 
     let mut selected = Vec::new();
     for package in &lock.packages {
-        // Step 2: drop packages excluded by their PEP 508 marker.
         if !package_applies(package, &marker_env)? {
             continue;
         }
 
-        // Step 4: pick the highest-priority compatible wheel.
         let wheel = pick_wheel(package, &tags, &target_label, &variant_label, wheel_priority)?;
 
-        // A wheel with no URL is not mirrorable — reject it so the downstream
-        // naming convention's URL assumption holds.
+        // `naming` derives the repository path from this URL's host.
         let Some(url) = wheel.url.clone() else {
             return Err(SelectError::MissingUrl {
                 package: package.name.clone(),
@@ -110,16 +77,11 @@ pub fn select_wheels(lock: &Pylock, target: &PythonTarget) -> Result<Vec<WheelRe
         });
     }
 
-    // Step 5: fail closed if any selected binary wheel's ABI contradicts the pin.
     validate_abi_consistency(&selected, &interpreter_abi, free_threaded)?;
 
     Ok(selected)
 }
 
-// ── Selection steps ─────────────────────────────────────────────────────────
-
-/// Step 1: converts the target's L1 facts + interpreter pin into a `uv-pep508`
-/// [`UvMarkerEnvironment`] from the target's os/arch [`PlatformFacts`].
 fn build_marker_environment(target: &PythonTarget) -> Result<UvMarkerEnvironment, SelectError> {
     let facts = PlatformFacts {
         operating_system: target.platform.operating_system,
@@ -143,8 +105,7 @@ fn build_marker_environment(target: &PythonTarget) -> Result<UvMarkerEnvironment
     .map_err(|error| model_error("marker environment", error))
 }
 
-/// Step 2: `true` when the package's marker matches the environment (or it has
-/// no marker). A malformed marker string is [`SelectError::MarkerSyntax`].
+/// `true` when the package's marker matches the environment, or it has none.
 fn package_applies(package: &LockedPackage, env: &UvMarkerEnvironment) -> Result<bool, SelectError> {
     let Some(marker) = package.marker.as_deref() else {
         return Ok(true);
@@ -153,14 +114,11 @@ fn package_applies(package: &LockedPackage, env: &UvMarkerEnvironment) -> Result
         package: package.name.clone(),
         source: Box::new(source),
     })?;
-    // No extras drive base-package platform filtering (colorama, watchdog, …).
+    // Platform filtering of base packages evaluates with no extras.
     Ok(tree.evaluate(env, &[]))
 }
 
-/// Step 3: builds the ordered priority tag set for the target. `uv`'s
-/// [`Tags::from_env`] already spans `abi3` across CPython minors, unions the
-/// `py3`/`none`/`any` tags, and orders exact matches highest — so tag
-/// compatibility (never equality) falls out of it.
+/// Builds the ordered priority tag set; compatibility, never string equality, decides a match.
 fn build_target_tags(target: &PythonTarget) -> Result<Tags, SelectError> {
     let platform = build_uv_platform(target)?;
     let version = parse_python_version(&target.interpreter.python_version)?;
@@ -180,9 +138,6 @@ fn build_target_tags(target: &PythonTarget) -> Result<Tags, SelectError> {
     .map_err(|error| model_error("platform tag set", error))
 }
 
-/// A ranked wheel candidate for a package: the `wheel_priority` class rank
-/// (decision B), then tag priority, then the tiebreak axes (PEP 427 build
-/// tag, then filename), highest wins.
 struct Candidate<'a> {
     class_rank: usize,
     priority: TagPriority,
@@ -191,9 +146,7 @@ struct Candidate<'a> {
 }
 
 impl Candidate<'_> {
-    /// The descending sort key: higher class rank first, then higher tag
-    /// priority, then higher build tag, then greater filename (deterministic
-    /// final tiebreak).
+    /// The sort key, highest wins; the filename makes the final tiebreak deterministic.
     fn key(&self) -> (usize, TagPriority, &Option<BuildTag>, &str) {
         (
             self.class_rank,
@@ -204,16 +157,7 @@ impl Candidate<'_> {
     }
 }
 
-/// The `wheel_priority` class rank of a wheel: the position of its
-/// highest-priority matching prefix among `priority`, inverted so the
-/// first-listed prefix ranks highest (`priority.len()`); an unmatched tag
-/// contributes nothing. Rank `0` means no prefix matched — with a non-empty
-/// `priority` the caller EXCLUDES such wheels (admissibility filter); with an
-/// empty `priority` every wheel ranks `0` and today's TagPriority-only
-/// ordering applies unchanged (backcompat). Matching is a prefix match
-/// against each of the wheel's platform tags (a wheel may carry a compressed
-/// multi-tag set), never re-admitting a wheel that tag-compatibility already
-/// excluded.
+/// The `wheel_priority` rank of a wheel: first-listed prefix ranks highest, `0` means no prefix matched.
 fn class_rank<'a>(platform_tags: impl Iterator<Item = &'a str>, priority: &[String]) -> usize {
     platform_tags
         .filter_map(|tag| priority.iter().position(|prefix| tag.starts_with(prefix.as_str())))
@@ -222,13 +166,7 @@ fn class_rank<'a>(platform_tags: impl Iterator<Item = &'a str>, priority: &[Stri
         .unwrap_or(0)
 }
 
-/// Step 4: filters a package's tag-compatible wheels through the non-empty
-/// `wheel_priority` admissibility list (a wheel matching no listed prefix is
-/// excluded), ranks survivors by class rank then tag priority (build tag then
-/// filename as deterministic tiebreakers), and returns the best. Zero
-/// admissible wheels is [`SelectError::NoCompatibleWheel`], whose
-/// `available_tags` names the platform tags that WERE present on the
-/// (excluded or incompatible) candidates.
+/// Returns the best admissible tag-compatible wheel of a package.
 fn pick_wheel<'a>(
     package: &'a LockedPackage,
     tags: &Tags,
@@ -241,17 +179,13 @@ fn pick_wheel<'a>(
 
     for wheel in &package.wheels {
         let Ok(parsed) = WheelFilename::from_str(&wheel.filename) else {
-            // A non-wheel filename can't be a candidate and contributes no
-            // platform tag to the diagnostic set.
             continue;
         };
         let wheel_tags: Vec<String> = parsed.platform_tags().iter().map(ToString::to_string).collect();
         available.extend(wheel_tags.iter().cloned());
         if let TagCompatibility::Compatible(priority) = parsed.compatibility(tags) {
             let class_rank = class_rank(wheel_tags.iter().map(String::as_str), wheel_priority);
-            // Admissibility: a non-empty priority list excludes wheels whose
-            // platform tags match none of its prefixes (rank 0). Its tags stay
-            // in `available` so the NoCompatibleWheel diagnostic names them.
+            // Excluded wheels keep their tags in `available` for the NoCompatibleWheel diagnostic.
             if !wheel_priority.is_empty() && class_rank == 0 {
                 continue;
             }
@@ -278,9 +212,7 @@ fn pick_wheel<'a>(
     }
 }
 
-/// Step 5: rejects any selected binary wheel whose CPython ABI's free-threaded
-/// flag contradicts the target's (`cp313` vs `cp313t`). `abi3`/`none` wheels are
-/// ABI-agnostic and always consistent.
+/// Rejects a selected wheel whose CPython free-threaded flag contradicts the target's (`cp313` vs `cp313t`).
 fn validate_abi_consistency(
     selected: &[WheelRef],
     interpreter_abi: &str,
@@ -305,11 +237,7 @@ fn validate_abi_consistency(
     Ok(())
 }
 
-// ── Target → uv model helpers ───────────────────────────────────────────────
-
-/// Maps the target's os/arch + variant libc into a `uv` [`UvPlatform`]. The
-/// variant's libc floor becomes the `manylinux`/`musllinux` OS version, which is
-/// exactly what constrains [`Tags::from_env`]'s compatible platform tags.
+/// Maps the target's os/arch and libc floor into a `uv` [`UvPlatform`].
 fn build_uv_platform(target: &PythonTarget) -> Result<UvPlatform, SelectError> {
     let arch = match target.platform.architecture {
         TargetArchitecture::Amd64 => Arch::X86_64,
@@ -317,16 +245,13 @@ fn build_uv_platform(target: &PythonTarget) -> Result<UvPlatform, SelectError> {
     };
     let os = match target.platform.operating_system {
         TargetOperatingSystem::Linux => linux_os(&target.variant)?,
-        // ponytail: v1 ships linux/amd64 only; macOS uses a permissive recent
-        // deployment floor (accepts wheels for that OS version or older).
-        // Refine the floor when the darwin leg lands.
+        // ponytail: fixed permissive macOS 15.0 floor; derive it per target when the darwin leg lands.
         TargetOperatingSystem::Darwin => Os::Macos { major: 15, minor: 0 },
         TargetOperatingSystem::Windows => Os::Windows,
     };
     Ok(UvPlatform::new(os, arch))
 }
 
-/// Derives the linux [`Os`] (with libc floor) from the variant constraints.
 fn linux_os(variant: &VariantConstraints) -> Result<Os, SelectError> {
     if variant.libc == Some(LibcFamily::Musl) {
         let floor = variant.min_musllinux.as_deref().unwrap_or(DEFAULT_MUSLLINUX_FLOOR);
@@ -390,8 +315,7 @@ fn target_label(target: &PythonTarget) -> String {
     format!("{os}/{arch}")
 }
 
-/// A short variant label for error messages (`"default"`, `"musl"`, `"cp313t"`,
-/// `"musl-cp313t"`), mirroring the L2 variant-prefix composition.
+/// A short variant label for error messages (`"default"`, `"musl-cp313t"`).
 fn variant_label(variant: &VariantConstraints) -> String {
     let mut parts: Vec<&str> = Vec::new();
     if variant.libc == Some(LibcFamily::Musl) {
@@ -407,8 +331,6 @@ fn variant_label(variant: &VariantConstraints) -> String {
     }
 }
 
-/// Wraps a `uv`/parse failure encountered while turning the target's own axes
-/// into a tag model as a [`SelectError::TargetModel`], carrying the source.
 fn model_error(context: &str, source: impl std::error::Error + Send + Sync + 'static) -> SelectError {
     SelectError::TargetModel {
         context: context.to_string(),
@@ -421,11 +343,6 @@ fn model_error(context: &str, source: impl std::error::Error + Send + Sync + 'st
 #[non_exhaustive]
 pub enum SelectError {
     /// No wheel for an applicable package intersects the target tag set.
-    ///
-    /// Names the package, the target triple, the variant, and the tags that
-    /// were available on the package's wheels — distinguishing
-    /// no-wheel-for-triple (e.g. `psycopg2`) from no-wheel-anywhere
-    /// (e.g. `uwsgi`).
     #[error(
         "no compatible wheel for package '{package}' on target '{target}' (variant '{variant}'); available tags: {available_tags:?}"
     )]
@@ -439,8 +356,7 @@ pub enum SelectError {
         /// The platform tags present on the package's candidate wheels.
         available_tags: Vec<String>,
     },
-    /// A selected binary wheel's ABI is inconsistent with the interpreter pin
-    /// (e.g. `cp313` wheel against a `cp313t` free-threaded interpreter).
+    /// A selected binary wheel's ABI is inconsistent with the interpreter pin.
     #[error("wheel '{filename}' ABI '{wheel_abi}' is incompatible with interpreter ABI '{interpreter_abi}'")]
     AbiMismatch {
         /// The offending wheel filename.
@@ -450,8 +366,7 @@ pub enum SelectError {
         /// The interpreter's ABI tag.
         interpreter_abi: String,
     },
-    /// The wheel selected for a package carries no download URL and so cannot be
-    /// mirrored (a path-based lock entry reached selection).
+    /// The wheel selected for a package carries no download URL.
     #[error("selected wheel '{filename}' for package '{package}' has no download URL")]
     MissingUrl {
         /// The package whose selected wheel has no URL.
@@ -468,9 +383,7 @@ pub enum SelectError {
         #[source]
         source: Box<uv_pep508::Pep508Error>,
     },
-    /// The target's own axes could not be turned into a `uv` tag model or marker
-    /// environment (malformed interpreter version, libc floor, or unsupported
-    /// implementation).
+    /// The target's own axes could not be turned into a `uv` tag model or marker environment.
     #[error("cannot build the selection tag model ({context})")]
     TargetModel {
         /// Which part of the model construction failed.

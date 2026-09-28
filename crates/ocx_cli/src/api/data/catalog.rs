@@ -32,8 +32,7 @@ impl Catalog {
     }
 
     pub fn with_tags(tags: HashMap<String, Vec<String>>) -> Self {
-        // Sort repository keys and each tag list so the table and JSON outputs
-        // are reproducible regardless of the incoming hash order.
+        // Sorted, or output order follows the incoming hash order.
         let sorted = tags
             .into_iter()
             .map(|(repository, mut repository_tags)| {
@@ -55,17 +54,8 @@ pub enum CatalogData {
 }
 
 impl Catalog {
-    /// The plain table's column-major rows, already neutralized (CWE-150).
-    ///
-    /// Repository names and tags here come off a registry's `list_repositories`
-    /// response, so they are foreign-authored. Split out of
-    /// [`Printable::print_plain`] so a hostile fixture can be asserted on the
-    /// rows themselves — they are exactly what `print_table` writes to the
-    /// terminal — rather than on a count of sanitizer calls in the source, which
-    /// admits slack the moment a call appears that is not a row push.
-    ///
-    /// The second element is empty for [`CatalogData::WithoutTags`], whose table
-    /// has one column.
+    /// The plain table's column-major rows, neutralized (CWE-150) since names and tags are
+    /// registry-authored; the second is empty for [`CatalogData::WithoutTags`].
     fn plain_rows(&self) -> [Vec<String>; 2] {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         match &self.repositories {

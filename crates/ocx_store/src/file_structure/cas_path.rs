@@ -5,80 +5,40 @@ use std::path::{Path, PathBuf};
 
 use ocx_oci::{Algorithm, Digest};
 
-/// [`Result`](std::result::Result) over the one failure writing a CAS digest
-/// file can raise. `From<FileError>` for the crate-wide error yields exactly
-/// `InternalFile(path, cause)`, which is what this returned one conversion
-/// later.
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
-/// What reading a digest file can fail with: the read itself, or the bytes it
-/// found not being a digest.
-///
-/// Two arms because those are the two [`read_digest_file`] can raise and no
-/// more — the rule `ocx_util::error::Error`'s own docs state. They are the two
-/// the crate-wide error already distinguished: an unreadable file is
-/// `InternalFile` (74) and a malformed digest is `Digest` (65), and folding
-/// either onto the other would move an exit code.
+/// Failure reading a digest file; the two arms map to different exit codes (74 vs 65), so never fold them.
 #[derive(Debug, thiserror::Error)]
 pub enum DigestFileError {
-    /// The digest file could not be read.
     #[error(transparent)]
     File(#[from] ocx_util::error::FileError),
-    /// The file was read, and its contents are not a digest.
     #[error(transparent)]
     Digest(#[from] ocx_oci::digest::error::DigestError),
 }
 
-/// Number of hex characters used as the shard prefix directory name.
 const CAS_SHARD_PREFIX_LEN: usize = 2;
 
-/// Total hex characters encoded in the path (prefix + suffix).
-/// The full digest is recovered from the `digest` file, not the path.
-/// 32 hex chars = 128 bits — birthday-safe for any realistic store size.
+/// 128 bits: birthday-safe for any realistic store; the full digest lives in the `digest` file.
 const CAS_SHARD_TOTAL_LEN: usize = 32;
 
-/// Number of hex characters in the suffix (remaining after prefix).
 const CAS_SHARD_SUFFIX_LEN: usize = CAS_SHARD_TOTAL_LEN - CAS_SHARD_PREFIX_LEN;
 
-/// Number of path components produced by [`cas_shard_path`]: `algorithm/prefix/suffix`.
-/// Store walkers add their own prefix levels (e.g., registry) to this.
+/// Path components produced by [`cas_shard_path`]; store walkers add their own prefix levels.
 pub const CAS_SHARD_DEPTH: usize = 3;
 
-/// Filename for the digest marker file inside a CAS directory.
-/// Used by all three CAS stores' `digest_file()` accessors.
 pub const DIGEST_FILENAME: &str = "digest";
 
 /// CAS tier classification for GC and reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CasTier {
-    /// A fully resolved and installed package.
     Package,
-    /// An extracted OCI layer (shared across packages).
     Layer,
-    /// A raw content-addressed blob.
     Blob,
-    /// A generated shim directory — the on-disk form of a *deferred* tool
-    /// (plan contract C-014, [#302](https://github.com/ocx-sh/ocx/issues/302)).
-    ///
-    /// Identity-keyed rather than purely content-addressed: the repository is
-    /// part of its path, unlike the three tiers above. It is nonetheless a
-    /// first-class GC entry — it is walked, it can be collected, and, unlike a
-    /// layer or a blob, it carries **outgoing** `refs/blobs/` edges.
-    ///
-    /// Its liveness comes directly from the lock-pinned root set and never from
-    /// a package edge: a shim directory exists precisely when the package
-    /// directory does not, so there is no package to point at it.
+    /// A deferred tool; carries outgoing `refs/blobs/` edges and is live only through the lock-pinned roots.
     Shim,
 }
 
-/// Returns a 2-level sharded path for the given digest, truncated to
-/// `CAS_SHARD_TOTAL_LEN` hex characters.
-///
-/// Layout: `{algorithm}/{hex[0..2]}/{hex[2..32]}`
-///
-/// The full digest is NOT recoverable from the path alone — use the sibling
-/// `digest` file for that. The truncation keeps paths bounded for Windows
-/// MAX_PATH compliance.
+/// Returns `{algorithm}/{hex[0..2]}/{hex[2..32]}`, truncated to stay under Windows `MAX_PATH`; the digest is not recoverable from it.
 pub fn cas_shard_path(digest: &Digest) -> PathBuf {
     let (algorithm, hex) = digest.parts();
     let mut path = PathBuf::from(algorithm);
@@ -87,18 +47,12 @@ pub fn cas_shard_path(digest: &Digest) -> PathBuf {
     path
 }
 
-/// Writes the full digest string (e.g., `sha256:43567c07...`) to the given path.
-///
-/// The caller provides the full path (typically from a store's `digest_file()` accessor).
 pub async fn write_digest_file(path: &Path, digest: &Digest) -> Result<()> {
     tokio::fs::write(path, digest.to_string())
         .await
         .map_err(|e| ocx_util::error::FileError::new(path, e))
 }
 
-/// Reads and parses a digest file at the given path.
-///
-/// The caller provides the full path (typically from a store's `digest_file()` accessor).
 pub async fn read_digest_file(path: &Path) -> std::result::Result<Digest, DigestFileError> {
     let content = tokio::fs::read_to_string(path)
         .await
@@ -107,27 +61,15 @@ pub async fn read_digest_file(path: &Path) -> std::result::Result<Digest, Digest
     Ok(digest)
 }
 
-/// Validates that a directory path ends with `{algorithm}/{2hex}/{remaining_hex}`.
-///
-/// Checks that the algorithm is known (`sha256`, `sha384`, `sha512`), the prefix
-/// is exactly 2 hex characters, and the remaining segment is valid hex.
-/// Derives a filesystem-safe reference name from a content digest.
-///
-/// Format: `{algorithm}_{32_hex}` — e.g. `sha256_4a3f...1b2c`. The
-/// algorithm prefix makes the filename self-describing when browsed
-/// in an IDE, and the 32-hex suffix mirrors `CAS_SHARD_TOTAL_LEN`
-/// so a reader can recognize the identity at a glance.
-///
-/// Used for `refs/layers/`, `refs/blobs/`, and `refs/deps/`, where the
-/// ref's identity is the content digest.
+/// Derives the `{algorithm}_{32_hex}` ref name for `refs/{layers,blobs,deps}/`.
 pub fn cas_ref_name(digest: &Digest) -> String {
     let hex = digest.hex();
     let total = CAS_SHARD_TOTAL_LEN.min(hex.len());
     format!("{}_{}", digest.algorithm().prefix(), &hex[..total])
 }
 
+/// True when `dir` ends with a [`cas_shard_path`] of a known algorithm.
 pub fn is_valid_cas_path(dir: &Path) -> bool {
-    // Collect last 3 components in reverse: remaining, prefix, algorithm
     let tail: Vec<&str> = dir
         .components()
         .rev()
@@ -137,7 +79,6 @@ pub fn is_valid_cas_path(dir: &Path) -> bool {
     if tail.len() != 3 {
         return false;
     }
-    // tail is reversed: [remaining, prefix, algorithm]
     let algorithm = tail[2];
     let prefix = tail[1];
     let remaining = tail[0];

@@ -8,12 +8,7 @@ pub enum Error {
     #[error("identifier requires a digest: {0}")]
     MissingDigest(String),
 
-    /// Bytes read from (or about to be written to) a content-addressed
-    /// dispatch object did not hash to the digest that named them — a
-    /// trust-boundary check (CWE-345) that fires on write (source-served
-    /// bytes disagree with their claimed digest) and on read (an on-disk
-    /// object was tampered with after being written). See
-    /// `adr_index_indirection.md` Decision A3.
+    /// A dispatch object's bytes did not hash to the digest naming them, on write or on read (`adr_index_indirection.md#a3`).
     #[error("dispatch object digest mismatch: claimed '{claimed}', computed '{computed}'")]
     DigestMismatch {
         /// The digest the caller claimed (write) or the on-disk filename encodes (read).
@@ -22,11 +17,7 @@ pub enum Error {
         computed: ocx_oci::Digest,
     },
 
-    /// A root document (`p/<ns>/<pkg>.json`) could not be parsed as the
-    /// frozen wire shape (`adr_index_indirection.md` F1/A2) — genuine
-    /// corruption, one of the few hard read-path failures. Never raised for
-    /// a bare root/catalog digest disagreement, which self-heals by
-    /// re-derivation instead (`IndexStore::read_root`).
+    /// A root document (`p/<ns>/<pkg>.json`) failed to parse (`adr_index_indirection.md#a2`); never raised for a root/catalog digest disagreement, which self-heals.
     #[error("malformed root document for source '{index_source}', repository '{repository}': {cause}")]
     MalformedRootDocument {
         index_source: String,
@@ -35,14 +26,7 @@ pub enum Error {
         cause: serde_json::Error,
     },
 
-    /// A `repository` reaching a wire-grammar path builder would join OUTSIDE
-    /// the source subtree under the index home (CWE-22 path traversal). The
-    /// repository component is split verbatim on `/` into path segments
-    /// (`file_structure::repository_path`), so an absolute segment, a `..`
-    /// escape, a Windows drive/UNC prefix, or a backslash-separated escape
-    /// would land a read or write outside the home. Defense-in-depth behind
-    /// the catalog-key boundary validation in `LocalIndex::sync_catalog`
-    /// (`adr_index_indirection.md` Decision F2).
+    /// A `repository` would join outside the source subtree (CWE-22) (`adr_index_indirection.md#f2`).
     #[error("index repository path '{repository}' escapes the source root")]
     RepositoryEscapesIndexHome {
         repository: String,
@@ -50,12 +34,9 @@ pub enum Error {
         source: ocx_util::fs::path::PathEscapeError,
     },
 
-    /// A filesystem name under a source's `p/` tree is not valid UTF-8, so the
-    /// `<ns>/<pkg>` repository key it belongs to cannot be formed
-    /// (`IndexStore::list_wire_repositories`). Reported rather than skipped or
-    /// transliterated to U+FFFD: that walk is the derivation basis for a
-    /// wholesale `c/index.json` replacement, so a name it drops is a package
-    /// deleted from the catalog while its root document is still on disk.
+    /// A name under a source's `p/` tree is not valid UTF-8.
+    ///
+    /// Raised, never skipped: the walk derives a wholesale `c/index.json`, so a dropped name deletes a package from the catalog.
     #[error("index path is not valid UTF-8: {}", path.display())]
     NonUtf8WireName { path: std::path::PathBuf },
 }

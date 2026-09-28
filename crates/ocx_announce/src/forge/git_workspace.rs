@@ -1,26 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The throwaway `git` clone the git write transport works in.
+//! The throwaway `git` clone the git write transport works in, kept until the forge
+//! drops: [`super::Forge::commit_files`] builds a local commit only
+//! [`super::Forge::open_or_update_pull_request`] publishes.
 //!
-//! One workspace per forge instance, created on the first git-half operation and
-//! living until the forge is dropped — its lifetime has to span both
-//! [`super::Forge::commit_files`] and
-//! [`super::Forge::open_or_update_pull_request`], because the first builds a
-//! local commit that only the second publishes.
-//!
-//! Nothing secret is ever written into the directory: the credential travels in
-//! the child environment, never into `.git/config`. That is what makes a
-//! directory left behind by a `SIGKILL` merely untidy rather than a leak, and a
-//! future change that writes a credential into the clone invalidates the premise
-//! and must say so.
-//!
-//! The methods below are the ADR's recipe in the recipe's own order — fetch,
-//! compare, the index-file commit chain, the local ref move, the push, the
-//! confirmation poll. Every invocation is built by one argv helper, so the flags
-//! that must be on *all* of them ([`GitWorkspace::argv_with`]) cannot be on all
-//! but one; the two that are conditional — the credential pair and the
-//! `credential.helper` reset — are conditional in exactly one place.
+//! The credential travels in the child environment, never `.git/config`, so a clone
+//! left by `SIGKILL` is untidy, not a leak.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -41,39 +27,18 @@ use super::{
 };
 
 /// The remote-tracking namespace every fetch writes into.
-///
-/// `o` rather than `origin`: the workspace configures no remote at all — every
-/// fetch and the push name a URL — so the namespace is ocx's own label, and the
-/// ADR's recipe spells it `o/<ref>`.
 const TRACKING_NAMESPACE: &str = "refs/remotes/o";
 
 /// The `<old>` value that makes `update-ref` a create rather than a swap.
-///
-/// Forty zeros, per C-038. A SHA-256 index repository would need sixty-four, and
-/// that is a recorded residual rather than a covered case: such a repository
-/// cannot be fetched into a SHA-1 workspace at all, so the mismatch fails loudly
-/// one step earlier, at the fetch.
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 
 /// Where a commit's file contents are written before `hash-object` reads them.
-///
-/// Inside the work tree, so the path handed to `git hash-object` is relative and
-/// inside the repository — the one placement no `git` argues with. Nothing ever
-/// adds it to the index: the commit is built from `read-tree` plus
-/// `update-index --cacheinfo`, neither of which looks at the work tree.
 const STAGING_DIRECTORY: &str = ".ocx-staging";
 
-/// The bounded schedule the merge-request confirmation poll runs on.
+/// The `1, 2, 4, 8, 15` [`backoff_delays`] schedule (~30 s) the merge-request
+/// confirmation poll runs on.
 ///
-/// The ADR's `1, 2, 4, 8, 15`, giving up at ~30s of wall clock, expressed as a
-/// configuration literal over the **existing** [`backoff_delays`] (DV-7). No
-/// second clock is minted in this module, and the delays are assertable without
-/// sleeping.
-///
-/// `request_timeout` is inert here and is deliberately left at the shared
-/// default: the probe is the caller's REST read and its own client already
-/// carries a timeout, so a different value would read as a bound this module
-/// applies and does not.
+/// `request_timeout` is inert: the probe's own REST client carries the timeout.
 pub const CONFIRMATION_SCHEDULE: PollSchedule = PollSchedule {
     initial_interval: Duration::from_secs(1),
     max_interval: Duration::from_secs(30),
@@ -81,30 +46,15 @@ pub const CONFIRMATION_SCHEDULE: PollSchedule = PollSchedule {
     request_timeout: super::poll::DEFAULT_REQUEST_TIMEOUT,
 };
 
-/// The `__testing`-gated seam that replaces [`CONFIRMATION_SCHEDULE`]'s three
-/// intervals, as `initial,max,deadline` **milliseconds**.
-///
-/// Why it exists: the schedule gives up at ~30 s of wall clock, and four
-/// acceptance rows drive it to exhaustion on purpose —
-/// `test_transport_git.py::test_merge_request_unconfirmed_exits_75_and_rerun_converges`
-/// plus the `merge-request-unconfirmed` arm of three parametrized rows — so the
-/// suite paid ~124 s of wall clock to observe a bound that is a *ratio*, not a
-/// duration. Scaling the ladder states the same claim in seconds. The ladder's
-/// shipped shape (`1, 2, 4, 8, 15`, deadline 30 s) stays asserted without
-/// sleeping, at `tests::poll_uses_forge_poll_backoff_delays`.
-///
-/// Compile-gated and `__OCX_TESTING_*`-named for the reasons the prefix exists:
-/// absent from release builds, reserved out of `Env::apply_ocx_config`, and
-/// undocumented in `website/src/docs/reference/environment.md`. Same shape as
-/// [`super::github`]'s `__OCX_TESTING_FORGE_BASE_URL`.
+/// The `__testing` seam replacing [`CONFIRMATION_SCHEDULE`]'s intervals, as
+/// `initial,max,deadline` **milliseconds**, so acceptance rows can exhaust the poll fast.
 #[cfg(any(test, feature = "__testing"))]
 const TESTING_CONFIRMATION_ENV: &str = "__OCX_TESTING_FORGE_CONFIRM_MS";
 
 /// [`CONFIRMATION_SCHEDULE`], or the [`TESTING_CONFIRMATION_ENV`] override.
 ///
-/// **Panics** on a malformed value rather than falling back to the shipped
-/// schedule: a seam that silently ignores what it was handed turns a typo into
-/// a row that quietly out-waits the real deadline and still passes.
+/// **Panics** on a malformed value: a silent fallback would let a typo'd row out-wait
+/// the real deadline and still pass.
 #[cfg(any(test, feature = "__testing"))]
 fn confirmation_schedule() -> PollSchedule {
     let Ok(raw) = std::env::var(TESTING_CONFIRMATION_ENV) else {
@@ -134,84 +84,44 @@ fn confirmation_schedule() -> PollSchedule {
     CONFIRMATION_SCHEDULE
 }
 
-/// The `http.<prefix>` scope a credential injected for `remote` may be used
-/// under.
+/// The `http.<prefix>` scope a credential injected for `remote` may be used under.
 ///
-/// C-034's rule lives in [`CredentialScope::new`]; this is only the derivation
-/// that feeds it — the remote URL with any trailing slash removed. Nothing else
-/// is stripped, and in particular a trailing `.git` stays: git matches
-/// `http.<url>.*` component-wise, so `…/index` is **not** a prefix of
-/// `…/index.git`, and a helpfully-shortened scope would stop applying silently,
-/// leaving the push unauthenticated rather than over-scoped.
-///
-/// Host case and an explicit port pass through untouched. Git normalises both
-/// itself when it matches a configuration URL against a request URL, so
-/// re-implementing that here would be a second normaliser free to disagree with
-/// the one that decides.
+/// Only a trailing slash is removed: git matches `http.<url>.*` per path component, so
+/// dropping `.git` would silently unscope the credential and leave the push
+/// unauthenticated. Host case and port pass through, or a second normaliser could
+/// disagree with git's.
 ///
 /// # Errors
 ///
-/// Returns [`ForgeError::GitUnavailable`] when `remote` names no project — see
-/// [`CredentialScope::new`], which fails closed rather than injecting the
-/// credential across a whole host or group.
+/// Returns [`ForgeError::GitUnavailable`] when `remote` names no project, rather than
+/// scoping the credential to a whole host or group.
 pub fn credential_scope(remote: &str) -> Result<CredentialScope, ForgeError> {
     CredentialScope::new(remote.trim_end_matches('/'))
 }
 
 /// Wait for the merge request the push asked the server to create.
 ///
-/// A push carrying merge-request push options returns as soon as the ref is
-/// written; the server creates the request **asynchronously**, so reading it
-/// back once races the server and reports "no request" on a healthy run.
-///
-/// `probe` performs the REST read — one `Ok(None)` means "not yet", not
-/// "never". It is a parameter rather than a method on the workspace because the
-/// workspace speaks `git` and nothing else: keeping the REST call on the
-/// caller's side is what stops a clone directory from growing an HTTP client.
-/// It is a free function rather than a forge method because the *schedule* is
-/// the contract being pinned, and it belongs beside the push it confirms.
-///
-/// The schedule is [`backoff_delays`] over [`CONFIRMATION_SCHEDULE`] — no second
-/// clock is minted here, and the delays are asserted without sleeping.
+/// The server creates it asynchronously, so a `probe` answer of `Ok(None)` means "not yet".
 ///
 /// # Errors
 ///
-/// Returns [`ForgeError::MergeRequestUnconfirmed`] when the schedule is
-/// exhausted with no request found — the push already succeeded, so the remedy
-/// is a rerun, not a retry of the write. **A forge-side 5xx raised inside this
-/// poll reaches the caller as that same variant**, for the reason the variant
-/// already states: by the time the poll runs, the ref is written. Reporting a
-/// 5xx here as [`ForgeError::Status`] would classify to `Unavailable` (69) and
-/// tell a CI wrapper the forge was down and the run never happened, when in
-/// fact the branch is published and rerunning is exactly the right recovery —
-/// which is `MergeRequestUnconfirmed`'s (75) whole meaning. Scoped to the poll:
-/// a 5xx on any read *before* the push keeps 69, because there the run really
-/// did not happen. Every other error `probe` returns propagates unchanged, a 429
-/// included — it already classifies to the same 75.
-///
-/// `Fn() -> Fut`, deliberately, and **not** `impl AsyncFn()`. `AsyncFn`'s
-/// associated future is higher-ranked over the call lifetime, so a probe that
-/// borrows its forge cannot be proved `Send` for *every* lifetime — which is
-/// what `async_trait`'s boxed `Send` future demands of the GitLab client that
-/// calls this. The compiler reports it as "implementation of `Send` is not
-/// general enough" on the whole trait method, with no mention of this bound.
-/// A plain `Fn` returning one concrete future has no such obligation.
+/// Returns [`ForgeError::MergeRequestUnconfirmed`] when the schedule runs out, including
+/// under forge 5xx answers: the ref is already written, so the recovery is a rerun (75),
+/// not the `Unavailable` (69) a [`ForgeError::Status`] classifies to. Every other
+/// `probe` error propagates unchanged.
 pub async fn confirm_merge_request<Probe, Fut>(probe: Probe) -> Result<PullRequest, ForgeError>
 where
+    // Not `AsyncFn()`: its higher-ranked future cannot be proved `Send` for GitLab's
+    // `async_trait` method, and that error never names this bound.
     Probe: Fn() -> Fut,
     Fut: Future<Output = Result<Option<PullRequest>, ForgeError>>,
 {
-    // The first read happens before the first delay: the common case is a server
-    // that has already run its post-receive worker, and a poll that slept first
-    // would add a second to every healthy claim. It goes through the same
-    // fault-folding attempt as the loop's — a 5xx on the very first read is the
-    // one an unfolded version would let escape as a 69.
+    // Read before sleeping, or every healthy claim waits a second.
+    // Through `confirmation_attempt` too, or a first-read 5xx escapes as 69.
     if let Some(found) = confirmation_attempt(&probe).await? {
         return Ok(found);
     }
-    // One read of the schedule, not one per use: the seam is an environment
-    // variable, and a ladder built from one read while the deadline reported on
-    // exhaustion came from another could disagree with itself.
+    // Read once, or the reported deadline could disagree with the ladder it ended.
     let schedule = confirmation_schedule();
     for delay in backoff_delays(&schedule) {
         tokio::time::sleep(delay).await;
@@ -224,19 +134,10 @@ where
     })
 }
 
-/// One confirmation read, with a forge-side fault folded into "not yet".
+/// One confirmation read, with a forge 5xx folded into "not yet" so a transient fault
+/// still confirms inside the deadline.
 ///
-/// The fold is deliberate swallowing, and the debug line is what keeps it from
-/// being silent: the error is not returned, so logging it here is the one place
-/// it can be observed at all. Folding rather than returning immediately is also
-/// what makes a *transient* incident recoverable inside the deadline — an
-/// instance that 5xxes once and then answers still confirms the request, where a
-/// version that gave up on the first fault would report an unconfirmed push the
-/// server had in fact already created.
-///
-/// Narrow on purpose. Only a 5xx is folded: a 401 mid-poll means the credential
-/// died and the operator must hear that, and a 404 is the probe's own "not
-/// found" rather than an error at all.
+/// Only a 5xx: a 401 mid-poll means the credential died, and the operator must hear it.
 async fn confirmation_attempt<Probe, Fut>(probe: &Probe) -> Result<Option<PullRequest>, ForgeError>
 where
     Probe: Fn() -> Fut,
@@ -253,16 +154,8 @@ where
 
 /// What a rejected `git push` needs before it can be named.
 ///
-/// Grouped rather than passed as two more parameters so [`GitWorkspace::push`]
-/// stays inside clippy's argument bound, and because the two travel together or
-/// not at all: `super::git_stderr::classify_push_failure` reads the preflight for
-/// exactly one row and the repository path for exactly one message.
-///
-/// **Neither is derivable inside the workspace.** The preflight is the forge's,
-/// run before the clone exists, and the repository is a forge coordinate while
-/// the workspace holds only a URL — so a push that classified from what it had
-/// would answer [`ForgeError::PushRefused`] (77) on the exact input C-044
-/// requires [`ForgeError::WriteCapabilityUnavailable`] (86) for, silently.
+/// The workspace cannot derive either; without the preflight a refusal classifies as
+/// [`ForgeError::PushRefused`] (77) where [`ForgeError::WriteCapabilityUnavailable`] (86) is required.
 pub struct RefusalContext<'a> {
     /// The write preflight this run already performed.
     pub preflight: &'a PushAccess,
@@ -270,24 +163,13 @@ pub struct RefusalContext<'a> {
     pub repo: &'a str,
 }
 
-/// The credential this workspace injects, and everything derived from it once.
-///
-/// The derivation happens at [`GitWorkspace::open`] rather than per invocation so
-/// the injected header and the redactor's secret list are fed from one value and
-/// cannot disagree about what the secret is — C-022's agreement, held by
-/// construction.
+/// The credential this workspace injects, derived once so the header and the
+/// redactor's secret list cannot disagree.
 struct Injected {
-    /// The `http.<prefix>` scope the header is placed under.
     scope: CredentialScope,
-    /// The pair the header is built from.
     credential: GitPushCredential,
-    /// Every live form of the secret, for [`redact`].
-    ///
-    /// Two, not one: the plaintext secret, and the base64 `user:secret` blob it
-    /// exists as on the wire, which no plaintext needle matches. The API
-    /// credential is not a third — C-063's ladder makes
-    /// [`GitPushCredential::secret`] whichever of the two credentials applies, so
-    /// there is no second secret in play on this path.
+    /// The plaintext secret and its base64 `user:secret` wire form; without the latter the
+    /// header survives redaction into `GitPushFailed`'s stderr.
     secrets: Vec<String>,
 }
 
@@ -306,65 +188,28 @@ impl Injected {
     }
 }
 
-/// A temporary blobless clone of the index repository.
+/// A temporary blobless clone of the index repository, removed on drop.
 ///
-/// The working directory is a temporary directory owned by this value, so it is
-/// removed when the workspace is dropped — including on the paths that unwind.
-/// No `Drop` body of its own: the temporary-directory guard already does the
-/// removal, and a hand-written `Drop` here would be a place for a panic to
-/// happen during unwinding, which aborts.
+/// No `Drop` of its own: a panic in one during unwinding aborts.
 pub struct GitWorkspace {
-    /// The `git` the argv-boundary gate resolved and version-checked.
     git: GitBinary,
-    /// The clone, and the guard that removes it.
     directory: TempDir,
-    /// The remote every fetch and the push name. Never carries a credential.
+    /// Never carries a credential.
     remote: String,
-    /// `None` leaves git's own credential helpers in charge (C-063 rung three).
+    /// `None` leaves git's own credential helpers in charge.
     injection: Option<Injected>,
 }
 
-// No block-level `expect(dead_code)` any more: deleting `has_unpushed_commit`
-// left every method on this impl with a production caller, and an unfulfilled
-// `expect` is a hard error under `warnings = "deny"`. Its absence is now the
-// check — a method added here without a caller reds the build.
 impl GitWorkspace {
-    /// Clone `remote` into a fresh temporary directory and fetch what the run
-    /// will read.
+    /// Clone `remote` into a fresh temporary directory and fetch `base`, plus `branch`.
     ///
-    /// The fetch is blobless (`--filter=blob:none`) and never shallow: the
-    /// commit chain has to be complete for an exact ancestry comparison, while
-    /// the file contents of unrelated packages are never read. `branch` is named
-    /// as a second refspec **only** when the branch-existence read found one —
-    /// fetching a ref that does not exist fails the whole fetch.
-    ///
-    /// `credential` `None` leaves git's own credential helpers in charge; `Some`
-    /// injects the pair and resets `credential.helper` for exactly the
-    /// invocations that carry it.
-    ///
-    /// **This parameter is the only channel by which a secret enters the
-    /// workspace, and one value is sufficient for all three forms C-022 names.**
-    /// Worth stating here because the argument is spread across three contracts
-    /// and an implementer would otherwise have to reassemble it: C-063's ladder
-    /// makes [`GitPushCredential::secret`] whichever of the two credentials
-    /// applies, so there is no second secret to pass; the base64
-    /// `Authorization` blob is *derived* from `username:secret` at injection
-    /// rather than supplied, so it is not an input to **this parameter**; and
-    /// C-035 strips every `OCX_*` variable from the child environment, so
-    /// nothing arrives out of band. That derived blob is still a secret,
-    /// though: [`Injected::secrets`] carries it alongside the plaintext so both
-    /// reach [`redact`], or an unmasked `Authorization` header would survive
-    /// into [`ForgeError::GitPushFailed`]'s `stderr` — exactly the third of
-    /// C-022's three forms, recoverable back to `user:secret`. Widening this
-    /// signature to carry a second secret would mean one of those three stopped
-    /// holding — say so if it does, rather than adding a parameter.
+    /// Pass `branch` only when it exists on the remote: a missing ref fails the whole fetch.
     ///
     /// # Errors
     ///
     /// Returns [`ForgeError::GitCommandFailed`] when a plumbing step fails, or
-    /// [`ForgeError::GitUnavailable`] when the workspace cannot be created at
-    /// all — which includes a `remote` naming no project, refused **before** any
-    /// directory exists and before any process starts.
+    /// [`ForgeError::GitUnavailable`] when the workspace cannot be created, including a
+    /// `remote` naming no project, refused before any directory or process exists.
     pub async fn open(
         git: &GitBinary,
         remote: &str,
@@ -372,9 +217,6 @@ impl GitWorkspace {
         branch: Option<&str>,
         credential: Option<&GitPushCredential>,
     ) -> Result<Self, ForgeError> {
-        // First, and deliberately: a scope too wide is refused before a
-        // directory is created and before `git` is started, so the fail-closed
-        // half of C-034 costs nothing and leaves nothing behind.
         let injection = credential
             .map(|credential| Injected::new(remote, credential))
             .transpose()?;
@@ -385,11 +227,7 @@ impl GitWorkspace {
             .map_err(|error| ForgeError::GitUnavailable {
                 reason: format!("the git workspace directory could not be created: {error}"),
             })?;
-        // Explicitly, not left to the umask (CWE-732) — and Unix only, because
-        // Windows has no mode bits and a `set_permissions` there is inert: an
-        // assertion written against it would pass whether or not anything
-        // happened. The Windows protection is the per-user temporary directory's
-        // own ACL, which ocx does not modify.
+        // 0700 explicitly, not the umask (CWE-732); Windows relies on the per-user temp dir's ACL.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -400,8 +238,6 @@ impl GitWorkspace {
             })?;
         }
 
-        // Built now so every fallible step below runs with the guard in scope: an
-        // early return drops `workspace`, which drops the directory.
         let workspace = Self {
             git: git.clone(),
             directory,
@@ -413,10 +249,7 @@ impl GitWorkspace {
         Ok(workspace)
     }
 
-    /// Re-fetch `base` and `branch` after a rejected ref update.
-    ///
-    /// Always names **both** refspecs: a rejection proves the branch exists now,
-    /// whatever the branch-existence read reported before the first attempt.
+    /// Re-fetch `base` and `branch` after a rejected ref update, which proves `branch` exists.
     ///
     /// # Errors
     ///
@@ -425,20 +258,7 @@ impl GitWorkspace {
         self.fetch_refs(base, Some(branch)).await
     }
 
-    /// How `branch` stands relative to `base`, computed from the clone.
-    ///
-    /// Exact, not approximate: it counts commits on each side rather than
-    /// inferring a relation. Never called when the branch does not exist — there
-    /// is no second ref to compare.
-    ///
-    /// **Orientation, because it is the one thing a reader can get backwards.**
-    /// `git rev-list --left-right --count <base>...<branch>` prints
-    /// `<base-only>\t<branch-only>`, so `0 n` is [`BranchComparison::Ahead`] and
-    /// `n 0` is [`BranchComparison::Behind`] — measured against git 2.54.0, and
-    /// the orientation C-037 now states, after DX-36 corrected the inverted
-    /// example notation that contract shipped with.
-    /// Reading that notation literally produces a build that rebuilds a branch
-    /// which was merely ahead and fast-forwards onto one that was left behind.
+    /// How an existing `branch` stands relative to `base`, counted exactly from the clone.
     ///
     /// # Errors
     ///
@@ -453,6 +273,8 @@ impl GitWorkspace {
         let (Some(Ok(base_only)), Some(Ok(branch_only))) = (counts.next(), counts.next()) else {
             return Err(self.unreadable("rev-list", &counted));
         };
+        // `<base>...<branch>` prints base-only first; read inverted, a merely-ahead branch
+        // is rebuilt and a behind one fast-forwarded onto.
         Ok(match (base_only, branch_only) {
             (0, 0) => BranchComparison::Identical,
             (0, _) => BranchComparison::Ahead,
@@ -461,59 +283,14 @@ impl GitWorkspace {
         })
     }
 
-    /// Build one commit carrying every file and move the **local** ref,
-    /// returning the new commit sha.
-    ///
-    /// Writes nothing to the network. The ref move is a local compare-and-swap
-    /// against the branch's current value, so a [`RefUpdate::FastForward`] whose
-    /// base moved surfaces as [`ForgeError::NonFastForward`] here rather than at
-    /// the push.
-    ///
-    /// The chain is `hash-object` per file, `read-tree` of the parent,
-    /// `update-index --cacheinfo` per file, `write-tree`, `commit-tree` — never
-    /// `mktree`, which builds one flat tree and would need a hand-rolled
-    /// `ls-tree`/`mktree` per level for the three-component path a claim writes.
-    ///
-    /// A [`FileChange::Delete`] rides the same index as the writes, as
-    /// `update-index --force-remove`, which drops the entry the `read-tree`
-    /// brought in from the parent. `--force-remove` is also what makes C-001's
-    /// no-op free here: measured against git 2.54.0, it exits 0 on a path the
-    /// index does not carry, so no existence read is spent.
-    ///
-    /// The parent is chosen exactly as the REST arm chooses `start_sha`: the
-    /// index base when the branch does not exist yet or when a spent branch is
-    /// being rebuilt, and the branch's own head when accumulating onto a live
-    /// one. Reading `base.sha` unconditionally would drop every tag the branch
-    /// already carried.
-    ///
-    /// **Accumulating, that head must be the base the caller read.** The files
-    /// it hands over were regenerated from one commit's root, and laying them on
-    /// a different commit's tree deletes whatever that commit added — silently,
-    /// because parenting on the remote head makes the push a genuine
-    /// fast-forward and no refusal is ever raised ([#436]). A head this run did
-    /// not read is therefore [`ForgeError::NonFastForward`], the same answer a
-    /// push race already gets, so the caller re-reads it and rebuilds on it.
-    ///
-    /// The REST arms need no such check, each for its own reason, and neither
-    /// is this one — the guarantee below is the git workspace's alone. GitHub
-    /// builds every commit on the base tree with `base.sha` as its parent
-    /// (`github.rs`, `commit_files_once`) and updates the ref with
-    /// `force: false`, so a branch that moved is not a descendant and the ref
-    /// update refuses. GitLab does parent on the branch head once the branch
-    /// exists — `start_sha`/`start_project` are sent only when it does not, or
-    /// under `Reset` — but every file action carries the `last_commit_id` read
-    /// at `base.sha`, and a head whose root was written by another commit fails
-    /// that per-file compare-and-swap. This is the only place a commit can end
-    /// up parented on something the caller never saw *and* be accepted.
-    ///
-    /// [#436]: https://github.com/ocx-sh/ocx/issues/436
+    /// Build one commit carrying every file and move the **local** ref, returning its
+    /// sha; nothing reaches the network.
     ///
     /// # Errors
     ///
-    /// Returns [`ForgeError::NonFastForward`] when the local ref moved under a
-    /// fast-forward-only update, or when the branch head a fast-forward would
-    /// parent on is not the base the caller read; [`ForgeError::GitCommandFailed`]
-    /// when a plumbing step fails.
+    /// Returns [`ForgeError::NonFastForward`] when the local ref moved meanwhile, or when
+    /// a fast-forward's branch head is not the base the caller read;
+    /// [`ForgeError::GitCommandFailed`] when a plumbing step fails.
     pub async fn commit_files(
         &self,
         branch: &str,
@@ -522,16 +299,14 @@ impl GitWorkspace {
         files: &BTreeMap<String, FileChange>,
         update: RefUpdate,
     ) -> Result<String, ForgeError> {
-        // Read **before** anything is built: this is the value the compare-and-swap
-        // is made against, so a ref that moves while the objects are being written
-        // is caught. Re-reading it at the update instead would compare the ref with
-        // itself and pass in every state — a swap that guards nothing.
+        // Read before building: re-read at the update, the swap compares the ref with
+        // itself and passes in every state.
         let expected = self.resolve(&format!("refs/heads/{branch}")).await?;
         let head = self.resolve(&self.tracking(branch)).await?;
+        // Onto an existing head (not `Reset`) parent on it: `base.sha` would drop every tag the branch carried.
         let parent = match (update, head) {
-            // The caller read its root at `base.sha`; a head that is not that
-            // commit carries content the root was never derived from. See the
-            // doc comment above — this is #436, and it is silent without the arm.
+            // The files were regenerated from `base`: laid on another head they silently
+            // delete what it added, and the push is a genuine fast-forward nobody refuses.
             (RefUpdate::FastForward, Some(head)) if head != base.sha => {
                 return Err(ForgeError::NonFastForward {
                     branch: branch.to_string(),
@@ -554,13 +329,7 @@ impl GitWorkspace {
                 removed.push(path.as_str());
                 continue;
             };
-            // The staged name is the position, never the caller's path: the file
-            // is read once by `hash-object` and its name reaches no tree, so
-            // nothing is gained by reproducing a path the index entry carries
-            // anyway — and a caller's path is the one input that could climb out
-            // of the staging directory. The position counts *written* files, so
-            // the staged names stay dense when a removal sits between two of
-            // them — `hash-object` is handed exactly this list.
+            // Named by position, never the caller's path, which could climb out of staging.
             let position = written.len();
             tokio::fs::write(staging.join(position.to_string()), contents)
                 .await
@@ -572,18 +341,7 @@ impl GitWorkspace {
         let blobs = self.hash_staged_files(&staged).await?;
         self.run_local("read-tree", &[], &[&parent]).await?;
         if !written.is_empty() {
-            // One `update-index` carrying every entry, not one per file. git
-            // applies repeated `--cacheinfo` in order (measured against 2.54.0),
-            // and each entry is the *value* of a flag rather than a positional —
-            // which is why this call has no `--end-of-options` and needs none.
-            //
-            // git reads `<mode>,<object>,<path>` by taking everything after the
-            // second comma as the path, so a comma in the path is carried
-            // verbatim and needs no escaping of ocx's own. That is the whole
-            // premise this format carries, and it is unchanged by the batching:
-            // the `--index-info` form that would have been the other way to batch
-            // is tab-delimited and *would* have added a no-tab-in-path premise,
-            // which is why it is not used.
+            // Flag values, not positionals: past `--end-of-options` `--cacheinfo` reads as a path.
             let entries = self.index_entries(&written, &blobs)?;
             let mut flags = Vec::with_capacity(entries.len() + 1);
             flags.push("--add");
@@ -591,40 +349,25 @@ impl GitWorkspace {
             self.run_local("update-index", &flags, &[]).await?;
         }
         if !removed.is_empty() {
-            // Its own invocation rather than more flags on the one above:
-            // `--force-remove` is a mode that applies to every *positional* path
-            // after it, while `--cacheinfo` carries its path as a flag value, so
-            // one argv mixing the two reads in an order a future edit could
-            // silently get wrong. Two calls have no such premise — and this one
-            // is the only place the argv builder's `--end-of-options` sits in an
-            // `update-index`, which is what keeps a path beginning with `-` a
-            // path (accepted by git 2.54.0).
+            // Its own call: `--force-remove` applies to every positional after it, so an argv
+            // shared with `--cacheinfo` can silently remove what a reorder meant to write.
             self.run_local("update-index", &["--force-remove"], &removed).await?;
         }
-        // `--missing-ok` because the fetch is blobless (C-036): every entry here
-        // either came from the server's own base tree or was just written by
-        // `hash-object -w`, so an absent blob is the expected state of this
-        // checkout rather than an inconsistency, and the tree names only objects
-        // the remote already has or the push carries. Without it `write-tree`
-        // verifies each entry exists, and in a partial clone that check *fetches*
-        // — a network dial from a local command that holds no credential.
+        // Without `--missing-ok`, `write-tree` fetches absent blobs in this blobless clone:
+        // a network dial from a local command holding no credential.
         let tree = self.run_local("write-tree", &["--missing-ok"], &[]).await?;
         let new = self.commit_tree(&tree, &parent, message).await?;
         self.move_ref(branch, &new, expected.as_deref()).await?;
         Ok(new)
     }
 
-    /// Append a commit carrying the same tree and a fresh committer timestamp,
-    /// returning its sha.
-    ///
-    /// A server only processes push options for a push that genuinely advances a
-    /// ref, so a run with nothing to say still needs the ref to move before it
-    /// can ask for a merge request.
+    /// Append a commit with the same tree and a fresh committer timestamp, returning its
+    /// sha, so a push with nothing new still advances the ref and its options are processed.
     ///
     /// # Errors
     ///
-    /// Returns [`ForgeError::GitCommandFailed`] when a plumbing step fails, or
-    /// when the refreshed commit is not new — see the one-second retry below.
+    /// Returns [`ForgeError::GitCommandFailed`] when a plumbing step fails, or when the
+    /// refresh reproduces the head even after a one-second retry.
     pub async fn refresh_commit(&self, branch: &str, message: &str) -> Result<String, ForgeError> {
         let expected = self.resolve(&format!("refs/heads/{branch}")).await?;
         let head = match expected.clone() {
@@ -634,27 +377,18 @@ impl GitWorkspace {
                 .await?
                 .ok_or_else(|| self.unreadable("rev-parse", &format!("branch {branch} has no head to refresh")))?,
         };
-        // `--verify` is load-bearing, not tidiness. A bare `git rev-parse` echoes
-        // every argument it does not recognise as a revision, so with the argv
-        // builder's `--end-of-options` in front of the revision its stdout is two
-        // lines — the separator, then the sha — and the whole blob then reaches
-        // `commit-tree` as a tree name. Measured against git 2.54.0;
-        // `--verify` suppresses the echo and makes a non-revision an error.
+        // Without `--verify`, `rev-parse` echoes `--end-of-options` and `commit-tree` gets a
+        // two-line tree name.
         let tree = self
             .run_local("rev-parse", &["--verify"], &[&format!("{head}^{{tree}}")])
             .await?;
 
         let mut refreshed = self.commit_tree(&tree, &head, message).await?;
+        // The committer date (one-second resolution) is the only varying input, so a refresh
+        // within the head's own second reproduces its sha.
         if refreshed == head {
-            // Same tree, same parent, same message, same fixed identity: the
-            // committer date is the *only* varying input, and git stamps it at
-            // one-second granularity — so a refresh landing inside the same
-            // second as the commit it refreshes reproduces that commit's sha
-            // exactly, the ref does not move, and the push the caller is about to
-            // make carries nothing for the server to attach options to.
-            // ponytail: one second and one retry; if this ever needs to be
-            // cheaper, `GIT_COMMITTER_DATE` is the lever, and it is an allowlist
-            // row in `git_command.rs` rather than a change here.
+            // ponytail: one second and one retry; `GIT_COMMITTER_DATE` is the cheaper lever,
+            // an allowlist row in `git_command.rs` rather than a change here.
             tokio::time::sleep(Duration::from_secs(1)).await;
             refreshed = self.commit_tree(&tree, &head, message).await?;
         }
@@ -668,23 +402,18 @@ impl GitWorkspace {
         Ok(refreshed)
     }
 
-    /// Push `branch`, carrying the merge-request push options that ask the
-    /// server to open the request.
+    /// Push `branch` with the push options that ask the server to open a merge request.
     ///
-    /// `lease` is the whole force story: `None` is an ordinary push, and `Some`
-    /// carries the sha the branch was read at as a lease, so a rebuild that
-    /// rewrites history still refuses to clobber a branch that moved
-    /// underneath it. There is no unleased force.
+    /// `lease` `Some` force-pushes leased at that sha, so a rebuild never clobbers a branch
+    /// that moved; there is no unleased force.
     ///
     /// # Errors
     ///
-    /// Returns [`ForgeError::PushOptionRefused`] **before any process starts**
-    /// when a rendered option value carries something the wire forbids; then
-    /// [`ForgeError::NonFastForward`], [`ForgeError::StaleLease`],
-    /// [`ForgeError::PushRefused`] or
-    /// [`ForgeError::WriteCapabilityUnavailable`] for a refusal the stderr
-    /// classifier recognises, and [`ForgeError::GitPushFailed`] for one it does
-    /// not.
+    /// Returns [`ForgeError::PushOptionRefused`] before any process starts when an option
+    /// value carries something the wire forbids; [`ForgeError::NonFastForward`],
+    /// [`ForgeError::StaleLease`], [`ForgeError::PushRefused`] or
+    /// [`ForgeError::WriteCapabilityUnavailable`] for a recognised refusal; and
+    /// [`ForgeError::GitPushFailed`] otherwise.
     pub async fn push(
         &self,
         branch: &str,
@@ -694,35 +423,17 @@ impl GitWorkspace {
         lease: Option<&str>,
         refusal: RefusalContext<'_>,
     ) -> Result<(), ForgeError> {
-        // Escaped, then rendered — and refused — first: nothing has been spawned
-        // yet, so a hostile value never reaches a pkt-line and no ref moves.
-        //
-        // The escape is the description's alone. A claim body is multi-line
-        // markdown and GitLab converts the two-character `\n` sequence back into
-        // a newline before it stores the description, so the body travels inside
-        // the wire alphabet instead of dying at its first LF. `target` is a ref
-        // name and `title` is one line: escaping either would turn a newline
-        // that must be **refused** into one silently carried.
+        // Only the description is escaped (GitLab restores `\n`); a newline in `target` or
+        // `title` must be refused, not escaped.
         let description = escape_newlines(description);
         let options = render_push_options(target, title, &description)?;
 
         let leased = lease.map(|sha| format!("--force-with-lease={branch}:{sha}"));
         let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
-        // Every flag before the positionals, which is what lets `--end-of-options`
-        // sit between them. `git push` accepts `-o` ahead of the repository
-        // (measured against 2.54.0); leaving the options where they used to be —
-        // after the refspec — would put them past the separator and turn each one
-        // into a refspec.
+        // Every `-o` before the positionals, or past `--end-of-options` each becomes a refspec.
         let mut flags = Vec::with_capacity(2 + options.len() * 2);
-        // `--porcelain` is what makes the rejection *readable*, not merely
-        // pretty. Without it the per-ref verdict is only in git's prose on
-        // stderr, so classifying a non-fast-forward meant matching a sentence;
-        // CI was observed emitting an empty stderr for a rejected push on both
-        // Linux and macOS, and an empty body matches no needle, so an ordinary
-        // concurrent-writer rejection reached the operator as an unclassified
-        // exit 1. With it git writes a tab-separated status line per ref to
-        // **stdout** — a form it documents for scripts — and the classifier
-        // reads both channels.
+        // `--porcelain` puts each ref's verdict on stdout; without it a rejection with an empty
+        // stderr (seen in CI) reaches the operator as an unclassified exit 1.
         flags.push("--porcelain");
         if let Some(leased) = &leased {
             flags.push(leased.as_str());
@@ -738,16 +449,13 @@ impl GitWorkspace {
         if output.status.success() {
             return Ok(());
         }
-        // `code()` is `None` on exactly one state: the child was killed by a
-        // signal, so it never reached the point where it prints a verdict.
-        // Nothing below can read one out of two empty channels.
         if output.status.code().is_none() {
+            // Reachable over `file://` and `ssh://`: a refspec skipped client-side leaves the
+            // push options undrained, and git dies of `SIGPIPE` with both channels empty.
             return self.verdict_after_signal(branch).await;
         }
-        // Uncapped on the way into the classifier: the phrases it matches are
-        // written behind the server's own `remote:` banner, at the tail, and a
-        // cap applied first would turn every recognised refusal into an
-        // unclassified exit 1. Capping is the error boundary's.
+        // Uncapped: the matched phrases sit at the tail behind `remote:` banners, and a cap
+        // here turns every recognised refusal into an unclassified exit 1.
         let stdout = redact(&String::from_utf8_lossy(&output.stdout), &self.secrets());
         let stderr = redact(&String::from_utf8_lossy(&output.stderr), &self.secrets());
         Err(classify_push_failure(
@@ -761,47 +469,15 @@ impl GitWorkspace {
         ))
     }
 
-    /// The verdict for a push whose child was **killed by a signal**, read from
-    /// the remote instead of from the corpse.
-    ///
-    /// A signalled `git push` printed nothing: no porcelain ref status, no
-    /// prose, no exit code. [`classify_push_failure`] then has no input at all,
-    /// matches no needle, and answers [`ForgeError::GitPushFailed`] — an
-    /// unclassified, terminal exit 1 — for what is ordinarily a retryable race.
-    ///
-    /// **It is reachable, and it is the flake this function exists for.**
-    /// `send-pack` writes its push-option section to `receive-pack`
-    /// unconditionally, but `receive-pack` reads that section only when at least
-    /// one ref command was sent. A push whose only refspec is skipped
-    /// *client-side* — rejected as a non-fast-forward, or already up to date —
-    /// sends zero commands, so `receive-pack` exits without draining the
-    /// options; the client's write then hits `EPIPE`, and git's `write_or_die`
-    /// deliberately re-raises `SIGPIPE` rather than reporting it. Whether the
-    /// option bytes reach the pipe buffer before the reader disappears is pure
-    /// scheduling, which is why it is intermittent. Measured on git 2.54.0
-    /// against a `file://` remote: with an option payload past the 64 KiB pipe
-    /// buffer the push dies on signal 13 every time, with **zero bytes on both
-    /// channels**; a fast-forwardable refspec with the same payload exits 0.
-    /// The stateless-RPC transports (`https://`) buffer the section into the
-    /// request instead of a child's stdin, so this is the local and `ssh://`
-    /// shape.
-    ///
-    /// Zero commands sent is also what makes the remote authoritative here: the
-    /// branch stands at the sha this push carried, so the update is in effect —
-    /// it landed, or it was already there — and the run succeeded. It stands
-    /// anywhere else, so the update is not in effect and the caller must re-read
-    /// the winning head and regenerate, which is exactly
-    /// [`ForgeError::NonFastForward`]'s contract. One read and no second push:
-    /// re-pushing from here would paper over the state this is reporting.
+    /// The verdict for a signal-killed push, read from the remote: success when the remote
+    /// branch stands at the pushed sha, else [`ForgeError::NonFastForward`] so the caller
+    /// re-reads and regenerates.
     async fn verdict_after_signal(&self, branch: &str) -> Result<(), ForgeError> {
         let reference = format!("refs/heads/{branch}");
         let pushed = self.run_local("rev-parse", &["--verify"], &[&reference]).await?;
         let advertised = self
             .run_network("ls-remote", &[], &[self.remote.as_str(), &reference])
             .await?;
-        // `git ls-remote` prints `<sha>\t<ref>` per match and nothing at all for
-        // a ref the remote does not carry, so an absent branch reads as "not the
-        // sha we pushed" without a special case.
         if advertised.split_whitespace().next() == Some(pushed.as_str()) {
             return Ok(());
         }
@@ -812,8 +488,7 @@ impl GitWorkspace {
 
     // ── The recipe's shared parts ────────────────────────────────────────────
 
-    /// The clone's root, which is also its work tree and the cwd of every
-    /// invocation.
+    /// The clone's root, work tree and every invocation's cwd.
     fn repository(&self) -> &Path {
         self.directory.path()
     }
@@ -823,14 +498,12 @@ impl GitWorkspace {
         format!("{TRACKING_NAMESPACE}/{branch}")
     }
 
-    /// Every live form of the injected secret, for [`redact`].
     fn secrets(&self) -> Vec<&str> {
         self.injection.as_ref().map_or_else(Vec::new, |injected| {
             injected.secrets.iter().map(String::as_str).collect()
         })
     }
 
-    /// The credential placement, borrowed for one invocation.
     fn injection(&self) -> Option<CredentialInjection<'_>> {
         self.injection.as_ref().map(|injected| CredentialInjection {
             url_prefix: &injected.scope,
@@ -838,60 +511,18 @@ impl GitWorkspace {
         })
     }
 
-    /// The argv every invocation shares, plus whatever `extra` the caller adds.
-    ///
-    /// One builder, so C-068's "every invocation, without exception" is a
-    /// property of this function rather than a habit at eleven call sites. The
-    /// redirect refusal is on all of them and not only on the two that touch the
-    /// network: git's default is `followRedirects=initial`, so the **initial**
-    /// request of a push *is* followed, and the push is the one invocation
-    /// carrying the credential as an `http.<prefix>.extraHeader`.
-    ///
-    /// `core.symlinks=false` is defence-in-depth. The recipe materialises no work
-    /// tree, so it is inert today; it is kept because it is free and because the
-    /// next path that does check out would otherwise inherit a contributor-planted
-    /// symlink.
-    ///
-    /// `http.lowSpeedLimit`/`http.lowSpeedTime` are the transport's deadline: a
-    /// transfer moving under 1000 bytes/s for 60 consecutive seconds is aborted,
-    /// so a black-holed or trickling remote cannot hang an announce forever.
-    /// Deliberately a *stall* bound and not a total one — a genuinely large
-    /// blobless fetch may run for minutes and must not be killed for being big.
-    /// It rides `argv_with` for the same reason the redirect refusal does, and it
-    /// is inert on the local invocations exactly as `core.symlinks` is. This is
-    /// **not** the deferred `tokio::time::timeout`, which stays deferred and
-    /// whose landing site is `git_command::run_git`.
-    ///
-    /// **The argv is split into flags and positionals so `--end-of-options` has
-    /// somewhere unambiguous to go.** git's separator means "everything after
-    /// this is a revision or a path", so it must sit after the last flag and
-    /// before the first bare positional — and inferring that boundary from a flat
-    /// argv is not possible here: `update-index --cacheinfo <entry>` takes its
-    /// value as a separate argument that does not begin with `-`, and
-    /// `push … -o <option>` writes flags *after* its positionals. Measured
-    /// against git 2.54.0, a separator placed by the naive "first argument
-    /// without a leading dash" rule breaks `commit-tree`
-    /// (`fatal: must give exactly one tree`), `update-index` and `push`; placed
-    /// structurally, all ten of the recipe's subcommands accept it.
-    ///
-    /// What it buys: a sha or ref that begins with `-` is then a bad object name
-    /// rather than an option. Measured — `git read-tree --upload-pack=/bin/false`
-    /// is parsed as an *unknown option* (exit 129), and with the separator it is
-    /// `fatal: Not a valid object name`. The shape guard on the forge's own
-    /// `commit.id` is the fix; this is the belt, and it covers every positional
-    /// rather than the one field a reviewer thought of. Available since git 2.24,
-    /// below this transport's 2.31 floor, so no capability check is needed.
-    ///
-    /// Emitted only when there is a positional to protect: `write-tree` and
-    /// `update-index` have none, and a separator with nothing after it would be
-    /// noise in a recorded argv.
+    /// The argv every invocation shares, plus the caller's `extra`; the one builder, so a
+    /// flag every invocation needs cannot be missing from one.
     fn argv_with(extra: &[&str], command: &str, flags: &[&str], positionals: &[&str]) -> Vec<OsString> {
         let mut argv = Vec::with_capacity(9 + extra.len() + flags.len() + positionals.len());
         for flag in [
+            // Git's default follows a push's initial request, the one carrying the credential.
             "-c",
             "http.followRedirects=false",
             "-c",
             "core.symlinks=false",
+            // A stall bound, so a trickling remote cannot hang an announce; a total bound would
+            // kill a large fetch for being big.
             "-c",
             "http.lowSpeedLimit=1000",
             "-c",
@@ -902,7 +533,11 @@ impl GitWorkspace {
         argv.extend(extra.iter().map(OsString::from));
         argv.push(OsString::from(command));
         argv.extend(flags.iter().map(OsString::from));
+        // Placed by the flags/positionals split, never before the first dash-less argument,
+        // which for `--cacheinfo` and `-p` is a flag value.
         if !positionals.is_empty() {
+            // Makes a `-`-leading sha or ref a bad object name, not an option
+            // (`--upload-pack=/bin/false`); git >= 2.24.
             argv.push(OsString::from("--end-of-options"));
         }
         argv.extend(positionals.iter().map(OsString::from));
@@ -917,12 +552,8 @@ impl GitWorkspace {
 
     /// The argv of an invocation that talks to the remote.
     ///
-    /// `-c credential.helper=` (an empty value resets the list) rides exactly the
-    /// invocations that inject an ocx credential and only those — C-034's scope
-    /// qualifier is load-bearing rather than a hedge: push-credential precedence
-    /// rung three injects nothing and exists precisely so an operator's own
-    /// helper can authenticate the push, so applying the reset there would break
-    /// the ratified fallback instead of protecting anything ocx supplied.
+    /// `credential.helper` is reset only when ocx injects a credential, or the operator's
+    /// own helper could no longer authenticate the push.
     fn network_argv(&self, command: &str, flags: &[&str], positionals: &[&str]) -> Vec<OsString> {
         let reset: &[&str] = if self.injection.is_some() {
             &["-c", "credential.helper="]
@@ -934,49 +565,20 @@ impl GitWorkspace {
 
     /// Fetch `base`, and `branch` when there is one, into the tracking namespace.
     ///
-    /// Never `--depth`: a shallow clone lies about ahead/behind, and the whole
-    /// point of the comparison is that it is exact. `--filter=blob:none` is what
-    /// makes a complete commit chain affordable — the file contents of unrelated
-    /// packages are never read.
+    /// Never `--depth`: a shallow clone makes the ahead/behind comparison wrong.
     async fn fetch_refs(&self, base: &str, branch: Option<&str>) -> Result<(), ForgeError> {
         let base_refspec = format!("{base}:{}", self.tracking(base));
         let branch_refspec = branch.map(|branch| format!("{branch}:{}", self.tracking(branch)));
         let mut positionals = vec![self.remote.as_str(), base_refspec.as_str()];
         if let Some(branch_refspec) = &branch_refspec {
-            // Only when the branch-existence read found one: `git fetch` fails the
-            // *whole* invocation on a refspec source the remote does not have, so
-            // an unconditional second refspec would make a first claim — the
-            // command's headline use case — impossible.
             positionals.push(branch_refspec.as_str());
         }
         self.run_network("fetch", &["--filter=blob:none"], &positionals).await?;
         Ok(())
     }
 
-    /// Write every staged file into the object store in one invocation, in the
-    /// order they were named.
-    ///
-    /// `git hash-object` accepts many paths and prints one object name per line
-    /// in argument order (measured against git 2.54.0), so the whole commit costs
-    /// one process instead of one per file. That is the change that matters for
-    /// announce, whose mature cascade writes a hundred-odd roots on every publish
-    /// — a claim writes one file and gains nothing from it.
-    ///
-    /// `--no-filters` because `HOME` reaches the child by design (C-033), so an
-    /// operator's `core.autocrlf` would otherwise rewrite the bytes of an index
-    /// root on their way into the object store.
-    ///
-    /// ponytail: argv, not `--stdin-paths`. The staged names are ocx-generated
-    /// decimal positions, so neither a newline nor a tab can appear in one, and
-    /// argv needs no new stdin seam in `git_command`. The ceiling is `ARG_MAX` —
-    /// about 2 MB on Linux against roughly 15 bytes per staged name, so tens of
-    /// thousands of files; `--stdin-paths` plus `update-index --index-info` is
-    /// the upgrade path if a commit ever approaches it, and it costs a
-    /// no-tab-in-path premise the `--cacheinfo` form does not carry.
-    ///
-    /// The pairing back onto the caller's paths — and the arity that pairing
-    /// depends on — is [`Self::index_entries`]'s, so it can be asserted without
-    /// a `git` that misbehaves.
+    /// Write every staged file into the object store in one `hash-object`, returning the
+    /// object names in argument order.
     ///
     /// # Errors
     ///
@@ -985,7 +587,12 @@ impl GitWorkspace {
         if staged.is_empty() {
             return Ok(Vec::new());
         }
+        // ponytail: argv, not `--stdin-paths`: staged names are ocx-generated decimal positions
+        // (no newline or tab), and argv needs no new stdin seam in `git_command`. Ceiling
+        // `ARG_MAX` (~2 MB at ~15 bytes per name, tens of thousands of files); the upgrade is
+        // `--stdin-paths` plus `update-index --index-info`, at the cost of a no-tab-in-path premise.
         let paths: Vec<&str> = staged.iter().map(String::as_str).collect();
+        // `--no-filters`, or the operator's `core.autocrlf` (via `HOME`) rewrites index roots.
         let hashed = self.run_local("hash-object", &["-w", "--no-filters"], &paths).await?;
         Ok(hashed
             .lines()
@@ -995,22 +602,10 @@ impl GitWorkspace {
             .collect())
     }
 
-    /// Pair each file's path with the object name `hash-object` printed for it,
-    /// rendered as the `--cacheinfo` flags one `update-index` carries.
+    /// Pair each path with its `hash-object` name as `--cacheinfo` flags for one `update-index`.
     ///
-    /// **The arity check is the load-bearing part, and it is why this is a
-    /// function rather than a loop inside the caller.** The pairing is positional
-    /// — `paths` is the caller's written set in `BTreeMap` key order, which is
-    /// the order the staged files were written and therefore the order git was
-    /// given them — so a short list commits each file's bytes under the *next*
-    /// file's path. That is silent corruption of a published index root, and no
-    /// assertion on the process count can see it.
-    ///
-    /// A real `git` cannot produce the short list: it exits non-zero on a path it
-    /// cannot hash, so the caller fails first. That makes the arity refusal
-    /// unfalsifiable *through* `git` — which is exactly why it lives here, where
-    /// a test hands the mismatched list in directly. A guard whose red state is
-    /// unreachable is not a guard.
+    /// The pairing is positional, so a short `blobs` would silently commit each file's
+    /// bytes under the next file's path.
     ///
     /// # Errors
     ///
@@ -1030,6 +625,7 @@ impl GitWorkspace {
         let mut entries = Vec::with_capacity(paths.len() * 2);
         for (path, blob) in paths.iter().zip(blobs) {
             entries.push("--cacheinfo".to_string());
+            // Everything after the second comma is the path, so a comma needs no escaping.
             entries.push(format!("100644,{blob},{path}"));
         }
         Ok(entries)
@@ -1037,29 +633,17 @@ impl GitWorkspace {
 
     /// `commit-tree`, the one place a commit object is minted.
     ///
-    /// The tree is the positional and the parent rides `-p`, which is the order
-    /// `--end-of-options` forces: measured against git 2.54.0,
-    /// `commit-tree --end-of-options <tree> -p <parent>` dies with
-    /// `fatal: must give exactly one tree`, because everything after the
-    /// separator — `-p` included — is read as a tree.
+    /// The parent rides the flags: past `--end-of-options`, `-p` reads as a second tree.
     async fn commit_tree(&self, tree: &str, parent: &str, message: &str) -> Result<String, ForgeError> {
         self.run_local("commit-tree", &["-p", parent, "-m", message], &[tree])
             .await
     }
 
-    /// Move `refs/heads/<branch>` to `new` as a compare-and-swap.
+    /// Move `refs/heads/<branch>` to `new` as a compare-and-swap against `expected`, read
+    /// before building; `None` makes it a create that refuses a ref that appeared meanwhile.
     ///
-    /// `expected` is the value the caller **read before it started building**, not
-    /// the ref's value now: passing the current value would compare the ref with
-    /// itself and succeed in every state. `None` becomes [`ZERO_OID`], the
-    /// spelling that makes the update a *create* and refuses to overwrite a ref
-    /// that appeared meanwhile.
-    ///
-    /// Every failure is reported as [`ForgeError::NonFastForward`], and that is a
-    /// deliberate narrowing rather than an oversight: the workspace is private and
-    /// throwaway, both object names are ones ocx just produced, and no other
-    /// process holds its ref lock — so a mismatched `<old>` is the only failure
-    /// this call can actually have.
+    /// Every failure is [`ForgeError::NonFastForward`]: in a private workspace a mismatched
+    /// `<old>` is the only one possible.
     async fn move_ref(&self, branch: &str, new: &str, expected: Option<&str>) -> Result<(), ForgeError> {
         let reference = format!("refs/heads/{branch}");
         let old = expected.unwrap_or(ZERO_OID);
@@ -1073,12 +657,7 @@ impl GitWorkspace {
         })
     }
 
-    /// The sha `revision` names, or `None` when it names nothing.
-    ///
-    /// `--verify --quiet` is what makes "absent" an ordinary answer rather than an
-    /// error: git prints nothing and exits non-zero. A genuinely broken repository
-    /// reads as absent here too — an accepted residual, because the next step
-    /// then fails loudly against the object it was handed.
+    /// The sha `revision` names, or `None` when it names nothing (a broken repository too).
     async fn resolve(&self, revision: &str) -> Result<Option<String>, ForgeError> {
         let argv = Self::local_argv("rev-parse", &["--verify", "--quiet"], &[revision]);
         let output = self.spawn(&argv, None, LazyFetch::Refuse).await?;
@@ -1115,12 +694,8 @@ impl GitWorkspace {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    /// The single seam every invocation in this file goes through.
-    ///
-    /// `super::git_command::run_git` is the only thing that starts a process on
-    /// this path, and this module never holds a child-process builder — which is
-    /// what the process firewall's one allowlist row for `git_command.rs` is
-    /// worth.
+    /// The single seam every invocation goes through; the process firewall allowlists only
+    /// `git_command.rs`, so this module never holds a child-process builder.
     async fn spawn(
         &self,
         argv: &[OsString],
@@ -1133,28 +708,12 @@ impl GitWorkspace {
 
     /// Name a failed non-push invocation.
     ///
-    /// A rejected credential is classified **before** the generic path, because
-    /// the generic path is deliberately unclassified and exits 1 — and the
-    /// published claim table promises exit 80 for "the credential was rejected
-    /// (401/403)" in every mode but `--out`. Under this transport the first
-    /// network call is the `fetch` at [`Self::open`], so a bad
-    /// `OCX_ANNOUNCE_GIT_TOKEN` used to reach the operator as an opaque exit 1
-    /// naming a plumbing step.
-    ///
-    /// The classifier reads the **uncapped** redacted text, for the same reason
-    /// the push classifier does: `remote:` banners push the phrase toward the
-    /// tail, and a cap applied first would silently destroy the input. The cap
-    /// stays on the payload of the error that is actually built.
-    ///
-    /// The push does not come through here — it classifies through
-    /// `git_stderr::classify_push_failure`, which asks the **same** table the
-    /// same question before it reads its own, so a rejected credential earns 80
-    /// on either path. What differs is one row: a 403 here is the credential
-    /// being refused, while a 403 on a push is authenticated-then-forbidden and
-    /// keeps its documented 77/86 verdict. That is the whole reason
-    /// [`GitInvocation`] is a parameter rather than something inferred.
+    /// A rejected credential is classified first, or a bad `OCX_ANNOUNCE_GIT_TOKEN` surfaces
+    /// at the first fetch as an opaque exit 1 instead of 80.
     fn command_failed(&self, command: &str, output: &std::process::Output) -> ForgeError {
+        // Uncapped: `remote:` banners push the phrase to the tail, where a cap would cut it.
         let stderr = redact(String::from_utf8_lossy(&output.stderr).trim(), &self.secrets());
+        // `Fetch`: here a 403 is a refused credential, while a push's 403 keeps its 77/86.
         if let Some(rejected) = classify_remote_failure(&stderr, &self.remote, GitInvocation::Fetch) {
             return rejected;
         }

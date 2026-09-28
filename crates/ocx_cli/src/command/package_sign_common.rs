@@ -1,25 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Shared plumbing for the signing and verifying `ocx package` subcommands.
+//! Shared plumbing for `ocx package sign`, `verify`, `attest`, `sbom` and `push --sbom`.
 //!
-//! Everything here was private to one command before a second one needed it:
-//! the C-S1-4 override-token resolution, the offline policy refusal, the
-//! report timestamp format, the Sigstore endpoint ladder, the trust-root and
-//! identity-policy resolution, the bounded `--predicate` read, and the two
-//! `PackageError` unwraps that keep `context.identifier` in the JSON envelope.
-//! `sign`, `verify`, `attest`, `sbom` and `push --sbom` all call in.
-//!
-//! One leaf rather than command-to-command imports, for two reasons: the token
-//! resolver is security-critical and must not fork into a second copy, and a
-//! helper reached across sibling commands (`push` calling into `attest`,
-//! `sbom` calling into `verify`) makes the dependency graph a mesh, where the
-//! next command has two plausible places to import each helper from.
-//!
-//! Named `package_sign_common` rather than for a verb: `<command>_<subcommand>.rs`
-//! is a leaf in this crate (`subsystem-cli.md`), so a shared leaf takes the
-//! `_common` suffix — the position `patch_common.rs` and `index_common.rs`
-//! already hold.
+//! Shared here, never imported command-to-command: the token resolver is security-critical and must not fork.
 
 use ocx_package_manager::Error as PmError;
 use std::path::Path;
@@ -38,15 +22,9 @@ use zeroize::Zeroizing;
 
 use crate::api::data::signature::{SignatureLegReport, SignatureReport};
 
-/// Refuse a sign-side operation when the run is offline.
+/// Refuses a sign-side operation offline with the caller's refusal `kind` (exit 77).
 ///
-/// S1-E policy: an offline sign is a deliberate rejection, NOT a passive
-/// network-access failure. The caller passes the refusal kind for its own verb
-/// ([`SignErrorKind::OfflineSignRefused`] for `sign`); every one of them
-/// classifies to exit 77 (`PermissionDenied`).
-///
-/// Callers run this before the token-resolution path, so a refused run never
-/// touches a credential.
+/// Call before token resolution, so a refused run never touches a credential.
 pub(super) fn refuse_when_offline(
     context: &crate::app::Context,
     identifier: &ocx_oci::PackageRef,
@@ -58,55 +36,29 @@ pub(super) fn refuse_when_offline(
     Ok(())
 }
 
-/// The basename of a credential path, for an error message.
-///
-/// `--identity-token-file` names a secret's location, and the full path leaks
-/// through stderr, the JSON error envelope and any log sink (CWE-209).
-/// [`SignErrorKind::IdentityTokenFilePermissive`] already renders only this
-/// half, and the I/O failures beside it must not render more — which is why
-/// the reads in [`resolve_override_token`] are typed through `file_error` with
-/// *this* rather than with the path itself. Typing them at all is what turns an
-/// operator's typo into exit 74 instead of exit 1 `internal`.
+/// The basename of a credential path for error messages: the full path must not leak to
+/// stderr, the JSON envelope or a log sink (CWE-209).
 #[cfg(unix)]
 fn redacted_token_path(path: &std::path::Path) -> std::path::PathBuf {
     path.file_name()
         .map_or_else(|| std::path::PathBuf::from("<redacted>"), std::path::PathBuf::from)
 }
 
-/// Resolve the override OIDC token per C-S1-4 precedence.
+/// Resolves the override OIDC token: `--identity-token-file`, then `--identity-token-stdin`, then
+/// `OCX_IDENTITY_TOKEN`; `Ok(None)` falls through to ambient detection. File and stdin are
+/// trimmed, or `echo`'s trailing newline poisons the JWT.
 ///
-/// Precedence: `--identity-token-file` > `--identity-token-stdin` >
-/// `OCX_IDENTITY_TOKEN`. Returns `Ok(None)` when no override source
-/// supplies a token — the dispatcher then falls through to ambient
-/// detection or the browser path.
+/// # Errors
 ///
-/// The file and stdin paths trim trailing whitespace so a trailing newline
-/// written by `echo $TOKEN > tokenfile` doesn't poison the JWT.
-///
-/// On Unix, `--identity-token-file` does not follow symlinks: the file is
-/// opened with `O_NOFOLLOW` so a symlink at the supplied path is rejected
-/// at `open(2)` time (CWE-367 TOCTOU hardening — a pre-open swap of the
-/// path's target would otherwise win the descriptor-side `fstat` check).
-/// The post-open owner check also rejects token files not owned by the
-/// effective user (CWE-732) so an attacker-writable file cannot be passed
-/// through. Both symlink and owner rejections surface as
-/// [`SignErrorKind::OidcPreCheckFailed`] (exit 77).
-///
-/// On Unix, the token file is also rejected if any group or other
-/// permission bit is set (`mode & 0o077 != 0`). This enforces `chmod 600`
-/// hygiene: a world- or group-readable token file is a security
-/// misconfiguration and surfaces as
-/// [`SignErrorKind::IdentityTokenFilePermissive`] (exit 77).
+/// On Unix, exit 77 when the token file is a symlink or not owned by the effective user
+/// ([`SignErrorKind::OidcPreCheckFailed`]) or has a group/other bit set
+/// ([`SignErrorKind::IdentityTokenFilePermissive`]).
 pub(super) async fn resolve_override_token(
     identity_token_file: Option<&Path>,
     identity_token_stdin: bool,
     identifier: &ocx_oci::PackageRef,
 ) -> anyhow::Result<Option<Zeroizing<String>>> {
-    // On a non-Unix target (Windows), ACL-based permission validation is not
-    // implemented for Slice 1 (windows-acl integration is out of scope).
-    // Refuse explicitly rather than silently skipping the check — a
-    // readable-by-others token file is a security misconfiguration and must
-    // not be accepted silently.
+    // No ACL validation off Unix: refuse the file rather than silently skip the check.
     #[cfg(not(unix))]
     if identity_token_file.is_some() {
         return Err(anyhow::Error::from(SignError::new(
@@ -120,31 +72,10 @@ pub(super) async fn resolve_override_token(
     }
     #[cfg(unix)]
     if let Some(path) = identity_token_file {
-        // C-S1-4 permission gate (Unix only): open the file once with
-        // `O_NOFOLLOW` so a symlink at `path` is rejected at `open(2)`
-        // time (CWE-367 — descriptor-side `fstat` is too late, a pre-open
-        // swap of the path's target wins the race). Validate permissions
-        // and ownership on the open handle, then read from the same
-        // handle to eliminate the TOCTOU race between stat and read.
-        //
-        // Symlink-on-resolved-target (open()'s O_NOFOLLOW only checks the
-        // final path component) is a deferred decision — current behavior
-        // is "reject the leaf only"; the file the symlink resolves to is
-        // unreachable because the open itself fails first.
+        // One `O_NOFOLLOW` handle for every check and the read, or a target swap wins the race
+        // (CWE-367). Only the final component is checked; a symlinked parent is still followed.
         {
-            // `--identity-token-file` is a sensitive credential location.
-            // Error context strings deliberately omit the path so it does
-            // not leak into stderr or the JSON envelope (CWE-209) — the
-            // structured `IdentityTokenFilePermissive` variant retains the
-            // `PathBuf` for callers that need it.
-            //
-            // `std::fs::OpenOptions::open` and `File::metadata` are
-            // synchronous syscalls that block the runtime worker; run
-            // them on the blocking pool via `tokio::task::spawn_blocking`
-            // and only resume the async task once an owned `std::fs::File`
-            // is returned. The reader side then wraps the handle with
-            // `tokio::fs::File::from_std` so the actual read happens on
-            // the async reactor.
+            // Context strings omit the path (CWE-209); only `IdentityTokenFilePermissive` keeps it.
             let path_owned = path.to_path_buf();
             let identifier_for_blocking = identifier.clone();
             let join_result = tokio::task::spawn_blocking(move || -> anyhow::Result<std::fs::File> {
@@ -154,11 +85,7 @@ pub(super) async fn resolve_override_token(
                     .custom_flags(libc::O_NOFOLLOW)
                     .open(&path_owned)
                     .map_err(|e| {
-                        // `O_NOFOLLOW` on a symlink returns `ELOOP` on every
-                        // POSIX target we support (Linux + Darwin/BSD). Map
-                        // to a typed pre-check failure so the exit-code
-                        // classifier returns 77; other errno values fall
-                        // through to the raw I/O context (exit 1).
+                        // `ELOOP` is `O_NOFOLLOW` meeting a symlink: a pre-check failure (77).
                         if e.raw_os_error() == Some(libc::ELOOP) {
                             anyhow::Error::from(SignError::new(
                                 identifier_for_blocking.clone(),
@@ -167,11 +94,7 @@ pub(super) async fn resolve_override_token(
                                 },
                             ))
                         } else {
-                            // Typed, so an operator's typo exits 74 rather than
-                            // falling through the downcast ladder to exit 1
-                            // `internal` — a missing token file reported as a bug
-                            // in ocx. The basename only: the CWE-209 note above is
-                            // not relaxed, it is honoured by what is handed in.
+                            // Typed with the basename only, or a typo exits 1 `internal` instead of 74.
                             anyhow::Error::new(ocx_util::error::FileError::new(redacted_token_path(&path_owned), e))
                                 .context("failed to open --identity-token-file")
                         }
@@ -180,10 +103,7 @@ pub(super) async fn resolve_override_token(
                     .metadata()
                     .map_err(|e| ocx_util::error::FileError::new(redacted_token_path(&path_owned), e))
                     .context("failed to stat --identity-token-file")?;
-                // CWE-732: reject token files not owned by the effective
-                // user. A file writable by another uid could have been
-                // swapped to malicious content even with 0600 perms (e.g.
-                // user-namespace games or wrongly-chowned tempfile).
+                // CWE-732: another uid's file could be swapped for malicious content even at 0600.
                 // SAFETY: `geteuid` is async-signal-safe and never fails.
                 let euid = unsafe { libc::geteuid() };
                 if meta.uid() != euid {
@@ -201,12 +121,8 @@ pub(super) async fn resolve_override_token(
                         SignErrorKind::IdentityTokenFilePermissive { path: path_owned, mode },
                     )));
                 }
-                // The regular-file half of `read_bounded`'s pair of guards,
-                // asked of the handle rather than re-derived from the path.
-                // `/dev/zero` reports length 0 and then yields forever, which
-                // no byte ceiling alone refuses; a FIFO blocks instead. Both
-                // pass the uid and mode checks above when the operator owns
-                // them.
+                // Asked of the handle: `/dev/zero` (length 0, endless) and a FIFO (blocks) pass the
+                // uid and mode checks when the operator owns them.
                 if !meta.is_file() {
                     return Err(anyhow::Error::new(ocx_util::error::FileError::new(
                         redacted_token_path(&path_owned),
@@ -219,17 +135,10 @@ pub(super) async fn resolve_override_token(
             .context("token-file open task panicked")?;
             let std_file = join_result?;
             let mut file = tokio::fs::File::from_std(std_file);
-            // Zeroizing wraps the read buffer so the full-token cleartext is
-            // scrubbed on drop, not just the trimmed copy returned below.
+            // The whole buffer is zeroized, not just the trimmed copy returned below.
             let mut raw = Zeroizing::new(String::new());
-            // The byte-ceiling half of `read_bounded`'s pair, applied to the
-            // handle the checks above validated rather than through a second
-            // `open` of the path. `read_bounded` takes a path, so calling it
-            // here would drop `O_NOFOLLOW`, reopen a name an attacker may have
-            // swapped since the uid/mode gate ran (CWE-367), and land the
-            // cleartext in an unzeroized `Vec`. `take` is the same bound over
-            // the handle: `cap + 1` is what tells "exactly at the cap" from
-            // "over it", and it stops the read rather than only the answer.
+            // Not `read_bounded`: it reopens by path (dropping `O_NOFOLLOW`, CWE-367) into an
+            // unzeroized `Vec`. `take(cap + 1)` stops the read itself and tells at-cap from over.
             (&mut file)
                 .take(MAX_IDENTITY_TOKEN_BYTES + 1)
                 .read_to_string(&mut raw)
@@ -249,9 +158,7 @@ pub(super) async fn resolve_override_token(
         }
     }
     if identity_token_stdin {
-        // Use tokio's async stdin to avoid blocking the runtime thread.
-        // Zeroizing scrubs the full-token cleartext on drop, not just the
-        // trimmed copy returned below.
+        // The whole buffer is zeroized, not just the trimmed copy returned below.
         let mut buf = Zeroizing::new(String::new());
         tokio::io::stdin()
             .read_to_string(&mut buf)
@@ -268,54 +175,25 @@ pub(super) async fn resolve_override_token(
     Ok(None)
 }
 
-/// The largest an `--identity-token-file` may be.
-///
-/// An OIDC ID token is a compact JWS — a few kilobytes at the outside, and the
-/// providers this path talks to sit well under one. Sixty-four kibibytes is the
-/// ceiling `MAX_KEY_PEM_BYTES` already puts on the other credential file an
-/// operator names, and it exists only to bound the read of a path that was
-/// typed, not to police token shape.
-///
-/// Unix-only, like its single use site. On Windows `--identity-token-file` is
-/// refused before any read — ACL-based permission validation is unimplemented
-/// there, and the flag fails closed rather than skipping the check — so there
-/// is no read for this ceiling to bound and an ungated constant is dead code
-/// that `-D warnings` fails the build on.
+/// The largest `--identity-token-file` read; an OIDC token is a few KiB, and 64 KiB matches
+/// `MAX_KEY_PEM_BYTES`.
 #[cfg(unix)]
 const MAX_IDENTITY_TOKEN_BYTES: u64 = 64 * 1024;
 
-/// Default public Fulcio CA endpoint.
-///
-/// The one literal for it: `sign`, `attest` and `push --sbom` all reach it
-/// through [`resolve_endpoint`], so there is no second copy to drift. Rekor's
-/// twin is [`ocx_oci::endpoint::DEFAULT_REKOR_URL`], which already lives
-/// in the library because verify needs it too.
+/// Default public Fulcio CA endpoint; Rekor's is [`ocx_oci::endpoint::DEFAULT_REKOR_URL`].
 pub(crate) const DEFAULT_FULCIO_URL: &str = "https://fulcio.sigstore.dev";
 
 /// Which Sigstore service an endpoint is being resolved for.
-///
-/// Names the service once instead of making a call site thread a config field
-/// and a matching builtin default that must agree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SigstoreEndpoint {
     Fulcio,
     Rekor,
 }
 
-/// Resolve a Sigstore endpoint URL: flag > `[trust.sigstore]` > builtin default.
+/// Resolves a Sigstore endpoint URL: flag > `[trust.sigstore]` > builtin default.
 ///
-/// The config tier is what makes a self-hosted Fulcio/Rekor a fleet-wide
-/// setting rather than a flag every invocation has to repeat — and until this
-/// existed, `[trust.sigstore].fulcio_url` and `.rekor_url` were documented
-/// defaults that nothing read.
-///
-/// The result is still untrusted: a config-supplied URL is exactly as
-/// attacker-reachable as a flag-supplied one (a `[managed]` payload can carry
-/// one), so every caller passes it through
-/// [`validate_sigstore_url`](ocx_oci::endpoint::validate_sigstore_url)
-/// before it becomes an HTTP target. Returning a `String` rather than a
-/// validated `Url` is what keeps that step at the call site, where the
-/// per-subsystem error wrap (`SignError` vs `VerifyError`) lives.
+/// Unvalidated: a config URL is as attacker-reachable as a flag (`[managed]`), so every caller
+/// passes it through [`validate_sigstore_url`](ocx_oci::endpoint::validate_sigstore_url) before dialing.
 pub(crate) fn resolve_endpoint(
     flag: Option<&str>,
     configured: Option<&ocx_trust::SigstoreTrust>,
@@ -332,23 +210,8 @@ pub(crate) fn resolve_endpoint(
     flag.or(from_config).unwrap_or(builtin).to_string()
 }
 
-/// Resolve and validate the Fulcio/Rekor pair every signing verb needs.
-///
-/// One ladder, walked twice: flag > `[trust.sigstore]` > builtin default, then
-/// the SSRF guard (CWE-918) on whichever tier supplied the value, because a
-/// config-sourced URL is exactly as attacker-reachable as a flag-sourced one —
-/// a `[managed]` payload can carry one. Failures route through
-/// [`SignErrorKind::InvalidEndpointUrl`] → exit 64, so the envelope's
-/// `error.detail` names the offending flag.
-///
-/// Every signing verb reaches this one ladder, including `push --sign` and
-/// `push --sbom`, which carry `--fulcio-url` / `--rekor-url` of their own
-/// (OCX-C-5). The config tier is what the flags rest on: without it an
-/// operator on a self-hosted stack could `attest` but not push — the same run,
-/// two different Fulcios.
-///
-/// Fulcio is validated first, so a run with both endpoints wrong names
-/// `--fulcio-url` every time rather than whichever the compiler ordered.
+/// Resolves and SSRF-validates (CWE-918) the Fulcio/Rekor pair every signing verb shares, so a
+/// self-hosted stack never signs against two different Fulcios. Fulcio is validated first.
 ///
 /// # Errors
 ///
@@ -368,21 +231,9 @@ pub(super) fn resolve_sigstore_pair(
     Ok((fulcio_url, rekor_url))
 }
 
-/// Resolve and validate the Rekor endpoint a verifying verb needs.
+/// Resolves and SSRF-validates the Rekor endpoint for verifying verbs.
 ///
-/// The same ladder and the same guard as [`resolve_sigstore_pair`], for the
-/// commands that read a transparency log without ever talking to a CA. It is a
-/// separate function rather than the pair's second element on purpose: reusing
-/// the pair here would make a `[trust.sigstore].fulcio_url` typo fail `verify`
-/// and `sbom`, which never contact Fulcio at all.
-///
-/// The refusal is a [`VerifyErrorKind`], not a `SignErrorKind` — same exit 64,
-/// but exit-code classification stays inside the subsystem that failed.
-///
-/// The config tier matters here for one reason beyond a convenient default:
-/// the trust-root cache is keyed by the Rekor instance, so a self-hosted root
-/// cached under the public-good key is a cache collision, not a cosmetic
-/// mismatch.
+/// Apart from the pair, or a `[trust.sigstore].fulcio_url` typo fails `verify` and `sbom`.
 ///
 /// # Errors
 ///
@@ -411,29 +262,13 @@ pub(super) fn iso8601(epoch_secs: u64) -> String {
         .unwrap_or_default()
 }
 
-// ── moved from `package_verify.rs` (ARCH-3) ─────────────────────────────
-
-/// Build the ANY-of identity constraints the signing certificate must
-/// satisfy.
+/// The ANY-of identity constraints the signing certificate must satisfy: the flag pair, else the
+/// scope-matched `[[trust.policy]]` set; `key` names the one public key that may have signed.
 ///
-/// Flag mode (`--certificate-identity` + `--certificate-oidc-issuer`, kept
-/// both-or-neither by clap): a single exact pair that overrides any policy
-/// — this preserves the original flag-only verify behaviour unchanged.
-/// Policy mode (neither flag): the scope-matched `[[trust.policy]]` set
-/// under cross-tier precedence — the operator `config.toml` tiers are
-/// authoritative; the project `ocx.toml` only adds trust where the operator
-/// has not governed the scope (see [`ocx_trust::resolve_tiered`]). A malformed
-/// matched policy → [`VerifyErrorKind::TrustPolicyInvalid`] (exit 78); no
-/// matching policy → [`VerifyErrorKind::NoIdentityProvided`] (exit 64). The
-/// one carve-out is a signer whose `key` names a file that cannot be read: that is a
-/// filesystem failure on an operator-supplied path, so it exits 74 `io_error`
-/// like the `--key` sign door, not 78.
+/// # Errors
 ///
-/// Key mode (`key`) short-circuits both: a `--key` reference names the one
-/// public key that may have signed, so no keyless matcher is consulted. The
-/// parameter is inert here — every caller passes `None`, and loop D supplies
-/// it from [`KeyOpt::reference`](crate::options::key::KeyOpt::reference) in
-/// its own command files, so this shared leaf is not edited again.
+/// Exit 64 with no identity source (`NoIdentityProvided`), 78 for a malformed matched policy
+/// ([`VerifyErrorKind::TrustPolicyInvalid`]), 74 for an unreadable signer `key` file.
 pub(super) async fn resolve_policies(
     context: &crate::app::Context,
     identifier: &ocx_oci::PackageRef,
@@ -449,20 +284,8 @@ pub(super) async fn resolve_policies(
     Ok(compiled)
 }
 
-/// [`resolve_policies`] without the empty-set refusal: no matching policy is
-/// an empty `Vec`, not an error.
-///
-/// The split exists because "no identity source" is a *question* for
-/// `ocx package sbom`, not a verdict. Its default mode reads the empty set as
-/// "nobody asked for verification here, so read permissively", where
-/// `ocx package verify` and an explicit `--verify` read the same emptiness as
-/// "you demanded verification and named nothing to verify against" (exit 64).
-/// One resolution, two readings — the alternative is a second copy of the
-/// tiered-precedence walk that drifts on the first fix.
-///
-/// `key` never widens the empty set the split is about: key mode returns
-/// exactly one policy or an error, so both readings stay reachable only
-/// through the keyless path they were written for.
+/// [`resolve_policies`] without the empty-set refusal, for `sbom`'s permissive default; key mode
+/// still returns exactly one policy or an error.
 pub(super) async fn resolve_policies_lenient(
     context: &crate::app::Context,
     identifier: &ocx_oci::PackageRef,
@@ -470,11 +293,7 @@ pub(super) async fn resolve_policies_lenient(
     certificate_oidc_issuer: Option<&str>,
     key: Option<&KeyRef>,
 ) -> anyhow::Result<Vec<CompiledPolicy>> {
-    // Key mode pins a single public key and never consults a keyless matcher,
-    // so it decides ahead of the flag pair. The keyless certificate flags are
-    // refused by clap (`conflicts_with = "key"`) on each command that carries
-    // both groups, so reaching here with a key *and* a flag pair is not a
-    // reachable invocation.
+    // Clap refuses a key beside the certificate flags, so this order never drops a flag pair.
     if let Some(key) = key {
         let policy = ocx_trust::compile_key_signer(key)
             .map_err(|kind| VerifyError::new(identifier.clone(), VerifyErrorKind::from(kind)))?;
@@ -487,23 +306,18 @@ pub(super) async fn resolve_policies_lenient(
 
     let target = format!("{}/{}", identifier.registry(), identifier.repository());
     let project_policies = project_trust_policies(context, identifier).await?;
-    // Operator tier (config.toml) is authoritative; the project ocx.toml
-    // only adds trust for scopes the operator has not governed.
+    // Operator `config.toml` is authoritative; `ocx.toml` only adds trust for ungoverned scopes.
     ocx_trust::resolve_tiered(context.config_trust_policies(), &project_policies, &target)
         .map_err(|kind| VerifyError::new(identifier.clone(), VerifyErrorKind::from(kind)).into())
 }
 
-/// The project `ocx.toml` trust policies for the in-effect project (empty
-/// when no project file resolves). This is the deliberate OCI-tier carve-out
-/// for a security concern — verify reads `[[trust.policy]]` from `ocx.toml`,
-/// which OCI-tier commands otherwise never consult (see `adr_trust_policy.md`).
+/// The in-effect project's `[[trust.policy]]` set, empty without a project file: the one OCI-tier
+/// read of `ocx.toml` (`adr_trust_policy.md`).
 async fn project_trust_policies(
     context: &crate::app::Context,
     identifier: &ocx_oci::PackageRef,
 ) -> anyhow::Result<Vec<ocx_trust::TrustPolicy>> {
-    // A missing/inaccessible CWD is non-fatal: `ProjectConfig::resolve` still
-    // honors an explicit `--project` / `OCX_PROJECT`, and with no project file
-    // resolved the trust-policy set is simply empty (flag-mode verify works).
+    // A missing CWD is non-fatal: `--project`/`OCX_PROJECT` still resolve.
     let cwd = std::env::current_dir().ok();
     let ocx_home = context.file_structure().root();
     let resolved =
@@ -511,21 +325,14 @@ async fn project_trust_policies(
             .await?;
     match resolved {
         Some((config_path, _lock_path)) => {
-            // Lenient trust-only parse: an unrelated malformed section (a bad
-            // `[tools]` entry, etc.) must NOT fail verify — only `[trust]`
-            // matters here (the OCI-tier carve-out is scoped to trust policy).
+            // Trust-only parse, or a malformed unrelated section fails verify.
             let text = tokio::fs::read_to_string(&config_path)
                 .await
                 .map_err(|error| ocx_util::error::FileError::new(&config_path, error))
                 .with_context(|| format!("reading project config `{}` for trust policies", config_path.display()))?;
-            // Anchored on the project file's own directory, like every other
-            // tier: a relative key path must name the same file whether
-            // verify runs from the project root or a subdirectory.
+            // Anchored on the project file's directory, or a relative key path depends on the CWD.
             let config_dir = config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
-            // Mapped, never bubbled: `TrustPolicyError` has no rung in the
-            // downcast ladder, so a bare `?` here exits 1 `internal` for an
-            // operator's malformed `ocx.toml`. The same wrapper every other
-            // trust-policy refusal on this path already goes through.
+            // Mapped, or a malformed `ocx.toml` exits 1 `internal`: `TrustPolicyError` has no classify rung.
             ocx_trust::policies_from_ocx_toml(&text, config_dir)
                 .map_err(|kind| VerifyError::new(identifier.clone(), VerifyErrorKind::TrustPolicyInvalid(kind)).into())
         }
@@ -533,18 +340,10 @@ async fn project_trust_policies(
     }
 }
 
-/// Read an explicit trust-root override — `--sigstore-trusted-root` or
-/// `OCX_SIGSTORE_TRUSTED_ROOT` — in the shared local-file grammar.
+/// Reads an explicit trust-root override, a bare path or a `file://` URL.
 ///
-/// [`FileReference::as_written`] is the policy on purpose, not
-/// `anchored_at`: a value typed at a shell or exported into the environment
-/// means what it means from the process working directory, which is what
-/// clap's `PathBuf` already did. Only a `file://` prefix is consumed, so a
-/// bare path — every value that works today — round-trips byte for byte.
-///
-/// A non-UTF-8 value carries no `file://` spelling to read (the prefix is
-/// ASCII) and is passed through untouched, so a path an `OsString` can hold
-/// and a `String` cannot is not lost at this door.
+/// [`FileReference::as_written`], not `anchored_at`: the value is relative to the process CWD.
+/// A non-UTF-8 path passes through untouched.
 pub(crate) fn explicit_trust_root_path(value: std::path::PathBuf) -> std::path::PathBuf {
     match value.to_str() {
         Some(written) => FileReference::parse(written).as_written().to_path_buf(),
@@ -552,21 +351,8 @@ pub(crate) fn explicit_trust_root_path(value: std::path::PathBuf) -> std::path::
     }
 }
 
-/// Resolve the trust root in precedence order, offline-aware.
-///
-/// Layers flag-vs-env override resolution on the shared
-/// [`ocx_lib::oci::verify::resolve_trust_root`] ladder (`--sigstore-trusted-root` /
-/// `OCX_SIGSTORE_TRUSTED_ROOT` → `[trust.sigstore]` → the
-/// `$OCX_HOME/sigstore/trusted-root.json` convention path → trust-root
-/// cache → embedded root, with the offline pinned-Rekor-key gate). The flag
-/// wins over the env; the shared ladder is the single source of truth for
-/// every rung below that (auto-verify reuses it). Any failure is tagged
-/// with the target identifier.
-///
-/// Both doors take the same two spellings `[trust.sigstore] trusted_root`
-/// reads — a bare path or a `file://` URL
-/// ([ocx-sh/ocx#379](https://github.com/ocx-sh/ocx/issues/379)) — and the rung
-/// below never learns which was written.
+/// Resolves the trust root: `--sigstore-trusted-root`, then `OCX_SIGSTORE_TRUSTED_ROOT`, on top of
+/// `ocx_sign::verify::resolve_trust_root`'s ladder, which auto-verify shares.
 pub(super) async fn resolve_trust_root(
     context: &crate::app::Context,
     identifier: &ocx_oci::PackageRef,
@@ -583,8 +369,6 @@ pub(super) async fn resolve_trust_root(
         explicit.as_deref(),
         context.config_trust_sigstore(),
         home_trusted_root.as_deref(),
-        // The trust-root cache is `ocx_sign`'s corner of the state root; the
-        // store only says where that root is (ADR 1.9).
         &ocx_sign::sign::state::SigningStatePaths::new(context.file_structure().state.root()),
         rekor_cache_key,
         offline,
@@ -593,17 +377,8 @@ pub(super) async fn resolve_trust_root(
     .map_err(|kind| VerifyError::new(identifier.clone(), kind).into())
 }
 
-/// Convert a verify-path [`PackageError`] into an `anyhow::Error`, unwrapping
-/// the inner [`VerifyError`] so the `--format json` error envelope's
-/// `context.identifier` is populated on every pipeline-stage failure — matching
-/// the pre-check paths (URL validation, identity/trust-root resolution) that
-/// already surface a bare `VerifyError`.
-///
-/// `ocx_lib::Error::Verify` is `#[error(transparent)]`, so its `source()`
-/// forwards straight to the inner `VerifyErrorKind`, skipping the `VerifyError`
-/// node the envelope's context walk downcasts to. The exit code, `error.kind`,
-/// and `error.detail` are unchanged — all three reach the same `VerifyErrorKind`
-/// whether or not the `VerifyError` node is preserved.
+/// Unwraps the inner [`VerifyError`], or the JSON envelope's `context.identifier` is empty:
+/// `Error::Verify` is `#[error(transparent)]`, so its `source()` skips that node.
 pub(super) fn verify_error_into_anyhow(err: PackageError) -> anyhow::Error {
     match err.kind {
         PackageErrorKind::Internal(PmError::Verify(verify_error)) => anyhow::Error::new(*verify_error),
@@ -611,14 +386,7 @@ pub(super) fn verify_error_into_anyhow(err: PackageError) -> anyhow::Error {
     }
 }
 
-// ── moved from `package_attest.rs` (ARCH-3) ─────────────────────────────
-
-/// Build the `SignError` for a rejected Sigstore endpoint URL.
-///
-/// Private: every signing verb reaches it through
-/// [`resolve_sigstore_pair`], so all three report the same kind, the same
-/// exit code (64) and the same offending flag by construction rather than by
-/// three call sites agreeing.
+/// The `SignError` for a rejected Sigstore endpoint URL (exit 64).
 fn invalid_endpoint(
     identifier: &ocx_oci::PackageRef,
     flag: &'static str,
@@ -635,15 +403,7 @@ fn invalid_endpoint(
     }
 }
 
-/// Read the `--predicate` file into memory, bounded and without following a
-/// symlink at the named path.
-///
-/// Shared with `package push --sbom`.
-///
-/// The bound is enforced *while reading*, never as a `metadata().len()` check
-/// followed by an unbounded read: the length on disk is a hint, not a promise
-/// about how many bytes arrive, and a `Vec::with_capacity` sized from it is an
-/// allocation an attacker chooses (PKG-04, PKG-07).
+/// Reads the `--predicate` file, bounded and refusing a symlink at the named path.
 ///
 /// # Errors
 ///
@@ -652,8 +412,8 @@ fn invalid_endpoint(
 pub(super) async fn read_predicate(path: &Path, identifier: &ocx_oci::PackageRef) -> anyhow::Result<Vec<u8>> {
     let file = open_predicate(path).await?;
 
-    // One byte past the ceiling: enough to tell "at the limit" from "over it"
-    // without reading a byte more than that.
+    // Bounded while reading, never sized from `metadata().len()`, which the attacker chooses;
+    // one byte past the ceiling tells at-limit from over.
     let ceiling = u64::try_from(MAX_PREDICATE_FILE_BYTES)
         .expect("MAX_PREDICATE_FILE_BYTES is a compile-time constant well under u64::MAX")
         .saturating_add(1);
@@ -668,9 +428,7 @@ pub(super) async fn read_predicate(path: &Path, identifier: &ocx_oci::PackageRef
             identifier.clone(),
             SignErrorKind::PredicateTooLarge {
                 limit: ceiling.saturating_sub(1),
-                // What was counted before the limit tripped, not what is on
-                // disk: the read stops at the ceiling, so the file's real size
-                // is deliberately never asked for.
+                // What was counted, not the on-disk size: the read stops at the ceiling.
                 actual: ceiling,
             },
         )));
@@ -678,25 +436,16 @@ pub(super) async fn read_predicate(path: &Path, identifier: &ocx_oci::PackageRef
     Ok(bytes)
 }
 
-/// Open the predicate file, refusing a symlink at the named path.
+/// Opens the predicate file, refusing a symlink at `open(2)`, or the link target is signed into an
+/// append-only public log; a prior `symlink_metadata` would leave a swap window (CWE-367).
 ///
-/// Unlike `--identity-token-file`, ownership and mode are deliberately NOT
-/// checked: a predicate is public data destined for publication, and a 0644
-/// SBOM written by an earlier CI step is the ordinary case — a mode gate would
-/// reject that while protecting nothing. The symlink refusal is kept because
-/// its consequence is not confidentiality-shaped but irreversible: whatever the
-/// link resolves to would be embedded, signed with the caller's identity,
-/// pushed, and hashed into an append-only public log. Refusing at `open(2)`
-/// rather than by a prior `symlink_metadata` check closes the swap window
-/// between the decision and the read (CWE-367).
+/// No ownership or mode gate, unlike `--identity-token-file`: a predicate is public, and a 0644
+/// SBOM from an earlier CI step is the ordinary case.
 async fn open_predicate(path: &Path) -> anyhow::Result<tokio::fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
 
-        // `OpenOptions::open` is a blocking syscall; run it on the blocking
-        // pool and hand the resulting descriptor to the reactor, the same shape
-        // `package_sign_common` uses for the token file.
         let owned = path.to_path_buf();
         let opened = tokio::task::spawn_blocking(move || {
             std::fs::OpenOptions::new()
@@ -709,9 +458,7 @@ async fn open_predicate(path: &Path) -> anyhow::Result<tokio::fs::File> {
 
         match opened {
             Ok(file) => Ok(tokio::fs::File::from_std(file)),
-            // POSIX specifies ELOOP for `O_NOFOLLOW` on a symlink; it is the
-            // one open(2) error that means "this path is a link", so it is
-            // reported as the refusal it is rather than as a generic I/O fault.
+            // `ELOOP` is `O_NOFOLLOW` meeting a symlink: reported as the refusal, not an I/O fault.
             Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
                 Err(anyhow::Error::from(ocx_util::error::FileError::new(path, error))
                     .context("refusing to read a predicate through a symlink"))
@@ -721,37 +468,26 @@ async fn open_predicate(path: &Path) -> anyhow::Result<tokio::fs::File> {
     }
     #[cfg(not(unix))]
     {
-        // No `O_NOFOLLOW` equivalent is wired for Windows here; the open is
-        // plain, and the symlink refusal is a Unix-only guarantee.
+        // No `O_NOFOLLOW` equivalent on Windows: the symlink refusal is Unix-only.
         tokio::fs::File::open(path)
             .await
             .map_err(|error| ocx_util::error::FileError::new(path, error).into())
     }
 }
 
-/// Describe a failed `push --sbom` attestation for the push report.
-///
-/// The slug is lifted out of the JSON error envelope this error would have
-/// rendered, so the value a script reads here is the value it reads there —
-/// two spellings of one failure is exactly what CLI-04 exists to stop.
+/// A failed `push --sbom` attestation, slugged as the JSON error envelope would slug it.
 pub(super) fn failed_outcome(err: &anyhow::Error) -> crate::api::data::push::AttestationOutcome {
     crate::api::data::push::AttestationOutcome::Failed {
         kind: error_slug("package attest", err),
-        // Registry-sourced names and tags reach an error chain verbatim
-        // (CWE-150), and this string is rendered to a terminal.
+        // Registry-sourced text reaches the chain verbatim (CWE-150), and this renders to a terminal.
         message: crate::api::data::sanitize_for_terminal(&format!("{err:#}")),
     }
 }
 
-/// The slug the JSON error envelope would give `err`, for a report that has to
-/// name a failure it survived.
+/// The slug the JSON error envelope would give `err`: `error.detail`, else `error.kind`.
 ///
-/// `error.detail` is the per-variant slug and `error.kind` the frozen category
-/// it rolls up to; `detail` is absent for errors outside the sign/verify
-/// taxonomy, and the category is then the most specific thing there is. Lifting
-/// it out of the rendered envelope rather than re-deriving it is the point:
-/// two spellings of one failure is exactly what CLI-04 exists to stop, and a
-/// `--tags` sweep reports per-tag failures the envelope never gets to render.
+/// Lifted from the rendered envelope, never re-derived, or a report and the envelope spell one
+/// failure two ways.
 pub(super) fn error_slug(command: &str, err: &anyhow::Error) -> String {
     crate::error_envelope::render_error_envelope(command, err)
         .ok()
@@ -766,14 +502,8 @@ pub(super) fn error_slug(command: &str, err: &anyhow::Error) -> String {
         .to_owned()
 }
 
-/// The frozen `error.kind` category a leg failure rolls up to, as the wire
-/// spells it.
-///
-/// A failed *leg* never reaches the error envelope — its run returned `Ok` —
-/// so there is no rendered `error.detail` to lift. The category is then the
-/// most specific thing there is, and it is the same fallback
-/// [`error_slug`] takes for errors outside the sign and verify taxonomies, so
-/// a sweep's rows carry one vocabulary either way.
+/// The frozen `error.kind` a failed leg rolls up to: its run returned `Ok`, so no envelope
+/// `error.detail` exists to lift.
 pub(super) fn category_slug(code: ocx_exit::ExitCode) -> String {
     serde_json::to_value(ocx_exit::ErrorCategory::from_exit_code(code))
         .ok()
@@ -781,20 +511,8 @@ pub(super) fn category_slug(code: ocx_exit::ExitCode) -> String {
         .unwrap_or_else(|| "failure".to_string())
 }
 
-/// The exit code a `--tags` / `--tags-file` sweep returns.
-///
-/// * No failure -> `Success`.
-/// * Every failure the same code -> that code. A twenty-tag sweep that hit one
-///   fault (every tag 401, say) is scriptably that one fault, and flattening it
-///   to a generic failure would throw away the only thing `case $?` could act
-///   on.
-/// * A mix -> `Failure`. There is no true single answer, and picking the first
-///   or the worst would claim a fault class the run did not have. `Failure` is
-///   defined as "use only when no specific code applies", which is exactly the
-///   state a mixed sweep is in. The per-tag codes stay readable in the report.
-///
-/// No new [`ExitCode`](ocx_exit::ExitCode) variant: every answer here is
-/// one a script already knows.
+/// A `--tags` sweep's exit code: `Success` with no failure, the shared code when every failure
+/// agrees, else `Failure` — never the first or worst, which claims a fault class the run did not have.
 pub(super) fn sweep_exit_code(failures: &[ocx_exit::ExitCode]) -> ocx_exit::ExitCode {
     let mut codes = failures.iter();
     let Some(first) = codes.next() else {
@@ -806,17 +524,8 @@ pub(super) fn sweep_exit_code(failures: &[ocx_exit::ExitCode]) -> ocx_exit::Exit
     }
 }
 
-/// Convert an attest-path [`PackageError`] into an `anyhow::Error`, unwrapping
-/// the inner [`SignError`] so the `--format json` envelope's
-/// `context.identifier` is populated on every pipeline-stage failure — matching
-/// the pre-check paths (offline refusal, URL validation, predicate read) that
-/// already surface a bare `SignError`.
-///
-/// `ocx_lib::Error::Sign` is `#[error(transparent)]`, so its `source()` forwards
-/// straight to the inner `SignErrorKind`, skipping the `SignError` node the
-/// envelope's context walk downcasts to. The exit code, `error.kind` and
-/// `error.detail` reach the same `SignErrorKind` either way; the identifier
-/// does not, which is what the unwrap is for.
+/// Unwraps the inner [`SignError`], or the JSON envelope's `context.identifier` is empty:
+/// `Error::Sign` is `#[error(transparent)]`, so its `source()` skips that node.
 pub(super) fn attest_error_into_anyhow(err: PackageError) -> anyhow::Error {
     match err.kind {
         PackageErrorKind::Internal(PmError::Sign(sign_error)) => anyhow::Error::new(*sign_error),
@@ -824,11 +533,7 @@ pub(super) fn attest_error_into_anyhow(err: PackageError) -> anyhow::Error {
     }
 }
 
-/// Build the per-reference report from one pipeline result.
-///
-/// Shared by the single-reference path and the sweep, so a swept tag's row
-/// carries the same document a single run prints — the sweep aggregates the
-/// existing report rather than modelling a second one.
+/// The per-reference report; a swept tag's row carries the same document a single run prints.
 pub(super) fn signature_report(
     identifier: &ocx_oci::PackageRef,
     platform: Option<&ocx_oci::Platform>,
@@ -865,14 +570,8 @@ pub(super) fn signature_report(
     .with_transparency_log(result.transparency_log_index)
 }
 
-/// The exit code one failed leg deserves, walking an `Internal` cause exactly
-/// the way [`SignError::classify`](ocx_lib::oci::sign::SignError::classify) does for a whole-run failure.
-///
-/// `SignErrorKind::exit_code` answers `Failure` (1) for `Internal`, and every
-/// registry fault reaches a leg wrapped in `Internal` (`referrers::map_client_error`
-/// keeps the `ClientError` intact under it rather than flattening it). Reading
-/// the kind directly would exit 1 for a 503 that exits 75 when it fails the run
-/// as a whole — the same fault, two codes, decided by how many legs it hit.
+/// The exit code for one failed leg, walking an `Internal` cause like a whole-run failure does,
+/// or a 503 exits 1 on one leg and 75 on the whole run.
 pub(super) fn leg_exit_code(kind: &ocx_sign::sign::SignErrorKind) -> ocx_exit::ExitCode {
     match kind {
         ocx_sign::sign::SignErrorKind::Internal(cause) => crate::exit::classify_library_error(cause.as_ref()),

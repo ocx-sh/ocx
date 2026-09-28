@@ -24,7 +24,6 @@ pub struct PatchSyncReport {
 }
 
 impl PatchSyncReport {
-    /// Build a sync report from the library-layer [`ocx_package_manager::PatchSyncReport`].
     pub fn new(inner: ocx_package_manager::PatchSyncReport) -> Self {
         Self {
             bases_checked: inner.bases_checked,
@@ -36,8 +35,7 @@ impl PatchSyncReport {
 
 impl Printable for PatchSyncReport {
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
-        // Column-major: each inner Vec is one column (Checked | Updated | Companions),
-        // matching `print_table`'s contract (`rows[c]` holds the cells of column c).
+        // Column-major: `rows[c]` holds column c.
         let rows: [Vec<String>; 3] = [
             vec![self.bases_checked.to_string()],
             vec![self.descriptors_updated.to_string()],

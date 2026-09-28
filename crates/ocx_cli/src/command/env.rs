@@ -13,28 +13,25 @@ use ocx_shell::shell::Shell;
 ///
 /// Plain format: aligned table with Key, Value, and Type columns where Type is `constant` or `path`.
 /// JSON format:  `{"entries": [{"key": "...", "value": "...", "type": "constant"|"path"}, ...]}`.
+/// External tools (Python scripts, Bazel rules, CI steps) use it to configure
+/// child process environments without going through `ocx exec`.
 ///
-/// This allows external tools (Python scripts, Bazel rules, CI steps) to correctly
-/// configure child process environments without going through `ocx exec`.
-///
-/// By default, env values are rooted in the content-addressed object store and
-/// may change when a package is updated.  Use `--candidate` or `--current` to
-/// root them in a stable symlink path instead — suitable for embedding in editor
-/// or IDE configuration files that should not change on every package update.
-/// See the path resolution modes documentation for details.
+/// Values are rooted in the content-addressed object store and may change when
+/// a package is updated; `--candidate` or `--current` roots them in a stable
+/// symlink path instead, for editor or IDE configuration files.
 #[derive(Parser)]
 pub struct Env {
     /// Expose the package's full env, including private (self-only) entries.
     /// See `ocx exec --help` for full view semantics.
-    ///
-    /// Generated launchers embed `--self`; avoid passing it directly unless
-    /// building a launcher equivalent.
-    ///
-    /// Cannot be combined with `--lazy-mode always`: a generated shim is a
-    /// launcher, launchers are consumer-facing, and a package's private view
-    /// bypasses them, so those two ask for contradictory things (exit 64).
-    /// `--lazy-mode never` agrees with this view and is accepted, as is an
-    /// `always` coming from `OCX_LAZY_MODE`, which composes eagerly.
+    #[arg(long_help = "\
+        Expose the package's full env, including private (self-only) entries. See `ocx exec --help` \
+        for full view semantics.\n\n\
+        Generated launchers embed `--self`; avoid passing it directly unless building a launcher \
+        equivalent.\n\n\
+        Cannot be combined with `--lazy-mode always`: a generated shim is a launcher, launchers are \
+        consumer-facing, and a package's private view bypasses them, so those two ask for \
+        contradictory things (exit 64). `--lazy-mode never` agrees with this view and is accepted, \
+        as is an `always` coming from `OCX_LAZY_MODE`, which composes eagerly.")]
     #[clap(long = "self", default_value_t = false)]
     self_view: bool,
 
@@ -47,8 +44,7 @@ pub struct Env {
     #[clap(flatten)]
     content_path: options::ContentPath,
 
-    /// Top tier of the `lazy-mode` ladder for every package this command
-    /// composes.
+    /// Top tier of the `lazy-mode` ladder for every package this command composes.
     ///
     /// `always` composes a package as a generated shim: its declared names
     /// reach `PATH` immediately and its content downloads on first use. The
@@ -84,16 +80,14 @@ pub struct Env {
     shell: Option<Option<Shell>>,
 
     /// Write the composed environment into a CI system's persistence channel.
-    ///
-    /// `--ci=github` appends package dirs and vars to `$GITHUB_PATH` /
-    /// `$GITHUB_ENV`; `--ci=gitlab` writes JSON-lines to `--export-file` (or
-    /// stdout). Bare `--ci` autodetects the provider from CI environment
-    /// variables; exit 64 if none is detected. Must be supplied with `=`
-    /// (`--ci=github`).
-    ///
-    /// Unlike `--shell` (which affects only the current step), the CI channel
-    /// makes the environment available to later pipeline steps. Conflicts with
-    /// `--shell`.
+    #[arg(long_help = "\
+        Write the composed environment into a CI system's persistence channel.\n\n\
+        `--ci=github` appends package dirs and vars to `$GITHUB_PATH` / `$GITHUB_ENV`; \
+        `--ci=gitlab` writes JSON-lines to `--export-file` (or stdout). Bare `--ci` autodetects the \
+        provider from CI environment variables; exit 64 if none is detected. Must be supplied with \
+        `=` (`--ci=github`).\n\n\
+        Unlike `--shell` (which affects only the current step), the CI channel makes the \
+        environment available to later pipeline steps. Conflicts with `--shell`.")]
     #[arg(long, value_enum, value_name = "PROVIDER", num_args = 0..=1, require_equals = true, conflicts_with = "shell")]
     ci: Option<Option<ocx_shell::ci::CiFlavor>>,
 
@@ -118,20 +112,8 @@ pub struct Env {
 }
 
 impl Env {
-    /// The materialization policy this command applies to a package whose
-    /// `lazy-mode` resolved to `never`.
-    ///
-    /// `--candidate` / `--current` root the composed values in the stable
-    /// install-symlink namespace instead of the object store, so they select a
-    /// different resolver — restated here as the library's vocabulary so the
-    /// lazy split reuses this command's existing policy rather than growing a
-    /// second one beside it.
-    ///
-    /// A **deferred** package has no install symlink and cannot acquire one
-    /// (`ocx package install` / `select` do not accept `--lazy-mode`, C-021),
-    /// so `--candidate`/`--current` combined with a deferred package is a
-    /// contradiction. It is refused as a usage error before anything resolves,
-    /// rather than silently honouring one of the two — see [`Self::execute`].
+    /// Materialization for an eager package: `--candidate`/`--current` root composed values in the
+    /// install-symlink namespace instead of the object store.
     fn materialization(&self) -> Materialization {
         match self.content_path.symlink_kind() {
             Some(kind) => Materialization::Symlink(kind),
@@ -139,23 +121,10 @@ impl Env {
         }
     }
 
-    /// Refuses `--ci github` — the space form, which `require_equals` reads as
-    /// a bare `--ci` plus a package named `github`.
-    ///
-    /// The same refusal `ocx package push` applies to `--ci-annotations`: both
-    /// sit beside a positional that absorbs the detached value. Here the
-    /// absorbed token becomes a package reference that then fails to resolve,
-    /// so the space form was never silent — it just blamed the registry for a
-    /// mistake in the argument. The third declaration site, root `ocx env`
-    /// (`toolchain_env.rs`), needs no guard at all: it declares no positional,
-    /// so clap refuses the detached value itself as an unexpected argument.
-    ///
-    /// A method rather than an inline call so a test can drive it on a
-    /// clap-parsed `Env`: the absorption is the parser's doing, and a test
-    /// that hand-built the fields would prove nothing about it.
+    /// Refuses `--ci github`, which `require_equals` reads as bare `--ci` plus a package `github` whose
+    /// resolve failure would blame the registry. A method so a test can drive it on a clap-parsed `Env`.
     fn refuse_spaced_ci(&self) -> Result<(), crate::error::UsageError> {
-        // `Some(None)` is the bare flag: the `Option<Option<_>>` grammar keeps
-        // bare and `--ci=gitlab` apart, so only the former can have lost a value.
+        // `Some(None)` is the bare flag, the only form that can have lost a value.
         refuse_spaced_enum_value::<ocx_shell::ci::CiFlavor>(
             "--ci",
             matches!(self.ci, Some(None)),
@@ -164,17 +133,11 @@ impl Env {
     }
 
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Before the autodetect below, not after: a value written with a space
-        // never reached the flag at all, and saying so beats both what
-        // autodetect guesses inside CI and the error it raises outside.
+        // Before the autodetect: a spaced value never reached the flag, and saying so beats its guess.
         self.refuse_spaced_ci()?;
-        // Resolve `--ci` early so a bare-`--ci` autodetect failure surfaces as a
-        // usage error before the (potentially slow) find-or-install resolution.
-        // `--ci` is mutually exclusive with `--shell` (clap `conflicts_with`).
+        // Early, so a bare-`--ci` autodetect failure is a usage error before the slow resolution.
         let ci = resolve_ci_arg(self.ci)?;
 
-        // Parse-level, beside the `--ci` resolution above and before the
-        // (potentially slow) package resolution below.
         let cwd = std::env::current_dir()
             .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
         let env_overrides = self.env.entries(&cwd)?;
@@ -186,11 +149,8 @@ impl Env {
 
         let materialization = self.materialization();
         let mode = resolved_lazy_mode(self.lazy_mode.mode(), self.self_view)?;
-        // `--candidate`/`--current` root the composed values in the stable
-        // install-symlink namespace precisely so they survive package updates.
-        // A deferred package has no such symlink and cannot acquire one, so the
-        // two requests contradict each other; honouring either silently is the
-        // worse failure, and a malformed invocation is 64.
+        // A deferred package has no install symlink to root values in, so the two requests contradict;
+        // 64 beats silently honouring either.
         if mode == ocx_project::lazy::LazyMode::Always && matches!(materialization, Materialization::Symlink(_)) {
             return Err(crate::error::UsageError::new(
                 "--candidate/--current cannot be combined with a lazy-mode of 'always': a deferred package has no install symlink to root values in",
@@ -209,18 +169,8 @@ impl Env {
         }
         let advisories = composed.advisories;
         let info: Vec<std::sync::Arc<ocx_package::install_info::InstallInfo>> = composed.roots;
-        // `resolve_env_with_attribution` additionally surfaces the admitted-set
-        // `binaries`/`entrypoints` claim attribution for the structured report's
-        // `binaries`/`entrypoints` arrays; the patch boundary is used the same
-        // way `resolve_env_with_patch_boundary` used it (annotate `--show-patches`
-        // entries). For `--ci`/`--shell` output the extra data is simply unused.
-        //
-        // OCI-tier (`ocx package env`): no `ocx.toml`, so no per-package
-        // opt-out and no project/group `[env]`. The `--env` overrides are the
-        // one thing a caller can contribute — a CLI argument, not project
-        // configuration, so it composes here without the tier reading a file.
-        // Their being applied last is what makes this command's output equal
-        // to what `ocx package exec --env` executes with.
+        // OCI tier: `--env` is the only per-invocation input and applies last, matching what
+        // `ocx package exec --env` executes with.
         let (mut entries, patch_start, provenance, attribution) = manager
             .resolve_env_with_attribution(
                 &info,
@@ -229,29 +179,19 @@ impl Env {
                 &platform,
             )
             .await?;
-        // W-11: settle each `list` entry's separator before any of the three
-        // downstream branches (`--ci`, `--shell`, structured report) reads
-        // `entries` — none of them may show an unreconciled `None` a package
-        // separator would otherwise have settled.
+        // Before any of the three output branches reads `entries`.
         reconcile_list_separators(entries.iter_mut())?;
-        // `--ci=<provider>` → CI sink path (persists env for later pipeline
-        // steps). Branch BEFORE consuming `entries` via `into_iter()`.
         if let Some(provider) = ci {
             export_ci(provider, self.export_file.clone(), &entries)?;
             return Ok(ExitCode::SUCCESS);
         }
-        // `--shell[=NAME]` → eval-safe emit path (handshake §3, C5).
-        // Shared bare-shell autodetect + identical UsageError (conventions).
-        // Branch BEFORE consuming `entries` via `into_iter()`.
         if let Some(shell) = resolve_shell_arg(self.shell)? {
             emit_lines(shell, &entries);
             return Ok(ExitCode::SUCCESS);
         }
 
-        // The companion-overlay region, for `--show-patches` attribution. The
-        // overlay is the MIDDLE region — the `--env` overrides compose after it —
-        // so the bound-checked accessor is what keeps an override from being
-        // mislabelled as a companion's doing (and from indexing past the vector).
+        // The overlay is the middle region (`--env` composes after it); the bound-checked accessor keeps
+        // an override from being labelled a companion's.
         let overlay = ocx_package_manager::PatchOverlay::new(patch_start, &provenance);
         let all_entries: Vec<api::data::env::EnvEntry> = entries
             .into_iter()
@@ -275,13 +215,7 @@ impl Env {
             })
             .collect();
 
-        // No synthetic PATHEXT entry: the Windows launcher is now a native
-        // `<name>.exe` shim, and `.EXE` is unconditionally in the default
-        // Windows PATHEXT — nothing to inject for bare-name resolution.
-
-        // Only where the footgun is: a non-terminal stdout is the
-        // `eval "$(ocx package env)"` case. Same predicate as `ocx env` —
-        // see `conventions::not_eval_safe_advisory`.
+        // Only on a non-terminal stdout (the `eval "$(ocx package env)"` case).
         if let Some(advisory) = not_eval_safe_advisory(
             context.api().is_json(),
             std::io::IsTerminal::is_terminal(&std::io::stdout()),
@@ -293,8 +227,6 @@ impl Env {
         let entrypoints = api::data::env::BinaryAttribution::from_pairs(&attribution.entrypoints);
         let integrations = api::data::env::IntegrationAttribution::from_pairs(&attribution.integrations);
 
-        // Structured report. Format is a context-level concern (root
-        // `--format`); this command does not override it.
         context.api().report(
             &api::data::env::EnvVars::new(all_entries, binaries, entrypoints, integrations)
                 .with_advisories(api::data::env::LazyAdvisoryReport::from_advisories(&advisories)),

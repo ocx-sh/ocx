@@ -3,25 +3,8 @@
 
 //! The Linux session-PATH writer: `environment.d/ocx.conf`.
 //!
-//! **Co-primary with the `~/.profile` managed block, not a fallback for it.**
-//! `environment.d` reaches only processes started under `systemd --user` —
-//! confirmed for GNOME and KDE Plasma Wayland, and read by neither LightDM (by
-//! default), SDDM, nor a non-systemd desktop. The profile block reaches login
-//! shells and nothing else. Each covers what the other misses, so both are
-//! written and neither is conditional on the other.
-//!
-//! The `~/.profile` half is **not** this module's: it is the managed RC block
-//! `ocx self setup` already writes through [`crate::rc_block`]. This
-//! module owns exactly one file.
-//!
-//! `~/.pam_environment` is deliberately not written — deprecated since
-//! pam_env 1.5.0.
-//!
-//! Two limits are stated rather than worked around: a desktop that is neither
-//! a systemd-user session nor profile-sourcing (a bare i3/sway started outside
-//! any Xsession wrapper) sees neither directory, and a Flatpak- or
-//! Snap-sandboxed application takes its PATH from the sandbox rather than from
-//! the session.
+//! Co-primary with the `~/.profile` managed block, not a fallback: `environment.d` reaches only
+//! `systemd --user` processes and the profile block only login shells.
 
 use std::path::{Path, PathBuf};
 
@@ -33,42 +16,10 @@ use crate::profiles::HomeEnv;
 /// The file this writer owns, relative to the XDG config home.
 pub const CONF_RELATIVE_PATH: &str = "environment.d/ocx.conf";
 
-/// Characters an `environment.d` value cannot carry **in any position**,
-/// checked in this order (the first match is the one the refusal names).
+/// Characters an `environment.d` value cannot carry anywhere, in the order the refusal names them.
 ///
-/// # Where this set comes from
-///
-/// Derived from systemd's own reader — `parse_env_file_internal` in
-/// `src/basic/env-file.c`, whose `VALUE`/`VALUE_ESCAPE`/`PRE_VALUE` states
-/// decide what survives — and then verified against the shipped
-/// `30-systemd-environment-d-generator` binary, one candidate character per
-/// run, on inputs where the losing cases and the surviving cases were both
-/// observed. It is **not** derived from `environment.d(5)`, which describes
-/// the format but does not enumerate the parser's escape and strip rules; the
-/// first cut of this set was written from the manual page and got `\` wrong.
-///
-/// - `\n` and `\r` — the format is line-structured `KEY=VALUE`, so a value
-///   spanning two lines declares a second, unrelated variable. `\r` is refused
-///   beside `\n` because a lone `\r` ends a line for some readers and not
-///   others, which is worse than either answer.
-/// - `\` — the parser's `VALUE_ESCAPE` state consumes it and takes the next
-///   character literally, so `/home/a\b` is read back as `/home/ab` and a
-///   directory ending in `\` swallows the `:` that follows it, welding two
-///   PATH entries into one. There is no way to spell a literal `\` that
-///   `environment.d` and a POSIX path agree on, so it is refused rather than
-///   doubled.
-/// - `$` — `${FOO}` and `${FOO:-x}` expand at session-manager read time, so a
-///   `$` in the directory names something else by the time it is read. The
-///   trailing `:$PATH` in the line we write is *ours* and deliberate; a `$`
-///   arriving from `$OCX_HOME` is not.
-/// - `:` — the list delimiter. A segment containing one is two segments to
-///   every reader.
-/// - `\0` — cannot appear in a text configuration file at all.
-///
-/// `=` is admitted, and that is a decision rather than an omission: the format
-/// splits a line on its **first** `=` only, so every later one is ordinary
-/// value text. So are `%`, `'`, `"`, `&`, `<`, `>`, `#`, `;` and a space away
-/// from the front — each confirmed to survive the generator unchanged.
+/// Derived from systemd's reader (`parse_env_file_internal`), not `environment.d(5)`, which omits its
+/// escape rules.
 pub const REFUSED: &[(char, &str)] = &[
     (
         '\n',
@@ -84,22 +35,8 @@ pub const REFUSED: &[(char, &str)] = &[
     ('\0', "which a text configuration file cannot carry"),
 ];
 
-/// Characters an `environment.d` value cannot carry **as its first character**,
-/// checked in this order after [`REFUSED`] finds nothing.
-///
-/// Same derivation as [`REFUSED`]: systemd's `PRE_VALUE` state skips over
-/// `WHITESPACE` before the value begins, and a quote in the first position
-/// opens a quoted string that runs past the line ending. Confirmed against the
-/// generator, which strips a leading space and a leading tab, and consumes a
-/// leading `'` or `"` while pulling the newline into the value. Vertical tab
-/// and form feed survive the same position untouched — they are not in
-/// systemd's `WHITESPACE` — and so are not refused.
-///
-/// Refused for **every** directory, not only the one that happens to be
-/// written first. Only the leading directory sits at the value's front, but
-/// which directory leads is [`render_conf`]'s business; making [`encode`]'s
-/// answer depend on a caller's ordering would be a contract that silently
-/// changes when the order does.
+/// Characters an `environment.d` value cannot start with, checked after [`REFUSED`] finds nothing.
+// Refused for every directory, not only the first written, or the verdict shifts silently with `render_conf`'s order.
 pub const REFUSED_LEADING: &[(char, &str)] = &[
     (' ', "which this format strips when it leads a value"),
     ('\t', "which this format strips when it leads a value"),
@@ -115,13 +52,6 @@ pub const REFUSED_LEADING: &[(char, &str)] = &[
 
 /// `$XDG_CONFIG_HOME/environment.d/ocx.conf`, or
 /// `$HOME/.config/environment.d/ocx.conf` when `XDG_CONFIG_HOME` is unset.
-///
-/// The XDG fallback is systemd's own search rule for `environment.d`, and it
-/// is spelled here from [`HomeEnv`]'s public fields rather than shared with
-/// [`crate::profiles`]'s private `config_home`, which applies the same
-/// rule for the profile targets. Two spellings of one rule is a drift risk
-/// worth one line of consolidation later; it is not worth widening another
-/// package's private helper mid-wave.
 pub fn conf_path(home: &HomeEnv) -> PathBuf {
     home.xdg_config_home
         .clone()
@@ -161,11 +91,7 @@ pub fn encode(directory: &Path) -> Result<&str, SessionPathError> {
 /// The whole content of `ocx.conf`: a single `PATH=…:$PATH` prepend carrying
 /// `directories` in order.
 ///
-/// A prepend, not an assignment: the session manager's own value follows, so
-/// nothing another tool put on PATH is displaced. Every directory is refused
-/// or encoded before it reaches the line, which is what makes a bare
-/// `format!` safe here — there is no escaping layer because there is no
-/// character left that would need one.
+/// Every directory is refused or encoded first; that alone makes the unescaped `format!` safe.
 ///
 /// # Errors
 ///
@@ -179,16 +105,8 @@ pub fn render_conf(directories: &[PathBuf]) -> Result<String, SessionPathError> 
     Ok(prepend_line(&segments))
 }
 
-/// The `PATH=` line carrying `segments`, in order, ahead of the inherited
-/// value.
-///
-/// The one place the file's shape is spelled, so [`render_conf`] and the
-/// subtractive rewrite in [`deregister`] cannot drift into two spellings of
-/// one line.
-///
-/// `$PATH` is appended as a segment rather than interpolated into a
-/// `:`-prefixed literal: with no directories the line is `PATH=$PATH`, never a
-/// leading `:` — which every reader takes as the working directory.
+/// The `PATH=` line carrying `segments`, in order, ahead of the inherited value.
+// `$PATH` is a segment, not a `:`-prefixed literal, or an empty list emits a leading `:`, read as the cwd.
 fn prepend_line(segments: &[&str]) -> String {
     let mut all = Vec::with_capacity(segments.len() + 1);
     all.extend_from_slice(segments);
@@ -199,29 +117,13 @@ fn prepend_line(segments: &[&str]) -> String {
 /// The assignment every line this writer emits begins with.
 const PREPEND_PREFIX: &str = "PATH=";
 
-/// The tail every line this writer emits ends with — the session manager's own
-/// value, which the prepend composes onto rather than replaces.
+/// The tail every emitted line ends with: the session manager's own value.
 const INHERITED: &str = "$PATH";
 
-/// The directories `content` would still prepend once `removed` are taken out,
-/// or `None` when it prepends none of them — nothing to subtract, and the
-/// caller must leave the store alone.
-///
-/// An empty `Some` is not the same answer: it means the store carried our
-/// segments and nothing survives them, which is [`deregister`]'s cue to delete
-/// the file rather than publish `PATH=$PATH`.
-///
-/// Pure and host independent, like [`render_conf`] — the `environment.d`
-/// delimiter is `:` on every host that reads the format, so this is not
-/// [`ocx_util::path::remove_segment`], whose separator is the *running*
-/// host's.
-///
-/// Comparison is **segment-exact**, which is the property C-084 needs and not
-/// a stylistic one: the retirement names one directory under the same root as
-/// the two that stay, so a prefix- or substring-shaped match would take
-/// `<root>/toolchain/active/bin` out with `<root>/toolchain` and leave the
-/// machine with no toolchain on PATH at all. `content` that is not this
-/// writer's shape is `None`.
+/// The directories `content` would still prepend once `removed` are taken out, or `None` when it
+/// prepends none of them or is not this writer's shape; an empty `Some` means delete the file.
+// Not `ocx_util::path::remove_segment`: that splits on the host's separator, this format always on `:`.
+// Segment-exact: a prefix match removing a retired directory would take its siblings under the same root.
 pub fn subtract<'a>(content: &'a str, removed: &[&str]) -> Option<Vec<&'a str>> {
     let value = content.strip_prefix(PREPEND_PREFIX)?.trim_end_matches('\n');
     let carried: Vec<&str> = value
@@ -236,30 +138,18 @@ pub fn subtract<'a>(content: &'a str, removed: &[&str]) -> Option<Vec<&'a str>> 
     (survivors.len() != carried.len()).then_some(survivors)
 }
 
-/// Write `ocx.conf`, creating `environment.d/` when absent.
-///
-/// Ensure-present rather than write-once: the file is rewritten when its
-/// content differs and left untouched when it already matches, so a re-run is
-/// [`SessionPathOutcome::Unchanged`] and does not disturb its mtime.
-///
-/// The write goes through [`ocx_util::fs::write_bytes_atomic`], which
-/// publishes a temp file created `0o600` in the target's own parent — the
-/// owner-only-write hygiene C-039 asks for (CWE-732), and the same primitive
-/// the shipped shim and profile writes already use rather than a second
-/// atomic-write path.
+/// Write `ocx.conf`, creating `environment.d/`; left untouched when already current.
 ///
 /// # Errors
 ///
-/// [`SessionPathError`] from [`render_conf`]. An I/O failure is
-/// [`SessionPathOutcome::Failed`], never an error.
+/// [`SessionPathError`] from [`render_conf`]; an I/O failure is [`SessionPathOutcome::Failed`].
 #[cfg(target_os = "linux")]
 pub(crate) fn register(
     home: &HomeEnv,
     directories: &[PathBuf],
     dry_run: bool,
 ) -> Result<(PathBuf, SessionPathOutcome), SessionPathError> {
-    // The one `?` on this path, and it runs before a byte is read or written:
-    // from here down every failure is an outcome (C-036).
+    // The only `?`, before any I/O: every later failure must be an outcome, never an error.
     let content = render_conf(directories)?;
     let path = conf_path(home);
 
@@ -272,8 +162,6 @@ pub(crate) fn register(
     let outcome = match write_conf(&path, &content) {
         Ok(()) => SessionPathOutcome::Written,
         Err(error) => {
-            // Reported, not swallowed: the user-facing half is the caller's
-            // warning, and this is the cause behind it.
             tracing::debug!(path = ?path, %error, "session-PATH conf write failed");
             SessionPathOutcome::Failed
         }
@@ -281,20 +169,9 @@ pub(crate) fn register(
     Ok((path, outcome))
 }
 
-/// Whether the conf on disk is already what this run would publish — **bytes
-/// and permissions both**.
-///
-/// The mode belongs in the comparison for the same reason it does in the
-/// macOS sibling's [`super::macos::plist_path`] check, and the failure it
-/// stops is worse here: a group- or world-**writable** `ocx.conf` lets another
-/// account prepend a directory to the victim's PATH in every `systemd --user`
-/// session (CWE-732). A bytes-only comparison reports such a file `Unchanged`
-/// forever, so the file `ocx self setup` is supposed to own would never be
-/// rewritten and the hygiene this writer claims would be a claim only.
-///
-/// Only the *writable* bits are judged. `environment.d` files are ordinarily
-/// world-readable, and rewriting a 0644 conf on every run to force 0600 would
-/// churn a file for a property that is not a vulnerability.
+/// Whether the conf on disk is already what this run would publish: bytes and permissions both.
+// Bytes alone would keep a group/world-writable conf `Unchanged` forever, letting another account
+// prepend to PATH (CWE-732); only the writable bits count, so a 0644 conf is not churned.
 #[cfg(target_os = "linux")]
 fn conf_is_current(path: &Path, content: &str) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
@@ -304,11 +181,7 @@ fn conf_is_current(path: &Path, content: &str) -> bool {
 }
 
 /// Create `environment.d/` and publish `content` into it.
-///
-/// The parent is created here because [`ocx_util::fs::write_bytes_atomic`]
-/// stages its temp file *in* the target's parent and does not create it — so on
-/// a fresh machine the very first `ocx self setup` would otherwise report
-/// [`SessionPathOutcome::Failed`].
+// `write_bytes_atomic` does not create the parent, so without this a fresh machine's first run fails.
 #[cfg(target_os = "linux")]
 fn write_conf(path: &Path, content: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -317,41 +190,22 @@ fn write_conf(path: &Path, content: &str) -> std::io::Result<()> {
     ocx_util::fs::write_bytes_atomic(path, content.as_bytes())
 }
 
-/// Subtract `directories` from `ocx.conf`, and delete the file when nothing of
-/// ours survives them.
+/// Subtract `directories` from `ocx.conf`, and delete the file when nothing of ours survives.
 ///
-/// **Subtractive, not a deletion** — contract (3) of
-/// [`super`], and the reason is a caller rather than a principle: `ocx self
-/// setup` calls this on *every* run with C-084's retired `<root>/bin` and then
-/// registers the current directories. A writer that deleted the store because
-/// it existed would take the current entries with it, make the following
-/// registration a write on a machine that was already correct, and report
-/// `written` where C-036 promises `unchanged` — and would predict `unchanged`
-/// under `--dry-run` for the same tree, because the file the prediction reads
-/// is still there.
-///
-/// So the store is read, the named segments are taken out of it, and it is
-/// touched at all only when it carried one. Removing the last of them removes
-/// the file: the conf exists to prepend, and `PATH=$PATH` is a drop-in that
-/// does nothing. A store that cannot be read carries no segment this function
-/// can name, so it is [`SessionPathOutcome::Unchanged`] and left where it is —
-/// the register path replaces it wholesale on the same run.
-///
-/// Nothing else is touched: not a sibling drop-in, and not `~/.profile`, whose
-/// managed block belongs to [`crate::rc_block`].
+/// An unreadable store is [`SessionPathOutcome::Unchanged`].
 ///
 /// # Errors
 ///
-/// [`SessionPathError`] from [`encode`] — the directories are still validated,
-/// so a value that could never have been written is diagnosed as such rather
-/// than reported as a successful removal.
+/// [`SessionPathError`] from [`encode`], so a never-writable value is diagnosed, not reported removed.
+// Subtractive, not a delete: setup calls this every run before registering, so deleting would make
+// every run a write reporting `written` where `unchanged` is promised.
 #[cfg(target_os = "linux")]
 pub(crate) fn deregister(
     home: &HomeEnv,
     directories: &[PathBuf],
     dry_run: bool,
 ) -> Result<(PathBuf, SessionPathOutcome), SessionPathError> {
-    // The one `?` on this path, and it runs before the store is read.
+    // The only `?`, before the store is read.
     let mut removed = Vec::with_capacity(directories.len());
     for directory in directories {
         removed.push(encode(directory)?);

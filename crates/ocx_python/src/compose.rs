@@ -1,45 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Env-package composition: layer layout, entrypoint synthesis, interpreter
-//! dependency, env metadata.
-//!
-//! Turns a validated set of [`RepackedWheel`]s plus a consumer-declared
-//! [`EnvSpec`] into an [`EnvComposition`]: the wheel layers (each applied at the
-//! content root — `repack` already emitted the final relocated tree), a
-//! synthesized entrypoint per `[console_scripts]` entry (extras-gated per
-//! [`EnvSpec::requested_extras`]), the private interpreter dependency, and the
-//! env metadata (`PYTHONPATH`, `PATH`, `PYTHONDONTWRITEBYTECODE=1`).
-//!
-//! # Target-agnostic
-//!
-//! The composition carries what an [`Info`](ocx_package::info::Info) holds —
-//! the composed [`Metadata`] and the base os/arch [`Platform`] — plus the wheel
-//! layers, and [`EnvComposition::into_info`] assembles the `Info`. It never
-//! names a registry: the consumer publishes the `Info` to a location of its own.
-//!
-//! # Entrypoint synthesis
-//!
-//! `compose` parses each [`ConsoleScript::reference`](crate::repack::ConsoleScript)
-//! (the raw `module[:attr[.attr…]]` object reference extracted by `repack`) into
-//! an entrypoint with `command: python` and `args: ["-c", <shim>]`, where the
-//! shim resolves the module via `importlib.import_module` and walks the attr
-//! chain with `getattr` (never a literal `from … import …`, which breaks on
-//! dotted attrs). A malformed reference is a [`ComposeError::InvalidEntryPoint`].
-//! `python` resolves via the private interpreter dependency on the composed
-//! `PATH`; ABI mismatch (parsed from [`RepackedWheel::filename`](crate::repack::RepackedWheel))
-//! fails here at compose, not at run.
-//!
-//! Every composition also carries a `python` entrypoint of its own — with no
-//! `command` and no `args`, so it dispatches to the private interpreter's real
-//! binary — unless a wheel already declared a console script by that name. It
-//! is what makes a bare `python` in a spec's test script reach the pinned
-//! interpreter instead of the host's.
-//!
-//! Which wheels' scripts synthesize is governed by
-//! [`EnvSpec::entrypoint_selection`] — see [`EntrypointSelection`] for the
-//! mode table, the fail-closed collision/miss errors, and the spawn-parity
-//! caveat on its `RootOnly` default.
+//! Env-package composition: layers, entrypoint synthesis, interpreter dependency, env metadata.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -62,43 +24,21 @@ use crate::repack::RepackedWheel;
 
 /// Which wheels' `[console_scripts]` entries synthesize as entrypoints.
 ///
-/// The mirror resolves any version-windowed `python.entrypoints:` config
-/// against the app version **before** calling [`compose_env`] — this crate
-/// stays version-agnostic (design decision C, `plan_python_mirror_v2`).
-///
-/// # Spawn-parity limitation
-///
-/// A synthesized entrypoint dispatches through OCX's launcher mechanism, and
-/// `plan_python_mirror_v2` W0.1 (finding V3) confirmed it IS spawnable like a
-/// normal executable (e.g. `subprocess.run([...])` inside the composed env
-/// finds it). Under [`RootOnly`](Self::RootOnly) — the default — an app that
-/// itself spawns a *dependency's* console script this way will no longer find
-/// it unless that script is admitted via [`All`](Self::All) or named
-/// explicitly via [`Explicit`](Self::Explicit): `RootOnly` only ever admits
-/// the root package's own scripts.
+/// Under [`RootOnly`](Self::RootOnly) an app that spawns a dependency's console script finds nothing unless it is
+/// admitted via [`All`](Self::All) or [`Explicit`](Self::Explicit).
 #[derive(Debug, Clone)]
 pub enum EntrypointSelection {
-    /// Only the root package's own console scripts synthesize, matched by
-    /// PEP-503-normalized dist name against each wheel's parsed
-    /// [`WheelFilename`]. The default as of `plan_python_mirror_v2` —
-    /// previously every wheel's scripts synthesized unconditionally (see
-    /// [`All`](Self::All)).
+    /// Only the root package's own console scripts synthesize. The default.
     RootOnly {
-        /// The root package's dist name (`source.package`/spec name); this
-        /// crate normalizes it before comparing, so the caller need not.
+        /// The root package's dist name, normalized here before comparing.
         root_package: String,
     },
-    /// Every wheel's console scripts synthesize — the pre-`plan_python_mirror_v2`
-    /// behavior.
+    /// Every wheel's console scripts synthesize.
     All,
-    /// Only the listed console-script names synthesize. A name listed here
-    /// that no admitted wheel provides is a
-    /// [`ComposeError::MissingEntrypoint`].
+    /// Only the listed console-script names synthesize; an unprovided name is [`ComposeError::MissingEntrypoint`].
     Explicit(Vec<String>),
 }
 
-/// Returns whether `script_name` should synthesize an entrypoint under
-/// `selection`, given the owning wheel's PEP-503-normalized dist name.
 fn entrypoint_admitted(selection: &EntrypointSelection, wheel_dist_name: &str, script_name: &str) -> bool {
     match selection {
         EntrypointSelection::All => true,
@@ -110,73 +50,40 @@ fn entrypoint_admitted(selection: &EntrypointSelection, wheel_dist_name: &str, s
 /// Consumer-declared inputs to composition.
 #[derive(Debug, Clone)]
 pub struct EnvSpec {
-    /// The extras requested for this env (e.g. `full` for `app[full]`).
-    ///
-    /// Drives extras-gated entrypoint synthesis and is validated against
-    /// [`declared_extras`](Self::declared_extras) — a requested extra the lock
-    /// does not declare is a [`ComposeError::UnknownExtra`].
+    /// The extras requested for this env; each must appear in [`declared_extras`](Self::declared_extras).
     pub requested_extras: Vec<String>,
-    /// The extras the lock declares (its top-level `extras` key), supplied by
-    /// the consumer.
-    ///
-    /// The validation floor for [`requested_extras`](Self::requested_extras):
-    /// any requested extra absent here is a [`ComposeError::UnknownExtra`]. Kept
-    /// distinct from the requested set so an unknown-extra typo fails closed
-    /// rather than silently synthesizing (or dropping) a launcher.
+    /// The extras the lock declares (its top-level `extras` key).
     pub declared_extras: Vec<String>,
-    /// The private interpreter dependency, pinned by the consumer
-    /// (python-build-standalone package). Its `python` on the composed `PATH`
-    /// is the dispatch target for every synthesized entrypoint.
+    /// The private interpreter dependency, whose `python` every synthesized entrypoint runs.
     pub interpreter: ocx_package::metadata::dependency::Dependency,
-    /// The selection target — supplies the base os/arch platform and the ABI
-    /// the wheel set is checked against.
+    /// The selection target: the base os/arch platform and the ABI the wheels are checked against.
     pub target: PythonTarget,
-    /// Which wheels' console scripts synthesize as entrypoints (design
-    /// decision C, `plan_python_mirror_v2`). The mirror resolves this from
-    /// `python.entrypoints:` plus the app version before calling
-    /// [`compose_env`] — this crate stays version-agnostic.
+    /// Which wheels' console scripts synthesize as entrypoints.
     pub entrypoint_selection: EntrypointSelection,
 }
 
 /// A single wheel layer descriptor: its source layer plus placement.
 #[derive(Debug, Clone)]
 pub struct WheelLayer {
-    /// Path to the repacked `tar.zst` layer (from [`RepackedWheel::layer_path`]).
+    /// Path to the repacked `tar.zst` layer.
     pub source: PathBuf,
-    /// The per-layer strip + output prefix. Defaults **empty**: `repack` emits
-    /// the final relocated tree (a wheel spans `lib/site-packages/`, `bin/`, and
-    /// `share/…`, which a single layer prefix cannot express), so each wheel
-    /// applies at the content root. The field exists because ocx_oci's layer-ref
-    /// requires a [`LayerLayoutSpec`] and to leave room for a future
-    /// strip/prefix edge case — not to relocate wheels.
+    /// The per-layer strip and prefix; empty, since `repack` already emitted the final tree.
     pub layout: LayerLayoutSpec,
 }
 
 /// The target-agnostic composition of an env package.
-///
-/// Carries an [`Info`](ocx_package::info::Info)'s
-/// [`metadata`](Self::metadata) and [`platform`](Self::platform) plus the
-/// layer descriptors. [`into_info`](Self::into_info) yields the `Info`; the
-/// consumer names the registry location it publishes to separately.
 #[derive(Debug, Clone)]
 pub struct EnvComposition {
-    /// The composed bundle metadata: synthesized entrypoints, env vars
-    /// (`PYTHONPATH`, `PATH`, `PYTHONDONTWRITEBYTECODE=1`), and the private
-    /// interpreter dependency.
+    /// The composed bundle metadata.
     pub metadata: Metadata,
-    /// The featureless base os/arch OCX platform (the mirror's push `-p`
-    /// flag owns the published, possibly `+libc.*`-suffixed, platform key).
+    /// The featureless base os/arch platform; the consumer owns the published platform key.
     pub platform: Platform,
-    /// The ordered wheel layer descriptors (source + placement).
+    /// The ordered wheel layer descriptors.
     pub layers: Vec<WheelLayer>,
 }
 
 impl EnvComposition {
-    /// Assembles the final [`Info`](ocx_package::info::Info).
-    ///
-    /// The crate stays target-agnostic: an `Info` names no registry, and the
-    /// consumer (the mirror) hands the publisher its own
-    /// [`OciIdentifier`](ocx_oci::OciIdentifier) target beside it.
+    /// Assembles the final [`Info`](ocx_package::info::Info), which names no registry.
     pub fn into_info(self) -> ocx_package::info::Info {
         ocx_package::info::Info {
             metadata: self.metadata,
@@ -189,39 +96,26 @@ impl EnvComposition {
 ///
 /// # Errors
 ///
-/// Returns [`ComposeError::UnknownExtra`] for a requested extra absent from the
-/// lock, [`ComposeError::AbiMismatch`] when a wheel's ABI is inconsistent with
-/// the interpreter pin, and [`ComposeError::InvalidEntryPoint`] for a malformed
-/// `[console_scripts]` object reference.
+/// [`ComposeError::UnknownExtra`] for an undeclared requested extra, [`ComposeError::AbiMismatch`] for a wheel
+/// inconsistent with the target ABI, [`ComposeError::InvalidEntryPoint`] for a malformed object reference or name,
+/// [`ComposeError::EntrypointCollision`] when two wheels claim one name, and [`ComposeError::MissingEntrypoint`]
+/// for an `Explicit` name no wheel provides.
 pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvComposition, ComposeError> {
-    // 1. Every requested extra must be one the lock declares. A typo fails
-    //    closed here rather than silently registering an unresolvable launcher.
     for extra in &spec.requested_extras {
         if !spec.declared_extras.contains(extra) {
             return Err(ComposeError::UnknownExtra { extra: extra.clone() });
         }
     }
 
-    // 2. ABI consistency: every wheel must match the target's effective ABI
-    //    (variant override, else the interpreter pin — fail closed) before any
-    //    layer or entrypoint is emitted.
     let interpreter_abi = spec.target.effective_abi();
     for wheel in wheels {
         check_abi(&wheel.filename, interpreter_abi)?;
     }
 
-    // 3. Entrypoint synthesis: one entrypoint per gated console script the
-    //    selection mode admits (`EntrypointSelection`). Fails closed on a
-    //    genuine cross-wheel name clash (`ComposeError::EntrypointCollision`,
-    //    replacing a silent last-write-wins `BTreeMap` insert) and on an
-    //    `Explicit` name no wheel provides (`ComposeError::MissingEntrypoint`).
     let mut entries: BTreeMap<EntrypointName, Entrypoint> = BTreeMap::new();
     let mut claimed_by: BTreeMap<EntrypointName, String> = BTreeMap::new();
     let mut matched_explicit_names: HashSet<&str> = HashSet::new();
     for wheel in wheels {
-        // `check_abi` (step 2, above) already parsed every wheel's filename to
-        // check its ABI tag, so re-parsing here to read the dist name cannot
-        // fail.
         let wheel_dist_name = wheel
             .filename
             .parse::<WheelFilename>()
@@ -230,9 +124,6 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
             .to_string();
 
         for script in &wheel.entry_points {
-            // Extras gating: synthesize only when every extra the script is
-            // gated on was requested (empty = always). Never inferred from
-            // dependency presence.
             if !script.extras.iter().all(|extra| spec.requested_extras.contains(extra)) {
                 continue;
             }
@@ -242,9 +133,7 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
             if let EntrypointSelection::Explicit(_) = &spec.entrypoint_selection {
                 matched_explicit_names.insert(script.name.as_str());
             }
-            // Validate the entrypoint name first so it is a known-safe slug
-            // (`^[a-z0-9][a-z0-9_-]*$`) before it is embedded in the shim's
-            // `sys.argv[0]` assignment.
+            // Validated before `synthesize_shim`, which embeds the name unescaped in a Python literal.
             let name = EntrypointName::try_from(script.name.as_str()).map_err(|_| ComposeError::InvalidEntryPoint {
                 name: script.name.clone(),
                 reference: script.reference.clone(),
@@ -262,17 +151,7 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
                     reference: script.reference.clone(),
                 }
             })?;
-            // `command` is the fixed, compile-time-valid slug `python` and the
-            // args are plain strings, so this Entrypoint always deserializes.
-            //
-            // `python`, NOT `python3`: python-build-standalone ships
-            // `python`/`pythonw` on Windows only, so a `python3` dispatch finds
-            // nothing in the package there and falls through to the WindowsApps
-            // store-alias stub, which hangs. `ocx launcher exec` resolves this
-            // command on the SELF-view PATH, which carries the private
-            // interpreter's `bin/` but not this package's own `entrypoints/`
-            // (see the `python` entrypoint synthesized in step 3b) — so it lands
-            // on the interpreter's real binary, never on a launcher.
+            // `python`, not `python3`: on Windows `python3` hits the WindowsApps store-alias stub, which hangs.
             let entrypoint: Entrypoint = serde_json::from_value(json!({
                 "command": "python",
                 "args": ["-c", shim],
@@ -283,9 +162,6 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
         }
     }
 
-    // An `Explicit` name no admitted wheel's console scripts provided fails
-    // closed rather than silently composing an env missing a requested
-    // launcher.
     if let EntrypointSelection::Explicit(names) = &spec.entrypoint_selection {
         for name in names {
             if !matched_explicit_names.contains(name.as_str()) {
@@ -294,62 +170,28 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
         }
     }
 
-    // 3b. The composed env always also carries `python` itself: a spec's test
-    //     script — and anything the app shells out to — must reach the
-    //     interpreter this package pinned, not whatever the host happens to
-    //     have. Without this entry a bare `python` resolves to the host copy
-    //     under `ocx package test`, and on a container image that ships none
-    //     (ubuntu, alpine, fedora) it fails to spawn at all.
-    //
-    //     `python`, NOT `python3` — same PBS-on-Windows reason as the dispatch
-    //     command above.
-    //
-    //     No `command` and no `args`: `Entrypoints::dispatch_command` then
-    //     returns the name verbatim and `ocx launcher exec` resolves it on the
-    //     SELF-view PATH. `Entrypoints::IMPLICIT_VISIBILITY` is INTERFACE, so
-    //     the root's own `entrypoints/` does not cross onto the private surface
-    //     while the private interpreter's `bin/` does — the launcher resolves to
-    //     the real interpreter and structurally cannot recurse onto itself.
-    //
-    //     `or_default` never clobbers: a wheel that genuinely declares a
-    //     `python` console script keeps its own shim.
+    // A bare `python` entrypoint, or a spec's test script runs the host's interpreter (absent on many images).
+    // `or_default`, or a wheel's own `python` script is overwritten. Cannot recurse: `python` resolves on the SELF-view
+    // PATH, which `Entrypoints::IMPLICIT_VISIBILITY` keeps `entrypoints/` off.
     entries
         .entry(EntrypointName::try_from("python").expect("`python` matches the entrypoint-name slug pattern"))
         .or_default();
 
     let entrypoints = Entrypoints::new(entries);
 
-    // 4. Env block: expose the site-packages tree, prepend the launcher bin
-    //    dir to PATH, and disable bytecode writes into read-only package
-    //    content (design spec, "Runtime-write mitigation").
-    //
-    //    `bin` is OPTIONAL (`required: false`): a pure-python app whose only
-    //    entrypoints are synthesized console scripts (dispatched via the
-    //    interpreter's `python`, not a wrapper in `bin/`) ships no `bin/`
-    //    directory at all — the repacked wheel is just `lib/site-packages`.
-    //    Marking it required makes env composition fail the "required path
-    //    exists" check with exit 79 for every such app. `site-packages` stays
-    //    required — repack always relocates purelib/platlib there.
     let env = EnvBuilder::new()
         .with_path("PYTHONPATH", "${installPath}/lib/site-packages", true)
+        // Optional: a pure-python app ships no `bin/`, and `required` fails it with exit 79.
         .with_path("PATH", "${installPath}/bin", false)
+        // Keeps `__pycache__` writes out of read-only package content.
         .with_constant("PYTHONDONTWRITEBYTECODE", "1")
         .build();
 
-    // 5. Interpreter dependency: `python` on the composed PATH is the dispatch
-    //    target for every synthesized entrypoint. A single dependency cannot
-    //    duplicate an identifier or name, so `Dependencies::new` is infallible.
     let dependencies = Dependencies::new(vec![spec.interpreter.clone()])
         .expect("a single interpreter dependency cannot duplicate an identifier or name");
 
-    // 6. Base os/arch platform (featureless). The consumer (the mirror) owns
-    //    the published platform key — including any `+libc.*` os.features
-    //    suffix — via its push `-p` flag; this composed value is the
-    //    target-agnostic default.
     let platform = base_platform(&spec.target.platform);
 
-    // 7. Layers: one per wheel, applied at the content root with an empty
-    //    layout — `repack` already emitted the final relocated tree.
     let layers = wheels
         .iter()
         .map(|wheel| WheelLayer {
@@ -358,15 +200,7 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
         })
         .collect();
 
-    // `binaries` is declared EMPTY (`Some([])`), not undeclared (`None`): the
-    // claim names raw executables in `bin/`, and an env has none. Console-script
-    // names are ENTRYPOINTS — dispatch metadata, never files in `bin/` — so they
-    // are not binaries. `None` means "never scanned", which makes every closure
-    // containing this package report `binaries incomplete`; the empty claim is
-    // both true and complete.
-    //
-    // Should `repack` ever relocate a wheel's `.data/scripts` into `bin/`, those
-    // files — and only those — belong in this claim.
+    // `Some([])`, not `None` ("never scanned"), or every closure holding this env reports `binaries incomplete`.
     let bundle = Bundle {
         version: BundleVersion::V1,
         strip_components: None,
@@ -374,8 +208,6 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
         dependencies,
         entrypoints,
         binaries: Some(Binaries::default()),
-        // No vendor-namespaced config to attach for a synthesized Python env —
-        // absent and empty are the same wire state (unlike `binaries`' tri-state).
         integrations: Integrations::default(),
     };
 
@@ -386,27 +218,15 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
     })
 }
 
-/// Synthesizes the `python -c` shim for a `[console_scripts]` object reference
-/// `module[:attr[.attr…]]`.
+/// Synthesizes the `python -c` shim for a `module[:attr[.attr…]]` object reference; `None` when it is malformed.
 ///
-/// The shim imports the module via `importlib.import_module`, walks the attr
-/// chain with `getattr`, and calls the resolved object under `sys.exit` — never
-/// a `from … import …` template, which cannot express a dotted attribute chain.
-/// Returns `None` when the reference is malformed (empty module, empty attr
-/// segment, or more than one `:`), which the caller turns into a
-/// [`ComposeError::InvalidEntryPoint`].
-///
-/// `name` is the console-script name; the caller validates it as an
-/// `EntrypointName` (`^[a-z0-9][a-z0-9_-]*$`) before calling, so it embeds
-/// safely inside the double-quoted `sys.argv[0]` literal with no escaping.
+/// `name` is embedded unescaped in a Python string literal, so the caller must have validated it as an
+/// `EntrypointName`.
 fn synthesize_shim(name: &str, reference: &str) -> Option<String> {
     let (module, attrs) = parse_object_reference(reference)?;
     let mut lines = vec![
         "import importlib, sys".to_string(),
-        // Present the console-script name as argv[0]. Without this the process
-        // sees `sys.argv[0] == "-c"` (the `python -c` invocation slug), so
-        // tools that derive their program name from argv[0] — click, argparse —
-        // print `-c` instead of the command name in --help/--version/usage.
+        // Without this, click and argparse print `-c` as the program name in usage and --help.
         format!("sys.argv[0] = \"{name}\""),
         format!("_obj = importlib.import_module(\"{module}\")"),
     ];
@@ -417,13 +237,9 @@ fn synthesize_shim(name: &str, reference: &str) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-/// Parses an object reference `module[:attr[.attr…]]` into its module and
-/// (possibly empty) attribute chain. Returns `None` for a malformed reference.
+/// Parses an object reference `module[:attr[.attr…]]`; `None` when malformed.
 ///
-/// The module and every attribute segment must be a non-empty Python
-/// identifier; a second `:` (more than one colon) is malformed. Segments are
-/// validated Python identifiers, so they contain no characters needing escaping
-/// when embedded into the shim's string literals.
+/// Every segment must be a Python identifier, since the shim embeds them unescaped.
 fn parse_object_reference(reference: &str) -> Option<(&str, Vec<&str>)> {
     let (module, attr_chain) = match reference.split_once(':') {
         Some((module, attrs)) => (module, Some(attrs)),
@@ -434,22 +250,17 @@ fn parse_object_reference(reference: &str) -> Option<(&str, Vec<&str>)> {
     }
     let attrs = match attr_chain {
         None => Vec::new(),
-        // A remaining `:` in the chain means the reference had more than one
-        // colon — malformed.
         Some(chain) if chain.contains(':') || !is_valid_dotted_identifier(chain) => return None,
         Some(chain) => chain.split('.').collect(),
     };
     Some((module, attrs))
 }
 
-/// Returns `true` when `value` is a non-empty dot-separated chain of Python
-/// identifiers (e.g. `pkg.mod`, `Class.method`).
 fn is_valid_dotted_identifier(value: &str) -> bool {
     !value.is_empty() && value.split('.').all(is_valid_python_identifier)
 }
 
-/// Returns `true` when `value` is a valid Python identifier: a leading letter or
-/// underscore followed by ASCII alphanumerics or underscores.
+/// ASCII-only Python identifier check.
 fn is_valid_python_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     match chars.next() {
@@ -459,14 +270,7 @@ fn is_valid_python_identifier(value: &str) -> bool {
     chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
-/// Validates a wheel's ABI against the interpreter pin, failing closed.
-///
-/// A wheel is ABI-consistent when it carries a universal ABI (`none` for
-/// pure-Python, `abi3` for the stable ABI) or a concrete CPython ABI equal to
-/// the interpreter's. A concrete `cpXY`/`cpXYt` that differs is a
-/// [`ComposeError::AbiMismatch`] (e.g. a `cp313` wheel against a free-threaded
-/// `cp313t` interpreter), as is a wheel filename that fails to parse — an
-/// unverifiable ABI is rejected rather than admitted.
+/// Admits `none`, `abi3` or an ABI equal to the interpreter's; an unparseable filename is rejected too.
 fn check_abi(filename: &str, interpreter_abi: &str) -> Result<(), ComposeError> {
     let wheel_abis: Vec<String> = match filename.parse::<WheelFilename>() {
         Ok(wheel) => wheel.abi_tags().iter().map(ToString::to_string).collect(),
@@ -521,9 +325,7 @@ pub enum ComposeError {
         /// The malformed object reference.
         reference: String,
     },
-    /// Two different wheels registered a console script under the same
-    /// entrypoint name and the selection mode admitted both — fails closed
-    /// rather than silently keeping whichever wheel was composed last.
+    /// Two different wheels registered a console script under the same entrypoint name.
     #[error("entrypoint '{name}' is registered by both '{first_wheel}' and '{second_wheel}'")]
     EntrypointCollision {
         /// The colliding entrypoint name.
@@ -533,8 +335,7 @@ pub enum ComposeError {
         /// The wheel filename that claimed `name` again.
         second_wheel: String,
     },
-    /// An [`EntrypointSelection::Explicit`] name matched no admitted wheel's
-    /// console script.
+    /// An [`EntrypointSelection::Explicit`] name matched no admitted wheel's console script.
     #[error("entrypoint '{name}' was requested but not found in any wheel")]
     MissingEntrypoint {
         /// The requested-but-absent entrypoint name.
@@ -542,9 +343,7 @@ pub enum ComposeError {
     },
 }
 
-/// Maps a target's os/arch key to a featureless OCX [`Platform`] — the
-/// target-agnostic default carried in the composed metadata; the mirror's push
-/// `-p` flag owns the published (possibly `+libc.*`-suffixed) platform.
+/// Maps a target's os/arch key to a featureless OCX [`Platform`].
 fn base_platform(platform: &TargetPlatform) -> Platform {
     use ocx_oci::{Architecture, OperatingSystem};
 

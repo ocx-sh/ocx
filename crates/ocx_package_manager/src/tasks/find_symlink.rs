@@ -10,45 +10,17 @@ use super::super::PackageManager;
 impl PackageManager {
     /// Returns the content digest of the `current` installation for `identifier`.
     ///
-    /// Resolves the `current` symlink for `identifier` to its package root and
-    /// reads the `digest` file from that root. Returns `Ok(None)` when:
-    ///
-    /// - the `current` symlink is absent
-    /// - the symlink is dangling (target does not exist)
-    /// - the `digest` file is unreadable or malformed
-    ///
-    /// These are all treated as "not installed" without emitting any diagnostic
-    /// (benign state per plan D6). Callers should treat `None` as "not current"
-    /// and proceed to install. Because a not-installed machine is indistinguishable
-    /// from a transient I/O surprise at this seam, even unexpected read failures
-    /// resolve to `Ok(None)` rather than an error — not-installed semantics win.
-    ///
-    /// Used by the pinned bootstrap path (`ensure_self_installed`) to compare
-    /// the installed digest against the one resolved from the pin, so that a
-    /// re-run with the same pin on an already-current machine is a no-op.
-    ///
-    /// Reuses the same path-resolution machinery as
-    /// [`find_symlink`](Self::find_symlink): the `current` symlink path from the
-    /// [`SymlinkStore`](ocx_store::file_structure::SymlinkStore), then
-    /// [`PackageStore::digest_file_for_content`](ocx_store::file_structure::PackageStore::digest_file_for_content)
-    /// (which follows the symlink to the package root) plus
-    /// [`read_digest_file`](ocx_store::file_structure::read_digest_file) — the
-    /// digest-reading half of `tasks/common.rs::identifier_for_symlink`.
+    /// `Ok(None)` whenever the symlink or its digest file cannot be read; never an error.
     pub async fn installed_current_digest(
         &self,
         identifier: &ocx_oci::PackageRef,
     ) -> crate::Result<Option<ocx_oci::Digest>> {
         let current = self.file_structure().symlinks.current(identifier);
 
-        // Symlink absent or dangling → not installed. `path_exists_lossy`
-        // follows the symlink, so a dangling `current` reads as `false`.
         if !ocx_util::fs::path_exists_lossy(&current).await {
             return Ok(None);
         }
 
-        // Resolve the `current` symlink to its package-root digest file. A
-        // dangling symlink (canonicalize fails) or an unreadable/malformed
-        // digest file is a benign not-installed state — return None, no warn.
         let objects = &self.file_structure().packages;
         let Ok(digest_path) = objects.digest_file_for_content(&current) else {
             return Ok(None);
@@ -59,19 +31,9 @@ impl PackageManager {
         }
     }
 
-    /// Resolves a package's content path via an install symlink rather than the
-    /// content-addressed object store.
+    /// Resolves a package through an install symlink rather than the object store.
     ///
-    /// The `content` path in the returned [`InstallInfo`] is the *symlink path
-    /// itself* rather than the resolved object-store path.  This is intentional:
-    /// downstream consumers embed this path in their output so it must be stable
-    /// across package updates.
-    ///
-    /// Unlike the resolver-backed tasks (`find`, `install`, etc.), this path does
-    /// not walk the OCI resolution chain and therefore does not upsert entries
-    /// into `refs/blobs/`. No resolution happens — the install symlink points
-    /// directly at an already-installed package whose `refs/blobs/` was populated
-    /// at install time.
+    /// The returned content path is the symlink path itself, so it stays stable across package updates.
     pub async fn find_symlink(
         &self,
         package: &ocx_oci::PackageRef,
@@ -110,10 +72,7 @@ impl PackageManager {
             symlink_path.display()
         );
 
-        // Install symlinks target the package root (post-flatten layout). The
-        // env-resolution layer derives `${installPath}` from
-        // `info.dir().content()` so traversal stays stable through the symlink
-        // while landing in the right subdir.
+        // Rooted at the symlink, not its target, or `${installPath}` changes on every update.
         let dir = PackageDir {
             dir: symlink_path.to_path_buf(),
         };

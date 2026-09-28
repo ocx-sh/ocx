@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Managed-config update + background-refresh task methods for
-//! [`PackageManager`].
-//!
-//! Mirrors the throttle/probe shape of `tasks/update_check.rs`: a full update
-//! path (`update_managed_config`, called by `ocx config update` and the setup
-//! phase 1.5 sync fetch) and a throttled background probe
-//! (`check_managed_config_refresh`, called by the CLI's background-tick hook)
-//! that never fails its caller.
+//! Managed-config update and throttled background-refresh task methods for [`PackageManager`].
 
 use super::super::PackageManager;
 use ocx_config::managed::{RefreshPolicy, ResolvedManagedConfig};
@@ -19,10 +12,9 @@ use ocx_oci::Digest;
 /// Outcome of a full managed-config update cycle.
 #[derive(Debug, Clone)]
 pub enum ManagedConfigUpdateResult {
-    /// The local snapshot already matches the registry's current digest —
-    /// nothing was fetched or written.
+    /// The local snapshot already matches the registry's current digest; nothing was written.
     AlreadyCurrent {
-        /// The existing (unchanged) manifest digest.
+        /// The unchanged manifest digest.
         digest: Digest,
     },
     /// A new snapshot was fetched and persisted.
@@ -32,53 +24,34 @@ pub enum ManagedConfigUpdateResult {
     },
 }
 
-/// Outcome of a single background-refresh probe tick
-/// ([`PackageManager::check_managed_config_refresh`]).
+/// Outcome of one [`PackageManager::check_managed_config_refresh`] tick.
 #[derive(Debug, Clone)]
 pub enum ManagedConfigRefreshOutcome {
-    /// Probe succeeded; the registry's current digest matches the local
-    /// snapshot (or the throttle window has not elapsed) — nothing to report.
+    /// No drift, or the throttle window has not elapsed.
     UpToDate,
-    /// `notify` posture: drift detected. Content was NOT fetched; the caller
-    /// prints the advisory ("run `ocx config update`").
+    /// `notify` posture: drift detected, nothing fetched; the caller prints the advisory.
     DriftDetected,
-    /// `apply` posture: drift detected and the new snapshot was fetched,
-    /// persisted, and swapped in silently.
+    /// `apply` posture: drift detected and the new snapshot persisted.
     Applied {
         /// The newly persisted manifest digest.
         digest: Digest,
     },
-    /// The probe could not reach the registry, or the apply-on-drift persist
-    /// failed. Already logged at debug by this function; the tick still never
-    /// fails its caller.
+    /// The probe could not reach the registry, or the apply-on-drift persist failed; already logged.
     Unreachable,
-    /// An in-force pause file (`ocx config update --pause`) short-circuited
-    /// the tick before the throttle and probe — zero transport calls.
+    /// An in-force `ocx config update --pause` short-circuited the tick; zero transport calls.
     Paused,
 }
 
 impl PackageManager {
-    /// Runs a full managed-config update: fetch the package, persist the
-    /// snapshot, and report what changed.
+    /// Runs a full managed-config update: fetch, persist, and report what changed.
     ///
-    /// Called by `ocx config update` (throttle bypassed — explicit intent) and
-    /// by `ocx self setup --managed-config` (synchronous, fence written only
-    /// on success — ADR "Setup ordering"). Fetches via the dedicated
-    /// managed-config client (local-only mirror map — never the payload's own
-    /// `[mirrors]`).
-    ///
-    /// `expected_digest` is the `tag@digest` immutability assertion from
-    /// `ocx config update <tag>@<digest>`: `resolved.source` must then be the
-    /// TAG-ONLY reference (fetching by digest would trivially satisfy the
-    /// assertion without verifying the tag), and a fetched top digest that
-    /// differs fails closed ([`ManagedConfigUpdateError::PinDigestMismatch`],
-    /// exit 65) with the existing snapshot untouched. Pass `None` for every
-    /// unpinned update.
+    /// `expected_digest` pins a `tag@digest` request; `resolved.source` must then be the tag-only
+    /// reference, or a digest-only fetch trivially satisfies the pin.
     ///
     /// # Errors
     ///
-    /// Returns [`ManagedConfigUpdateError`] on any fetch or persist failure;
-    /// the existing snapshot (if any) is left untouched on error.
+    /// [`ManagedConfigUpdateError`] on any fetch or persist failure, including
+    /// [`ManagedConfigUpdateError::PinDigestMismatch`]; the existing snapshot is left untouched.
     pub async fn update_managed_config(
         &self,
         resolved: &ResolvedManagedConfig,
@@ -101,8 +74,7 @@ impl PackageManager {
             });
         };
 
-        // Fail-closed `tag@digest` immutability assertion — BEFORE the
-        // already-current check and persist, so a mismatch never touches disk.
+        // Before the already-current check and persist, so a mismatch never touches disk.
         if let Some(expected) = expected_digest
             && fetched.manifest_digest != *expected
         {
@@ -112,18 +84,11 @@ impl PackageManager {
             });
         }
 
-        // Deliberate divergence from `snapshot_matches_source` (which floats
-        // tags within a repository): the explicit-update already-current check
-        // demands an EXACT source-string match so a pin/rollback to a
-        // different tag at the same digest still re-persists — the snapshot's
-        // `tag`/`fetched_at` bookkeeping must track the newly requested ref.
+        // Exact source match, not `snapshot_matches_source`, so a rollback to another tag at one digest re-persists.
         let canonical_source = resolved.source.to_string();
         let existing =
             ocx_config::managed_config::read_managed_config_snapshot(&self.file_structure.state.managed_config()).await;
 
-        // Capture the payload text before `persist_managed_config` consumes
-        // `fetched` — the patch piggyback below needs it on both the persist
-        // and the already-current paths.
         let payload_text = fetched.config_text.clone();
 
         let result = if let Some(existing) = &existing
@@ -145,62 +110,30 @@ impl PackageManager {
             }
         };
 
-        // Best-effort: converge patch descriptors declared by the freshly
-        // fetched payload's `[patches]` pointer. The manager's construction-time
-        // `patches()` reflects the PRE-update config, so a managed config that
-        // introduces or moves the patch tier would otherwise never sync until
-        // the user ran `ocx patch sync` by hand (the reported bug). Mirrors the
-        // `ocx index update` piggyback — never fails this update.
         sync_patches_from_payload(self, &payload_text).await;
 
         Ok(result)
     }
 
-    /// Probe-only: fetches the managed-config artifact's current manifest
-    /// digest from the registry WITHOUT downloading the config layer or ever
-    /// persisting/swapping state.
+    /// Probes the managed-config manifest digest without downloading or persisting anything.
     ///
-    /// Used by `ocx config update --check`'s live-drift report. Returns
-    /// `None` when the registry is unreachable OR the source is absent —
-    /// `--check` degrades to a local-state-only report in that case. The
-    /// caller (`execute_check`) distinguishes a probe that ran from one that
-    /// did not by whether this returns `Some`.
+    /// `None` when the registry is unreachable or the source is absent.
     pub async fn probe_managed_config_digest(&self, resolved: &ResolvedManagedConfig) -> Option<Digest> {
         let client = self.managed_config_client.as_ref()?;
         match ocx_config::managed_config::probe_managed_config_digest(client, &resolved.source).await {
             Ok(digest) => digest,
             Err(error) => {
-                // W8: surface the discarded cause at debug so a failing probe
-                // ("check_unavailable") is diagnosable from `--log-level debug`.
                 log::debug!("managed-config digest probe for '{}' failed: {error}", resolved.source);
                 None
             }
         }
     }
 
-    /// Throttled background-refresh probe (ADR Decision F).
+    /// Throttled background-refresh probe; never fails the caller.
     ///
-    /// `notify` posture reports drift without fetching content; `apply`
-    /// posture silently fetches + persists + swaps on drift; `manual` posture
-    /// is skipped entirely by the caller before this is ever invoked. Never
-    /// fails the caller — any network/auth error is logged at debug and
-    /// swallowed, mirroring
-    /// [`PackageManager::self_check_update`](crate::PackageManager::self_check_update)'s
-    /// "auto-check must never fail a user command" contract.
-    ///
-    /// Touch policy (mirrors `check_update`'s update-check throttle contract):
-    /// touch the refresh marker on a probe error, on a no-drift probe, on a
-    /// `notify`/`manual` drift advisory, and on a successful `apply` persist.
-    /// NEVER touch on the throttle short-circuit, and NEVER when an
-    /// `apply`-on-drift fetch or persist fails — a failed apply must re-probe
-    /// on the next tick instead of being throttled for the full interval
-    /// (marking a failed apply here would silence the tier until the window
-    /// elapsed).
+    /// The refresh marker is never touched on the throttle short-circuit or a failed `apply`,
+    /// or the tier stays silent for the full interval instead of re-probing next tick.
     pub async fn check_managed_config_refresh(&self, resolved: &ResolvedManagedConfig) -> ManagedConfigRefreshOutcome {
-        // Pause short-circuit BEFORE the throttle and probe: an in-force
-        // `ocx config update --pause` freezes the tick entirely (expired or
-        // corrupt pause files read as absent). Pause never affects the
-        // required gate or an explicit `ocx config update`.
         if ocx_config::managed_config::read_pause(&self.file_structure.state.managed_config())
             .await
             .is_some()
@@ -211,9 +144,7 @@ impl PackageManager {
         let marker = self.file_structure.state.managed_config().refresh_marker();
         let interval = resolved.interval;
         let marker_check = marker.clone();
-        // Run is_throttled (sync fs I/O) off the async executor via spawn_blocking.
-        // `.unwrap_or(false)` collapses a task panic (JoinError) to "not throttled"
-        // so a broken blocking thread cannot wedge the refresh probe into permanent skip.
+        // `unwrap_or(false)`: a panicked blocking task must not wedge the probe into permanent skip.
         let throttled = tokio::task::spawn_blocking(move || {
             ocx_store::file_structure::StateStore::is_throttled(&marker_check, interval)
         })
@@ -228,9 +159,6 @@ impl PackageManager {
             return ManagedConfigRefreshOutcome::Unreachable;
         };
 
-        // Digest-only probe (ADR Decision F): the tick detects drift from the
-        // manifest digest alone — the ≤64 KiB config layer is pulled ONLY on
-        // the `apply`-on-drift branch below, never for `notify`/`manual`.
         let probed_digest =
             match ocx_config::managed_config::probe_managed_config_digest(client, &resolved.source).await {
                 Ok(Some(digest)) => digest,
@@ -251,32 +179,23 @@ impl PackageManager {
 
         let existing =
             ocx_config::managed_config::read_managed_config_snapshot(&self.file_structure.state.managed_config()).await;
-        // Drift = identity mismatch (gate v2: repository identity, digest-pin
-        // binding — shared `snapshot_matches_source` predicate) OR a content
-        // digest that differs from the registry's current top digest.
         let drift = existing.as_ref().is_none_or(|snapshot| {
             !ocx_config::managed::snapshot_matches_source(snapshot, &resolved.source)
                 || snapshot.digest != probed_digest
         });
         if !drift {
-            // A successful probe that found no drift closes the throttle window.
             ocx_store::file_structure::StateStore::touch(marker).await;
             return ManagedConfigRefreshOutcome::UpToDate;
         }
 
         match resolved.refresh {
-            // Defensive fallback only — the caller gates on `Manual` before
-            // ever invoking this probe. A drift advisory (no content fetched)
-            // still closes the throttle window.
+            // `Manual` never reaches here; the caller gates on it.
             RefreshPolicy::Manual | RefreshPolicy::Notify => {
                 ocx_store::file_structure::StateStore::touch(marker).await;
                 ManagedConfigRefreshOutcome::DriftDetected
             }
             RefreshPolicy::Apply => {
-                // Only now — with drift confirmed — pull the full layer for
-                // persistence. The marker is deliberately NOT touched before
-                // this fetch: a failed apply must re-probe on the next tick,
-                // not be throttled for the full interval (Codex-F1).
+                // Marker untouched until the persist succeeds, or a failed apply is throttled a full interval.
                 let fetched = match ocx_config::managed_config::fetch_managed_config(client, &resolved.source).await {
                     Ok(Some(fetched)) => fetched,
                     Ok(None) => {
@@ -299,21 +218,13 @@ impl PackageManager {
                 .await
                 {
                     Ok(snapshot) => {
-                        // Touch only after the persist succeeds — the tier is
-                        // now current, so the window may safely close.
                         ocx_store::file_structure::StateStore::touch(marker).await;
-                        // Same best-effort patch convergence as the explicit
-                        // update path — a silently-applied managed config must
-                        // also pull the patch descriptors it now points at.
                         sync_patches_from_payload(self, &snapshot.config).await;
                         ManagedConfigRefreshOutcome::Applied {
                             digest: snapshot.digest,
                         }
                     }
-                    // A bundle this host cannot load is a publisher-side
-                    // defect the operator must see (the tier stays on the
-                    // previous snapshot until the payload is fixed); every
-                    // other persist failure is transient and stays at debug.
+                    // A publisher-side defect the operator must see; other persist failures are transient.
                     Err(error @ ocx_config::managed_config::ManagedConfigPersistError::ExtraCaCertsInvalid { .. }) => {
                         log::warn!(
                             "managed-config apply-on-drift refused '{}': {}",
@@ -332,19 +243,9 @@ impl PackageManager {
     }
 }
 
-/// Best-effort patch-descriptor sync driven by a just-fetched managed-config
-/// payload.
+/// Best-effort patch-descriptor sync from a just-fetched managed-config payload; never fails the caller.
 ///
-/// A managed config commonly distributes the fleet's `[patches]` registry
-/// pointer (ADR `adr_managed_config_tier.md`), but the manager's `patches()`
-/// field is resolved once at construction from the PRE-update config — so the
-/// pointer the payload just introduced or moved is invisible to it. Re-resolve
-/// `[patches]` from the payload text and sync against that instead of trusting
-/// the stale field.
-///
-/// Never fails the caller: parse/resolve problems log at debug, a sync failure
-/// logs a warning, and offline / no-patch-tier payloads are skipped. Mirrors
-/// the `ocx index update` piggyback (host platform only).
+/// Resolves `[patches]` from the payload, not `patches()`, which still holds the pre-update config.
 async fn sync_patches_from_payload(manager: &PackageManager, payload_toml: &str) {
     if manager.is_offline() {
         return;
@@ -353,9 +254,6 @@ async fn sync_patches_from_payload(manager: &PackageManager, payload_toml: &str)
         return; // payload declares no (usable) patch tier — nothing to converge
     };
 
-    // `with_patches` overrides the manager's construction-time (stale) tier with
-    // the one the payload just distributed; host platform only, matching the
-    // `ocx index update` piggyback.
     let host = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
     match manager.clone().with_patches(Some(resolved)).sync_patches(&[host]).await {
         Ok(_report) => log::debug!("managed-config patch sync: completed"),
@@ -363,13 +261,7 @@ async fn sync_patches_from_payload(manager: &PackageManager, payload_toml: &str)
     }
 }
 
-/// Resolve the `[patches]` tier from a managed-config payload's TOML text.
-///
-/// Returns `None` — never an error — when the payload is unparseable, declares
-/// no patch tier, or declares a malformed one. The piggyback is best-effort, so
-/// every such case collapses to "nothing to converge" (logged at debug). This
-/// is the seam that fixes the reported bug: patches are resolved from the
-/// freshly fetched payload, not from the manager's pre-update `patches()`.
+/// The `[patches]` tier a managed-config payload declares; `None`, never an error, for any unusable payload.
 fn patches_from_payload(payload_toml: &str) -> Option<ResolvedPatchConfig> {
     let config = match toml::from_str::<ocx_config::Config>(payload_toml) {
         Ok(config) => config,

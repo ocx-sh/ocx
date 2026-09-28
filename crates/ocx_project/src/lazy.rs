@@ -1,14 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Lazy package loading: `LazyMode` and `LazyReport`, the two closed enums
-//! backing the `lazy-mode` / `lazy-report` config ladder, plus the ladder's
-//! resolution entry point.
-//!
-//! See `plan_lazy_package_loading.md` contracts C-005 / C-006 for the full
-//! design: a tool declared with `lazy-mode = "always"` composes onto `PATH`
-//! as a generated shim instead of eager content; `lazy-report` controls
-//! whether the shim's first-invocation materialization renders progress.
+//! Lazy package loading: the `lazy-mode` / `lazy-report` enums and their
+//! resolution ladders.
 
 use std::fmt;
 use std::str::FromStr;
@@ -18,19 +12,13 @@ use serde::{Deserialize, Serialize};
 /// Whether a declared tool composes onto `PATH` eagerly or as a shim that
 /// defers content materialization to first invocation.
 ///
-/// Closed, internal enum — no `#[non_exhaustive]` (`arch-principles.md`
-/// "Internal enum exhaustiveness"): `ocx_lib` ships no external API, so
-/// every match over `LazyMode` stays total across the workspace.
-///
-/// `Deserialize` rejects any wire value outside `"never"` / `"always"` —
-/// the derived enum tag match is exhaustive by construction, so an unknown
-/// value surfaces as a parse error rather than silently defaulting.
+/// Wire values are `"never"` and `"always"`; any other value is a parse error,
+/// never a silent default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum LazyMode {
-    /// Compose eagerly: content materializes before the tool reaches
-    /// `PATH`. The floor [`LazyModeLadder::resolve`] applies when every
-    /// tier of the resolution ladder is absent.
+    /// Compose eagerly: content materializes before the tool reaches `PATH`.
+    /// The default when every tier of the resolution ladder is absent.
     Never,
     /// Compose a shim: content materializes on the first invocation of one
     /// of the tool's declared names.
@@ -38,7 +26,6 @@ pub enum LazyMode {
 }
 
 impl fmt::Display for LazyMode {
-    /// Formats as the lowercase wire value (e.g. `"never"`, `"always"`).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Never => write!(f, "never"),
@@ -50,10 +37,7 @@ impl fmt::Display for LazyMode {
 impl FromStr for LazyMode {
     type Err = InvalidLazyModeError;
 
-    /// Parses from the lowercase wire value. Case-sensitive, and so is
-    /// `--lazy-mode`: nothing sets `Arg::ignore_case`, so `--lazy-mode Always`
-    /// is rejected as an invalid value rather than folded. [`LazyMode::from_env`]
-    /// is the only reader that folds case.
+    /// Parses the lowercase wire value case-sensitively; only `from_env` folds case.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "never" => Ok(Self::Never),
@@ -64,17 +48,8 @@ impl FromStr for LazyMode {
 }
 
 impl LazyMode {
-    /// Reads the [`ocx_config::env::keys::OCX_LAZY_MODE`] tier of the resolution
-    /// ladder (`plan_lazy_package_loading.md` C-006).
-    ///
-    /// Parses case-insensitively and **warns and falls back** on an
-    /// unrecognized value rather than erroring — the
-    /// `ColorMode::from_args` idiom, mirroring
-    /// [`ocx_util::env::flag`]'s treatment of an invalid boolean.
-    ///
-    /// `None` means "this tier is absent": the variable is unset, empty, or
-    /// carried a value outside `never` / `always`. Absence lets the ladder
-    /// continue to its floor — it never short-circuits resolution.
+    /// Reads the `OCX_LAZY_MODE` tier, case-insensitively; empty or
+    /// unrecognised (warned) is absent, so the ladder continues.
     pub fn from_env() -> Option<Self> {
         let key = ocx_config::env::keys::OCX_LAZY_MODE;
         let value = ocx_util::env::var(key)?;
@@ -113,12 +88,10 @@ impl clap_builder::ValueEnum for LazyMode {
 
 /// Whether a shim's first-invocation materialization renders progress.
 ///
-/// Closed, internal enum — no `#[non_exhaustive]`, same rationale as
-/// [`LazyMode`]. Under [`LazyReport::Progress`], opening the controlling
-/// terminal (`/dev/tty`, `CONOUT$`) degrades to [`LazyReport::Silent`] on
-/// failure, never to an error — `ENXIO` is the documented, common case in
-/// Docker builds, CI runners, and anything under `setsid`. Errors still go
-/// to stderr regardless of this setting.
+/// Under `progress`, failing to open the controlling terminal (`/dev/tty`,
+/// `CONOUT$`) degrades to `silent`, never to an error. Errors still go to
+/// stderr regardless of this setting.
+// Never an error: `ENXIO` is the common case in Docker builds, CI runners and anything under `setsid`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum LazyReport {
@@ -129,7 +102,6 @@ pub enum LazyReport {
 }
 
 impl fmt::Display for LazyReport {
-    /// Formats as the lowercase wire value (e.g. `"silent"`, `"progress"`).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Silent => write!(f, "silent"),
@@ -141,10 +113,7 @@ impl fmt::Display for LazyReport {
 impl FromStr for LazyReport {
     type Err = InvalidLazyReportError;
 
-    /// Parses from the lowercase wire value. Case-sensitive, and so is
-    /// `--lazy-report`: nothing sets `Arg::ignore_case`, so `--lazy-report
-    /// Progress` is rejected as an invalid value rather than folded.
-    /// [`LazyReport::from_env`] is the only reader that folds case.
+    /// Parses the lowercase wire value case-sensitively; only `from_env` folds case.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "silent" => Ok(Self::Silent),
@@ -155,12 +124,7 @@ impl FromStr for LazyReport {
 }
 
 impl LazyReport {
-    /// Reads the [`ocx_config::env::keys::OCX_LAZY_REPORT`] tier of the resolution
-    /// ladder (`plan_lazy_package_loading.md` C-006).
-    ///
-    /// Same contract as [`LazyMode::from_env`]: case-insensitive, warn and
-    /// fall back on an unrecognized value, `None` meaning "this tier is
-    /// absent" so the ladder continues to its floor.
+    /// Reads the `OCX_LAZY_REPORT` tier, with [`LazyMode::from_env`]'s contract.
     pub fn from_env() -> Option<Self> {
         let key = ocx_config::env::keys::OCX_LAZY_REPORT;
         let value = ocx_util::env::var(key)?;
@@ -197,16 +161,9 @@ impl clap_builder::ValueEnum for LazyReport {
     }
 }
 
-/// One tier's contribution to the `lazy-mode` resolution ladder
-/// (`plan_lazy_package_loading.md` C-006), most-specific tier first:
-/// CLI flag ▸ `[package."<id>"]` ▸ `[group.<g>]` ▸ toolchain ▸ `OCX_LAZY_MODE`.
-///
-/// Every field is independently optional, and each `None` means "inherit
-/// from the next-less-specific tier" — never "resolves to
-/// [`LazyMode::Never`]". Only [`Self::resolve`]'s floor applies that
-/// default, and only once every tier is `None`. A five-field struct (rather
-/// than five positional `Option<LazyMode>` parameters) so a caller cannot
-/// transpose two same-typed tiers by accident.
+/// The `lazy-mode` ladder, most specific first: CLI ▸ `[package."<id>"]` ▸
+/// `[group.<g>]` ▸ toolchain ▸ `OCX_LAZY_MODE`; a `None` tier defers to the next.
+/// Named fields, so a caller cannot transpose two same-typed tiers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LazyModeLadder {
     /// `--lazy-mode` on the invoked command.
@@ -217,87 +174,35 @@ pub struct LazyModeLadder {
     pub group: Option<LazyMode>,
     /// Toolchain-tier `lazy-mode` (`ocx.toml`'s top-level scalar).
     pub toolchain: Option<LazyMode>,
-    /// `OCX_LAZY_MODE`, already read by the caller via [`LazyMode::from_env`]
-    /// — the case-insensitive reader. [`FromStr::from_str`] is case-sensitive
-    /// and would drop `OCX_LAZY_MODE=Always`.
+    /// `OCX_LAZY_MODE` via [`LazyMode::from_env`]; `FromStr` alone drops `Always`.
     pub environment: Option<LazyMode>,
 }
 
 impl LazyModeLadder {
-    /// Resolves the ladder most-specific-first per C-006's precedence
-    /// order — `--lazy-mode ▸ [package."<id>"] ▸ [group.<g>] ▸ toolchain ▸
-    /// OCX_LAZY_MODE ▸ never` — defaulting to the literal `LazyMode::Never`
-    /// only once every tier above the floor is absent.
+    /// Resolves most-specific-first, falling to `LazyMode::Never` only when
+    /// every tier is absent.
     pub fn resolve(self) -> LazyMode {
         self.cli
             .or(self.package)
             .or(self.group)
             .or(self.toolchain)
             .or(self.environment)
-            // The floor is this literal, never `LazyMode::default()` — C-006
-            // (ii) dropped the derive so moving the floor cannot go unnoticed.
+            // A literal floor, never `default()`, so moving it cannot go unnoticed.
             .unwrap_or(LazyMode::Never)
     }
 
-    /// Resolves the ladder, then applies the host's shim-support floor —
-    /// the form every production caller uses.
-    ///
-    /// **The Windows floor this method once applied is gone (plan contract
-    /// C-027, removed in the same change as C-026's producer).** Windows
-    /// composed eagerly regardless of `lazy-mode` only because nothing wrote
-    /// the Windows half of a deferred tool's shim slot; C-026 gives
-    /// `prepare_lazy::write_shim_launchers` that producer (its `.exe` +
-    /// `.shimref` pair, `write_windows_shim_slot`),
-    /// so the floor's premise no longer holds and this is now a plain
-    /// passthrough to [`Self::resolve`].
-    ///
-    /// Kept as its own named method rather than deleted or inlined at every
-    /// call site: `composer.rs` and `project/config.rs` both route through
-    /// `resolve_for_host` deliberately (their own comments say so, contrasting
-    /// it with a bare `resolve()`), and collapsing the two would touch files
-    /// outside this change's own set for a rename with no behavioural
-    /// payoff. It remains the one host-aware entry point in case a future
-    /// platform needs a floor of its own.
+    /// Resolves under the host's shim-support floor, today a passthrough; the
+    /// one host-aware entry point production callers use.
     pub fn resolve_for_host(self) -> LazyMode {
         self.resolve()
     }
 }
 
-/// One tier's contribution to the `lazy-report` resolution ladder
-/// (`plan_lazy_package_loading.md` C-006), most-specific tier first:
-/// CLI flag ▸ `[package."<id>"]` ▸ toolchain ▸ `OCX_LAZY_REPORT`.
-///
-/// **Four tiers, not [`LazyModeLadder`]'s five: there is no `[group.<g>]`
-/// tier.** `lazy-mode` is resolved while composing, where the selected group
-/// is known; `lazy-report` is resolved inside `ocx launcher shim`, a separate
-/// process that receives only a pinned identifier and a basename and cannot
-/// learn which group composed the tool. The group tier was therefore settable
-/// and unreadable — C-006 (i)'s own defect one tier down — and is removed
-/// rather than left to be silently ignored.
-///
-/// Every field is independently optional, and each `None` means "inherit
-/// from the next-less-specific tier" — never "resolves to
-/// [`LazyReport::Silent`]". Only [`Self::resolve`]'s floor applies that
-/// default, and only once every tier is `None`. A four-field struct (rather
-/// than four positional `Option<LazyReport>` parameters) so a caller cannot
-/// transpose two same-typed tiers by accident.
-///
-// Deliberately a second concrete struct, not `crate::ladder::Ladder<T>`
-// (plan_toolchain_activation.md C-005, shipped after this comment was first
-// written). That type already answers the floor-mechanism half of the
-// argument this comment used to make here — `Ladder::resolve` takes the
-// floor as a parameter, never `T::default()`, so reusing it would not
-// re-create the hazard the derive removal above eliminates. The reason
-// `LazyModeLadder` and `LazyReportLadder` stay unshared is shape, not floor
-// safety: `Ladder<T>` is three tiers (`cli` / `file` / `environment`), sized
-// for `activate` and `pinned`, neither of which has a per-tool
-// (`[package."<id>"]`) or per-group (`[group.<g>]`) equivalent.
-// `LazyModeLadder` carries five tiers and `LazyReportLadder` four, both with
-// tool- and/or group-scoped fields `Ladder<T>` has no slot for. Folding them
-// in would mean widening `Ladder<T>` past what its other consumer needs, or
-// leaving fields on it unused by every other caller — incidental similarity,
-// not shared logic (`crate::ladder`'s own doc comment makes the same point
-// from the other side).
+/// The `lazy-report` ladder: CLI ▸ `[package."<id>"]` ▸ toolchain ▸
+/// `OCX_LAZY_REPORT`, with [`LazyModeLadder`]'s tier semantics. No group tier:
+/// `ocx launcher shim` resolves it without the group, so one would be unreadable.
+// Not `crate::ladder::Ladder<T>`: its three tiers have no slot for the per-tool
+// `[package."<id>"]` tier, and widening it would serve no other consumer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LazyReportLadder {
     /// `--lazy-report` on the invoked command.
@@ -306,25 +211,18 @@ pub struct LazyReportLadder {
     pub package: Option<LazyReport>,
     /// Toolchain-tier `lazy-report` (`ocx.toml`'s top-level scalar).
     pub toolchain: Option<LazyReport>,
-    /// `OCX_LAZY_REPORT`, already read by the caller via
-    /// [`LazyReport::from_env`] — the case-insensitive reader.
-    /// [`FromStr::from_str`] is case-sensitive and would drop
-    /// `OCX_LAZY_REPORT=Progress`.
+    /// `OCX_LAZY_REPORT` via [`LazyReport::from_env`]; `FromStr` alone drops `Progress`.
     pub environment: Option<LazyReport>,
 }
 
 impl LazyReportLadder {
-    /// Resolves the ladder most-specific-first per C-006's precedence
-    /// order — `--lazy-report ▸ [package."<id>"] ▸ toolchain ▸
-    /// OCX_LAZY_REPORT ▸ silent` — defaulting to the literal
-    /// `LazyReport::Silent` only once every tier above the floor is absent.
+    /// Resolves most-specific-first, falling to `LazyReport::Silent` only when
+    /// every tier is absent.
     pub fn resolve(self) -> LazyReport {
         self.cli
             .or(self.package)
             .or(self.toolchain)
             .or(self.environment)
-            // The floor is this literal — same C-006 (ii) rationale as
-            // [`LazyModeLadder::resolve`].
             .unwrap_or(LazyReport::Silent)
     }
 }

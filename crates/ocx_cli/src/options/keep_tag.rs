@@ -3,13 +3,6 @@
 
 /// Whether a command also writes a digest-named `__ocx.keep.<algorithm>-<hex>`
 /// tag for each platform manifest it publishes.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add the paired
-/// `--keep-tag` / `--no-keep-tag` flags. Keep tagging is the
-/// default: `--keep-tag` is the affirmative form of the default,
-/// `--no-keep-tag` opts out. The two use POSIX last-wins semantics
-/// (`overrides_with`), matching the `--verify` / `--no-verify` convention.
-/// Resolve with [`KeepTag::enabled`].
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct KeepTag {
     /// Write a `__ocx.keep.sha256-<hex>` tag for each platform manifest
@@ -23,8 +16,7 @@ pub struct KeepTag {
 }
 
 impl KeepTag {
-    /// Resolve whether the keep tag is written. Default is on; only an
-    /// explicit (last-wins) `--no-keep-tag` turns it off.
+    /// Whether the keep tag is written; on unless `--no-keep-tag` won.
     pub fn enabled(&self) -> bool {
         !self.no_keep_tag
     }

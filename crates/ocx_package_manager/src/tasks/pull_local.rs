@@ -13,15 +13,7 @@ use super::super::PackageManager;
 use super::pull::{SetupGroups, setup_owned};
 use super::resolve::{ChainBlob, ChainRole, NoTransport, ResolvedChain};
 
-/// Singleflight coordinator for blob writes within a single `pull_local` operation.
-///
-/// Owns a `singleflight::Group<Digest, ()>` scoped to one pull operation, coalescing
-/// concurrent same-digest fan-out from the resolver `JoinSet`. Created per
-/// [`PackageManager::pull_local`] call so entries are freed when the pull completes.
-///
-/// Index-layer callers (`write_manifest_blob`, `ChainedIndex::fetch_blob` write-through)
-/// call `BlobStore::write_blob` directly without a coordinator — they are sequential
-/// callers and content-addressed safety covers them.
+/// Coalesces concurrent same-digest blob writes within one [`PackageManager::pull_local`] call.
 pub(crate) struct PullCoordinator {
     write_group: ocx_util::singleflight::Group<ocx_oci::Digest, ()>,
 }
@@ -36,12 +28,8 @@ impl PullCoordinator {
         }
     }
 
-    /// Wrap `BlobStore::write_blob` with per-pull-operation dedup.
-    ///
-    /// The first caller for a given `digest` becomes the leader and performs
-    /// the actual write. Concurrent callers with the same digest become waiters
-    /// and receive the result when the leader completes. This prevents redundant
-    /// concurrent downloads of the same digest within a single pull operation.
+    /// Wrap `BlobStore::write_blob` with per-pull-operation dedup: the first caller per digest writes,
+    /// concurrent callers wait for its result.
     pub(crate) async fn stage_blob_bytes(
         &self,
         store: &ocx_store::file_structure::BlobStore,
@@ -60,8 +48,7 @@ impl PullCoordinator {
                         Ok(())
                     }
                     Err(e) => {
-                        // Broadcast a shared error to waiters; the leader
-                        // surfaces the original typed error to its caller.
+                        // Waiters get a shared copy of the error; the leader returns the typed original.
                         let _shared = handle.fail(std::io::Error::other(format!("{e}")));
                         Err(e.into())
                     }
@@ -72,56 +59,19 @@ impl PullCoordinator {
     }
 }
 
-/// Maximum size (in bytes) for a file-layer archive that `pull_local` will load into memory.
-///
-/// 8 GiB is chosen to resist accidental OOM on CI runners (typical limit: 16 GiB RAM) while
-/// still being larger than any realistic single-package archive. A file-layer that exceeds this
-/// limit is almost certainly either a mistake or a malformed input. CWE-400/789.
+/// Largest file-layer archive `pull_local` loads into memory, bounding OOM on CI runners (CWE-400/789).
 const MAX_FILE_LAYER_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 impl PackageManager {
-    /// Materialize a package built from a local [`Info`](ocx_package::info::Info) and layer
-    /// descriptors without going through the registry.
+    /// Materializes a package from local metadata and layer descriptors, bypassing the registry.
     ///
-    /// Reuses the install pipeline (dep resolution, blob extraction, entrypoint generation,
-    /// atomic move) and threads `dest_override` through the two destination computation
-    /// sites in `pull.rs` so the root package lands at the caller-supplied path rather
-    /// than the content-addressed object store.
-    ///
-    /// # Parameters
-    ///
-    /// * `identifier` — the package identifier the result is stored under, and
-    ///   the name a `Digest` layer's registry location is routed from.
-    /// * `info` — package metadata + platform.
-    /// * `layers` — [`LayerRef`](ocx_oci::layer_ref::LayerRef)s in declaration order. `File` layers
-    ///   are read, sha256-hashed, and staged into the regular `BlobStore`. `Digest` layers
-    ///   are pulled from the registry on demand by the existing layer-fetch path. In offline
-    ///   mode, missing digest blobs error with `OfflineMode`.
-    /// * `dest_override` — when `Some(path)`, the package is moved to `path` instead of
-    ///   `$OCX_HOME/packages/{registry}/.../{digest}/`. The launcher bake-in path is computed
-    ///   from the same override. `path` must be empty (or absent) and reside on the same
-    ///   filesystem as `$OCX_HOME/layers/`.
-    ///
-    /// # Singleflight bypass
-    ///
-    /// Unlike [`pull`](PackageManager::pull), this method constructs a fresh `SetupGroups`
-    /// per call and calls `setup_owned` directly, bypassing the `setup_impl` dedup gate.
-    /// This ensures two concurrent invocations of the same content with different
-    /// `dest_override` paths each get their own materialization. Layer-level singleflight
-    /// (within the fresh group) still deduplicates within a single invocation's transitive
-    /// layer pulls.
-    ///
-    /// # Side effects
-    ///
-    /// Dependencies are auto-installed into the regular object store under
-    /// `$OCX_HOME/packages/`. Only the root package honors the override.
+    /// Only the root lands at `dest_override` (empty or absent, on the filesystem of `$OCX_HOME/layers/`);
+    /// dependencies still install under `$OCX_HOME/packages/`.
     ///
     /// # Errors
     ///
-    /// Returns [`PackageErrorKind::Internal`] wrapping [`crate::Error::OfflineMode`] when offline
-    /// mode is active and a digest layer must be fetched from the registry. Returns
-    /// [`PackageErrorKind::Internal`] for I/O failures, plus all other error kinds raised by the
-    /// install pipeline.
+    /// [`PackageErrorKind::Internal`] wrapping [`crate::Error::OfflineMode`] when offline and a digest layer
+    /// needs the registry; otherwise what the install pipeline raises.
     pub async fn pull_local(
         &self,
         identifier: &ocx_oci::PackageRef,
@@ -132,23 +82,16 @@ impl PackageManager {
         let fs = self.file_structure();
         let registry = identifier.registry().to_string();
 
-        // Create a per-pull coordinator that coalesces concurrent same-digest
-        // blob writes within this operation via singleflight dedup.
         let coordinator = PullCoordinator::new();
-
-        // Step 1: Resolve layer descriptors locally.
-        // File layers → hash + write to blobs/ + extract to layers/{digest}/content/
-        // Digest layers → pull from registry on demand (or error offline).
         let layer_descriptors = stage_layers(self, layers, identifier, &registry, &coordinator).await?;
 
-        // Step 2: Synthesize the OCI image manifest from the info + layer descriptors.
-        // Shared with `Publisher::push_package` so push and test agree byte-for-byte.
+        // Shared with `Publisher::push_package`, or push and test stop agreeing byte-for-byte.
         let parts = info
             .manifest_builder()
             .and_then(|builder| builder.layers(layer_descriptors).build())
             .map_err(|e| PackageErrorKind::Internal(e.into()))?;
 
-        // Step 3: Stage the manifest blob to blobs/ so refs/blobs/ links resolve.
+        // Staged so `refs/blobs/` links resolve.
         stage_blob_bytes(
             fs,
             &registry,
@@ -158,20 +101,16 @@ impl PackageManager {
         )
         .await?;
 
-        // Step 4: Synthesize a PinnedIdentifier keyed by the manifest digest.
         let pinned = {
             let id_with_digest = identifier.clone_with_digest(parts.manifest_digest.clone());
             ocx_oci::PinnedPackageRef::try_from(id_with_digest).map_err(|e| PackageErrorKind::Internal(e.into()))?
         };
 
-        // Step 5: Validate metadata (same gate as setup_owned applies to registry-fetched
-        // metadata). Do it here so the error surfaces before we acquire a temp dir.
+        // The only validation gate: `setup_owned` skips it for provided metadata.
         let validated_metadata: metadata::Metadata = metadata::ValidMetadata::try_from(info.metadata)
             .map_err(|error| PackageErrorKind::Internal(error.into()))?
             .into();
 
-        // Step 6: Synthesize a ResolvedChain from the staged manifest.
-        // All-pub fields — struct literal per plan §2.2 step 4.
         let manifest_media = parts
             .manifest
             .media_type
@@ -179,10 +118,6 @@ impl PackageManager {
             .unwrap_or_else(|| ocx_oci::OCI_IMAGE_MEDIA_TYPE.to_string());
         let chain = ResolvedChain {
             pinned: pinned.clone(),
-            // Local materialization: every layer was staged above (a `Digest`
-            // layer fetched from its routed location), so there is nothing to
-            // download and no transport. The name is author-supplied and never
-            // resolved; it is not a place to read from (ocx#504).
             transport_pinned: Err(NoTransport::LocalMaterialization),
             chain: vec![ChainBlob {
                 identifier: pinned.clone(),
@@ -194,9 +129,7 @@ impl PackageManager {
             platform: info.platform.clone(),
         };
 
-        // Step 7: Hand off to setup_owned with a fresh SetupGroups (singleflight bypass).
-        // Concurrent calls with different dest_override paths each get their own
-        // materialization — the fresh group prevents cross-contamination.
+        // A fresh `SetupGroups` per call, or concurrent calls with different `dest_override` share one materialization.
         setup_owned(
             self,
             &pinned,
@@ -210,19 +143,9 @@ impl PackageManager {
     }
 }
 
-/// Stage layer refs into the local `blobs/` + `layers/` stores.
+/// Stage layer refs into the local `blobs/` + `layers/` stores, returning descriptors in `layers` order.
 ///
-/// Returns OCI descriptors in the same order as `layers`, ready for
-/// [`build_image_manifest`](ocx_oci::manifest_builder::build_image_manifest).
-///
-/// File layers are read, hashed, their raw bytes written to `blobs/` (so
-/// `refs/blobs/` links resolve after install), and the archive extracted into
-/// `layers/{registry}/{digest}/content/` so the assembly step finds the content
-/// via the fast-path.
-///
-/// Digest layers are expected to already have their content present in
-/// `layers/{registry}/{digest}/content/`. If absent: error with
-/// `PackageErrorKind::OfflineMode` (offline) or pull via client (online).
+/// A `Digest` layer absent locally is pulled online, or errors `OfflineMode` offline.
 async fn stage_layers(
     mgr: &PackageManager,
     layers: &[ocx_oci::layer_ref::LayerRef],
@@ -232,8 +155,7 @@ async fn stage_layers(
 ) -> Result<Vec<ocx_oci::Descriptor>, PackageErrorKind> {
     let fs = mgr.file_structure();
     let mut descriptors = Vec::with_capacity(layers.len());
-    // Routed once, by the first digest layer that has to be read from the
-    // registry: a run whose layers are all local asks the index nothing.
+    // Routed lazily, so a run whose layers are all local asks the index nothing.
     let routed = tokio::sync::OnceCell::new();
 
     for layer_ref in layers {
@@ -241,13 +163,7 @@ async fn stage_layers(
             ocx_oci::layer_ref::LayerRef::File { path, layout, .. } => {
                 validate_file_layer(path).await?;
 
-                // Infer media type from extension. An extension with no media
-                // type has no correct answer, so refuse it here rather than
-                // guessing: a guess would label the bytes in the synthesized
-                // manifest with a compression they do not use, and `package
-                // push` refuses the same input (`client.rs`), so guessing makes
-                // this pre-push gate pass what push rejects. Checked before the
-                // read so a doomed archive is never loaded into memory.
+                // Refused, not guessed: a guess tags the wrong compression and diverges from `package push`.
                 let media_type = ocx_oci::media_type::media_type_from_path(path).ok_or_else(|| {
                     let accepted: Vec<String> = ocx_oci::layer_ref::ArchiveMediaType::ALL
                         .iter()
@@ -263,7 +179,6 @@ async fn stage_layers(
                     )
                 })?;
 
-                // Read + hash the archive in one pass.
                 let (bytes, digest) = ocx_oci::Algorithm::Sha256
                     .hash_file_read(path)
                     .await
@@ -279,15 +194,11 @@ async fn stage_layers(
                     )
                 })?;
 
-                // Stage raw bytes to blobs/ so refs/blobs/ links are valid.
                 stage_blob_bytes(fs, registry, &bytes, &digest, coordinator).await?;
 
-                // Explicitly release the allocation before extraction so peak RSS is
-                // approximately max(archive_size) rather than 2× (Perf W3).
+                // Dropped before extraction, or peak RSS doubles to 2x the archive.
                 drop(bytes);
 
-                // Extract archive into layers/{registry}/{digest}/content/
-                // if not already present (idempotent).
                 let layer_content = fs.layers.content(registry, &digest);
                 if !ocx_util::fs::path_exists_lossy(&layer_content).await {
                     let layer_path = fs.layers.path(registry, &digest);
@@ -302,8 +213,6 @@ async fn stage_layers(
                     size,
                     urls: None,
                     artifact_type: None,
-                    // Emits keys only when the publisher set layout (BC2); the
-                    // default spec yields `None`, keeping the manifest identical.
                     annotations: layout.to_annotations(),
                 });
             }
@@ -314,7 +223,6 @@ async fn stage_layers(
                 layout,
                 ..
             } => {
-                // Check if the layer content is already present locally.
                 let layer_content = fs.layers.content(registry, digest);
                 if ocx_util::fs::path_exists_lossy(&layer_content).await {
                     let size = resolve_digest_size(mgr, fs, base_identifier, &routed, registry, digest).await?;
@@ -329,7 +237,6 @@ async fn stage_layers(
                 } else if mgr.is_offline() {
                     return Err(PackageErrorKind::Internal(crate::Error::OfflineMode));
                 } else {
-                    // Online: pull blob from registry into a temp dir, then atomic-rename.
                     let layer_path = fs.layers.path(registry, digest);
                     let temp_layer = layer_path.with_extension("_tmp");
                     let blob_size =
@@ -353,17 +260,10 @@ async fn stage_layers(
     Ok(descriptors)
 }
 
-/// Validate a file-layer source path before reading it.
+/// Rejects non-regular files and archives over [`MAX_FILE_LAYER_BYTES`] before the in-memory read.
 ///
-/// Rejects non-regular files (directories, symlinks, FIFOs, sockets, devices) and
-/// archives exceeding [`MAX_FILE_LAYER_BYTES`]. CWE-400/789 defense: bounding the
-/// in-memory hash buffer and refusing unbounded streams (FIFOs report `len() == 0`
-/// but stream forever).
-///
-/// Uses `symlink_metadata`, which does NOT follow symlinks. A symlink to a regular
-/// file is therefore rejected here, eliminating the TOCTOU class where an adversary
-/// swaps the symlink target between the `is_file()` check and the subsequent
-/// `hash_file_read` / `extract_with_options` opens.
+/// Non-regular is refused because a FIFO reports `len() == 0` but streams forever, and `symlink_metadata`
+/// rejects symlinks, or the target could be swapped between this check and the later open.
 async fn validate_file_layer(path: &std::path::Path) -> Result<(), PackageErrorKind> {
     let file_meta = tokio::fs::symlink_metadata(path)
         .await
@@ -396,11 +296,8 @@ async fn validate_file_layer(path: &std::path::Path) -> Result<(), PackageErrorK
     Ok(())
 }
 
-/// Where `base_identifier`'s layer blobs are read from: the location the
-/// index routes it to ([`ocx_index::Index::route_for_dial`]), never the name as
-/// typed — an index-served namespace such as `ocx.sh` is not a registry
-/// (ocx#504). Routed once per `routed` cell; storage stays keyed on the
-/// logical registry.
+/// Where `base_identifier`'s layer blobs are read from: the index-routed location, never the name as typed,
+/// since an index-served namespace such as `ocx.sh` is not a registry.
 async fn layer_source<'a>(
     mgr: &PackageManager,
     base_identifier: &ocx_oci::PackageRef,
@@ -412,15 +309,10 @@ async fn layer_source<'a>(
         .map_err(|error| PackageErrorKind::Internal(error.into()))
 }
 
-/// Resolve the byte size of a cached digest layer's blob.
+/// Byte size of a cached digest layer's blob: the local blob, else a HEAD at [`layer_source`].
 ///
-/// Order of strategies:
-/// 1. **Local blob fast path** — if `blobs/{registry}/{digest}/data` exists, stat it.
-/// 2. **Offline error** — if no local blob and `mgr.is_offline()`, return
-///    [`crate::Error::OfflineMode`]. Required for manifest parity with `package push`:
-///    the OCI descriptor's `size` field cannot default to 0.
-/// 3. **HEAD fallback** — online with no local blob, capture content-length via
-///    [`ocx_oci::Client::head_blob`], at the routed [`layer_source`].
+/// Offline with no local blob is [`crate::Error::OfflineMode`]: `size` cannot default to 0 and keep
+/// manifest parity with `package push`.
 async fn resolve_digest_size(
     mgr: &PackageManager,
     fs: &file_structure::FileStructure,
@@ -463,16 +355,8 @@ async fn resolve_digest_size(
     })
 }
 
-/// HEAD the digest blob (parity with `package push`), pull it via the registry client
-/// into `temp_layer/`, write the CAS-recovery digest file. Returns the blob's
-/// content-length for the synthesized OCI descriptor. Stops *before* the atomic rename
-/// into the layer store.
-///
-/// Calls `head_blob` first so the descriptor's `size` field has byte-for-byte parity
-/// with the manifest produced by `package push` (see `client.rs:602`). The synthesized
-/// pinned identifier is rooted at the package repo the index routes to
-/// ([`layer_source`]) because OCI layer blobs live in the same repo as the
-/// referencing manifest.
+/// Pull the digest blob into `temp_layer/` and write its digest file, returning the HEAD content-length
+/// (byte parity with `package push`'s descriptor `size`); the caller does the rename.
 async fn pull_digest_layer_to_temp(
     mgr: &PackageManager,
     base_identifier: &ocx_oci::PackageRef,
@@ -509,9 +393,7 @@ async fn pull_digest_layer_to_temp(
 
     client.pull_layer(&synth_pinned, &layer_desc, temp_layer).await?;
 
-    // Ad-hoc code-sign the extracted tree (macOS only). First use of `content/`
-    // after extraction, deliberately: nothing may read or link an unsigned
-    // Mach-O out of the layer store.
+    // First use of `content/` after extraction: nothing may read or link an unsigned Mach-O out of the layer store.
     ocx_store::codesign::sign_extracted_content(&temp_layer.join("content"))
         .await
         .map_err(|e| PackageErrorKind::Internal(ocx_oci::client::error::ClientError::internal(e).into()))?;
@@ -523,15 +405,10 @@ async fn pull_digest_layer_to_temp(
     Ok(blob_size)
 }
 
-/// Mkdir `temp_extract/content/`, extract the archive at `src` into it, write the
-/// CAS-recovery digest file at `temp_extract/{DIGEST_FILENAME}`. Stops *before* the
-/// atomic rename into the layer store — caller owns that step.
+/// Extract `src` into `temp_extract/content/` and write its digest file; the caller does the rename.
 ///
-/// The archive extracts verbatim (`strip_components: 0`) into the shared
-/// content-addressed layer store, exactly like the registry pull path. The
-/// package-wide strip is applied once, later, at assemble time — extracting
-/// with a strip here would both corrupt the shared store on blob reuse and
-/// double-strip, because the same assemble step re-applies it.
+/// Verbatim (`strip_components: 0`): assemble applies the strip, so stripping here corrupts the shared
+/// layer store on blob reuse and double-strips.
 async fn extract_archive_to_temp(
     src: &std::path::Path,
     temp_extract: &std::path::Path,
@@ -557,12 +434,8 @@ async fn extract_archive_to_temp(
     Ok(())
 }
 
-/// Write `bytes` into `blobs/{registry}/{digest}/data` via tempfile + atomic rename.
-///
-/// Content-addressed: if the blob data file already exists the write is skipped
-/// (identity guaranteed — same digest ⟹ same bytes). The `coordinator` coalesces
-/// concurrent same-digest writes within a single pull operation so the underlying
-/// `BlobStore::write_blob` is called at most once per unique digest.
+/// Write `bytes` into `blobs/{registry}/{digest}/data`, skipping an existing blob and coalescing
+/// concurrent same-digest writes through `coordinator`.
 async fn stage_blob_bytes(
     fs: &file_structure::FileStructure,
     registry: &str,
@@ -570,8 +443,6 @@ async fn stage_blob_bytes(
     digest: &ocx_oci::Digest,
     coordinator: &PullCoordinator,
 ) -> Result<(), PackageErrorKind> {
-    // Fast-path: blob is content-addressed, so if the data file exists the
-    // bytes are identical. Skip before entering the singleflight group.
     if fs.blobs.data(registry, digest).exists() {
         return Ok(());
     }

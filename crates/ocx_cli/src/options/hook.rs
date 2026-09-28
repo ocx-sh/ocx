@@ -1,20 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Whether to install the per-prompt reconcile hook during
-//! `ocx self activate` / write it during `ocx self setup`.
-//!
-//! Hosts the five-rung enablement ladder both `[shell]` toggles share
-//! (C-038, C-039): [`resolve_ladder`] is the single implementation, and
-//! [`super::Completion`] evaluates it with its own flag pair and its own
-//! environment key.
+//! Whether `ocx self activate` / `ocx self setup` install the per-prompt
+//! reconcile hook, and the enablement ladder both `[shell]` toggles share.
 
-/// Flatten into a command with `#[clap(flatten)]` to add the paired
-/// `--hook` / `--no-hook` flags.
-///
-/// `--hook` forces the per-prompt hook on, `--no-hook` forces it off. The two
-/// are POSIX last-wins, so passing both is not an error. With neither flag the
-/// decision follows the ladder in [`Hook::enabled`].
+/// The paired `--hook` / `--no-hook` flags, POSIX last-wins; with neither,
+/// `Hook::enabled` follows the ladder.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Hook {
     /// Force the per-prompt hook on, regardless of session interactivity.
@@ -26,11 +17,7 @@ pub struct Hook {
     no_hook: bool,
 }
 
-/// Which rung of the five-rung ladder decided the answer (C-038).
-///
-/// Exposed alongside [`Hook::enabled`] and [`super::Completion::enabled`] so
-/// that `ocx shell state` reads the decision instead of deriving it a second
-/// time.
+/// Which rung of the five-rung ladder decided the answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Rung {
     /// Rung 1 — `--no-hook` / `--no-completion`.
@@ -46,19 +33,8 @@ pub enum Rung {
 }
 
 /// Resolve the enablement ladder shared by `[shell] hook` and
-/// `[shell] completions`, returning both the decision and the rung that made
-/// it.
-///
-/// Rungs, most specific first:
-///
-/// 1. `flag` is `Some(false)` (`--no-X`) → off
-/// 2. `flag` is `Some(true)` (`--X`) → on
-/// 3. `env_opt_out` (`OCX_NO_X` truthy) → off
-/// 4. `configured` (`[shell] X`) → as set
-/// 5. auto → `interactive`
-// One implementation for both keys, deliberately: a precedence that differed
-// between `hook` and `completions` would make the `[shell]` grammar
-// unlearnable, and the arm order below is the whole contract.
+/// `[shell] completions`, returning both the decision and the rung that made it.
+// The arm order is the precedence of both `[shell]` keys.
 pub(crate) fn resolve_ladder(
     flag: Option<bool>,
     env_opt_out: bool,
@@ -76,28 +52,8 @@ pub(crate) fn resolve_ladder(
 
 impl Hook {
     /// Resolve whether the per-prompt hook is enabled for this session.
-    ///
-    /// Ladder, most specific first:
-    ///
-    /// 1. `--no-hook` → off
-    /// 2. `--hook` → on
-    /// 3. `OCX_NO_HOOK` truthy → off
-    /// 4. `[shell] hook` (`configured`) → as set
-    /// 5. auto: `interactive`
-    ///
-    /// The default is on, in interactive shells only.
-    //
-    // `interactive` is decided shell-side and passed in, by every shim, through
-    // the `--interactive`/`--no-interactive` pair ([`super::Interactive`]): `$-`
-    // on POSIX, `status is-interactive` on fish, `[Console]::IsInputRedirected`
-    // on pwsh, `test -t 0` on elvish. The binary probes only when no caller
-    // spoke, because no descriptor it can see answers this correctly — it
-    // redirects its own stderr, and `ssh -t host 'bash -lc …'` hands a terminal
-    // on stdin to a shell that never renders a prompt.
-    //
-    // The pair feeds this rung's INPUT and never becomes a rung: `--interactive`
-    // at rung 2 would outrank `OCX_NO_HOOK` and `[shell] hook`, revoking both
-    // opt-outs for every shell the shims start.
+    // `interactive` comes from the shim, never a probe: shims redirect stderr, and `ssh -t` hands a
+    // non-prompting shell a terminal. Never give `--interactive` a rung, or it outranks both opt-outs.
     pub fn enabled(&self, interactive: bool, configured: Option<bool>) -> bool {
         self.resolve(interactive, configured).0
     }
@@ -107,8 +63,7 @@ impl Hook {
         self.resolve(interactive, configured).1
     }
 
-    // One ladder evaluation feeds both accessors, so the reported rung can
-    // never disagree with the decision it explains.
+    // One evaluation feeds both accessors, so the reported rung cannot disagree with the decision.
     fn resolve(&self, interactive: bool, configured: Option<bool>) -> (bool, Rung) {
         let flag = if self.no_hook {
             Some(false)
@@ -117,11 +72,6 @@ impl Hook {
         } else {
             None
         };
-        // A bare literal, not an `ocx_config::env::keys` entry: the sibling this
-        // ladder mirrors reads `OCX_NO_COMPLETIONS` the same way, and moving
-        // one new key into `keys` would change a shipped module for nothing.
-        // Negative-only like every other toggle here — `--hook` is the positive
-        // channel, and "auto" is what an unset variable already means.
         resolve_ladder(flag, ocx_util::env::flag("OCX_NO_HOOK", false), configured, interactive)
     }
 }

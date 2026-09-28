@@ -1,40 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Rekor transparency-log verification, delegated to `sigstore-rs`.
-//!
-//! Two independent pieces of evidence a bundle carries about its Rekor entry:
-//!
-//! * the **Signed Entry Timestamp** (inclusion *promise*) — the log's ECDSA
-//!   P-256 signature over the RFC 8785 canonical JSON of
-//!   `{body, integratedTime, logIndex, logID}`; and
-//! * the **inclusion proof** — the Merkle audit path from the entry's leaf hash
-//!   to a signed checkpoint root.
-//!
-//! Plus one assertion *about* the entry rather than over it:
-//! [`verify_integrated_time_within_certificate`] re-checks that the entry's
-//! `integratedTime` falls inside the signing certificate's validity window.
-//! It lives here because this is the path both content modes share, so "runs
-//! for signatures and for attestations" is a structural fact rather than a
-//! discipline.
-//!
-//! No cryptography is computed here. [`CosignVerificationKey`] owns the ECDSA
-//! verification, [`InclusionProof::verify`] owns the RFC 6269 leaf hashing, the
-//! audit-path recomputation and the checkpoint signature and root-consistency
-//! checks, and `serde_json_canonicalizer` owns RFC 8785.
-//!
-//! [`SetPayload`] is the one thing declared locally: it is a four-field wire
-//! *schema*, not an algorithm. `sigstore-rs` has the identical struct as
-//! `cosign::bundle::Payload`, but its `cosign` feature additionally pulls in
-//! `oci-client`, `regex` and `async-trait` — a second OCI client in a binary
-//! that already ships one, for four field names. The shape is pinned by a test
-//! against the bytes Rekor signs.
-//!
-//! Before this module OCX invented its own SET payload (`ocx-rekor-set-v1\n…`)
-//! and verified it as Ed25519. Both were fictions of the in-repo fake stack: a
-//! real Rekor signs ECDSA P-256 over canonical JSON, so every bundle produced
-//! against a real log failed to verify and every bundle produced against the
-//! fake proved nothing about the real format (#209).
+//! Rekor transparency-log verification (SET and Merkle inclusion proof), with all cryptography delegated to
+//! `sigstore-rs`.
 
 use base64::Engine as _;
 use chrono::{DateTime, SecondsFormat};
@@ -51,10 +19,7 @@ use super::error::VerifyErrorKind;
 use super::signing_instant::SigningInstant;
 
 /// The canonical payload a Rekor v1 Signed Entry Timestamp is computed over.
-///
-/// Field names and order are Rekor's wire schema, mirrored from
-/// `sigstore::cosign::bundle::Payload`. RFC 8785 sorts keys on serialization,
-/// so declaration order here is not load-bearing — the names and types are.
+// Field names and types are Rekor's wire schema (`sigstore::cosign::bundle::Payload`); a rename fails every SET.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetPayload {
@@ -78,21 +43,13 @@ pub(super) struct TlogEntry<'a> {
     pub(super) signed_entry_timestamp: &'a [u8],
 }
 
-/// Parse the log's public key PEM into the scheme Rekor signs with.
-///
-/// Rekor v1 signs the SET and its checkpoints with ECDSA P-256 / SHA-256 in
-/// ASN.1 DER form; the same key verifies both.
+/// Parse the log's public key PEM; Rekor v1 signs the SET and checkpoints with ECDSA P-256 / SHA-256 (DER).
 pub(super) fn rekor_key(pem: &str) -> Result<CosignVerificationKey, VerifyErrorKind> {
     CosignVerificationKey::from_pem(pem.as_bytes(), &SigningScheme::ECDSA_P256_SHA256_ASN1)
         .map_err(|_| VerifyErrorKind::RekorSetInvalid)
 }
 
-/// Verify the Signed Entry Timestamp over the entry's canonical payload.
-///
-/// The payload is built as [`SetPayload`] and canonicalized by
-/// `serde_json_canonicalizer` — the identical construction
-/// `sigstore::cosign::bundle::Bundle::verify_bundle` performs, so a SET this
-/// accepts is one cosign accepts.
+/// Verify the Signed Entry Timestamp over the entry's RFC 8785 canonical payload, as cosign does.
 pub(super) fn verify_set(key: &CosignVerificationKey, entry: &TlogEntry<'_>) -> Result<(), VerifyErrorKind> {
     let payload = SetPayload {
         body: base64::engine::general_purpose::STANDARD.encode(entry.canonicalized_body),
@@ -107,17 +64,12 @@ pub(super) fn verify_set(key: &CosignVerificationKey, entry: &TlogEntry<'_>) -> 
 
 /// Verify the Merkle inclusion proof against its signed checkpoint.
 ///
-/// The leaf is hashed from `canonicalized_body` exactly as stored, never from a
-/// re-serialization of a parsed entry — Rekor's leaf hash is over the bytes it
-/// persisted, and any re-encoding risks a different byte string for the same
-/// logical entry.
+/// `canonicalized_body` must be the stored bytes, never a re-serialization, or the leaf hash can differ.
 pub(super) fn verify_inclusion(
     key: &CosignVerificationKey,
     proof: &ProtoInclusionProof,
     canonicalized_body: &[u8],
 ) -> Result<(), VerifyErrorKind> {
-    // Cross the protobuf/API boundary through the crate's own conversion so
-    // the hex decoding and the Signed Note checkpoint parsing stay its code.
     let api = RekorInclusionProof {
         hashes: proof.hashes.iter().map(hex::encode).collect(),
         log_index: proof.log_index,
@@ -135,25 +87,10 @@ pub(super) fn verify_inclusion(
         .map_err(|_| VerifyErrorKind::RekorSetInvalid)
 }
 
-/// Re-assert that the entry's `integratedTime` falls inside the signing
-/// certificate's validity window.
+/// Re-assert `NotBefore <= integratedTime <= NotAfter` on the leaf the identity check read
+/// (`adr_sbom_attestations.md` Part III row 13).
 ///
-/// Part III row 13 (CVE-2024-55655). The delegated `sigstore` verifier checks
-/// this too; the duplication is the point, because that CVE is precisely a
-/// library dropping the step. The window is **inclusive at both ends** —
-/// `adr_sbom_attestations.md` states it as `NotBefore <= integratedTime <=
-/// NotAfter`.
-///
-/// Takes the already-parsed leaf: `parse_certificate` runs once in
-/// `verify_one_referrer`, so the window checked here is the window the identity
-/// check read, not a second parse that could disagree.
-///
-/// The instant arrives as a [`SigningInstant`] rather than a bare `i64` so no
-/// caller can hand it the wall clock: a Fulcio certificate is short-lived by
-/// design, and "is this valid *now*" refuses every keyless signature older than
-/// its ten-minute window. See `super::signing_instant` for the whole rule,
-/// including why the no-transparency-log case is legal and supplies its own
-/// instant.
+/// Duplicates `sigstore`'s own check on purpose: CVE-2024-55655 was a library dropping this step.
 pub(super) fn verify_integrated_time_within_certificate(
     signed_at: SigningInstant,
     leaf: &Certificate,
@@ -172,21 +109,12 @@ pub(super) fn verify_integrated_time_within_certificate(
     Ok(())
 }
 
-/// Seconds since the Unix epoch for an X.509 `Time`.
-///
-/// `to_unix_duration` is non-negative by construction — `x509-cert` floors
-/// `UTCTime` at 1970 — so the only unrepresentable value is a `notAfter` past
-/// year 292277026596, and saturating there refuses nothing a real certificate
-/// asserts.
+/// Seconds since the Unix epoch for an X.509 `Time`, saturating at `i64::MAX`.
 fn unix_seconds(time: Time) -> i64 {
     i64::try_from(time.to_unix_duration().as_secs()).unwrap_or(i64::MAX)
 }
 
-/// Render epoch seconds as RFC 3339 with an explicit `Z` (PLAT-31).
-///
-/// The fallback is the bare integer: a timestamp chrono cannot represent is
-/// already outside every certificate window, so it only ever appears inside a
-/// refusal, where an unformatted number still names the offending value.
+/// Render epoch seconds as RFC 3339 with an explicit `Z`, or the bare integer when chrono cannot represent it.
 fn rfc3339_utc(epoch_seconds: i64) -> String {
     DateTime::from_timestamp(epoch_seconds, 0).map_or_else(
         || epoch_seconds.to_string(),
@@ -207,7 +135,7 @@ fn rfc3339_utc(epoch_seconds: i64) -> String {
 ///   -not_before 260101000000Z -not_after 260101001000Z | base64 -w0`
 const FIXTURE_CERT_DER_BASE64: &str = "MIIBjjCCATOgAwIBAgIUXDerMK9Jof8dxErPo1pTx55fDskwCgYIKoZIzj0EAwIwHDEaMBgGA1UEAwwRb2N4LXJvdzEzLWZpeHR1cmUwHhcNMjYwMTAxMDAwMDAwWhcNMjYwMTAxMDAxMDAwWjAcMRowGAYDVQQDDBFvY3gtcm93MTMtZml4dHVyZTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABFi6Pl8zq1kkrEGV8nr66Trdd7QM0BKnLL0JHXFlZ3rSSW16yLZV7td8RAo0Mqo/VApbH7TeA/bXmByIGzn+8mijUzBRMB0GA1UdDgQWBBQf1NnnrXUcU+VMImU74mm+zuysXjAfBgNVHSMEGDAWgBQf1NnnrXUcU+VMImU74mm+zuysXjAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0kAMEYCIQC+ZkSuPm9qPlJ4GftxDoyvXgo6yKt9zdSrfmsewd+B+gIhAMFZQ7iOfDmrNir7vXT5fXAn6XmS/PCOesmjsnFa9ywB";
 
-/// G0's keyless golden bundle, verbatim. Its Fulcio certificate expired ten
+/// The keyless golden bundle, verbatim. Its Fulcio certificate expired ten
 /// minutes after capture, which is what makes it the regression fixture for
 /// "validity anchors to signing time" — see `super::signing_instant`.
 #[cfg(test)]

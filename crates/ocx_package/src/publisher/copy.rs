@@ -3,15 +3,8 @@
 
 //! Promotion of an already-published package between registries.
 //!
-//! Three objects, three different copy semantics — the whole design is in that
-//! distinction (`adr_package_copy.md`):
-//!
-//! - a **leaf platform manifest** and its blobs are immutable content, copied
-//!   verbatim by [`ocx_oci::copy::copy_leaf`] so the digest never moves;
-//! - a **tag's image index** is a mutable set keyed by platform, so it is merged
-//!   one platform at a time and never byte-copied;
-//! - **rolling tags** are derived, so they are recomputed against the *target*
-//!   registry's tag list rather than carried over from the source's.
+//! Leaf manifests and blobs are copied verbatim, a tag's index is merged per platform, and
+//! rolling tags are recomputed against the target (`adr_package_copy.md`).
 
 use std::collections::BTreeMap;
 
@@ -25,72 +18,43 @@ use crate::version::Version;
 use ocx_oci::client::Client;
 use ocx_oci::client::error::ClientError;
 
-/// Why a copy could not be performed.
-///
-/// Three-layer, matching `SignError`/`VerifyError`: this struct attaches the
-/// per-copy context (which promotion failed), and [`CopyErrorKind`] is the
-/// discriminant. The kind is `#[source]`, so a chain walk reaches it and the
-/// `--json` envelope can fill both `error.detail` (the kind slug) and
-/// `error.context` (the identifiers) — neither of which a bare pass-through
-/// wrapper could ever supply.
+/// Why a copy could not be performed; the `#[source]` kind lets `--json` fill both
+/// `error.detail` and `error.context`.
 #[derive(Debug, thiserror::Error)]
 #[error("copying {source_identifier} to {target_identifier}")]
 pub struct CopyError {
-    /// The package the copy was reading from.
     pub source_identifier: ocx_oci::PackageRef,
-    /// The package the copy was writing to.
     pub target_identifier: ocx_oci::OciIdentifier,
-    /// Discriminant kind of the failure.
     #[source]
     pub kind: CopyErrorKind,
 }
 
-/// Discriminant kind for [`CopyError`].
-///
-/// The structural refusals are named variants rather than formatted strings so
-/// that a caller can dispatch on them without parsing stderr, and so the
-/// `detail` slug is a value rather than prose. Their messages omit the source
-/// identifier: the outer [`CopyError`] already names both endpoints, and a
-/// chain reporter prints the pair once (ERR-06).
+/// Discriminant kind for [`CopyError`]; messages omit the endpoints, which the outer error names.
 #[derive(Debug, thiserror::Error)]
 pub enum CopyErrorKind {
-    /// The source names an image index by digest.
-    ///
-    /// Exit 64 (`UsageError`). An index digest is a snapshot of a mutable set;
-    /// there is no honest way to merge "the platform list as it was" into a
-    /// target that has moved on.
+    /// The source names an image index by digest: a snapshot of a mutable set, which cannot
+    /// merge into a target that moved on.
     #[error("names an image index by digest; copy the tag instead")]
     IndexNamedByDigest,
 
-    /// The source is a bare platform manifest and no platform was named.
-    ///
-    /// Exit 64 (`UsageError`). A leaf manifest carries no platform of its own,
-    /// and guessing files the package under a platform nobody built it for.
+    /// The source is a bare platform manifest, which carries no platform, and none was named.
     #[error("is a platform manifest and carries no platform; pass --platform")]
     PlatformRequired,
 
-    /// The source is a bare platform manifest and more than one platform was
-    /// named.
-    ///
-    /// Exit 64 (`UsageError`).
+    /// The source is a bare platform manifest and more than one platform was named.
     #[error("is a single platform manifest; pass exactly one --platform")]
     PlatformAmbiguous,
 
     /// The source index offers no platform the request names.
-    ///
-    /// Exit 64 (`UsageError`) — the index is intact; the request named
-    /// something it does not publish.
     #[error("offers no platform matching {requested}; available: {available}")]
     NoMatchingPlatform {
-        /// What the invocation asked for, joined for display.
+        /// What was asked for, joined for display.
         requested: String,
-        /// What the source actually offers, joined for display. Without it the
-        /// reader has to go and list the index by hand to fix their own typo.
+        /// What the source offers, joined for display.
         available: String,
     },
 
-    /// Everything else — registry, transport, index. Carries the cause, and
-    /// defers classification to it.
+    /// Everything else; classification defers to the cause.
     #[error(transparent)]
     Registry(#[from] PackageError),
 }
@@ -116,13 +80,10 @@ impl From<ocx_oci::platform::error::PlatformError> for CopyErrorKind {
 /// What a copy was asked to do.
 #[derive(Debug)]
 pub struct CopyRequest<'a> {
-    /// Where to read from. A tag names an image index (or, for a
-    /// single-platform package, a bare manifest); a digest names one leaf and
-    /// then `platforms` must name its platform, because a leaf manifest does not
-    /// carry one — OCX records the platform in the index entry and the build
-    /// receipt, never in the manifest (`package/metadata/authoring.rs`).
+    /// Where to read from; a digest names one leaf, whose platform `platforms` must name,
+    /// since a leaf manifest carries none.
     pub source: &'a ocx_oci::PackageRef,
-    /// Where to write. Carries the tag the promoted package lands on.
+    /// Where to write, including the tag the package lands on.
     pub target: &'a ocx_oci::OciIdentifier,
     /// Empty means every platform the source index offers.
     pub platforms: Vec<ocx_oci::Platform>,
@@ -136,24 +97,13 @@ pub struct CopyRequest<'a> {
     pub annotations: &'a BTreeMap<String, String>,
     /// Plan only — report what would happen and write nothing.
     pub dry_run: bool,
-    /// Where each promoted layer spools on its way through.
-    ///
-    /// Not optional. `$TMPDIR` is memory-backed on most Linux hosts, so a
-    /// caller that left this unset would defeat the bounded spool the copy
-    /// relies on — the cap bounds the file, not the medium it lands in. The
-    /// CLI owns the `FileStructure` and therefore the `TempStore` root; any
-    /// other consumer must name a directory it is willing to fill.
+    /// Where each promoted layer spools.
+    // Required: `$TMPDIR` is memory-backed on most Linux hosts, and the spool cap bounds the file, not the medium.
     pub scratch_root: &'a std::path::Path,
 }
 
 /// What became of one platform at the target.
-///
-/// Two renderings, one vocabulary. `Serialize` is the machine-readable form a
-/// `--format json` consumer matches on; `Display` below is the terminal prose,
-/// which is free to read like English precisely because nothing parses it.
-/// Pre-formatting the prose into a JSON string made a sentence with a space and
-/// two parentheses into a wire value (`subsystem-cli-api.md`, "Typed Enums Over
-/// Strings").
+// Serialized as the enum, never the `Display` prose: `--format json` consumers match on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Disposition {
@@ -164,8 +114,8 @@ pub enum Disposition {
     /// The target pointed at a different digest for this platform.
     Replaced,
     /// The target offers this platform and the source does not, so the merge
-    /// leaves it alone. Reported because a filtered copy that silently left a
-    /// mixed index behind would be indistinguishable from a complete one.
+    /// leaves it alone.
+    // Must be reported: a filtered copy that silently left a mixed index would look complete.
     KeptNotInSource,
 }
 
@@ -185,8 +135,7 @@ impl std::fmt::Display for Disposition {
 #[derive(Debug)]
 pub struct CopiedPlatform {
     pub platform: ocx_oci::Platform,
-    /// The leaf digest now at the target for this platform. For a
-    /// `KeptNotInSource` row this is the digest the target already had.
+    /// The leaf digest now at the target (for `KeptNotInSource`, the one it already had).
     pub digest: ocx_oci::Digest,
     pub disposition: Disposition,
 }
@@ -195,28 +144,22 @@ pub struct CopiedPlatform {
 #[derive(Debug)]
 pub struct CopyOutcome {
     pub source: ocx_oci::PackageRef,
-    /// Where `source` was read from: the location the index routed it to, or
-    /// `source` itself when nothing rewrote it. A later read of the same
-    /// source reuses it rather than asking the index again.
+    /// Where `source` was read from, after index routing; reuse it rather than routing again.
     pub source_location: ocx_oci::OciIdentifier,
     pub target: ocx_oci::OciIdentifier,
     /// One row per platform, source-supplied and target-only alike.
     pub platforms: Vec<CopiedPlatform>,
     /// Rolling tags written in addition to the target's own tag.
     pub cascade_tags: Vec<String>,
-    /// Digest-named `__ocx.keep.<algorithm>-<hex>` tags written, deduped by manifest
-    /// digest.
+    /// `__ocx.keep.<algorithm>-<hex>` tags written, deduped by manifest digest.
     pub keep_tags: Vec<String>,
     /// Referrer manifests copied, summed over every platform.
     pub referrers: usize,
     /// cosign sidecar tags carried, summed over every platform.
     pub sidecars: usize,
-    /// Sidecar tags left untouched because the target already holds a different
-    /// manifest under them (`ocx_oci::copy::SidecarCopy`). Data rather than an
-    /// error: the leaf and every other sidecar still landed, so failing the
-    /// whole promotion here would block a legitimate re-promotion onto a target
-    /// that merely holds more signatures than the source. The caller turns a
-    /// non-empty list into a non-zero exit.
+    /// Sidecar tags left alone because the target holds a different manifest under them; the
+    /// caller turns a non-empty list into a non-zero exit.
+    // Data, not an error: failing here would block re-promoting onto a target with extra signatures.
     pub sidecar_conflicts: Vec<String>,
     pub blobs: ocx_oci::copy::BlobTransfers,
     /// True when nothing was written.
@@ -224,8 +167,7 @@ pub struct CopyOutcome {
 }
 
 impl CopyOutcome {
-    /// True when every source platform was already at the target under the same
-    /// digest — a re-run of a completed promotion.
+    /// True when every source platform was already at the target under the same digest.
     pub fn is_no_op(&self) -> bool {
         self.platforms
             .iter()
@@ -234,26 +176,15 @@ impl CopyOutcome {
 }
 
 impl Publisher {
-    /// Promote an already-published package to another registry or repository.
+    /// Promotes an already-published package to another registry or repository.
     ///
-    /// See [`CopyRequest`]. Leaf manifests and blobs are copied first — pure
-    /// additions, invisible until a tag names them — and only then are the
-    /// indexes merged and the rolling tags moved. An interruption during the
-    /// first phase therefore leaves the target's tags exactly as they were.
-    ///
-    /// Every source read dials where `index` routes the source
-    /// ([`Index::route_for_dial`](ocx_index::Index::route_for_dial)), never the
-    /// name as typed — an index-served namespace such as `ocx.sh` is not a
-    /// registry (ocx#504). The target is written as typed.
+    /// Content lands before any tag moves, so an interruption leaves the tags as they were.
+    /// Source reads dial where `index` routes the source; the target is written as typed.
     pub async fn copy(
         &self,
         index: &ocx_index::Index,
         request: CopyRequest<'_>,
     ) -> std::result::Result<CopyOutcome, CopyError> {
-        // The endpoints are attached once, here, so every `?` inside `run` can
-        // stay on the bare kind — the alternative is threading two identifiers
-        // through each conversion, which is what makes wrapper errors get
-        // written as bare pass-throughs in the first place.
         let source_identifier = request.source.clone();
         let target_identifier = request.target.clone();
         run(&self.client, index, request).await.map_err(|kind| CopyError {
@@ -269,17 +200,13 @@ async fn run(
     index: &ocx_index::Index,
     request: CopyRequest<'_>,
 ) -> std::result::Result<CopyOutcome, CopyErrorKind> {
-    // Routed once; every source read below dials `source_location`, and
-    // everything reported keeps naming `request.source`.
     let source_location = index.route_for_dial(request.source).await.map_err(PackageError::from)?;
     let source_leaves =
         resolve_source_leaves(client, index, request.source, &source_location, &request.platforms).await?;
     let target_entries = read_target_entries(client, request.target).await?;
 
     let mut rows = Vec::new();
-    // What phase 1 wrote, and the leaf size it measured while writing it —
-    // phase 2's index entries are built from this, never from `source_leaves`,
-    // so a platform can only be named in a tag after its content landed.
+    // Phase 2 builds entries from this, never `source_leaves`, so no tag names unlanded content.
     let mut copied_leaves: Vec<(ocx_oci::Platform, ocx_oci::Digest, i64)> = Vec::new();
     let mut blobs = ocx_oci::copy::BlobTransfers::default();
     let mut referrers = 0usize;
@@ -304,17 +231,8 @@ async fn run(
             continue;
         }
 
-        // Phase 1 — content. `Unchanged` re-verifies rather than short-circuits,
-        // and that is deliberate: an index entry proves the *manifest* is
-        // present under that digest, and says nothing about whether every blob
-        // it names still is. A target that was garbage-collected, partially
-        // pushed, or restored from an incomplete backup carries an entry whose
-        // blobs are gone, and a no-op would report `unchanged` over a package
-        // that cannot be pulled. Re-verifying costs one HEAD per already-present
-        // blob and one re-PUT of the leaf, which a registry deduplicates. Do not
-        // "optimise" this into a skip — the ADR and the user docs state the
-        // re-verify contract to match.
-        //
+        // Phase 1, content. `Unchanged` re-verifies, never skips: an index entry proves the
+        // manifest present, not its blobs, and the docs promise this re-verify.
         let copied = ocx_oci::copy::copy_leaf(
             client,
             &source_location,
@@ -331,8 +249,6 @@ async fn run(
         copied_leaves.push((platform.clone(), source_digest.clone(), copied.size));
     }
 
-    // Every platform the target offers that this copy did not touch. Listed so a
-    // filtered promotion says out loud what it left behind.
     for (platform, digest) in &target_entries {
         if !source_leaves.iter().any(|(candidate, _)| candidate == platform) {
             rows.push(CopiedPlatform {
@@ -344,17 +260,11 @@ async fn run(
     }
 
     if !request.dry_run {
-        // Phase 2 — tags. Every merge is a read-modify-write of one index, so
-        // platforms are merged sequentially; concurrent merges would race and
-        // the loser's platform would vanish.
+        // Phase 2, tags. Sequential: a concurrent read-modify-write merge loses a platform.
         let primary = request.target.tag_or_latest().to_string();
         for (platform, digest, size) in &copied_leaves {
-            // One list, primary first, built once. `target_tags` has already
-            // dropped the primary from the rolling set, so the report's
-            // `cascade_tags` is exactly this list's tail — deriving both from
-            // one value is what stops the tags reported from drifting away from
-            // the tags written. The primary leads because only its merged index
-            // is a subject a keep tag may be derived from.
+            // One list for both the writes and the report, so they cannot drift; primary first,
+            // since only its merged index may derive a keep tag.
             let merge_tags: Vec<String> = std::iter::once(primary.clone())
                 .chain(target_tags(client, &request, platform).await?)
                 .collect();
@@ -406,30 +316,16 @@ async fn run(
     })
 }
 
-/// The rolling tags this platform should move at the **target**.
-///
-/// Computed from the target's own tag list, never the source's: whether `3.28`
-/// should point at `3.28.1` depends on what the target already publishes, and a
-/// staging registry that is ahead of production has a different answer.
-///
-/// Both registry reads below address the **canonical** target
-/// ([`ReadAddressing::Canonical`]), never a configured mirror — this listing
-/// and the blocker probe inside `resolve_cascade_tags` together decide which
-/// rolling tags get re-pointed, and the tags are written canonically.
-/// Answering that question from a mirror and applying it to the canonical
-/// registry is a decision about a repository nobody read
-/// (`subsystem-oci.md` Invariant #5, CWE-345/367).
-///
-/// A target repository nobody has pushed to yet answers the tag listing with a
-/// 404, and that is an answer, not a failure: none of the rolling tags are
-/// taken. `list_tags_or_empty_addressed` folds exactly that case and nothing
-/// else, so a transient failure still aborts the promotion.
+/// The rolling tags this platform should move, from the target's own tags, never the source's.
+// Canonical reads only: the tags are written canonically, so a mirror's answer would decide
+// for a repository nobody read (`subsystem-oci.md` Invariant #5, CWE-345).
 async fn target_tags(client: &Client, request: &CopyRequest<'_>, platform: &ocx_oci::Platform) -> Result<Vec<String>> {
     if !request.cascade {
         return Ok(Vec::new());
     }
     let tag = request.target.tag_or_latest();
     let version = Version::parse(tag).ok_or_else(|| crate::error::Error::VersionInvalid(tag.to_string()))?;
+    // Only a 404 folds to empty; a transient failure still aborts the promotion.
     let listed = client
         .list_tags_or_empty_addressed(request.target.clone(), ocx_oci::client::ReadAddressing::Canonical)
         .await?;
@@ -438,15 +334,10 @@ async fn target_tags(client: &Client, request: &CopyRequest<'_>, platform: &ocx_
     Ok(tags.into_iter().filter(|candidate| candidate != tag).collect())
 }
 
-/// The `(platform, leaf digest)` pairs this copy will move; a miss still
-/// names `source`.
-///
-/// Which leaves a tag names is the index's answer for an index-served source
-/// ([`Index::resolve_version`](ocx_index::Index::resolve_version)) — its tag
-/// existence, yank status and committed dispatch — and the registry's own tag
-/// otherwise. Only the leaves, immutable by digest, are then read at
-/// `source_location`: a physical tag moved since publication must not be what
-/// a promotion of the logical version carries.
+/// The `(platform, leaf digest)` pairs this copy moves: the index's answer for an
+/// index-served source, else the registry's tag.
+// Only digest-addressed leaves are read at `source_location`, so a physical tag moved since
+// publication never replaces the logical version.
 async fn resolve_source_leaves(
     client: &Client,
     index: &ocx_index::Index,
@@ -474,15 +365,10 @@ async fn resolve_source_leaves(
     match manifest {
         ocx_oci::Manifest::ImageIndex(index) => {
             if source.digest().is_some() {
-                // An index digest is a snapshot of a mutable set. Promoting it
-                // would carry the source's whole platform list as if it were
-                // content, and there is no honest way to merge "the set as it
-                // was" into a target that has moved on. Name the tag instead.
                 return Err(CopyErrorKind::IndexNamedByDigest);
             }
             let mut leaves = Vec::new();
-            // Collected before the filter, not after: the whole value of this
-            // list is that it says what the caller could have asked for.
+            // Before the filter: the list says what the caller could have asked for.
             let mut available = Vec::new();
             for entry in index.manifests {
                 let Some(native) = entry.platform else { continue };
@@ -509,9 +395,7 @@ async fn resolve_source_leaves(
             }
             Ok(leaves)
         }
-        // A bare manifest carries no platform of its own, so the caller has to
-        // declare one. Guessing would file the package under a platform nobody
-        // built it for, which resolves for the wrong hosts and fails at exec.
+        // Never guessed: a wrong platform resolves for the wrong hosts and fails at exec.
         ocx_oci::Manifest::Image(_) => match requested {
             [platform] => Ok(vec![(platform.clone(), digest)]),
             [] => Err(CopyErrorKind::PlatformRequired),
@@ -530,32 +414,15 @@ fn lookup<'a>(
         .map(|(_, digest)| digest)
 }
 
-/// The platform entries the target's tag already carries.
-///
-/// Absent tag, or a tag naming a bare manifest, both mean "nothing to compare
-/// against" — the first because the tag is new, the second because a
-/// single-platform tag has no per-platform entry the merge could preserve.
-///
-/// A *failure* to read is neither, and is propagated. Absence already arrives
-/// as `Ok(None)`: `fetch_manifest_raw_bytes_addressed` maps
-/// `ClientError::ManifestNotFound` there, and the transport folds
-/// `MANIFEST_UNKNOWN`, `NOT_FOUND` and `NAME_UNKNOWN` into it — so a target
-/// repository that does not exist yet, the first-promotion case, is still an
-/// empty list rather than an error. What remains in the `Err` arm is an auth
-/// denial, a transient 5xx, an SSRF refusal, a digest mismatch on the target's
-/// own index, or a malformed index. Reporting any of those as "the target has
-/// nothing" makes every platform read `Added`, silently drops every
-/// `KeptNotInSource` row, and does it most visibly under `--dry-run`, which
-/// writes nothing and so never reaches the "it surfaces on the first write"
-/// backstop — exactly the review step before a production promotion.
+/// The platform entries the target's tag already carries; none for an absent tag or a bare
+/// manifest.
 async fn read_target_entries(
     client: &Client,
     target: &ocx_oci::OciIdentifier,
 ) -> Result<Vec<(ocx_oci::Platform, ocx_oci::Digest)>> {
-    // A `Vec` rather than a map: `Platform` is deliberately not `Ord` (its
-    // ordering would have to encode compatibility, which is a directed relation,
-    // not a total order), and an index carries a handful of entries.
+    // A `Vec`: `Platform` is deliberately not `Ord`, since compatibility is not a total order.
     let mut entries = Vec::new();
+    // A read failure propagates: as "nothing", every platform reads `Added`, silently under `--dry-run`.
     let Some((_, _, manifest)) = client.fetch_manifest_raw_bytes(target).await? else {
         log::debug!("Target {target} has no index yet");
         return Ok(entries);

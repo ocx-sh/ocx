@@ -1,21 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `file://` transport for a **shipped copy** of a static-file index
-//! (`adr_servable_index_snapshot.md` Decision D, contracts C-015 – C-017).
-//!
-//! The air-gap half of [`IndexTransport`]: an operator copies
-//! `$OCX_HOME/index/<source>/` onto a disconnected machine, points
-//! `[registries."<ns>"] index` at `file:///srv/ocx-index`, and every fetch the
-//! HTTPS transport would have made becomes a bounded read under one directory.
-//! Read-only — the trait has no write path.
-//!
-//! Scheme policy stays out of this module. C-018's closed scheme set and
-//! C-019's empty-authority rule live in
-//! [`OcxIndex::resolve_base_url`](super::OcxIndex::resolve_base_url), the
-//! single place a scheme is decided; it hands the `(base_url, root)` pair here
-//! already checked. A second parse here would be a second place for the two to
-//! disagree.
+//! `file://` transport for a shipped copy of a static-file index
+//! (`adr_servable_index_snapshot.md` Decision D): every fetch becomes a bounded,
+//! read-only read under one directory. Scheme policy lives only in
+//! [`OcxIndex::resolve_base_url`](super::OcxIndex::resolve_base_url).
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -30,86 +19,24 @@ use super::{IndexFetch, IndexTransport};
 use ocx_oci::client::MAX_INDEX_DOCUMENT_BYTES;
 use ocx_util::fs::path::join_under_root;
 
-/// Ceiling on one [`IndexTransport::get`], mirroring the HTTPS sibling's
-/// `INDEX_REQUEST_TIMEOUT` (`ocx_index.rs:108-116`).
+/// Ceiling on one [`IndexTransport::get`].
 const INDEX_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// [`IndexTransport`] backed by a directory tree instead of an HTTPS origin.
 ///
-/// `base_url` is the `file://<abs>` prefix every URL must carry, stored
-/// trailing-slash-trimmed; `root` is that same absolute path. Both are needed
-/// because [`IndexTransport::get`] is handed a full URL and must recover the
-/// tail relative to the base before it can touch the filesystem.
-///
 /// Every refusal is [`IndexHttpFailed`](super::error::Error::IndexHttpFailed),
-/// which classifies as
-/// [`ExitCode::Unavailable`](ocx_exit::ExitCode::Unavailable) — **69**. A
-/// refusal is never `Ok(IndexFetch::NotFound)`: under Decision A a base that
-/// misses everything resolves as a valid, empty v1 index, so reporting
-/// "refused" as "absent" silently erases packages from a resolve. That is the
-/// defect this change exists to fix, and it is why the line is drawn at every
-/// arm below.
-///
-/// # Contract
-///
-/// Enforced by [`get`](IndexTransport::get); C-015's outcome table in
-/// `adr_servable_index_snapshot.md` is the full mapping.
-///
-/// 1. **Containment, no percent-decoding (C-016).** `url` must carry
-///    `base_url` as a prefix *and* leave a remainder that is empty or starts
-///    with `/`; a bare prefix test lets a sibling base `<base>2/p/ns/x.json`
-///    read a wrong path under this root. The single leading `/` is stripped
-///    and the tail joined through
-///    [`join_under_root`](ocx_util::fs::path::join_under_root) as a
-///    **literal** relative path — decoding would manufacture a `%2e%2e`
-///    traversal vector out of what is, literally, a filename. `join_under_root`
-///    folds `.`/`..` lexically and refuses only a *residual escaping* `..`, so
-///    `a/../b` resolves to `root/b`.
-/// 2. **Symlinks may stay inside the tree (C-016).** `rsync`/hardlink/symlink
-///    staging is legitimate, so a link is not refused for being a link — but
-///    the resolved target is canonicalized and must remain under a
-///    canonicalized `root`. The lexical fold of rule 1 runs first and stays the
-///    primary defence (it normalizes `..` before the OS sees the path, so a
-///    symlinked directory component cannot be re-expanded); canonicalization is
-///    a second gate, not a replacement.
-/// 3. **Regular files only (C-017),** checked on a pre-stat *and* re-checked on
-///    the open handle. The two lookups are independent: a concurrent `rsync`,
-///    or any local user with write access, can swap a FIFO in behind a passed
-///    `is_file()`. The pre-stat is kept because it avoids `open()`ing device
-///    nodes, which can have side effects.
-/// 4. **Size cap, measured not declared (C-017).** At most
-///    `MAX_INDEX_DOCUMENT_BYTES + 1` bytes are read and the count decides. A
-///    `len()` from [`std::fs::Metadata`] describes a different moment than the
-///    read, and a `/proc` entry declares 0 while yielding content.
-/// 5. **A `root` that is not a directory is not an empty index (C-015).** Below
-///    a missing root, or one that is a regular file, every read is `NotFound`
-///    or `NotADirectory` — the two kinds that may read as absence — so the
-///    absence arm re-checks the root and refuses instead.
-///
-/// `get` is additionally bounded by [`INDEX_REQUEST_TIMEOUT`] (CWE-400): on a
-/// stalled network mount the first blocking call is the `stat` itself, upstream
-/// of every type check, and each retry pins another `spawn_blocking` thread.
-///
-/// All reads go through [`tokio::fs`] — `std::fs` on an async path blocks a
-/// runtime worker.
+/// never `Ok(IndexFetch::NotFound)`: a base that misses everything reads as a
+/// valid empty index, so "refused" reported as "absent" silently erases packages.
 #[derive(Clone)]
 pub struct FileIndexTransport {
-    /// The `file://<abs>` prefix every URL handed to `get` must carry
-    /// verbatim, at a path boundary.
+    /// The `file://<abs>` prefix every URL must carry at a path boundary.
     base_url: String,
-    /// The containment root — the absolute path `base_url` names.
+    /// The absolute path `base_url` names.
     root: PathBuf,
 }
 
-/// Strips `user[:password]@` userinfo from `url`'s authority before it lands in
-/// an error or log line (CWE-532).
-///
-/// A `file://` base has an empty authority, but rule 1's prefix-mismatch arm is
-/// by definition handed a *foreign* URL, which may carry credentials.
-///
-// Duplicated from `ocx_index::redact_url`, which is module-private and lives in
-// a file another work package owns; fold the two together when both can be
-// edited in one change.
+/// Strips `user[:password]@` userinfo from `url` before it lands in an error
+/// (CWE-532): the prefix-mismatch arm is handed a foreign URL that may carry credentials.
 fn redact_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();
@@ -122,31 +49,19 @@ fn redact_url(url: &str) -> String {
     }
 }
 
-/// A C-015 refusal: [`IndexHttpFailed`](super::error::Error::IndexHttpFailed),
-/// hence [`ExitCode::Unavailable`](ocx_exit::ExitCode::Unavailable) (**69**).
-///
-/// One constructor so no arm can drift to another variant — and with it another
-/// exit code — while the module grows.
+/// A refusal: [`IndexHttpFailed`](super::error::Error::IndexHttpFailed), exit 69 — the one constructor, so no arm drifts to another exit code.
 fn refused(url: &str, source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> super::error::Error {
     super::error::Error::IndexHttpFailed {
         url: redact_url(url),
-        // A `file://` refusal has no HTTP status, and the retry ladder never
-        // reaches this transport.
         status: None,
         source: source.into(),
     }
 }
 
-/// Splits an I/O failure into the two kinds that may read as absence and
-/// everything else (C-015).
+/// Maps `NotFound`/`NotADirectory` to absence and every other I/O kind to a refusal.
 ///
-/// `NotFound` and `NotADirectory` (a path component is a regular file) are the
-/// whole absence set; `PermissionDenied`, `IsADirectory`, `ELOOP` and the rest
-/// are refusals. Absence additionally requires `root` to be a **directory**:
-/// those same two kinds are exactly what a base pointed at a missing path or at
-/// a regular file produces for *every* read, and calling that an empty index is
-/// C-015's own defect. Checking here rather than up front gates only the
-/// `Ok(NotFound)` return and keeps the extra stat off the happy path.
+/// Absence also requires `root` to be a directory, or a base pointed at a
+/// missing path or a regular file would read as an empty index.
 async fn absent_or_refused(root: &Path, url: &str, source: std::io::Error) -> Result<IndexFetch> {
     if !matches!(source.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) {
         return Err(refused(url, source));
@@ -161,11 +76,9 @@ async fn absent_or_refused(root: &Path, url: &str, source: std::io::Error) -> Re
     }
 }
 
-/// Bounds one fetch in time (C-017, CWE-400); elapsing is a refusal.
+/// Bounds one fetch in time (CWE-400); elapsing is a refusal.
 ///
-/// Takes the deadline rather than reading [`INDEX_REQUEST_TIMEOUT`] directly so
-/// the elapsed arm is testable in milliseconds: once the type checks are in
-/// place no filesystem fixture stalls a fetch short of a real hung mount.
+/// Takes the deadline as a parameter so the elapsed arm is testable in milliseconds.
 async fn bounded(
     url: &str,
     deadline: Duration,
@@ -178,10 +91,8 @@ async fn bounded(
 
 /// Opens `path` for reading without blocking on a FIFO or device node.
 ///
-/// `O_NONBLOCK` is a no-op on a regular file. It is what keeps the handle
-/// re-check in [`FileIndexTransport::fetch`] reachable: without it a FIFO
-/// swapped in after the pre-stat blocks inside `open()` itself, with nothing to
-/// cancel (C-017).
+/// Without `O_NONBLOCK`, a FIFO swapped in after the pre-stat blocks inside
+/// `open()` before the handle re-check can refuse it.
 #[cfg(unix)]
 async fn open_for_read(path: &Path) -> std::io::Result<fs::File> {
     fs::OpenOptions::new()
@@ -191,27 +102,17 @@ async fn open_for_read(path: &Path) -> std::io::Result<fs::File> {
         .await
 }
 
-/// Opens `path` for reading. No `O_NONBLOCK` equivalent applies — the named
-/// pipes this guards against are a Unix concern.
+/// Opens `path` for reading.
 #[cfg(not(unix))]
 async fn open_for_read(path: &Path) -> std::io::Result<fs::File> {
     fs::File::open(path).await
 }
 
 impl FileIndexTransport {
-    /// Build a transport serving `root` under `base_url`.
-    ///
-    /// Infallible:
-    /// [`OcxIndex::resolve_base_url`](super::OcxIndex::resolve_base_url) is the
-    /// gate (C-018/C-019) and only calls this once it has established an empty
-    /// authority and an absolute path. Re-deriving either here would put the
-    /// scheme decision in two places.
-    ///
-    /// `base_url` is stored trailing-slash-trimmed, matching `OcxIndex::new`
-    /// (`ocx_index.rs:405`): every URL is minted as `format!("{base}/…")`, so a
-    /// base configured with a trailing `/` would leave a `//`-prefixed
-    /// remainder and refuse every fetch this transport exists to serve.
+    /// Build a transport serving `root` under `base_url`, which
+    /// [`OcxIndex::resolve_base_url`](super::OcxIndex::resolve_base_url) has already checked.
     pub fn new(base_url: String, root: PathBuf) -> Self {
+        // Trimmed, or the `format!("{base}/…")` URLs leave a `//` tail and every fetch refuses.
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             root,
@@ -220,26 +121,17 @@ impl FileIndexTransport {
 
     /// The body of [`IndexTransport::get`], minus the timeout wrapper.
     async fn fetch(&self, url: &str) -> Result<IndexFetch> {
-        // 1. Prefix *and* path boundary (C-016). `filter` is the boundary half:
-        //    a sibling base sharing a string prefix (`<base>2/…`) leaves a tail
-        //    that starts with neither nothing nor `/`, and must refuse rather
-        //    than read a wrong path under this root.
+        // The boundary `filter` refuses a sibling base sharing the string prefix (`<base>2/…`).
         let tail = url
             .strip_prefix(&self.base_url)
             .filter(|tail| tail.is_empty() || tail.starts_with('/'))
             .ok_or_else(|| refused(url, "URL does not lie under the file:// index base"))?;
 
-        // 2. Strip the one leading separator every minted URL carries, and
-        //    change nothing else — the tail is a *literal* relative path, never
-        //    percent-decoded (C-016). `join_under_root` owns lexical
-        //    containment and runs before the OS sees the path, which is what
-        //    stops a symlinked directory component being re-expanded by `..`.
+        // Never percent-decode the tail: a `%2e%2e` filename would become a traversal.
         let path = join_under_root(&self.root, Path::new(tail.strip_prefix('/').unwrap_or(tail)))
             .map_err(|source| refused(url, source))?;
 
-        // 3. Pre-stat, before `open()` so a device node is never opened at all
-        //    (C-017). Follows symlinks on purpose — an operator-staged tree may
-        //    legitimately link (C-016).
+        // Stat before `open()`, so a device node is never opened.
         let metadata = match fs::metadata(&path).await {
             Ok(metadata) => metadata,
             Err(source) => return absent_or_refused(&self.root, url, source).await,
@@ -248,11 +140,8 @@ impl FileIndexTransport {
             return Err(refused(url, "index object is not a regular file"));
         }
 
-        // 4. Symlink containment (C-016). After the stat because canonicalizing
-        //    a path that does not exist fails, and a clean miss must stay a
-        //    miss; before the open because an out-of-tree target must not be
-        //    opened at all. `root` is canonicalized too — the shipped tree may
-        //    itself sit behind a link, and only like-for-like compares.
+        // Symlink containment: after the stat so a clean miss stays a miss, before the open
+        // so an out-of-tree target is never opened; `root` is canonicalized too so both sides compare.
         let resolved = fs::canonicalize(&path).await.map_err(|source| refused(url, source))?;
         let canonical_root = fs::canonicalize(&self.root)
             .await
@@ -261,9 +150,7 @@ impl FileIndexTransport {
             return Err(refused(url, "index object resolves outside the index root"));
         }
 
-        // 5. Open, then re-check the type on the *handle* (C-017): the pre-stat
-        //    and the open are independent lookups, and anything that replaces
-        //    the path between them passes the check above.
+        // Re-check the type on the handle: a writer can swap a FIFO in after the pre-stat.
         let file = match open_for_read(&path).await {
             Ok(file) => file,
             Err(source) => return absent_or_refused(&self.root, url, source).await,
@@ -273,10 +160,7 @@ impl FileIndexTransport {
             return Err(refused(url, "index object is not a regular file"));
         }
 
-        // 6. Counted read (C-017): at most `cap + 1` bytes, so an over-cap body
-        //    is detected from what actually arrived. Not `absent_or_refused` —
-        //    this path was stat'd and opened, so absence is no longer a
-        //    reachable meaning for a failure here.
+        // Count what arrived (`cap + 1`), never trust `len()`: a `/proc` entry declares 0 yet yields content.
         let mut bytes = Vec::new();
         let mut reader = file.take(MAX_INDEX_DOCUMENT_BYTES as u64 + 1);
         reader
@@ -298,21 +182,12 @@ impl FileIndexTransport {
 impl IndexTransport for FileIndexTransport {
     /// Read the object `url` names from the shipped tree.
     ///
-    /// Unconditional, like every [`IndexTransport`]: there is no ETag, no
-    /// `If-None-Match`, and no revalidation anywhere in this subsystem.
-    ///
     /// # Errors
     ///
-    /// [`IndexHttpFailed`](super::error::Error::IndexHttpFailed) —
-    /// [`ExitCode::Unavailable`](ocx_exit::ExitCode::Unavailable) — for a URL
-    /// that fails the prefix-and-boundary test, a tail that fails containment,
-    /// a target resolving outside the root, a `root` that is not a directory, a
-    /// target that is not a regular file, a body over the cap, an elapsed
-    /// [`INDEX_REQUEST_TIMEOUT`], or any other I/O error.
-    /// `Ok(IndexFetch::NotFound)` is reserved for
-    /// [`ErrorKind::NotFound`](std::io::ErrorKind::NotFound) and
-    /// [`ErrorKind::NotADirectory`](std::io::ErrorKind::NotADirectory) below a
-    /// root that is a directory.
+    /// [`IndexHttpFailed`](super::error::Error::IndexHttpFailed) (exit 69) for any
+    /// refusal: prefix or containment failure, a non-directory root, a non-regular
+    /// file, an over-cap body, a timeout, or any other I/O error.
+    /// `Ok(IndexFetch::NotFound)` only for a missing path below a directory root.
     async fn get(&self, url: &str) -> Result<IndexFetch> {
         bounded(url, INDEX_REQUEST_TIMEOUT, self.fetch(url)).await
     }

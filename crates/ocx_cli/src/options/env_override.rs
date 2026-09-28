@@ -7,52 +7,19 @@ use ocx_package::metadata::env::entry::Entry;
 
 /// The repeatable `--env NAME|KEY[:TYPE[:SEP]]=VALUE` per-invocation override.
 ///
-/// Flatten into a command with `#[clap(flatten)]` to add the flag, then read
-/// the resolved entries through [`EnvOverride::entries`] — never the raw
-/// strings. The flag belongs to both CLI tiers: it is a per-invocation
-/// override, not project configuration, so adding it to an OCI-tier command
-/// does not make that command read `ocx.toml`.
-///
-/// The entries are the highest-precedence stage of the composition order, so a
-/// caller appends them last, after the package-composed set and (project tier)
-/// after the project and group `[env]` tables.
+/// Read it through `EnvOverride::entries`, never the raw strings.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct EnvOverride {
     /// Set an environment variable for this invocation, or pass one by name.
     ///
-    /// Repeatable; a later `--env` for the same key wins. The value is split
-    /// on the FIRST `=`, so `--env FOO=a=b` sets `FOO` to `a=b`. Values are
-    /// literal - no interpolation.
-    ///
-    /// `--env NAME`, with no `=` and no `:TYPE`, copies the invoking
-    /// process's own `NAME` into the child - the same effect as
-    /// `--env NAME="$NAME"`, without the calling script having to spell the
-    /// value out. It is how an allowlist of variables survives `--clean`. A
-    /// `NAME` the invoking process does not set is skipped silently; a `NAME`
-    /// set to the empty string forwards the empty string.
-    ///
-    /// `TYPE` is `constant` (replace the existing value), `path` (prepend to
-    /// it) or `list` (append to it), and defaults to `constant`. A relative
-    /// `path` value resolves against the current directory, so
-    /// `--env PATH:path=node_modules/.bin` puts a project-local directory in
-    /// front of the composed `PATH`. Without `:path` a `PATH` override
-    /// replaces the composed value outright, dropping every package directory.
-    ///
-    /// `SEP` is the string a `list` contribution is joined to the existing
-    /// value with, as in `--env GODEBUG:list:,=gctrace=1`. It accepts any
-    /// text, including a colon. Omitted, the key takes whatever separator
-    /// another contributor to it declared, or a single space if none did.
-    ///
-    /// Applied last, so it overrides every package-declared variable - and,
-    /// for the project toolchain, the project's `[env]` and any selected
-    /// group's `[env]` as well.
-    ///
-    /// A qualified key with no value (`--env FOO:path`) is rejected - only
-    /// the plain bare form passes a value through. Keys matching `OCX_*` or
-    /// `__OCX_*` are rejected in both forms; so is a `TYPE` outside
-    /// `constant`, `path` and `list`, a `SEP` that is empty or that qualifies
-    /// any type but `list`, and a `list` value starting or ending with its own
-    /// separator. All exit 64.
+    /// Repeatable; a later `--env` for the same key wins. Applied last, so it overrides package variables and, for the
+    /// project toolchain, the project and group `[env]` tables. Splits on the FIRST `=` (`--env FOO=a=b` sets `FOO` to
+    /// `a=b`); values are literal. A bare `--env NAME` copies this process's own `NAME` into the child (skipped if
+    /// unset) -- the way an allowlist survives `--clean`. `TYPE` is `constant` (replace, default), `path` (prepend,
+    /// resolved against the current directory) or `list` (append, joined by `SEP`); `PATH` without `:path` replaces the
+    /// composed `PATH`, dropping every package directory. `OCX_*`/`__OCX_*` keys and a qualified key with no value are
+    /// rejected; every failure exits 64. Full grammar, including the `SEP` default:
+    /// <https://ocx.sh/docs/reference/command-line#exec>
     #[arg(long = "env", value_name = "NAME|KEY[:TYPE[:SEP]]=VALUE")]
     env: Vec<String>,
 }
@@ -60,62 +27,15 @@ pub struct EnvOverride {
 impl EnvOverride {
     /// Parse the collected `--env` arguments into resolved entries.
     ///
-    /// Splits each argument on the FIRST `=` so a value may itself contain `=`.
-    /// The segment before it is `KEY`, `KEY:TYPE` or `KEY:TYPE:SEP`, where
-    /// `TYPE` names a [`ModifierKind`] — `constant` (replace), `path`
-    /// (prepend) or `list` (append). Omitted, it is `constant`, so a plain
-    /// `KEY=VALUE` means exactly what it always did. Values are literal, never
-    /// interpolated. A later occurrence of a key overrides an earlier one.
-    ///
-    /// An argument carrying no `=` **and** no `:` is a bare `NAME`: the
-    /// ambient value of `NAME` in *this* process becomes a `constant` entry,
-    /// the Docker `-e NAME` convention. It is read here, at parse time, and
-    /// not in the child, which is the whole point — under `--clean` the child
-    /// env starts empty, so naming a variable is the only way one of the
-    /// caller's own reaches the far side. An unset `NAME` contributes no entry
-    /// at all: an allowlist names what *may* travel, and most of what it names
-    /// is typically absent, so a warning would fire on the common case. A
-    /// `NAME` set to the empty string is set, and forwards the empty string.
-    ///
-    /// `SEP` is raw text, taken from the first `:` after the type to the end
-    /// of the segment — so it may itself be or contain a colon, and
-    /// `K:list::=x` declares the separator `:`. Omitting it leaves the entry's
-    /// separator unset for
-    /// [`reconcile_list_separators`](ocx_package::metadata::env::apply::reconcile_list_separators)
-    /// to settle against the other contributors to the same key; that is why
-    /// this parser cannot check an omitted separator against the value, and
-    /// only rejects a value edged by a separator spelled out here.
-    ///
-    /// The grammar is unambiguous because [`ocx_util::env::is_valid_env_key`]
-    /// admits no `:` — a colon in the pre-`=` segment is therefore always the
-    /// type marker or part of the separator, and a Windows value like
-    /// `C:\tools\bin` is untouched because only that segment is inspected.
-    ///
-    /// A relative `path` value resolves against `cwd`, the directory the flag
-    /// was typed in. This deliberately differs from the `ocx.toml` form, which
-    /// anchors to the project root for cwd-independence: a checked-in file must
-    /// mean the same thing from any subdirectory, whereas a flag is composed by
-    /// whatever script is invoking ocx, and cwd is the one base such a script
-    /// can compute. Both forms resolve to an absolute value before the entry
-    /// exists, so an emitted export line means the same thing wherever it is
-    /// evaluated.
-    ///
-    /// `cwd` is a parameter rather than a `current_dir()` call inside the body
-    /// so the function stays pure and directly unit-testable.
+    /// An omitted `SEP` is left for
+    /// [`reconcile_list_separators`](ocx_package::metadata::env::apply::reconcile_list_separators);
+    /// a relative `path` value resolves against `cwd`, not the project root.
     ///
     /// # Errors
     ///
-    /// [`crate::error::UsageError`] (exit 64) when an argument carries a
-    /// qualifier but no `=` (`FOO:path` names a modifier with no value to
-    /// apply it to — a typo, not a pass-through), when the declared `TYPE`
-    /// names no modifier, when a `SEP`
-    /// qualifies a type other than `list`, when a `SEP` is one the fold cannot
-    /// use, when a `list` value starts or ends with its own separator, when
-    /// the key is outside the POSIX environment-name grammar, or when a key
-    /// matches the reserved `OCX_*` / `__OCX_*` namespace — the same gate the
-    /// file form applies, so the flag cannot be the way in.
-    ///
-    /// [`ModifierKind`]: ocx_package::metadata::env::modifier::ModifierKind
+    /// [`crate::error::UsageError`] (exit 64) for a qualifier with no `=`, an invalid `TYPE` or
+    /// `SEP`, a `list` value edged by its own separator, or a key failing the shared
+    /// grammar/reserved-namespace gate.
     pub fn entries(&self, cwd: &Path) -> Result<Vec<Entry>, crate::error::UsageError> {
         use ocx_package::metadata::env::list::{is_separator_edged, separator_is_valid};
         use ocx_package::metadata::env::modifier::ModifierKind;
@@ -125,24 +45,16 @@ impl EnvOverride {
         }
         let mut entries = Vec::with_capacity(self.env.len());
         for argument in &self.env {
-            // First `=` only: everything after it is the value, verbatim. This
-            // is what makes `--env FOO=a=b` set `FOO` to `a=b` rather than
-            // erroring.
             let Some((qualified_key, value)) = argument.split_once('=') else {
-                // No `=`. A plain name is the Docker `-e NAME` pass-through;
-                // anything carrying the type marker is not, because a
-                // modifier with no value to modify cannot be anything but a
-                // typo — and reading one as a pass-through would silently
-                // ignore the `:path` the caller typed.
+                // A qualifier with no value is a typo, or a pass-through would silently drop the `:path`.
                 if argument.contains(':') {
                     return Err(crate::error::UsageError::new(format!(
                         "--env value '{argument}' is not KEY[:TYPE[:SEP]]=VALUE; only a bare NAME passes the invoking process's value through"
                     )));
                 }
-                // Both key gates first, so a refusal does not depend on
-                // whether the variable happens to be set in this shell:
-                // `--env OCX_OFFLINE` is exit 64 either way.
+                // Before the lookup, so `--env OCX_OFFLINE` is exit 64 whether or not it is set.
                 reject_unusable_key(argument)?;
+                // Unset is skipped without a warning: most of what an allowlist names is absent.
                 if let Some(value) = ocx_util::env::var(argument) {
                     entries.push(Entry {
                         key: argument.to_owned(),
@@ -153,15 +65,11 @@ impl EnvOverride {
                 }
                 continue;
             };
-            // Strip the qualifier BEFORE the key gates, so `PATH:path=/x` is
-            // reported against `PATH` — running them on the raw segment would
-            // reject a well-formed argument as an invalid variable name.
+            // Strip the qualifier before the key gates, or `PATH:path=/x` is refused as an invalid name.
             let (key, kind, declared_separator) = match qualified_key.split_once(':') {
                 None => (qualified_key, ModifierKind::Constant, None),
                 Some((key, qualifier)) => {
-                    // Exactly one more split: the separator is raw text to the
-                    // end of the segment, so `K:list::=x` reads as the
-                    // separator `:` rather than an empty one plus a stray.
+                    // One more split only, so `K:list::=x` reads as the separator `:`.
                     let (declared_type, declared_separator) = match qualifier.split_once(':') {
                         None => (qualifier, None),
                         Some((declared_type, separator)) => (declared_type, Some(separator)),
@@ -173,21 +81,14 @@ impl EnvOverride {
                 }
             };
             let separator = match declared_separator {
+                // Settled later against the other contributors, so its edges cannot be checked here.
                 None => None,
                 Some(_) if kind != ModifierKind::List => {
                     return Err(crate::error::UsageError::new(format!(
                         "--env value '{argument}': a separator qualifies a `list` value only, not `{kind}`"
                     )));
                 }
-                // Through the same predicate the metadata and `ocx.toml`
-                // surfaces use, so one rule cannot drift into three. Its `=`
-                // half is unreachable here (a separator containing `=` would
-                // have ended the qualifier at that `=`); the empty and
-                // line-break halves are both reachable from argv.
-                //
-                // `{:?}` on the separator: it is refused for carrying
-                // something unprintable, and echoing a raw newline would split
-                // the error into two lines (CWE-117).
+                // `{:?}` quotes the separator, or a raw newline splits the error line (CWE-117).
                 Some(separator) if !separator_is_valid(separator) => {
                     return Err(crate::error::UsageError::new(format!(
                         "--env value '{argument}': separator {separator:?} must be non-empty and free of '=', newline and carriage return"
@@ -204,14 +105,9 @@ impl EnvOverride {
             entries.push(Entry {
                 key: key.to_owned(),
                 value: match kind {
-                    // A list contribution is literal text like a constant — the
-                    // cwd anchors directories, not option strings.
+                    // Literal: the cwd anchors directories, not option strings.
                     ModifierKind::Constant | ModifierKind::List => value.to_owned(),
-                    // Same `join` resolution the file form uses: an absolute
-                    // value replaces the base outright, a relative one lands
-                    // under it, and a driveless-but-rooted POSIX-authored value
-                    // gets anchored to a drive on Windows instead of following
-                    // the process's.
+                    // The same `join` resolution the file form uses.
                     ModifierKind::Path => cwd.join(value).to_string_lossy().into_owned(),
                 },
                 kind,
@@ -222,14 +118,8 @@ impl EnvOverride {
     }
 }
 
-/// Refuse a key no `--env` argument may set, whichever shape it arrived in.
-///
-/// Two gates, in the order [`ocx_util::env::is_reserved_ocx_key`] documents:
-/// the POSIX environment-name grammar first, then the reserved `OCX_*` /
-/// `__OCX_*` namespace. Shared by the `KEY[:TYPE[:SEP]]=VALUE` form — which
-/// calls it once the qualifier is stripped, so `PATH:path=/x` is judged as
-/// `PATH` — and by the bare `NAME` pass-through, so neither shape can become
-/// the way in for a key that reconfigures how ocx itself resolves.
+/// Refuse a key no `--env` argument may set: the environment-name grammar first,
+/// then the reserved `OCX_*` / `__OCX_*` namespace.
 ///
 /// # Errors
 ///

@@ -36,18 +36,9 @@ mod wire;
 pub mod wire_writer;
 
 // ── Shared clock ──
-//
-// One instant, two renderings (announce + claim design record, C-005/C-006).
-// `current_date` is defined in terms of `current_timestamp` rather than taking
-// its own reading, so the two never straddle midnight and disagree.
 
-/// The current instant, rendered in the index bot's `%Y-%m-%dT%H:%M:%SZ`
-/// seconds-Z form.
-///
-/// Used for the `observed` timestamp on new/changed tags (announce) and the
-/// analogous timestamp fields a claim writes. The `__OCX_TESTING_ANNOUNCE_CLOCK`
-/// env seam (test / `__testing` builds only) pins this so acceptance tests get
-/// byte-deterministic output; production reads the wall clock.
+/// The current instant in the index bot's `%Y-%m-%dT%H:%M:%SZ` form;
+/// `__OCX_TESTING_ANNOUNCE_CLOCK` pins it in test and `__testing` builds.
 pub fn current_timestamp() -> String {
     #[cfg(any(test, feature = "__testing"))]
     {
@@ -58,96 +49,47 @@ pub fn current_timestamp() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-/// The current instant, rendered as a bare `%Y-%m-%d` date.
-///
-/// This is the first ten characters of [`current_timestamp`]'s own render of
-/// the *same* instant, never an independent `Utc::now()` read — two
-/// independent reads can straddle midnight and disagree, which is the defect
-/// this contract exists to prevent. Used for the claim root's `created` field.
+/// The current instant as a bare `%Y-%m-%d` date: a prefix of
+/// [`current_timestamp`], never a second clock read, or the two can straddle midnight and disagree.
 pub fn current_date() -> String {
     let timestamp = current_timestamp();
-    // A pin shorter than ten ASCII bytes panics here by design: a malformed
-    // test pin must fail loudly at the seam, not silently yield a truncated
-    // "date" that then propagates into a written root. Unreachable outside a
-    // `__testing` build, where `__OCX_TESTING_ANNOUNCE_CLOCK` is the only source.
+    // A test pin shorter than ten bytes panics by design, not a truncated date written into a root.
     timestamp[..10].to_string()
 }
 
-/// Re-export the private `IndexImpl` trait for sibling-module tests.
-///
-/// Tests that need to construct an `Index` from a hand-rolled mock must
-/// implement `IndexImpl`. Production code reaches `Index` only via
-/// [`Index::from_chained`] / [`Index::from_remote`], which is why this is
-/// behind the seam rather than plainly `pub`: the callers are unit tests in
-/// `ocx_lib` (`project::resolve`, `package_manager::tasks::*`), which reach it
-/// through a `__testing` dev edge, and no production path may.
+/// Test seam: lets tests outside this crate build an `Index` from a mock `IndexImpl`.
 #[cfg(any(test, feature = "__testing"))]
 pub use index_impl::IndexImpl;
 
-/// Whether a chain source will answer for a given name, and what its silence
-/// means (`adr_index_indirection.md` F3/H).
-///
-/// A distinct type returned by a distinct method, consulted **before** a source
-/// is asked — so "outside jurisdiction" can never be confused with the
-/// `Ok(None)` a fetch returns. An out-of-jurisdiction source is never fetched
-/// from, so there is no fetch outcome to misread.
+/// Whether a chain source answers for a name, and what its silence means
+/// (`adr_index_indirection.md#decision-h`); asked before any fetch, so it is never confused with a fetch's `Ok(None)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Jurisdiction {
-    /// Ask it; its miss or refusal is terminal for the chain. A registry that
-    /// happens to serve the same name must never shadow this source's answer.
+    /// Ask it; its miss or refusal is terminal, never shadowed by a registry serving the same name.
     Authoritative,
     /// Ask it; its miss falls through to the next source (the OCI catch-all).
     FallThrough,
-    /// The name is in another registry altogether — never ask it, and its
-    /// silence decides nothing.
-    ///
-    /// This is the verdict's **only** remaining meaning (ocx#251). A configured
-    /// index used to be able to decline an individual name it declared its
-    /// grammar could not express, handing it to the plain registry; it no longer
-    /// can, so no source ever declines a name inside a registry it serves.
+    /// The name is in another registry: never ask it, and its silence decides nothing.
     Outside,
 }
 
-/// Routing policy for a [`ChainedIndex`](chained_index::ChainedIndex).
-///
-/// Threaded through `Index::from_chained` and on into the chained index so
-/// that callers can pick the right cache/source policy without changing the
-/// `IndexImpl` trait. The parameter is threaded end-to-end; each variant
-/// below documents its own cache/source routing behaviour.
+/// Cache/source routing policy for a [`ChainedIndex`](chained_index::ChainedIndex).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChainMode {
-    /// Local-index first for all lookups. Tag-addressed `fetch_manifest`
-    /// with `IndexOperation::Resolve` walks the chain and persists on
-    /// miss; pure `Query` calls return `None` without contacting the
-    /// chain. Default online operation.
+    /// Local index first; a tag `Resolve` miss walks the chain and persists, a `Query` miss is `None`.
     Default,
-    /// Mutable lookups (tag list, catalog, tag-addressed `fetch_manifest`)
-    /// bypass the local index and go straight to the source. Digest-
-    /// addressed (immutable) lookups still consult the local index first.
-    /// Used for `--remote`.
+    /// `--remote`: mutable lookups (tags, catalog, tag-addressed manifests) go
+    /// straight to the source; digest lookups stay local-first.
     Remote,
-    /// Local index only. Source list is empty or never consulted; misses
-    /// return `None` for digest-addressed content and **error** for an
-    /// unpinned (tag-only) `Resolve` miss (no source was allowed to be
-    /// consulted, so "policy blocked" is the honest answer). Used for
-    /// `--offline`.
+    /// `--offline`: local index only; a digest miss is `None`, an unpinned tag `Resolve` miss errors.
     Offline,
-    /// Freeze tag resolution to the local index: a tag-only `Resolve` miss
-    /// **errors** (never walks the chain to fetch + commit an unknown
-    /// reference), but digest-addressed content is still fetched from the
-    /// source exactly like [`Self::Default`] (a digest is an already-known
-    /// version). Used for `--frozen`. Distinct from [`Self::Offline`] on the
-    /// digest axis: offline blocks all source contact; frozen still pulls
-    /// locked digests.
+    /// `--frozen`: an unpinned tag `Resolve` miss errors as under [`Self::Offline`],
+    /// but digest-addressed content is still fetched from the source.
     Frozen,
 }
 
 impl ChainMode {
-    /// Lowercase label for the no-resolve policies, embedded in the
-    /// [`error::Error::PolicyResolutionBlocked`] message so a user sees which
-    /// flag refused the resolution. `Default` / `Remote` are not no-resolve
-    /// policies and never reach the policy-block path, but return their own
-    /// label for completeness.
+    /// Lowercase flag name embedded in [`error::Error::PolicyResolutionBlocked`].
     pub fn policy_label(self) -> &'static str {
         match self {
             ChainMode::Default => "default",
@@ -158,32 +100,13 @@ impl ChainMode {
     }
 }
 
-/// Caller intent for a manifest lookup on `IndexImpl`.
-///
-/// The trait conflated query and update before this enum existed: pure
-/// queries (e.g. `index list --platforms`) and install/pull resolution
-/// shared the same surface, and a cache miss in `ChainedIndex::fetch_manifest`
-/// would silently walk the source chain and persist the result to the local
-/// index even from query callers. Making intent explicit at every call site
-/// prevents that leak. See `adr_index_routing_semantics.md`.
-///
-/// Naming: `Resolve` (not `Persist`) describes caller intent — "resolve
-/// this identifier for use" — rather than the side effect (`Persist`),
-/// because not every `Resolve` actually persists (digest-only identifiers
-/// skip the tag-pointer commit; Remote-mode hits the source without
-/// touching the local index for tag listings).
+/// Caller intent for a manifest lookup (`adr_index_routing_semantics.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexOperation {
-    /// Pure read. `ChainedIndex` returns the local-index result and never
-    /// walks the source chain on miss. Used by `index list`,
-    /// `index catalog`, `package description pull`, and any other path that reports
-    /// existing data without producing it.
+    /// Pure read: never walks the source chain or writes the local index on a miss.
     Query,
-    /// Read with write-through on miss. Install/pull paths walk the source
-    /// chain on cache miss and persist the manifest blobs (and, for tag-
-    /// addressed identifiers without a digest, the tag pointer). The only
-    /// callers are `package_manager::tasks::resolve` (install/pull) and
-    /// project lock resolution.
+    /// Read with write-through: a miss walks the chain and persists the manifest
+    /// (and, for a tag-only identifier, the tag pointer).
     Resolve,
 }
 
@@ -191,20 +114,12 @@ pub enum IndexOperation {
 pub enum SelectResult {
     /// Exactly one candidate matched.
     Found(ocx_oci::PackageRef),
-    /// Multiple candidates matched — the caller must decide how to handle the
-    /// ambiguity (e.g. ask the user or report an error).
+    /// Multiple candidates matched; the caller decides.
     Ambiguous(Vec<ocx_oci::PackageRef>),
-    /// No candidates matched the requested platforms (or the package was not
-    /// found in the index at all).
+    /// No candidate matched the platform, or the package is absent.
     NotFound,
-    /// The host declared non-empty `os.features` but no candidate sharing the
-    /// host's os+arch satisfied subset matching on `os_features`. Distinct
-    /// from [`NotFound`](Self::NotFound) (no os/arch candidates at all): here
-    /// the package ships for this os/arch but only under different
-    /// `os.features` (e.g. a different libc). The caller (package-manager
-    /// layer) maps this to a feature-mismatch error so the user can
-    /// `--platform`-override. `available` lists the candidate platforms the
-    /// user could target.
+    /// Candidates share the host's os+arch but none satisfies its `os.features` (e.g. a
+    /// different libc); `available` lists the platforms a `--platform` override could target.
     FeatureMismatch {
         host_features: Vec<String>,
         available: Vec<ocx_oci::Platform>,
@@ -214,12 +129,9 @@ pub enum SelectResult {
 /// Who says which content a package's tag names — see [`Index::resolve_version`].
 #[derive(Debug)]
 pub enum ResolvedVersion {
-    /// No index owns the name, or the identifier carries its own digest: the
-    /// registry's reference is the version, read there as before.
+    /// No index owns the name, or the identifier carries its own digest: read the registry.
     Registry,
-    /// The index resolved the tag, and this is its committed answer — the
-    /// dispatch manifest and its digest, never whatever the physical tag names
-    /// now.
+    /// The index's committed dispatch manifest, never whatever the physical tag names now.
     Indexed {
         digest: ocx_oci::Digest,
         manifest: Box<ocx_oci::Manifest>,
@@ -228,15 +140,10 @@ pub enum ResolvedVersion {
     Absent,
 }
 
-/// Note, some operations are cached and the cache is shared between clones of the index.
-/// This means that if you clone the index, they will share the same cache and benefit from each other's cached data.
-/// On the other hand, if you have a long-running index instance, you may want to periodically clear the cache to avoid memory bloat and ensure that you always have the latest data.
-/// The cache is currently never cleared, but expiration or manual clearing may be added in the future if needed.
+/// A package index; clones share one in-memory cache, which is never cleared.
 pub struct Index {
     inner: Box<dyn index_impl::IndexImpl>,
     /// Proxy-route rules for the dial-site SSRF guard ([`Self::guard_physical_dial`]).
-    /// Defaults to the process-wide [`ocx_oci::ssrf::proxy_rules`]; override
-    /// with [`Self::with_proxy_rules`] (test seam).
     rules: std::sync::Arc<ocx_oci::ssrf::ProxyRules>,
 }
 
@@ -248,10 +155,8 @@ impl Index {
         }
     }
 
-    /// Wrap an [`OcxIndex`] (an `index.ocx.sh`-style static-file source) as a
-    /// chain source. Registered alongside [`OciIndex`] in the default chain
-    /// so a logical `ocx.sh/<ns>/<pkg>` reference the registry does not serve
-    /// resolves through the two-hop index path (`adr_index_indirection.md` F).
+    /// Wrap an [`OcxIndex`] (an `index.ocx.sh`-style static-file source) as a chain source
+    /// (`adr_index_indirection.md#decision-f`).
     pub fn from_source(source: OcxIndex) -> Self {
         Self {
             inner: Box::new(source),
@@ -259,17 +164,7 @@ impl Index {
         }
     }
 
-    /// Inject an arbitrary `IndexImpl` implementation.
-    ///
-    /// Used exclusively in unit tests to wrap `TestIndex` fakes without
-    /// exposing `IndexImpl` as a public trait.  Not available in production
-    /// builds.
-    ///
-    /// Behind the `__testing` seam so a test can inject its own mock index
-    /// implementation without going through the heavier `from_chained`
-    /// construction path. Those callers used to be sibling modules; the crate
-    /// split moved them to `ocx_lib`, so `pub(crate)` no longer reaches them
-    /// and the seam is what keeps the widening out of production builds.
+    /// Test seam: wrap a mock `IndexImpl` without going through `from_chained`.
     #[cfg(any(test, feature = "__testing"))]
     pub fn from_impl(inner: impl index_impl::IndexImpl + 'static) -> Self {
         Self {
@@ -278,12 +173,7 @@ impl Index {
         }
     }
 
-    /// Construct an index that reads from `cache` first, falling through to
-    /// `sources` in order on miss. Successful source fetches are persisted
-    /// into `cache` via `update_tag`.
-    ///
-    /// `mode` controls cache/source routing — see [`ChainMode`] for each
-    /// variant's behaviour.
+    /// An index reading `cache` first, then `sources` in order, routed by `mode`.
     pub fn from_chained(cache: LocalIndex, sources: Vec<Index>, mode: ChainMode) -> Self {
         Self {
             inner: Box::new(chained_index::ChainedIndex::new(cache, sources, mode)),
@@ -291,13 +181,8 @@ impl Index {
         }
     }
 
-    /// Like [`Self::from_chained`], but attaches the machine-global blob store
-    /// (`$OCX_HOME/blobs`) so an absent dispatch object recovers its content
-    /// from installed blobs before any source walk
-    /// (`adr_index_indirection.md` A3 step 2 / B2). This is the production
-    /// construction (`context.rs`); the blob store is opt-in here so the
-    /// signature-stable [`Self::from_chained`] keeps every unit-test caller
-    /// unchanged (no blob store → recovery is a no-op).
+    /// Like [`Self::from_chained`], but an absent dispatch object recovers from the
+    /// machine-global blob store before any source walk (`adr_index_indirection.md#a3`).
     pub fn from_chained_with_content_store(
         cache: LocalIndex,
         sources: Vec<Index>,
@@ -310,11 +195,8 @@ impl Index {
         }
     }
 
-    /// Like [`Self::from_chained`], but tag resolution never commits a tag
-    /// pointer into `cache` — the caller's lock file is the canonical record
-    /// of tag -> digest. Content-addressed blob writes still happen. Built
-    /// for the update-verb family (`ocx update`); see
-    /// `adr_toolchain_update_family.md`.
+    /// Like [`Self::from_chained`], but never commits a tag pointer: the caller's lock
+    /// file records tag -> digest (`adr_toolchain_update_family.md`).
     pub fn from_chained_lock_scoped(cache: LocalIndex, sources: Vec<Index>, mode: ChainMode) -> Self {
         Self {
             inner: Box::new(chained_index::ChainedIndex::new_lock_scoped(cache, sources, mode)),
@@ -322,23 +204,17 @@ impl Index {
         }
     }
 
-    /// Overrides the proxy-route rules used by [`Self::guard_physical_dial`].
-    /// Test seam — production always builds from the process-wide
-    /// [`ocx_oci::ssrf::proxy_rules`].
+    /// Test seam: override the proxy rules used by [`Self::guard_physical_dial`].
     #[must_use]
     pub fn with_proxy_rules(mut self, rules: std::sync::Arc<ocx_oci::ssrf::ProxyRules>) -> Self {
-        // The chain's own resolve-time guard reads its own copy, so pinning
-        // one half would leave the other on the ambient environment.
+        // Pin the chain's copy too, or its resolve-time guard stays on the ambient environment.
         self.inner.set_proxy_rules(rules.clone());
         self.rules = rules;
         self
     }
 
-    /// A view of this index that resolves identically but writes nothing into
-    /// the local index (no dispatch object, no tag pointer) — see
-    /// [`index_impl::IndexImpl::read_only_view`]. Content-addressed blob writes
-    /// still happen. Used by `ocx package inspect` so a read-only look never
-    /// grows the permanent index.
+    /// A view that resolves identically but writes nothing into the local index;
+    /// content-addressed blob writes still happen.
     pub fn read_only_view(&self) -> Self {
         Self {
             inner: self.inner.read_only_view(),
@@ -346,11 +222,8 @@ impl Index {
         }
     }
 
-    /// A view of this index that lists and reads live from the sources
-    /// regardless of the ambient [`ChainMode`], and writes nothing into the
-    /// local index — see [`index_impl::IndexImpl::remote_view`]. Used by the
-    /// update-check probe, which must see the freshest published release and
-    /// must never move a pin.
+    /// A view that lists and reads live from the sources whatever the [`ChainMode`],
+    /// and writes nothing into the local index.
     pub fn remote_view(&self) -> Self {
         Self {
             inner: self.inner.remote_view(),
@@ -364,12 +237,8 @@ impl Index {
         self.inner.list_repositories(registry).await
     }
 
-    /// List all tags available for the given identifier.
-    ///
-    /// Reserved tags — the `__ocx` namespace (keep tags included) and the
-    /// frozen legacy `sha256.<hex>` keep tags
-    /// ([`is_reserved_tag`]) — are automatically filtered out. Returns `None`
-    /// when the package is not known to this index.
+    /// Tags for `identifier`, minus reserved tags ([`is_reserved_tag`]); `None` when the
+    /// package is unknown to this index.
     pub async fn list_tags(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<Vec<String>>> {
         log::debug!("Listing tags for '{}'.", identifier);
         self.inner.list_tags(identifier).await.map(|opt| {
@@ -382,12 +251,7 @@ impl Index {
         })
     }
 
-    /// Fetch the manifest for the given identifier.
-    ///
-    /// `op` declares whether the call is a pure query (no chain walk on
-    /// miss, no local-index writes) or a resolve (walk + persist on miss
-    /// for install/pull paths). Returns `None` when the manifest is not
-    /// available under the routing implied by `op` and the impl's mode.
+    /// Fetch the manifest for `identifier`; `None` when unavailable under `op` and the mode's routing.
     pub async fn fetch_manifest(
         &self,
         identifier: &ocx_oci::PackageRef,
@@ -397,10 +261,7 @@ impl Index {
         self.inner.fetch_manifest(identifier, op).await
     }
 
-    /// Find the manifest digest for the given identifier and tag.
-    ///
-    /// `op` carries the same contract as on [`Self::fetch_manifest`].
-    /// Returns `None` when the identifier cannot be resolved.
+    /// The manifest digest for `identifier`, `None` when unresolvable; `op` as on [`Self::fetch_manifest`].
     pub async fn fetch_manifest_digest(
         &self,
         identifier: &ocx_oci::PackageRef,
@@ -409,40 +270,23 @@ impl Index {
         self.inner.fetch_manifest_digest(identifier, op).await
     }
 
-    /// Fetch the raw bytes of a content blob.
-    ///
-    /// `blob_ref` carries `(registry, repo)` for the OCI blob endpoint and
-    /// the blob's own digest for content addressing. `Ok(None)` = unrecoverable
-    /// miss under the active routing policy (e.g. `ChainMode::Offline` + local
-    /// cache miss).
+    /// Fetch a content blob's bytes; `Ok(None)` is a miss the routing policy cannot recover.
     pub async fn fetch_blob(&self, blob_ref: &ocx_oci::PinnedPackageRef) -> Result<Option<Vec<u8>>> {
         log::trace!("Fetching blob '{blob_ref}'.");
         self.inner.fetch_blob(blob_ref).await
     }
 
-    /// Where a read of `identifier` goes: the physical location the index
-    /// routes it to, or `identifier` itself when no source rewrites it
-    /// (registry-backed). Either way it carries `identifier`'s tag and digest.
+    /// Where a read of `identifier` goes: the physical location its index routes it to, or `identifier`
+    /// itself when nothing rewrites it, carrying `identifier`'s tag and digest.
     ///
-    /// No rewrite is passthrough only where no index is authoritative for the
-    /// name. Where one is, its miss is terminal: no routing call falls back
-    /// from the index protocol to the logical host (ocx#504).
-    ///
-    /// This is the only way to turn a package identifier into something a
-    /// [`Client`](ocx_oci::Client) accepts. Transport-only
-    /// (`adr_index_indirection.md` C2): the answer is never a storage key, and
-    /// anything reported to the user still names `identifier`.
-    ///
-    /// No dial guard runs here, so a warm, offline resolve that is downloading
-    /// nothing never has to resolve the physical host. A caller about to dial
-    /// the answer wants [`Self::route_for_dial`], or runs
-    /// [`Self::guard_physical_dial`] itself where the dial is imminent.
+    /// Transport-only (`adr_index_indirection.md#c2-structural`), never a storage key. No dial guard runs,
+    /// so a warm offline resolve never looks up the physical host; a caller about to dial wants
+    /// [`Self::route_for_dial`].
     ///
     /// # Errors
     ///
-    /// Whatever the index raises while looking the pointer up — the local
-    /// copy's SSRF floor included; [`error::Error::NotInIndex`] when the index
-    /// authoritative for the name does not hold it.
+    /// Index lookup failures, the local SSRF floor included; [`error::Error::NotInIndex`] when
+    /// the authoritative index lacks the name.
     pub async fn route(&self, identifier: &ocx_oci::PackageRef) -> Result<ocx_oci::OciIdentifier> {
         match self.physical_reference(identifier).await? {
             Some(physical) => Ok(physical),
@@ -450,21 +294,12 @@ impl Index {
         }
     }
 
-    /// The identifier a read of `identifier` must dial: [`Self::route`], plus
-    /// the refusals a direct dial needs.
-    ///
-    /// For a caller that reads the registry **directly** through a `Client`
-    /// rather than through this index — `ocx package push`'s dependency-pin
-    /// gate. A logical name dialled as-is reaches whatever host shares its
-    /// spelling, not the registry the index points at (ocx#504). The dial-site
-    /// SSRF floor ([`Self::guard_physical_dial`]) runs inside, so routing
-    /// cannot be had without it.
+    /// [`Self::route`] plus the dial-site SSRF floor, for a caller that dials the registry
+    /// directly through a `Client`.
     ///
     /// # Errors
     ///
-    /// Whatever [`Self::route`] raises; [`error::Error::NotInIndex`] when the
-    /// index authoritative for the name does not hold it;
-    /// [`error::Error::Ssrf`] when the floor refuses the rewritten target.
+    /// [`Self::route`]'s errors; [`error::Error::Ssrf`] when the floor refuses the rewritten target.
     pub async fn route_for_dial(&self, identifier: &ocx_oci::PackageRef) -> Result<ocx_oci::OciIdentifier> {
         let Some(routed) = self.physical_reference(identifier).await? else {
             return self.unrouted(identifier);
@@ -473,26 +308,15 @@ impl Index {
         Ok(routed)
     }
 
-    /// Which content `identifier`'s tag names, asked of whoever owns the
-    /// answer. `routed` is what [`Self::route_for_dial`] answered for it.
+    /// Which content `identifier`'s tag names, asked of whoever owns the answer; `routed` is
+    /// [`Self::route_for_dial`]'s answer for it.
     ///
-    /// For a direct registry reader that reads a package **by tag**
-    /// (`ocx package copy`, `ocx package push`'s `any`-provenance check). Routing
-    /// carries the tag onto the physical location, but for an index-served name
-    /// the physical tag is not the version: the index's own resolution — tag
-    /// existence, yank status, the committed dispatch — is, exactly as install
-    /// reads it. A physical tag moved since publication would otherwise be
-    /// read as the package. The index is asked through
-    /// [`Self::read_only_view`], so a read-only command grows nothing locally,
-    /// and under the ambient [`ChainMode`] like every other resolve.
-    ///
-    /// Index-served means an index rewrote the name or is authoritative for
-    /// its registry; neither is [`ResolvedVersion::Registry`] (S-5).
+    /// For an index-served name the index's resolution is the version, not the physical tag, which may
+    /// have moved since publication. Asked through [`Self::read_only_view`], so nothing is written locally.
     ///
     /// # Errors
     ///
-    /// Whatever the index raises resolving the tag — a yanked tag and a
-    /// `--offline`/`--frozen` refusal included.
+    /// Index resolution failures, a yanked tag and an `--offline`/`--frozen` refusal included.
     pub async fn resolve_version(
         &self,
         identifier: &ocx_oci::PackageRef,
@@ -517,16 +341,12 @@ impl Index {
         )
     }
 
-    /// Where the **locally committed** root routes `identifier`, never
-    /// dialling a source — see [`index_impl::IndexImpl::physical_reference_local`].
-    /// `None` means no root is committed for the name. That is an answer, not
-    /// a refusal: nothing is dialled, so there is no logical host to fall back
-    /// to. Used by the store-hit path of `PackageManager::find`, which is
-    /// downloading nothing and so must not pay for a pointer it will not use.
+    /// Where the locally committed root routes `identifier`, never dialling a source;
+    /// `None` when no root is committed for the name.
     ///
     /// # Errors
     ///
-    /// The local copy's SSRF floor refusing the committed pointer.
+    /// The local SSRF floor refusing the committed pointer.
     pub async fn route_local(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
         Ok(self
             .inner
@@ -535,19 +355,12 @@ impl Index {
             .map(|physical| physical.at_version_of(identifier)))
     }
 
-    /// [`Self::route`] for a resolve that exists in order to **materialize**,
-    /// which also records the routing pointer locally when a source answered
-    /// with one — see [`index_impl::IndexImpl::record_routing_pointer`].
-    ///
-    /// Called by `PackageManager::resolve_transport_pinned` only. Readers ask
-    /// [`Self::route`] and so leave no snapshot behind; keeping the write on
-    /// its own, separately named entry point is what gates it by call site
-    /// (#424).
+    /// [`Self::route`] that also records a source-answered routing pointer locally; a separate
+    /// entry point so only a materializing resolve writes, never a reader.
     ///
     /// # Errors
     ///
-    /// Whatever [`Self::route`] raises, [`error::Error::NotInIndex`] included.
-    /// The record itself is best-effort.
+    /// [`Self::route`]'s errors; the record itself is best-effort.
     pub async fn route_to_materialize(&self, identifier: &ocx_oci::PackageRef) -> Result<ocx_oci::OciIdentifier> {
         match self.physical_reference(identifier).await? {
             Some(physical) => {
@@ -558,10 +371,8 @@ impl Index {
         }
     }
 
-    /// The answer for a name no source rewrites: `identifier` itself, unless an
-    /// index is authoritative for its registry. That index owns every name
-    /// there, so its miss is [`error::Error::NotInIndex`], never a read of the
-    /// host the name happens to spell.
+    /// `identifier` itself, unless an index is authoritative for its registry: then the miss is
+    /// [`error::Error::NotInIndex`], never a read of the host the name happens to spell.
     fn unrouted(&self, identifier: &ocx_oci::PackageRef) -> Result<ocx_oci::OciIdentifier> {
         if let Some(base_url) = self.authoritative_index_base_url(identifier) {
             return Err(error::Error::NotInIndex {
@@ -576,32 +387,19 @@ impl Index {
         }
     }
 
-    /// The `trusted_hosts` escape hatch configured for `registry`.
-    ///
-    /// Exposed so the Sigstore trust-service dial guard
-    /// ([`ocx_oci::endpoint::resolve_sigstore_url`](ocx_oci::endpoint::resolve_sigstore_url))
-    /// reads the same operator-configured allowlist the registry guard reads,
-    /// rather than minting a second config surface for the same question.
+    /// The `trusted_hosts` SSRF exemption configured for `registry`.
     pub fn trusted_hosts_for(&self, registry: &str) -> &[String] {
         self.inner.trusted_hosts_for(registry)
     }
 
     /// The plain-HTTP allowance set (`[registries."<ns>"].insecure`).
-    ///
-    /// Exposed for the same reason [`Self::trusted_hosts_for`] is: a caller
-    /// that builds a [`DialPolicy`](ocx_oci::ssrf::DialPolicy) for a signing
-    /// pipeline reads the operator's configured set through the index that
-    /// already resolved it, rather than minting a second config surface.
     #[must_use]
     pub fn insecure_hosts(&self) -> &[String] {
         self.inner.insecure_hosts()
     }
 
-    /// The dial-site SSRF floor this index enforces, as a value a pipeline can
-    /// hold without holding the index (ADR 1.9).
-    ///
-    /// `registry` is the **logical** one — the `trusted_hosts` entry is keyed
-    /// on it, never on the physical host it rewrites to (ocx#455).
+    /// The dial-site SSRF floor as a value a pipeline can hold without the index; `registry` is
+    /// the logical one, which `trusted_hosts` is keyed on, never the physical host.
     #[must_use]
     pub fn dial_policy(&self, registry: &str) -> ocx_oci::ssrf::DialPolicy<'_> {
         ocx_oci::ssrf::DialPolicy {
@@ -611,70 +409,34 @@ impl Index {
         }
     }
 
-    /// SSRF floor for a **rewritten** physical target, applied at the dial site —
-    /// immediately before the first request that would reach it, and only when
-    /// one is imminent.
+    /// SSRF floor for a rewritten physical target, run at the dial site just before the first request.
     ///
-    /// [`Self::route`] resolves the pointer on *every* resolve, warm
-    /// or cold, so its own guard
-    /// ([`guard_local_physical`](chained_index::ChainedIndex::guard_local_physical))
-    /// must tolerate a lookup failure — a machine with no resolver has to keep
-    /// resolving from its committed index. That tolerance admits an answer the
-    /// guard could not judge, and the pull that later consumes it dials on the
-    /// shared `PackageManager` client, which carries no
-    /// [`GuardedResolver`](ocx_oci::ssrf::GuardedResolver) and performs its own,
-    /// independent lookup. A hostile local tree naming an attacker-controlled
-    /// domain therefore only has to answer NXDOMAIN while the pre-flight asks and
-    /// a loopback address when the pull dials.
-    ///
-    /// So this half **fails closed on everything**, a lookup failure included:
-    /// here a dial is about to happen, and a connection can no more succeed on a
-    /// name that does not resolve than the lookup did — while an answer that
-    /// appears only between the two questions is precisely the attack.
-    ///
-    /// That rationale is about a lookup **this process performs**, so it scopes
-    /// to a direct dial. When a configured HTTP proxy intercepts the dial
-    /// ([`ocx_oci::ssrf::guard_destination`]) the destination name never reaches a
-    /// local resolver at all — it is text in the proxy's `CONNECT` line — so
-    /// there is no answer for a second one to contradict, and refusing an
-    /// unresolvable name would abort a pull that was going to work on a
-    /// proxy-only-DNS network (ocx#407). The floor itself does not move: a
-    /// forbidden IP literal is refused on either route. The two
-    /// halves share the carve-out for a **non-rewrite** (`physical.registry() ==
-    /// logical.registry()`) and the one `trusted_hosts` set
-    /// ([`index_impl::IndexImpl::trusted_hosts_for`], keyed on the LOGICAL
-    /// registry): a pull that was always going to that host is not something the
-    /// index added, and guarding it would refuse every private registry that
-    /// predates indices.
-    ///
-    /// Residual: the validate → connect window stays open, because the shared
-    /// client resolves the name again for itself. Closing it needs a
-    /// per-namespace `GuardedResolver` on that client.
+    /// Fails closed on a lookup failure too, unlike [`Self::route`]'s tolerant guard: the pull re-resolves
+    /// on an unguarded client, so a tree answering NXDOMAIN here and loopback there would pass.
     ///
     /// # Errors
     ///
-    /// [`error::Error::Ssrf`] when the physical host resolves into a forbidden
-    /// range without a `trusted_hosts` entry, or — on a direct dial only —
-    /// cannot be resolved at all.
+    /// [`error::Error::Ssrf`] when the host resolves into a forbidden range without a
+    /// `trusted_hosts` entry, or, on a direct dial only, cannot be resolved.
     pub async fn guard_physical_dial(
         &self,
         logical: &ocx_oci::PackageRef,
         physical: &ocx_oci::OciIdentifier,
     ) -> Result<()> {
+        // Not a rewrite: guarding it would refuse every private registry that predates indices.
         if physical.registry() == logical.registry() {
             return Ok(());
         }
+        // Unresolvable fails closed on a direct dial only: behind a proxy the name never reaches a local
+        // resolver, so refusing would break proxy-only-DNS networks. Residual: validate → connect stays open.
         ocx_oci::ssrf::guard_physical_dial(&self.dial_policy(logical.registry()), logical, physical)
             .await
             .map_err(|refused| error::Error::Ssrf { source: refused })?;
         Ok(())
     }
 
-    /// Fetch a published index root document verbatim (bytes + parsed
-    /// [`IndexRoot`](wire::IndexRoot)) so a published source's local copy can be
-    /// grown byte-for-byte (copy-a-mirror, `adr_index_indirection.md` A2). A
-    /// derived source returns `None` — its root is OCX-authored, not copied. See
-    /// [`index_impl::IndexImpl::fetch_root_document`].
+    /// A published root document verbatim (bytes + parsed) so a local copy grows byte-for-byte
+    /// (`adr_index_indirection.md#a2`); `None` for a derived source.
     pub async fn fetch_root_document(
         &self,
         identifier: &ocx_oci::PackageRef,
@@ -682,14 +444,8 @@ impl Index {
         self.inner.fetch_root_document(identifier).await
     }
 
-    /// The physical location a source rewrites `identifier` to, or `None` for
-    /// no rewrite. `ocx_index`-internal: the chain asks each source through
-    /// this, and everything outside the crate asks [`Self::route`], which
-    /// cannot answer `None`.
-    ///
-    /// The answer is re-addressed at `identifier`'s version, so a source that
-    /// dropped the tag (or the digest) cannot hand a caller a location at the
-    /// wrong version.
+    /// The physical location a source rewrites `identifier` to, or `None`; re-addressed at
+    /// `identifier`'s version so a source that dropped the tag or digest cannot hand back the wrong one.
     async fn physical_reference(&self, identifier: &ocx_oci::PackageRef) -> Result<Option<ocx_oci::OciIdentifier>> {
         Ok(self
             .inner
@@ -698,60 +454,39 @@ impl Index {
             .map(|physical| physical.at_version_of(identifier)))
     }
 
-    /// Whether this index will answer for `identifier`, and what its silence
-    /// means. See [`index_impl::IndexImpl::jurisdiction`].
-    ///
-    /// `oci::index`-internal (no `pub`), like [`Self::source_kind`] — the chain
-    /// is the only consumer, and `OcxIndex`'s inherent `pub` method serves the
-    /// one caller outside this module.
+    /// Whether this index answers for `identifier`, and what its silence means.
     fn jurisdiction(&self, identifier: &ocx_oci::PackageRef) -> Jurisdiction {
         self.inner.jurisdiction(identifier)
     }
 
-    /// Whether a source in this index is the configured owner of `registry` —
-    /// cheap, synchronous, no I/O. See [`index_impl::IndexImpl::serves_registry`].
+    /// Whether a source in this index is the configured owner of `registry` (no I/O).
     fn serves_registry(&self, registry: &str) -> bool {
         self.inner.serves_registry(registry)
     }
 
-    /// This source's `trusted_hosts` SSRF exemption set. See
-    /// [`index_impl::IndexImpl::trusted_hosts`]. `oci::index`-internal, like
-    /// [`Self::serves_registry`] — the chain is the only consumer.
+    /// This source's `trusted_hosts` SSRF exemption set.
     fn trusted_hosts(&self) -> &[String] {
         self.inner.trusted_hosts()
     }
 
-    /// The static-file base URL this source resolves against, or `None` when it
-    /// is not a configured ocx-index. See
-    /// [`index_impl::IndexImpl::index_base_url`].
+    /// The static-file base URL this source resolves against, `None` when it is not a configured ocx-index.
     fn index_base_url(&self) -> Option<&str> {
         self.inner.index_base_url()
     }
 
-    /// The base URL of the index authoritative for `identifier`, if any. See
-    /// [`index_impl::IndexImpl::authoritative_index_base_url`].
+    /// The base URL of the index authoritative for `identifier`, if any.
     fn authoritative_index_base_url(&self, identifier: &ocx_oci::PackageRef) -> Option<&str> {
         self.inner.authoritative_index_base_url(identifier)
     }
 
-    /// This source's provenance (`adr_index_indirection.md` A2/H) — `Published`
-    /// for an `index.ocx.sh`-style source, `Derived` for everything else. Cheap,
-    /// synchronous, no I/O. [`ChainedIndex`](chained_index::ChainedIndex) uses
-    /// this to pick the local dispatch-object read/recovery routing.
-    ///
-    /// `oci::index`-internal (no `pub`, default visibility reaches every
-    /// descendant module including `chained_index`) — `SourceKind` itself is
-    /// `pub(super)` inside `local_index`, so this stays unexported at the
-    /// crate boundary.
+    /// This source's provenance (`adr_index_indirection.md#a2`): `Published` for an
+    /// `index.ocx.sh`-style source, `Derived` otherwise (no I/O).
     fn source_kind(&self) -> local_index::SourceKind {
         self.inner.source_kind()
     }
 
-    /// Fetch the verbatim manifest bytes alongside the parsed manifest and its
-    /// digest — the seam [`LocalIndex::persist_dispatch`] uses to write a
-    /// self-contained, verifiable dispatch object (`adr_index_indirection.md` A3).
-    ///
-    /// Returns `Ok(None)` when the tag/manifest is absent.
+    /// The verbatim manifest bytes with digest and parsed manifest, so
+    /// [`LocalIndex::persist_dispatch`] writes a verifiable dispatch object; `Ok(None)` when absent.
     pub async fn fetch_manifest_raw_bytes(
         &self,
         identifier: &ocx_oci::PackageRef,
@@ -781,11 +516,7 @@ impl Index {
             ocx_oci::Manifest::ImageIndex(index) => {
                 let mut candidates = Vec::with_capacity(index.manifests.len());
                 for entry in index.manifests {
-                    // One shared eligibility rule (see
-                    // `ocx_oci::Platform::candidate_from_descriptor`): a descriptor
-                    // that names no platform, or one OCX cannot represent, is
-                    // an attestation/referrer entry — not a fault, and not
-                    // something a `--platform` request can ever mean.
+                    // A descriptor with no representable platform is an attestation/referrer entry, not a fault.
                     let Some(platform) = ocx_oci::Platform::candidate_from_descriptor(&entry) else {
                         log::debug!(
                             "skipping non-candidate image-index descriptor {} for '{}'",
@@ -820,22 +551,10 @@ impl Index {
             return Ok(SelectResult::NotFound);
         };
 
-        // Route through the shared D1 selection helper (`is_compatible` +
-        // `compatibility_score`): the same relation `lookup_host_leaf` and
-        // authoring `resolve_for_specific` use, so fresh-resolve gives an
-        // identical answer for the same requested platform and candidate set.
-        // An `Any`-offered candidate satisfies every requirement by
-        // construction (D1 rule), so no separate `Any` fallback tier is
-        // needed here.
+        // Lock-read and authoring pinning use `select_best` too; a local matcher here would make them disagree.
         let result = match ocx_oci::select_best(platform, &candidates) {
             ocx_oci::Selection::Found(id) => SelectResult::Found(id),
             ocx_oci::Selection::Ambiguous(ids) => SelectResult::Ambiguous(ids),
-            // Distinguish a feature mismatch from a plain not-found. When the
-            // host declared non-empty `os.features` and there exist candidates
-            // sharing the host's os+arch but none satisfied subset matching,
-            // the package ships for this os/arch under different `os.features`
-            // only — surface the dedicated variant so the caller can report a
-            // feature mismatch rather than a generic not-found.
             ocx_oci::Selection::None => match host_os_features(platform) {
                 Some(host_features) => {
                     let available = candidates_sharing_host_os_arch(platform, &candidates);
@@ -886,12 +605,8 @@ impl Clone for Index {
     }
 }
 
-/// Extract the requested platform's declared `os_features`, when it is
-/// `Specific` and carries a non-empty set.
-///
-/// A non-empty `os_features` set (e.g. a detected libc, or an explicit
-/// `--platform linux/amd64+libc.musl`) is the signal that a no-match is a
-/// feature mismatch rather than a plain not-found.
+/// The requested platform's `os_features` when `Specific` and non-empty: the signal that a
+/// no-match is a feature mismatch rather than a plain not-found.
 fn host_os_features(platform: &ocx_oci::Platform) -> Option<Vec<String>> {
     match platform {
         ocx_oci::Platform::Specific { os_features, .. } if !os_features.is_empty() => Some(os_features.clone()),
@@ -899,26 +614,18 @@ fn host_os_features(platform: &ocx_oci::Platform) -> Option<Vec<String>> {
     }
 }
 
-/// Parses an index root's `repository` pointer (`oci://host/path`) into the
-/// physical location it names — [`ocx_oci::OciIdentifier::parse_repository_pointer`]
-/// with its refusal reported as this crate's
+/// Parses a root's `repository` pointer (`oci://host/path`), refusing with
 /// [`Error::MalformedPhysicalRef`](error::Error::MalformedPhysicalRef).
 ///
-/// The one parse every root read and every rewrite goes through, so a pointer
-/// the root-read hook accepts is exactly one a rewrite can dereference. The
-/// value is transport-only routing input, never a storage key (C2).
+/// Every root read and rewrite parses through this one function, so any pointer a read accepts a rewrite can dereference.
 fn parse_repository_pointer(value: &str) -> Result<ocx_oci::OciIdentifier> {
     ocx_oci::OciIdentifier::parse_repository_pointer(value).map_err(|_| error::Error::MalformedPhysicalRef {
         value: value.to_string(),
     })
 }
 
-/// Collect the candidate platforms that share os+arch with the requested
-/// `Specific` platform.
-///
-/// These are the entries the user could target with `--platform` — the package
-/// ships for this os/arch, just under a different libc. Returns them sorted by
-/// display string for deterministic error output.
+/// Candidate platforms sharing os+arch with the `Specific` request, sorted by display string
+/// for deterministic error output.
 fn candidates_sharing_host_os_arch(
     platform: &ocx_oci::Platform,
     candidates: &[(ocx_oci::PackageRef, ocx_oci::Platform)],
@@ -959,14 +666,8 @@ pub mod test_source {
     use super::{Index, IndexOperation, index_impl};
     use ocx_oci::{self, Digest, Manifest, PackageRef};
 
-    /// A source that owns a namespace and carries its `trusted_hosts` exemption —
-    /// the `OcxIndex` shape the chain keys on, with nothing else wired up.
-    ///
-    /// It also **counts** every time it is asked for that set, which is the one
-    /// question [`Index::guard_physical_dial`] asks per evaluation. That makes
-    /// the counter an evaluation counter, so a caller can prove a memoized
-    /// verdict is asked for once rather than once per layer — without asserting
-    /// on `tokio::sync::OnceCell`'s internals.
+    /// A source that owns a namespace and carries its `trusted_hosts` exemption, counting each
+    /// time that set is asked for: one ask per [`Index::guard_physical_dial`] evaluation.
     #[derive(Clone)]
     pub struct TrustingSource {
         namespace: String,
@@ -1020,21 +721,9 @@ pub mod test_source {
         }
     }
 
-    /// A source reduced to the one question a direct registry reader asks an
-    /// index ([`Index::route_for_dial`]): where does this name live?
-    /// [`rewriting`](Self::rewriting) serves every name from one physical
-    /// `(registry, repository)`; [`passthrough`](Self::passthrough) rewrites
-    /// nothing, a plain registry's answer; [`authoritative_miss`](Self::authoritative_miss)
-    /// is a configured index that owns every name and holds none of them.
+    /// A source answering only where a name lives ([`Index::route_for_dial`]) and the tags it is told about.
     ///
-    /// Answers digest-only, the way a source answered before tags were carried,
-    /// so a tag on the dialled reference is the router's doing, not this
-    /// fixture's.
-    ///
-    /// Resolves no tag unless told to: [`with_tag`](Self::with_tag) commits a
-    /// tag to a dispatch manifest, [`with_yanked_tag`](Self::with_yanked_tag)
-    /// yanks one — the index's own answers, independent of what any registry
-    /// holds under the same tag.
+    /// Answers digest-only, so a tag on the dialled reference is the router's doing.
     #[derive(Clone)]
     pub struct RoutingSource {
         physical: Option<(String, String)>,
@@ -1090,10 +779,8 @@ pub mod test_source {
             self
         }
 
-        /// This source wrapped as an [`Index`] on direct proxy rules, so the
-        /// dial-site floor never reads the ambient environment. Keep `registry`
-        /// equal to the logical one and the floor's not-a-rewrite carve-out
-        /// answers without a DNS lookup.
+        /// This source as an [`Index`] on direct proxy rules, so the dial-site floor never reads the
+        /// ambient environment; a `registry` equal to the logical one skips its DNS lookup.
         pub fn into_index(self) -> Index {
             Index::from_impl(self).with_proxy_rules(ocx_oci::ssrf::ProxyRules::direct())
         }
@@ -1164,7 +851,7 @@ pub mod test_source {
     }
 }
 
-// ── Index::select integration tests with multi-libc ImageIndex (Step 3.4) ──
+// ── Index::select integration tests with multi-libc ImageIndex ──
 
 #[cfg(test)]
 mod tests {

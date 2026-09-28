@@ -15,28 +15,14 @@ use crate::app::project_context::{load_project_for_mutate, record_activation_con
 
 /// Remove one or more package bindings from `ocx.toml`.
 ///
-/// Each argument is reduced to a binding name — an identifier form like
-/// `ocx.sh/cmake:3.28` matches the binding named `cmake` — and the
-/// implicit default `[tools]` table and all named groups are searched for
-/// that name. A binding added under an explicit name
-/// (`ocx add glab=ocx.sh/gitlab/cli`) is matched only by that name.
-/// Matched bindings are removed, `ocx.lock` is rewritten with every
-/// surviving entry carried forward unchanged, and their packages are
-/// uninstalled. If any argument matches no binding, the whole command
-/// fails and `ocx.toml` is left untouched.
-///
-/// Removing a binding never re-resolves the surviving bindings: their pins
-/// are preserved exactly. Fails with exit 65 when `ocx.toml` drifted from
-/// `ocx.lock` before this remove (run `ocx lock` to reconcile), or exit 78
-/// when a survivor's legacy entry can no longer be migrated exactly (run
-/// `ocx update`).
-///
-/// When the same binding name exists in multiple groups, use `--group` to
-/// target a specific group. `--group default` targets the implicit
-/// `[tools]` table; `--group <name>` targets a named `[group.<name>]` table.
-///
-/// Fails if no matching binding is found in the targeted group (or any
-/// group when `--group` is absent).
+/// Each argument reduces to a binding name (`ocx.sh/cmake:3.28` matches
+/// `cmake`; an explicitly named binding only by its name), searched in
+/// `[tools]` and every group, or only in `--group <name>`. Matches are removed,
+/// `ocx.lock` keeps every survivor's pin exactly, and their packages are
+/// uninstalled. Any argument matching nothing fails the whole command with
+/// `ocx.toml` untouched. Exits 65 when `ocx.toml` drifted from `ocx.lock`
+/// (run `ocx lock`), 78 when a survivor's legacy entry can no longer be
+/// migrated exactly (run `ocx update`).
 #[derive(Parser, Clone)]
 pub struct Remove {
     /// Bindings to remove (binding name or fully-qualified
@@ -54,15 +40,8 @@ pub struct Remove {
 
 impl Remove {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Acquire flock + load snapshot + predecessor. Errors propagate to
-        // the `main.rs` boundary (logged + classified there).
         let guard = load_project_for_mutate(&context).await?;
 
-        // For each identifier, derive the binding key + look up the live
-        // identifier from the pre-mutation snapshot so we can uninstall it
-        // after the commit. `remove_keys` carries the TOML key per input;
-        // `install_identifiers` collects only the bindings that were live so
-        // the post-commit uninstall targets exactly those.
         let mut remove_keys: Vec<String> = Vec::with_capacity(self.identifiers.len());
         let mut install_identifiers: Vec<ocx_oci::PackageRef> = Vec::new();
 
@@ -100,10 +79,7 @@ impl Remove {
             remove_keys.push(binding_key);
         }
 
-        // Stage: in-memory remove of every identifier on a clone of the
-        // snapshot. A missing binding surfaces as `BindingNotFound` inside the
-        // closure, aborting before any disk write — nothing is removed unless
-        // every identifier matches.
+        // Any unmatched key aborts here, before a disk write, so nothing is removed unless all match.
         let config_path = guard.config_path().to_path_buf();
         let group = self.group.clone();
         let staged = guard.stage(move |cfg| {
@@ -113,15 +89,7 @@ impl Remove {
             Ok(())
         })?;
 
-        // Whole-file model (spec §4.4): `remove` re-resolves NOTHING. Every
-        // survivor is carried forward verbatim (V2 byte-identical; V1 via
-        // exact-only pinned-index transcribe), and the dropped binding falls
-        // out of the carry-forward because it is no longer declared in the
-        // candidate config. The freshness gate anchors on the pre-mutation
-        // snapshot (`guard.config()`, which still contains the removed binding)
-        // so a clean lock passes; drift surfaces as `StaleLockOnPartial` (65,
-        // run `ocx lock`) and a survivor's gone V1 index as `LockUpgradeRequired`
-        // (78, run `ocx update`). Both propagate to the `main.rs` boundary.
+        // Empty touched set: survivors keep their pins verbatim, and drift fails 65/78 instead of re-resolving.
         let new_lock = match guard.previous_lock().cloned() {
             Some(prev) => {
                 resolve_lock_touched(
@@ -134,8 +102,6 @@ impl Remove {
                 )
                 .await?
             }
-            // No predecessor lock to preserve — resolve the post-mutation
-            // config directly (never fails closed).
             None => {
                 resolve_lock(
                     staged.config(),
@@ -147,12 +113,7 @@ impl Remove {
             }
         };
 
-        // C-054 / D-V8 / S-008 — commit, then re-render the toolchain home, so
-        // the removed tool's trampoline is pruned by the same invocation that
-        // dropped it from the lock. The scope is derived while the guard still
-        // exists; a render failure afterwards never rolls the commit back
-        // (RUL-53). `ocx remove` has no `--platform`, so the render resolves
-        // link leaves for the host.
+        // A render failure never rolls the commit back, so `ocx.lock` can land with a stale trampoline.
         let scope = context.toolchain_render_scope(guard.config_path()).await?;
         let host = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         let commit = context
@@ -170,29 +131,18 @@ impl Remove {
             .await?
             .commit;
 
-        // Consent write seam (C-024, A-29) — one of the commands allowed to
-        // stamp, opting in explicitly. AFTER the commit, so the stamp records
-        // the source set the user just asked for rather than the one it
-        // replaced. Best-effort; never fails the mutation.
+        // Stamped after the commit, or consent records the source set being replaced.
         record_activation_consent(&commit.config_path, &new_lock, None).await;
 
-        // Best-effort uninstall after commit. Tools may not be installed
-        // (lock-only workflow); errors here do not roll back. One batched
-        // `uninstall_all` call over every live binding.
+        // Best-effort: a lock-only workflow never installed them, and the commit is not rolled back.
         if !install_identifiers.is_empty() {
             let _ = context
                 .manager()
                 .uninstall_all(&install_identifiers, false, false)
                 .await;
 
-            // Global-tier symmetry: `add` is symlink-free (it materialises via
-            // `pull_all`), so `current` exists here only when the user set it
-            // with an explicit `ocx package select`. Clear it anyway, so a
-            // hand-anchored tool does not outlive the binding that named it.
-            // `current` is keyed by registry/repository only — strip the
-            // tag/digest (matches `resolve_global_current_env`'s lookup and
-            // `deselect`'s tag-less requirement). Project tier never touches
-            // `current` (resolves via the lock), so this is `--global`-only.
+            // Keyed tag-less like `resolve_global_current_env`, or a `package select`-anchored `current`
+            // outlives its binding.
             if context.global() {
                 let current_keys: Vec<_> = install_identifiers
                     .iter()

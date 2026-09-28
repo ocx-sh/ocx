@@ -3,38 +3,20 @@
 
 //! Where the managed-config tier keeps its state on disk.
 //!
-//! Five paths under one directory, derived from the `state/` root. They used to
-//! be five accessors on `StateStore`, which forced the config loader — which
-//! holds no store and must never construct one — to reach into
-//! `ocx_store::file_structure` just to find the snapshot it reads at startup. That
-//! is the `ocx_config → ocx_store` edge the crate map forbids, and the layout
-//! is config's to own anyway: the loader's discovery candidate and the
-//! persister's write target have to be one path, or a snapshot is written where
-//! nothing looks for it.
-//!
-//! `StateStore::managed_config()` hands one of these out for its own root, so
-//! the store still answers "where" for callers that hold one, and the
-//! derivation lives in exactly one place either way.
+//! The loader's discovery path and the persister's write target both derive from here, or a
+//! snapshot is written where nothing looks for it.
 
 use std::path::{Path, PathBuf};
 
-/// The directory name under the `state/` root, and the four file names in it.
-///
-/// Named constants rather than inline literals because two of them are
-/// *external* contracts in the weak sense that matters here: a user's existing
-/// `$OCX_HOME/state/managed-config/` is on disk right now, and renaming a
-/// segment orphans it silently rather than failing.
+// Renaming any segment silently orphans every existing `$OCX_HOME/state/managed-config/`.
 const DIR: &str = "managed-config";
 const SNAPSHOT_FILE: &str = "snapshot.json";
 const PAYLOAD_FILE: &str = "config.toml";
 const REFRESH_MARKER_FILE: &str = ".last-refresh-check";
 const PAUSE_FILE: &str = "pause.json";
 
-/// The managed-config tier's on-disk layout, rooted at the `state/` directory.
-///
-/// `state_root` is `$OCX_HOME/state` — the same root `StateStore` is
-/// constructed with, not `$OCX_HOME` itself. Use [`Self::for_ocx_home`] when
-/// all you hold is the home.
+/// The managed-config tier's on-disk layout, rooted at `$OCX_HOME/state`, not `$OCX_HOME`
+/// (use [`Self::for_ocx_home`] for that).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedConfigPaths {
     state_root: PathBuf,
@@ -48,61 +30,41 @@ impl ManagedConfigPaths {
         }
     }
 
-    /// Layout under `$OCX_HOME`, which carries the `state/` join itself.
-    ///
-    /// The config loader's only handle is the home, and it must not construct a
-    /// `StateStore` to get from there to the snapshot.
+    /// Layout under `$OCX_HOME`, joining `state/` itself.
     pub fn for_ocx_home(ocx_home: &Path) -> Self {
         Self::new(ocx_home.join("state"))
     }
 
-    /// The directory holding the managed-config tier's persistent state.
-    ///
-    /// Path: `{state_root}/managed-config/`
+    /// `{state_root}/managed-config/`
     pub fn dir(&self) -> PathBuf {
         self.state_root.join(DIR)
     }
 
-    /// The managed-config snapshot metadata file (`ManagedConfigSnapshot`,
-    /// written atomically by `persist_managed_config`). The payload it describes
-    /// lives in the sibling [`Self::toml_file`].
-    ///
-    /// Path: `{state_root}/managed-config/snapshot.json`
+    /// `{state_root}/managed-config/snapshot.json`, the snapshot metadata describing
+    /// [`Self::toml_file`].
     pub fn snapshot_file(&self) -> PathBuf {
         self.dir().join(SNAPSHOT_FILE)
     }
 
-    /// The managed-config payload file — the raw `config.toml` bytes the
-    /// metadata snapshot describes, written as a readable sibling of
-    /// `snapshot.json` by `persist_managed_config`.
-    ///
-    /// Path: `{state_root}/managed-config/config.toml`
+    /// `{state_root}/managed-config/config.toml`, the raw payload bytes.
     pub fn toml_file(&self) -> PathBuf {
         self.dir().join(PAYLOAD_FILE)
     }
 
-    /// The zero-byte freshness marker touched by the background refresh tick
-    /// (separate from the snapshot file itself so a throttled probe never has to
-    /// touch — and risk racing — the content file).
+    /// `{state_root}/managed-config/.last-refresh-check`, the refresh tick's freshness marker.
     ///
-    /// Path: `{state_root}/managed-config/.last-refresh-check`
+    /// Kept apart from the snapshot so a throttled probe never races the content file.
     pub fn refresh_marker(&self) -> PathBuf {
         self.dir().join(REFRESH_MARKER_FILE)
     }
 
-    /// The content-bearing pause file for the managed-config background tick
-    /// (`ocx config update --pause` — see `managed_config::pause`).
-    ///
-    /// Path: `{state_root}/managed-config/pause.json`
+    /// `{state_root}/managed-config/pause.json`, written by `ocx config update --pause`.
     pub fn pause_file(&self) -> PathBuf {
         self.dir().join(PAUSE_FILE)
     }
 
-    /// The payload path sitting beside the metadata snapshot at `snapshot_path`.
-    ///
-    /// A pure sibling derivation for the reader that holds only the snapshot
-    /// path (`read_managed_config_snapshot_at`). It and [`Self::toml_file`]
-    /// resolve to one path, so reader and writer can never drift.
+    /// The payload path beside `snapshot_path`; must match [`Self::toml_file`] or reader and
+    /// writer drift apart.
     pub fn toml_beside_snapshot(snapshot_path: &Path) -> PathBuf {
         snapshot_path.with_file_name(PAYLOAD_FILE)
     }

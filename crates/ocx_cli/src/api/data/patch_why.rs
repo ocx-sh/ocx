@@ -28,20 +28,8 @@ impl PatchWhyEntry {
     }
 }
 
-/// Report emitted by `ocx patch why <base>`.
-///
-/// Names, for every env var a companion overlay contributes to `base`, the
-/// descriptor rule glob that matched and the companion identifier that
-/// produced it. Empty when no `[patches]` tier is configured, or when a
-/// `[patches]` tier is configured but no companion contributes a var to this
-/// base — both are a clean "no patches apply" result, not an error.
-///
-/// Plain format: a `Variable | Rule | Companion` table, one row per
-/// contributed var. An empty result prints a one-line "no patches apply to
-/// `<base>`" hint instead of an empty table.
-///
-/// JSON format: a bare array of `{ "variable", "rule", "companion" }`
-/// objects (`[]` when no patches apply).
+/// `ocx patch why <base>`: each env var a companion contributes to `base`, with the matching rule
+/// and companion. Empty means no patches apply, never an error.
 pub struct PatchWhyReport {
     base: String,
     entries: Vec<PatchWhyEntry>,
@@ -78,8 +66,7 @@ impl Printable for PatchWhyReport {
     }
 }
 
-// The `Serialize` impl above is transparent, so the published schema is the
-// inner type's. `base` is plain-channel only and never reaches JSON.
+// Transparent `Serialize`: the schema is the bare entry array; `base` never reaches JSON.
 impl schemars::JsonSchema for PatchWhyReport {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "PatchWhyReport".into()

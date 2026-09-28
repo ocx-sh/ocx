@@ -2,9 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! Filesystem-based reachability graph for object store garbage collection.
-//!
-//! Built from `refs/` (install back-references) and `deps/` (dependency forward-references).
-//! Objects with live refs are roots. BFS through `deps/` edges determines reachable objects.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -17,62 +14,25 @@ use ocx_store::file_structure::{CasTier, FileStructure, ShimDir};
 
 use super::project_roots::ProjectRootDigests;
 
-/// Maximum concurrent I/O tasks for graph building.
 const BUILD_CONCURRENCY: usize = 50;
 
-/// Size ceiling, in bytes, for a blob considered as a possible OCI image-index
-/// manifest in [`add_index_retention_edges`]. A blob **larger** than this is
-/// skipped without being read (it cannot be a manifest — it is a layer tarball
-/// or config); a blob **at or under** this size is read in full and parsed.
-///
-/// This is a *whole-blob* ceiling, not a read prefix: a candidate index is read
-/// completely so a large-but-valid index (many child descriptors / annotations)
-/// is never truncated mid-JSON. Truncation would silently drop the
-/// `child_leaf_blob → index_blob` retention edge and let GC collect a live
-/// parent index blob. 4 MiB is far above any real OCI manifest/index (a few
-/// hundred descriptors with annotations is still well under 1 MiB) and far
-/// below a layer tarball, so the ceiling separates the two classes cleanly
-/// without slurping multi-hundred-MB archives.
-///
-/// The OCI distribution spec recommends registries cap manifest size at
-/// 4 MiB (`distribution` `maxManifestBytes`); matching that ceiling means any
-/// manifest a spec-compliant registry would accept is read whole here.
+/// Size above which a blob is not probed as an image index (the OCI spec's recommended `maxManifestBytes`).
 const INDEX_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Pre-computed dependency graph with BFS reachability queries.
-///
-/// Covers all four store tiers (packages, layers, blobs, shims) in a single
-/// graph. Packages and shims carry outgoing edges; layers and blobs are passive,
-/// reachable exclusively through a package's or shim's `refs/layers/` and
-/// `refs/blobs/` edges. A shim is rooted only by a lock pin — it has no incoming
-/// edge, because a shim exists precisely when the package it stands in for does
-/// not (plan contract C-014).
+/// Pre-computed dependency graph over all four store tiers, with BFS reachability queries.
 pub struct ReachabilityGraph {
     pub roots: HashSet<PathBuf>,
     pub edges: HashMap<PathBuf, Vec<PathBuf>>,
     pub all_entries: HashMap<PathBuf, CasTier>,
-    /// Maps each package-store path that is a project-registry root to the
-    /// `ocx.lock` paths that contributed it. Used by `ocx clean --dry-run`
-    /// to populate the `Held By` column. Empty when `project_roots` is `&[]`.
+    /// Each project-held path → the `ocx.lock` paths holding it, for `ocx clean --dry-run`.
     pub roots_attribution: HashMap<PathBuf, Vec<PathBuf>>,
 }
 
 impl ReachabilityGraph {
-    /// Scan all four stores, identify roots, build edges.
+    /// Scans all four stores, identifies roots and builds edges.
     ///
-    /// Packages are probed for `refs/symlinks/` (roots), `refs/deps/` (package edges),
-    /// `refs/layers/` (layer edges), and `refs/blobs/` (blob edges). Shims are probed
-    /// for `refs/blobs/` only — see [`shim_entries`]. Layers and blobs are passive
-    /// entries: no outgoing edges, reachable only through a package's or shim's refs.
-    ///
-    /// `project_roots` supplies additional roots from registered projects' `ocx.lock`
-    /// files (Unit 6), rooted through [`extend_lock_pinned_roots`] once every tier has
-    /// been walked. Pass `&[]` when project-registry roots are suppressed (e.g.
-    /// `ocx clean --force`) — which, since a shim is held by nothing but a lock pin,
-    /// collects every shim in the store (plan contract C-014, F-3). See
-    /// [`adr_clean_project_backlinks.md`].
+    /// Passing no `project_roots` (`ocx clean --force`) collects every shim in the store.
     pub async fn build(file_structure: &FileStructure, project_roots: &[ProjectRootDigests]) -> crate::Result<Self> {
-        // Walk all four stores in parallel.
         let (package_dirs, layer_dirs, blob_dirs, shim_dirs) = tokio::try_join!(
             file_structure.packages.list_all(),
             file_structure.layers.list_all(),
@@ -84,7 +44,6 @@ impl ReachabilityGraph {
         let canon_layers_root = canonicalize_or_keep(file_structure.layers.root());
         let canon_blobs_root = canonicalize_or_keep(file_structure.blobs.root());
 
-        // Spawn parallel I/O tasks to probe refs/ for each package.
         let sem = Arc::new(Semaphore::new(BUILD_CONCURRENCY));
         let mut tasks = JoinSet::new();
 
@@ -103,9 +62,7 @@ impl ReachabilityGraph {
             let sem = Arc::clone(&sem);
 
             tasks.spawn(async move {
-                // `sem` is constructed in this function and outlives every
-                // spawned task (each holds an `Arc` clone); it is never closed
-                // before all permits release, so `acquire_owned` cannot fail.
+                // `sem` is never closed, so `acquire_owned` cannot fail.
                 let _permit = sem.acquire_owned().await.expect("semaphore closed");
                 let is_root = has_live_refs(&pkg_dir).await;
                 let dep_refs = read_refs(&deps_dir, &pkgs_root).await;
@@ -134,7 +91,6 @@ impl ReachabilityGraph {
             all_entries.insert(pkg_dir, CasTier::Package);
         }
 
-        // Register layers and blobs as passive entries (no edges, no roots).
         for layer in &layer_dirs {
             let layer_dir = canonicalize_or_keep(&layer.dir);
             all_entries.insert(layer_dir, CasTier::Layer);
@@ -144,19 +100,13 @@ impl ReachabilityGraph {
             all_entries.insert(blob_dir, CasTier::Blob);
         }
 
-        // Register shims with the PACKAGE shape — entry *and* edges — never the
-        // passive shape above. A shim directory's `refs/blobs/` links are the
-        // only thing holding a deferred tool's closure config blobs, and they
-        // are where a deferred consumer reads its env carriers from (C-014's
-        // F-1 correction; C-020).
+        // Shims carry edges, unlike layers and blobs, or GC collects a deferred tool's config blobs.
         for (shim_dir, blob_refs) in shim_entries(&shim_dirs, blobs_root.as_path()).await {
             edges.insert(shim_dir.clone(), blob_refs);
             all_entries.insert(shim_dir, CasTier::Shim);
         }
 
-        // Root every lock-pinned identity in whichever tiers hold it. This runs
-        // *below* the drain and the passive loops because both insertions are
-        // guarded on `all_entries` membership, which is only complete here.
+        // Only here is `all_entries`, which both insertions guard on, complete.
         extend_lock_pinned_roots(
             file_structure,
             project_roots,
@@ -165,41 +115,10 @@ impl ReachabilityGraph {
             &mut roots_attribution,
         );
 
-        // Index-manifest retention edges. An OCI image-index manifest blob
-        // (the outer multi-platform index) is not referenced by any package's
-        // `refs/blobs/` — packages reference only the per-platform leaf
-        // manifest they were assembled from. Under V2 per-platform pinning the
-        // index digest is never stored in `ocx.lock`, so the index blob has no
-        // GC root and would be collected on every `ocx clean`, even though the
-        // leaves it ties together are held.
-        //
-        // Add a `child_leaf_blob → index_blob` edge for every child the index
-        // advertises: when any child leaf blob is reachable (held by a rooted
-        // package), the BFS reaches the index blob and retains it. This is GC
-        // hygiene only — it never roots the index, and a fully-unreferenced
-        // index (no reachable child) is still collected.
         add_index_retention_edges(&blob_dirs, &mut edges).await;
 
-        // Propagate project-root attribution transitively through the edge
-        // graph so that layers and blobs reachable from a project-root package
-        // carry the same `held_by` entries as the root itself.
-        //
-        // Without this step, `roots_attribution` would only map the top-level
-        // package path → lock paths. Layer and blob paths reachable via
-        // `refs/layers/` and `refs/blobs/` edges would return `None` from
-        // the attribution lookup in `PackageManager::clean`, producing an
-        // empty `held_by` in the dry-run report even though those entries are
-        // retained by the registry.
-        //
-        // Single multi-source BFS: enumerate every (root, lock) pair, dedup
-        // lock paths into a flat `lock_pool`, and propagate `LockId` indices
-        // through the graph. Each node accumulates a `HashSet<LockId>`; we
-        // materialise the final `Vec<PathBuf>` in `roots_attribution` once
-        // when the BFS completes. This keeps allocations O(E) instead of
-        // O(R·E) — the previous per-root BFS cloned the full lock-path list
-        // at every visited node.
+        // Propagate attribution to reachable layers and blobs; one BFS over interned ids keeps it O(E).
         if !roots_attribution.is_empty() {
-            // Build a deduplicated pool of lock paths and a parallel id map.
             type LockId = u32;
             let mut lock_pool: Vec<PathBuf> = Vec::new();
             let mut lock_index: HashMap<PathBuf, LockId> = HashMap::new();
@@ -213,9 +132,6 @@ impl ReachabilityGraph {
                 id
             };
 
-            // Snapshot the seed (root, lock_id) pairs — `roots_attribution`
-            // gets re-read during materialisation so we cannot borrow into
-            // it during the BFS.
             let mut seeds: Vec<(PathBuf, LockId)> = Vec::new();
             for (root_path, lock_paths) in &roots_attribution {
                 for lock_path in lock_paths {
@@ -229,7 +145,6 @@ impl ReachabilityGraph {
             while let Some((current, lock_id)) = queue.pop_front() {
                 let entry = propagated.entry(current.clone()).or_default();
                 if !entry.insert(lock_id) {
-                    // This (node, lock) pair was already enqueued — skip.
                     continue;
                 }
                 if let Some(neighbors) = edges.get(&current) {
@@ -239,9 +154,7 @@ impl ReachabilityGraph {
                 }
             }
 
-            // Materialise lock ids back into owned `PathBuf` values. Skip the
-            // seed roots themselves (already attributed verbatim from the
-            // seed map) so we do not double-append their lock paths.
+            // Seed roots are already attributed; appending again would duplicate their lock paths.
             let seed_roots: HashSet<PathBuf> = seeds.into_iter().map(|(p, _)| p).collect();
             for (node, ids) in propagated {
                 if seed_roots.contains(&node) {
@@ -262,10 +175,7 @@ impl ReachabilityGraph {
         })
     }
 
-    /// BFS from the given starting set through all edge types (deps, layers, blobs).
-    ///
-    /// Starting paths are canonicalized to match the graph's internal representation.
-    /// Internal edges are already canonical from [`build()`].
+    /// BFS from the given starting set; starts are canonicalized to match the graph's keys.
     pub fn bfs(&self, starts: impl IntoIterator<Item = PathBuf>) -> HashSet<PathBuf> {
         let mut reachable = HashSet::new();
         let mut queue: VecDeque<PathBuf> = starts.into_iter().map(|p| canonicalize_or_keep(&p)).collect();
@@ -288,26 +198,7 @@ impl ReachabilityGraph {
     }
 }
 
-/// Add `child_leaf_blob_dir → index_blob_dir` retention edges for every OCI
-/// image-index manifest blob in the store.
-///
-/// The index blob lives at `{blobs_root}/{registry_slug}/{algo}/{2hex}/{30hex}`;
-/// each child manifest the index advertises lives under the **same** registry
-/// slug at its own digest shard. Reading the index blob and resolving each
-/// child to its on-disk blob dir lets the GC retain the index when any child
-/// leaf is reachable (so a normal `ocx lock` + `ocx pull` leaves no orphan
-/// index blob), without ever storing the index digest in `ocx.lock`.
-///
-/// Best-effort: unreadable or non-manifest blobs are skipped silently (a blob
-/// store holds layer archives, configs, and leaf manifests too).
-///
-/// The per-blob read+parse is fanned out across the same bounded-parallel
-/// pattern the package walk in [`ReachabilityGraph::build`] uses (a [`JoinSet`]
-/// gated by a shared [`Semaphore`] with [`BUILD_CONCURRENCY`] permits). Each
-/// task carries its `blob_dirs` index; results are reassembled in input order
-/// before edges are appended, so the resulting `edges` map is identical to the
-/// previous serial pass (and identical run-to-run despite completion-order
-/// `join_next`).
+/// Adds `child_leaf_blob → index_blob` edges, so an index `ocx.lock` never pins stays alive while a child is reachable.
 async fn add_index_retention_edges(
     blob_dirs: &[ocx_store::file_structure::BlobDir],
     edges: &mut HashMap<PathBuf, Vec<PathBuf>>,
@@ -316,8 +207,7 @@ async fn add_index_retention_edges(
     let mut tasks = JoinSet::new();
 
     for (order, blob) in blob_dirs.iter().enumerate() {
-        // The registry slug is three levels up from the digest-suffix dir:
-        // .../{registry_slug}/{algo}/{2hex}/{30hex}.
+        // Three levels up: .../{registry_slug}/{algo}/{2hex}/{30hex}
         let Some(registry_root) = blob.dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) else {
             continue;
         };
@@ -327,19 +217,13 @@ async fn add_index_retention_edges(
         let sem = Arc::clone(&sem);
 
         tasks.spawn(async move {
-            // `sem` is constructed in this function and outlives every spawned
-            // task (each holds an `Arc` clone); it is never closed before all
-            // permits release, so `acquire_owned` cannot fail.
+            // `sem` is never closed, so `acquire_owned` cannot fail.
             let _permit = sem.acquire_owned().await.expect("semaphore closed");
             let pairs = index_retention_pairs(&data_path, &blob_dir, &registry_root).await;
             (order, pairs)
         });
     }
 
-    // Collect completion-order results, then restore `blob_dirs` order so the
-    // appended edges match the serial pass byte-for-byte (the BFS only reads
-    // set membership, but deterministic ordering keeps the graph identical
-    // run-to-run, as required by quality-rust.md for `JoinSet` consumers).
     let mut collected: Vec<(usize, Vec<(PathBuf, PathBuf)>)> = Vec::with_capacity(blob_dirs.len());
     while let Some(result) = tasks.join_next().await {
         collected.push(result.expect("task panicked"));
@@ -348,25 +232,14 @@ async fn add_index_retention_edges(
 
     for (_, pairs) in collected {
         for (child_dir, index_dir) in pairs {
-            // Reverse edge: a reachable child leaf blob retains its parent index.
             edges.entry(child_dir).or_default().push(index_dir);
         }
     }
 }
 
-/// Read one candidate blob and, if it is an OCI image-index manifest, resolve
-/// every advertised child to its `(child_blob_dir, index_blob_dir)` retention
-/// pair.
-///
-/// Returns an empty vec when the blob is unreadable, too large to be a manifest,
-/// or not an image index — the same best-effort skip the serial pass performed.
-/// Pairs are emitted in the index's `manifests` order so the caller, appending
-/// them in `blob_dirs` order, reproduces the serial edge layout exactly.
+/// The `(child_blob_dir, index_blob_dir)` pairs of one blob; empty unless it is a readable image index.
 async fn index_retention_pairs(data_path: &Path, blob_dir: &Path, registry_root: &Path) -> Vec<(PathBuf, PathBuf)> {
-    // Read the blob in full when it is small enough to be a manifest, or skip
-    // it without reading when it exceeds the manifest ceiling (a layer tarball
-    // or config). A candidate index is never truncated, so a large-but-valid
-    // index cannot lose its retention edge.
+    // Over-ceiling blobs are skipped unread, never truncated, or a large valid index loses its retention edge.
     let Some(bytes) = read_manifest_candidate_blob(data_path).await else {
         return Vec::new();
     };
@@ -387,40 +260,18 @@ async fn index_retention_pairs(data_path: &Path, blob_dir: &Path, registry_root:
     pairs
 }
 
-/// Read a blob **in full** when it could be an OCI manifest, or skip it when it
-/// is too large to be one, for the image-index probe in
-/// [`add_index_retention_edges`].
+/// Reads a blob whole, never truncated, or `None` if over [`INDEX_MANIFEST_MAX_BYTES`] or unreadable.
 ///
-/// A blob whose size exceeds [`INDEX_MANIFEST_MAX_BYTES`] is a layer tarball or
-/// config, not a manifest — return `None` without reading it (so a
-/// multi-hundred-MB archive is never slurped into memory). A blob at or under
-/// the ceiling is read completely; a candidate index is therefore **never
-/// truncated**, so a large-but-valid index (many descriptors / annotations)
-/// keeps its `child_leaf_blob → index_blob` retention edge instead of being
-/// mis-classified as a non-manifest and silently collected.
-///
-/// `metadata().len()` is the size authority. The bounded `take(MAX + 1)` read
-/// is a defence-in-depth guard for synthetic files whose metadata reports 0 but
-/// whose read is unbounded (procfs, pipes) — mirrors the lock loader's pattern;
-/// a blob that grows past the ceiling between the stat and the read is dropped
-/// rather than partially parsed.
-///
-/// Returns `None` on any I/O error (best-effort: an unreadable blob is simply
-/// not treated as an index).
+/// A truncated read would drop a live index's retention edge and let GC collect it.
 async fn read_manifest_candidate_blob(path: &Path) -> Option<Vec<u8>> {
     use tokio::io::AsyncReadExt;
 
     let file = tokio::fs::File::open(path).await.ok()?;
-    // Stat first: skip a blob that is too large to be a manifest without
-    // reading any of its bytes.
     if file.metadata().await.ok()?.len() > INDEX_MANIFEST_MAX_BYTES {
         return None;
     }
 
-    // Read the whole blob, bounded by `MAX + 1` so a synthetic 0-length-metadata
-    // file (procfs/pipe) cannot read unbounded. If the read reaches the bound,
-    // the blob is larger than the ceiling after all — drop it (a manifest never
-    // exceeds the ceiling).
+    // Bounded anyway: a file that grew after the stat, or a pipe reporting 0 bytes, would read unbounded.
     let mut buf = Vec::new();
     file.take(INDEX_MANIFEST_MAX_BYTES + 1)
         .read_to_end(&mut buf)
@@ -432,26 +283,7 @@ async fn read_manifest_candidate_blob(path: &Path) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Collects the shim tier's contribution to the graph: one entry per published
-/// shim directory, paired with the `refs/blobs/` forward-refs it carries
-/// (plan contract C-014, [#302](https://github.com/ocx-sh/ocx/issues/302)).
-///
-/// **The shim tier is edge-bearing, not passive.** Layers and blobs are
-/// registered by the passive-entry loop in [`ReachabilityGraph::build`] because
-/// they have no outgoing references. A shim directory does have them: its
-/// [`refs/blobs/`](ShimDir::refs_blobs_dir) links are the only thing keeping a
-/// deferred tool's closure config blobs off the unreachable set, and the only
-/// place a consumer can read that tool's env carriers from, since no package
-/// directory exists for it (plan contract C-020). Registering a shim the way a
-/// layer is registered would root the shim and collect every blob it needs.
-///
-/// Returned paths are canonical, matching the graph's keying; each edge target
-/// is the blob **entry directory** ([`read_refs`] takes the symlink target's
-/// parent) and is dropped if it escapes `blobs_root`.
-///
-/// Sequential, deliberately: this is one `read_dir` per *deferred tool* — a set
-/// bounded by the registered locks — where the package walk's bounded fan-out
-/// exists because a package store routinely holds thousands of entries.
+/// One canonical entry per published shim directory, paired with its `refs/blobs/` forward-refs.
 async fn shim_entries(shim_dirs: &[ShimDir], blobs_root: &Path) -> Vec<(PathBuf, Vec<PathBuf>)> {
     let mut entries = Vec::with_capacity(shim_dirs.len());
     for shim in shim_dirs {
@@ -461,38 +293,9 @@ async fn shim_entries(shim_dirs: &[ShimDir], blobs_root: &Path) -> Vec<(PathBuf,
     entries
 }
 
-/// Roots every lock-pinned `(repository, digest)` in whichever tiers actually
-/// hold it, and records which `ocx.lock` contributed each root
-/// (plan contract C-014).
+/// Roots every lock-pinned digest in whichever tiers hold it, recording the contributing `ocx.lock`.
 ///
-/// Replaces the inline project-root loop in [`ReachabilityGraph::build`] and
-/// extends it with the shim tier.
-///
-/// **Two tiers, one pin.** A pinned leaf names a package directory
-/// ([`PackageStore::path`](ocx_store::file_structure::PackageStore::path), keyed on
-/// registry and digest with the repository deliberately dropped for cross-repo
-/// dedup) *and* a shim directory
-/// ([`ShimStore::path`](ocx_store::file_structure::ShimStore::path), which does
-/// carry the repository). Normally exactly one of the two exists — a
-/// shim directory exists precisely when the package is absent — but both may:
-/// materializing a deferred tool never removes its shim, and plan contract C-013
-/// keeps the composer emitting the shim slot regardless of content-cache state,
-/// so a leftover shim is live, not litter.
-///
-/// **Shim liveness has no package edge to inherit.** Layers and blobs stay alive
-/// through an edge out of a materialized package directory. A deferred tool has
-/// no package directory at all, so modelling shim liveness on that pattern would
-/// collect every live shim on the first `ocx clean`. The lock pin *is* the root.
-///
-/// Both insertions are guarded on `all_entries` membership — the same guard
-/// [`GarbageCollector::build`](super::GarbageCollector::build) applies to its
-/// patch roots. A pin whose tier is absent on this machine (a foreign-platform
-/// leaf; a tool that was never deferred) must not become a root: an unwalked
-/// path can never be *collected*, but it would be *reported*, because
-/// `PackageManager::clean` turns every attribution key into a dry-run row.
-///
-/// Call this **after** `all_entries` is complete — below the passive-entry
-/// loops, not at the top of `build` where today's unguarded loop sits.
+/// The lock pin is a shim's only root; modelling it as a package edge collects every live shim.
 fn extend_lock_pinned_roots(
     file_structure: &FileStructure,
     project_roots: &[ProjectRootDigests],
@@ -504,11 +307,7 @@ fn extend_lock_pinned_roots(
         for pinned in &project_root.digests {
             let tiers = [file_structure.packages.path(pinned), file_structure.shims.path(pinned)];
             for tier_path in tiers {
-                // Canonicalize before the guard, never after: `all_entries` is
-                // canonical-keyed, so a raw probe misses whenever `$OCX_HOME`
-                // sits behind a symlink. An absent tier fails to canonicalize,
-                // falls back to the raw path, misses the guard, and is skipped
-                // — which is exactly the gate this contract wants.
+                // An absent tier must stay unrooted, or `clean` renders a phantom `Held By` row.
                 let canonical = canonicalize_or_keep(&tier_path);
                 if !all_entries.contains_key(&canonical) {
                     continue;
@@ -523,11 +322,7 @@ fn extend_lock_pinned_roots(
     }
 }
 
-/// Reads forward-refs from a refs subdirectory (deps/, layers/, or blobs/).
-///
-/// Each symlink target is expected to be a content path inside `store_root`.
-/// The parent of the target (the CAS entry directory) is returned.
-/// Symlinks pointing outside `store_root` are skipped (defence-in-depth).
+/// The CAS entry directories a refs subdirectory points at; targets outside `store_root` are skipped.
 async fn read_refs(refs_dir: &Path, store_root: &Path) -> Vec<PathBuf> {
     let mut targets = Vec::new();
     let Ok(mut entries) = tokio::fs::read_dir(refs_dir).await else {
@@ -553,19 +348,14 @@ async fn read_refs(refs_dir: &Path, store_root: &Path) -> Vec<PathBuf> {
     targets
 }
 
-/// Returns true if the package directory has any live install refs.
-///
-/// A ref is live if its symlink target still exists. Broken refs (target deleted
-/// by user or crashed uninstall) do not protect the package from collection.
+/// Returns true if the package has an install ref whose symlink target still exists.
 async fn has_live_refs(pkg_dir: &Path) -> bool {
     let refs_dir = pkg_dir.join("refs").join("symlinks");
     let Ok(mut entries) = tokio::fs::read_dir(&refs_dir).await else {
         return false;
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
-        // Skip `replace_atomic`/`register` staging temps: a crash-orphaned
-        // `.tmp-*` symlink must never root a package (issue #179), mirroring
-        // `ProjectRegistry::live_projects`.
+        // A crash-orphaned `.tmp-*` staging symlink must never root a package.
         if entry.file_name().to_string_lossy().starts_with(".tmp-") {
             continue;
         }
@@ -580,7 +370,6 @@ async fn has_live_refs(pkg_dir: &Path) -> bool {
     false
 }
 
-/// Canonicalize a path, falling back to the original on error.
 fn canonicalize_or_keep(path: &Path) -> PathBuf {
     dunce::canonicalize(path).unwrap_or_else(|e| {
         log::debug!("Cannot canonicalize {}: {e}", path.display());
@@ -836,10 +625,10 @@ pub mod tests {
         );
     }
 
-    // ── C-014: the shim tier ───────────────────────────────────────────────
+    // ── the shim tier ───────────────────────────────────────────────────────
     //
     // Fixtures here are real directories under a *canonicalized* tempdir root.
-    // The defect class C-014 guards against is path keying — a raw path probed
+    // The defect class guarded against here is path keying — a raw path probed
     // against a canonical-keyed map — so a hand-built path map would exercise
     // the wrong thing (`quality-rust.md` "Cross-Platform Path Handling").
 
@@ -923,8 +712,8 @@ pub mod tests {
 
     // ── shim_entries: the shim tier is edge-bearing, not passive ───────────
 
-    /// C-014: "its `refs/blobs/` links keep the closure's config blobs
-    /// reachable". The shim tier is therefore registered with the **package**
+    /// Its `refs/blobs/` links keep the closure's config blobs
+    /// reachable. The shim tier is therefore registered with the **package**
     /// shape — entry *and* edges — so `shim_entries` pairs each walked shim
     /// with the blob entry directories its forward-refs name.
     #[tokio::test]
@@ -957,8 +746,8 @@ pub mod tests {
 
     /// A shim that links no config blob is still an **entry**. Dropping it
     /// would keep it out of `all_entries`, and the `all_entries`-guarded
-    /// rooting would then refuse to root a live shim — collecting it. C-008
-    /// (A1) makes the empty case legal, not exceptional.
+    /// rooting would then refuse to root a live shim — collecting it. The
+    /// empty case is legal here, not exceptional.
     #[tokio::test]
     async fn shim_entries_reports_a_shim_with_no_config_blobs_as_an_edgeless_entry() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1019,7 +808,7 @@ pub mod tests {
 
     // ── extend_lock_pinned_roots: one gate, two tiers ─────────────────────
 
-    /// C-014, the core clause: a shim directory is live iff its
+    /// The core clause: a shim directory is live iff its
     /// `(repository, digest)` is in the lock-pinned root set. The pin is the
     /// root — a deferred tool has no package directory to inherit an edge from.
     #[tokio::test]
@@ -1090,11 +879,11 @@ pub mod tests {
         );
     }
 
-    /// C-013: the composer emits the shim slot **regardless of content-cache
+    /// The composer emits the shim slot **regardless of content-cache
     /// state**, and materializing never removes the shim directory — so a tool
     /// that was composed lazily and then materialized has both tiers on disk
     /// and both are live. Collecting the leftover shim would make the emitted
-    /// environment a function of content-cache state, which C-013 forbids.
+    /// environment a function of content-cache state, which this forbids.
     #[tokio::test]
     async fn extend_lock_pinned_roots_roots_both_tiers_when_both_exist() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1213,7 +1002,7 @@ pub mod tests {
 
     // ── the graph, end to end ─────────────────────────────────────────────
 
-    /// C-014's mandated red-and-green, first half: the graph must **see** a
+    /// The mandated red-and-green, first half: the graph must **see** a
     /// deferred tool's shim directory as a walked `CasTier::Shim` entry, root
     /// it from the lock pin, and reach its config blob through the shim's own
     /// `refs/blobs/` edge.
@@ -1224,8 +1013,8 @@ pub mod tests {
     /// rooted while its closure's config blobs are collected on the same run.
     ///
     /// The fixture's repository is deliberately deep. `ShimStore::list_all` is
-    /// unbounded by C-004's amendment, and a `max_depth` bound copied from
-    /// `package_store.rs` reports an EMPTY list — which under C-014 means
+    /// deliberately unbounded, and a `max_depth` bound copied from
+    /// `package_store.rs` reports an EMPTY list — which here means
     /// "collect every shim". This test reds if that bound ever reappears.
     #[tokio::test(flavor = "multi_thread")]
     async fn reachability_graph_walks_and_roots_a_deferred_tools_shim_dir() {
@@ -1259,7 +1048,7 @@ pub mod tests {
         );
     }
 
-    /// C-014's mandated red-and-green, second half, at the layer that decides
+    /// The mandated red-and-green, second half, at the layer that decides
     /// deletion: install nothing, compose lazily, clean — the shim directory
     /// and its config blob survive.
     ///
@@ -1336,7 +1125,7 @@ pub mod tests {
         );
     }
 
-    /// D4 / C-014: `$OCX_HOME/.bin/` is never collected. It holds no CAS tier —
+    /// `$OCX_HOME/.bin/` is never collected. It holds no CAS tier —
     /// nothing enumerates it — so the guarantee is structural, and its red
     /// state is reachable only by a future change that enumerates `.bin` as a
     /// tier. That is exactly the regression this guard exists for; it defends
@@ -1380,9 +1169,9 @@ pub mod tests {
         );
     }
 
-    /// The GC collects precisely what `ShimStore::list_all` fails to report
-    /// (C-014), and a repository's segment count is variable and unbounded
-    /// (C-004's amendment) — so a `max_depth` bound on that walk is not a
+    /// The GC collects precisely what `ShimStore::list_all` fails to report,
+    /// and a repository's segment count is variable and unbounded by design —
+    /// so a `max_depth` bound on that walk is not a
     /// partial bug but total data loss. The shallow shim is asserted alongside
     /// the deep one because the bound copied from `package_store.rs` is short
     /// by the whole repository component and loses both.

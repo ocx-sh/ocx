@@ -10,22 +10,13 @@ use tokio::task::JoinSet;
 
 use crate::error::FileError;
 
-/// Every failure this walker raises is a directory read that failed, named by
-/// the directory it failed on — one shape, so the concrete type rather than
-/// the tier's union (plan C-042).
 type Result<T> = std::result::Result<T, FileError>;
 
-/// Default maximum number of concurrent directory reads.
 const DEFAULT_CONCURRENCY: usize = 50;
 
 /// Instructs the walker how to handle a directory entry.
-///
-/// Each directory can yield zero or more items AND optionally descend into
-/// children. Use the convenience constructors for common patterns.
 pub struct WalkDecision<T> {
-    /// Items to yield from this directory.
     pub items: Vec<T>,
-    /// Whether to recurse into child directories.
     pub descend: bool,
     /// Child directory names to skip when descending.
     pub skip_names: &'static [&'static str],
@@ -50,8 +41,7 @@ impl<T> WalkDecision<T> {
         }
     }
 
-    /// Recurse into child directories, skipping children whose file name
-    /// matches one of the provided names.
+    /// Recurse into child directories, skipping children named in `skip_names`.
     pub fn descend_skip(skip_names: &'static [&'static str]) -> Self {
         Self {
             items: Vec::new(),
@@ -90,15 +80,6 @@ impl<T> WalkDecision<T> {
 
 /// Async BFS directory walker with semaphore-bounded concurrency.
 ///
-/// Walks from `root` through the directory tree.  For each directory,
-/// a `classify` function decides whether it is a leaf result, should be
-/// skipped, or should be recursed into.
-///
-/// # Defaults
-///
-/// - `max_depth`: unlimited (`usize::MAX`)
-/// - `concurrency`: 50 parallel directory reads
-///
 /// # Example
 ///
 /// ```ignore
@@ -108,16 +89,7 @@ impl<T> WalkDecision<T> {
 ///     .await?;
 /// ```
 ///
-/// Results are sorted by path for deterministic output.
-///
-/// # Classify and blocking I/O
-///
-/// The `classify` function has a synchronous signature and runs inside
-/// spawned tokio tasks.  Callers performing filesystem checks (e.g.,
-/// `is_dir()`, `is_file()`) inside `classify` should keep them fast —
-/// a single `stat()` is acceptable, but heavy I/O should be avoided.
-/// Concurrency is bounded by the semaphore, so at most `concurrency`
-/// blocking calls can be in-flight simultaneously.
+/// `classify` is synchronous and runs on async tasks, so keep its filesystem work to a single `stat()`.
 pub struct DirWalker<T, F>
 where
     T: Send + 'static,
@@ -135,7 +107,6 @@ where
     T: Send + 'static,
     F: Fn(&Path, usize) -> WalkDecision<T> + Send + Sync + 'static,
 {
-    /// Creates a new walker rooted at `root` with the given classification function.
     pub fn new(root: impl Into<PathBuf>, classify: F) -> Self {
         Self {
             root: root.into(),
@@ -146,15 +117,13 @@ where
         }
     }
 
-    /// Sets the maximum recursion depth. Directories deeper than this are
-    /// not explored. Default: unlimited.
+    /// Sets the maximum recursion depth (default unlimited).
     pub fn max_depth(mut self, depth: usize) -> Self {
         self.max_depth = depth;
         self
     }
 
-    /// Sets the maximum number of concurrent directory reads.
-    /// Default: 50. Values below 1 are clamped to 1.
+    /// Sets the maximum concurrent directory reads (default 50, at least 1).
     pub fn concurrency(mut self, n: usize) -> Self {
         self.concurrency = n.max(1);
         self
@@ -183,7 +152,6 @@ where
             if tasks.is_empty() {
                 break;
             }
-            // Drain all pending tasks before spawning the next wave.
             while let Some(result) = tasks.join_next().await {
                 let result = result.expect("task panicked")?;
                 results.extend(result.items);

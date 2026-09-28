@@ -2,12 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! Package identity, metadata, versioning, cascade, authoring and publication.
-//!
-//! What a package *is* — the metadata document and its validation, the version
-//! grammar, the binary and libc scans, the description artifact — and the write
-//! half that puts one in a registry ([`publisher`]). The crate root is the
-//! promoted `package` module, so a type keeps the path its callers already
-//! spell minus the `ocx_lib::package::` prefix.
 
 pub mod publisher;
 

@@ -3,26 +3,9 @@
 
 //! Resolution, install, environment composition, patches, launch and execution records.
 //!
-//! # The subtree flattened; `ocx_package_manager::package_manager` does not exist
-//!
-//! `ocx_lib::package_manager::**` became this crate's root, so a caller writes
-//! `ocx_package_manager::composer`, not
-//! `ocx_package_manager::package_manager::composer`. `ocx_oci` set the
-//! precedent and `ocx_project` followed it at WP-33. The three siblings that
-//! came along keep their own names — `patch`, `record` and `launch` are not
-//! the package manager, they are what it drives — and none of their names
-//! collides with a flattened child.
-//!
-//! # Error shape is a contract here, not a detail
-//!
-//! This tier's root `Error` reaches `ocx_index` and `ocx_package`, and its
-//! conversions from both are **hand-written flattening** impls. A derived
-//! `#[from]` in their place wraps where the tier flattens, and because the
-//! wrappers are `#[error(transparent)]` a `source()` walk then steps over the
-//! inner error without yielding it — which silently defeats
-//! `downcast_ref::<ClientError>()`, stops retries being spent, and moves an
-//! exit code. `error.rs`'s shape assertions hold that contract; read them
-//! before changing any `From` here.
+//! The `From` impls for `ocx_index` and `ocx_package` errors flatten by hand: a derived
+//! `#[from]` wraps, so a `source()` walk skips the inner error and `downcast_ref::<ClientError>()`,
+//! retries and the exit code silently break (`error.rs` `flattening_shape` holds this).
 
 pub mod launch;
 pub mod patch;
@@ -326,9 +309,8 @@ pub use tasks::patch_publish::PatchPublishReport;
 pub use tasks::patch_sync::PatchSyncReport;
 pub use tasks::purge::{PurgeUnrooted, RootSet};
 // The request/report vocabulary `ocx_cli` needs to spell a `render_toolchain`
-// call. Every other task's types are re-exported here; these five were the
-// omission (RUL-48) that made `PackageManager::render_toolchain` unreachable
-// from outside the crate.
+// call; without it `PackageManager::render_toolchain` is unreachable from
+// outside the crate.
 pub use tasks::render_toolchain::{RenderOutcome, RenderReport, RenderRequest, RenderedArtifact, RenderedItem};
 pub use tasks::resolve::{
     AdmittedClaims, ChainBlob, ChainRole, EnvScope, NoTransport, PatchOverlay, PatchProvenance, PatchRootScope,
@@ -343,22 +325,14 @@ use crate::patch::PatchSnapshot;
 use ocx_config::patch::ResolvedPatchConfig;
 use ocx_store::file_structure;
 
-/// Central facade for package operations (find, install, uninstall, etc.).
+/// Central facade for package operations (find, install, uninstall, etc.): holds
+/// what tasks need — file structure, index, OCI client — and is cheap to [`Clone`].
 ///
-/// `PackageManager` holds all the context that tasks need — file structure,
-/// index, OCI client — and is cheap to [`Clone`].
-///
-/// Environment variable resolution uses persisted `resolve.json` files
-/// written at install time — see [`resolve_env`](Self::resolve_env).
-///
-/// Progress is rendered through a span-free [`ProgressManager`]
-/// (`ocx_console::progress`); task code creates RAII bar/spinner guards
-/// from it. See ADR adr_progress_architecture for why progress no longer
-/// rides the `tracing` span tree.
-///
-/// The optional [`ResolvedPatchConfig`] enables the patch-discovery hook
-/// after a user-requested base install. When `None`, the patch tier is
-/// disabled and `discover_and_install_patches` is a no-op.
+/// Environment resolution reads the `resolve.json` files written at install time
+/// (see [`resolve_env`](Self::resolve_env)). Progress renders through a span-free
+/// [`ProgressManager`], never the `tracing` span tree (ADR adr_progress_architecture).
+/// The optional [`ResolvedPatchConfig`] enables patch discovery after a
+/// user-requested base install; `None` makes `discover_and_install_patches` a no-op.
 #[derive(Clone)]
 pub struct PackageManager {
     file_structure: file_structure::FileStructure,
@@ -459,7 +433,7 @@ impl PackageManager {
     }
 
     /// The dedicated managed-config-fetch client, if one was injected — the
-    /// client whose trust set must be the local-only view (D-6, S-006).
+    /// client whose trust set must be the local-only view.
     pub fn managed_config_client(&self) -> Option<&ocx_oci::Client> {
         self.managed_config_client.as_ref()
     }
@@ -626,14 +600,10 @@ impl PackageManager {
         let metadata: ocx_package::metadata::Metadata = ValidMetadata::try_from(metadata_result?)?.into();
         let resolved = resolved_result?;
 
-        // Reconstruct a PinnedIdentifier from the sibling `digest` file.
-        // The identifier is used only for dedup tracking in resolve_env.
-        // Uses the full content digest hex; collision-resistant. The synthetic
-        // repository path is internal-only — never persisted in OCI manifests
-        // and never compared with real registry repositories — so the longer
-        // string is acceptable in exchange for full SHA-256 (~2^256) keyspace,
-        // which makes a `(registry, repository)` collision between two distinct
-        // pkg-roots probabilistically impossible.
+        // A PinnedIdentifier from the sibling `digest` file, used only for dedup
+        // in resolve_env. The synthetic repository is internal-only (never
+        // persisted, never compared with real ones), so it carries the full digest
+        // hex and two distinct pkg-roots can never collide on `(registry, repository)`.
         let digest_path = objects.digest_file_for_content(pkg_root)?;
         let digest = read_digest_file(&digest_path).await?;
         let repo_name = format!("file-url-mode/{}", digest.hex());
@@ -669,33 +639,21 @@ impl PackageManager {
             .await
     }
 
-    /// Boundary primitive for hook-style commands (`shell-hook`, `hook-env`,
-    /// future `generate direnv`) that must NOT contact any registry,
-    /// regardless of the global `--remote` / `--offline` flags.
+    /// Boundary primitive for hook-style commands that must NOT contact any
+    /// registry, regardless of the global `--remote` / `--offline` flags.
     ///
-    /// Builds a fresh [`PackageManager`] using the supplied local cache
-    /// `local_index` as the *only* index source: chain mode is forced to
-    /// [`ocx_index::ChainMode::Offline`], and the OCI client is dropped to
-    /// `None`. Any incidental tag/manifest lookup short-circuits to the
-    /// local cache; an attempt to use the (now-absent) client surfaces as
-    /// `Error::OfflineMode`. This is the layer the security boundary docs
-    /// in ADR §5B (decision 5B) reference — see
-    /// `.claude/artifacts/adr_project_toolchain_config.md`.
-    ///
-    /// Caller passes the local-index handle separately because the manager
-    /// holds a type-erased `Index` (which may be `Default`, `Remote`, or
-    /// already `Offline`); reaching back through the type-erased boundary
-    /// would couple this primitive to `ChainedIndex` internals. The CLI
-    /// `Context` already exposes `local_index().clone()`, so the call site
-    /// is `context.manager().offline_view(context.local_index().clone())`.
+    /// The only index source is `local_index`, chain mode is forced to
+    /// [`ocx_index::ChainMode::Offline`] and the client is `None`, so any use of it
+    /// surfaces as `Error::OfflineMode` — the security boundary of
+    /// `.claude/artifacts/adr_project_toolchain_config.md` §5B. The caller passes
+    /// `local_index` because the manager's `Index` is type-erased, and reaching
+    /// back through it would couple this primitive to `ChainedIndex` internals.
     pub fn offline_view(&self, local_index: ocx_index::LocalIndex) -> Self {
-        // Attach the machine-global blob store so a lock-pinned tool's leaf
-        // platform manifest (content, cached in `$OCX_HOME/blobs` at install —
-        // never the local index, A3) resolves offline with zero network: an
-        // an absent dispatch object is recovered from the blob store before the (absent)
-        // source chain (`adr_index_indirection.md` A3 step 2 / B2). Without this
-        // the global-toolchain / direnv exporters silently omit every installed
-        // tool whose leaf is not in `o/`.
+        // Attach the global blob store so a lock-pinned leaf manifest (cached in
+        // `$OCX_HOME/blobs`, never the local index) resolves with zero network
+        // (`adr_index_indirection.md` § "The object store holds dispatch objects
+        // only"). Without it the global-toolchain and direnv exporters silently
+        // omit every installed tool whose leaf is not in `o/`.
         let offline_index = ocx_index::Index::from_chained_with_content_store(
             local_index,
             Vec::new(),
@@ -708,24 +666,11 @@ impl PackageManager {
             client: None,
             default_registry: self.default_registry.clone(),
             progress: self.progress.clone(),
-            // Preserve the patch config. `offline_view` disables the *network*
-            // (client = None → `is_offline()` true), NOT the patch tier. These are
-            // two separate concerns:
-            //
-            // - Phase 3 discovery (`discover_and_install_patches`) requires network
-            //   to fetch descriptor blobs, and already short-circuits on
-            //   `self.is_offline()` — so keeping `patches` here does NOT re-enable
-            //   any network discovery on an offline view.
-            // - Phase 4 site-overlay (`build_site_patch_set`) is compose-time and
-            //   purely local (tag store + descriptor blobs + installed companions).
-            //   It MUST still run on offline env paths (`ocx direnv export`, the
-            //   global toolchain) so already-discovered companion overlays apply,
-            //   and so a `required` companion that is unavailable **fails closed**.
-            //
-            // Dropping `patches` here would silently skip required overlays on
-            // exactly those local-only exporters — a fail-OPEN gap violating the
-            // ADR offline contract (C4 "works offline once synced", C6 zip-`OCX_HOME`
-            // parity, C7 fail-closed). So the tier is carried through unchanged.
+            // Kept: discovery already short-circuits on `is_offline()`, while the
+            // local `build_site_patch_set` overlay MUST still run on offline
+            // exporters (`ocx direnv export`, the global toolchain). Dropping it
+            // silently skips required overlays there: an unavailable `required`
+            // companion would fail open instead of closed.
             patches: self.patches.clone(),
             // Carry the snapshot through so offline env paths (direnv export,
             // global toolchain) still resolve frozen companion digests when a

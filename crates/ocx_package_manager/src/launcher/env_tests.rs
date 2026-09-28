@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use ocx_config::env::{TRAMPOLINE_MARKER, TRAMPOLINE_PROBE_BYTES, is_ocx_trampoline};
 
 /// An executable POSIX body carrying [`TRAMPOLINE_MARKER`] on its second line,
-/// exactly where C-028's generated trampoline puts it.
+/// exactly where the generated trampoline puts it.
 #[cfg(unix)]
 fn write_trampoline(dir: &std::path::Path, name: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -39,7 +39,7 @@ fn write_trampoline(dir: &std::path::Path, name: &str) -> PathBuf {
     path
 }
 
-/// C-069 / D-V12: the marker is **discriminating by construction**.
+/// The marker is **discriminating by construction**.
 ///
 /// Three arms in one test so it cannot pass vacuously: the real
 /// `unix_launcher_body` output is not refused, the real `unix_shim_body`
@@ -105,15 +105,15 @@ async fn the_marker_admits_the_shipped_launcher_and_shim_bodies_and_refuses_only
     );
 }
 
-/// E-21 / T-11: an ordinary **package launcher** whose baked package root
+/// An ordinary **package launcher** whose baked package root
 /// spells the marker in its own path text must keep resolving.
 ///
 /// This is the case the bounded-prefix rule alone cannot answer, and it is
-/// reachable: WP-6 interpolates an operator-controlled absolute path into
+/// reachable: rendering interpolates an operator-controlled absolute path into
 /// every generated body, so a `$OCX_HOME` containing the marker string puts
 /// it inside the probed head — line 3, at roughly byte 90, well inside 256.
-/// Under a "marker anywhere in the prefix" rule C-069 refuses this file and
-/// `ocx launcher exec` breaks for that install: exactly the class D-V12
+/// Under a "marker anywhere in the prefix" rule the probe refuses this file and
+/// `ocx launcher exec` breaks for that install: exactly the class the design
 /// excluded when it rejected keying on the shared header. The line-2 anchor
 /// is what closes it.
 ///

@@ -1,19 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The DSSE envelope: PAE encoding, the wire shape, and the sign-side envelope
-//! hashes.
-//!
-//! Nothing here verifies a signature. This module owns the *structural* half of
-//! a DSSE envelope — the bytes a signature is computed over, and the checks that
-//! must pass before a payload is worth parsing at all. The cryptographic half
-//! lives in `oci/verify/dsse.rs`, which calls in here first.
-//!
-//! Items are `pub` rather than the ADR's `pub(crate)` for the reason
-//! [`crate::attest`] records against its constants: no in-crate caller
-//! exists until the verify and sign pipelines land, and `pub(crate)` trips
-//! `dead_code` under `warnings = "deny"` until one does. Each of those work
-//! packages narrows what it consumes as it lands.
+//! The DSSE envelope's structural half: PAE, wire shape, envelope hashes. The
+//! cryptographic half is `verify/dsse.rs`.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -23,11 +12,7 @@ use crate::attest::{DSSE_PAYLOAD_TYPE, MAX_STATEMENT_PAYLOAD_BYTES};
 use crate::verify::VerifyErrorKind;
 use ocx_oci::{Algorithm, Digest};
 
-/// Pre-Authentication Encoding, per the DSSE spec.
-///
-/// `"DSSEv1" SP LEN(type) SP type SP LEN(body) SP body`, where `LEN` is the
-/// ASCII decimal *byte* length. `payload` is the raw decoded payload — never
-/// the base64 text (verifier checklist row 1).
+/// Pre-Authentication Encoding, per the DSSE spec; `payload` is the decoded bytes, never the base64 text.
 pub(crate) fn pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload_type.len().saturating_add(payload.len()).saturating_add(32));
     out.extend_from_slice(b"DSSEv1 ");
@@ -42,14 +27,10 @@ pub(crate) fn pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
 }
 
 /// A DSSE envelope, with the payload held decoded.
-///
-/// Field order is fixed by declaration order and serde emits in that order, so
-/// the same envelope always serializes to the same bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DsseEnvelope {
-    /// The decoded payload. Base64 exists only at the serde boundary.
+    /// The decoded payload.
     pub payload: Vec<u8>,
-    /// The declared payload type; what says how to read [`Self::payload`].
     pub payload_type: String,
     /// Exactly one signature on every envelope OCX writes or accepts.
     pub signatures: Vec<DsseSignature>,
@@ -58,52 +39,34 @@ pub(crate) struct DsseEnvelope {
 /// One signature over the envelope's PAE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DsseSignature {
-    /// The raw signature bytes; base64 only at the serde boundary.
     pub sig: Vec<u8>,
-    /// A lookup hint, never a security decision (checklist row 10).
+    /// A lookup hint, never a security decision.
     pub keyid: String,
 }
 
 impl DsseEnvelope {
-    /// Parses and structurally validates an envelope.
-    ///
-    /// **Preconditions.** The caller owns the `MAX_ATTESTATION_ENVELOPE_BYTES`
-    /// bound on `bytes` (checklist row 15) — this function is handed a slice
-    /// and cannot see how it was read. The decoded-payload bound,
-    /// `MAX_STATEMENT_PAYLOAD_BYTES` (row 16), is enforced here instead,
-    /// because only this side knows the base64 length before the decode.
+    /// Parses and structurally validates an envelope; the caller bounds `bytes` at `MAX_ATTESTATION_ENVELOPE_BYTES`.
     ///
     /// # Errors
     ///
-    /// Rejects malformed JSON, a `payloadType` other than the in-toto one, an
-    /// over-cap payload, and any signature count other than one.
+    /// Malformed JSON, a non-in-toto `payloadType`, an over-cap payload, or a signature count other than one.
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self, VerifyErrorKind> {
         let wire: WireEnvelope = serde_json::from_slice(bytes).map_err(|_| VerifyErrorKind::BundleParseFailed)?;
 
-        // Row 3: the declared type is what says how to read the bytes, so it is
-        // checked before anything reads them.
         if wire.payload_type != DSSE_PAYLOAD_TYPE {
             return Err(VerifyErrorKind::PayloadTypeUnsupported {
                 payload_type: wire.payload_type,
             });
         }
 
-        // Row 8: verifying one signature out of several would report
-        // "verified" for an envelope whose others nobody checked.
+        // Verifying one of several signatures would report the unchecked others as verified.
         if wire.signatures.len() != 1 {
             return Err(VerifyErrorKind::MultipleSignatures {
                 count: wire.signatures.len(),
             });
         }
 
-        // Row 16: asserted from the base64 length, before the decode buffer
-        // exists. Base64 expands at a fixed 4/3, so `len / 4 * 3` is the
-        // decoded size's upper bound; refusing on that bound is conservative
-        // by at most the two padding bytes, which is the safe direction. The
-        // reported `actual` is therefore that bound — the number the check
-        // acted on — since counting the real bytes would mean decoding them.
-        // The arithmetic cannot overflow (the result is under the input length)
-        // and the `as u64` widens rather than narrows on every Rust target.
+        // Bounded from the base64 length before any decode buffer exists; `actual` is that ceiling, not the real count.
         let decoded_ceiling = wire.payload.len() / 4 * 3;
         if decoded_ceiling > MAX_STATEMENT_PAYLOAD_BYTES {
             return Err(VerifyErrorKind::AttestationPayloadTooLarge {
@@ -166,12 +129,8 @@ struct WireEnvelope {
 #[derive(Serialize, Deserialize)]
 struct WireSignature {
     sig: String,
-    /// cosign omits this on a keyless signature, and row 10 makes it a hint
-    /// rather than a security input — so its absence is not an error. On the
-    /// write side an empty keyid is omitted too: Rekor's envelopeHash commits
-    /// to these bytes, and every bundle-side verifier (sigstore-rs included)
-    /// recomputes the envelope from proto3 JSON, which skips empty fields —
-    /// emitting `"keyid":""` here would make our own log entry unverifiable.
+    /// Absent on cosign keyless signatures, so defaulted.
+    /// Empty is omitted: verifiers recompute the envelope as proto3 JSON, so `"keyid":""` makes our own Rekor entry unverifiable.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     keyid: String,
 }
@@ -185,8 +144,7 @@ pub(crate) struct EnvelopeHashes {
     pub payload: Digest,
 }
 
-/// Hashes the exact serialized envelope bytes handed to Rekor, never a
-/// re-serialization of the struct. Sign-side self-check only.
+/// Hashes the exact serialized envelope bytes handed to Rekor, never a re-serialization of the struct.
 pub(crate) fn envelope_hashes(envelope_json: &[u8], payload: &[u8]) -> EnvelopeHashes {
     EnvelopeHashes {
         envelope: Algorithm::Sha256.hash(envelope_json),

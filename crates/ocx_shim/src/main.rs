@@ -1,123 +1,68 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx-shim` — native Windows launcher shim.
+//! `ocx-shim`: native Windows launcher shim.
 //!
-//! One copy is emitted per entrypoint at install time (`<name>.exe`) next to
-//! a one-line `<name>.shim` sidecar carrying the package root. At runtime the
-//! shim derives its own stem, reads the sidecar, and spawns
-//! `ocx launcher exec "<pkg_root>" -- "<stem>" <argv>` directly via
-//! `CreateProcessW` — bypassing `cmd.exe` and closing the residual
-//! BatBadBut / `%*` re-parse surface that the `.cmd` launcher leaves open.
-//!
-//! The shim is a separate binary; it does not use OCX's `Error` enum. Each
-//! failure maps to a process exit code aligned with `quality-rust-exit_codes.md`
-//! (sysexits.h base 64). Diagnostics go to stderr, one lowercase line, no
-//! trailing period, prefixed `ocx-shim:` (`quality-rust-errors.md` C-GOOD-ERR).
-//!
-//! See `.claude/artifacts/adr_windows_exe_shim.md` (error taxonomy E1–E8,
-//! Contract 1) and `system_design_windows_exe_shim.md`.
-//
-// TODO(arch-review): confirm msvc vs gnu toolchain choice and DLL
-// search-order hardening (SetDllDirectoryW(null) early in main on msvc, vs
-// the gnu hermetic-launcher precedent). `dist-workspace.toml` lists
-// windows-msvc targets, so `rust-toolchain.toml` pins the two msvc targets;
-// revisit during architecture review (plan §1.1 gate-affecting decision).
+//! One copy per entrypoint reads the sidecar beside it and spawns `ocx` with the wire verb that sidecar selects, via
+//! `CreateProcessW`, bypassing `cmd.exe` and its BatBadBut `%*` re-parse. Each failure is one `ocx-shim:` stderr line
+//! and a sysexits-aligned exit code.
+//! See `.claude/artifacts/adr_windows_exe_shim.md`, `system_design_windows_exe_shim.md`.
 
-// On non-Windows hosts the entire Win32 runtime is stubbed out; `cargo check`
-// must stay green on the Linux CI host (the shim is check-only there).
+// The Win32 runtime is stubbed off Windows, and `cargo check` must stay green on the Linux CI host.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use std::process::exit;
 
-// Stack-probe builtins for the hermetic `*-pc-windows-gnullvm` cross-build
-// (cargo-zigbuild, `-nolibc`). `target_abi = "llvm"` is the discriminator that
-// uniquely selects the gnullvm targets — msvc/gnu builds get the probe from
-// their own runtime and must not pick this up. See `chkstk.rs`.
+// `target_abi = "llvm"` selects only the gnullvm targets; msvc/gnu get the probe from their own runtime.
 #[cfg(all(target_os = "windows", target_env = "gnu", target_abi = "llvm"))]
 mod chkstk;
 
-/// Shim failure taxonomy. Mirrors the ADR §Error Taxonomy table.
+/// Shim failure taxonomy (`adr_windows_exe_shim.md` § Error Taxonomy).
 ///
-/// E7 (job-object setup failure) is intentionally **not** a variant: it is
-/// non-fatal — the shim logs a warning and proceeds without the job object
-/// rather than failing (failing there would regress vs `.cmd`). E8 (child ran
-/// and exited) is likewise not an error: the child's exit code is forwarded
-/// transparently (full i32 passthrough, Windows semantics).
+/// Job-object setup failure is deliberately no variant: the shim warns and spawns without the job.
 #[derive(Debug)]
 enum ShimError {
-    /// E1 — no sidecar exists. Exit 78 (`EX_CONFIG`).
+    /// No sidecar exists. Exit 78 (`EX_CONFIG`).
     ///
-    /// `stem_path` is the shim's own path with its `.exe` stripped, so the
-    /// message can name **all three** candidates the probe missed
-    /// (`<stem_path>.shim`, `<stem_path>.shimref`, `<stem_path>.exec`). Naming
-    /// a subset would send the operator looking for a file that was never
-    /// supposed to exist for their case — the deferred tool has no `.shim`, and
-    /// a rendered trampoline has neither of the other two.
+    /// `stem_path` is the shim's own path without `.exe`, so the message can name all three candidates.
     SidecarNotFound { stem_path: String },
-    /// E2 — a sidecar was found but failed its grammar: empty, too large, not
-    /// UTF-8, an embedded NUL/CR/LF before the terminator, a `.shim` whose
-    /// value is not an absolute path, or a `.shimref` whose value is not an
-    /// admissible pinned identifier. Exit 78.
+    /// A sidecar failed its grammar. Exit 78.
     MalformedSidecar { reason: String },
-    /// E3 — `pkg_root` resolves outside `<OCX_HOME>/packages/`
-    /// (defense-in-depth; primary check stays in `ocx launcher exec`).
-    /// Exit 77 (`EX_NOPERM`).
+    /// `pkg_root` resolves outside the containment roots (defense in depth; `ocx launcher exec` holds the primary
+    /// check). Exit 77 (`EX_NOPERM`).
     ContainmentViolation { path: String },
-    /// E4 — `GetModuleFileNameW` failed or yielded no usable stem.
-    /// Exit 74 (`EX_IOERR`).
+    /// `GetModuleFileNameW` failed or yielded no usable stem. Exit 74 (`EX_IOERR`).
     SelfPathFailure,
-    /// E5 — `ocx` could not be started because it was not found. Exit 69
-    /// (`EX_UNAVAILABLE`). `pinned` carries the resolved program whenever it
-    /// was resolved **explicitly** — a defined `OCX_BINARY_PIN`, or the
-    /// absolute `ocx` a `.exec` sidecar baked (V-9) — so the stderr line names
-    /// the missing path instead of the misleading "add ocx to PATH" hint;
-    /// `None` means the literal-`ocx` rung ran and its PATH search missed.
+    /// `ocx` was not found. Exit 69 (`EX_UNAVAILABLE`).
+    ///
+    /// `pinned` names an explicitly resolved program (pin or `.exec` baked `ocx`); `None` means the literal-`ocx`
+    /// PATH search missed.
     OcxNotFound { pinned: Option<String> },
-    /// E6 — `CreateProcessW` failed for any other reason. Exit 74, unless the
-    /// Win32 error is `ERROR_ACCESS_DENIED` (5) → exit 77 (derived purely from
-    /// `win32`; no redundant flag). `win32` carries the raw `GetLastError`
-    /// code so the stderr line names it (ADR E6, plan F-5); `program` is the
-    /// resolved program so the operator sees what failed.
+    /// `CreateProcessW` failed otherwise: exit 74, or 77 when `win32` is `ERROR_ACCESS_DENIED`.
     SpawnFailure { win32: u32, program: String },
 }
 
-/// `GetLastError` value for `ERROR_ACCESS_DENIED`. Named (not a bare `5`
-/// literal) so the E6 → exit-code 77 derivation is self-documenting and
-/// avoids the magic-numeric anti-pattern (`quality-rust-exit_codes.md`).
-///
-/// Bound to the `windows-sys` constant on the real Windows target; the
-/// non-Windows host build (Linux CI, check/test-only — `windows-sys` is a
-/// `cfg(windows)` dependency) mirrors the same stable Win32 value so the
-/// pure exit-code mapping stays host-testable.
+/// `ERROR_ACCESS_DENIED`; the non-Windows build mirrors the Win32 value so the exit-code mapping stays host-testable.
 #[cfg(windows)]
 const ERROR_ACCESS_DENIED_CODE: u32 = windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
 #[cfg(not(windows))]
 const ERROR_ACCESS_DENIED_CODE: u32 = 5;
 
-/// `ERROR_NOT_SUPPORTED` — what `CreateProcessW` returns when it refuses the
-/// `PROC_THREAD_ATTRIBUTE_LIST` itself. Gates the degraded spawn retry so the
-/// handle/job scoping is surrendered only for that one diagnosed cause.
+/// `ERROR_NOT_SUPPORTED`, returned when `CreateProcessW` refuses the attribute list: the only code that permits the
+/// degraded spawn retry.
 #[cfg(windows)]
 const ERROR_NOT_SUPPORTED_CODE: u32 = windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED;
 #[cfg(not(windows))]
 const ERROR_NOT_SUPPORTED_CODE: u32 = 50;
 
 impl ShimError {
-    /// Maps each failure to its process exit code per the ADR §Error Taxonomy
-    /// table.
+    /// Maps each failure to its exit code (ADR § Error Taxonomy).
     fn exit_code(&self) -> i32 {
         match self {
-            // E1 / E2 — missing or unusable per-install config artifact.
             ShimError::SidecarNotFound { .. } | ShimError::MalformedSidecar { .. } => 78,
-            // E3 — tamper / containment violation.
             ShimError::ContainmentViolation { .. } => 77,
-            // E4 — OS-level failure obtaining own identity.
             ShimError::SelfPathFailure => 74,
-            // E5 — required dependency unavailable (pinned or PATH miss).
             ShimError::OcxNotFound { .. } => 69,
-            // E6 — spawn failure; ACCESS_DENIED is the permission subcase,
-            // derived purely from the Win32 code (no redundant flag).
             ShimError::SpawnFailure { win32, .. } => {
                 if *win32 == ERROR_ACCESS_DENIED_CODE {
                     77
@@ -128,19 +73,10 @@ impl ShimError {
         }
     }
 
-    /// One lowercase stderr line, no trailing period, `ocx-shim:` prefix
-    /// (`quality-rust-errors.md` C-GOOD-ERR). Config-class errors (E1/E2)
-    /// append a parenthetical recovery hint.
+    /// One lowercase `ocx-shim:` stderr line, no trailing period; config errors append a recovery hint.
     fn stderr_message(&self) -> String {
         match self {
             ShimError::SidecarNotFound { stem_path } => {
-                // All three candidates are named because the recovery differs
-                // by which one was meant to be there: `ocx install` regenerates
-                // an installed package's `.exe` + `.shim`, a deferred tool's
-                // `.exe` + `.shimref` is regenerated by whichever command
-                // composed it (`ocx env`, `ocx exec`, …), and a toolchain
-                // trampoline's `.exe` + `.exec` is regenerated by `ocx pull`,
-                // which renders the whole `toolchain/active/bin` home.
                 format!(
                     "ocx-shim: sidecar not found: none of {stem_path}.shim, {stem_path}.shimref or {stem_path}.exec \
                      (re-run `ocx install`, `ocx pull`, or the command that composed this tool, to regenerate the entrypoint)"
@@ -157,41 +93,24 @@ impl ShimError {
                 "ocx-shim: ocx not found (set OCX_BINARY_PIN or add ocx to PATH)".to_string()
             }
             ShimError::OcxNotFound { pinned: Some(p) } => {
-                // OCX_BINARY_PIN was defined but the path does not exist —
-                // naming the pinned program is actionable; the generic
-                // "add ocx to PATH" hint would be misleading (PATH was not
-                // the resolution path here).
                 format!("ocx-shim: pinned ocx not found: {p} (OCX_BINARY_PIN points at a missing path)")
             }
             ShimError::SpawnFailure { win32, program } => {
-                // ADR E6 / plan F-5: name the Win32 error and the resolved
-                // program. Clean C-GOOD-ERR line — no angle-bracket
-                // placeholder (lowercase, no trailing period).
                 format!("ocx-shim: failed to start {program}: win32 error {win32}")
             }
         }
     }
 }
 
-/// Pure (host-runnable) shim logic, split from the Win32 syscalls so the
-/// wire-ABI assembler, sidecar parser, stem derivation, and program
-/// resolution can be unit-tested on the Linux CI host (system_design §8
-/// mandates the pure/Win32 split). See [`core`] module docs.
 mod core;
 
-/// Entry point. Always diverges via [`std::process::exit`] (the crate builds
-/// with `panic = "abort"` in the size profile — see `Cargo.toml`).
+/// Entry point; always diverges via [`std::process::exit`].
 fn main() -> ! {
-    // DLL search-order hardening (plan F-3): on the chosen msvc target a
-    // planted DLL in the application directory could be loaded ahead of the
-    // System32 copy. Lock the search path to System32 *before any other Win32
-    // call* (well before `CreateProcessW`/dependent DLL loads). msvc is the
-    // chosen target; gnu is fallback-only.
+    // Before any other Win32 call, or a DLL planted beside the shim can load ahead of the System32 copy.
     #[cfg(windows)]
     harden_dll_search_path();
 
     match run() {
-        // E8 — child ran and exited; forward its code transparently.
         Ok(code) => exit(code),
         Err(err) => {
             eprintln!("{}", err.stderr_message());
@@ -200,31 +119,19 @@ fn main() -> ! {
     }
 }
 
-/// Restricts the process DLL search path to System32 so a DLL planted next to
-/// the shim cannot be loaded ahead of the system copy (plan F-3). Called as
-/// the very first Win32 interaction in [`main`].
+/// Restricts the DLL search path to System32 so a DLL planted beside the shim cannot load ahead of the system copy.
 ///
-/// `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)` is available on
-/// every shipped Windows 8+/Win10+ msvc target the shim is built for, so its
-/// failure is not a reachable state in practice. The earlier
-/// `SetDllDirectoryW(NULL)` fallback was dropped (YAGNI): it is unreachable on
-/// supported targets and is strictly *weaker* (it only drops the current
-/// working directory from the search order, leaving the application directory
-/// — the actual planted-DLL vector — in place). On the unreachable
-/// API-missing path the documented degraded state is "default OS DLL search
-/// order"; the shim does no further dependent `LoadLibrary` work before
-/// `CreateProcessW`, so the residual exposure is minimal.
+/// No `SetDllDirectoryW(NULL)` fallback: it leaves the application directory, the planted-DLL vector, searched.
 #[cfg(windows)]
 fn harden_dll_search_path() {
     use windows_sys::Win32::System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories};
 
-    // SAFETY: `SetDefaultDllDirectories` takes only an integer flag and has no
-    // pointer parameters. `LOAD_LIBRARY_SEARCH_SYSTEM32` is a valid flag value.
-    // A zero return is the documented (here unreachable) degraded state above.
+    // SAFETY: takes one integer flag and no pointers. A zero return (unreachable on supported Windows) leaves the
+    // default search order, so the result is ignored.
     let _ = unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) };
 }
 
-/// Shim runtime (ADR Contract 1, §Behavior).
+/// Shim runtime (`adr_windows_exe_shim.md` § Contract 1).
 #[cfg(windows)]
 fn run() -> Result<i32, ShimError> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -245,25 +152,13 @@ fn run() -> Result<i32, ShimError> {
         UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
-    // ── Step 1: own module path → stem (grow-buffer; no silent truncation) ──
-    //
-    // A fixed buffer would silently yield a *truncated* path → wrong stem and
-    // wrong sidecar with no E4 (Codex-deferred self-path truncation). Retry on
-    // ERROR_INSUFFICIENT_BUFFER, growing the buffer, until the OS reports a
-    // length strictly less than the buffer (i.e. it fit, not truncated).
-    //
-    // Assumes Vista+ : only there does `GetModuleFileNameW` NUL-truncate the
-    // buffer AND set `ERROR_INSUFFICIENT_BUFFER` on overflow. Pre-Vista has
-    // neither (it returns `nSize` with no error), so the `written == cap`
-    // check below is the pre-Vista safety net. Every shipped msvc target the
-    // shim is built for is Vista+, so this is reality, not a hypothetical.
+    // Grow the buffer until the length is below it: a fixed buffer silently truncates the path and picks the wrong
+    // sidecar. `written == cap` means truncated even without `ERROR_INSUFFICIENT_BUFFER` (pre-Vista), so it grows too.
     let module_path = {
         let mut cap: usize = 512;
         loop {
             let mut buf = vec![0u16; cap];
-            // SAFETY: `buf` is a valid, `cap`-element u16 allocation; we pass
-            // its length as `nsize`. `GetModuleFileNameW(NULL, ...)` writes at
-            // most `nsize` code units and returns the count written.
+            // SAFETY: `buf` holds `cap` u16s and `cap` is passed as `nsize`.
             let written = unsafe { GetModuleFileNameW(std::ptr::null_mut(), buf.as_mut_ptr(), cap as u32) };
             if written == 0 {
                 return Err(ShimError::SelfPathFailure);
@@ -273,8 +168,6 @@ fn run() -> Result<i32, ShimError> {
                 buf.truncate(written);
                 break std::ffi::OsString::from_wide(&buf);
             }
-            // Path did not fit (return == cap). On Win Vista+ the buffer is
-            // also NUL-truncated and GetLastError == ERROR_INSUFFICIENT_BUFFER.
             // SAFETY: no pointers; reads thread-local last-error.
             let last = unsafe { GetLastError() };
             if last != ERROR_INSUFFICIENT_BUFFER && written != cap {
@@ -288,21 +181,8 @@ fn run() -> Result<i32, ShimError> {
     };
     let stem = core::derive_stem(&module_path)?;
 
-    // ── Step 2+3: probe the three sidecars in order, validate the first ────
-    //
-    // `<stem>.shim` (an installed package), then `<stem>.shimref` (a deferred
-    // tool), then `<stem>.exec` (a toolchain trampoline) — the order and its
-    // rationale live on `core::SIDECAR_PROBE_ORDER`. Each candidate is paired
-    // with the parser for its own grammar, so the verb the child is dispatched
-    // to is decided by WHICH file was found, never by inspecting what is in it.
-    // That is load-bearing for `.exec` specifically: its value is an absolute
-    // path, exactly like a `.shim`'s, so nothing in the content distinguishes
-    // them.
-    //
-    // A read error that is not `NotFound` fails immediately rather than falling
-    // through to the next candidate: a permission-denied or I/O-erroring
-    // `.shim` is a broken installed entrypoint, and silently materializing a
-    // package instead would answer a question nobody asked.
+    // Each candidate carries its own parser, so the verb follows which file was found, never its content: `.exec` and
+    // `.shim` values are both absolute paths.
     let module_dir = std::path::Path::new(&module_path)
         .parent()
         .ok_or(ShimError::SelfPathFailure)?
@@ -312,6 +192,8 @@ fn run() -> Result<i32, ShimError> {
     let mut sidecar: Option<core::Sidecar> = None;
     for (extension, parse) in core::SIDECAR_PROBE_ORDER {
         let candidate = module_dir.join(format!("{stem}.{extension}"));
+        // A read error other than `NotFound` fails here: falling through would let a broken `.shim` silently become a
+        // package materialization.
         match std::fs::read(&candidate) {
             Ok(raw) => {
                 sidecar = Some(parse(&raw)?);
@@ -329,26 +211,10 @@ fn run() -> Result<i32, ShimError> {
         stem_path: stem_path.display().to_string(),
     })?;
 
-    // ── Step 4: optional E3 containment (only when OCX_HOME is readable) ────
-    //
-    // Two distinct canonicalize failure modes (do NOT collapse them):
-    //  - `OCX_HOME` itself does not canonicalize → the shim cannot run the
-    //    defense-in-depth check at all; this is the ADR-sanctioned delegate
-    //    path (the authoritative `validate_package_root` runs inside
-    //    `launcher exec`). Silent, expected.
-    //  - `OCX_HOME` canonicalizes but `pkg_root` does NOT → suspicious: the
-    //    sidecar points at a path that does not resolve while OCX home does.
-    //    Still delegate (`launcher exec` is authoritative) but log to stderr
-    //    so the operator sees it — never silently swallow this one.
-    //
-    // A `.shimref` yields no containment path at all (`containment_path()` →
-    // `None`), so this whole block is skipped for a deferred tool — by design,
-    // not by omission. See `Sidecar::containment_path` for what stands in its
-    // place and what that concedes.
+    // Containment runs only when `OCX_HOME` resolves; `launcher exec`'s `validate_launcher_pkg_root` stays
+    // authoritative. A `pkg_root` that fails to resolve under a good `OCX_HOME` is suspicious: delegate, but say so.
     if let (Some(pkg_root), Some(ocx_home)) = (sidecar.containment_path(), std::env::var_os("OCX_HOME")) {
         let home = std::path::Path::new(&ocx_home);
-        // OCX_HOME unresolvable → ADR-sanctioned silent delegate (the
-        // authoritative `validate_package_root` runs inside `launcher exec`).
         if let Ok(canon_home) = dunce::canonicalize(home) {
             match dunce::canonicalize(pkg_root) {
                 Ok(canon_root) => {
@@ -359,8 +225,6 @@ fn run() -> Result<i32, ShimError> {
                     }
                 }
                 Err(err) => {
-                    // OCX_HOME ok but pkg_root unresolvable — delegate to the
-                    // authoritative `launcher exec` check, but surface it.
                     eprintln!(
                         "ocx-shim: cannot canonicalize package root {pkg_root} ({err}); delegating containment to `launcher exec`"
                     );
@@ -369,54 +233,22 @@ fn run() -> Result<i32, ShimError> {
         }
     }
 
-    // ── Step 4b: a trampoline clears the tier selectors (C-033, S-009) ─────
-    //
-    // The Windows counterpart of the POSIX trampoline body's
-    // `unset OCX_GLOBAL OCX_PROJECT`, and load-bearing for the same reason: the
-    // baked `.exec` selector is the ONLY selector, so one exported `OCX_GLOBAL`
-    // in the caller's environment would otherwise make every trampoline on that
-    // `PATH` exit 64 from `check_global_project_exclusivity`, for flags the user
-    // never typed.
-    //
-    // `CreateProcessW` runs with `lpEnvironment = NULL` (step 10), so the child
-    // inherits THIS process's block — which is why deleting the two names from
-    // the shim's own environment is what strips them from the child's. A
-    // `SetEnvironmentVariableW` with a NULL `lpValue` deletes; there is no
-    // separate delete call.
-    //
-    // The `.exec`-only scope (RUL-14 / D-V20) lives in
-    // `core::strips_tier_selectors`, not in this `#[cfg(windows)]` arm: it is a
-    // pure predicate over the parsed sidecar, and stating it here would put the
-    // whole of the scope decision somewhere no test on the Linux host can reach
-    // (RUL-39). This block is only the Win32 half — what the answer is applied
-    // to, never what the answer is.
     if core::strips_tier_selectors(&sidecar) {
         use windows_sys::Win32::System::Environment::SetEnvironmentVariableW;
 
+        // The child inherits this process's environment (`lpEnvironment = NULL`), so deleting here strips the child's.
         for name in ["OCX_GLOBAL", "OCX_PROJECT"] {
             let name_w: Vec<u16> = std::ffi::OsStr::new(name).encode_wide().chain(Some(0)).collect();
-            // SAFETY: `name_w` is a valid NUL-terminated UTF-16 buffer that
-            // outlives the call. A NULL `lpValue` is the documented delete
-            // form. Failure means the variable was already absent (or the name
-            // is unsettable), which is the state we want either way — hence no
-            // return-value check and no diagnostic: this is not a degraded
-            // mode, it is a no-op.
+            // SAFETY: `name_w` is NUL-terminated and outlives the call; a NULL `lpValue` deletes. Failure means the
+            // name was already absent, the wanted state, so the result is ignored.
             unsafe { SetEnvironmentVariableW(name_w.as_ptr(), std::ptr::null()) };
         }
     }
 
-    // ── Step 5: resolve program (pin ▸ baked ▸ literal `ocx`) ──────────────
-    // The pin arm mirrors the `.cmd` `IF DEFINED OCX_BINARY_PIN`: present at
-    // all (even empty) → pin branch. Below it sits the `.exec` sidecar's baked
-    // absolute `ocx` (V-9) — the Windows half of the POSIX body's
-    // `exec "${OCX_BINARY_PIN:-${__ocx_binary}}"`, and what stops a
-    // co-resident `bin\ocx.exe` from capturing this spawn. Both are resolved
-    // EXPLICITLY via `lpApplicationName` (no command-line program parsing —
-    // CWE-428, and no application-directory search — V-9).
+    // Defined-but-empty must stay `Some`: `core::resolve_program` treats it as a pin.
     let pin = std::env::var_os("OCX_BINARY_PIN").map(|v| v.to_string_lossy().into_owned());
     let program = core::resolve_program(pin.as_deref(), sidecar.baked_ocx());
 
-    // ── Step 6: build child command line (byte-exact wire ABI) ─────────────
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let command_line = core::build_child_command_line(&program.token, &sidecar, &stem, &argv);
     let mut command_line_w: Vec<u16> = std::ffi::OsStr::new(&command_line)
@@ -424,38 +256,19 @@ fn run() -> Result<i32, ShimError> {
         .chain(Some(0))
         .collect();
 
-    // SECURITY (B2 / CWE-428, V-9): a pinned or baked program goes through
-    // `lpApplicationName` as its OWN NUL-terminated UTF-16 buffer so
-    // `CreateProcessW` does NO command-line program-name parsing (a pinned
-    // `C:\Program Files\…\ocx.cmd` would otherwise mis-resolve to
-    // `C:\Program.exe`) and NO directory search. `lpApplicationName = NULL` is
-    // reached only by the literal-`ocx` rung; the policy lives in
-    // `core::ResolvedProgram`, not here, because this arm is `#[cfg(windows)]`
-    // and no test on the Linux host can observe a decision made inside it.
+    // A pinned or baked program gets its own `lpApplicationName` buffer, so `CreateProcessW` neither parses it from
+    // the command line (CWE-428: `C:\Program Files\…` → `C:\Program.exe`) nor searches directories for it.
     let app_name_w: Option<Vec<u16>> = program
         .application_name()
         .map(|p| std::ffi::OsStr::new(p).encode_wide().chain(Some(0)).collect());
     let app_name_ptr = app_name_w.as_ref().map_or(std::ptr::null(), |b| b.as_ptr());
 
-    // ── Step 7: console control handler installed BEFORE the child can run ─
-    //
-    // Finding 4 (Ctrl+C race): the child is born running (no `CREATE_SUSPENDED`
-    // — see step 9), so the no-op handler MUST be in place before
-    // `CreateProcessW`. Installing it afterwards left a window where a Ctrl+C
-    // hit the shim's default handler and killed it before it could wait →
-    // lost exit-code propagation + job cleanup. Registration failure is an
-    // explicit logged degraded mode (mirrors E7 best-effort), not silent.
+    // Before `CreateProcessW`: the child is born running, and a Ctrl+C before install kills the shim before it can
+    // wait, losing the exit code and job cleanup.
     install_console_ctrl_handler();
 
-    // ── Step 8: job object KILL_ON_JOB_CLOSE created FIRST (E7 best-effort) ─
-    //
-    // The job is created and configured BEFORE `CreateProcessW` so the child
-    // can be born inside it atomically via `PROC_THREAD_ATTRIBUTE_JOB_LIST`
-    // (step 9). This removes the old `CREATE_SUSPENDED`→`AssignProcessToJobObject`
-    // →`ResumeThread` race window entirely. Per E7 the job is best-effort: if
-    // any of create / configure fails we fall back to a plain spawn with no
-    // job (logged), never failing the shim (that would regress vs `.cmd`).
-    //
+    // Created before `CreateProcessW` so the child is born inside it via `JOB_LIST`, with no suspend-assign-resume
+    // race. Best-effort: on failure, spawn without a job, logged.
     // SAFETY: NULL security attrs + NULL name = an anonymous job object.
     let job: HANDLE = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     let job = if job.is_null() {
@@ -464,13 +277,10 @@ fn run() -> Result<i32, ShimError> {
         eprintln!("ocx-shim: job object setup failed: {last}");
         std::ptr::null_mut()
     } else {
-        // SAFETY: `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` is a plain C struct
-        // whose all-zero bit pattern is a valid initial state; we then set
-        // only the `LimitFlags` field before passing it to the OS.
+        // SAFETY: all-zero is a valid `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`.
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: `info` is a valid, correctly-sized, zero-initialised struct;
-        // the size argument matches its type. Failure is non-fatal (E7).
+        // SAFETY: `info` is initialised and the size argument matches its type.
         let set = unsafe {
             SetInformationJobObject(
                 job,
@@ -483,8 +293,7 @@ fn run() -> Result<i32, ShimError> {
             // SAFETY: no pointers; reads thread-local last-error.
             let last = unsafe { GetLastError() };
             eprintln!("ocx-shim: job object setup failed: {last}");
-            // SAFETY: `job` is a valid handle from a successful
-            // CreateJobObjectW; not used again on this path.
+            // SAFETY: `job` is a valid handle, not used again on this path.
             unsafe { CloseHandle(job) };
             std::ptr::null_mut()
         } else {
@@ -492,40 +301,18 @@ fn run() -> Result<i32, ShimError> {
         }
     };
 
-    // ── Step 9: STARTUPINFOEXW + attribute list (HANDLE_LIST + JOB_LIST) ────
-    //
-    // Finding 1 (CWE-403, blanket handle inheritance): `bInheritHandles=TRUE`
-    // alone makes the child inherit EVERY inheritable handle in the shim, not
-    // just stdio. `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` whitelists exactly the
-    // three standard handles so nothing else leaks; `STARTF_USESTDHANDLES`
-    // wires those same three as the child's std streams (ADR Contract 1
-    // postcondition: "the child writes directly to the real console").
-    // `PROC_THREAD_ATTRIBUTE_JOB_LIST` assigns the job at creation so the
-    // child is born inside it (no race window).
-    //
-    // No-console parent (Codex#1 regression vs the removed `.cmd` path):
-    // when invoked detached / from a GUI process / a service, one or more std
-    // handles are `NULL`/`INVALID_HANDLE_VALUE`. `STARTF_USESTDHANDLES` is set
-    // ONLY when all three are valid (see `core::use_std_handles`); otherwise
-    // the `hStd*` slots stay zeroed and the OS gives the child default
-    // streams — the child must still launch. The HANDLE_LIST whitelist is
-    // independent: it is built from the unique *valid* std handles, so a
-    // no-console parent yields an empty list, which the attribute logic below
-    // already tolerates (`want_handle_list` is then false).
-    //
-    // The valid std handles are also de-duplicated: a console process commonly
-    // has stdin == stdout (the same console handle), and the HANDLE_LIST must
-    // not contain duplicates.
-    //
-    // SAFETY: `GetStdHandle` returns a process-owned pseudo/real handle (or
-    // INVALID_HANDLE_VALUE) for the given well-known id; no pointers.
+    // `bInheritHandles=TRUE` alone leaks every inheritable handle (CWE-403): `HANDLE_LIST` whitelists the std handles,
+    // and `JOB_LIST` assigns the job at creation.
+    // SAFETY: `GetStdHandle` returns a process-owned pseudo/real handle (or INVALID_HANDLE_VALUE); no pointers.
     let h_in: HANDLE = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
     let h_out: HANDLE = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
     let h_err: HANDLE = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
 
+    // A no-console parent has invalid std handles and the child must still launch, so only valid ones are listed.
     let valid = |h: HANDLE| !h.is_null() && h != INVALID_HANDLE_VALUE;
     let wire_std_handles = core::use_std_handles(valid(h_in), valid(h_out), valid(h_err));
 
+    // De-duplicated: stdin and stdout are often one handle, and `HANDLE_LIST` must hold no duplicates.
     let mut unique_handles: Vec<HANDLE> = Vec::with_capacity(3);
     for h in [h_in, h_out, h_err] {
         if !valid(h) {
@@ -536,56 +323,39 @@ fn run() -> Result<i32, ShimError> {
         }
     }
 
-    // SAFETY: `STARTUPINFOEXW` / `PROCESS_INFORMATION` are plain C structs
-    // whose all-zero bit pattern is a valid, documented initial state (the
-    // Win32 convention is to zero them and set `cb`). No padding/niche
-    // concerns.
+    // SAFETY: all-zero is the documented initial state of `STARTUPINFOEXW`.
     let mut startup_ex: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     startup_ex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
-    // No-console gate: only claim explicit std handles when ALL THREE are
-    // valid. A no-console parent leaves the flag unset and `hStd*` zeroed so
-    // `CreateProcessW` provides the child default streams rather than wiring
-    // a broken handle (Codex#1 — must still launch the child).
     if wire_std_handles {
         startup_ex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         startup_ex.StartupInfo.hStdInput = h_in;
         startup_ex.StartupInfo.hStdOutput = h_out;
         startup_ex.StartupInfo.hStdError = h_err;
     }
-    // SAFETY: see above — `PROCESS_INFORMATION` is an all-zeroes-valid output
-    // struct CreateProcessW fills in.
+    // SAFETY: all-zero is a valid `PROCESS_INFORMATION`, which `CreateProcessW` fills in.
     let mut process_info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
-    // Number of attributes we intend to set: HANDLE_LIST (always, when we
-    // have ≥1 unique std handle) + JOB_LIST (only when the job exists).
     let want_handle_list = !unique_handles.is_empty();
     let want_job_list = !job.is_null();
     let attr_count = want_handle_list as u32 + want_job_list as u32;
 
-    // RAII-ish guard: the attribute-list backing buffer + whether it was
-    // initialised, so every early return and the success path delete it
-    // exactly once. `attr_list_buf` keeps the allocation alive for the whole
-    // `CreateProcessW` call (the OS reads it during process creation).
+    // `attr_list_buf` backs the list and must outlive `CreateProcessW`, which reads it; every path deletes it once.
     let mut attr_list_buf: Vec<u8> = Vec::new();
     let mut attr_list_ptr: LPPROC_THREAD_ATTRIBUTE_LIST = std::ptr::null_mut();
     let mut extended_present: u32 = 0;
 
     if attr_count > 0 {
-        // First call sizes the opaque list. SAFETY: NULL list + out-pointer
-        // to a local `usize`; documented two-call sizing protocol.
+        // SAFETY: a NULL list with a `usize` out-pointer is the documented sizing call.
         let mut size: usize = 0;
         unsafe {
             InitializeProcThreadAttributeList(std::ptr::null_mut(), attr_count, 0, &mut size);
         }
         if size == 0 {
-            // Cannot size the list → degrade to a plain (non-extended) spawn
-            // with explicit std handles only. Logged best-effort (E7-class).
             eprintln!("ocx-shim: proc-thread attribute list sizing failed; spawning without handle/job scoping");
         } else {
             attr_list_buf = vec![0u8; size];
             attr_list_ptr = attr_list_buf.as_mut_ptr().cast();
-            // SAFETY: `attr_list_ptr` is a `size`-byte allocation; `size` is
-            // the value the sizing call returned for `attr_count` attributes.
+            // SAFETY: `attr_list_ptr` is a `size`-byte buffer, sized by the call above for `attr_count` attributes.
             let init = unsafe { InitializeProcThreadAttributeList(attr_list_ptr, attr_count, 0, &mut size) };
             if init == 0 {
                 // SAFETY: no pointers; reads thread-local last-error.
@@ -598,10 +368,8 @@ fn run() -> Result<i32, ShimError> {
             } else {
                 let mut ok = true;
                 if want_handle_list {
-                    // SAFETY: `attr_list_ptr` is an initialised list with room
-                    // for `attr_count` attributes. `unique_handles` is a live
-                    // slice of `HANDLE` (pointer-sized) that outlives the
-                    // `CreateProcessW` call below.
+                    // SAFETY: the list is initialised for `attr_count` entries, and `unique_handles` outlives
+                    // `CreateProcessW`.
                     let r = unsafe {
                         UpdateProcThreadAttribute(
                             attr_list_ptr,
@@ -621,12 +389,10 @@ fn run() -> Result<i32, ShimError> {
                     }
                 }
                 if ok && want_job_list {
-                    // `PROC_THREAD_ATTRIBUTE_JOB_LIST` takes an array of job
-                    // handles; we pass exactly one. `job_handle` outlives the
-                    // `CreateProcessW` call.
                     let job_handle = [job];
-                    // SAFETY: as above; `job_handle` is a live 1-element array
-                    // of `HANDLE` that outlives `CreateProcessW`.
+                    // SAFETY: the list is initialised for `attr_count` entries. Win32 requires `job_handle` to stay
+                    // alive until the list is deleted, but it drops at this block's end, before `CreateProcessW`
+                    // reads it: open bug ocx-sh/ocx#542.
                     let r = unsafe {
                         UpdateProcThreadAttribute(
                             attr_list_ptr,
@@ -649,8 +415,6 @@ fn run() -> Result<i32, ShimError> {
                     startup_ex.lpAttributeList = attr_list_ptr;
                     extended_present = EXTENDED_STARTUPINFO_PRESENT;
                 } else {
-                    // Any attribute set failed → drop the list and spawn
-                    // without extended startup info (E7-class degrade).
                     // SAFETY: `attr_list_ptr` was successfully initialised.
                     unsafe { DeleteProcThreadAttributeList(attr_list_ptr) };
                     attr_list_ptr = std::ptr::null_mut();
@@ -660,23 +424,8 @@ fn run() -> Result<i32, ShimError> {
         }
     }
 
-    // ── Step 10: CreateProcessW (no CREATE_SUSPENDED — child born running) ──
-    //
-    // `bInheritHandles=TRUE` is REQUIRED for the whitelisted HANDLE_LIST set
-    // to be inherited; with the attribute list present only those three std
-    // handles cross into the child (Finding 1). When the attribute list could
-    // not be built we still pass TRUE but only the explicit STARTF_USESTDHANDLES
-    // trio is meaningfully consumed — a strictly smaller surface than the
-    // previous unconditional blanket inheritance, and the documented degraded
-    // mode.
-    //
-    // SAFETY: `lpApplicationName` is either NULL (literal-`ocx` PATH search)
-    // or a valid NUL-terminated UTF-16 buffer (`app_name_w`) that outlives
-    // the call — never parsed from the command line for a pinned program.
-    // `command_line_w` is a mutable, NUL-terminated buffer that outlives the
-    // call. `startup_ex` (and its attribute list, kept alive by
-    // `attr_list_buf`) outlives the call. All other pointer args are NULL
-    // except `process_info`, a valid zero-initialised output struct.
+    // SAFETY: `app_name_ptr` is NULL or a NUL-terminated buffer, `command_line_w` is mutable and NUL-terminated, and
+    // `startup_ex`'s attribute list is backed by `attr_list_buf`; all outlive the call.
     let mut created = unsafe {
         CreateProcessW(
             app_name_ptr,
@@ -692,46 +441,18 @@ fn run() -> Result<i32, ShimError> {
         )
     };
 
-    // The attribute list has done its job once CreateProcessW returns; delete
-    // it on EVERY exit path (success and failure). `attr_list_buf` is dropped
-    // naturally afterwards.
     let delete_attr_list = |ptr: LPPROC_THREAD_ATTRIBUTE_LIST| {
         if !ptr.is_null() {
-            // SAFETY: `ptr` was produced by a successful
-            // InitializeProcThreadAttributeList and is deleted exactly once.
+            // SAFETY: `ptr` came from a successful InitializeProcThreadAttributeList and is deleted exactly once.
             unsafe { DeleteProcThreadAttributeList(ptr) };
         }
     };
 
-    // Degraded retry (E7-class): some host states reject the EXTENDED
-    // attribute spawn itself (observed: GHA windows runners returning
-    // ERROR_NOT_SUPPORTED (50) when the shim is launched by the `package
-    // test` script engine with piped stdio). The module already documents
-    // spawning without handle/job scoping as the degraded mode when the
-    // attribute list cannot be BUILT — extend the same degrade to a rejected
-    // extended spawn: retry once with a plain STARTUPINFOW (the
-    // STARTF_USESTDHANDLES trio still wires the std streams). The original
-    // error code is logged so the environments that need this stay visible.
-    //
-    // What the degrade actually costs: the child is no longer born into the
-    // job object created above, so JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE no
-    // longer reaps it if the shim dies — an orphaned child is possible on
-    // this path. Handle inheritance also widens from the explicit
-    // PROC_THREAD_ATTRIBUTE_HANDLE_LIST trio to every inheritable handle.
-    // ERROR_NOT_SUPPORTED (50) here is the classic nested-job symptom, which
-    // points at JOB_LIST rather than HANDLE_LIST as the rejected attribute;
-    // a two-stage degrade (retry with HANDLE_LIST only, then fully plain)
-    // would keep inheritance scoped, but needs a Windows host that actually
-    // reproduces the rejection to verify, so it is deliberately not guessed
-    // at here.
+    // Some hosts refuse the attribute list itself with ERROR_NOT_SUPPORTED (seen on GHA windows runners with piped
+    // stdio): retry once plain, logged.
+    // Only that code: any other would surrender handle and job scoping for a failure the list did not cause.
     // SAFETY: no pointers; reads thread-local last-error.
     let extended_error = if created == 0 { unsafe { GetLastError() } } else { 0 };
-    // Narrowly gated on ERROR_NOT_SUPPORTED: that is the diagnosed symptom
-    // (the attribute list itself is refused), and it is the only code for
-    // which dropping the scoping is the right answer. Retrying on ANY error
-    // would surrender handle and job scoping for failures that have nothing
-    // to do with the attribute list — an access-denied or missing-image spawn
-    // would still fail, just less safely.
     if created == 0 && extended_present != 0 && extended_error == ERROR_NOT_SUPPORTED_CODE {
         let last = extended_error;
         eprintln!("ocx-shim: extended spawn failed: win32 error {last}; retrying without handle/job scoping");
@@ -739,21 +460,14 @@ fn run() -> Result<i32, ShimError> {
         attr_list_ptr = std::ptr::null_mut();
         attr_list_buf.clear();
         startup_ex.lpAttributeList = std::ptr::null_mut();
-        // `cb` must describe the struct actually passed. The extended call
-        // declared STARTUPINFOEXW; this one hands `CreateProcessW` the inner
-        // STARTUPINFOW with no EXTENDED_STARTUPINFO_PRESENT flag, so leaving
-        // the larger size in place would misdeclare it to any host that
-        // validates the field — and the retry would fail for a second,
-        // unrelated reason.
+        // `cb` must match the `STARTUPINFOW` now passed, or a host that validates it fails the retry a second way.
         startup_ex.StartupInfo.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-        // CreateProcessW may have MODIFIED the mutable command-line buffer on
-        // the failed attempt (documented behaviour) — rebuild it fresh.
+        // The failed call may have modified the command-line buffer; rebuild it.
         command_line_w = std::ffi::OsStr::new(&command_line)
             .encode_wide()
             .chain(Some(0))
             .collect();
-        // SAFETY: identical contract to the extended call above, minus the
-        // attribute list (`dwCreationFlags = 0`, `lpAttributeList = NULL`).
+        // SAFETY: as for the extended call, without the attribute list.
         created = unsafe {
             CreateProcessW(
                 app_name_ptr,
@@ -781,17 +495,8 @@ fn run() -> Result<i32, ShimError> {
         }
         return match last {
             ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => Err(ShimError::OcxNotFound {
-                // Name the program whenever it was resolved EXPLICITLY — a
-                // defined pin, or a `.exec` sidecar's baked absolute `ocx`.
-                // Both name a path the operator can go look at; only the
-                // literal-`ocx` rung is a PATH miss, and that one keeps the
-                // original both-hints message.
                 pinned: program.application_name().map(str::to_string),
             }),
-            // Every non-file-not-found failure is the same SpawnFailure value;
-            // the ACCESS_DENIED → exit-77 (vs 74) discrimination lives in
-            // `ShimError::exit_code()`, derived purely from the carried Win32
-            // code — so there is no separate match arm to build here.
             other => Err(ShimError::SpawnFailure {
                 win32: other,
                 program: program.token.clone(),
@@ -801,13 +506,10 @@ fn run() -> Result<i32, ShimError> {
     let child_process: HANDLE = process_info.hProcess;
     let child_thread: HANDLE = process_info.hThread;
 
-    // Success path: the OS has copied the attribute data; release it now.
     delete_attr_list(attr_list_ptr);
     drop(attr_list_buf);
 
-    // ── Step 11: wait + GetExitCodeProcess ─────────────────────────────────
-    // SAFETY: `child_process` is a valid process handle; INFINITE blocks until
-    // the child exits.
+    // SAFETY: `child_process` is a valid process handle.
     let wait = unsafe { WaitForSingleObject(child_process, INFINITE) };
     let mut exit_code: u32 = 1;
     if wait != WAIT_FAILED {
@@ -817,8 +519,7 @@ fn run() -> Result<i32, ShimError> {
         }
     }
 
-    // Best-effort handle cleanup before the transparent exit. SAFETY: each
-    // handle was produced by a successful Win32 call and is not used again.
+    // SAFETY: each handle came from a successful Win32 call and is not used again.
     unsafe {
         CloseHandle(child_thread);
         CloseHandle(child_process);
@@ -827,24 +528,14 @@ fn run() -> Result<i32, ShimError> {
         }
     }
 
-    // ── Step 12: full i32 passthrough (E8) ─────────────────────────────────
-    // Mirrors the Windows branch of `child_process::exit_code_from_status`
-    // (full i32 passthrough — no remap, no truncation).
+    // Full i32 passthrough, as `child_process::exit_code_from_status` does on Windows: never remap or truncate.
     Ok(exit_code as i32)
 }
 
-/// Installs a no-op console control handler that returns `TRUE` so the shim
-/// itself does not terminate on Ctrl+C / Ctrl+Break — the child (sharing the
-/// console, no new process group) handles the signal and the shim propagates
-/// its exit code (ADR Contract 1; `CREATE_NEW_PROCESS_GROUP` is deliberately
-/// NOT used).
+/// Installs a no-op console control handler so Ctrl+C / Ctrl+Break leave the shim alive to forward the exit code of
+/// the child, which shares the console and handles the signal itself.
 ///
-/// Finding 4 (Ctrl+C race): this is installed BEFORE `CreateProcessW` (which
-/// no longer uses `CREATE_SUSPENDED` — the child is born running). A Ctrl+C
-/// arriving in the previously-unguarded window between spawn and handler
-/// install would otherwise hit the shim's default handler and kill it before
-/// it could wait, losing exit-code propagation and job cleanup. Registration
-/// failure only degrades Ctrl+C handling and is non-fatal (E7-class).
+/// No `CREATE_NEW_PROCESS_GROUP`: it disables Ctrl+C in the child.
 #[cfg(windows)]
 fn install_console_ctrl_handler() {
     use windows_sys::Win32::Foundation::TRUE;
@@ -852,39 +543,26 @@ fn install_console_ctrl_handler() {
     use windows_sys::core::BOOL;
 
     unsafe extern "system" fn handler(_ctrl_type: u32) -> BOOL {
-        // Returning TRUE marks the signal "handled" so the default terminate
-        // action does not fire for the shim. The child receives the same
-        // console signal and decides how to react.
+        // TRUE suppresses the default terminate for the shim only; the child receives the same signal.
         TRUE
     }
 
-    // SAFETY: `handler` is a valid `extern "system"` callback with the
-    // PHANDLER_ROUTINE signature; passing TRUE adds it. A failure here only
-    // degrades Ctrl+C handling and is non-fatal.
+    // SAFETY: `handler` has the `PHANDLER_ROUTINE` signature; failure only degrades Ctrl+C handling.
     unsafe {
         SetConsoleCtrlHandler(Some(handler), TRUE);
     }
 }
 
-/// Non-Windows builds never run the shim; this keeps `cargo check --workspace`
-/// green on the Linux CI host without pulling in any Win32 surface.
+/// Keeps `cargo check --workspace` green on the Linux CI host, which never runs the shim.
 #[cfg(not(windows))]
 fn run() -> Result<i32, ShimError> {
     unimplemented!("ocx-shim has no non-Windows runtime")
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-//  Specification tests (contract-first TDD, Phase 3.2)
-//
-//  These pin the shim's pure logic against the ADR §Error Taxonomy (E1–E8),
-//  the Wire-ABI Parity matrix (plan §"Wire-ABI Parity"), and the `.shim`
-//  Sidecar Format Contract. They are host-runnable (Linux CI) because the
-//  Win32 syscalls are split out of `core::*` (system_design §8).
-//
-//  Tests are DAMP/self-contained: each spells out its own inputs and the
-//  exact expected bytes/exit code rather than sharing builders, so a failure
-//  names the precise contract clause that regressed.
-// ───────────────────────────────────────────────────────────────────────────
+// ── Specification tests ─────────────────────────────────────────────────────
+// Host-runnable on the Linux CI, since the Win32 syscalls are split out of `core::*`. They pin the error taxonomy,
+// the wire-ABI parity matrix and the sidecar format contract. Each test spells out its own inputs and expected
+// bytes/exit code rather than sharing builders, so a failure names the clause that regressed.
 #[cfg(test)]
 mod tests {
     use super::ShimError;

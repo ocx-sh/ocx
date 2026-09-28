@@ -3,11 +3,7 @@
 
 //! The OCI annotations a push derives from the CI environment it runs in.
 //!
-//! Every variable is read through [`ocx_util::env::var`] — the *runtime* reader.
-//! `app::build_info`'s `GITHUB_*` reads look like the same thing and are not:
-//! those are `option_env!`, resolved when ocx itself was compiled, which is
-//! exactly what makes that module hermetic. The environment that matters here
-//! is the publishing job's, so it must be read at runtime.
+//! Read at runtime, never via `option_env!`, or the stamp describes ocx's own build job instead of the publisher's.
 
 use std::collections::BTreeMap;
 
@@ -18,15 +14,8 @@ use ocx_package::version::Version;
 
 /// Builds the annotation set `flavor`'s environment describes.
 ///
-/// `version` is the resolved push identifier's version. Its variant prefix is
-/// stripped, so a `full-1.2.3` push annotates `1.2.3` — a variant names a
-/// build of a version, not a version of its own. `None` (a tag that is not a
-/// version) writes no version key rather than failing the push.
-///
-/// A variable that is unset or blank yields no key at all:
-/// `org.opencontainers.image.source=""` on a published index states, wrongly,
-/// that the publisher answered the question. `created` is the one key always
-/// written, because it has a source that cannot be missing — the clock.
+/// `version` is annotated without its variant prefix; `None` writes no version key.
+/// An unset or blank variable writes no key; `created` is always written.
 pub fn for_flavor(flavor: CiFlavor, version: Option<&Version>) -> BTreeMap<String, String> {
     let mut annotations = BTreeMap::new();
     if let Some(source) = source(flavor) {
@@ -49,9 +38,7 @@ pub fn for_flavor(flavor: CiFlavor, version: Option<&Version>) -> BTreeMap<Strin
 /// The source repository URL, or `None` when the environment does not name one.
 fn source(flavor: CiFlavor) -> Option<String> {
     match flavor {
-        // Two variables, one value: GitHub names the forge and the repository
-        // separately and publishes no join of them. The trailing-slash trim is
-        // for self-hosted GHES, where the server URL is operator-typed.
+        // GHES server URLs are operator-typed and may end in `/`.
         CiFlavor::GitHubActions => {
             let server = var("GITHUB_SERVER_URL")?;
             let repository = var("GITHUB_REPOSITORY")?;
@@ -61,47 +48,31 @@ fn source(flavor: CiFlavor) -> Option<String> {
     }
 }
 
-/// The instant to stamp, RFC 3339 with seconds precision — the spelling every
-/// other `created` OCX writes uses.
+/// The instant to stamp, in the [`bundle_created`] spelling.
 ///
-/// `SOURCE_DATE_EPOCH` outranks CI's own pipeline clock. A build that pins its
-/// instant for reproducibility must not be re-stamped here, or the index and
-/// the attestation the same push writes disagree about when it happened. Both
-/// candidate instants are parsed and re-emitted through [`bundle_created`], so
-/// every `created` value shares one spelling regardless of its source.
+/// `SOURCE_DATE_EPOCH` outranks the pipeline clock, or the index and the push's attestation disagree.
 fn created(flavor: CiFlavor) -> String {
     let instant = pinned_instant().or_else(|| match flavor {
-        // GitHub Actions exposes no pipeline-creation timestamp.
         CiFlavor::GitHubActions => None,
         CiFlavor::GitLab => pipeline_created_at(),
     });
     bundle_created(instant.unwrap_or_else(chrono::Utc::now))
 }
 
-/// GitLab's `$CI_PIPELINE_CREATED_AT`, parsed as RFC 3339, or `None` when the
-/// variable is unset, blank, or not a valid timestamp.
-///
-/// Parsed and re-emitted through [`bundle_created`] by the caller rather than
-/// passed through verbatim, so a GitLab pipeline clock lands in the same
-/// spelling every other `created` OCX stamps uses (UTC, seconds precision,
-/// literal `Z`) — and a runner that exports a malformed value warns and falls
-/// back to the wall clock instead of writing garbage onto the published index.
+/// GitLab's `$CI_PIPELINE_CREATED_AT` as RFC 3339, or `None` when unset, blank or malformed.
 fn pipeline_created_at() -> Option<chrono::DateTime<chrono::Utc>> {
     let raw = var("CI_PIPELINE_CREATED_AT")?;
     match chrono::DateTime::parse_from_rfc3339(&raw) {
         Ok(parsed) => Some(parsed.with_timezone(&chrono::Utc)),
         Err(_) => {
-            // The key alone, never the value: a CI job log is durable and read
-            // by more parties than the process environment.
+            // Log the key, never the value: CI job logs are durable and widely read.
             log::warn!("ignoring malformed CI_PIPELINE_CREATED_AT; stamping the wall clock instead");
             None
         }
     }
 }
 
-/// A runtime environment variable, blank treated as absent and surrounding
-/// whitespace trimmed (a CI variable interpolated from a file keeps its
-/// newline, and an annotation is not the place to discover that).
+/// A runtime environment variable, trimmed (file-interpolated values keep a newline), blank as absent.
 fn var(key: &str) -> Option<String> {
     ocx_util::env::var(key)
         .map(|value| value.trim().to_string())

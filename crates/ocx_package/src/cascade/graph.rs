@@ -1,21 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The pure compute core of `ocx package cascade check|repair`.
+//! The pure, I/O-free core of `ocx package cascade check|repair`: functions of a
+//! [`TagGraphObservation`] alone.
 //!
-//! Everything here is synchronous and I/O-free: [`fold_expected`], [`diff`],
-//! [`plan_repairs`] and [`scope_filter`] are functions of a
-//! [`TagGraphObservation`] alone. That is the point of the split — the whole
-//! state space (dropped platforms, prereleases, variant tracks, orphans,
-//! never-created aliases) is reachable from a literal, so it can be covered by
-//! ordinary unit tests instead of a registry fixture. Reads live in
-//! [`super::gather`], writes in [`super::apply`].
-//!
-//! The expected state is a **fold**, not a materialized trie. Version tags form
-//! a trie through [`Version::parent`]; a version's alias chain is derived on
-//! demand by [`alias_chain`] from the production [`decompose`](super::decompose)
-//! algebra — the same code the push path walks — so what check expects can never
-//! drift from what a push would have written.
+//! [`alias_chain`] derives each chain from the push path's
+//! [`decompose`](super::decompose) algebra, so check cannot drift from push.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -34,20 +24,11 @@ use ocx_oci::{
 #[cfg(test)]
 mod tests;
 
-/// The expected content of the whole graph: per alias tag, per platform, the
-/// entry that alias should carry and the version it was folded from.
-///
-/// A type alias rather than a struct — it is the plain output of a fold, and
-/// every consumer wants the maps, not a wrapper with accessors.
+/// The expected content of the whole graph, per alias tag and platform.
 pub type ExpectedGraph = BTreeMap<AliasTag, BTreeMap<native::Platform, ExpectedSlot>>;
 
 /// A tag that carries content on behalf of a whole subtree rather than one
-/// concrete build.
-///
-/// Every alias but a track root is named by the [`Version`] it rolls (`3`,
-/// `3.28`, `3.28.1`). A track root — `latest` for the default track, the bare
-/// variant name (`debug`) for a variant track — is named by no version at all,
-/// which is the only reason this enum exists rather than a bare `Version`.
+/// concrete build: a track root, or the [`Version`] it rolls.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AliasTag {
     /// The root of one track: `None` is the default track's `latest`, `Some`
@@ -58,15 +39,11 @@ pub enum AliasTag {
 }
 
 impl AliasTag {
-    /// Classifies a registry tag as a node of this package's tag graph.
+    /// Classifies a registry tag as a graph node, or `None` for a reserved or
+    /// non-version tag.
     ///
-    /// `variants` is the set of variant names the package's tag list carries
-    /// ([`variant_names`](crate::version::variant_names)), because a
-    /// bare tag alone cannot say whether it is a track root: `debug` is the
-    /// `debug` track's root only next to a `debug-…` sibling, and is otherwise
-    /// an arbitrary tag someone pushed. Reserved tags — the `__ocx` namespace
-    /// and keep tags — and anything else that is not a
-    /// version return `None`, which is what puts them in `ignored_tags`.
+    /// A bare name is a track root only when `variants`
+    /// ([`variant_names`](crate::version::variant_names)) lists it.
     pub fn parse(tag: &str, variants: &[String]) -> Option<Self> {
         match Tag::from(tag.to_string()) {
             Tag::Latest => Some(AliasTag::Root { variant: None }),
@@ -78,7 +55,7 @@ impl AliasTag {
         }
     }
 
-    /// The variant track this tag belongs to — `None` for the default track.
+    /// `None` for the default track.
     pub fn track(&self) -> Option<&str> {
         match self {
             AliasTag::Root { variant } => variant.as_deref(),
@@ -97,18 +74,14 @@ impl fmt::Display for AliasTag {
     }
 }
 
-/// Serializes as the registry tag itself, so the report's JSON keys are the
-/// tags a reader would type at the registry, not a tagged union.
+/// Serializes as the registry tag itself.
 impl Serialize for AliasTag {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)
     }
 }
 
-// The `#[derive(schemars::JsonSchema)]` a plain enum would carry publishes a
-// tagged union (`Root`/`Version` variant shapes) — a lie once `Serialize`
-// above collapses every variant to the tag string. The schema must describe
-// the wire form, not the Rust shape behind it.
+// Hand-written: a derive would publish a tagged union, but `Serialize` emits the tag string.
 impl schemars::JsonSchema for AliasTag {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "AliasTag".into()
@@ -122,51 +95,33 @@ impl schemars::JsonSchema for AliasTag {
     }
 }
 
-/// Everything one gather pass read about one package.
-///
-/// Absence is never recorded here, only derived: gather fetches the tags the
-/// registry listed, so an alias that was never created is simply missing from
-/// [`Self::tags`], and the pure core reads that as `Absent`. A listed tag that
-/// could not be fetched aborts the run instead of landing here as a gap — a
-/// degraded read would manufacture findings that look exactly like real drift.
+/// Everything one gather pass read about one package; a tag missing from
+/// [`Self::tags`] reads as never created.
 #[derive(Clone, Debug)]
 pub struct TagGraphObservation {
     /// The physical repository every tag below was read from.
     pub identifier: ocx_oci::OciIdentifier,
-    /// The logical name the user asked for, when it differed from
-    /// [`Self::identifier`]. `Some` is what turns the index layer on.
+    /// The logical name the user asked for, when it differed; `Some` turns the index layer on.
     pub logical: Option<ocx_oci::PackageRef>,
-    /// Every version-ish tag the registry holds, with the body behind it.
     pub tags: BTreeMap<AliasTag, ObservedTag>,
-    /// Tags deliberately not part of the graph — keep tags
-    /// tags, `__ocx.*` internals, and anything that is not a version.
-    /// Reported so a user can see nothing was silently dropped.
+    /// Tags deliberately not part of the graph.
     pub ignored_tags: Vec<String>,
-    /// The live index root for a logical package, when one was read. `None`
-    /// for a physical invocation, where no root maps back to the repository.
+    /// The live index root; `None` for a physical invocation.
     pub index_root: Option<ocx_index::IndexRoot>,
 }
 
 /// One tag exactly as the registry served it.
-///
-/// `size` is the byte length of the manifest body `digest` was computed over,
-/// not of a re-serialization: an alias holding a bare image manifest is
-/// repaired by wrapping that manifest in an index entry, and a descriptor
-/// whose `size` disagreed with the bytes on the registry would be a broken
-/// pointer even though the digest matched.
 #[derive(Clone, Debug)]
 pub struct ObservedTag {
-    /// The digest the tag resolved to.
     pub digest: ocx_oci::Digest,
-    /// The length in bytes of the manifest body served at `digest`.
+    /// The served body's length, never a re-serialization's, or a wrapped
+    /// bare manifest's descriptor becomes a broken pointer.
     pub size: i64,
-    /// The parsed body.
     pub manifest: ocx_oci::Manifest,
 }
 
 impl TagGraphObservation {
-    /// The concrete versions the graph is folded from — every observed tag
-    /// that names a version, alias-shaped or not.
+    /// The concrete versions the graph is folded from.
     pub fn versions(&self) -> BTreeSet<Version> {
         self.tags
             .keys()
@@ -177,7 +132,6 @@ impl TagGraphObservation {
             .collect()
     }
 
-    /// The index at `tag`, when the tag exists and is one.
     fn index(&self, tag: &AliasTag) -> Option<&ocx_oci::ImageIndex> {
         match &self.tags.get(tag)?.manifest {
             ocx_oci::Manifest::ImageIndex(index) => Some(index),
@@ -186,12 +140,8 @@ impl TagGraphObservation {
     }
 }
 
-/// What one alias should carry for one platform, and where that came from.
-///
-/// `entry` is a verbatim copy of the leaf's own index entry, so a repair
-/// re-points an alias at content that already exists instead of composing a
-/// new descriptor; `source` is the version it was copied from, which is what
-/// makes a finding explainable ("`3` should carry what `3.28.1` carries").
+/// What one alias should carry for one platform: a verbatim copy of `source`'s
+/// own index entry, so a repair never composes a new descriptor.
 #[derive(Clone, Debug)]
 pub struct ExpectedSlot {
     pub entry: ocx_oci::ImageIndexEntry,
@@ -223,9 +173,9 @@ pub enum SlotStatus {
 /// One row of the diff: what one alias holds for one platform versus what the
 /// fold says it should hold.
 ///
-/// Digests are the wire strings verbatim rather than parsed values: an index
-/// may legitimately name a digest algorithm this build does not implement, and
-/// a report must be able to show it.
+/// Digests are the wire strings verbatim, an algorithm this build does not
+/// implement included.
+// Strings, not parsed digests: an index may legitimately name an algorithm this build lacks.
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub struct SlotRow {
     pub tag: AliasTag,
@@ -289,7 +239,7 @@ pub enum Unrepairable {
     ChildManifestMissing { tag: AliasTag, digest: String },
     /// A planned entry names a digest algorithm this build cannot address, so
     /// whether the child is still there could not be checked at all. Distinct
-    /// from [`Self::ChildManifestMissing`]: nothing was observed to be gone —
+    /// from `child-manifest-missing`: nothing was observed to be gone —
     /// the alias is refused because the check could not be made.
     ChildDigestUnaddressable { tag: AliasTag, digest: String },
     /// Repairing the alias would leave it with no entries at all. Refused:
@@ -297,8 +247,9 @@ pub enum Unrepairable {
     WouldEmptyIndex { tag: AliasTag },
 }
 
+// Also the input `plan_repairs` works from.
 /// The whole finding set for one package — the value both `check` and `repair`
-/// report, and the input `plan_repairs` works from.
+/// report.
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub struct CascadeReport {
     /// The physical repository the graph was read from.
@@ -319,10 +270,7 @@ pub struct CascadeReport {
 }
 
 impl CascadeReport {
-    /// Whether anything at all needs attention — the exit-code question.
-    ///
-    /// True when any row is not [`SlotStatus::Ok`], any alias is absent or not
-    /// an index, or the index layer disagrees with the registry.
+    /// Whether anything needs attention: a non-`Ok` row, a non-present alias, or an index finding.
     pub fn has_findings(&self) -> bool {
         self.rows.iter().any(|row| row.status != SlotStatus::Ok)
             || self.aliases.values().any(|state| state != &AliasState::Present)
@@ -353,17 +301,15 @@ pub struct PlannedWrite {
     pub referenced_digests: Vec<String>,
     /// The rows that justify the write — what the user is being told changed.
     ///
-    /// Includes the alias's [`SlotStatus::Orphan`] rows even though an orphan
-    /// never causes a write on its own: they are how apply tells a preserved
-    /// leftover from a folded entry when preflight finds a child gone, and so
-    /// which entry it may drop instead of refusing the whole alias.
+    /// Includes the alias's `orphan` rows even though an orphan never causes a
+    /// write on its own.
+    // They are how apply tells a preserved leftover from a folded entry when
+    // preflight finds a child gone, and so which entry it may drop instead of
+    // refusing the whole alias.
     pub reasons: Vec<SlotRow>,
 }
 
-/// Why a requested scope cannot be turned into a set of alias tags.
-///
-/// A usage fault in every variant: the argument names something that is not a
-/// node of this package's tag graph.
+/// Why a requested scope names no node of this package's tag graph; a usage fault.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ScopeError {
@@ -375,21 +321,8 @@ pub enum ScopeError {
     UnknownTag(String),
 }
 
-/// The alias chain a version cascades into: every rolling tag that should
-/// carry this version's content when nothing newer blocks it.
-///
-/// Derived from [`decompose_targets`](super::decompose_targets) — the half of
-/// the push path's [`decompose`](super::decompose) that answers exactly this
-/// question — so every carve-out the push path implements (a build-less
-/// prerelease cascading nowhere, a prerelease-with-build reaching only its
-/// parent prerelease, a variant track terminating at its own bare name) holds
-/// here by construction rather than by a second implementation that could
-/// disagree.
-///
-/// `others` is not read: which tags a version cascades *into* is a property of
-/// the version, and the set only decides which of them it is blocked from
-/// reaching — a question the fold asks separately, one alias at a time. Taking
-/// it here is what let the fold pay for a blocker scan per version per level.
+/// Every rolling tag that should carry `version`'s content when nothing newer
+/// blocks it, from the push path's [`decompose_targets`](super::decompose_targets).
 pub fn alias_chain(version: &Version, _others: &BTreeSet<Version>) -> Vec<AliasTag> {
     let targets = decompose_targets(version);
     let mut chain: Vec<AliasTag> = targets.targets.into_iter().map(AliasTag::Version).collect();
@@ -401,12 +334,7 @@ pub fn alias_chain(version: &Version, _others: &BTreeSet<Version>) -> Vec<AliasT
     chain
 }
 
-/// Every alias any observed version cascades into — the whole set of tags the
-/// graph is supposed to carry.
-///
-/// This is also the leaf test: a version *not* in here is in nobody's alias
-/// chain, so nothing rolls it and it carries content of its own. `3.28.1` is a
-/// leaf until `3.28.1_b1` is published and starts rolling it.
+/// Every alias any observed version cascades into; a version not in it is a leaf.
 fn alias_universe(versions: &BTreeSet<Version>) -> BTreeSet<AliasTag> {
     versions
         .iter()
@@ -414,11 +342,8 @@ fn alias_universe(versions: &BTreeSet<Version>) -> BTreeSet<AliasTag> {
         .collect()
 }
 
-/// The versions that carry content of their own — the ones in nobody's alias
-/// chain, and so the only legitimate sources for a fold.
-///
-/// Ascending, which is what makes "the last write wins" the max-selection the
-/// fold is defined by.
+/// The versions in nobody's alias chain, the only sources for a fold; ascending,
+/// so the fold's last write is its max-selection.
 fn leaves(versions: &BTreeSet<Version>) -> Vec<&Version> {
     let universe = alias_universe(versions);
     versions
@@ -427,25 +352,18 @@ fn leaves(versions: &BTreeSet<Version>) -> Vec<&Version> {
         .collect()
 }
 
-/// The platform an entry claims a slot for, or `None` when it claims none.
+/// The platform an entry claims a slot for; `None` only for no platform or the
+/// `unknown/unknown` attestation placeholder.
 ///
-/// Two shapes carry no platform slot: a descriptor with no `platform` at all
-/// (an attestation or a bare-manifest wrap) and the `unknown/unknown`
-/// placeholder attestations are conventionally tagged with. Everything else is
-/// a slot, including `any/any` and platforms this build cannot model — reading
-/// "we failed to parse it" as "it has no platform" would blind the fold to a
-/// real `freebsd/amd64` entry and plan its deletion.
+/// An unmodellable platform is still a slot, or the fold plans a real entry's deletion.
 fn platform_slot(entry: &ocx_oci::ImageIndexEntry) -> Option<&native::Platform> {
     let platform = entry.platform.as_ref()?;
     let unknown = platform.os.to_string() == "unknown" && platform.architecture.to_string() == "unknown";
     (!unknown).then_some(platform)
 }
 
-/// Whether two descriptors are the same in every field a repair would rewrite.
-///
-/// Full-descriptor rather than digest-only: a repair PUTs whole entries, so a
-/// diff that ignored `size`, `mediaType`, `artifactType` or `annotations`
-/// would call an entry clean and then silently change it.
+/// Whether two descriptors match in every field, not just the digest: a repair
+/// PUTs whole entries, so a narrower diff would silently change a "clean" one.
 fn same_descriptor(left: &ocx_oci::ImageIndexEntry, right: &ocx_oci::ImageIndexEntry) -> bool {
     left.digest == right.digest
         && left.size == right.size
@@ -456,15 +374,7 @@ fn same_descriptor(left: &ocx_oci::ImageIndexEntry, right: &ocx_oci::ImageIndexE
 }
 
 /// The platform-slot entries of one alias, keyed by platform, plus the entries
-/// a later one shadows.
-///
-/// A well-formed index has one entry per platform, and every consumer resolves
-/// the last one — so a shadowed entry is published but unreachable. Collecting
-/// straight into the map would hide that: the alias would diff as clean
-/// whenever the *surviving* entry happens to match the fold, and the repair
-/// would plan nothing. The shadowed entries come back so the diff can report
-/// them; the rewrite drops them for free, since it rebuilds the index from one
-/// entry per platform.
+/// a later one shadows, which the diff must report or they hide behind a clean slot.
 fn observed_slots<'a>(
     observation: &'a TagGraphObservation,
     alias: &AliasTag,
@@ -488,12 +398,8 @@ fn observed_slots<'a>(
     (slots, shadowed)
 }
 
-/// Which published version a digest observed at an alias came from.
-///
-/// Built over leaves only: an alias's own content is a copy, so attributing a
-/// digest to the alias that also happens to carry it would explain a finding
-/// with another finding. The greatest matching leaf wins when two leaves
-/// publish byte-identical content.
+/// Which leaf version a digest observed at an alias came from; the greatest
+/// leaf wins on byte-identical content.
 fn leaf_provenance(observation: &TagGraphObservation) -> BTreeMap<(native::Platform, String), Version> {
     let versions = observation.versions();
     let mut provenance = BTreeMap::new();
@@ -511,18 +417,13 @@ fn leaf_provenance(observation: &TagGraphObservation) -> BTreeMap<(native::Platf
     provenance
 }
 
-/// Folds every observed version into the state each alias should be in.
-///
-/// An alias's slot for a platform is the entry of the greatest version that
-/// cascades into that alias and publishes that platform — which is why a
-/// platform dropped by the newest build keeps folding from the older version
-/// that still ships it, instead of vanishing from the rolling tag.
+/// Folds every observed version into the state each alias should be in: per
+/// platform, the entry of the greatest version that cascades there and ships it.
 pub fn fold_expected(observation: &TagGraphObservation) -> ExpectedGraph {
     let versions = observation.versions();
     let mut expected = ExpectedGraph::new();
 
-    // Only leaves are folded: an alias tag's own content is a cascade copy, so
-    // folding it upward would let one broken alias justify the next.
+    // Only leaves: folding an alias's own copy would let one broken alias justify the next.
     for leaf in leaves(&versions) {
         let Some(index) = observation.index(&AliasTag::Version(leaf.clone())) else {
             continue;
@@ -549,12 +450,7 @@ pub fn fold_expected(observation: &TagGraphObservation) -> ExpectedGraph {
     expected
 }
 
-/// Diffs what the registry holds against what the fold expects, restricted to
-/// `scope`.
-///
-/// Pure and total: every alias in scope produces an [`AliasState`], every
-/// (alias, platform) slot in either map produces a [`SlotRow`], and the index
-/// layer contributes findings only when the observation carries a root.
+/// Diffs what the registry holds against what the fold expects, restricted to `scope`.
 pub fn diff(observation: &TagGraphObservation, expected: &ExpectedGraph, scope: &BTreeSet<AliasTag>) -> CascadeReport {
     let provenance = leaf_provenance(observation);
     let no_slots = BTreeMap::new();
@@ -605,10 +501,6 @@ pub fn diff(observation: &TagGraphObservation, expected: &ExpectedGraph, scope: 
             })
             .collect();
 
-        // One row per shadowed entry, carrying the digest that is published but
-        // unreachable. Appended and then re-sorted rather than woven into the
-        // pass above, because the pass is keyed by platform and this is the one
-        // case where a platform owns more than one row.
         alias_rows.extend(shadowed.iter().map(|(platform, entry)| SlotRow {
             tag: alias.clone(),
             platform: (*platform).clone(),
@@ -641,11 +533,8 @@ pub fn diff(observation: &TagGraphObservation, expected: &ExpectedGraph, scope: 
     }
 }
 
-/// The registry-versus-index layer: what the public index committed for each
-/// alias against what the alias points at right now.
-///
-/// Empty for a physical invocation — with no root there is nothing to compare
-/// against, and inventing one from the repository name would be a guess.
+/// What the public index committed for each alias against what it points at
+/// now; empty without a root.
 fn index_findings(observation: &TagGraphObservation, scope: &BTreeSet<AliasTag>) -> Vec<IndexFinding> {
     let Some(root) = observation.index_root.as_ref() else {
         return Vec::new();
@@ -667,13 +556,7 @@ fn index_findings(observation: &TagGraphObservation, scope: &BTreeSet<AliasTag>)
         .collect()
 }
 
-/// Whether an alias needs its index rewritten.
-///
-/// An orphan alone does not: the policy is to preserve an orphan whose child
-/// still exists, so an alias whose only fault is a leftover entry is reported
-/// and left byte-identical. A duplicate does, and is the one case where the
-/// rewrite is the whole fix: the plan carries one entry per platform, so
-/// republishing the alias is what drops the shadowed copy.
+/// Whether an alias needs its index rewritten; an orphan alone is reported and left alone.
 fn needs_write(state: &AliasState, rows: &[SlotRow]) -> bool {
     state != &AliasState::Present
         || rows.iter().any(|row| {
@@ -684,14 +567,8 @@ fn needs_write(state: &AliasState, rows: &[SlotRow]) -> bool {
         })
 }
 
-/// The complete `manifests` list one alias should carry.
-///
-/// The shape mirrors what the push path leaves behind: platform entries in
-/// platform order, then whatever carries no platform (attestations, and the
-/// wrap of a bare manifest found at the tag) in the order the registry served
-/// them. Every entry is either a verbatim copy of a leaf's descriptor or a
-/// verbatim copy of something already at this tag — a repair re-points, it
-/// never composes new content.
+/// The complete `manifests` list one alias should carry: platform entries in
+/// platform order, then platform-less ones as served, each a verbatim copy.
 fn planned_entries(
     alias: &AliasTag,
     observation: &TagGraphObservation,
@@ -710,8 +587,7 @@ fn planned_entries(
         Some(ocx_oci::Manifest::ImageIndex(index)) => {
             for entry in &index.manifests {
                 match platform_slot(entry) {
-                    // An entry nothing folds into is an orphan: preserved, so
-                    // a truncated tag listing can never turn into a deletion.
+                    // Orphans are preserved, so a truncated tag listing never becomes a deletion.
                     Some(platform) => {
                         slots.entry(platform.clone()).or_insert_with(|| entry.clone());
                     }
@@ -719,9 +595,7 @@ fn planned_entries(
                 }
             }
         }
-        // Parity with the push path's merge: a bare manifest at an alias tag
-        // becomes a platform-less entry of the index that replaces it, rather
-        // than content this run drops on the floor.
+        // As the push path's merge does: a bare manifest becomes a platform-less entry, never dropped.
         Some(ocx_oci::Manifest::Image(_)) => {
             if let Some(tag) = observed {
                 unplatformed.push(ocx_oci::ImageIndexEntry {
@@ -742,11 +616,8 @@ fn planned_entries(
     entries
 }
 
-/// Turns a report into the exact set of index writes that would resolve it.
-///
-/// Only aliases with a non-`Ok` row are planned, each rebuilt from observed
-/// content alone — a repair publishes nothing new, it re-points. An alias that
-/// would end up empty is refused rather than written.
+/// Turns a report into the index writes that would resolve it; an alias that
+/// would end up empty is left out.
 pub fn plan_repairs(
     report: &CascadeReport,
     observation: &TagGraphObservation,
@@ -754,9 +625,6 @@ pub fn plan_repairs(
 ) -> Vec<PlannedWrite> {
     let mut writes = Vec::new();
 
-    // Grouped once rather than re-filtered per alias: the scan is over every
-    // row of the whole report, so doing it inside the loop made a package's
-    // aliases and its platforms multiply.
     let mut by_alias: BTreeMap<&AliasTag, Vec<SlotRow>> = BTreeMap::new();
     for row in report.rows.iter().filter(|row| row.status != SlotStatus::Ok) {
         by_alias.entry(&row.tag).or_default().push(row.clone());
@@ -768,8 +636,7 @@ pub fn plan_repairs(
             continue;
         }
 
-        // Refused rather than written: `diff` has already recorded the alias
-        // as `WouldEmptyIndex`, and an empty index is worse than a stale one.
+        // `diff` already recorded this as `WouldEmptyIndex`.
         let manifests = planned_entries(alias, observation, expected);
         if manifests.is_empty() {
             continue;
@@ -783,15 +650,12 @@ pub fn plan_repairs(
             tag: alias.clone(),
             index: ocx_oci::ImageIndex {
                 schema_version: ocx_oci::INDEX_SCHEMA_VERSION,
-                // Preserved verbatim where the tag already held an index —
-                // including an absent one; only a freshly built index states
-                // its own type.
+                // Preserved verbatim, even when absent; only a fresh index states its own.
                 media_type: match observed_index {
                     Some(index) => index.media_type.clone(),
                     None => Some(MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
                 },
-                // Filled if absent, never overwritten: stating what ocx wrote
-                // is not the same as relabelling someone else's artifact.
+                // Filled if absent, never overwritten: never relabel someone else's artifact.
                 artifact_type: observed_index
                     .and_then(|index| index.artifact_type.clone())
                     .or_else(|| Some(MEDIA_TYPE_PACKAGE_V1.to_string())),
@@ -807,12 +671,7 @@ pub fn plan_repairs(
     writes
 }
 
-/// Reads the scope request out of an identifier.
-///
-/// `None` means the identifier named no tag and the whole graph is in scope.
-/// A digest reference names one manifest rather than a tag graph, and a tag
-/// that is not a version names nothing the graph contains — both are usage
-/// faults, refused here rather than silently scoped to nothing.
+/// Reads the scope request out of an identifier; `None` scopes the whole graph.
 ///
 /// # Errors
 ///
@@ -828,21 +687,13 @@ pub fn scope_request(identifier: &ocx_oci::PackageRef) -> Result<Option<AliasTag
     match Tag::from(tag.to_string()) {
         Tag::Latest => Ok(Some(AliasTag::Root { variant: None })),
         Tag::Version(version) => Ok(Some(AliasTag::Version(version))),
-        // A bare variant name is deliberately not accepted here: whether
-        // `debug` names a track root depends on the package's other tags,
-        // which this call has not read. `debug-3` scopes the same track,
-        // since a major's path to the root is that root.
+        // A bare variant name is refused: whether it is a root depends on tags not read here.
         _ => Err(ScopeError::NotAVersionTag(tag.to_string())),
     }
 }
 
-/// Expands per-identifier requests into the set of alias tags to act on.
-///
-/// A request for an alias covers its whole subtree plus its path to the track
-/// root — repairing `3.28` without also considering `3` and `latest` would
-/// leave the graph half-fixed. A request for a leaf covers its path to the
-/// root and excludes the leaf itself, since a leaf carries its own content and
-/// is never rewritten. Requests union; `None` means the whole graph.
+/// Expands requests into the alias tags to act on: an alias's subtree plus its
+/// path to the track root, a leaf's path alone; `None` means the whole graph.
 ///
 /// # Errors
 ///
@@ -871,8 +722,6 @@ pub fn scope_filter(
                 } else if !versions.contains(version) {
                     return Err(ScopeError::UnknownTag(version.to_string()));
                 }
-                // A leaf is never rewritten, so it contributes only the path
-                // it rolls into; an alias contributes that path too.
                 scope.extend(path_to_root(version, &universe));
             }
         }

@@ -1,71 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Lazy-mode advisory detector.
+//! Lazy-mode advisory detector (`adr_lazy_package_loading.md`).
 //!
-//! A pure classifier over a single package's already-loaded metadata,
-//! surfacing the three ways a package's own declarations make lazy
-//! composition observably different from eager composition. See plan
-//! contract C-015 (`plan_lazy_package_loading.md`).
-//!
-//! **Warning only, never a decision.** [`classify_lazy_advisories`] has no
-//! way to fail composition or steer resolution — every finding is an
-//! informational [`LazyAdvisory`], emitted at lock/compose time for a
-//! **deferred** tool only. Nothing downstream may treat a `LazyAdvisory` as
-//! anything but advisory.
+//! Warning only: nothing downstream may fail composition or steer resolution on a [`LazyAdvisory`].
 
 use ocx_package::metadata::Metadata;
 use ocx_package::metadata::env::modifier::Modifier;
 use ocx_package::metadata::template::classify_install_path_rooted_dir;
 
-/// The package-rooted interpolation token.
-///
-/// Spelled here rather than imported: `template.rs` owns only the
-/// `"${installPath}/"` *directory prefix* (inside
-/// [`classify_install_path_rooted_dir`]), and `package::libc_lint` — the other
-/// classifier that reads declared `path` values segment by segment — spells the
-/// bare token locally for the same reason.
 const INSTALL_PATH_TOKEN: &str = "${installPath}";
 
-/// A non-fatal observation about a deferred tool's declared metadata.
-///
-/// Each variant names one way a package's own declarations make lazy
-/// composition observably different from eager composition — see the
-/// module doc comment for the "warning only" contract. Emitted at
-/// lock/compose time for a **deferred** tool only (never for a tool that
-/// materializes eagerly), and serialized verbatim under `--format json`.
+/// A way a deferred tool's own declarations make lazy composition differ from eager composition.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LazyAdvisory {
-    /// An env var whose value interpolates `${installPath}` but is declared
-    /// with a non-`path` modifier (`constant` or `list`).
-    ///
-    /// A `path`-kind entry pointing into an unmaterialized package is
-    /// harmless — nothing resolves it until the shim fires on first
-    /// invocation. A `constant`/`list` entry hands that same unmaterialized
-    /// path to a tool that may `stat` it immediately, which is not.
+    /// A `constant`/`list` var interpolating `${installPath}`, which a tool may `stat` before materialization.
     InstallPathRootedNonPathVar {
-        /// The deferred tool whose metadata declared the var.
         package: ocx_oci::PinnedPackageRef,
-        /// The declared env-var name.
         key: String,
     },
-    /// The package's `binaries` claim is absent (`None`, not `Some([])`),
-    /// so the interface name set the shim generator needs is not
-    /// enumerable.
+    /// No `binaries` claim (`None`, not `Some([])`), so the shim name set is not enumerable.
     UndeclaredBinaries {
         /// The deferred tool with no `binaries` claim.
         package: ocx_oci::PinnedPackageRef,
     },
-    /// A `path`-modifier value concatenates a package-rooted
-    /// `${installPath}` segment with something else — a literal
-    /// prefix/suffix or a second token (`${deps.*}`) — so the shim slot
-    /// cannot be substituted cleanly. Only the exact `${installPath}/<rel>`
-    /// shape substitutes cleanly.
+    /// A `path` value combining `${installPath}` with anything else, so the shim slot cannot substitute it.
     CombinedPathValue {
-        /// The deferred tool whose metadata declared the var.
         package: ocx_oci::PinnedPackageRef,
-        /// The declared env-var name.
         key: String,
     },
 }
@@ -91,28 +53,10 @@ impl std::fmt::Display for LazyAdvisory {
     }
 }
 
-/// Classifies `metadata`'s declarations for `package` into lazy-mode
-/// advisories.
-///
-/// Pure and warning-only — see the module doc comment. Reads only the
-/// already-loaded `metadata`; performs no I/O and touches neither the
-/// filesystem nor the network. Iterates every declared env var regardless
-/// of surface visibility — the caller (lock/compose) decides which surface,
-/// and which deferred tools, to run this over.
-///
-/// Free function, not a [`crate::PackageManager`] method:
-/// per `subsystem-package-manager.md`, only facade operations that need
-/// `&self` state (file structure, index, client) hang off `impl
-/// PackageManager`. This classifier needs none of that — its only inputs
-/// are a package identifier and its already-loaded metadata — so it stays a
-/// plain free function taking explicit params, following the
-/// `tasks/common.rs` shared-helper convention.
+/// Classifies `metadata`'s declarations into lazy-mode advisories, over every env var regardless of visibility.
 pub fn classify_lazy_advisories(package: &ocx_oci::PinnedPackageRef, metadata: &Metadata) -> Vec<LazyAdvisory> {
     let mut advisories = Vec::new();
 
-    // `None` is "the publisher declared nothing"; `Some([])` is "the publisher
-    // declared zero". Only the former leaves the shim generator without an
-    // enumerable name set.
     if metadata.binaries().is_none() {
         advisories.push(LazyAdvisory::UndeclaredBinaries {
             package: package.clone(),
@@ -120,10 +64,7 @@ pub fn classify_lazy_advisories(package: &ocx_oci::PinnedPackageRef, metadata: &
     }
 
     for var in metadata.env().into_iter().flatten() {
-        // `None` here is `Modifier::Unknown` — a `type` tag a newer ocx defines,
-        // whose value fields this binary cannot interpret. The value is then
-        // neither provably package-rooted nor provably not, and a warning-only
-        // classifier stays silent rather than guess (C-015 (b)).
+        // `None` is a `Modifier::Unknown` from a newer ocx; a warning-only classifier stays silent rather than guess.
         let Some(value) = var.value() else { continue };
         if !value.contains(INSTALL_PATH_TOKEN) {
             continue;
@@ -139,9 +80,7 @@ pub fn classify_lazy_advisories(package: &ocx_oci::PinnedPackageRef, metadata: &
                 package: package.clone(),
                 key: var.key.clone(),
             },
-            // Unreachable — `Var::value()` returned `None` for this variant
-            // above. Matched explicitly rather than through a wildcard so a
-            // future modifier type has to be classified deliberately.
+            // Unreachable (`value()` is `None`); no wildcard, so a new modifier must be classified here.
             Modifier::Unknown { .. } => continue,
         };
         advisories.push(advisory);
@@ -150,30 +89,9 @@ pub fn classify_lazy_advisories(package: &ocx_oci::PinnedPackageRef, metadata: &
     advisories
 }
 
-/// Whether a `path`-modifier value is package-rooted in the one shape the shim
-/// slot can substitute: the whole value is a single `${installPath}`-rooted
-/// directory.
-///
-/// Two clean shapes, and everything else is a concatenation:
-///
-/// - a bare `${installPath}` — the content root itself, the most trivially
-///   substitutable shape there is (C-015 (a); [`classify_install_path_rooted_dir`]
-///   returns `None` for it because it strips the literal `"${installPath}/"`
-///   prefix, so the bare form is checked beside that helper, never by a second
-///   `${installPath}` parser);
-/// - `${installPath}/<rel>`, which is exactly what that helper classifies —
-///   including its `<rel>` contains-`${` exclusion, which covers the
-///   second-token form `${installPath}/bin:${deps.other.installPath}/bin`.
-///
-/// A `PATH` value is a separator-joined list, so more than one segment means the
-/// package-rooted part is concatenated with something else regardless of what
-/// that something is. Split on `:` rather than [`std::env::split_paths`] for the
-/// reason `package::libc_lint::resolve_scan_scope` gives: the value is authored
-/// for the *target*, so the build host's separator is the wrong one. Residual: a
-/// Windows-targeted `;`-joined value whose segments carry neither `:` nor a
-/// second token reads as one segment and is not flagged — a missed warning, and
-/// warnings are all this function feeds.
+/// Whether a `path` value is a single `${installPath}`-rooted directory, the one shape the shim slot substitutes.
 fn path_value_substitutes_cleanly(value: &str) -> bool {
+    // `:`, not `std::env::split_paths`: the value is authored for the target, not the build host.
     let mut segments = value.split(':');
     let Some(only) = segments.next() else {
         return false;
@@ -181,18 +99,19 @@ fn path_value_substitutes_cleanly(value: &str) -> bool {
     if segments.next().is_some() {
         return false;
     }
+    // The bare token separately: `classify_install_path_rooted_dir` only accepts `${installPath}/<rel>`.
     only == INSTALL_PATH_TOKEN || classify_install_path_rooted_dir(only).is_some()
 }
 
 #[cfg(test)]
 mod tests {
-    //! Specification tests for C-015, written from the plan's component
+    //! Specification tests for the lazy-advisory classifier, written from the plan's component
     //! contract before the classifier body exists.
     //!
     //! **No fixture here touches the filesystem or the network.** Every input
     //! is an in-memory [`Metadata`] and an in-memory [`ocx_oci::PinnedPackageRef`];
     //! no `TempDir`, no `tokio`, no transport. That is the executable half of
-    //! C-015's purity claim — the other half is
+    //! the classifier's purity claim — the other half is
     //! [`classify_lazy_advisories_takes_only_an_identifier_and_metadata`],
     //! which pins the signature so no I/O handle can be threaded in later.
 
@@ -273,7 +192,7 @@ mod tests {
 
     /// Projects advisories onto comparable `"<kind>:<key>"` strings, sorted.
     ///
-    /// C-015 fixes no emission order, so the multi-finding assertion compares
+    /// The classifier fixes no emission order, so the multi-finding assertion compares
     /// sorted sets rather than positions — see the Specify report's ordering
     /// note. `LazyAdvisory` derives no `PartialEq`/`Ord` of its own, which is
     /// why this projects instead of comparing values.
@@ -304,7 +223,7 @@ mod tests {
             .expect("every advisory message carries at least one plain word")
     }
 
-    // ── C-015: InstallPathRootedNonPathVar ───────────────────────────────────
+    // ── InstallPathRootedNonPathVar ──────────────────────────────────────────
 
     #[test]
     fn install_path_rooted_constant_var_is_flagged() {
@@ -372,7 +291,7 @@ mod tests {
         );
     }
 
-    // ── C-015: UndeclaredBinaries ────────────────────────────────────────────
+    // ── UndeclaredBinaries ───────────────────────────────────────────────────
 
     #[test]
     fn absent_binaries_claim_is_flagged() {
@@ -417,7 +336,7 @@ mod tests {
         );
     }
 
-    // ── C-015: CombinedPathValue ─────────────────────────────────────────────
+    // ── CombinedPathValue ────────────────────────────────────────────────────
 
     #[test]
     fn path_value_combining_install_path_with_a_dep_token_is_flagged() {
@@ -499,7 +418,7 @@ mod tests {
         );
     }
 
-    /// C-015 (a), closed 2026-08-10 and previously unguarded: a value that is
+    /// Closed 2026-08-10 and previously unguarded: a value that is
     /// *exactly* `${installPath}` fires nothing.
     ///
     /// The clean-shape predicate cannot be
@@ -521,9 +440,9 @@ mod tests {
         );
     }
 
-    // ── C-015 (b): an unreadable modifier ────────────────────────────────────
+    // ── An unreadable modifier ───────────────────────────────────────────────
 
-    /// C-015 (b), closed 2026-08-10 and previously unguarded: a `type` tag this
+    /// Closed 2026-08-10 and previously unguarded: a `type` tag this
     /// binary does not know emits nothing.
     ///
     /// `Var::value()` returns `None` for [`Modifier::Unknown`], so the value is
@@ -554,7 +473,7 @@ mod tests {
         );
     }
 
-    // ── C-015: several findings in one metadata ──────────────────────────────
+    // ── Several findings in one metadata ─────────────────────────────────────
 
     #[test]
     fn metadata_with_several_offenders_yields_one_advisory_per_finding() {
@@ -610,11 +529,11 @@ mod tests {
         }
     }
 
-    // ── C-015: purity ────────────────────────────────────────────────────────
+    // ── Purity ───────────────────────────────────────────────────────────────
 
     /// The classifier takes an identifier and metadata, and nothing else.
     ///
-    /// C-015 calls it pure; this is the part a test can hold. Coercing the
+    /// The classifier is pure; this is the part a test can hold. Coercing the
     /// function item to this exact `fn` pointer type fails to compile if a
     /// parameter is added (a `&FileStructure`, an `&ocx_oci::Client`), if it
     /// becomes `async`, or if the return type moves — so no I/O capability can
@@ -625,7 +544,7 @@ mod tests {
         let _ = signature;
     }
 
-    // ── C-015: serialized shape (`--format json`) ────────────────────────────
+    // ── Serialized shape (`--format json`) ───────────────────────────────────
 
     fn expected_package_string() -> String {
         format!("{REGISTRY}/cmake@sha256:{}", "a".repeat(64))

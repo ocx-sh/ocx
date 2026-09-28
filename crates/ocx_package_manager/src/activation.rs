@@ -1,40 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The per-prompt session: the sequencing that binds the pure reconciler
-//! pieces into one answer, and the consent gate that fronts it.
+//! The per-prompt session: the sequencing that binds the pure reconciler pieces into one answer,
+//! and the consent gate that fronts it.
 //!
-//! [`plan`](reconcile::plan), [`capture_priors`](reconcile::capture_priors),
-//! [`current_fingerprint`](reconcile::current_fingerprint) and the
-//! [`Ledger`] codec are each pure and each testable alone. What they do not
-//! say is the **order**: resolve the global tier, evaluate consent over the
-//! walk's project, compose only what consent authorized, diff that against
-//! the live environment, and record the result as the ledger the next prompt
-//! plans against. That order is normative — C-018's capture ordering, C-028's
-//! read-before-consent bound, A-11's determinacy rule — and it lived in
-//! `ocx_cli` until [ocx-sh/ocx#343](https://github.com/ocx-sh/ocx/issues/343),
-//! where `ocx shell state` had to re-derive it to explain it.
-//!
-//! Both callers now share one derivation: `ocx self activate --reconcile`
-//! runs [`session`] and renders its [`Outcome`]; `ocx shell state` runs
-//! [`evaluate_consent`] and reports the [`ProjectConsent`] it produced. The
-//! command crate above keeps only argv, rendering and I/O.
-//!
-//! `Context`-free by construction: every input is a plain parameter
-//! ([`SessionInput`]), so nothing here can reach for ambient CLI state.
-//!
-//! # Why this is not `shell::reconcile::session`
-//!
-//! Sequencing is application-layer, not shell-emit vocabulary, and putting it
-//! under `shell/` made the two modules mutually dependent:
-//! [`ocx_project::consent`] reads `shell::coexistence::Observation` and
-//! `shell::reconcile::ScopeId`, while this module reads `project::consent`. No
-//! other file under `shell/` reaches for `project`, so the cycle was this one
-//! alone — and a `use` cycle does not compile across a crate boundary, which
-//! makes it a blocker for the planned `ocx_lib` split
-//! ([ocx-sh/ocx#313](https://github.com/ocx-sh/ocx/issues/313),
-//! [ocx-sh/ocx#324](https://github.com/ocx-sh/ocx/issues/324)). At the crate
-//! root it may depend on both, and both stay independent of it.
+//! The order is normative: resolve the global tier, evaluate consent, compose only what consent
+//! authorized, diff against the live environment, record the ledger. Not under `ocx_shell`: that
+//! closes a `use` cycle.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -52,35 +24,14 @@ use ocx_shell::shell::coexistence;
 use ocx_shell::shell::reconcile::{self, Ledger, LedgerEntry, Plan, ProjectScope, Scopes, Verdict};
 use ocx_store::file_structure;
 
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
 /// What one per-prompt session can fail with.
-///
-/// `ocx_lib` cannot use `anyhow`, so the two project-tier refusals the
-/// activation path raises carry their own variants here. Both keep the exact
-/// wording `ProjectContextError` uses for the same states — a user who hits
-/// them from `ocx pull` and from a prompt must read the same sentence — and
-/// both keep their exit codes through the `ClassifyExitCode` impl the
-/// binary carries (`ocx::exit`)
-/// rather than through the caller.
-///
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     /// `ocx.lock` is absent, or no longer describes the `ocx.toml` beside it.
-    ///
-    /// [`LockCurrency::Missing`] is reachable on the activation path because a
-    /// `paths` grant is the one consent clause that holds without a readable
-    /// lock. Wrapped rather than restated: `ProjectContextError` names the same
-    /// two states for `ocx pull`, and a user meeting one from a command and
-    /// from a prompt must read the same sentence.
     #[error("{0}")]
     Lock(#[from] LockCurrency),
 
-    /// Any library error the composition raised. Display and `source()` both
-    /// delegate, so `classify_error`'s chain walk reaches the inner type and
-    /// classifies on it.
+    /// Any library error the composition raised.
     #[error("{0}")]
     Library(#[from] crate::Error),
 
@@ -95,27 +46,18 @@ impl From<ocx_project::Error> for SessionError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Inputs
-// ---------------------------------------------------------------------------
-
 /// The project the CWD walk resolved, and the two labels the ledger records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectIdentity {
     /// The resolved `ocx.toml`.
     pub config_path: PathBuf,
-    /// Its canonical directory (A-30) — the project's identity.
+    /// Its canonical directory — the project's identity.
     pub dir: PathBuf,
-    /// `ReferenceManager::name_for_path` of `dir`: a lookup index, never the
-    /// identity.
+    /// `ReferenceManager::name_for_path` of `dir`: a lookup index, never the identity.
     pub key: String,
 }
 
-/// Why a resolved `ocx.toml` could not be turned into a [`ProjectIdentity`].
-///
-/// Both states are about a project that demonstrably exists — the walk found
-/// the file — so both callers treat them as *indeterminate*, never as "no
-/// project here".
+/// Why a resolved `ocx.toml` could not be turned into a [`ProjectIdentity`]; indeterminate, never "no project".
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum IdentityError {
@@ -135,28 +77,13 @@ pub enum IdentityError {
 }
 
 impl ProjectIdentity {
-    /// Derive the identity of the project at `config_path` — A-30's canonical
-    /// directory, then its lookup key.
-    ///
-    /// The **only** way to build one from a path. Both callers used to run this
-    /// pair themselves: `ocx self activate --reconcile`'s walk and `ocx shell
-    /// state`'s selection each did `canonical_project_dir` then
-    /// `name_for_path`, which made `key` — the `state/projects/<key>/` stamp
-    /// key — a value with two derivations. That is the residual second answer
-    /// [#343](https://github.com/ocx-sh/ocx/issues/343) was about; the
-    /// *selection* of which `ocx.toml` to resolve stays with each caller,
-    /// because a prompt only ever walks the CWD while a diagnostic must answer
-    /// for the `--project` the user typed.
+    /// Derive the identity of the project at `config_path`; the only derivation of its stamp `key`.
     ///
     /// # Errors
     ///
-    /// [`IdentityError`] when the path will not canonicalize, or the blocking
-    /// hop fails. Both mean *indeterminate*, not *absent*.
+    /// [`IdentityError`] when the path will not canonicalize or the blocking hop fails.
     pub async fn resolve(config_path: PathBuf) -> Result<Self, IdentityError> {
         let canonical = config_path.clone();
-        // `canonical_project_dir` is two `stat`-walking syscalls, so it goes to
-        // a blocking thread rather than stalling the runtime — the same hop
-        // both callers already made around it.
         let dir = tokio::task::spawn_blocking(move || consent::canonical_project_dir(&canonical))
             .await?
             .map_err(|source| IdentityError::Canonicalize {
@@ -168,16 +95,9 @@ impl ProjectIdentity {
     }
 }
 
-/// Everything one session reads, as plain values.
-///
-/// Deliberately not a `Context`: the CLI's context type carries argv, colour
-/// config and a network client, none of which a reconcile may reach for, and
-/// taking it would put `ocx_lib` downstream of `ocx_cli`. The global tier's
-/// entries arrive already resolved — that resolution is the login exporter's
-/// (`ocx_cli::command::toolchain_env`), which composes `--env` overrides and
-/// group selection the prompt never has.
+/// Everything one session reads, as plain values — never the CLI `Context`, whose network client a reconcile must not reach.
 pub struct SessionInput<'a> {
-    /// The global toolchain tier's entries, resolved by the caller (A-44).
+    /// The global toolchain tier's entries, resolved by the caller.
     pub global: Vec<Entry>,
     /// The offline-capable manager the project composition runs against.
     pub manager: &'a crate::PackageManager,
@@ -195,112 +115,29 @@ pub struct SessionInput<'a> {
     pub project: Option<&'a ProjectIdentity>,
 }
 
-/// The session-level `PATH` directories, **in desired-vector order — which is
-/// the reverse of their `PATH` order** (C-059, C-060, RUL-62).
+/// The session-level `PATH` directories, in desired-vector order — the reverse of `PATH` order,
+/// since `export_path` prepends. Front to back on `PATH`: `project_bin`, `global_bin`, `install_bin`.
 ///
-/// # The order is inverted on purpose, and reusing the sibling slice is the trap
-///
-/// [`Shell::export_path`](ocx_shell::shell::Shell::export_path) *prepends*
-/// ([`utility::path::move_to_front`](ocx_util::path::move_to_front)), so
-/// the **last** entry a plan emits ends up frontmost on `PATH`. C-060's order,
-/// front to back, is [`Self::project_bin`], then [`Self::global_bin`], then
-/// [`Self::install_bin`] — so the desired vector runs the other way, and the
-/// field declaration order below *is* that vector.
-///
-/// `setup::session_path_directories`
-/// looks like the same list and is not: it documents `directories[0]` as
-/// nearest the front, because its consumers build `PATH=d0:d1:$PATH`
-/// themselves. Copying that slice here reverses C-060's order with every unit
-/// test on the vector still green — which is why the ordering is pinned by
-/// asserting the **resulting `PATH` string**, never this vector.
-///
-/// # Why `install_bin` is backmost, stated honestly
-///
-/// Because a toolchain that pins `ocx` has to be able to win. D-4 removed the
-/// `ShimNameShadowsOcx` refusal so that a project — or the global tier — may
-/// pin its own `ocx`, and an ordering that put the installed binary in front of
-/// both made that pin unreachable by construction: the name rendered, and
-/// nothing could ever resolve it. `ocx` therefore reads the same way as every
-/// other name — project, then global, then the installed binary as the floor.
-///
-/// What used to justify the other order does not survive. A rendered trampoline
-/// bakes an **absolute** `ocx` path (`launcher::generate`'s
-/// `trampoline_ocx_binary`), so it does not resolve `ocx` through `PATH` at all,
-/// and the one remaining bare-name case — a trampoline rendered when both rungs
-/// of that ladder declined — is defended where the resolution actually happens
-/// rather than by ordering: [`resolve_command_excluding`](ocx_config::env) drops
-/// every trampoline directory from its **lookup copy** of `PATH`, and
-/// `is_ocx_trampoline` re-checks the resolved answer independently.
-///
-/// # Why a struct and not a `Vec<PathBuf>`
-///
-/// The project slot is filled a long way after the other two — after consent,
-/// after the C-061 stamp gate, after the C-062 heal. A `Vec` would take a
-/// `push` or an `insert(n, …)`, and neither states which end it meant: a `push`
-/// is correct for today's order and was silently wrong for the one this file
-/// carried until the tiers were re-ordered. A named `Option` field cannot be
-/// filled at the wrong position, whatever the order becomes next.
+/// `setup::session_path_directories` lists front-first; copying its order reverses `PATH`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPath {
-    /// [`FileStructure::ocx_install_bin_path`](ocx_store::file_structure::FileStructure::ocx_install_bin_path) —
-    /// the directory the installed `ocx` itself resolves from. Backmost of the
-    /// three on `PATH`, so it is emitted **first**: it is the floor a bare
-    /// `ocx` falls back to when no toolchain pins one, never a lid over a
-    /// toolchain that does.
-    ///
-    /// One spelling of this directory, workspace-wide (RUL-63, R-W29): a second
-    /// derivation makes `repair_owned_segments` delete one spelling and add the
-    /// other on every prompt, because both sit under `$OCX_HOME` and only one of
-    /// them is ever in the desired set.
+    /// The installed `ocx`'s directory, backmost on `PATH` so a toolchain-pinned `ocx` stays reachable
+    /// (`adr_toolchain_activation.md` § Rationale from code: activation).
     pub install_bin: PathBuf,
 
-    /// `$OCX_HOME/toolchain/active/bin` — the global rendered toolchain's trampolines.
-    /// Between the other two on `PATH`, so it is emitted **second**: a global
-    /// pin shadows the installed binary, and a project's pin shadows it in turn.
-    ///
-    /// [`ToolchainStore::bin`](ocx_store::file_structure::ToolchainStore::bin),
-    /// never a literal `toolchain/active/bin` join (C-001).
-    ///
-    /// # No `active_is_valid` gate here, unlike the project tier — deliberate
-    ///
-    /// The project slot resolves through its own `active` too and **is** gated
-    /// (C-080), because a repointed link there is an
-    /// arbitrary-directory-on-`PATH` primitive a repository can commit. This
-    /// entry is not gated, and adding the gate would be a bug rather than a
-    /// hardening: it is unconditional by [`SessionPath::new`]'s contract, and a
-    /// prompt that dropped it from the desired set would make
-    /// `repair_owned_segments` **delete** the session-`PATH` registration
-    /// `ocx self setup` wrote — `$OCX_HOME` is an owned prefix, so omitted
-    /// means removed, never left alone.
-    ///
-    /// The asymmetry is sound because the threat models differ: `$OCX_HOME` is
-    /// the user's own installation root, outside anything a checked-out
-    /// repository controls, so a rewritten `active` there is already a
-    /// compromise of the tier that would do the gating.
+    /// The global toolchain's trampolines (`$OCX_HOME/toolchain/active/bin`).
+    // Never gated like the project slot: dropping it makes `repair_owned_segments` delete `ocx self setup`'s registration.
     pub global_bin: PathBuf,
 
-    /// The consented project's `<home>/toolchain/active/bin`, in `bin` mode only —
-    /// `None` in `env` and `none` mode, and `None` in `bin` mode whenever the
-    /// C-061 stamp gate withheld it.
-    ///
-    /// Frontmost of the three on `PATH`, so it is emitted **last**: the most
-    /// specific tier that pinned a name is the one that answers for it.
+    /// The consented project's `<home>/toolchain/active/bin`, only in `bin` mode past the render-stamp gate.
     pub project_bin: Option<PathBuf>,
 }
 
 impl SessionPath {
-    /// The two **unconditional** session entries (C-059), with the project slot
-    /// still empty.
+    /// The two unconditional session entries, with the project slot still empty.
     ///
-    /// Both directories are session-level facts rather than activation
-    /// decisions, so this is minted before the walk's project is even looked at
-    /// and survives every early return [`session`] takes — including the
-    /// `activate = "none"` one. Dropping them from the desired set does not mean
-    /// "left alone": `owned_prefixes` contains `$OCX_HOME`, both directories sit
-    /// under it, and `repair_owned_segments` removes every owned segment the
-    /// desired set does not contribute — so an arm that returned early without
-    /// them would **delete the session-`PATH` registration `ocx self setup` had
-    /// just written**.
+    /// Desired on every arm: an omitted one is under an owned prefix, so the repair deletes
+    /// the session-`PATH` registration `ocx self setup` wrote.
     #[must_use]
     pub fn new(file_structure: &file_structure::FileStructure) -> Self {
         Self {
@@ -311,25 +148,8 @@ impl SessionPath {
     }
 
     /// The three directories as `PATH` entries, in desired-vector order.
-    ///
-    /// The one place this struct's field order becomes a sequence — see the type
-    /// docs for why that order is the reverse of the `PATH` order (RUL-62), and
-    /// why the test that pins it must read the emitted `PATH` string rather than
-    /// this vector.
-    ///
-    /// Every entry is [`ModifierKind::Path`] on the `PATH` key; a directory
-    /// whose bytes will not survive the platform's `PATH` grammar is dropped by
-    /// [`reconcile::plan`]'s A-10 pass, exactly as any other contributor's is.
-    ///
-    /// A directory whose bytes are not UTF-8 is skipped here rather than
-    /// rendered lossily: `to_string_lossy` would name a *different* directory,
-    /// and the repair would then add that one and remove the real one on every
-    /// prompt. Skipping is also the answer `repair_owned_segments` already
-    /// gives for such a segment — it cannot name it, so it never removes it —
-    /// which leaves the two halves agreeing rather than fighting.
+    // A non-UTF-8 directory is skipped: a lossy rendering names another directory, added while the real one is removed each prompt.
     pub(crate) fn entries(&self) -> Vec<Entry> {
-        // The desired vector, back to front on `PATH`: see the type docs
-        // (RUL-62) for why this order is the reverse of the documented one.
         [
             Some(&self.install_bin),
             Some(&self.global_bin),
@@ -359,83 +179,35 @@ impl SessionPath {
 /// What one recomposition resolved: the entries each scope wants, the project
 /// slot's identity, and every message the prompt owes the user.
 pub struct Outcome {
-    /// The session-level `PATH` directories (C-059) — desired in **every**
-    /// `activate` mode, on every arm, including the ones that compose nothing.
-    ///
-    /// Not an `Option` and not a `Vec` that an arm could leave empty: the field
-    /// is minted in the one [`Outcome`] literal [`session`] builds, above every
-    /// early return, which is what makes "unconditional" a property of the type
-    /// rather than of a rule each arm has to remember.
+    /// The session-level `PATH` directories, desired on every arm.
     pub session: SessionPath,
 
-    /// The global toolchain tier's entries, applied first (C-018).
+    /// The global toolchain tier's entries, applied first.
     pub global: Vec<Entry>,
     /// The project tier's entries — empty when inert or yielded.
     pub project: Vec<Entry>,
 
-    /// The **second** owned prefix: the resolved toolchain home of the
-    /// consented, in-scope project (C-063, RUL-68). `None` on every other arm.
-    ///
-    /// `owned_prefixes` is a **deletion authority over a live shell's `PATH`** —
-    /// `repair_owned_segments` removes every segment under an owned prefix the
-    /// desired set does not contribute — so what may be listed is exactly
-    /// `$OCX_HOME` plus this. Never the bare `toolchain_dir` root (it holds
-    /// *other projects'* homes), never a consent-refused project, never a
-    /// project the walk found but did not put in scope.
-    ///
-    /// Carried on the outcome rather than re-derived at the call site because
-    /// the call site cannot: `plan_for`'s caller has a `FileStructure` and a
-    /// `Ledger`, and the home depends on the project directory *and* on the
-    /// merged `toolchain_dir` tier. Minted only after [`ConsentProof`] is in
-    /// hand, which is what keeps "strictly after consent" a property of where
-    /// the field is assigned.
+    /// The second owned prefix: the consented, in-scope project's toolchain home; `None` otherwise.
+    // Owned prefixes delete live `PATH` segments: never the bare `toolchain_dir` (other projects' homes) or an unconsented project.
     pub owned_home: Option<PathBuf>,
 
     /// The project slot to record, or `None` to retire it.
     pub slot: Option<ProjectIdentity>,
-    /// Whether the CWD walk resolved a project at all.
-    ///
-    /// `slot` cannot answer this: it is `None` both when no project was found
-    /// **and** when one was found but yielded to direnv/mise or was refused by
-    /// consent. Only "no project at all" is cacheable as
-    /// [`Verdict::NoProject`] — a yield is expired by an env sentinel the
-    /// fingerprint does not fold, so it must recompose every prompt.
+    /// Whether the CWD walk resolved a project at all; only `false` is cacheable as [`Verdict::NoProject`].
     pub resolved: bool,
-    /// Whether the resolved project was refused by consent (C-025).
+    /// Whether the resolved project was refused by consent.
     pub inert: bool,
-    /// Deferred diagnostics, in emission order (A-21).
+    /// Deferred diagnostics, in emission order.
     pub messages: Vec<String>,
 }
 
-/// The C-028 gate, in its own module so its field is genuinely private.
-///
-/// A unit struct would be freely constructible anywhere in this file — Rust's
-/// privacy is module-scoped — which would make the "compile-time obligation"
-/// claim false for exactly the edit it is meant to stop. The private field
-/// makes [`ConsentProof::of`] the only way to mint one from anywhere outside
-/// these few lines.
+/// The consent-before-read gate, in its own module so no other code in this file can mint a proof.
 mod consent_gate {
     use ocx_project::consent::{Decision, Grant};
 
-    /// Evidence that consent was evaluated for this project and said
-    /// `Activate`, **and which clause said so** (C-028).
+    /// Evidence that consent said `Activate`, and which clause said so.
     ///
-    /// A capability token, not decoration. C-028 is the design's mise-CVE
-    /// lesson — *"the only project-supplied bytes read before consent is
-    /// established are the CWD walk's `stat` calls and the `ocx.lock` parse the
-    /// source-set predicate requires; `ProjectConfig` deserialization happens
-    /// after"* — and it was previously guaranteed by statement order alone, so
-    /// hoisting one call above another defeated it silently with every test
-    /// still green.
-    ///
-    /// `project_entries` takes one of these, and one cannot exist
-    /// without a [`Decision`] having been produced first, so the ordering is a
-    /// **compile-time** obligation rather than a comment a future edit can
-    /// step over.
-    ///
-    /// The carried [`Grant`] extends the same idea one step: the token now says
-    /// *how much* was granted, so the project-file `[env]` channel is opened by
-    /// a value rather than by the absence of a check.
+    /// `project_entries` requires one, so reading `ocx.toml` before consent does not compile.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ConsentProof(Grant);
 
@@ -448,8 +220,7 @@ mod consent_gate {
             }
         }
 
-        /// Whether the granting clause authorizes the project-file `[env]`
-        /// channel — clause 1 or clause 3, never clause 2.
+        /// Whether the granting clause authorizes the project-file `[env]` channel.
         pub fn authorizes_project_env(self) -> bool {
             self.0.authorizes_project_env()
         }
@@ -458,21 +229,8 @@ mod consent_gate {
 
 pub use consent_gate::ConsentProof;
 
-// ---------------------------------------------------------------------------
-// Consent — the one derivation both `self activate` and `shell state` use
-// ---------------------------------------------------------------------------
-
 /// The consent answer for one project, and the evidence that produced it.
-///
-/// **The struct is the seam.** Its fields are private and it has no public
-/// constructor, so the only way to hold one is to have called
-/// [`evaluate_consent`] — the same compile-time shape [`ConsentProof`] uses one
-/// level down. That is what stops a second derivation from growing back: a
-/// caller cannot assemble a `Decision` of its own and feed it to either
-/// consumer, which is exactly how `ocx shell state` came to read the two
-/// `OCX_CONSENT_*` variables as string literals where `ocx self activate` read
-/// them through the constants
-/// ([ocx-sh/ocx#343](https://github.com/ocx-sh/ocx/issues/343)).
+// No public constructor: `ocx shell state` and `ocx self activate` must share `evaluate_consent`, or their answers drift.
 #[derive(Debug)]
 pub struct ProjectConsent {
     decision: Decision,
@@ -486,50 +244,28 @@ impl ProjectConsent {
         &self.decision
     }
 
-    /// Whether a usable stamp backs it (A-25 — an unusable stamp is an absent
-    /// one).
+    /// Whether a usable stamp backs it (an unusable stamp counts as absent).
     pub fn stamped(&self) -> bool {
         self.stamp.is_some()
     }
 
     /// The usable stamp itself, when there is one.
-    ///
-    /// Carried rather than reduced to a bool because `ocx shell state` reports
-    /// *when* the stamp was written: a grant the user cannot see the age of is
-    /// half the invisibility the stamp was faulted for. Reading the file a
-    /// second time from the renderer would reopen the drift
-    /// [#343](https://github.com/ocx-sh/ocx/issues/343) closed.
     pub fn stamp(&self) -> Option<&ConsentStamp> {
         self.stamp.as_ref()
     }
 
-    /// The parsed `ocx.lock` the evidence hop read, or `None` when it was
-    /// absent, unreadable or unparseable — one outcome, because all three
-    /// leave the source-set predicate with nothing to quantify over.
-    ///
-    /// Handed back rather than re-read: two reads of the same file are two
-    /// different byte sequences the moment a `git checkout` lands between
-    /// them, and consent deciding on one while composition uses the other is
-    /// the whole finding C-028 exists for.
+    /// The parsed `ocx.lock` consent decided on, or `None` when absent, unreadable or unparseable.
+    // Handed back, never re-read: a `git checkout` between two reads lets consent and composition see different locks.
     pub fn lock(&self) -> Option<&ProjectLock> {
         self.lock.as_ref()
     }
 
-    /// Take the lock back out, for the composition that follows a grant.
     fn into_lock(self) -> Option<ProjectLock> {
         self.lock
     }
 }
 
-/// Evaluate consent over one project: read every input on one blocking hop,
-/// then run the predicate.
-///
-/// The single entry point for the question "is this project activated, and if
-/// not, why". `ocx self activate --reconcile` turns the answer into a
-/// [`ConsentProof`] or an inert outcome; `ocx shell state` renders the same
-/// answer as the report's reason. Neither derives it a second time.
-///
-/// Read-only (A-29): nothing here writes a stamp. A grant activates directly.
+/// Evaluate consent over one project; read-only, the one derivation `self activate` and `shell state` share.
 pub async fn evaluate_consent(
     whitelist: &ShellConsent,
     target: &ocx_oci::Platform,
@@ -550,43 +286,10 @@ pub async fn evaluate_consent(
     ProjectConsent { decision, stamp, lock }
 }
 
-/// Every piece of consent evidence the prompt needs, on **one** blocking hop
-/// (C-028, C-044).
+/// Every piece of consent evidence the prompt needs, on one blocking hop; `lock` moves through, never cloned.
 ///
-/// Two blocking reads used to sit on this path independently:
-/// [`consent::verified_sources`] on its own `spawn_blocking`, and
-/// [`consent::load`] — a `std::fs::read` — inline on the runtime thread. They
-/// fold into a single hop for the same reason the fingerprint fold does (see
-/// `run_reconcile`): one hop for the whole read set is cheaper than the exec
-/// that reached it, and an inline `std::fs::read` is not a hop at all.
-///
-/// `lock` travels **in and back out** rather than being cloned. `ProjectLock`
-/// derives `Clone` with no `Arc`, so a clone deep-copies every [`LockedTool`] —
-/// two `String`s, a `PackageRef` and a platform `BTreeMap` apiece — on every
-/// prompt, and the caller needs the original afterwards for `project_entries`.
-///
-/// # The clause-2 gate
-///
-/// [`consent::verified_sources`] costs a `read_dir` plus a per-marker read for
-/// **every** locked tool, and its result is unobservable unless
-/// `[shell.consent] namespaces` is configured. Both branches of
-/// [`consent::evaluate_with_stamp`] that read `verified` are reached only
-/// through its `namespace_granted`, which returns `false` outright when
-/// `whitelist.namespaces` is `None` — the grant branch cannot fire, and the
-/// `UncorroboratedNamespace` refusal that would have carried `verified` in its
-/// payload is behind the same short-circuit. So with no namespaces grant the
-/// evidence is not read at all and `None` is passed on. `None` there is not the
-/// weaker answer it is elsewhere: it is *indistinguishable* from any `Some(..)`,
-/// because the only clause that could tell them apart is already refused.
-///
-/// # Failing closed
-///
-/// A join error yields `(None, None, None)`. No stamp and no corroboration is
-/// strictly less consent than the hop would have produced, and the lost lock
-/// reproduces `project_entries`' `LockMissing` arm, whose contract is "emit
-/// nothing, retain what is applied" rather than a torn-down environment.
-///
-/// [`LockedTool`]: ocx_project::lock::LockedTool
+/// `verified_sources` runs only when `namespaces` is configured, the only case that reads it.
+/// A join error fails closed to `(None, None, None)`: strictly less consent.
 async fn consent_evidence(
     lock: Option<ProjectLock>,
     whitelist: &ShellConsent,
@@ -616,17 +319,7 @@ async fn consent_evidence(
     }
 }
 
-/// One info line **per observed tool** (C-049, A-37).
-///
-/// The count is the contract, not the wording: with both direnv and mise live,
-/// both lines appear. This function owns the **renderer** half of A-37 — fan out
-/// one line per observation, never just the first. The **detection** half (the
-/// two sentinels being independent `if`s rather than an `elif` chain) lives in
-/// `shell::coexistence::detect` and is guarded there by
-/// `detect_both_sentinels_fire_independently_a37` (`coexistence.rs:227`), which
-/// sets both env sentinels for real. An `elif` there would return one
-/// `Observation` and this function would faithfully render one line, so the two
-/// halves need their own guards and neither can stand in for the other.
+/// One info line per observed tool, never just the first: with direnv and mise both live, both lines appear.
 pub fn yield_messages(yielded: &coexistence::Yield) -> Vec<String> {
     yielded
         .observed
@@ -644,38 +337,14 @@ pub fn yield_messages(yielded: &coexistence::Yield) -> Vec<String> {
         .collect()
 }
 
-/// Whether this prompt can answer from `stat`s alone (C-042).
-///
-/// **Only the negative verdicts are cached.** An `Activate` verdict is always
-/// re-derived, because caching it would make the ledger a consent input, which
-/// C-007 forbids — and caching a negative one can only ever cause ocx to do
-/// *less*, which is the fail-safe direction. The cache is sound only because the
-/// watch set it hangs off expires it (A-13).
-///
-/// [`Verdict::NoProject`] is the second negative and is **not** consent-derived
-/// — there is no project to consent to — so it leaves C-007 exactly where it
-/// was. Without it the fast path could only ever fire inside a consent-refused
-/// project, and every `cd` in an ordinary directory paid `Context::try_init`,
-/// `resolve_global_pinned_env` and a full plan to recompose the global tier the
-/// fingerprint had already proved unchanged: 21.3 ms against 4.5 ms, measured on
-/// a real bash with the real emitted hook.
+/// Whether this prompt can answer from `stat`s alone.
+// Only negative verdicts: caching `Activate` would make the ledger a consent input.
 pub fn is_stat_only(ledger: &Ledger, fingerprint: &str) -> bool {
     ledger.fp == fingerprint && matches!(ledger.verdict, Some(Verdict::Inert | Verdict::NoProject))
 }
 
-/// The project-file `[env]` channel, gated on the clause that granted.
-///
-/// Returns the entries to apply and whether a **declared** `[env]` was withheld
-/// — the second half is what the caller owes a hint line for, and it is `false`
-/// for a project that declares no `[env]` at all so an ordinary
-/// namespace-granted project prints nothing every prompt.
-///
-/// This is the only call to [`project_env_entries`] on the activation path, and
-/// it is the only consumer of `project_entries`' `consent` parameter: deleting
-/// the gate leaves that parameter unused, which fails the build under
-/// `-D warnings` rather than silently re-opening the channel.
-///
-/// [`project_env_entries`]: ocx_project::project_env_entries
+/// The project-file `[env]` channel, gated on the clause that granted: the entries to apply, and
+/// whether a declared `[env]` was withheld.
 pub fn authorized_project_env(
     consent: ConsentProof,
     config: &ocx_project::ProjectConfig,
@@ -690,45 +359,15 @@ pub fn authorized_project_env(
     (Vec::new(), withheld)
 }
 
-/// Compose the consenting project's toolchain env, and report whether the
-/// project's own `[env]` was withheld.
-///
-/// Deliberately **not** `load_project_with_lock_consenting`: nothing on the
-/// activation path writes a stamp (A-26). A grant activates directly.
-///
-/// Also deliberately **not** `load_project_with_lock`: that helper re-runs the
-/// precedence chain and re-reads `ocx.lock`, so consent could be decided on one
-/// set of bytes and composition run on another, and an ambient `OCX_GLOBAL=1`
-/// would re-target it at `$OCX_HOME/ocx.toml` behind the verdict's back. The
-/// config the caller already deserialized and the lock the source-set predicate
-/// already parsed are passed in instead.
+/// Compose the consenting project's toolchain env, and report whether its own `[env]` was withheld.
+// Never `load_project_with_lock`: it re-reads `ocx.lock` and honours `OCX_GLOBAL`, so composition could diverge from what consent decided.
 async fn project_entries(
     input: &SessionInput<'_>,
-    // C-028 — S1: the proof is *read* here, by `authorized_project_env`, so the
-    // project-file `[env]` channel is opened by a value rather than by the
-    // absence of a check, and deleting the gate leaves an unused binding that
-    // fails the build under `-D warnings`.
     consent: ConsentProof,
     project: &ProjectIdentity,
     config: &ocx_project::ProjectConfig,
-    // Taken **by value** so it can be moved into `ToolchainLinks` below instead
-    // of cloned there. `ProjectLock` derives `Clone` with no `Arc`, so a clone
-    // deep-copies every `LockedTool` — two `String`s, a `PackageRef` and a
-    // platform `BTreeMap` apiece — on every prompt. That is the same cost
-    // `consent_evidence` travels in-and-back-out to avoid (see its doc), and
-    // this was the one site still paying it. `ActivateMode::Env` is the last
-    // reader of the lock in `emit_for_mode`, so moving it costs the caller
-    // nothing.
     lock: ProjectLock,
-    // The **already ownership-vetted** home from `owned_project_home`, never a
-    // second `project_home` call: that helper's own doc records why resolving it
-    // twice is a regression, and its `Err` travels to `session`, whose contract
-    // is "emit nothing at all" — so one refused `toolchain_dir` would silently
-    // no-op the hook in every project, C-059's two global directories included.
-    //
-    // `None` is C-067's digest lane, and it is the correct answer for exactly
-    // the states that produced it: a refused `toolchain_dir`, and a home ocx may
-    // not own.
+    // The vetted home from `owned_project_home`, never a second `project_home` call: its `Err` would no-op the hook in every project.
     home: Option<file_structure::ToolchainHome>,
 ) -> Result<(Vec<Entry>, bool), SessionError> {
     use crate::composer::{ComposeRequest, Materialization};
@@ -737,9 +376,7 @@ async fn project_entries(
     let groups = vec![DEFAULT_GROUP.to_owned()];
     let tools = compose_tool_set(config, Some(&lock), &groups, &[], input.target)?;
 
-    // `LocalOnly`, unconditionally: a prompt must never block on the network,
-    // and a tool that is not materialised yet is an omission the next explicit
-    // `ocx pull` fixes — never a hung shell.
+    // `LocalOnly`: a prompt must never block on the network.
     let manager = input.manager.offline_view(input.local_index.clone());
     let requests: Vec<ComposeRequest> = tools
         .iter()
@@ -752,13 +389,7 @@ async fn project_entries(
         .compose_roots(&requests, input.target, Materialization::LocalOnly, input.concurrency)
         .await?;
     let (env, env_withheld) = authorized_project_env(consent, config, &project.config_path, &groups);
-    // C-065/C-070: the `env`-mode hook is a composing emitter, so it heals the
-    // groups it is about to emit. That set is `[DEFAULT_GROUP]` here — not
-    // C-062's cost-driven narrowing of a *wider* selection, but the actual
-    // scope of this composition, which `compose_tool_set` above was given.
-    //
-    // No CLI tier: the hook has no `--pinned`, so `ocx.toml` and
-    // `OCX_TOOLCHAIN_PINNED` decide (C-007).
+    // Heals exactly the groups it emits: the scope `compose_tool_set` was given.
     let toolchain = home.map(|home| {
         Box::new(crate::ToolchainLinks {
             pinned: crate::pinned_for_project(None, config),
@@ -780,48 +411,19 @@ async fn project_entries(
     Ok((entries, env_withheld))
 }
 
-/// Compose both scopes and decide the project slot (C-018, C-025, C-049).
+/// Compose both scopes and decide the project slot.
 ///
-/// An `Err` here emits **nothing at all**, which is the fail-safe outcome and
-/// not a degraded one: the previous environment stays applied and the carrier
-/// stays as it was, so a momentarily stale lock (mid-`git checkout`) retains the
-/// scope rather than tearing it down. Emitting a partial plan built from a
-/// `desired` that is missing the project scope would *revert* it — the wrong
-/// direction — which is the same reasoning C-018 gives for an indeterminate
-/// walk.
+/// An `Err` must emit nothing at all: a partial plan lacking the project scope would revert it.
 ///
 /// # Errors
 ///
-/// [`SessionError::LockMissing`] and [`SessionError::StaleLock`] when the
-/// consenting project's lock is absent or disagrees with its `ocx.toml`;
-/// otherwise whatever the composition raised.
+/// [`SessionError::Lock`] when the consenting project's lock is absent or stale; otherwise
+/// whatever the composition raised.
 pub async fn session(input: SessionInput<'_>) -> Result<Outcome, SessionError> {
-    // A-44 — the ocx home toolchain is ALWAYS consented, which is why the
-    // caller resolves it before this function is even entered: before the
-    // walk's project, before the lock read, before `evaluate_with_stamp`. Every
-    // arm below returns this same `Outcome` and none of them clears `global`.
-    // `$OCX_HOME/ocx.toml` is the user's own file, so no `[shell.consent]`
-    // entry — nor the absence of one, nor a refused project sitting in the CWD
-    // — may withhold it. Do not put a *consent* gate in front of this.
-    //
-    // D-3 carves out exactly one gate, and it is not a consent one: the caller
-    // resolves `input.global` through the global tier's own `activate`
-    // (`ocx_cli::command::self_group::activate`'s `global_prompt_entries`), so
-    // `bin` and `none` arrive here as an empty `global` rather than as a
-    // withheld one. That is the user's own file deciding for the user's own
-    // toolchain — the same authority the project tier has over its own. Nothing
-    // else may narrow it, and the gate stays *outside* this function so every
-    // arm below still carries whatever `global` the caller resolved.
-    //
-    // C-059 — and the two session `PATH` directories are minted in the same
-    // literal, for the same reason one step out: they are session-level facts,
-    // not activation decisions, so every arm below — the yielded one, the
-    // consent-refused one, `activate = "none"` — carries them. An arm that
-    // dropped them would not "leave them alone"; both sit under `$OCX_HOME`,
-    // which is an owned prefix, so the repair would delete the registration
-    // `ocx self setup` wrote. Do not move this below any `return`.
     let mut outcome = Outcome {
+        // Above every `return`, or an arm drops these and the repair deletes `ocx self setup`'s registration.
         session: SessionPath::new(input.file_structure),
+        // Always consented (the user's own file): no consent gate may withhold or clear it.
         global: input.global.clone(),
         project: Vec::new(),
         owned_home: None,
@@ -832,8 +434,7 @@ pub async fn session(input: SessionInput<'_>) -> Result<Outcome, SessionError> {
     };
 
     let shell_config = input.config.shell.as_ref();
-    // C-034 — the managed tier dropped a `[shell.consent]` payload. `log::warn!`
-    // goes to a stderr the shims discard, so the reason rides the prompt.
+    // Not `log::warn!`: the shims discard stderr.
     if let Some(reason) = shell_config.and_then(|shell| shell.consent_strip_reason.as_ref()) {
         outcome.messages.push(format!("ocx: {reason}"));
     }
@@ -842,47 +443,24 @@ pub async fn session(input: SessionInput<'_>) -> Result<Outcome, SessionError> {
         return Ok(outcome);
     };
 
-    // C-049 + A-37 — the two sentinels are **independent `if`s, never an `elif`
-    // chain**: with both direnv and mise live, both lines appear. Narrowing
-    // `desired` to the global scope and leaving `slot` at `None` is the whole
-    // behaviour: C-016's retirement rule then retires the project's recorded
-    // entries subtractively, with no new planner arm.
+    // A yield leaves `slot` at `None`, so the retirement rule retires the project's recorded entries.
     let yielded = coexistence::detect(&project.dir);
     if !yielded.observed.is_empty() {
         outcome.messages.extend(yield_messages(&yielded));
         return Ok(outcome);
     }
 
-    // C-028's bounded carve-out: the lock parse the source-set predicate needs,
-    // and nothing else, before consent is established.
-    //
-    // Hoisted above the hop that consults it: `effective_consent` is the
-    // already-loaded `[shell]` table plus two `OCX_CONSENT_*` env reads (C-031),
-    // so it costs nothing here and lets the hop skip evidence the whitelist
-    // makes unobservable.
     let whitelist = effective_consent(shell_config);
     let evaluated = evaluate_consent(&whitelist, input.target, &input.file_structure.packages, project).await;
 
     let Some(consent_proof) = ConsentProof::of(evaluated.decision()) else {
         outcome.inert = true;
-        // The gesture first, the diagnostic second. Pointing only at
-        // `ocx shell state` dead-ends: it is read-only, so a user who follows
-        // the hint learns the reason and still has nothing to type.
-        // `ocx shell allow` is the grant, and naming the directory is what
-        // makes either half actionable at a prompt.
         outcome.messages.push(format!(
             "ocx: {dir} is not activated; run `ocx shell allow` to consent, or `ocx shell state` to see why",
             dir = project.dir.display(),
         ));
         return Ok(outcome);
     };
-    // Consent said yes: everything the project's own bytes decide happens
-    // beyond this point, behind the proof.
-    //
-    // **Read once.** The lock travels out of `evaluate_consent` rather than
-    // being re-read here: two reads of the same file are two different byte
-    // sequences the moment a `git checkout` lands between them, and consent
-    // deciding on one while composition uses the other is the whole finding.
     let lock_path = lock_path_for(&project.config_path);
     project_contribution(
         &input,
@@ -897,32 +475,10 @@ pub async fn session(input: SessionInput<'_>) -> Result<Outcome, SessionError> {
     Ok(outcome)
 }
 
-/// What one consenting project contributes to this prompt, per its resolved
-/// `activate` mode (C-005, C-006, C-061, C-063).
-///
-/// The **one** post-consent reader of the project's own bytes, and the reason
-/// the mode dispatch lives here rather than in [`session`]: `activate` is an
-/// `ocx.toml` key, so resolving it needs the deserialization C-028 puts behind
-/// the proof. Hoisting the parse into `session` would move that read out from
-/// behind the parameter that gates it and leave the ordering guaranteed by
-/// statement order alone — which is exactly the shape [`ConsentProof`] exists to
-/// replace.
-///
-/// Writes into `outcome` rather than returning a tuple of four optional things:
-/// the three modes contribute to three different fields, and a struct whose
-/// every field is `None` on two arms out of three is a worse shape than the
-/// mutation.
-///
-/// # Errors
-///
-/// The `ocx.toml` parse; the home resolution (C-017–C-019's `toolchain_dir`
-/// funnel, or the canonicalisation's own I/O failure);
-/// [`LockCurrency`] for the two modes that read the lock; and whatever the
-/// composition or the heal raised.
+/// What one consenting project contributes to this prompt, per its resolved `activate` mode.
+// The `ocx.toml` parse stays here, behind `consent`; hoisted into `session`, only statement order would gate it.
 async fn project_contribution(
     input: &SessionInput<'_>,
-    // C-028 — the parameter *is* the gate: there is no way to reach the
-    // `ocx.toml` deserialization below without having evaluated consent first.
     consent: ConsentProof,
     project: &ProjectIdentity,
     lock_path: &Path,
@@ -933,40 +489,19 @@ async fn project_contribution(
 
     let config = ocx_project::ProjectConfig::from_path(&project.config_path).await?;
 
-    // C-063, RUL-91 — the second owned prefix, and it widens for **every**
-    // mode, not only `bin`. `<home>/bin` lives outside `$OCX_HOME`, so under a
-    // `bin`-only reading a `bin → none` transition would have nothing
-    // authorised to remove the segment it had just stopped contributing, and it
-    // would strand on `PATH` for the shell's whole life. Assigned here — after
-    // the proof, before any mode branch — so "strictly after consent" is a
-    // property of where the field is written.
-    //
-    // `None` is the refusing answer, and it is deliberately **not** an error:
-    // stranding a stale `<home>/bin` on `PATH` is strictly safer than owning a
-    // prefix the repository chose.
+    // Owned in every mode, not only `bin`, or a `bin → none` switch strands `<home>/bin` on `PATH`.
     let home = owned_project_home(input, project, outcome).await;
     outcome.owned_home = home.as_ref().map(|home| home.root().to_path_buf());
 
     match activate_mode(&config) {
-        // C-059 — and this arm still carries the two session directories,
-        // because they were minted in `session`'s one `Outcome` literal above
-        // every branch. `none` contributes nothing of its own and reads no
-        // lock: a lock it never opens cannot be stale for it.
         ActivateMode::None => {}
 
         ActivateMode::Bin => {
-            // A home ocx may not own cannot be put on `PATH` either. The line
-            // naming why was already pushed by `owned_project_home`; a second
-            // one here would say the same thing twice on one prompt.
             let Some(home) = home else { return Ok(()) };
             let lock = current_lock(lock, &config, lock_path)?;
             match bin_mode_entry(input, project, &home, &lock).await? {
                 Some(bin) => outcome.session.project_bin = Some(bin),
-                // C-061's two negative outcomes — no stamp, and a mismatch —
-                // have one behaviour, so they have one sentence. It rides
-                // `messages` rather than `log::debug!` because every emitted
-                // hook redirects this process's stderr to `/dev/null`, and
-                // S-001 promises the user sees it (RUL-88).
+                // Not `log::debug!`: every emitted hook sends stderr to `/dev/null`.
                 None => outcome.messages.push(format!(
                     "ocx: {dir}: its toolchain has not been rendered for this lock; run `ocx pull` here",
                     dir = project.dir.display(),
@@ -976,16 +511,9 @@ async fn project_contribution(
 
         ActivateMode::Env => {
             let lock = current_lock(lock, &config, lock_path)?;
-            // `home`, not a second resolution: the following lane may only
-            // follow a tree this prompt was already willing to own.
             let (entries, env_withheld) = project_entries(input, consent, project, &config, lock, home).await?;
             outcome.project = entries;
             if env_withheld {
-                // A namespaces grant is a fleet auto-enabler satisfied by the
-                // project's own lock text, so it authorizes packages and not the
-                // project file's own `[env]`. Same shape as the inert hint one
-                // level up: name the directory, name the gesture that would
-                // widen it.
                 outcome.messages.push(format!(
                     "ocx: {dir}: its [env] is not applied - a namespaces grant covers packages only; run `ocx pull` \
                      here once, or add the directory to `[shell.consent] paths`",
@@ -997,38 +525,11 @@ async fn project_contribution(
     Ok(())
 }
 
-/// The project's home **when ocx may own it** (C-063, RUL-33, RUL-44).
+/// The project's home when ocx may own it; `None`, never an error, which widens no deletion authority.
 ///
-/// `None` is not an error and never propagates one: it says "this prompt widens
-/// no deletion authority to this project", which costs a stale `<home>/bin`
-/// stranded on `PATH` and buys back the two states below. The two session
-/// directories still emit either way, because they are minted one level up.
-///
-/// # Why the prompt path needs its own call to the render-side guard
-///
-/// A guard on the write path did nothing for the read path.
-/// [`ocx_project::resolve_toolchain_home`] builds the default home
-/// **lexically** — `<canonical project>/.ocx/toolchain`, no component stat'ed —
-/// and [`shell::reconcile::plan`](ocx_shell::shell::reconcile::plan) canonicalises
-/// each owned prefix, which resolves that final component, then decides
-/// ownership by `starts_with`. So a repository committing `.ocx/toolchain` as a
-/// symlink to `/` put `/` in the owned set, and `repair_owned_segments` emits a
-/// removal for every `PATH` segment the desired set does not contribute — the
-/// user's whole ambient `PATH`, on every prompt. `ocx pull` refused to *render*
-/// through that link the whole time; nothing refused to *own* it. The refusal
-/// runs **before** the assignment, never after.
-///
-/// A `namespaces` grant needs no gesture from the user at all, so "they
-/// consented" is not a mitigation — it is the premise.
-///
-/// # The other refusing state
-///
-/// A `toolchain_dir` the config tier declares and C-017–C-019 refuse (exit 78)
-/// used to travel out of here as an error, and `session`'s `Err` contract is
-/// "emit nothing" — so one bad `[managed]` push turned every prompt in every
-/// project into a silent no-op, C-059's directories included. It degrades here
-/// for the same reason the `Lock` arm refuses to: a config the user cannot see
-/// the effect of is worse than a toolchain that is not activated.
+/// A symlinked home must be refused before it becomes an owned prefix, or a repository
+/// linking `.ocx/toolchain` to `/` deletes the user's whole `PATH` each prompt. An `Err` would
+/// make `session` emit nothing, so one bad `toolchain_dir` would no-op every project.
 async fn owned_project_home(
     input: &SessionInput<'_>,
     project: &ProjectIdentity,
@@ -1053,9 +554,7 @@ async fn owned_project_home(
     .await
     {
         Ok(verdict) => verdict.err(),
-        // The hop dying is not evidence the tree is safe, and this is the one
-        // decision in the session where the fail-safe direction is "own
-        // nothing".
+        // A dead hop is no evidence the tree is safe: own nothing.
         Err(error) => Some(crate::error::file_error(home.root(), std::io::Error::other(error))),
     };
     match refusal {
@@ -1070,32 +569,13 @@ async fn owned_project_home(
     }
 }
 
-/// The project's resolved toolchain home (C-002, C-063).
-///
-/// The `toolchain_dir` funnel is re-run here rather than taken as a parameter:
-/// [`SessionInput`] is a plain-value contract, and a bare `Option<&Path>`
-/// parameter is the compile-legal bypass R-W20 closed —
-/// [`ToolchainRoot`](ocx_config::ToolchainRoot) is constructible only by its
-/// own resolver, so the validated value cannot be handed in without widening the
-/// input type to something that can also be handed the unvalidated one.
-///
-/// # What a consented prompt actually pays
-///
-/// One `Config` clone, one `spawn_blocking` hop, and one
-/// `dunce::canonicalize` of the project directory — **every** prompt in a
-/// consented project, in every mode, because that is where C-063's owned prefix
-/// is decided. Only the funnel's own containment `stat`s are conditional on a
-/// tier having declared a root; the clone and the canonicalisation are not.
-///
-/// The clone is the price of the closed type above: `ToolchainRoot::resolve`
-/// takes the whole `Config`, its two tiers (`config.toml` then
-/// `OCX_TOOLCHAIN_DIR`) are spelled once inside `config.rs`, and extracting
-/// just the declared value here would be a second spelling of that ladder — the
-/// drift class RUL-63 exists to forbid.
+/// The project's resolved toolchain home.
 ///
 /// # Errors
 ///
-/// The funnel's own refusal (exit 78), or the canonicalisation's I/O failure.
+/// The `toolchain_dir` funnel's refusal (exit 78), or the canonicalisation's I/O failure.
+// Re-runs the `toolchain_dir` funnel from `Config`: a bare root-path parameter would bypass
+// `ToolchainRoot`'s validation.
 async fn project_home(config: &Config, project_dir: &Path) -> Result<file_structure::ToolchainHome, SessionError> {
     let config = config.clone();
     let owned_dir = project_dir.to_path_buf();
@@ -1106,26 +586,16 @@ async fn project_home(config: &Config, project_dir: &Path) -> Result<file_struct
     .await
     {
         Ok(home) => Ok(home?),
-        // The blocking unit itself dying — a panic, or a shutting-down runtime
-        // — is a state the unit under it cannot report, so it is attributed to
-        // the path it was resolving.
         Err(error) => Err(crate::error::file_error(project_dir, std::io::Error::other(error)).into()),
     }
 }
 
 /// The lock the two lock-reading modes need, current with `config`.
 ///
-/// The pair of refusals `project_entries` used to make inline, lifted so `bin`
-/// mode makes the same two in the same words. Both name the state `ocx pull`
-/// reports for it, which `session`'s `Err` contract turns into "emit nothing,
-/// retain what is applied" rather than a torn-down environment.
-///
 /// # Errors
 ///
-/// [`LockCurrency::Missing`] — a `paths` grant is the one clause that holds
-/// without a readable lock, so this arm is reachable — and
-/// [`LockCurrency::Stale`] when the lock's stored hash disagrees with the
-/// current `ocx.toml`.
+/// [`LockCurrency::Missing`] (reachable under a `paths` grant), or [`LockCurrency::Stale`] when
+/// the lock disagrees with `ocx.toml`.
 fn current_lock(
     lock: Option<ProjectLock>,
     config: &ocx_project::ProjectConfig,
@@ -1146,139 +616,35 @@ fn current_lock(
     Ok(lock)
 }
 
-/// Resolve the `activate` ladder for one toolchain tier (C-005, C-006).
-///
-/// `cli ▸ file ▸ environment ▸ floor`, and this is the **only** site that
-/// resolves it — the site [`Ladder::resolve`](ocx_project::ladder::Ladder::resolve)
-/// names as where its review convention starts being checked. Two halves of that
-/// convention:
-///
-/// - the floor is [`ACTIVATE_FLOOR`](ocx_project::activate::ACTIVATE_FLOOR), passed by
-///   name, never a re-spelled `ActivateMode::Env`;
-/// - the `cli` tier is `None` **as a statement**, not an omission: there is no
-///   `--activate` flag by design (C-006/C-042 put the choice in `ocx.toml` and
-///   `ocx self setup`).
-///
-/// The environment tier is the **weakest**, below the file tier, and is read
-/// through [`ActivateMode::from_env`](ocx_project::activate::ActivateMode::from_env)
-/// so an unrecognised `OCX_TOOLCHAIN_ACTIVATE` warns and falls through to the
-/// floor rather than short-circuiting to it.
-///
-/// Takes the already-deserialized config: the `ocx.toml` parse is C-028's
-/// post-consent step, so this cannot become the thing that reads project bytes
-/// early.
-///
-/// # Both tiers, one ladder
-///
-/// Three production call sites across two tiers, and the tier is decided
-/// entirely by *which* `ocx.toml` the caller deserialized:
-///
-/// - the **project** tier — [`project_contribution`], over a consenting
-///   project's own file, after C-028's consent step;
-/// - the **global** tier — the per-prompt hook
-///   (`ocx_cli::command::self_group::activate`), over `$OCX_HOME/ocx.toml`,
-///   which ADR `adr_toolchain_activation.md` D-3 makes the clean-shell case's
-///   own control;
-/// - **either** tier — `ocx shell state`, over the manifest belonging to the
-///   scope it reports. It is the command whose product is *"why does my shell
-///   do nothing"*, so it must answer from the resolver the prompt obeyed and
-///   never from a second copy of the ladder.
-///
-/// A tier that re-spelled the ladder rather than calling this would be a second
-/// floor no reader of [`ocx_project::activate::ACTIVATE_FLOOR`] can see — the drift
-/// [`ocx_project::activate`]'s module doc warns about.
+/// Resolve the `activate` ladder (`file ▸ environment ▸ floor`) for one toolchain tier; the only
+/// resolver, so no tier carries a second floor (`adr_toolchain_activation.md` § Rationale from code: activation).
 pub fn activate_mode(config: &ocx_project::ProjectConfig) -> ocx_project::activate::ActivateMode {
     ocx_project::ladder::Ladder {
-        // There is no `--activate` flag, by design (C-006/C-042): the choice
-        // lives in `ocx.toml` and in `ocx self setup`. Spelled as a `None`
-        // rather than omitted so a reader sees the tier was considered.
         cli: None,
         file: config.activate,
-        // The **weakest** tier, below the file tier — an exported
-        // `OCX_TOOLCHAIN_ACTIVATE` never overrides a project that states a
-        // value. Read through `from_env` so an unrecognised value warns and
-        // leaves this tier *absent* rather than short-circuiting to the floor.
+        // Weakest tier; `from_env` makes an unrecognised value absent rather than the floor.
         environment: ocx_project::activate::ActivateMode::from_env(),
     }
     .resolve(ocx_project::activate::ACTIVATE_FLOOR)
 }
 
-/// C-061's stamp gate: does `bin_dir` still hold exactly what `stamp` recorded?
-///
-/// **No compose, no metadata read, no network** — one `readdir` over `bin/` plus
-/// one `fstatat` per entry, and a content hash only for the entries the cheap
-/// comparison already found suspect.
-///
-/// # What "matches" means (RUL-67 — set equality, both directions)
-///
-/// [`RenderStamp::names`](ocx_store::file_structure::RenderStamp::names) documents itself as *the on-disk entry set*, and this
-/// honours that literally:
-///
-/// - every name the stamp records must be present, **and**
-/// - every name present must be recorded by the stamp.
-///
-/// A one-way lookup over [`RenderStamp::bin_fingerprint`](ocx_store::file_structure::RenderStamp::bin_fingerprint)'s keys passes the
-/// moment every recorded entry matches — which is precisely S-003, where a
-/// hostile clone force-commits an extra `bin/cmake` beside a legitimate tree.
-/// That file would reach `PATH` through the gate built to stop it.
-///
-/// # The stat pair gates the hash; it never substitutes for it
-///
-/// `(size, file id)` from [`BinEntryStamp`](ocx_store::file_structure::BinEntryStamp) decides *what to hash*, never *what
-/// to trust*: an entry whose stat pair differs is hashed and compared, an entry
-/// whose stat pair agrees is taken as unchanged. **mtime is not consulted**
-/// (C-003) — it is forgeable and is preserved by an in-place overwrite, so it
-/// reports "unchanged" for exactly the edit the stamp exists to notice. The
-/// accepted residual of the cheap half is on [`BinEntryStamp`](ocx_store::file_structure::BinEntryStamp) itself (R-W4):
-/// a same-name, same-size, same-inode in-place overwrite passes.
-///
-/// A `file_id` of `None` — the platform or filesystem would not report one —
-/// falls through to the content hash rather than guessing.
-///
-/// # Not this function's job
-///
-/// The **identity** check — that the stamp's [`RenderStamp::scope`](ocx_store::file_structure::RenderStamp::scope) names this
-/// project and its `home` names this home — belongs to the caller
-/// ([`bin_mode_entry`]), which is the level that holds both. Two projects
-/// colliding in the 64 bits of `name_for_path` under one `toolchain_dir` share a
-/// stamp, and this function compares a directory against a stamp it is handed;
-/// it cannot know whose.
-///
-/// # Never an error
-///
-/// An unreadable `bin/`, an entry that vanished mid-walk, a name that is not
-/// UTF-8 — every one of them is a **mismatch**, which is the fail-closed answer:
-/// the entry is withheld and `PATH` does not change. A prompt has nothing useful
-/// to do with an `Err` here, and C-061's two negative outcomes ("no stamp" and
-/// "a mismatch") already collapse to one behaviour.
+/// The render-stamp gate: does `bin_dir` hold exactly what `stamp` recorded, in both directions?
+/// Any unreadable or odd condition is a mismatch (`adr_toolchain_activation.md` § Rationale from code: activation).
 pub(crate) async fn bin_stamp_matches(bin_dir: &Path, stamp: &file_structure::RenderStamp) -> bool {
     let bin_dir = bin_dir.to_path_buf();
     let recorded = stamp.bin_fingerprint.clone();
-    // One blocking unit for the whole walk: this is the per-prompt path, so a
-    // `read_dir` plus one `fstatat` per entry must not run on the runtime.
     match tokio::task::spawn_blocking(move || bin_matches_recorded(&bin_dir, &recorded)).await {
         Ok(matched) => matched,
         Err(error) => {
-            // The join failing is one more condition with nothing useful to
-            // report at a prompt, so it takes the same fail-closed answer every
-            // filesystem condition takes.
             tracing::debug!("the render-stamp comparison task failed: {error}");
             false
         }
     }
 }
 
-/// [`bin_stamp_matches`]' blocking half — the walk itself.
-///
-/// Split out so the `spawn_blocking` closure stays one call, and so the
-/// early-return-per-condition shape reads as the fail-closed ladder it is:
-/// every `return false` is a mismatch, never an error.
+/// [`bin_stamp_matches`]' blocking half.
 fn bin_matches_recorded(bin_dir: &Path, recorded: &BTreeMap<String, file_structure::BinEntryStamp>) -> bool {
-    // `read_dir` **follows** a symlinked `bin/`, so a `bin` replaced by a link
-    // after a successful render enumerates the link's target and every entry
-    // below can match — putting a directory outside the 0700 home on `PATH`.
-    // `owned_project_home` refuses the same shape one step earlier; this is the
-    // second, independent guard, on the function that actually reads the tree.
+    // `read_dir` follows a symlinked `bin/`, which would put a directory outside the home on `PATH`.
     if std::fs::symlink_metadata(bin_dir).is_ok_and(|metadata| metadata.is_symlink()) {
         return false;
     }
@@ -1291,9 +657,7 @@ fn bin_matches_recorded(bin_dir: &Path, recorded: &BTreeMap<String, file_structu
         let Ok(entry) = entry else {
             return false;
         };
-        // RUL-67, the direction a lookup over the stamp's own keys misses: an
-        // on-disk entry the stamp does not name is a mismatch. S-003's hostile
-        // clone force-commits exactly one such file beside a legitimate tree.
+        // An on-disk entry the stamp does not name is a mismatch (a force-committed extra file).
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             return false;
         };
@@ -1301,13 +665,7 @@ fn bin_matches_recorded(bin_dir: &Path, recorded: &BTreeMap<String, file_structu
             return false;
         };
 
-        // `symlink_metadata`, never `metadata`: the stamp's producer records
-        // regular files, so a link under a recorded name is an entry the stamp
-        // cannot describe — and following it would read *through* a
-        // repository-controlled link into an arbitrary path. The `is_file()`
-        // decision below is also what licenses `from_metadata` to re-open the
-        // path for its file identity on Windows: the name has been judged not
-        // to be a link, and the re-open refuses to traverse one anyway.
+        // Never `metadata`: following a link reads through a repository-controlled target.
         let path = entry.path();
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
             return false;
@@ -1316,24 +674,13 @@ fn bin_matches_recorded(bin_dir: &Path, recorded: &BTreeMap<String, file_structu
             return false;
         }
 
-        // The cheap half of the gate: `(size, file id)`, both derived through
-        // the one function that owns `file_id`'s platform split, so the
-        // producing and the comparing end cannot disagree. The hash slot is
-        // seeded from the record precisely because the hash is not what this
-        // comparison asks — equality here means "size and file id both agree".
-        //
-        // mtime is not read, here or anywhere below (C-003): it is forgeable
-        // and is preserved by an in-place overwrite, so it reports "unchanged"
-        // for exactly the edit the stamp exists to notice.
+        // `(size, file id)` picks what to hash, never what to trust; never mtime, which an in-place overwrite forges.
         let stat_pair = file_structure::BinEntryStamp::from_metadata(&path, &metadata, recorded.content_hash.clone());
-        // A `file_id` the platform or filesystem would not report falls
-        // **through** to the content hash rather than being guessed either way.
         if stat_pair.file_id.is_some() && stat_pair == *recorded {
             seen += 1;
             continue;
         }
 
-        // The stat pair decided *what* to hash; the hash decides what to trust.
         let Some(hashed) = file_structure::BinEntryStamp::of_file(&path, &metadata) else {
             return false;
         };
@@ -1343,64 +690,18 @@ fn bin_matches_recorded(bin_dir: &Path, recorded: &BTreeMap<String, file_structu
         seen += 1;
     }
 
-    // RUL-67's other direction: every recorded name had to be met. Counting
-    // rather than re-walking works because each on-disk entry matched a
-    // *distinct* recorded key — `read_dir` yields no name twice.
+    // Every recorded name met: each entry matched a distinct key, as `read_dir` yields no name twice.
     seen == recorded.len()
 }
 
-/// The `bin`-mode arm: the project `PATH` entry, or `None` and a hint (C-061,
-/// C-062, C-064).
+/// The `bin`-mode arm: the project `PATH` entry, or `None` for the caller's hint.
 ///
-/// Sequenced, and the order is the contract:
-///
-/// 1. Read the render stamp for this home's tier
-///    ([`StateStore::render_stamp`](ocx_store::file_structure::StateStore::render_stamp)).
-///    Absent, unreadable, or at an unrecognised schema version — all of which
-///    that accessor already reports as absent — yields `Ok(None)`.
-/// 2. Check identity before content: the stamp's `home` must be this home and
-///    its [`RenderStampScope`](ocx_store::file_structure::RenderStampScope) must
-///    name this canonical project directory (D-V13). Under `toolchain_dir`, two
-///    projects colliding in `name_for_path`'s 64 bits share one home *and* one
-///    stamp, and the project half is what tells them apart — without it project
-///    B's prompt passes over trampolines that bake `--project '<A>'`.
-/// 3. Two gates, in order. First C-080: `<home>/active` must be the derived
-///    link, or the value step 5 returns names whatever a repoint chose — the
-///    CWE-426 primitive the clause exists to close. Then
-///    [`bin_stamp_matches`] over the **physical** `<home>/shells/<shell>/bin`,
-///    never through `active`. Either negative yields `Ok(None)`.
-/// 4. Only then, C-062: heal the **default group's** links
-///    ([`heal_links`](crate::tasks::render_toolchain)) so the
-///    trampolines the entry is about to expose dereference to the digests the
-///    lock names. Strictly after the gate, and strictly after consent — the
-///    caller cannot reach here without a [`ConsentProof`].
-/// 5. Return the PATH-facing `<home>/active/bin` — **unless the heal refused
-///    the tree**, which is one
-///    more `None`. A refusal means a symlink on the home root, on `bin/`, or on
-///    a component above them, and the return value of this function goes on
-///    `PATH`; the repair count is not consulted, only the refusal.
-///
-/// # C-064 — this path never prunes
-///
-/// There is no delete here and none may be added. The stale window between a
-/// lock change and the next composing trigger is **designed**: emit nothing,
-/// print one hint, leave the stale trampolines on disk. A prompt that pruned
-/// would be a whole-directory delete inside an attacker-writable tree, running
-/// before every command the user types, with no `--dry-run` in front of it.
-///
-/// # The hint is the caller's
-///
-/// Both negative outcomes are one `None`, because C-061 gives them one
-/// behaviour: withhold the entry, say `ocx pull` once, change nothing. The
-/// sentence rides [`Outcome::messages`] rather than `log::debug!` — every
-/// emitted hook redirects this process's stderr to `/dev/null`, so a log line
-/// here is a line nobody reads.
+/// Step order is the contract, and this path never prunes: a prompt-time delete would run in an
+/// attacker-writable tree before every command (`adr_toolchain_activation.md` § Rationale from code: activation).
 ///
 /// # Errors
 ///
-/// Only what the heal raises — a group key from `ocx.lock` that cannot become a
-/// path component (exit 78). Every filesystem condition on the gate is a
-/// mismatch, not an error.
+/// Only what the heal raises (a lock group key that cannot become a path component, exit 78).
 pub(crate) async fn bin_mode_entry(
     input: &SessionInput<'_>,
     project: &ProjectIdentity,
@@ -1409,9 +710,7 @@ pub(crate) async fn bin_mode_entry(
 ) -> Result<Option<PathBuf>, SessionError> {
     use file_structure::{RenderStampScope, RenderStampTarget};
 
-    // 1. This project's tier, never the global one — reading `Global` here is
-    //    the `RenderStampTarget` hazard that type is named for. Absent,
-    //    unreadable or at an unrecognised `v` all arrive as `None`.
+    // 1. This project's stamp, never `Global`.
     let state = input.file_structure.state.clone();
     let key = project.key.clone();
     let stamp = match tokio::task::spawn_blocking(move || state.render_stamp(RenderStampTarget::Project(&key))).await {
@@ -1425,63 +724,30 @@ pub(crate) async fn bin_mode_entry(
         return Ok(None);
     };
 
-    // 2. Identity before content, both halves (D-V13). `home` alone is not
-    //    enough: under `toolchain_dir`, two projects colliding in the 64 bits
-    //    of `name_for_path` share one home *and* one stamp, and the scope's
-    //    canonical project directory is what tells them apart — without it
-    //    project B's prompt passes over trampolines that bake `--project '<A>'`.
-    //    The scope alone is not enough either, for a stamp describing some
-    //    other tree.
+    // 2. Identity before content, both halves: two projects colliding in `name_for_path` share a home and stamp.
     let scope = RenderStampScope::Project(project.dir.clone());
     if stamp.home != home.root() || stamp.scope != scope {
         return Ok(None);
     }
 
-    // 3a. C-080, before the content gate and for a different question: is
-    //     `<root>/active` the derived link? `bin()` — the value step 5 returns
-    //     and the value `PATH` receives — resolves *through* it, so a repoint
-    //     is an arbitrary-directory-on-PATH primitive (CWE-426). Read-only: a
-    //     `false` withholds here and is healed by the render (C-081), because
-    //     a prompt must never write. Two syscalls, `lstat` + `readlink`, which
-    //     is why this stays inline rather than taking a blocking hop.
+    // 3a. The returned `bin()` resolves through `active`, so a repointed link puts any directory on `PATH`.
     if !home.active_is_valid(file_structure::DEFAULT_SHELL) {
         return Ok(None);
     }
 
-    // 3b. The content gate, over the **physical** directory (C-078, C-080's
-    //     second amendment). `lstat` does not follow a path's final component
-    //     but does follow every intermediate one, so a gate reading through
-    //     `active` would judge whatever `active` currently names — and would
-    //     agree with a stamp written through the same link. A mismatch is the
-    //     same answer no stamp gives: withhold.
+    // 3b. The physical directory: through `active`, the gate judges whatever `active` names.
     if !bin_stamp_matches(&home.shell_bin(file_structure::DEFAULT_SHELL), &stamp).await {
         return Ok(None);
     }
 
-    // 4. C-062, and strictly after the gate — a tree the gate refused is never
-    //    written to (C-064). The **default group only**: that is the group
-    //    `bin/` exposes, and it is the one the stamp's `link_fingerprint`
-    //    covers. Widening it would make every non-default repoint mismatch on
-    //    every prompt; those groups are C-070's, on the composing side.
+    // 4. Heal after the gate, default group only: the stamp covers no other group's links.
     let groups = [ocx_project::DEFAULT_GROUP.to_owned()];
     let healed =
         crate::tasks::render_toolchain::heal_links(input.file_structure, home, &scope, lock, &groups, input.target)
             .await
             .map_err(crate::Error::from)?;
 
-    // 5. A refused tree withholds the entry — the same `None` every other
-    //    negative outcome takes (C-061), and for a stronger reason than the
-    //    others: the heal refuses exactly when the home root, `bin/`, or a
-    //    component above them is a symlink, and the value this function
-    //    returns is put on `PATH` for every command the user types. Returning
-    //    `Some` here would expose an attacker-relocated `bin/` on the strength
-    //    of a heal that declined to touch it.
-    //
-    //    `owned_project_home` takes the same refusal one level up, before this
-    //    function is entered — this is the second, independent check, on the
-    //    call that actually walks the tree, and it closes the window between
-    //    the two. No hint rides it: C-061 gives every negative outcome one
-    //    behaviour, and the caller already pushed a message for this shape.
+    // 5. A refused heal means a symlinked home or `bin/`; `Some` would put the relocated `bin/` on `PATH`.
     if let HealOutcome::Refused { reason } = healed {
         tracing::debug!(
             "the toolchain home '{}' was not healed and is not exposed: {reason}",
@@ -1493,21 +759,9 @@ pub(crate) async fn bin_mode_entry(
     Ok(Some(home.bin()))
 }
 
-/// The union `desired` set: `global ++ session ++ project` (C-018, C-059,
-/// RUL-87).
+/// The union `desired` set: `global ++ session ++ project`.
 ///
-/// The session block sits **between** the two tiers, and the position is the
-/// contract rather than an arrangement. Entries later in this vector end up
-/// nearer the front of `PATH` ([`Shell::export_path`](ocx_shell::shell::Shell::export_path)
-/// prepends), so front to back a shell reads: the project's composed entries,
-/// the project's `bin/`, `$OCX_HOME/toolchain/active/bin`,
-/// [`SessionPath::install_bin`], the global tier's composed entries.
-///
-/// Putting the session block last instead would place the **global** tier's
-/// composed entries ahead of the project's own trampoline directory, so a
-/// globally installed `cmake` would shadow the project's — the tier inversion
-/// C-018 forbids. Putting it first would put both tiers behind the global
-/// tier's composed entries, which is the same inversion one tier up.
+/// The session block must sit between the tiers: moved either way, a global tool shadows a project one.
 pub fn desired_entries(outcome: &Outcome) -> Vec<Entry> {
     let mut desired = outcome.global.clone();
     desired.extend(outcome.session.entries());
@@ -1520,19 +774,8 @@ pub fn plan_for(previous: &Ledger, outcome: &Outcome, owned: &[&Path], current: 
     reconcile::plan(&desired_entries(outcome), current, previous, owned)
 }
 
-/// The digest [`Ledger::messages_fp`] records for one prompt's deferred
-/// diagnostics.
-///
-/// Length-prefixed per message, the same rule [`reconcile::fingerprint`]'s own
-/// fold follows and for the same reason: without it `["ab", "c"]` and
-/// `["a", "bc"]` are one byte stream, and a message set that changed would read
-/// as unchanged. Truncated to 16 hex characters — this decides whether to
-/// re-print a line, not whether to trust one, so the carrier budget matters more
-/// than the remaining collision margin.
-///
-/// An empty list digests to the empty string rather than to SHA-256's digest of
-/// nothing, so "this prompt had nothing to say" is spelled the same way
-/// [`Ledger::empty`] spells it and costs no carrier bytes.
+/// The digest [`Ledger::messages_fp`] records for one prompt's diagnostics; empty for none.
+// Length-prefixed, or `["ab", "c"]` and `["a", "bc"]` digest alike.
 fn messages_fingerprint(messages: &[String]) -> String {
     use sha2::Digest as _;
 
@@ -1547,16 +790,8 @@ fn messages_fingerprint(messages: &[String]) -> String {
     hex::encode(hasher.finalize())[..16].to_owned()
 }
 
-/// Carry `previous` forward verbatim, recording `messages` as announced (A-21).
-///
-/// The refusal path's counterpart to [`next_ledger`], and deliberately not a
-/// call to it. A prompt whose project lock is absent or stale emits **no plan**
-/// — [`session`]'s `Err` contract is "emit nothing at all", so the applied
-/// environment stays exactly as it stands — but it still owes the user the
-/// sentence, and a sentence the shell repeats before every prompt until they
-/// run `ocx lock` is the noise [`Ledger::messages_fp`] exists to stop. Building
-/// a fresh ledger instead would drop the project scope this path is refusing to
-/// tear down, and the *next* prompt would then have no record of it to revert.
+/// Carry `previous` forward verbatim, recording `messages` as announced.
+// Not `next_ledger`: a fresh ledger drops the project scope this refusal path keeps, leaving nothing to revert.
 pub fn announcing(previous: &Ledger, messages: &[String]) -> Ledger {
     Ledger {
         messages_fp: messages_fingerprint(messages),
@@ -1564,32 +799,15 @@ pub fn announcing(previous: &Ledger, messages: &[String]) -> Ledger {
     }
 }
 
-/// Build the ledger the next prompt will plan against (C-002, C-015, C-018).
-///
-/// `current` is the **pre-global** environment — the live shell as this prompt
-/// found it. Both capture points are derived here rather than by the caller,
-/// because C-018's ordering *is* the difference between them: the global scope's
-/// priors are captured against `current`, then global is applied, then the
-/// project's priors are captured against the result. Handing this function a
-/// pre-applied environment would put that ordering somewhere no test of this
-/// function can see it.
+/// Build the ledger the next prompt will plan against; `current` is the live shell before global applies.
 pub fn next_ledger(previous: &Ledger, fingerprint: &str, outcome: &Outcome, current: &Env) -> Ledger {
-    // A-10 — `L ⊆ emittable(D)`. `plan` drops what no arm can emit, and what it
-    // drops is never applied to the shell; recording it as applied anyway would
-    // put a key in L that ocx claims to own and can never remove. The sharpest
-    // case is A-02's refused `PATH`/`PATHEXT` constant: `plan` refuses it, and a
-    // ledger that carried it would hand the whole variable's restore to a prior
-    // captured from an apply that never happened.
+    // Emittable only: recording what `plan` drops claims a key ocx can never remove.
     let desired_global: Vec<_> = reconcile::emittable_entries(&outcome.global)
         .into_iter()
         .cloned()
         .collect();
     let global: Vec<LedgerEntry> = desired_global.iter().map(LedgerEntry::from).collect();
-    // R1 — against `current`, the environment *before* global applied, which is
-    // the only place the user's own value for a global constant is still
-    // visible. Without it a constant the global tier stops declaring
-    // (`ocx remove --global <pkg>`) has no prior to restore and ocx's value
-    // stays in the shell for its whole life.
+    // Against `current`, the only place the user's own value is visible, or a dropped global constant is never restored.
     let global_priors = reconcile::capture_priors(
         &global,
         current,
@@ -1606,16 +824,7 @@ pub fn next_ledger(previous: &Ledger, fingerprint: &str, outcome: &Outcome, curr
             .cloned()
             .collect();
         let applied: Vec<LedgerEntry> = desired.iter().map(LedgerEntry::from).collect();
-        // The same set the emitted global statements will apply, so the
-        // project's priors are captured against the environment the shell will
-        // actually be in (C-018).
-        //
-        // Built **only where it is read**: `capture_priors` skips every
-        // non-`Constant` entry before touching its `current` argument, while
-        // building this clones the whole process `Env` and replays every global
-        // path entry through a full-`PATH` `move_to_front`. A path-only
-        // toolchain — the common case — declares no constant at all, and paid
-        // both on every prompt for an answer nothing consulted.
+        // Project priors are captured after global applies; built only when a `Constant` reads it.
         let after_global = applied
             .iter()
             .any(|entry| matches!(entry.kind, ModifierKind::Constant))
@@ -1627,15 +836,8 @@ pub fn next_ledger(previous: &Ledger, fingerprint: &str, outcome: &Outcome, curr
         ProjectScope {
             key: slot.key.clone(),
             dir: slot.dir.clone(),
-            // §10a — WP-1 shipped `capture_priors` precisely because nothing was
-            // contracted to build the *next* ledger; the ordering is the
-            // caller's (C-015 rules 3-4, C-018). Without this call a project
-            // leave has no prior to restore and a global constant the project
-            // overrode is lost for the shell's whole life.
             priors: reconcile::capture_priors(
                 &applied,
-                // Unread when `after_global` was not built, since the only
-                // reader is the `Constant` arm that would have built it.
                 after_global.as_ref().unwrap_or(current),
                 previous
                     .scopes
@@ -1650,43 +852,18 @@ pub fn next_ledger(previous: &Ledger, fingerprint: &str, outcome: &Outcome, curr
     Ledger {
         v: previous.v,
         fp: fingerprint.to_owned(),
-        // Carried forward for the same reason `tiers` is, one line down, but a
-        // different one: `ws` describes the gate the **shell** currently holds,
-        // and only the emission that redefines that gate
-        // ([`ocx_shell::shell::hook::redefinition`]) may move it. Deriving it here
-        // would record a membership the shell was never given, and the stale
-        // gate would then never be noticed again.
+        // Carried: only the hook redefinition moves the shell's gate; deriving it hides a stale gate forever.
         ws: previous.ws.clone(),
-        // Carried forward, never re-derived: this process cannot see the
-        // `--config` overlay the shell-start pass recorded (A-13, A-33).
+        // Carried: this process cannot see the shell-start `--config` overlay.
         tiers: previous.tiers.clone(),
-        // What this prompt owes the user, as a digest the next prompt compares
-        // against to decide whether its own messages are news (A-21).
         messages_fp: messages_fingerprint(&outcome.messages),
-        // C-042 — only a negative verdict is ever written. An `Activate` verdict
-        // is re-derived every prompt; caching it would make the ledger a consent
-        // input, which C-007 forbids.
-        //
-        // Three-way, and the third arm is the common one: a walk that resolved
-        // no project caches `NoProject`, which is not consent-derived and so
-        // touches C-007 not at all. The `else` covers both remaining states —
-        // an activated project, and one that yielded to direnv/mise. Neither is
-        // cacheable: the first by C-007, the second because the yield hangs off
-        // an env sentinel `fingerprint` does not fold.
+        // Never cache `Activate` (a consent input) or a yield (its sentinel is not fingerprinted).
         verdict: match (outcome.inert, outcome.resolved) {
             (true, _) => Some(Verdict::Inert),
             (false, false) => Some(Verdict::NoProject),
             (false, true) => None,
         },
-        // Empty on purpose, and **not** carried forward from `previous`: this
-        // field is `encode`'s *input*, and `encode` derives the emitted marker
-        // from the scopes this ledger actually carries (`Ledger::dropped_scopes`
-        // unions it with whatever the ledger already names). Seeding it from the
-        // previous prompt would make a ledger that now fits under the cap
-        // advertise abandoned scopes it holds in full — and `ocx shell state`
-        // would report `LedgerOverCap` for a healthy shell. The over-cap state
-        // survives across prompts through the encoded carrier, which is what
-        // `ledger_lines` compares against.
+        // Never carried: `encode` derives it, and a seeded one reports `LedgerOverCap` for a healthy shell.
         over_cap: Vec::new(),
         scopes: Scopes {
             global: Some(global),
@@ -1696,72 +873,39 @@ pub fn next_ledger(previous: &Ledger, fingerprint: &str, outcome: &Outcome, curr
     }
 }
 
-/// A-11's determinacy check, run **only on the revert path** — never on the
-/// no-op path, so it costs nothing on the prompt that matters.
-///
-/// The scope is retained when `recorded_dir` — the project directory the
-/// previous ledger recorded — is still an ancestor-or-self of the CWD **and**
-/// its `ocx.toml` is still a regular file. A genuine leave fails the ancestor
-/// test, a genuine deletion fails the `symlink_metadata` test, and
-/// `OCX_NO_PROJECT=1` is excluded outright — all three revert normally.
-///
-/// Takes the recorded directory rather than the whole [`Ledger`] because that
-/// is all it reads, and because the caller hands it to a `spawn_blocking` hop:
-/// two `Option<PathBuf>`s cross that boundary for free where a `Ledger` would
-/// deep-copy both scopes' entries and priors on every revert.
-///
-/// **Blocking**: one `symlink_metadata`. Call it from a blocking context.
+/// Whether a revert must retain the recorded scope: `recorded_dir` is an ancestor-or-self of the CWD
+/// and its `ocx.toml` is still a regular file. Blocking; revert path only.
 pub fn walk_is_indeterminate(recorded_dir: Option<&Path>, cwd: Option<&Path>) -> bool {
     let Some(recorded_dir) = recorded_dir else {
-        // Nothing recorded, nothing to retain: the distinction cannot matter.
         return false;
     };
-    // The carrier is untrusted (C-007), and this is the **one** place a recorded
-    // `dir` reaches the filesystem, so it is validated here rather than trusted.
-    // A-30 makes an honest one canonical, hence absolute; anything else is
-    // forged or corrupt and gets the fail-safe answer.
-    //
-    // `""` is the case that bites, and it is not hypothetical — it is in the
-    // forged set the carrier tests already enumerate. Every path
-    // `starts_with("")`, so the ancestor test below waves it through, and
-    // `Path::new("").join("ocx.toml")` is **relative**: the probe would quietly
-    // become "does the process CWD hold an `ocx.toml`", a question the walk has
-    // already answered, and a carrier could pin the recorded scope for the
-    // shell's life from any directory that happens to hold one.
+    // The carrier is untrusted: a relative `dir` (even `""`) would probe the CWD and pin the scope forever.
     if !recorded_dir.is_absolute() {
         return false;
     }
-    // `OCX_NO_PROJECT=1` is a deliberate instruction, not a failed probe. It
-    // must revert even though the directory and its file are both still there.
     if ocx_util::env::flag("OCX_NO_PROJECT", false) {
         return false;
     }
     let Some(cwd) = cwd else {
-        // No CWD to test against — the walk's answer is unknowable rather than
-        // negative, and a recorded scope exists. Retain.
+        // Unknowable is not negative: retain.
         return true;
     };
     if !cwd.starts_with(recorded_dir) {
         return false;
     }
-    // `symlink_metadata`, not `metadata`: A-11 names it, and the CWD walk that
-    // produced the ledger rejects a symlinked candidate too (A-12).
+    // Not `metadata`: the CWD walk rejects a symlinked `ocx.toml` too.
     std::fs::symlink_metadata(recorded_dir.join("ocx.toml")).is_ok_and(|meta| meta.file_type().is_file())
 }
 
-/// C-007 rule (a) at the **one** place the carrier's `dir` reaches the
-/// filesystem.
-///
-/// `plan.rs` cannot host this guard: `plan` reads neither identity label and
-/// constructs no path at all, so a forged-`dir` test there is invariant by
-/// construction and green in every state — it names a guarantee it cannot
-/// exercise. The constructor is here.
-/// The one derivation of a project's identity (finding 23).
+/// The carrier-`dir` guard lives at the **one** place that `dir` reaches the
+/// filesystem: `plan` reads no identity label and builds no path, so a forged-`dir`
+/// test there would be green in every state. Also: the one derivation of a
+/// project's identity.
 #[cfg(test)]
 mod identity_tests {
     use super::ProjectIdentity;
 
-    /// `key` is the `state/projects/<key>/` stamp key, and it must be A-30's
+    /// `key` is the `state/projects/<key>/` stamp key, and it must be the
     /// canonical directory hashed — not the walked path.
     ///
     /// The prompt and `ocx shell state` each used to run
@@ -1811,7 +955,7 @@ mod identity_tests {
     /// EC-SCOPE-010 — the lock the watch set stats is the lock the loader
     /// reads.
     ///
-    /// `shell/` may not import `ocx_project` (A-45), so
+    /// `shell/` may not import `ocx_project`, so
     /// `reconcile::watch_paths` derives the project's `ocx.lock` from
     /// `config_path.parent()` itself rather than calling
     /// [`ocx_project::lock::lock_path_for`]. That is a second derivation of
@@ -1939,17 +1083,12 @@ mod forged_dir_tests {
     }
 }
 
-// ARCH-16 / A-45 — `shell/` must not reach for `project/`. The guard that
-// stood here was a directory walk over `src/shell/**` looking for the text
-// `ocx_project`, because nothing about the cycle was visible to
-// `cargo check` while both modules lived in `ocx_lib`. WP-32 moved `shell/`
-// into `ocx_shell`, whose manifest does not list `ocx_project` and may not
-// (`ocx_project` depends on `ocx_shell`, so the edge is a cycle Cargo
-// refuses). The import the guard looked for is now an unresolved-crate
-// error, so the guard's red state is unreachable and it was deleted rather
-// than re-pointed — a guard that cannot fire reads as coverage (DEC-47).
+// `shell/` must not reach for `project/`. `ocx_shell`'s manifest cannot list
+// `ocx_project` (which depends on it: a cycle Cargo refuses), so that import is an
+// unresolved-crate error; the former source-walk guard could no longer go red and
+// was deleted rather than re-pointed, since a guard that cannot fire reads as coverage.
 
-/// The clause-2 evidence gate on [`consent_evidence`] (C-025, C-044).
+/// The clause-2 evidence gate on [`consent_evidence`].
 ///
 /// The prompt path pays for [`consent::verified_sources`] on **every** prompt,
 /// and its answer is unobservable to [`consent::evaluate_with_stamp`] unless a
@@ -2057,7 +1196,7 @@ mod consent_evidence_tests {
         (home, store, lock)
     }
 
-    /// C-044 — with no `namespaces` grant configured, the per-prompt hop does
+    /// With no `namespaces` grant configured, the per-prompt hop does
     /// **not** read the package store's origin records.
     ///
     /// The store here genuinely corroborates the lock, so the `None` is the
@@ -2136,29 +1275,20 @@ mod consent_evidence_tests {
 }
 
 // ---------------------------------------------------------------------------
-// WP-9 — Specify phase
+// Specification tests: every case names the contract it traces to and the
+// mutation that must turn it red.
 // ---------------------------------------------------------------------------
-//
-// Written from `plan_toolchain_activation.md` (C-059-C-064, S-001, S-003,
-// S-006, R-W4) and `.tmp/hex/w3/wp9-rulings.md` (RUL-62, RUL-67, RUL-68,
-// RUL-87, RUL-89), never from a stub body. Every case names the contract it
-// traces to and the mutation that must turn it red.
 
-/// C-059, C-060, RUL-62, RUL-87 — what the session directories do to `PATH`.
+/// What the session directories do to `PATH`.
 ///
 /// **Everything here asserts the resulting `PATH` string, never the desired
-/// vector's order** (RUL-62). [`Shell::export_path`](ocx_shell::shell::Shell::export_path)
-/// prepends, so the desired vector runs backwards relative to `PATH`; a test
-/// that asserted the vector would agree with an implementation that copied
-/// `setup::session_path_directories`
-/// verbatim, which is exactly the inversion C-060 exists to forbid.
-///
-/// [`EnvEntriesExt::apply_entries`] is the fold used here rather than a hand-rolled
-/// prepend: `reconcile::plan`'s own `settled_keys` uses it to decide whether
-/// the emitted arms would change anything, so "this fold's answer" *is* "what
-/// the emitted lines produce" by the same contract the shell arms are held to.
-/// The byte-exact end-to-end through a real `bash` lives beside `plan_lines`
-/// in `crates/ocx_cli/src/command/self_group/activate.rs`.
+/// vector's order**: `export_path` prepends, so the vector runs backwards, and a
+/// vector assertion would agree with an implementation that copied
+/// `setup::session_path_directories` verbatim — the very inversion forbidden.
+/// [`EnvEntriesExt::apply_entries`] is the fold because `reconcile::plan`'s own
+/// `settled_keys` uses it, so its answer *is* what the emitted lines produce. The
+/// byte-exact end-to-end through a real `bash` sits beside `plan_lines` in
+/// `crates/ocx_cli/src/command/self_group/activate.rs`.
 #[cfg(test)]
 mod session_path_tests {
     use std::path::{Path, PathBuf};
@@ -2206,7 +1336,7 @@ mod session_path_tests {
         }
     }
 
-    /// The two unconditional session entries (C-059), project slot empty —
+    /// The two unconditional session entries, project slot empty —
     /// what `env` and `none` mode both carry.
     fn session() -> SessionPath {
         SessionPath {
@@ -2216,7 +1346,7 @@ mod session_path_tests {
         }
     }
 
-    /// C-059 — the outcome every arm of `session` builds: the session pair is
+    /// The outcome every arm of `session` builds: the session pair is
     /// present whatever the `activate` mode said.
     fn outcome(session: SessionPath, global: Vec<Entry>, project: Vec<Entry>, owned_home: Option<PathBuf>) -> Outcome {
         Outcome {
@@ -2257,9 +1387,9 @@ mod session_path_tests {
             .unwrap_or_else(|| panic!("{needle} must be on PATH; got {path:#?}"))
     }
 
-    // ── C-059 — the live defect ─────────────────────────────────────────────
+    // ── The live defect ─────────────────────────────────────────────
 
-    /// **C-059, the headline.** `ocx_install_bin_path` sits under `$OCX_HOME`,
+    /// **The headline.** `ocx_install_bin_path` sits under `$OCX_HOME`,
     /// so `repair_owned_segments` owns it — and only `ocx self setup`'s startup
     /// stream ever emits it. Unless the desired set contributes it on every
     /// prompt, the **first prompt of any shell deletes the session-`PATH`
@@ -2288,7 +1418,7 @@ mod session_path_tests {
         );
 
         // `activate = "none"`: the arm that composes nothing, and therefore the
-        // sharpest one — C-059 says the session pair survives even here.
+        // sharpest one — the session pair survives even here.
         let global = vec![path_entry(&format!("{OCX_HOME}/packages/aa/bb/content/bin"))];
         let applied = outcome(session(), global, Vec::new(), Some(PathBuf::from(PROJECT_HOME)));
         let ledger = next_ledger(&Ledger::empty(), "fp-1", &applied, &Env::clean());
@@ -2307,9 +1437,9 @@ mod session_path_tests {
         );
     }
 
-    /// C-059 — and the survival is not passive: the desired set *contributes*
+    /// And the survival is not passive: the desired set *contributes*
     /// both directories, so a shell that lost them (a `PATH` overwritten by a
-    /// login script, C-006's lost-ledger case) gets them back.
+    /// login script, the lost-ledger case) gets them back.
     ///
     /// Red state: make [`SessionPath::entries`] emit only what the mode
     /// selected, or drop the splice from `desired_entries`.
@@ -2322,16 +1452,16 @@ mod session_path_tests {
         position(&path, &global_bin());
     }
 
-    // ── C-060 / RUL-62 — the order, read off `PATH` ─────────────────────────
+    // ── The order, read off `PATH` ─────────────────────────
 
-    /// **C-060, RUL-62.** Front to back on `PATH`: the project's
+    /// Front to back on `PATH`: the project's
     /// `<home>/toolchain/active/bin` (`bin` mode only), then `$OCX_HOME/toolchain/active/bin`,
     /// then `ocx_install_bin_path`.
     ///
     /// The most specific tier that pinned a name answers for it, `ocx`
-    /// included — the installed binary is the floor, never a lid (D-4).
+    /// included — the installed binary is the floor, never a lid.
     ///
-    /// Asserted on the *resulting `PATH`*, which is the whole of RUL-62: the
+    /// Asserted on the *resulting `PATH`*, which is the whole ordering rule: the
     /// desired vector runs the other way because `export_path` prepends, so an
     /// implementation that copies `setup::session_path_directories`' slice
     /// verbatim produces the reverse of this and satisfies any assertion made
@@ -2358,7 +1488,7 @@ mod session_path_tests {
         );
     }
 
-    /// C-060 — the project slot is `bin` mode's alone. In `env` and `none` mode
+    /// The project slot is `bin` mode's alone. In `env` and `none` mode
     /// the two global entries are adjacent on `PATH` with nothing between them.
     ///
     /// Red state: emit `<home>/toolchain/active/bin` unconditionally.
@@ -2373,9 +1503,9 @@ mod session_path_tests {
         );
     }
 
-    // ── RUL-87 — where the session block sits in the desired vector ─────────
+    // ── Where the session block sits in the desired vector ─────────
 
-    /// **RUL-87 (C-018 × C-059).** The desired vector is
+    /// The desired vector is
     /// `global ++ session ++ project`, so `PATH` front to back reads:
     /// project-composed ▸ project `bin/` ▸ `$OCX_HOME/toolchain/active/bin` ▸
     /// `install_bin` ▸ global-composed.
@@ -2384,7 +1514,7 @@ mod session_path_tests {
     /// splice (`global ++ project ++ session`, or session first) puts the
     /// *global* tier's composed entries ahead of the project's own `bin/`, so
     /// a globally installed `cmake` shadows the project's trampoline for the
-    /// same name — the tier inversion C-018 forbids.
+    /// same name — the forbidden tier inversion.
     ///
     /// Red state: splice the session block anywhere but between the two tiers.
     #[test]
@@ -2416,7 +1546,7 @@ mod session_path_tests {
         );
     }
 
-    /// RUL-87, stated as the property it exists to defend: a tool the **global**
+    /// Stated as the property it exists to defend: a tool the **global**
     /// tier composes can never shadow the project's own trampoline directory.
     ///
     /// Separate from the ordering test above because this is the consequence a
@@ -2445,7 +1575,7 @@ mod session_path_tests {
         );
     }
 
-    /// **D-3 — the global tier's own `env` → `bin` transition, in one plan.**
+    /// **The global tier's own `env` → `bin` transition, in one plan.**
     ///
     /// Every limb of this was traced and each is sound on its own: the global
     /// manifest is watch-set member 3 so editing it expires the stat-only
@@ -2457,9 +1587,9 @@ mod session_path_tests {
     /// The two halves fail differently and neither implies the other: an
     /// unretired element leaves a stale `PATH` segment, while an unrestored
     /// constant leaves ocx's `JAVA_HOME` in the shell for its whole life
-    /// (C-006 forbids guess-unsetting it, so the prior is the only operand).
+    /// (guess-unsetting it is forbidden, so the prior is the only operand).
     ///
-    /// C-059's session pair rides through untouched, which is the third
+    /// The session pair rides through untouched, which is the third
     /// assertion: `bin` composes nothing *and* keeps the global toolchain
     /// reachable through its trampolines.
     ///
@@ -2499,8 +1629,8 @@ mod session_path_tests {
         current.apply_entries(&desired_entries(&was_env));
 
         // This prompt: `$OCX_HOME/ocx.toml` now states `activate = "bin"`, so
-        // `global_prompt_entries` returns an empty vector — and C-059 keeps the
-        // session pair in every mode.
+        // `global_prompt_entries` returns an empty vector — and the session pair stays in every
+        // mode.
         let now_bin = outcome(session(), Vec::new(), Vec::new(), None);
         let plan = plan_for(&ledger, &now_bin, &[Path::new(OCX_HOME)], &current);
 
@@ -2541,9 +1671,9 @@ mod session_path_tests {
         );
     }
 
-    // ── C-063 / RUL-68 — the deletion authority's scope ─────────────────────
+    // ── The deletion authority's scope ─────────────────────
 
-    /// **C-063, RUL-68.** `owned_prefixes` is `$OCX_HOME` **plus** the
+    /// `owned_prefixes` is `$OCX_HOME` **plus** the
     /// consented, in-scope project's own home — and the second prefix is what
     /// makes leaving `bin` mode subtractive at all: the project's home sits
     /// under the project directory, not under `$OCX_HOME`, so without it a
@@ -2590,7 +1720,7 @@ mod session_path_tests {
         );
     }
 
-    /// **C-078's routed edge, refuted.** A dangling `active` does not shelter
+    /// **The routed edge, refuted.** A dangling `active` does not shelter
     /// the physical spelling from the reconciler's repair.
     ///
     /// The concern routed here was that `owned_spellings`
@@ -2600,7 +1730,7 @@ mod session_path_tests {
     /// `shells/<shell>/bin` segment would survive on `PATH`.
     ///
     /// It cannot happen, and the reason is what `owned_prefixes` holds:
-    /// `$OCX_HOME` and the project's toolchain **home root** (C-063), never a
+    /// `$OCX_HOME` and the project's toolchain **home root**, never a
     /// `bin` directory and never `active`. `is_owned` is a component-wise
     /// `starts_with` against those roots, so both `<root>/active/bin` and
     /// `<root>/shells/<shell>/bin` are owned by their shared prefix, and
@@ -2672,7 +1802,7 @@ mod session_path_tests {
         );
     }
 
-    /// C-063 — the negative half, and the security-relevant one:
+    /// The negative half, and the security-relevant one:
     /// `owned_prefixes` may never carry the bare `toolchain_dir` root. That
     /// root holds **other projects'** homes, so owning it makes this prompt a
     /// deletion authority over a sibling project's `PATH` segments — a project
@@ -2734,7 +1864,7 @@ mod session_path_tests {
     // ── The six `activate` transitions ──────────────────────────────────────
 
     /// The outcome each `activate` mode produces for one consented, in-scope
-    /// project — the modelled contract (C-059, C-060, C-061), not a call into
+    /// project — the modelled contract, not a call into
     /// the resolver.
     fn outcome_for(mode: ocx_project::activate::ActivateMode) -> Outcome {
         use ocx_project::activate::ActivateMode;
@@ -2751,7 +1881,7 @@ mod session_path_tests {
         outcome(session, Vec::new(), project, Some(PathBuf::from(PROJECT_HOME)))
     }
 
-    /// C-059, C-063 — all six ordered `activate` transitions. In every one of
+    /// All six ordered `activate` transitions. In every one of
     /// them the two session directories stay on `PATH`, and the only thing that
     /// moves is the project's own contribution.
     ///
@@ -2805,7 +1935,7 @@ mod session_path_tests {
         }
     }
 
-    /// C-063, C-060 — `bin → none`. The project's trampoline directory is
+    /// `bin → none`. The project's trampoline directory is
     /// withdrawn, which only works because the home is an owned prefix.
     ///
     /// Red state: leave `Outcome::owned_home` at `None` (today's `goat`) and
@@ -2831,7 +1961,7 @@ mod session_path_tests {
         );
     }
 
-    /// C-059, C-060 — `none → bin`. The project's trampoline directory arrives
+    /// `none → bin`. The project's trampoline directory arrives
     /// **in front of** both session entries, and the pair behind it keeps
     /// `$OCX_HOME/toolchain/active/bin` ahead of the installed binary.
     ///
@@ -2862,12 +1992,12 @@ mod session_path_tests {
     }
 }
 
-/// C-061, C-003, RUL-67, R-W4 — the `bin`-mode stamp gate.
+/// The `bin`-mode stamp gate.
 ///
 /// [`bin_stamp_matches`] answers one question: does `<home>/bin` still hold
 /// exactly what the render recorded? Everything below drives that answer
 /// directly, because the gate is the only thing standing between a
-/// repository-controlled directory and a live shell's `PATH` (S-003).
+/// repository-controlled directory and a live shell's `PATH`.
 #[cfg(test)]
 mod stamp_gate_tests {
     use std::collections::BTreeMap;
@@ -2926,7 +2056,7 @@ mod stamp_gate_tests {
         );
     }
 
-    /// **S-003, RUL-67 — the discriminating case.** A fresh clone force-commits
+    /// **The discriminating case.** A fresh clone force-commits
     /// `.ocx/toolchain/shells/default/bin/cmake` beside a legitimately rendered tree. Every
     /// name the stamp records is present and matches; the hostile file is the
     /// one thing the stamp does *not* name.
@@ -2949,7 +2079,7 @@ mod stamp_gate_tests {
         );
     }
 
-    /// RUL-67, the other direction — a name the stamp records that is no longer
+    /// The other direction — a name the stamp records that is no longer
     /// on disk. Set equality means both inclusions, and this is the one a
     /// directory-driven comparison would miss.
     ///
@@ -2965,7 +2095,7 @@ mod stamp_gate_tests {
         );
     }
 
-    /// **C-061 — content hashing is the authority; the stat pair only decides
+    /// **Content hashing is the authority; the stat pair only decides
     /// what to hash.** A replacement written through a rename carries a new
     /// inode, so the cheap comparison already disagrees and the entry is
     /// hashed; the hash is what refuses it.
@@ -2991,7 +2121,7 @@ mod stamp_gate_tests {
         );
     }
 
-    /// **C-003 — mtime is never consulted.** Touching an entry's modification
+    /// **Mtime is never consulted.** Touching an entry's modification
     /// time changes nothing the gate reads, so a tree whose bytes are intact
     /// still passes. mtime is forgeable and is *preserved* by an in-place
     /// overwrite, so consulting it would report "unchanged" for exactly the
@@ -3019,14 +2149,14 @@ mod stamp_gate_tests {
         );
     }
 
-    /// **R-W4 — the accepted residual, recorded as a decision rather than
+    /// **The accepted residual, recorded as a decision rather than
     /// discovered as a surprise.** An in-place overwrite (write, no rename)
     /// preserves the inode, and at the same size it changes none of
     /// `(name, size, file id)`. The entry is therefore never re-hashed and the
     /// stat gate lets it through. Nothing on the emit path re-hashes either, so
     /// the window is "until the next `pull`/`add`/`remove`/`lock`/`update`".
     ///
-    /// If this case ever needs to fail, OQ-2 has been reopened and C-061's
+    /// If this case ever needs to fail, the stat-gate decision has been reopened and its
     /// stat-gate sentence has reverted to an unconditional hash — a contract
     /// change, not a bug fix. **Delete this test in that same change.**
     ///
@@ -3069,7 +2199,7 @@ mod stamp_gate_tests {
         );
     }
 
-    /// C-061 — a `file_id` the platform would not report falls **through** to
+    /// A `file_id` the platform would not report falls **through** to
     /// the content hash rather than guessing. Both answers are asserted: intact
     /// bytes pass, changed bytes at the same size do not.
     ///
@@ -3094,9 +2224,9 @@ mod stamp_gate_tests {
         );
     }
 
-    /// C-061 — every filesystem condition is a **mismatch**, never an `Err`: a
+    /// Every filesystem condition is a **mismatch**, never an `Err`: a
     /// `bin/` that is not there is the fail-closed answer, because a prompt has
-    /// nothing useful to do with an error and C-061's two negative outcomes
+    /// nothing useful to do with an error and the gate's two negative outcomes
     /// already collapse to one behaviour.
     ///
     /// Red state: return `true` for an unreadable directory (fail-open), or
@@ -3112,10 +2242,10 @@ mod stamp_gate_tests {
         );
     }
 
-    /// C-061 — an empty stamp over an empty `bin/` is a match, and an empty
+    /// An empty stamp over an empty `bin/` is a match, and an empty
     /// stamp over a populated `bin/` is not.
     ///
-    /// The degenerate pair, and the second half is S-003 at its sharpest: a
+    /// The degenerate pair, and the second half is the hostile-clone case at its sharpest: a
     /// render that produced nothing followed by a clone that committed
     /// everything.
     ///
@@ -3135,7 +2265,7 @@ mod stamp_gate_tests {
         );
     }
 
-    /// C-061 — a `bin/` entry that is not a regular file is not silently
+    /// A `bin/` entry that is not a regular file is not silently
     /// accepted. The stamp's producer records regular files only, so a symlink
     /// appearing under a recorded name is an entry the stamp cannot describe.
     ///
@@ -3156,7 +2286,7 @@ mod stamp_gate_tests {
         );
     }
 
-    /// **C-061 — `bin/` itself, not only what is under it.** `read_dir`
+    /// **`bin/` itself, not only what is under it.** `read_dir`
     /// *follows* a symlink, so a `bin` replaced by a link after a successful
     /// render enumerates the link's target: every recorded name is present,
     /// every body hashes the same, and the gate would hand `<home>/bin` — a
@@ -3186,7 +2316,7 @@ mod stamp_gate_tests {
         );
     }
 
-    /// C-061 — the gate reads `<home>/bin` and nothing else. A stamp is
+    /// The gate reads `<home>/bin` and nothing else. A stamp is
     /// compared against the directory it is handed; whose stamp it is belongs
     /// to [`super::bin_mode_entry`], one level up.
     ///
@@ -3205,7 +2335,7 @@ mod stamp_gate_tests {
     }
 }
 
-/// C-005, C-006, C-007 — the `activate` ladder's first production resolution.
+/// The `activate` ladder's first production resolution.
 #[cfg(test)]
 mod activate_ladder_tests {
     use ocx_config::env::keys::OCX_TOOLCHAIN_ACTIVATE;
@@ -3215,7 +2345,7 @@ mod activate_ladder_tests {
     use super::activate_mode;
 
     /// An `ocx.toml` carrying `activate = <value>` (or none), parsed through
-    /// the production reader — C-028's post-consent step, so the fixture uses
+    /// the production reader — the post-consent step, so the fixture uses
     /// the same route the prompt does.
     async fn config_with(activate: Option<&str>) -> (tempfile::TempDir, ProjectConfig) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3226,7 +2356,7 @@ mod activate_ladder_tests {
         (dir, config)
     }
 
-    /// C-005, C-006 — the file tier outranks the environment tier. Every
+    /// The file tier outranks the environment tier. Every
     /// less-specific tier is set to a *different* value, so a resolver that
     /// consults them in the wrong order answers something else.
     ///
@@ -3240,7 +2370,7 @@ mod activate_ladder_tests {
         assert_eq!(activate_mode(&config), ActivateMode::Bin, "C-006: `ocx.toml` decides");
     }
 
-    /// C-006 — with the file tier absent the environment tier is consulted.
+    /// With the file tier absent the environment tier is consulted.
     ///
     /// Red state: drop the environment tier, and this falls to the floor.
     #[tokio::test]
@@ -3252,7 +2382,7 @@ mod activate_ladder_tests {
         assert_eq!(activate_mode(&config), ActivateMode::Bin);
     }
 
-    /// C-007 — both tiers absent resolves to [`ACTIVATE_FLOOR`], which is
+    /// Both tiers absent resolves to [`ACTIVATE_FLOOR`], which is
     /// asserted **by name**: the review convention this ladder's first
     /// production site starts enforcing is that the floor is passed as the
     /// constant, never re-spelled as `ActivateMode::Env`.
@@ -3267,7 +2397,7 @@ mod activate_ladder_tests {
         assert_eq!(activate_mode(&config), ACTIVATE_FLOOR);
     }
 
-    /// C-006 — an unrecognised `OCX_TOOLCHAIN_ACTIVATE` warns and leaves the
+    /// An unrecognised `OCX_TOOLCHAIN_ACTIVATE` warns and leaves the
     /// tier *absent*, so the ladder continues rather than short-circuiting.
     /// With no file tier below it, that lands on the floor.
     ///
@@ -3283,7 +2413,7 @@ mod activate_ladder_tests {
         assert_eq!(activate_mode(&config), ACTIVATE_FLOOR);
     }
 
-    /// C-006 — the environment tier never overrides a project that states
+    /// The environment tier never overrides a project that states
     /// `none`, which is the arm a "the env var force-enables it" reading would
     /// break.
     ///
@@ -3298,21 +2428,12 @@ mod activate_ladder_tests {
     }
 }
 
-/// C-061, C-062, C-064, S-003, S-006 — the `bin`-mode arm end to end.
-///
-/// [`bin_mode_entry`] sequences stamp identity ▸ the C-061 gate ▸ the C-062
-/// heal ▸ the entry, and the order is the contract. Everything below drives
-/// that one function against a real tree.
 /// Seed the physical `<root>/shells/<shell>/bin` and plant the `active` link a
-/// render publishes (C-078, C-081) — **derived**, never spelled.
-///
-/// The target comes from `ToolchainHome::expected_active_target`, the same
-/// derivation C-080's predicate compares against, so a fixture can never plant
-/// a link the gate would reject for a reason the test did not intend.
-///
-/// Every arena that drives [`bin_mode_entry`] needs it: after C-080 the gate
-/// withholds on an `active` that is not the derived link, so a fixture that
-/// only created directories would make every positive row unreachable.
+/// render publishes — **derived** from `ToolchainHome::expected_active_target`, the
+/// derivation the `active` gate compares against, never spelled, so a fixture never
+/// plants a link the gate rejects for an unintended reason. Every arena driving
+/// [`bin_mode_entry`] needs it: the gate withholds on a non-derived `active`, so
+/// bare directories would make every positive row unreachable.
 #[cfg(test)]
 fn plant_active(home: &file_structure::ToolchainHome) {
     std::fs::create_dir_all(home.shell_bin(file_structure::DEFAULT_SHELL)).expect("mkdir <root>/shells/<shell>/bin");
@@ -3342,7 +2463,7 @@ mod bin_mode_entry_tests {
     use super::{ProjectIdentity, SessionInput, bin_mode_entry};
 
     const REGISTRY: &str = "ocx.sh";
-    /// Branch A's pin and branch B's pin — S-006's "same path, different lock".
+    /// Branch A's pin and branch B's pin — "same path, different lock".
     const DIGEST_A: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const DIGEST_B: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
@@ -3430,7 +2551,7 @@ mod bin_mode_entry_tests {
         }
 
         /// Write one trampoline into the **physical** `<home>/shells/default/bin`
-        /// and answer its stamp — where a render writes (C-078).
+        /// and answer its stamp — where a render writes.
         fn render_trampoline(&self, name: &str, body: &str) -> BinEntryStamp {
             let path = self.home.shell_bin(DEFAULT_SHELL).join(name);
             std::fs::write(&path, body).expect("write the trampoline");
@@ -3454,7 +2575,7 @@ mod bin_mode_entry_tests {
             self.file_structure.packages.path(&pinned(hex))
         }
 
-        /// Replace `<root>/active` with `state` (C-080's four negative rows).
+        /// Replace `<root>/active` with `state` (the four negative rows).
         ///
         /// Removes whatever is there first, by observed kind, so one helper
         /// serves the link rows and the real-directory row alike.
@@ -3496,7 +2617,7 @@ mod bin_mode_entry_tests {
     }
 
     /// `(path, kind, bytes, mtime_nsec, inode)` for every node under `root`,
-    /// sorted — the "wrote nothing" oracle C-064 needs.
+    /// sorted — the "wrote nothing" oracle the no-prune rule needs.
     ///
     /// **Not an empty-output check**: the prompt path emits no output either
     /// way, so the only observable difference between "withheld the entry" and
@@ -3540,7 +2661,7 @@ mod bin_mode_entry_tests {
     }
 
     /// A `SessionInput` for one prompt. The manager is offline with an empty
-    /// local index because C-061 forbids this path composing anything at all —
+    /// local index because the gate forbids this path composing anything at all —
     /// a call that reached the network would fail here rather than pass slowly.
     struct Session {
         manager: PackageManager,
@@ -3583,9 +2704,9 @@ mod bin_mode_entry_tests {
         }
     }
 
-    // ── C-061 — the stamp must be *this* home's and *this* project's ────────
+    // ── The stamp must be *this* home's and *this* project's ────────
 
-    /// C-061 — no stamp at all withholds the entry. S-001's error column: a
+    /// No stamp at all withholds the entry. The error column: a
     /// coworker sets `activate = "bin"` and has never run `ocx pull`.
     ///
     /// Red state: emit `<home>/bin` whenever the directory exists.
@@ -3607,7 +2728,7 @@ mod bin_mode_entry_tests {
         assert_eq!(entry, None, "C-061: no stamp means no PATH entry and no PATH change");
     }
 
-    /// C-061 — the positive control. Without it every withholding case below is
+    /// The positive control. Without it every withholding case below is
     /// satisfied by a function that returns `None` unconditionally.
     #[tokio::test]
     async fn c061_a_matching_stamp_emits_the_homes_bin_directory() {
@@ -3633,7 +2754,7 @@ mod bin_mode_entry_tests {
         );
     }
 
-    // ── C-080 / ADR item 43 — the gate withholds on every `active` that is
+    // ── The gate withholds on every `active` that is
     //    not the derived link ─────────────────────────────────────────────────
 
     /// A fully valid arena — matching stamp, healed link — so the *only*
@@ -3663,7 +2784,7 @@ mod bin_mode_entry_tests {
         .expect("an invalid `active` is a withhold, never an error")
     }
 
-    /// C-080 row 1 — `active` absent. The tree renders trampolines the stamp
+    /// Row 1 — `active` absent. The tree renders trampolines the stamp
     /// still matches, and `bin()` names a path that does not resolve.
     ///
     /// RED: drop the `active_is_valid` call from `bin_mode_entry` — the stamp
@@ -3681,8 +2802,8 @@ mod bin_mode_entry_tests {
         );
     }
 
-    /// C-080 row 2 — `active` is a **real directory**, the `cp -rL` / Docker
-    /// `COPY` outcome (C-081). The prompt path may only read, so the directory
+    /// Row 2 — `active` is a **real directory**, the `cp -rL` / Docker
+    /// `COPY` outcome. The prompt path may only read, so the directory
     /// must still be there afterwards: healing it is the render's job.
     ///
     /// RED: weaken the predicate to "exists" and the row emits; add a heal here
@@ -3705,7 +2826,7 @@ mod bin_mode_entry_tests {
         );
     }
 
-    /// C-080 row 3 — `active` repointed **outside** the home. This is the
+    /// Row 3 — `active` repointed **outside** the home. This is the
     /// CWE-426 primitive the clause exists to close: whatever the link names
     /// would go on `PATH` for every command the user types.
     ///
@@ -3726,10 +2847,10 @@ mod bin_mode_entry_tests {
         );
     }
 
-    /// C-080 row 4 — `active` repointed at a **sibling `shells/<other>` that
+    /// Row 4 — `active` repointed at a **sibling `shells/<other>` that
     /// exists**, so it is contained, resolvable and still wrong.
     ///
-    /// The row a containment test cannot catch, and the reason C-080 is an
+    /// The row a containment test cannot catch, and the reason the check is an
     /// equality against a derived value: the target is inside the home and
     /// names a real `bin` directory holding a real executable.
     ///
@@ -3755,7 +2876,7 @@ mod bin_mode_entry_tests {
         );
     }
 
-    /// C-061, D-V13 — identity before content. Under `toolchain_dir` two
+    /// Identity before content. Under `toolchain_dir` two
     /// projects colliding in `name_for_path`'s 64 bits share one home *and* one
     /// stamp; the scope's project directory is what tells them apart. Without
     /// it, project B's prompt passes over trampolines that bake
@@ -3792,7 +2913,7 @@ mod bin_mode_entry_tests {
         );
     }
 
-    /// C-061 — the `home` half of the identity pair: a stamp describing a
+    /// The `home` half of the identity pair: a stamp describing a
     /// different toolchain home is not this home's, whatever its scope says.
     ///
     /// Red state: compare the scope alone and skip `stamp.home`.
@@ -3821,7 +2942,7 @@ mod bin_mode_entry_tests {
         assert_eq!(entry, None, "C-061: a stamp for another home describes another tree");
     }
 
-    /// C-061 — a global stamp never stands in for a project's. The two live
+    /// A global stamp never stands in for a project's. The two live
     /// under different keys, and reading the wrong one is the
     /// `RenderStampTarget` hazard stated on that type.
     ///
@@ -3857,15 +2978,15 @@ mod bin_mode_entry_tests {
         assert_eq!(entry, None, "C-061: the project's tier has no stamp of its own");
     }
 
-    // ── S-003 — the committed hostile `bin/` ────────────────────────────────
+    // ── The committed hostile `bin/` ────────────────────────────────
 
-    /// **S-003 end to end.** A fresh clone force-commits
+    /// **The hostile clone end to end.** A fresh clone force-commits
     /// `.ocx/toolchain/shells/default/bin/cmake`; consent is granted; the first prompt in
     /// `bin` mode emits **no** `PATH` entry, so the hostile file never reaches
     /// `PATH`.
     ///
     /// The stamp here is a legitimate one over `ninja`, which is what makes
-    /// this the RUL-67 case rather than the trivial "no stamp" one: every name
+    /// this the set-equality case rather than the trivial "no stamp" one: every name
     /// the stamp records is present and matches.
     ///
     /// Red state: a one-way lookup over `bin_fingerprint`'s keys in the gate.
@@ -3893,9 +3014,9 @@ mod bin_mode_entry_tests {
         assert_eq!(entry, None, "S-003: the committed `bin/cmake` must not reach PATH");
     }
 
-    // ── C-064 — the prompt path never prunes ────────────────────────────────
+    // ── The prompt path never prunes ────────────────────────────────
 
-    /// **C-064.** The stale window between a lock change and the next composing
+    /// The stale window between a lock change and the next composing
     /// trigger is designed: emit nothing, leave the stale trampolines on disk.
     /// A prompt that pruned would be a whole-directory delete inside an
     /// attacker-writable tree, running before every command the user types,
@@ -3939,7 +3060,7 @@ mod bin_mode_entry_tests {
         );
     }
 
-    /// C-064, C-062 — the heal is **strictly after** the gate. A tree the gate
+    /// The heal is **strictly after** the gate. A tree the gate
     /// refuses is not healed either, so a stale `default/cmake` link stays
     /// exactly as it is.
     ///
@@ -3979,9 +3100,9 @@ mod bin_mode_entry_tests {
         );
     }
 
-    // ── C-062 / S-006 — heal before emit ────────────────────────────────────
+    // ── Heal before emit ────────────────────────────────────
 
-    /// **C-062 + S-006.** Branch switch at the same path, different lock, no
+    /// Branch switch at the same path, different lock, no
     /// `ocx pull`. `bin/` is gitignored so the trampolines are unchanged and
     /// the stamp still matches — which is exactly why the default group's links
     /// must be healed **before** the entry is emitted. Without it the
@@ -4023,7 +3144,7 @@ mod bin_mode_entry_tests {
         );
     }
 
-    /// C-062, RUL-29 — a link the render never wrote is *created* by the heal,
+    /// A link the render never wrote is *created* by the heal,
     /// which is the commonest post-`git pull` state.
     ///
     /// Red state: repoint only links that already exist.
@@ -4053,8 +3174,8 @@ mod bin_mode_entry_tests {
         );
     }
 
-    /// C-062 — the heal is scoped to the **default group** alone. A
-    /// non-default group's stale link is left for the composing side (C-070),
+    /// The heal is scoped to the **default group** alone. A
+    /// non-default group's stale link is left for the composing side,
     /// because widening the stamp's `link_fingerprint` would make every
     /// non-default repoint mismatch on every prompt and print the `ocx pull`
     /// hint forever.
@@ -4089,7 +3210,7 @@ mod bin_mode_entry_tests {
         );
     }
 
-    /// C-061 — no compose, no metadata read, no network. The manager handed in
+    /// No compose, no metadata read, no network. The manager handed in
     /// is offline over an empty local index, so a path that tried to resolve a
     /// package would fail; asserting the *positive* answer is therefore also
     /// asserting that nothing was resolved.
@@ -4123,8 +3244,8 @@ mod bin_mode_entry_tests {
         );
     }
 
-    /// C-062, RUL-47 — the heal's **refusal** withholds the entry, and the
-    /// C-061 gate cannot substitute for it.
+    /// The heal's **refusal** withholds the entry, and the
+    /// stamp gate cannot substitute for it.
     ///
     /// The tree is relocated behind a symlinked `<project>/.ocx` *after* the
     /// stamp is written, and moved rather than copied so `bin/`'s inode and
@@ -4149,7 +3270,7 @@ mod bin_mode_entry_tests {
 
         // `<project>/.ocx` becomes a symlink out of the project — one component
         // above the home root, the hole `ensure_home_root` cannot see from
-        // where it stands (RUL-44/RUL-47).
+        // where it stands.
         let dot_ocx = arena.project.dir.join(".ocx");
         let elsewhere = arena.project.dir.with_file_name("elsewhere");
         std::fs::rename(&dot_ocx, &elsewhere).expect("the tree is relocatable");
@@ -4181,20 +3302,15 @@ mod bin_mode_entry_tests {
     }
 }
 
-/// RUL-63, RUL-86, RUL-90, R-W29 — **one directory, one derivation.**
-///
-/// `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin` was derived in three
-/// production places on `goat`:
+/// **One directory, one derivation.** `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin`
+/// was derived in three production places:
 /// [`FileStructure::ocx_install_bin_path`](ocx_store::file_structure::FileStructure::ocx_install_bin_path),
-/// `crate::launcher::generate::trampoline_ocx_binary` (RUL-86) and
-/// `shell::reconcile::fingerprint`'s watch set (RUL-90). Two spellings that
-/// disagree make `repair_owned_segments` **delete one and add the other on
-/// every prompt** — both sit under `$OCX_HOME`, so both are owned, and only
-/// one of them is ever in the desired set.
-///
-/// Structural because the defect is: nothing a behavioural test can observe
-/// distinguishes "two spellings that happen to agree" from "one spelling", and
-/// the day they stop agreeing is the day the prompt starts flapping.
+/// `crate::launcher::generate::trampoline_ocx_binary` and the
+/// `shell::reconcile::fingerprint` watch set. Two disagreeing spellings make
+/// `repair_owned_segments` **delete one and add the other on every prompt** (both
+/// sit under the owned `$OCX_HOME`; only one is ever desired). Structural because
+/// no behavioural test tells "two spellings that happen to agree" from "one
+/// spelling", and the day they stop agreeing the prompt starts flapping.
 #[cfg(test)]
 mod one_install_bin_derivation {
     use std::path::{Path, PathBuf};
@@ -4234,7 +3350,7 @@ mod one_install_bin_derivation {
         files
     }
 
-    /// RUL-63, RUL-86, RUL-90 — exactly one file derives the directory, and it
+    /// Exactly one file derives the directory, and it
     /// is `ocx_store`'s `file_structure.rs`, which owns the symlink store the
     /// derivation runs over. Every other reader calls
     /// [`FileStructure::ocx_install_bin_path`](ocx_store::file_structure::FileStructure::ocx_install_bin_path).
@@ -4248,7 +3364,7 @@ mod one_install_bin_derivation {
     #[test]
     fn only_the_store_derives_the_install_bin_directory() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        // Three roots since WP-27: the derivation's home left for `ocx_store`,
+        // Three roots: the derivation's home left for `ocx_store`,
         // and a guard that kept scanning only the two crates it is not in would
         // report a clean sweep over a tree that no longer holds its subject.
         let roots: [(PathBuf, &str); 3] = [
@@ -4300,27 +3416,16 @@ mod one_install_bin_derivation {
 }
 
 // ---------------------------------------------------------------------------
-// WP-9 — what `session` itself composes
+// What `session` itself composes
 // ---------------------------------------------------------------------------
 
-/// [`session`]'s own composition, end to end (C-018, C-059, RUL-87).
-///
-/// Every other module here pins one piece: `session_path_tests` the splice,
-/// `bin_mode_entry_tests` the stamp gate and the heal, `activate_ladder_tests`
-/// the mode. [`session`] is the function that puts those pieces into **one**
-/// `Outcome`, and which tier each contribution lands in is what decides whether
-/// a globally installed tool shadows a project's own trampoline. Two rows, one
-/// per arm that composes anything:
-///
-/// - the `bin`-mode arm, asserted on the resulting `PATH` rather than on the
-///   vector, for RUL-62's reason — the vector runs backwards, so a vector
-///   assertion cannot tell the right answer from the shadowing one;
-/// - the project-free arm, where `project_contribution` never runs and the two
-///   session directories are the whole of the answer.
-///
-/// Both red under a mutation of [`session`] itself, never of a caller: a
-/// mutation one level up would prove the caller is wired, not that this
-/// function composes correctly.
+/// [`session`]'s own composition, end to end: which tier each contribution lands
+/// in decides whether a globally installed tool shadows a project's trampoline.
+/// Two rows, one per arm that composes anything: the `bin`-mode arm, asserted on
+/// the resulting `PATH` (a vector assertion cannot tell the right answer from the
+/// shadowing one), and the project-free arm, where the two session directories
+/// are the whole answer. Both red under a mutation of [`session`] itself, never of
+/// a caller, which would prove only the wiring.
 #[cfg(test)]
 mod session_composition_tests {
     use std::collections::BTreeMap;
@@ -4359,7 +3464,7 @@ mod session_composition_tests {
     }
 
     /// The `PATH` a shell holds after `entries` fold over one ambient segment,
-    /// as segments — the only operand RUL-62 permits an ordering claim about.
+    /// as segments — the only operand the ordering rule permits an ordering claim about.
     fn resulting_path(entries: &[Entry]) -> Vec<String> {
         let mut env = Env::clean();
         env.set("PATH", "/usr/bin");
@@ -4439,7 +3544,7 @@ mod session_composition_tests {
 
         /// Render one trampoline, link the default group at the locked digest,
         /// and persist the stamp that describes both — the tree `ocx pull`
-        /// leaves behind, which is what the C-061 gate demands before the
+        /// leaves behind, which is what the stamp gate demands before the
         /// project's `bin/` may be emitted.
         fn render(&self, key: &str) {
             let path = self.home.shell_bin(DEFAULT_SHELL).join("cmake");
@@ -4483,7 +3588,7 @@ mod session_composition_tests {
     }
 
     /// The plain-value inputs one prompt reads. Offline, with an empty local
-    /// index: C-061 forbids this path composing anything, so a call that
+    /// index: the gate forbids this path composing anything, so a call that
     /// reached the network fails here rather than passing slowly.
     struct Prompt {
         manager: PackageManager,
@@ -4494,7 +3599,7 @@ mod session_composition_tests {
 
     impl Prompt {
         /// `consented` is written into `[shell.consent] paths`, the one clause
-        /// that holds with no stamp on disk (C-025 clause 3).
+        /// that holds with no stamp on disk.
         fn new(file_structure: &FileStructure, consented: Option<&Path>) -> Self {
             let index = Index::from_chained(
                 LocalIndex::new(LocalConfig {
@@ -4542,7 +3647,7 @@ mod session_composition_tests {
         }
     }
 
-    /// **C-018 x RUL-87, composed by [`session`] rather than assembled by the
+    /// **Composed by [`session`] rather than assembled by the
     /// test.** A `bin`-mode project whose home is rendered contributes its
     /// `<home>/toolchain/active/bin`, and that directory lands **ahead** of everything
     /// the global tier composed: a globally installed `cmake` must never win
@@ -4556,7 +3661,7 @@ mod session_composition_tests {
     /// Red state: in [`session`]'s `Outcome` literal, file `input.global` under
     /// `project` instead of `global` — the desired vector then reads
     /// `[] ++ session ++ global-composed`, the global tool ends up in front of
-    /// the trampolines, and this is the shadowing C-018 forbids.
+    /// the trampolines, and this is the forbidden shadowing.
     #[tokio::test]
     async fn c018_rul87_a_bin_mode_projects_trampolines_outrank_the_global_tiers_tools() {
         let arena = Arena::new("bin").await;
@@ -4590,7 +3695,7 @@ mod session_composition_tests {
         );
     }
 
-    /// **C-059 on the project-free arm.** A prompt outside every project runs
+    /// **The session pair on the project-free arm.** A prompt outside every project runs
     /// no `project_contribution` at all — and still contributes both session
     /// directories, because they are session-level facts minted above the
     /// early return rather than activation decisions taken below it.
@@ -4638,7 +3743,7 @@ mod session_composition_tests {
     }
 
     /// **A repository-committed symlink must not hand ocx a deletion authority
-    /// over the filesystem** (C-063, RUL-33/RUL-44).
+    /// over the filesystem**.
     ///
     /// `owned_prefixes` is read by `repair_owned_segments` as authority to
     /// delete every `PATH` segment beneath it that the desired set does not
@@ -4707,7 +3812,7 @@ mod session_composition_tests {
         );
     }
 
-    /// C-063 — the widening is **strictly after consent**, not merely usually
+    /// The widening is **strictly after consent**, not merely usually
     /// after it: a project with no grant at all leaves `owned_home` unset, so a
     /// refused project can never contribute a deletion authority.
     ///
@@ -4742,7 +3847,7 @@ mod session_composition_tests {
         );
     }
 
-    /// C-063 — and the refusal is *told*, on the stream the prompt actually
+    /// And the refusal is *told*, on the stream the prompt actually
     /// reads. A degrade nobody can see is the silent forever-failure this
     /// whole path exists to avoid.
     #[tokio::test]
@@ -4771,7 +3876,7 @@ mod session_composition_tests {
             outcome.messages
         );
 
-        // C-059 is unaffected: the session pair is minted above every arm.
+        // The session pair is unaffected: it is minted above every arm.
         let path = resulting_path(&desired_entries(&outcome));
         position(&path, &outcome.session.install_bin);
         position(&path, &outcome.session.global_bin);

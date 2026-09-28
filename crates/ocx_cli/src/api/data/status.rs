@@ -3,10 +3,7 @@
 
 //! Wire shape for `ocx status` — what `ocx.toml` and `ocx.lock` say, verbatim.
 //!
-//! Nothing here resolves anything. No platform is selected, no package metadata
-//! is read, no relative `path` value is anchored to the project root. Those are
-//! `ocx inspect`'s job; status reports the declaration and its lock, including
-//! the states where the two disagree.
+//! Nothing here resolves (platform, metadata, path anchoring): that is `ocx inspect`'s job.
 
 use std::collections::BTreeMap;
 
@@ -18,12 +15,8 @@ use serde::Serialize;
 
 use crate::api::Printable;
 
-/// One declared environment value, normalized.
-///
-/// Deliberately NOT `ProjectEnv`'s own `Serialize`: that one round-trips the
-/// TOML authoring grammar, emitting a constant as a bare string and a path as a
-/// `{ type, value }` table. A JSON consumer would have to branch on
-/// string-vs-object per key to read it. The report always emits both fields.
+// Not `ProjectEnv`'s own `Serialize`: its TOML grammar mixes strings and tables per key.
+/// One declared environment value, normalized: `type` and `value` are always emitted.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct EnvValueOut {
     #[serde(rename = "type")]
@@ -35,9 +28,8 @@ pub struct EnvValueOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     separator: Option<String>,
-    /// Verbatim as written. A relative `path` value stays relative — resolving
-    /// it against the project root is composition, which `ocx inspect` and
-    /// `ocx env` do.
+    /// Verbatim as written: a relative `path` value stays relative. `ocx inspect`
+    /// and `ocx env` resolve it against the project root.
     value: String,
 }
 
@@ -56,22 +48,20 @@ pub struct ToolStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     declared: Option<String>,
-    /// EVERY platform leaf the lock records, not the host's. Picking the host
-    /// leaf is resolution — `ocx inspect` does that.
+    /// EVERY platform leaf the lock records, not the host's; `ocx inspect`
+    /// picks the host leaf.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     platforms: Option<BTreeMap<String, String>>,
 }
 
 /// One group's declarations. `default` is a group like any other: the
-/// top-level `[tools]` and `[env]` tables in `ocx.toml` ARE its tools and env,
-/// which is why `default` is a reserved group name.
+/// top-level `[tools]` and `[env]` tables in `ocx.toml` ARE its tools and env.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct GroupStatus {
     tools: BTreeMap<String, ToolStatus>,
     /// This scope's `[env]` table alone — never merged with another scope's.
-    /// Merging is composition, and a merged view cannot show which scope
-    /// declared a key.
+    // Never merge: a merged view cannot show which scope declared a key.
     env: BTreeMap<String, EnvValueOut>,
 }
 
@@ -81,9 +71,8 @@ pub struct GroupStatus {
 /// state (nothing has run `ocx lock` yet), not an error, so status reports it
 /// and exits 0. Same for a lock that exists but cannot be parsed (an
 /// unsupported `lock_version`, a corrupt file): `error` carries why, and the
-/// header fields stay absent. Status is the command reached for when the
-/// project is broken, so failing the way every other command already fails
-/// would leave it with nothing to say in exactly that case.
+/// header fields stay absent.
+// Never an error: status is the command reached for when the project is broken.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct LockStatus {
     present: bool,
@@ -107,13 +96,8 @@ pub struct LockStatus {
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     declaration_hash: Option<String>,
     /// The hash recomputed from `ocx.toml` — what the lock's stored hash would
-    /// have to be for `current` to hold. Emitted alongside the stored one so a
-    /// consumer sees *why* `current` is false rather than having to recompute
-    /// the project's canonicalization itself.
-    ///
-    /// Named `expected`, not `current`: `current` one level up is a verdict
-    /// about the lock, and reusing the word for a hash value would give it two
-    /// meanings in one object.
+    /// have to be for `current` to hold, so a consumer sees *why* `current` is
+    /// false without recomputing the project's canonicalization.
     ///
     /// Both hashes cover `[tools]` and `[group.*]` only — `[env]` and
     /// `[package.*]` are excluded by design, so an edit to either leaves
@@ -127,20 +111,11 @@ pub struct LockStatus {
     generated_at: Option<String>,
 }
 
+// Plain is a tree under `inspect`'s single-table exemption: groups × tools × env share no row shape.
 /// Report emitted by `ocx status`.
 ///
-/// JSON format: `{ project, lock, groups, package_settings }`.
-///
-/// `groups` and the maps inside it are keyed **objects**, not arrays: within one
-/// scope a binding name and an env key are unique by construction (they are TOML
-/// table keys), and the underlying maps are key-sorted, so there is no authored
-/// order to lose and lookup-by-name is the natural access. `ocx inspect` uses
-/// arrays for the opposite reason — a composed env can carry one key twice.
-///
-/// Plain format: a tree (groups contain tools and env). Status holds the same
-/// single-table exemption `inspect` does — its content is inherently nested,
-/// and flattening groups × tools × env into one row shape would encode the
-/// structure as string prefixes.
+/// `groups` and the maps inside it are key-sorted **objects** keyed by group
+/// name, binding name and env key, not arrays.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct StatusReport {
     /// Absolute path of the `ocx.toml` this report describes.
@@ -175,11 +150,7 @@ fn env_out(env: &ProjectEnv) -> BTreeMap<String, EnvValueOut> {
 }
 
 impl StatusReport {
-    /// Project the loaded config and optional lock into the report.
-    ///
-    /// `lock` is `Ok(None)` when `ocx.lock` does not exist and `Err` when it
-    /// exists but could not be parsed — both are states to report, not
-    /// failures.
+    /// Project config and lock into the report; `lock` is `Ok(None)` when absent, `Err` when unparseable.
     pub fn new(project: &std::path::Path, config: &ProjectConfig, lock: Result<Option<&ProjectLock>, String>) -> Self {
         let lock = match lock {
             Ok(lock) => lock,
@@ -187,9 +158,7 @@ impl StatusReport {
         };
         let config_hash = config.declaration_hash_cached().to_string();
 
-        // Seed every declared group first (including `default`, whose tools and
-        // env are the top-level tables), so a group with no lock entries still
-        // appears rather than looking undeclared.
+        // Seed declared groups first, so one with no lock entries still appears.
         let mut groups: BTreeMap<String, GroupStatus> = BTreeMap::new();
         groups.insert(
             ocx_project::DEFAULT_GROUP.to_owned(),
@@ -208,9 +177,7 @@ impl StatusReport {
             );
         }
 
-        // Fold the lock in. A binding the lock knows but the config no longer
-        // declares is orphaned — it lands with `declared` absent, which is the
-        // only place that state is visible.
+        // A locked binding no longer declared lands with `declared` absent: the orphan state.
         for locked in lock.map(|lock| lock.tools.as_slice()).unwrap_or_default() {
             let entry = groups.entry(locked.group.clone()).or_insert_with(|| GroupStatus {
                 tools: BTreeMap::new(),
@@ -266,9 +233,7 @@ impl StatusReport {
 }
 
 impl StatusReport {
-    /// The lock exists but did not parse. Report the declaration in full — it
-    /// is still readable and still the thing the user needs to see — with the
-    /// lock reduced to "present, unreadable, here is why".
+    /// The lock did not parse: report the declaration in full and the lock as present, unreadable.
     fn unreadable_lock(project: &std::path::Path, config: &ProjectConfig, error: String) -> Self {
         let mut groups: BTreeMap<String, GroupStatus> = BTreeMap::new();
         groups.insert(
@@ -333,8 +298,7 @@ fn declared_tools(tools: &BTreeMap<String, ocx_oci::PackageRef>) -> BTreeMap<Str
         .collect()
 }
 
-/// A plain-text tree node. Built only for `print_plain`; JSON goes through the
-/// `Serialize` impls above.
+/// A plain-text tree node for `print_plain`.
 struct Node {
     label: String,
     annotations: Vec<String>,
@@ -382,10 +346,7 @@ impl TreeItem for Node {
 }
 
 impl ToolStatus {
-    /// Host-facing summary of the lock state for the plain tree.
-    ///
-    /// The host leaf is picked for DISPLAY only — the JSON keeps every
-    /// platform, because choosing one is resolution.
+    /// Host-facing lock summary for the plain tree; the JSON keeps every platform.
     fn plain_annotation(&self, host: &Platform) -> String {
         let Some(platforms) = &self.platforms else {
             return "not locked".to_owned();

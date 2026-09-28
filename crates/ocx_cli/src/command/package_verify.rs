@@ -1,40 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx package verify` — keyless Sigstore verification of a target manifest's
-//! signature via OCI Referrers.
+//! `ocx package verify` — Sigstore verification of a package's signature referrer. State machine:
+//! [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md).
 //!
-//! Fetches the Sigstore bundle v0.3 referrer for the target, verifies the
-//! Fulcio cert chain against the resolved trust root, verifies the Rekor
-//! SET, verifies the signature over the subject digest, and checks the cert
-//! identity + issuer against the accepted identity. See
-//! [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md)
-//! for the full state machine.
-//!
-//! There are **no default** `--certificate-identity` / `--certificate-oidc-issuer`
-//! values — keyless verification is meaningless without knowing whose
-//! signature you trust. The pair may come from the flags or from a
-//! `[[trust.policy]]` entry whose scope covers the target; the flags are
-//! optional only when such a policy matches, and are required otherwise.
-//!
-//! This command resolves the identifier, validates `--rekor-url` (SSRF guard),
-//! resolves the trust root in precedence order — `--sigstore-trusted-root` /
-//! `OCX_SIGSTORE_TRUSTED_ROOT`, then `[trust.sigstore]` from `config.toml`,
-//! then `$OCX_HOME/sigstore/trusted-root.json`, then the fresh trust-root
-//! cache, then the Sigstore TUF root fetched over the network — and drives the verify
-//! pipeline through the [`PackageManager`](ocx_package_manager) facade
-//! (`verify_one`), which runs the full state machine and returns a
-//! [`VerificationReport`].
-//!
-//! Verify reads the artifact and its signature referrer from the registry in
-//! every mode. `--offline` / `OCX_OFFLINE` scopes to the Sigstore trust services
-//! (the Rekor-key fetch and TUF), not the artifact registry: offline verify
-//! reuses cached or supplied trust material (which must carry a pinned Rekor
-//! key) and never contacts Sigstore; with no such material it fails with an
-//! actionable error rather than skipping verification. A successful online
-//! verify caches its trust material for later offline runs. The positive path is
-//! exercised end-to-end against a real Sigstore deployment — Fulcio, Rekor,
-//! TesseraCT and dex under the `sigstore` Docker Compose profile.
+//! No default identity or issuer: the pair comes from the flags or a matching `[[trust.policy]]`.
+//! `--offline` scopes to the Sigstore trust services only, and without cached or supplied trust
+//! material it fails rather than skips verification.
 
 use std::process::ExitCode;
 
@@ -102,9 +74,7 @@ pub struct PackageVerify {
     #[clap(flatten)]
     signature_format: options::signature_format::SignatureFormatOpt,
 
-    // C-S1-3 injection seam: private-Rekor override (validated in `execute`).
-    // `Option`, not a clap default, so `[trust.sigstore].rekor_url` can sit
-    // between the flag and the builtin.
+    // `Option`, not a clap default, or `[trust.sigstore].rekor_url` can never apply.
     /// Rekor transparency-log endpoint
     ///
     /// Defaults to [trust.sigstore].rekor_url, else public Rekor.
@@ -126,16 +96,15 @@ pub struct PackageVerify {
     predicate_type: Option<PredicateType>,
 
     /// Accept a keyless cosign sidecar that carries no transparency-log entry.
-    ///
-    /// A keyless `sha256-<hex>.sig` or `sha256-<hex>.att` proves nothing about
-    /// *when* it was signed unless its layer carries a
-    /// `dev.sigstore.cosign/bundle` annotation: the Fulcio certificate it names
-    /// lived about ten minutes, so without an entry a long-expired certificate
-    /// is indistinguishable from a live one. Verify refuses both shapes (exit
-    /// 65). Pass this in air-gapped CI, where the entry could not be fetched or
-    /// was never written, and you accept a signature nothing timestamps. Inert
-    /// everywhere else: a bundle's transparency evidence stays mandatory under
-    /// keyless and optional under `--key`.
+    #[arg(long_help = "\
+        Accept a keyless cosign sidecar that carries no transparency-log entry.\n\n\
+        A keyless `sha256-<hex>.sig` or `sha256-<hex>.att` proves nothing about *when* it was \
+        signed unless its layer carries a `dev.sigstore.cosign/bundle` annotation: the Fulcio \
+        certificate it names lived about ten minutes, so without an entry a long-expired \
+        certificate is indistinguishable from a live one. Verify refuses both shapes (exit 65). \
+        Pass this in air-gapped CI, where the entry could not be fetched or was never written, and \
+        you accept a signature nothing timestamps. Inert everywhere else: a bundle's transparency \
+        evidence stays mandatory under keyless and optional under `--key`.")]
     #[clap(long = "allow-unlogged-signature")]
     allow_unlogged_signature: bool,
 
@@ -163,46 +132,26 @@ impl PackageVerify {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifier = self.identifier.with_domain(context.default_registry())?;
 
-        // D9's format pin, resolved and refused at the invocation boundary:
-        // `--signature-format both` names two shapes, and a verification result
-        // cannot say "either of these satisfied me", so it is a usage error (64)
-        // rather than a silent pick — before any network request rather than
-        // after one. The resolved pin then decides *discovery*: the shape it
-        // does not name is never looked for.
+        // `both` is a usage error (64): a verdict cannot report "either shape satisfied me".
         let signature_format = self.signature_format.pin().map_err(crate::error::UsageError::from)?;
 
-        // Parsed before the trust root is resolved and before any request, so
-        // `--key awskms://alias/release` names its unimplemented backend (exit
-        // 85) instead of being read as a filename and reported as a missing
-        // file. `KeyRefError` carries which of the two it is; the `From` impl
-        // is the only thing that decides 85 from 64.
+        // Parsed up front, or `--key awskms://…` fails later as a missing file instead of exit 85.
         let key = self
             .key
             .reference()
             .map_err(|error| VerifyError::new(identifier.clone(), VerifyErrorKind::from(error)))?;
 
-        // SSRF hardening (CWE-918): validate the user-supplied endpoint at the
-        // boundary before it becomes an HTTP client target. Precedence, guard
-        // and refusal kind are the shared ladder's — see `resolve_rekor_endpoint`.
+        // Also the SSRF guard (CWE-918): the endpoint is validated before any client dials it.
         let rekor_url = package_sign_common::resolve_rekor_endpoint(
             context.config_trust_sigstore(),
             &identifier,
             self.rekor_url.as_deref(),
         )?;
 
-        // Verify reads the artifact + its signature referrer from the registry in
-        // every mode. `--offline` scopes to the Sigstore trust services (the
-        // Rekor-key fetch and TUF), not the registry — so, unlike sign, offline
-        // verify does not exit 81; it requires cached/supplied trust material
-        // instead. See `verify_client`. The index the pipeline uses comes from
-        // the manager facade, so only the registry client + offline flag are
-        // taken here.
+        // `verify_client`, not the offline-gated client: verify reads the registry under `--offline` too.
         let client = context.verify_client();
         let offline = context.is_offline();
 
-        // The trust-root cache is keyed by the Rekor instance; compute the key
-        // here (where `rekor_url`'s type is in scope) so the resolver takes a
-        // plain string and the CLI need not name `url::Url`.
         let rekor_cache_key = ocx_sign::verify::trust_cache::cache_key_for_rekor(&rekor_url);
         let trust_root = package_sign_common::resolve_trust_root(
             &context,
@@ -213,9 +162,6 @@ impl PackageVerify {
         )
         .await?;
 
-        // Resolve the identity constraints: flag override (exact pair), or the
-        // scope-matched [[trust.policy]] set pooled across config.toml tiers +
-        // the project ocx.toml.
         let policies = package_sign_common::resolve_policies(
             &context,
             &identifier,
@@ -225,9 +171,6 @@ impl PackageVerify {
         )
         .await?;
 
-        // Route through the PackageManager facade: it assembles the verify
-        // pipeline (registry client, index) and returns a per-package error
-        // whose kind preserves the verify exit-code taxonomy.
         let options = VerifyOptions {
             policies: &policies,
             client,
@@ -239,9 +182,7 @@ impl PackageVerify {
             content: self.content_mode(),
             signature_format,
             allow_unlogged_signature: self.allow_unlogged_signature,
-            // `signatures[]` reports every signature the subject carries, so
-            // the scan has to look at every candidate. The install-time
-            // auto-verify hook renders no report and deliberately does not.
+            // `signatures[]` reports every signature, so the scan must not stop at the first pass.
             report_all: true,
         };
         let verified = context
@@ -251,20 +192,13 @@ impl PackageVerify {
             .map_err(package_sign_common::verify_error_into_anyhow)?
             .signatures;
 
-        // Built before the verdict is moved out: every verified candidate gets a
-        // row, the verdict included, so `signatures[0]` and the flat fields
-        // describe the same signature.
         let signatures: Vec<SignatureEntry> = verified.iter().map(Self::signature_entry).collect();
-        // Non-empty by `VerifyPipeline::run`'s contract; the verdict is the
-        // first candidate that fully passed, under either arity.
+        // `VerifyPipeline::run` puts the passing verdict first, so `signatures[0]` matches the flat fields.
         let Some(result) = verified.into_iter().next() else {
             unreachable!("a successful verify returns at least one signature");
         };
 
-        // The flat report predates the key model and its three certificate
-        // fields are `String`. Under a key they are genuinely absent, and the
-        // empty string is how this shape spells that — the typed absence
-        // survives on `VerifyResult` and reaches JSON through `signatures[]`.
+        // Empty under `--key`: the flat fields are frozen as `String`; `signatures[]` keeps the typed absence.
         let mut report = VerificationReport::new(
             result.subject_digest,
             result.referrer_digest,
@@ -277,11 +211,8 @@ impl PackageVerify {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// Project one verified candidate onto the frozen `signatures[]` row.
-    ///
-    /// A borrow, not a move: the verdict is the first of the same list and the
-    /// flat fields are read off it afterwards. Nothing here is rendered in
-    /// plain text — see the `SignatureEntry` struct note (CWE-150).
+    /// Projects one verified candidate onto the frozen `signatures[]` row; never rendered in
+    /// plain text (CWE-150, see `SignatureEntry`).
     fn signature_entry(result: &ocx_sign::verify::VerifyResult) -> SignatureEntry {
         SignatureEntry {
             signature_format: result.signature_format,
@@ -295,8 +226,6 @@ impl PackageVerify {
         }
     }
 
-    /// The kind of signed content to verify: a bare artifact signature, or an
-    /// in-toto attestation optionally narrowed to one predicate type.
     fn content_mode(&self) -> VerifyContentMode {
         if self.attestation {
             VerifyContentMode::Attestation {

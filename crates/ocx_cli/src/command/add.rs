@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx add [--group <name>] <identifier>...` — append one or more
-//! bindings to `ocx.toml`, atomically rewrite `ocx.lock` for impacted
-//! tools, and install.
+//! `ocx add`: append bindings to `ocx.toml`, rewrite `ocx.lock` for the impacted tools, and install.
 
 use std::process::ExitCode;
 
@@ -17,9 +15,7 @@ use crate::app::project_context::{
 use crate::conventions;
 use crate::options;
 
-/// Arguments of `ocx add`. The user-facing description lives on the
-/// [`Command::Add`](crate::command::Command::Add) variant — that is the doc
-/// clap renders, and this one reaches nothing but rustdoc.
+// User-facing help lives on `Command::Add`; a doc here renders nowhere.
 #[derive(Parser, Clone)]
 pub struct Add {
     /// Named group to add the bindings to. Defaults to the implicit
@@ -41,23 +37,11 @@ pub struct Add {
 
 impl Add {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // F7: a `--global` mutator on an absent global file auto-creates
-        // it (mirrors project `add` on a fresh project; the global tier is
-        // the one sanctioned auto-scaffold site). No-op when not `--global`
-        // or the file already exists.
         ensure_global_project_initialized(&context).await?;
 
-        // Parse every positional up front — before the flock — applying the
-        // default registry if unqualified and the `:latest` default for bare
-        // identifiers (no tag, no digest). Parsing all of them first means a
-        // malformed identifier fails fast without touching the flock or
-        // `ocx.toml`. The `:latest` default is intentionally NOT a duplicate
-        // of the config-parse-layer default in `ProjectConfig::from_toml_str`.
-        //
-        // A leading `NAME=` picks the binding key explicitly. `=` never
-        // appears in a valid OCI identifier, so splitting on the FIRST `=` is
-        // unambiguous. The name itself is validated by the library
-        // (`InvalidBindingName`), so an empty `=foo` fails there, not here.
+        // Parsed before the flock, so a malformed identifier fails without touching `ocx.toml`.
+        // This `:latest` default stays separate from `ProjectConfig::from_toml_str`'s — do not unify them.
+        // `=` never appears in an OCI identifier, so the first one splits off `NAME=`.
         let bindings: Vec<(Option<String>, ocx_oci::PackageRef)> = self
             .identifiers
             .iter()
@@ -76,16 +60,10 @@ impl Add {
             })
             .collect::<Result<_, _>>()?;
 
-        // Resolve project, acquire flock, load snapshot + predecessor lock.
-        // Errors propagate to the `main.rs` boundary: `log::error!` logs the
-        // message once and `app::classify_error` derives the exit code from
-        // `ProjectContextError`'s `ClassifyExitCode` impl.
         let guard = load_project_for_mutate(&context).await?;
 
-        // Decide per binding what this invocation owes, against the manifest
-        // as it is on disk — before anything is staged, so an `ocx add` of
-        // what is already declared never reaches the library's duplicate
-        // refusal and never rewrites `ocx.toml`.
+        // Planned against the on-disk manifest before staging, so re-adding a declared binding never
+        // reaches the duplicate refusal or rewrites `ocx.toml`.
         let plan = plan_bindings(
             guard.config(),
             guard.previous_lock().map_or(&[][..], |lock| lock.tools.as_slice()),
@@ -96,17 +74,8 @@ impl Add {
         let platform = conventions::platform_or_default(self.platform.platform.clone());
         let config_path = guard.config_path().to_path_buf();
 
-        // Stage: in-memory add of every binding the plan did not already
-        // account for. A binding whose key is taken by a *different*
-        // identifier is deliberately left in the staging set, so the refusal
-        // (`BindingAlreadyExists`) keeps its single owner in the library and
-        // aborts before any disk write. Atomic: all staged bindings land or
-        // none do; `ocx.toml` is never left half-edited.
-        //
-        // Ahead of the status lines below, so a mixed batch that exits 64
-        // never first claims that part of it was already added. Staging is
-        // pure and the candidate is owned, so the no-op path can still roll
-        // the guard back afterwards.
+        // A key taken by a different identifier stays staged, so `add_binding_in_memory`'s refusal
+        // aborts the batch before any disk write.
         let bindings_for_stage = plan.stage.clone();
         let group = self.group.clone();
         let staging_config_path = config_path.clone();
@@ -117,14 +86,15 @@ impl Add {
             Ok(())
         })?;
 
-        // Nothing new reached the manifest: the commit writes `ocx.lock` only,
-        // leaving `ocx.toml` byte-identical.
+        // Nothing new staged: the commit writes `ocx.lock` only.
         let staged = if plan.stage.is_empty() {
             staged.lock_only()
         } else {
             staged
         };
 
+        // After staging, so a batch that exits 64 never reports part of itself as added; staging is
+        // pure, so the no-op path below can still roll the guard back.
         for key in &plan.already {
             context.ui().status(
                 "Unchanged",
@@ -132,39 +102,24 @@ impl Add {
             );
         }
 
-        // `--no-pull` promises this invocation downloads nothing, and the
-        // render's metadata closure walk is a download. It therefore runs
-        // against the offline view (the shipped `--no-pull` idiom, as in
-        // `ocx env --no-pull`): a warm store still re-renders, a cold one
-        // degrades quietly and the deferred `ocx pull` renders instead.
-        //
-        // Both exits below render, so both derive the manager and the scope
-        // from here: the tree the user ends up with must not depend on
-        // whether this invocation happened to change the manifest. The scope
-        // in particular is derived while the guard still exists, since the
-        // no-op path renders after dropping it.
+        // `--no-pull` promises no downloads and the render's closure walk is one, so render offline;
+        // a cold store degrades quietly and the deferred `ocx pull` renders instead.
         let render_manager = if eager {
             context.manager().clone()
         } else {
             context.manager().offline_view(context.local_index().clone())
         };
+        // Derived while the guard is held (the no-op path renders after dropping it), and shared by
+        // both exits so the result does not depend on whether the manifest changed.
         let scope = context.toolchain_render_scope(guard.config_path()).await?;
 
-        // Everything asked for is already declared and already pinned. Drop the
-        // guard without committing: `ocx.toml` and `ocx.lock` keep their bytes
-        // AND their mtimes, so nothing downstream re-fires on a no-op. The pull
-        // and the render still run — a re-add after a failed download, or after
-        // an earlier `--no-pull`, is the case this path exists for, and the
-        // command promises the toolchain home either way. `previous_lock` is
-        // `Some` by construction here (a binding is only "already pinned" if a
-        // lock holds the pin); the fall-through covers the unreachable `None`
-        // without a panic.
+        // All declared and pinned: roll back, not commit, so `ocx.toml`/`ocx.lock` keep their mtimes and
+        // nothing downstream re-fires; pull and render still run to finish an earlier failed download.
         if plan.stage.is_empty()
             && plan.touched.is_empty()
             && let Some(existing) = guard.previous_lock().cloned()
         {
-            // The candidate answers for `pinned`, exactly as it does on the
-            // committing path — here it is byte-identical to the snapshot.
+            // The candidate answers for `pinned`, as on the committing path.
             let pinned = ocx_package_manager::pinned_for_project(None, staged.config());
             guard.rollback();
             record_activation_consent(&config_path, &existing, None).await;
@@ -174,21 +129,11 @@ impl Add {
             return Ok(ExitCode::SUCCESS);
         }
 
-        // Whole-file model (spec §4.3): re-resolve ONLY the new bindings and
-        // carry every pre-existing lock entry forward verbatim (V2
-        // byte-identical; V1 via exact-only pinned-index transcribe). The
-        // freshness gate inside `resolve_lock_touched` anchors on the
-        // pre-mutation snapshot (`guard.config()`) — the inserted bindings make
-        // the candidate hash differ, so anchoring on the candidate would fail
-        // every clean add — and stamps the candidate hash into the produced
-        // lock. Drift on the pre-mutation snapshot surfaces as
-        // `StaleLockOnPartial` (65, run `ocx lock`); a carried V1 entry whose
-        // index is gone surfaces as `LockUpgradeRequired` (78, run
-        // `ocx update`). Both propagate to the `main.rs` boundary.
-        // `resolve_lock_touched` dedups the touched set internally.
         let touched = plan.touched.clone();
         let new_lock = match guard.previous_lock().cloned() {
             Some(prev) => {
+                // Freshness anchors on the pre-mutation snapshot: the new bindings change the candidate's
+                // hash, so anchoring on it would fail every clean add.
                 resolve_lock_touched(
                     staged.config(), // candidate (post-mutation)
                     guard.config(),  // pre-mutation snapshot — freshness anchor
@@ -199,8 +144,6 @@ impl Add {
                 )
                 .await?
             }
-            // Bootstrap: no predecessor to preserve, nothing to launder — a
-            // direct resolve that must never fail closed.
             None => {
                 resolve_lock(
                     staged.config(),
@@ -212,13 +155,8 @@ impl Add {
             }
         };
 
-        // Commit: lock-first, manifest-second, both atomic — then re-render the
-        // toolchain home the new lock describes (C-054, D-V8). Both steps are
-        // the one shared `commit_and_render`; a call site that reached
-        // `MutationGuard::commit` directly would write a correct lock and leave
-        // the tree describing the previous one. The scope is derived while the
-        // guard still exists; a render failure after the commit never rolls it
-        // back (RUL-53).
+        // Through `commit_and_render`, never `MutationGuard::commit`, or the toolchain tree keeps
+        // describing the previous lock.
         let commit = render_manager
             .commit_and_render(
                 guard,
@@ -233,29 +171,10 @@ impl Add {
             .await?
             .commit;
 
-        // Consent write seam (C-024, A-29) — one of the commands allowed to
-        // stamp, opting in explicitly. AFTER the commit, so the stamp records
-        // the source set the user just asked for rather than the one it
-        // replaced. Best-effort; never fails the mutation.
+        // After the commit, so the stamp records the requested source set, not the one it replaced.
         record_activation_consent(&commit.config_path, &new_lock, None).await;
 
-        // Best-effort pull AFTER the commit lands. A failure here does
-        // not roll back the manifest/lock — the binding is declaratively
-        // present even if the pull needs a retry.
-        //
-        // Symbol-free by design: `materialize_lock` warms the object
-        // store via `pull_all`, never `install_all`. The signed
-        // handshake §1 contract — "global IS the project toolchain, only
-        // difference is the load site" — combined with ADR D5
-        // (amended 2026-05-19, env = lock-pinned digest, current symlink
-        // demoted to IDE-anchor abstraction not consulted by env) means
-        // neither tier needs a candidate or `current` symlink to make
-        // the added tool resolvable. Users that want a per-repo stable
-        // anchor invoke `ocx package install` / `ocx package select`
-        // explicitly.
-        //
-        // `--no-pull` opts out: lock write happens regardless; only the
-        // object-store materialization is deferred.
+        // After the commit: a failed download leaves the binding declared.
         materialize_lock(&context, &new_lock, eager, platform.clone()).await?;
 
         report_lock(&context, &new_lock, &platform)?;
@@ -264,23 +183,11 @@ impl Add {
     }
 }
 
-/// Re-render the toolchain home for a lock this invocation did not commit,
-/// then say on **stderr** what the render could not do (C-050, RUL-53).
+/// Re-render the toolchain home for a lock this invocation did not commit, warning on stderr.
 ///
-/// The committing path gets its render from `commit_and_render`; the
-/// whole-batch no-op never reaches it, and the command promises the home
-/// unconditionally. Under `activate = "bin"` the case this path exists for — a
-/// re-add after an earlier `--no-pull` — would otherwise leave
-/// `toolchain/active/bin` without its trampolines until some later `ocx pull`.
-///
-/// `groups` is the same set `commit_and_render` derives: the lock's groups plus
-/// [`DEFAULT_GROUP`](ocx_project::DEFAULT_GROUP), which is always in scope
-/// (RUL-70). `dry_run` is `ocx pull`'s alone, so this passes `false`.
-///
-/// A render outcome is never this command's exit code. The manifest and lock
-/// are already what the user asked for before this runs; a read-only checkout,
-/// a foreign-owned `.ocx/`, or a closure an offline invocation cannot walk are
-/// all states where that stayed true.
+/// The whole-batch no-op never reaches `commit_and_render`; without this, a re-add under
+/// `activate = "bin"` after an earlier `--no-pull` leaves `toolchain/active/bin` without
+/// trampolines. A render outcome is never this command's exit code.
 async fn render_and_warn(
     context: &crate::app::Context,
     manager: &ocx_package_manager::PackageManager,
@@ -308,10 +215,7 @@ async fn render_and_warn(
                 context.ui().warn(line);
             }
         }
-        // Quiet on an offline manager, loud otherwise — the same split
-        // `commit_and_render` makes for the committing path: `--no-pull`
-        // renders through `offline_view` on purpose, so a cold store there is
-        // the ordinary state and the next `ocx pull` renders.
+        // Quiet offline, as in `commit_and_render`: a cold store is ordinary under `--no-pull`.
         Err(error) if manager.is_offline() => {
             log::debug!("The toolchain home was not rendered: {error}");
         }
@@ -321,12 +225,8 @@ async fn render_and_warn(
     }
 }
 
-/// Report the full resulting lock to the user, keyed on the requested
-/// platform when `--platform` was given (else the host).
-///
-/// Shared by the committing path and the already-declared-and-pinned no-op,
-/// which reports the predecessor lock unchanged — the payload is the same
-/// answer either way, so the two must not drift into two shapes.
+/// Report the full resulting lock, keyed on `--platform` (else the host). Shared by the commit and
+/// no-op paths so the payload cannot drift into two shapes.
 fn report_lock(
     context: &crate::app::Context,
     lock: &ocx_project::ProjectLock,
@@ -340,32 +240,21 @@ fn report_lock(
 /// What one `ocx add` invocation owes, decided per parsed binding.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct AddPlan {
-    /// Bindings the staging closure still runs: the genuinely new keys, and
-    /// the ones whose key is taken by a different identifier — those are left
-    /// for `add_binding_in_memory` to refuse, so the refusal keeps one owner.
+    /// Bindings to stage: new keys, and keys taken by a different identifier, left for
+    /// `add_binding_in_memory` to refuse.
     stage: Vec<(Option<String>, ocx_oci::PackageRef)>,
     /// `(group, key)` pairs to re-resolve: every new binding, plus an
     /// already-declared one the predecessor lock holds no pin for.
     touched: Vec<(String, String)>,
-    /// Keys the manifest already binds to exactly the identifier that was
-    /// asked for. One diagnostic line each.
+    /// Keys already bound to exactly the requested identifier; one diagnostic line each.
     already: Vec<String>,
 }
 
-/// Partition `bindings` against what `config` already declares in the target
-/// group and what `locked` already pins.
+/// Partition `bindings` against what `config` declares in the target group and `locked` pins.
 ///
-/// Keyed on what the mutation would write — the explicit `NAME=` key when
-/// given, else [`ocx_project::binding_key`] — and scoped to the target group,
-/// exactly as `add_binding_in_memory`'s own duplicate check is. Equality is
-/// `PackageRef` equality; both sides carry the `:latest` default, so
-/// `ocx add cmake` twice compares equal.
-///
-/// A key repeated inside one batch is decided against the identifier the
-/// earlier occurrence declared, so `ocx add A A` collapses to one binding
-/// while `ocx add A:1 A:2` still conflicts.
-///
-/// Pure: no I/O, no ordering assumption beyond the batch's own order.
+/// Keyed on the key the mutation would write (`NAME=` or [`ocx_project::binding_key`]), compared by
+/// `PackageRef` equality. A key repeated in one batch is decided against its earlier occurrence:
+/// `ocx add A A` collapses, `ocx add A:1 A:2` still conflicts.
 fn plan_bindings(
     config: &ocx_project::ProjectConfig,
     locked: &[ocx_project::LockedTool],
@@ -385,8 +274,7 @@ fn plan_bindings(
     for (name, identifier) in bindings {
         let key = name.clone().unwrap_or_else(|| ocx_project::binding_key(identifier));
         let in_manifest = declared.and_then(|tools| tools.get(&key));
-        // What the target group binds this key to already — from an earlier
-        // occurrence in this same batch first, else from the manifest.
+        // An earlier occurrence in this batch first, else the manifest.
         let current = batch
             .iter()
             .find(|(seen, _)| *seen == key)
@@ -401,11 +289,8 @@ fn plan_bindings(
                 batch.push((key, identifier.clone()));
             }
             Some(current) if &current == identifier => {
-                // A repeat inside this batch is fully covered by its first
-                // occurrence. A manifest binding earns the diagnostic, and is
-                // re-resolved only when nothing pins it yet: re-resolving a
-                // pinned binding would silently advance it, which is
-                // `ocx update`'s job and nobody else's.
+                // A batch repeat is covered by its first occurrence. A manifest binding is re-resolved only
+                // when unpinned: re-resolving a pinned one would silently advance it (`ocx update`'s job).
                 if in_manifest.is_some() && !plan.already.contains(&key) {
                     let pinned = locked.iter().any(|tool| tool.group == lock_group && tool.name == key);
                     if !pinned {
@@ -540,7 +425,7 @@ mod tests {
     }
 
     /// A second `--platform` occurrence is a usage error — the flag takes at
-    /// most one value (D4 of `adr_platform_model_unification.md`).
+    /// most one value (see `adr_platform_model_unification.md`).
     #[test]
     fn rejects_repeated_platform_flag() {
         assert!(

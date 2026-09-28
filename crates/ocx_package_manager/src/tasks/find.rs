@@ -9,13 +9,7 @@ use ocx_package::install_info::InstallInfo;
 use super::super::PackageManager;
 
 impl PackageManager {
-    /// Finds a package in the object store without index resolution.
-    ///
-    /// The identifier must carry a digest. Returns the installed package
-    /// info if present, or `None` if the object is absent.
-    ///
-    /// Also serves as defense layer 2 in the concurrent pull safety model —
-    /// see [`PackageManager::pull`] for details.
+    /// Finds a package in the object store without index resolution; `None` if absent.
     pub async fn find_plain(
         &self,
         identifier: &ocx_oci::PinnedPackageRef,
@@ -23,52 +17,7 @@ impl PackageManager {
         super::common::find_in_store(&self.file_structure().packages, identifier).await
     }
 
-    /// Locates a package, resolving through the index only when locating it
-    /// actually requires resolution.
-    ///
-    /// A digest-addressed identifier that is already in the store is answered
-    /// without resolving anything: the package directory is pure path
-    /// arithmetic over the digest, so a manifest walk cannot change the answer,
-    /// and the transport address the walk would derive routes a download this
-    /// call has just established it is not going to make. That walk ended in a
-    /// live `GET /p/<ns>/<pkg>.json` per package whenever the local index held
-    /// no committed root — which is the permanent state of any machine that
-    /// only ever runs `pull` and `exec` against a committed lock, because a
-    /// digest-addressed resolve never grows one. Issue #424: a rendered
-    /// trampoline paid it on every invocation, once per locked tool.
-    ///
-    /// The four cases, in full:
-    ///
-    /// - **pinned, in the store** — answered here, zero network.
-    /// - **pinned, absent from the store** — falls through; the resolve and,
-    ///   through [`find_or_install`](Self::find_or_install), the pull happen
-    ///   exactly as before. First use still works.
-    /// - **unpinned (tag)** — falls through unconditionally: a tag has to be
-    ///   resolved before anything can be located.
-    /// - **a digest that is not a platform leaf** (an image-index digest) —
-    ///   misses the store, which is keyed on the leaf, and falls through.
-    ///
-    /// The two stamps the resolve path applies are preserved rather than
-    /// dropped, so a root reached this way and a root reached through the
-    /// resolve describe the same artefact identically:
-    ///
-    /// - the platform is [`ocx_oci::Platform::any()`], which is not a guess — a
-    ///   store hit proves the digest is a platform leaf, a leaf manifest is a
-    ///   flat image manifest, and [`resolve`](Self::resolve)'s flat arm stamps
-    ///   `any()` unconditionally;
-    /// - the transport registry comes from the locally committed index root
-    ///   whenever there is one — a derived root naming the package's own
-    ///   registry included, since that is still where the content came from,
-    ///   and the resolve path stamps it too — and is left unset when there is
-    ///   not: the state
-    ///   [`InstallInfo::transport_registry`] already documents for a path that
-    ///   resolved nothing through the index. Naming the *logical* host instead
-    ///   would report a registry nothing was ever fetched from.
-    ///
-    /// The `refs/blobs/` upsert is likewise skipped: it heals a legacy or
-    /// alt-tag install's resolution chain, and this path has no chain to write.
-    /// The `--no-pull` probe (`composer::local_root`) already answers from the
-    /// store without it.
+    /// Locates a package; a pinned digest already in the store is answered with no network.
     pub async fn find(
         &self,
         package: &ocx_oci::PackageRef,
@@ -80,6 +29,7 @@ impl PackageManager {
             && let Some(info) = self.find_plain(&pinned).await?
         {
             log::debug!("Found package in store without resolving: {}", pinned);
+            // `any()`: a store hit proves a flat platform leaf, which `resolve`'s flat arm also stamps `any()`.
             let info = info.with_platform(ocx_oci::Platform::any());
             // A guard refusal propagates; only a genuine absence is a miss.
             return Ok(
@@ -89,6 +39,7 @@ impl PackageManager {
                     .await
                     .map_err(|error| PackageErrorKind::Internal(error.into()))?
                 {
+                    // Stamp route_local's registry, not the logical host, or this reports a fetch that never happened.
                     Some(routed) => info.with_transport_registry(routed.registry()),
                     None => info,
                 },
@@ -104,21 +55,14 @@ impl PackageManager {
             log::debug!("Package not found locally for '{}'.", identifier);
             PackageErrorKind::NotFound
         })?;
-        // Stamp what the resolution learned — the selected platform and the
-        // registry the content is fetched from — exactly as the pull path does
-        // in `setup_owned`. Without it the same artefact describes itself
-        // differently depending on whether this invocation happened to find it
-        // in the store or had to fetch it: a cached find would report no
-        // platform and no content registry at all.
+        // Stamp as `setup_owned` does, or a cached find reports no platform and no registry.
         let info = info.with_platform(resolved.platform.clone());
         let info = match &resolved.transport_pinned {
             Ok(transport) => info.with_transport_registry(transport.registry()),
             Err(_) => info,
         };
 
-        // Upsert the resolution chain into the installed package's `refs/blobs/`
-        // — idempotent, covers legacy installs and alt-tag resolves that walked
-        // through a different image index than the one originally pulled.
+        // Idempotent upsert: heals legacy installs and alt-tag resolves through a different image index.
         super::common::reference_manager(self.file_structure())
             .link_blobs(&info.dir().content(), resolved.blobs())
             .await

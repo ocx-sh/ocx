@@ -1,25 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The per-prompt environment reconciler: the `__OCX_ENV_STATE` ledger, its
-//! envelope codec, and the typed three-way [`plan`].
+//! The per-prompt environment reconciler: the `__OCX_ENV_STATE` ledger, its codec, and the
+//! typed three-way [`plan`].
 //!
-//! The carrier is **untrusted input** (C-007): its only permitted effects are
-//! naming the revert set and supplying the equality operand for the exit
-//! guard. Nothing here constructs a path from it, re-grants consent, or
-//! selects a value for a key it is not reverting.
-//!
-//! Split by concept ([ocx-sh/ocx#345](https://github.com/ocx-sh/ocx/issues/345)):
-//! [`ledger`] is the carrier format, [`plan`] is the three-way planner, and
-//! [`fingerprint`] is the watch-set fingerprint. This module retains only
-//! what genuinely spans them — the key/element comparison and equivalence
-//! primitives both the carrier's decode-time forging guard and the planner's
-//! revert-set membership tests share.
-//!
-//! All three are **pure**, and that is what keeps `shell/` independent of
-//! `project/`. The sequencing that binds them into one prompt's answer — and
-//! which does read consent — lives at `package_manager::activation`; see its module
-//! docs for why it is not a submodule here.
+//! The carrier is **untrusted input**: it may only name the revert set and supply the exit
+//! guard's equality operand, never a path, a consent grant, or a value for a key it is not reverting.
 
 use std::ffi::{OsStr, OsString};
 
@@ -39,33 +25,14 @@ pub use ledger::{
 };
 pub use plan::{PLAN_VERSION, Plan, capture_priors, emittable_entries, plan, summary};
 
-// ---------------------------------------------------------------------------
-// Shared primitives — span the carrier format (ledger) and the planner (plan)
-// ---------------------------------------------------------------------------
-
-/// The keys no scope may ever declare [`ModifierKind::Constant`] for (A-02).
+/// The keys no scope may ever declare [`ModifierKind::Constant`] for.
 const NEVER_CONSTANT: [&str; 2] = ["PATH", "PATHEXT"];
 
 /// The comparison rule for a value, **selected by the kind that wrote it**.
 ///
-/// The two rules are the emitters' own, and the planner must not be wider than
-/// the arm that will render its decision — a comparison that calls two spellings
-/// equal suppresses a removal the emitter would have applied byte-exact, and the
-/// variable then accumulates both.
-///
-/// - [`ModifierKind::List`] — **byte-exact, case-sensitive on every platform**
-///   ([`crate::shell::Shell::remove_list_element`], [`crate::shell::Shell::export_list`]).
-///   A list element is an opaque option string: `-DFOO=1` and `-Dfoo=1` are
-///   different options, and a `"` inside one is part of the option, never a
-///   quoting artefact.
-/// - [`ModifierKind::Path`] — A-19: segment-exact after stripping one
-///   surrounding pair of `"` (`std::env::split_paths` unquotes on Windows, so
-///   the operand ocx sees may carry a pair its own emit did not write),
-///   case-sensitive on Unix and ASCII-case-insensitive on Windows.
-/// - [`ModifierKind::Constant`] — the `C == L.applied` exit guard, which the ADR
-///   pins to the same predicate as A-19 (ASCII-case-insensitive on Windows).
-///
-/// The stored string is never normalised — only the comparison is (C-008).
+/// Never wider than the emit arm: an equality the byte-exact emitter does not share suppresses a
+/// removal, and the variable accumulates both.
+/// Path and Constant strip one `"` pair because Windows `split_paths` unquotes the operand.
 fn element_eq(left: &str, right: &str, kind: &ModifierKind) -> bool {
     match kind {
         ModifierKind::List => left == right,
@@ -102,8 +69,7 @@ fn unquote(value: &str) -> &str {
         .unwrap_or(value)
 }
 
-/// Key equality as `EnvKey` already defines it: case-insensitive on Windows,
-/// where `$env:Path` and `$env:PATH` are one variable, exact elsewhere.
+/// Key equality as `EnvKey` defines it: ASCII-case-insensitive on Windows only.
 fn key_eq(left: &str, right: &str) -> bool {
     if cfg!(windows) {
         left.eq_ignore_ascii_case(right)
@@ -132,56 +98,19 @@ fn os_to_string(value: &OsStr) -> String {
     value.to_string_lossy().into_owned()
 }
 
-// ---------------------------------------------------------------------------
-// The ambient environment an explicit invocation starts from (design spec A.2)
-// ---------------------------------------------------------------------------
-
-/// The ambient environment an **explicit** ocx invocation starts a child
-/// from: [`Env::new`] with the per-prompt shell reconciler's own
-/// contribution taken back out.
+/// [`Env::new`] with the per-prompt reconciler's contribution taken back out; the start env of an explicit invocation.
 ///
-/// `ocx exec -- cmd` names the environment it wants. The project toolchain
-/// the reconciler happened to fold into the calling shell is not part of
-/// it, and letting it through is exactly the ambient-`PATH` pollution
-/// clean-env execution exists to prevent — ocx's own shell integration
-/// would otherwise undercut the guarantee that separates it from the
-/// shim-and-shell tools.
-///
-/// The user's *own* environment is untouched. Flipping this to
-/// [`Env::clean`] instead would eat their `EDITOR`, `SSH_AUTH_SOCK` and
-/// proxy vars — a far bigger break than the leak; `--clean` still means
-/// what it always meant.
-///
-/// With no `__OCX_ENV_STATE` carrier — no shell integration, a CI runner,
-/// a plain `ocx exec` from an un-hooked shell — this is [`Env::new`],
-/// variable for variable.
+/// Not [`Env::clean`], which would also strip the user's own `EDITOR` and `SSH_AUTH_SOCK`.
 pub fn inherited_env() -> Env {
     let mut env = Env::new();
     revert_reconciled(&mut env);
     env
 }
 
-/// Take the reconciler's contribution back out, using the
-/// `__OCX_ENV_STATE` ledger as the revert set.
+/// Revert the ledger's contribution by [`plan`]ning against an empty desired set.
 ///
-/// The revert set is [`plan`] against an **empty** desired set —
-/// "ocx wants nothing here now", which is precisely what an explicit
-/// invocation means. Reusing the planner is the point: it already knows
-/// that a constant only reverts while the live value is still the one ocx
-/// wrote, and that a key with no recorded prior is left alone. A second
-/// reverter would be a second thing to drift from the shell arms.
-///
-/// `owned_prefixes` is deliberately empty. The lost-ledger repair (C-006)
-/// would also strip `$OCX_HOME` segments *this* ledger never claimed —
-/// `ocx self activate`'s own `bin/` among them, which is how the child
-/// finds `ocx` at all — and the ledger is present here, so there is
-/// nothing to guess.
-///
-/// The carrier is untrusted input (C-007): its only effect here is naming
-/// the revert set. [`Ledger::decode`] answers `None` for every malformed
-/// value, and this reverts nothing and leaves the carrier alone in that
-/// case; an entry naming an empty element or an empty separator is skipped
-/// rather than folded, because either would make the list removal a wipe.
+/// `owned_prefixes` stays empty, or the lost-ledger repair strips `ocx self activate`'s own `bin/`.
+/// An empty element or separator is skipped, since either makes the list removal a wipe.
 fn revert_reconciled(env: &mut Env) {
     let Some(raw) = env.get(CARRIER_KEY).map(|v| v.to_string_lossy().into_owned()) else {
         return;
@@ -189,7 +118,6 @@ fn revert_reconciled(env: &mut Env) {
     let Some(ledger) = Ledger::decode(&raw) else {
         return;
     };
-    // The record describes an environment this child no longer has.
     env.remove(CARRIER_KEY);
 
     let plan = plan(&[], env, &ledger, &[]);
@@ -199,12 +127,9 @@ fn revert_reconciled(env: &mut Env) {
         }
         let Some(existing) = env.get(key) else { continue };
         let value = match separator {
-            // Path kind: the same segment-exact removal the emitted arms do.
             None => ocx_util::path::remove_segment(existing, OsStr::new(element)),
             Some(separator) if !separator.is_empty() => {
-                // List kind: `append_unique` is the pinned fold, so removal
-                // is that fold minus its re-append — one algorithm, not a
-                // second copy of the flank rule.
+                // Removal is `append_unique` minus its re-append, so the flank rule has one copy.
                 let appended = ocx_util::list::append_unique(&existing.to_string_lossy(), element, separator);
                 let tail = format!("{separator}{element}");
                 OsString::from(appended.strip_suffix(&tail).unwrap_or("").to_owned())

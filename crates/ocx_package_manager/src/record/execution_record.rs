@@ -3,33 +3,9 @@
 
 //! The record payload, and the inputs a launching frame supplies to build it.
 //!
-//! **The key set here is frozen wire format.** It is deliberately *not* uniform:
-//! the envelope (`schemaVersion`, `recordedAt`, `identityNote`, `cleanEnv`,
-//! `projectRoot`, `declarationDigest`, `requestedPlatform`, `managedConfig`,
-//! `autoInstalled`, `noVerify`, `insecureRegistries`, `patchSnapshot`) is
-//! camelCase — the record is an in-toto-style document, and in-toto/SLSA render
-//! their own envelopes lowerCamelCase — while the `process`, `host` and `os`
-//! blocks keep the flat lowercase spelling of the vocabularies they were lifted
-//! from, including `process.working_directory`, which is snake.
-//!
-//! The dotted `sh.ocx.*` keys are neither: they are namespaced annotation keys
-//! in the OCI sense — `sh.ocx.role`, `sh.ocx.provenance` — not field names, and
-//! `kind` carries the same dotted namespace in its value
-//! (`sh.ocx.execution-record`).
-//!
-//! For that reason no container here carries a blanket `rename_all`: a single
-//! `rename_all = "camelCase"` would silently rewrite `working_directory` to
-//! `workingDirectory` and break every consumer, with nothing in the type system
-//! objecting. Each key that differs from its Rust field name carries an explicit
-//! `#[serde(rename = "…")]`, and a golden test asserts the exact key set.
-//!
-//! Two field classes, and only one can fail the invocation. Load-bearing fields
-//! (`packages[]`, `digest`, `process.executable`, `frame`) are in hand from
-//! resolution — absence would be a bug, not a runtime condition. Best-effort
-//! fields are `Option` and **omit their key** when undeterminable: an absent key
-//! means "not determinable here", a present key is always true, and a
-//! `"unknown"` sentinel would be indistinguishable from a host genuinely named
-//! `unknown`.
+//! The key set is frozen wire format and deliberately mixed-case; a blanket
+//! `rename_all` would rewrite `process.working_directory` and break every consumer.
+//! Best-effort fields omit their key when undeterminable, never an `"unknown"` sentinel.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -49,41 +25,32 @@ use ocx_oci::{Architecture, Digest, OperatingSystem, PackageRef, PinnedPackageRe
 use ocx_package::install_info::InstallInfo;
 use ocx_package::metadata::visibility::Visibility;
 
-/// The in-band schema version, a string, bumped **only** for a
-/// backward-incompatible change.
-///
-/// Additive fields never bump it; consumers must tolerate unknown keys. This is
-/// pip's installation-report discipline, adopted verbatim.
+/// The in-band schema version, bumped only for a backward-incompatible change;
+/// additive fields never bump it.
 pub const SCHEMA_VERSION: &str = "1";
 
 /// The `kind` discriminator carried by every record.
 pub const RECORD_KIND: &str = "sh.ocx.execution-record";
 
-/// Why a launcher frame's identity is degraded, stated in-band so a consumer
-/// reading one record in isolation learns the limitation from the record itself
-/// rather than from documentation it may not have.
+/// The in-band `identityNote` of a degraded launcher frame.
 const DEGRADED_IDENTITY_NOTE: &str = "package directories are content-shared and carry no registry/repository, so \
      logical identity is not recoverable in this frame and no purl can be emitted";
 
 /// One pre-exec resolution record: the full resolved closure plus the resolved
 /// executable, written immediately before the child starts.
 ///
-/// Serialized **compact, one document per file, one line**. Every mainstream log
-/// shipper is line-oriented, so on one line "read whole file" degenerates to
-/// "read one line" and all of them cope. See [`Self::to_json`].
+/// Serialized **compact, one document per file, one line**.
+// One line: every mainstream log shipper is line-oriented, so a pretty-printed record breaks ingestion.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ExecutionRecord {
-    /// Format version; always [`SCHEMA_VERSION`].
+    /// Format version, a string bumped only for a backward-incompatible change.
     #[serde(rename = "schemaVersion")]
     pub schema_version: String,
 
-    /// Format discriminator; always [`RECORD_KIND`].
+    /// Format discriminator; always `sh.ocx.execution-record`.
     pub kind: String,
 
     /// When the record was written — RFC 3339, UTC, millisecond precision.
-    ///
-    /// Schema'd as a string rather than pulling in schemars' chrono feature: the
-    /// wire form *is* a string, so the feature would buy nothing.
     #[serde(rename = "recordedAt", serialize_with = "serialize_rfc3339_millis")]
     #[schemars(with = "String")]
     pub recorded_at: DateTime<Utc>,
@@ -104,12 +71,7 @@ pub struct ExecutionRecord {
     pub os: Os,
 
     /// `sh.ocx.*` facts about the resolved executable: provenance, kind, and the
-    /// package purl it came from.
-    ///
-    /// A flat string map, deliberately **not** nested under
-    /// `process.executable`: that field is typed as a flat keyword string by the
-    /// vocabulary it was borrowed from, so hanging sub-fields off it would be an
-    /// ingest type conflict rather than a naming quibble.
+    /// package purl it came from, as a flat string map.
     ///
     /// `sh.ocx.provenance` is the field an auditor reads first — `ocx-package`
     /// when the resolved path lands inside the store, `external` when it does
@@ -150,7 +112,7 @@ pub struct Frame {
     /// Whether the frame could name the packages it resolved.
     pub identity: FrameIdentity,
 
-    /// Why identity is [`FrameIdentity::Degraded`]. Omitted when it is complete.
+    /// Why `identity` is `degraded`. Omitted when it is complete.
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     #[serde(rename = "identityNote", skip_serializing_if = "Option::is_none")]
     pub identity_note: Option<String>,
@@ -158,18 +120,15 @@ pub struct Frame {
 
 /// The command that opened a launching frame.
 ///
-/// The wire values are the CLI's own canonical command names
-/// (`ocx_cli::app::canonical_command_name`), space-separated exactly as that
-/// function spells them: one grep joins a record to the error envelope of the
-/// same invocation, instead of two ocx-authored JSON documents naming one
-/// command two ways.
+/// The wire values are the CLI's own canonical command names, space-separated:
+/// one grep joins a record to the error envelope of the same invocation.
+// Must match `ocx_cli::app::canonical_command_name`, or two ocx JSON documents name one command two ways.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub enum FrameCommand {
     /// `ocx exec` — the project tier.
     ///
-    /// Also what the hidden deprecated `ocx run` spelling records. The record
-    /// states what executed, and both spellings execute the project tier; the
-    /// deprecation warning is the CLI's business, not the audit trail's.
+    /// Also what the hidden deprecated `ocx run` spelling records.
+    // The record states what executed; the deprecation is the CLI's business, not the audit trail's.
     #[serde(rename = "exec")]
     Exec,
     /// `ocx package exec` — the OCI tier.
@@ -192,8 +151,8 @@ pub enum FrameIdentity {
     Complete,
     /// Digest-complete but name-degraded. Package directories are
     /// content-shared and carry no registry/repository, so a launcher frame
-    /// cannot recover logical identity and emits no purl. A truthful partial
-    /// record beats a fabricated complete one.
+    /// cannot recover logical identity and emits no purl.
+    // Never fabricate identity here: a truthful partial record beats a fabricated complete one.
     #[serde(rename = "degraded")]
     Degraded,
 }
@@ -223,14 +182,9 @@ pub struct Process {
     ///
     /// The **process's** architecture, not the machine's: an amd64 ocx under
     /// Rosetta or qemu on an arm64 host reports `amd64` here, which is exactly
-    /// true of the process that ran. The machine's native architecture is
-    /// deliberately absent — recovering it needs a per-OS native probe plus a
-    /// `uname`-name-to-OCI mapping table this module would then own and have to
-    /// keep correct, and a wrong answer in that field is worse than no answer.
-    ///
-    /// Typed rather than stringly because the controlled vocabulary is the OCI
-    /// architecture vocabulary OCX already carries. An architecture outside that
-    /// closed set is undeterminable here and omits the key.
+    /// true of the process that ran. The machine's native architecture is not
+    /// recorded. An architecture outside the OCI architecture vocabulary is
+    /// undeterminable here and omits the key.
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<String>")]
@@ -241,9 +195,8 @@ pub struct Process {
 
     /// The working directory the child inherits.
     ///
-    /// Snake-cased on the wire, unlike its camelCase envelope siblings, because
-    /// that is the published spelling of the vocabulary this block borrows.
     /// Best-effort; omitted when undeterminable.
+    // Snake-cased, unlike its camelCase siblings: the published spelling of the vocabulary this block borrows.
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<PathBuf>,
@@ -259,26 +212,22 @@ pub struct ParentProcess {
 /// The invoking user.
 ///
 /// Two fields with different trust, which is the whole point of carrying both:
-/// [`Self::id`] comes from the kernel and cannot be forged by the caller's
-/// environment, while [`Self::name`] is read from the environment and can be.
+/// `id` comes from the kernel and cannot be forged by the caller's
+/// environment, while `name` is read from the environment and can be.
 /// An audit sink correlating *who ran this* must key on `id`.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct User {
     /// The effective user id the kernel reports, as a string.
     ///
-    /// A string rather than a number because the platforms disagree on the
-    /// type: a POSIX uid is numeric, a Windows SID is `S-1-5-…`. One key with
-    /// one type means a consumer never branches on OS to read it.
-    ///
-    /// Omitted when undeterminable — currently always on Windows, which has no
-    /// uid and whose SID needs a token lookup this module does not do.
+    /// Omitted when undeterminable — currently always on Windows.
+    // A string, not a number, so a Windows SID (`S-1-5-…`) fits the same key once a token lookup reads it.
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
 
     /// Account name, best-effort and **not trustworthy**: it is read from
     /// `$USER`/`$LOGNAME` (`%USERNAME%` on Windows), all of which the caller
-    /// controls. Present for readability; [`Self::id`] is the field to key on.
+    /// controls. Present for readability; `id` is the field to key on.
     ///
     /// Omitted when undeterminable — a scratch container sets none of them.
     #[schemars(extend("x-ocx-absent-when-none" = true))]
@@ -338,15 +287,12 @@ pub struct ResourceDescriptor {
     /// declared binaries and entry points, and the resolved-from marker that
     /// makes tag drift visible.
     ///
-    /// Values are JSON, not strings: an in-toto descriptor's `annotations` is
-    /// an object with arbitrary values, and the name lists genuinely are lists.
-    /// Joining them into one string would be lossy — no separator is forbidden
-    /// in a binary name, so `["a,b"]` and `["a","b"]` would arrive
-    /// indistinguishable.
+    /// Values are JSON, not strings: the name lists are lists.
+    // Never join a list into one string: no separator is forbidden in a binary name.
     pub annotations: BTreeMap<String, Value>,
 }
 
-/// The record's `scope` block — the serialized projection of [`Scope`].
+/// The record's `scope` block.
 ///
 /// Internally tagged on `tier`, matching the three-way union of the published
 /// shape. The launcher variant carries nothing else: a launcher re-entry has no
@@ -392,30 +338,25 @@ pub struct LockReference {
 
     /// The lock's declaration hash, as `algorithm → bare lowercase hex`.
     ///
-    /// Named for what it hashes: the `ocx.toml` **declarations** the lock was
-    /// generated from, which is the value the project tier already defines and
-    /// carries in the lock's own metadata. It is deliberately **not** a digest
-    /// of the lock's contents — two runs whose declarations agree share this
-    /// value even when they resolved different closures, so a consumer must
-    /// never use it as a closure identity. The resolved closure is recorded
-    /// package-by-package with its digests in `packages[]`; that is the
-    /// authoritative answer to "what actually ran".
+    /// Hashes the `ocx.toml` **declarations** the lock was generated from, as
+    /// carried in the lock's own metadata; it is **not** a digest of the lock's
+    /// contents. Two runs whose declarations agree share this value even when
+    /// they resolved different closures, so never use it as a closure identity:
+    /// `packages[]` records what actually ran.
     #[serde(rename = "declarationDigest")]
     pub declaration_digest: BTreeMap<String, String>,
 }
 
 /// The resolution policy in force for this invocation.
 ///
-/// The four frame-varying fields below distinguish two states a plain empty
-/// collection cannot: `None` means the frame has no such context at all (the
-/// launcher frame), `Some(empty)` means the frame has the context and it is
-/// empty. The published shape shows both — a package-tier record carries
-/// `"mirrors": {}` while a launcher record omits the key entirely.
+/// Frame-varying fields distinguish two states an empty collection cannot: a
+/// missing key (or `null`) means the frame has no such context at all (the
+/// launcher frame), an empty value means it has the context and it is empty —
+/// a package-tier record carries `"mirrors": {}`, a launcher record omits it.
 ///
-/// `autoInstalled` is load-bearing, not decoration: together with a
-/// `sh.ocx.resolved-from: tag` annotation it is what shows an invocation
-/// resolved a floating tag and materialized the package on the spot — the one
-/// state no pull-time record can capture.
+/// `autoInstalled` together with a `sh.ocx.resolved-from: tag` annotation is
+/// what shows an invocation resolved a floating tag and materialized the
+/// package on the spot — the one state no pull-time record can capture.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Resolution {
     /// Whether `--offline` was in force.
@@ -436,26 +377,19 @@ pub struct Resolution {
     /// The patch snapshot in force, as `algorithm → bare lowercase hex` over
     /// the snapshot **file's own bytes**.
     ///
-    /// The patch tier's answer to [`Self::frozen`], which scopes to the package
-    /// tier alone. A snapshot is selected by `OCX_PATCH_SNAPSHOT` naming a
+    /// The patch tier's answer to `frozen`, which scopes to the package tier
+    /// alone. A snapshot is selected by `OCX_PATCH_SNAPSHOT` naming a
     /// `patches.snapshot.json` that `ocx patch freeze` wrote; under one, every
-    /// companion composes at the digest the snapshot pins rather than at
-    /// whatever its tag resolves to today. Recording the content digest rather
-    /// than the path is what makes that auditable: a path is a name an operator
-    /// can point anywhere, while this value changes the moment the pins do.
-    ///
-    /// Omitted when no snapshot is in force — the common case, and a different
-    /// statement from "a snapshot with no pins".
+    /// companion composes at the digest the snapshot pins. Omitted when no
+    /// snapshot is in force — a different statement from "a snapshot with no pins".
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     #[serde(rename = "patchSnapshot", skip_serializing_if = "BTreeMap::is_empty")]
     pub patch_snapshot: BTreeMap<String, String>,
 
     /// Whether the policy-gated auto-verify was opted out of (`OCX_NO_VERIFY`).
     ///
-    /// Beside `offline` / `remote` / `frozen` because it belongs to the same
-    /// class: an operator-set policy that changes what resolution was allowed to
-    /// do. An auditor reading a record from a signing-enforced fleet needs to
-    /// see that this invocation ran with verification disabled — the record is
+    /// An auditor reading a record from a signing-enforced fleet needs to see
+    /// that this invocation ran with verification disabled — the record is
     /// otherwise silent about it and the packages look identically resolved.
     ///
     /// The env-tier opt-out only. The per-command `--no-verify` flag is a
@@ -468,17 +402,13 @@ pub struct Resolution {
     /// grammar — `linux/amd64+libc.glibc`.
     ///
     /// The request, not the outcome: what each package's manifest leaf actually
-    /// resolved to is its own `sh.ocx.platform` annotation, and the two differ
-    /// legitimately — a flat single-image package selects `any` under any
-    /// request. Naming this field for the request is what keeps the pair
-    /// readable.
-    ///
-    /// A **string**, not a serialized [`Platform`]: `Platform`'s own
-    /// serialization is the OCI descriptor object, which is a different shape.
+    /// resolved to is its own `sh.ocx.platform` annotation; a flat single-image
+    /// package legitimately selects `any` under any request.
     ///
     /// Emitted as an explicit `null` when the frame has no platform context —
     /// never omitted, and never fabricated from the host, which would make the
     /// record lie in exactly the audit that matters.
+    // A string, not `Platform`, which serializes as the OCI descriptor object: a different wire shape.
     #[serde(rename = "requestedPlatform")]
     pub requested_platform: Option<String>,
 
@@ -486,50 +416,30 @@ pub struct Resolution {
     ///
     /// The **content** registries: the physical hosts the transport addressed,
     /// not the index endpoints a version choice was looked up through, and not
-    /// the logical namespaces the identifiers name. All three are routinely
-    /// different — a package named `ocx.sh/acme/tool` can be resolved through
-    /// `index.ocx.sh` and fetched from `ghcr.io` — and reporting one under
-    /// another's name is the kind of quiet mislabelling an audit trail cannot
-    /// afford. The logical namespace is reported too, in each `packages[]`
-    /// purl's `repository_url`, so a divergence between the two is visible
-    /// rather than flattened.
-    ///
-    /// Reported before any `[mirrors]` rewrite of that host — the rewrites in
-    /// force are their own field, so the pair composes. A root whose resolution
+    /// the logical namespaces the identifiers name — a package named
+    /// `ocx.sh/acme/tool` can be resolved through `index.ocx.sh` and fetched
+    /// from `ghcr.io`. The logical namespace is each `packages[]` purl's
+    /// `repository_url`, so a divergence between the two is visible. Reported
+    /// before any `[mirrors]` rewrite of that host; a root whose resolution
     /// named no content registry is omitted rather than guessed at.
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registries: Option<Vec<String>>,
 
-    /// Which of [`Self::registries`] this invocation was allowed to reach over
-    /// plain HTTP.
+    /// Which of `registries` this invocation was allowed to reach over plain HTTP.
     ///
     /// The subset declared plaintext-eligible by `[registries."<name>"]
-    /// insecure = true` or `OCX_INSECURE_REGISTRIES`, computed by the one
-    /// predicate every other plaintext gate uses
-    /// (`allows_plain_http`) so the record cannot disagree with the
-    /// transport about which hosts were exempt.
-    ///
-    /// Intersected with the registries this frame actually fetched from rather
-    /// than reporting the whole configured allowance: a fleet-wide list of
-    /// hosts nobody contacted says nothing about this invocation, while a host
-    /// that both served content *and* was exempt from TLS is exactly the
-    /// finding an auditor is looking for.
-    ///
-    /// Empty is absent, not `[]`: the overwhelmingly common case is that no
-    /// registry was exempt, and a key present on every record would train
-    /// readers to skip it.
+    /// insecure = true` or `OCX_INSECURE_REGISTRIES`, intersected with the
+    /// registries this frame actually fetched from: a host that both served
+    /// content *and* was exempt from TLS is exactly the finding an auditor is
+    /// looking for. Omitted when empty, never `[]`.
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     #[serde(rename = "insecureRegistries", skip_serializing_if = "Vec::is_empty")]
     pub insecure_registries: Vec<String>,
 
     /// Active mirror rewrites, upstream traffic host to its replacement
-    /// endpoints.
-    ///
-    /// A per-host object rather than one endpoint string: a mirror entry
-    /// declares the `registry` role, the `index` role, or both, and the roles
-    /// address path-disjoint traffic. Collapsing them to one value would drop
-    /// the second endpoint of every entry that configures both.
+    /// endpoints, one per declared role (`registry`, `index`).
+    // Per-host object, not one string: collapsing the roles drops the second endpoint of an entry declaring both.
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mirrors: Option<BTreeMap<String, MirrorEndpoints>>,
@@ -571,101 +481,55 @@ pub struct ManagedConfigReference {
     /// Digest of the applied snapshot, as `algorithm → bare lowercase hex`.
     ///
     /// Omitted when the applied snapshot's digest is not in hand at the
-    /// launching frame. The source alone still names which tier was in force,
-    /// and an empty map on the wire would read as "no digest algorithm applies"
-    /// rather than "not determinable here".
+    /// launching frame; the source alone still names which tier was in force.
+    // Omitted, never an empty map: that would read as "no digest algorithm applies".
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub digest: BTreeMap<String, String>,
 }
 
 /// Everything a launching frame hands the record builder.
-///
-/// Eight fields are uniform across frames; only [`Self::scope`] diverges, which
-/// is what lets [`Frame`] be derived here rather than passed in by each caller.
 #[derive(Debug)]
 pub struct RecordInputs<'a> {
     /// Root packages; the transitive closure rides inside each resolved package.
     pub packages: &'a [Arc<InstallInfo>],
 
-    /// Claimed executable names per package — which binaries and entry points
-    /// each package put on `PATH`.
-    ///
-    /// The third claim class the composition attributes, `integrations`, is
-    /// deliberately not projected: it composes vendor-namespaced configuration,
-    /// not an executable the record's subject could have run.
+    /// Claimed executable names per package: the binaries and entry points each put on `PATH`.
     pub admitted: &'a AdmittedClaims,
 
-    /// The patch companions this frame's site tier overlaid onto its packages,
-    /// as `PackageManager::resolve_env_with_attribution` reported them.
-    ///
-    /// One entry per companion-contributed environment variable, so a companion
-    /// contributing three variables appears three times; the record dedups by
-    /// content identity. Empty when no `[patches]` tier is configured, which is
-    /// the common case.
+    /// The patch companions the site tier overlaid, one entry per contributed
+    /// variable (so repeats are expected; the record dedups by content identity).
     pub patch_companions: &'a [PatchProvenance],
 
     /// The resolved executable, as `Env::resolve_command` produced it.
     pub executable: &'a Path,
 
-    /// Root of the package store — `PackageStore::root`.
-    ///
-    /// Containment against this, rather than against the frame's root package
-    /// directories, is what decides `sh.ocx.provenance`: every package lives
-    /// under it, dependencies and launcher-frame packages included, and those
-    /// are exactly the ones a frame never enumerates.
+    /// Root of the package store; containment under it decides `sh.ocx.provenance`.
     pub store_root: &'a Path,
 
-    /// Root of the shim store — `ShimStore::root`.
-    ///
-    /// The second half of the same containment test. A deferred tool reaches
-    /// `PATH` as a generated launcher under `$OCX_HOME/shims/`, a sibling
-    /// namespace to the three CAS tiers rather than a subtree of `packages/`,
-    /// so a store-only test would libel every lazily composed tool as
-    /// `external` — the record stating the binary did not come from an ocx
-    /// package, which is exactly false.
+    /// Root of the shim store; without it every deferred tool's launcher records as `external`.
     pub shim_root: &'a Path,
 
-    /// `argv[0]` plus arguments, as invoked.
-    ///
-    /// Drives the launch — [`crate::launch`] takes the child's arguments from
-    /// its tail — and is deliberately **not** recorded: a command line carries
-    /// access tokens and passwords often enough that a record shipped to a
-    /// central sink must not contain one.
+    /// `argv[0]` plus arguments, as invoked; never recorded, since a command line
+    /// can carry tokens a central sink must not hold.
     pub argv: &'a [String],
 
     /// Resolution policy, feeding the `resolution` block.
     pub config: &'a OcxConfigView,
 
-    /// Every host this process may contact over plain HTTP — the process-wide
-    /// union `Context` resolved once from `[registries]` and
-    /// `OCX_INSECURE_REGISTRIES`.
-    ///
-    /// Handed in whole rather than pre-intersected with this frame's registries
-    /// so the record does the intersection through the same
-    /// `allows_plain_http` predicate the transport uses; a caller
-    /// filtering it first would be a second implementation of that comparison.
+    /// Every host this process may contact over plain HTTP, unfiltered: the record
+    /// intersects it through `allows_plain_http` itself.
     pub insecure_registries: &'a [String],
 
-    /// Digest of the applied managed-config snapshot.
-    ///
-    /// A separate input from [`Self::config`] because [`OcxConfigView`] carries
-    /// the managed-config *source* — the resolution-affecting value it forwards
-    /// to child processes — while the digest of the snapshot that source
-    /// resolved to lives in the state store. Reading it here would be I/O on the
-    /// exec path; `None` omits the key rather than delaying the launch.
+    /// Digest of the applied managed-config snapshot, passed in so the builder
+    /// stays I/O-free on the exec path; `None` omits the key.
     pub managed_config_digest: Option<&'a Digest>,
 
-    /// Digest of the active patch snapshot's own file bytes.
-    ///
-    /// Read once at `Context::try_init`, in the same pass that parses the
-    /// snapshot, so the digest and the pins it describes come from one read of
-    /// one file. `None` when `OCX_PATCH_SNAPSHOT` designated nothing, which
-    /// omits the key.
+    /// Digest of the active patch snapshot's file bytes; `None` omits the key.
     pub patch_snapshot_digest: Option<&'a Digest>,
 
-    /// The platform OCX resolved to. `None` at the launcher frame, which has no
-    /// platform context and must emit `"platform": null` rather than guess.
+    /// The platform resolution was asked for; `None` at the launcher frame emits
+    /// `null` rather than a guess from the host.
     pub platform: Option<&'a Platform>,
 
     /// Whether the child env was built clean.
@@ -678,10 +542,7 @@ pub struct RecordInputs<'a> {
     pub scope: Scope,
 }
 
-/// What the launching frame was scoped to.
-///
-/// The input twin of [`ScopeBlock`]: this carries the lock's declaration hash as
-/// a parsed digest, the serialized block carries it as the wire map.
+/// What the launching frame was scoped to; the input twin of [`ScopeBlock`].
 #[derive(Debug)]
 pub enum Scope {
     /// `ocx exec` — a project toolchain.
@@ -690,21 +551,12 @@ pub enum Scope {
         root: PathBuf,
         /// The sibling `ocx.lock`.
         lock: PathBuf,
-        /// The lock's own `metadata.declaration_hash` — the hash of the
-        /// `ocx.toml` declarations, not of the lock's contents. Recorded under
-        /// that name; see [`LockReference::declaration_digest`].
-        ///
-        /// Taken from the already-loaded lock rather than hashed afresh here:
-        /// the value is the RFC 8785 canonicalization the project tier defines,
-        /// and recomputing it would need the project config plus file I/O on the
-        /// exec path.
+        /// The loaded lock's `metadata.declaration_hash` (of the `ocx.toml`
+        /// declarations, not the lock); recomputing it would need I/O on the exec path.
         declaration_digest: Digest,
         /// Selected groups, in selection order.
         groups: Vec<String>,
         /// Which `ocx.toml` binding each root package was selected under.
-        ///
-        /// Only the project tier has bindings; the OCI tier names identifiers
-        /// directly and the launcher frame names neither.
         bindings: Vec<PackageBinding>,
     },
 
@@ -714,17 +566,11 @@ pub enum Scope {
         requested: Vec<PackageRef>,
     },
 
-    /// `ocx launcher exec` — a generated entrypoint re-entry, which has no
-    /// project context and a synthetic identifier by construction.
+    /// `ocx launcher exec` — an entrypoint re-entry: no project context, a synthetic identifier.
     Launcher,
 
-    /// `ocx launcher shim` — a deferred tool's first invocation.
-    ///
-    /// Its own variant rather than [`Self::Package`] because [`frame_for`]
-    /// derives the command from the scope, and this frame is neither
-    /// `package exec` nor the identity-degraded `launcher exec`: it composes
-    /// the package tier the way `package exec` does, but from an identifier
-    /// ocx itself baked into the shim rather than one a user typed.
+    /// `ocx launcher shim` — a deferred tool's first invocation; not folded into
+    /// [`Self::Package`], because [`frame_for`] derives `frame.command` from the scope.
     LauncherShim {
         /// The tool the shim named, exactly as baked.
         requested: PinnedPackageRef,
@@ -732,11 +578,6 @@ pub enum Scope {
 }
 
 /// The `ocx.toml` binding a project-tier root package was selected under.
-///
-/// Carried on [`Scope::Project`] rather than beside the packages because it is
-/// project-tier-only data, and [`Scope`] is where the frame-divergent inputs
-/// live. Matched to a package by content identity, so the advisory tag cannot
-/// split a binding from its package.
 #[derive(Debug, Clone)]
 pub struct PackageBinding {
     /// Binding name from `ocx.toml`.
@@ -748,17 +589,9 @@ pub struct PackageBinding {
 }
 
 impl ExecutionRecord {
-    /// Build a record from a launching frame's inputs.
+    /// Build a record from a launching frame's inputs; infallible and I/O-free.
     ///
-    /// `pid` is a parameter rather than read from the current process because
-    /// the two platforms learn it at different moments: on Unix it is ocx's own
-    /// pid, known up front; on Windows it is the spawned child's, which does not
-    /// exist until after the spawn.
-    ///
-    /// Infallible: every load-bearing field is already in hand from resolution,
-    /// and every environmental field omits its key instead of failing. There is
-    /// no I/O here — the record is assembled from what the frame already
-    /// resolved, so it adds nothing to the exec path but one serialization.
+    /// `pid` is the process that runs the tool: ocx's own on Unix, the spawned child's on Windows.
     pub fn build(inputs: &RecordInputs<'_>, recorded_at: DateTime<Utc>, pid: u32) -> Self {
         Self {
             schema_version: SCHEMA_VERSION.to_string(),
@@ -779,8 +612,7 @@ impl ExecutionRecord {
         }
     }
 
-    /// Serialize to the published on-disk form: one JSON document, compact, on a
-    /// single line, with no trailing newline handling implied.
+    /// Serialize to the published form: one compact JSON document on a single line.
     ///
     /// # Errors
     ///
@@ -790,18 +622,14 @@ impl ExecutionRecord {
     }
 }
 
-/// Which command opened the frame, and whether it could name what it resolved.
-///
-/// Derived from [`Scope`] rather than passed in, so a frame cannot claim
-/// complete identity while carrying a scope that structurally cannot have it.
+/// Which command opened the frame, derived from [`Scope`] so a frame cannot claim
+/// identity its scope cannot have.
 fn frame_for(scope: &Scope) -> Frame {
     let (command, identity) = match scope {
         Scope::Project { .. } => (FrameCommand::Exec, FrameIdentity::Complete),
         Scope::Package { .. } => (FrameCommand::PackageExec, FrameIdentity::Complete),
         Scope::Launcher => (FrameCommand::LauncherExec, FrameIdentity::Degraded),
-        // Complete, unlike its `launcher exec` sibling: a shim is baked with the
-        // tool's pinned identifier, so this frame resolves logical identity
-        // rather than being handed an anonymous package directory.
+        // Complete, unlike `launcher exec`: a shim is baked with the tool's pinned identifier.
         Scope::LauncherShim { .. } => (FrameCommand::LauncherShim, FrameIdentity::Complete),
     };
     Frame {
@@ -814,7 +642,6 @@ fn frame_for(scope: &Scope) -> Frame {
     }
 }
 
-/// Project the frame's scope into its serialized block.
 fn scope_block(inputs: &RecordInputs<'_>) -> ScopeBlock {
     match &inputs.scope {
         Scope::Project {
@@ -837,9 +664,7 @@ fn scope_block(inputs: &RecordInputs<'_>) -> ScopeBlock {
             requested: requested.iter().map(ToString::to_string).collect(),
         },
         Scope::Launcher => ScopeBlock::Launcher,
-        // The package tier, because that is the tier a shim composes
-        // (`EnvScope::package_tier`) and the identifier is the whole scope. The
-        // command that opened the frame is `frame.command`'s job, not `tier`'s.
+        // A shim composes the package tier (`EnvScope::package_tier`); `frame.command` names the shim.
         Scope::LauncherShim { requested } => ScopeBlock::Package {
             clean_env: inputs.clean_env,
             requested: vec![requested.to_string()],
@@ -849,17 +674,12 @@ fn scope_block(inputs: &RecordInputs<'_>) -> ScopeBlock {
 
 /// Project the resolution policy in force.
 ///
-/// The launcher frame omits the four context fields rather than emitting empty
-/// collections: it did not compose the environment and has no index, mirror or
-/// managed-config context of its own, which is a different statement from
+/// The launcher frame omits the context fields: it composed nothing, which is not
 /// "composed with none".
 fn resolution_block(inputs: &RecordInputs<'_>) -> Resolution {
     let composed = !matches!(inputs.scope, Scope::Launcher);
     let registries = composed.then(|| registries(inputs.packages));
-    // Derived from `registries` rather than from the configured allowance, and
-    // through the same predicate the transport consults: a host is reported here
-    // only if this frame both fetched from it and was licensed to do so in the
-    // clear.
+    // Only fetched hosts, through the transport's own predicate, or the record disagrees with the transport.
     let insecure = registries
         .iter()
         .flatten()
@@ -882,25 +702,9 @@ fn resolution_block(inputs: &RecordInputs<'_>) -> Resolution {
     }
 }
 
-/// The content registries the frame's root packages were fetched from, sorted
-/// and deduplicated.
-///
-/// Each root's **physical** transport host, taken from
-/// [`InstallInfo::transport_registry`] — never the logical namespace its
-/// identifier names. Index indirection separates the two: an `ocx.sh` index root
-/// can point at `ghcr.io/acme/tool`, and a field named for content registries
-/// that reported `ocx.sh` would name a host nothing was fetched from. The
-/// logical identity is not lost by this — it is what every `packages[]` purl
-/// carries, in `repository_url`.
-///
-/// Reported before any `[mirrors]` rewrite of that host; the rewrites in force
-/// are their own field.
-///
-/// A root with no transport provenance contributes nothing: a placeholder
-/// identifier (whose registry is whichever default happened to be configured,
-/// not a source anything was fetched from), or any path that resolved nothing
-/// through the index. A frame whose every root is like that reports an empty
-/// list — it fetched nothing it can name.
+/// The roots' physical transport hosts ([`InstallInfo::transport_registry`]), sorted
+/// and deduplicated; never the logical namespace, which may name a host nothing
+/// was fetched from.
 fn registries(packages: &[Arc<InstallInfo>]) -> Vec<String> {
     let mut sources: Vec<String> = packages
         .iter()
@@ -913,11 +717,8 @@ fn registries(packages: &[Arc<InstallInfo>]) -> Vec<String> {
     sources
 }
 
-/// Project the resolved mirror entries to the frozen `host → {registry?, index?}`
-/// shape, with any embedded credential stripped from both endpoints.
-///
-/// Both roles are reported because both rewrite this invocation's traffic. An
-/// entry declaring neither is not a rewrite and is skipped.
+/// Project the mirror entries to the frozen `host → {registry?, index?}` shape,
+/// credentials stripped.
 fn mirror_endpoints(mirrors: &[(String, MirrorConfig)]) -> BTreeMap<String, MirrorEndpoints> {
     mirrors
         .iter()
@@ -934,24 +735,11 @@ fn mirror_endpoints(mirrors: &[(String, MirrorConfig)]) -> BTreeMap<String, Mirr
         .collect()
 }
 
-/// A mirror endpoint with any `user:password@` userinfo removed.
+/// A mirror endpoint with any `user:password@` userinfo removed, else returned byte-for-byte.
 ///
-/// `[mirrors]` values reach the record as the operator typed them, and userinfo
-/// in a remote-repository URL is a mainstream Artifactory/Nexus idiom that OCX
-/// accepts silently: [`parse_url`](ocx_config::mirror::parse_url) keeps it
-/// inside the host, and the index transport interpolates that host back into
-/// every request, so the credential is *functional* rather than decorative. This
-/// record's sink is operator-collected and routinely fleet-aggregated — the same
-/// reason `process.args` is not carried. One credential in one config file must
-/// not become one copy per invocation in a log store.
-///
-/// The authority rule is `parse_url`'s, deliberately, not the `url` crate's: the
-/// span redacted here has to be the span the config layer treats as the host, or
-/// the two would disagree about what was hidden. Scheme split on `://`, the
-/// authority runs to the first `/`, and userinfo ends at the last `@` within it.
-/// A value carrying no userinfo is returned byte-for-byte — the audit value of
-/// this field is which host traffic was rewritten to, and normalizing an
-/// untouched endpoint would cost that for nothing.
+/// The sink is fleet-aggregated, so a kept credential is copied into every record.
+/// The authority ends at the first `/` as in `parse_url`, so the redacted span is
+/// the host the config layer sees.
 fn without_userinfo(endpoint: &str) -> String {
     let (scheme, rest) = match endpoint.split_once("://") {
         Some((scheme, rest)) => (Some(scheme), rest),
@@ -977,15 +765,8 @@ fn managed_config(inputs: &RecordInputs<'_>) -> Option<ManagedConfigReference> {
 
 /// `sh.ocx.*` facts about the resolved executable.
 ///
-/// `sh.ocx.provenance` is the field an auditor reads first: `ocx-package` when
-/// the resolved path lands inside the package store, `external` when it does
-/// not. `ocx exec -- bash` picking up the system bash lands in the second case,
-/// which is the fact the record exists to make visible.
-///
-/// The test is store containment rather than a walk of the frame's root
-/// packages: a dependency's binary is on `PATH` too, and the launcher frame runs
-/// a binary from a package it never enumerated. Both are inside the store and
-/// both would be libelled `external` by a root-only test.
+/// Provenance is store containment, not a walk of the frame's roots, or dependency
+/// and launcher-frame binaries record as `external`.
 fn executable_block(inputs: &RecordInputs<'_>) -> BTreeMap<String, String> {
     let mut block = BTreeMap::new();
     let in_shim_store = relative_to(inputs.executable, inputs.shim_root).is_some();
@@ -996,9 +777,6 @@ fn executable_block(inputs: &RecordInputs<'_>) -> BTreeMap<String, String> {
     }
 
     block.insert("sh.ocx.provenance".to_string(), "ocx-package".to_string());
-    // A shim tree holds neither `entrypoints/` nor `content/`, so the
-    // store-relative scan has nothing to find there; the third kind is the
-    // containment answer itself.
     let kind = if in_shim_store {
         Some("shim")
     } else {
@@ -1007,10 +785,7 @@ fn executable_block(inputs: &RecordInputs<'_>) -> BTreeMap<String, String> {
     if let Some(kind) = kind {
         block.insert("sh.ocx.kind".to_string(), kind.to_string());
     }
-    // The purl needs the owning package's identity, which only a root carries —
-    // a dependency is reachable here as an identifier but not as a directory. A
-    // dependency-owned executable therefore records its provenance and kind
-    // truthfully and omits the package purl rather than guessing at one.
+    // Only a root is reachable as a directory, so a dependency-owned executable omits the purl.
     if let Some(info) = owning_root(inputs)
         && let Some(purl) = package_url(info.identifier(), info.platform())
     {
@@ -1019,33 +794,11 @@ fn executable_block(inputs: &RecordInputs<'_>) -> BTreeMap<String, String> {
     block
 }
 
-/// `executable` relative to `root`, tested on the raw spelling first and on the
-/// canonical form only if that misses.
+/// `executable` relative to `root`: raw spelling first, canonical form only on a miss.
 ///
-/// # Why the canonical retry exists (RUL-82, RUL-97)
-///
-/// C-065 makes a following-lane composition emit
-/// `<home>/toolchain/links/<group>/<entry>/…` on `PATH`, and `which::which_in` keeps
-/// whichever spelling it resolved through — so from this function's side every
-/// project-tier `ocx exec` arrives holding a link path. A raw containment test
-/// answers "not in the store" for all of them, which would record
-/// `sh.ocx.provenance = "external"`, drop `sh.ocx.kind` and drop the
-/// `sh.ocx.package` purl, on an invocation that ran an ocx package.
-///
-/// The record is on RUL-82's must-stay-digest list, so the *record* resolves the
-/// link. The launch does not: the caller still executes the raw path, and this
-/// canonicalisation is read-only.
-///
-/// # Both sides, or neither
-///
-/// The raw test runs first and costs no syscall, which is what every
-/// digest-spelled invocation hits — and keeps the pre-C-065 answer bit-identical.
-/// The retry canonicalises **both** operands, never one: `store_root` under a
-/// symlinked prefix (macOS `/tmp`) would otherwise stop matching a canonical
-/// executable, turning a working containment test into a silent `external`.
-/// A canonicalisation failure — a deferred root's package directory, which is
-/// path arithmetic over a digest and does not exist yet — answers "not
-/// contained", and `owning_root`'s shim-tree arm covers that case instead.
+/// Raw-only would record every following-lane `ocx exec` (a `toolchain/links/` path) as `external`.
+/// The retry canonicalises both operands, or a symlinked `store_root` (macOS `/tmp`) answers `external`.
+/// A path that fails to canonicalise (a deferred root not yet on disk) is not contained.
 fn relative_to(executable: &Path, root: &Path) -> Option<PathBuf> {
     if let Ok(relative) = executable.strip_prefix(root) {
         return Some(relative.to_path_buf());
@@ -1055,24 +808,10 @@ fn relative_to(executable: &Path, root: &Path) -> Option<PathBuf> {
     executable.strip_prefix(root).ok().map(Path::to_path_buf)
 }
 
-/// Which of a package's two executable trees the resolved path sits in.
+/// `launcher` under a package's `entrypoints/`, `binary` under its `content/`.
 ///
-/// The store's two; the third kind, `shim`, is not a tree inside a package at
-/// all but the separate shim store, so [`executable_block`] decides it by
-/// containment before calling this.
-///
-/// `entrypoints/` holds the generated launcher shims, `content/` the payload the
-/// package shipped. That distinction is what makes the two records an entrypoint
-/// invocation produces readable as a pair: the outer frame resolves the launcher,
-/// the launcher re-entry resolves the leaf binary, and they join on the digest.
-///
-/// Scanned forward from the store root, so a package that ships its own
-/// `content/entrypoints/` directory still reports the package-level tree.
-///
-/// Takes the **already store-relative** path from [`relative_to`] rather than
-/// stripping the prefix itself: that strip is where C-065's link spelling has to
-/// be resolved, and one producer of it means the containment answer and the kind
-/// answer can never be derived from two different spellings.
+/// Scans forward, so a package's own `content/entrypoints/` still reports `binary`.
+/// Takes the store-relative path from [`relative_to`], so containment and kind read one spelling.
 fn executable_kind(store_relative: &Path) -> Option<&'static str> {
     store_relative
         .components()
@@ -1085,17 +824,8 @@ fn executable_kind(store_relative: &Path) -> Option<&'static str> {
 
 /// The frame's root package that owns the resolved executable, if one does.
 ///
-/// Two directories per root, because a deferred root has two: the package
-/// directory it *will* materialize into, which is pure path arithmetic over the
-/// pinned identifier and does not exist yet, and the generated shim tree its
-/// launchers actually run from. Matching only the first would drop
-/// `sh.ocx.package` from every lazily composed tool.
-///
-/// Both arms go through [`relative_to`], for the same reason the store
-/// containment test does: on the following lane the executable arrives spelled
-/// as a `<home>/toolchain/links/<group>/<entry>` link, and a raw `starts_with`
-/// against
-/// the digest root would drop `sh.ocx.package` from every project-tier frame.
+/// Checks the shim tree too, or every deferred tool loses `sh.ocx.package`; both via
+/// [`relative_to`], or every following-lane project frame loses it.
 fn owning_root<'a>(inputs: &'a RecordInputs<'_>) -> Option<&'a Arc<InstallInfo>> {
     inputs.packages.iter().find(|info| {
         relative_to(inputs.executable, info.dir().root()).is_some()
@@ -1105,30 +835,15 @@ fn owning_root<'a>(inputs: &'a RecordInputs<'_>) -> Option<&'a Arc<InstallInfo>>
     })
 }
 
-/// Project the resolved closure: roots in composition order, then the
-/// dependencies each root carries in the topological order they were resolved
-/// in, then the patch companions the site tier overlaid. Deduplicated by content
-/// identity, so a package reachable twice appears once and keeps its first-seen
-/// role.
-///
-/// Companions come last and as their own pass, not interleaved with the roots
-/// they were admitted for: the overlay is site policy rather than anything the
-/// invocation asked for, and a reader scanning `packages[]` top-down should
-/// reach everything the caller requested before anything the site added.
+/// Project the closure: roots, then each root's dependencies in topological order,
+/// then patch companions; deduplicated by content identity, first-seen role wins.
 fn descriptors(inputs: &RecordInputs<'_>) -> Vec<ResourceDescriptor> {
     let mut seen: HashSet<PinnedPackageRef> = HashSet::new();
     let mut descriptors = Vec::new();
     let admitted = AdmittedIndex::build(inputs.admitted);
 
     for info in inputs.packages {
-        // A root has no incoming dependency edge, so it carries no edge
-        // visibility of its own; from the composition's perspective it is fully
-        // visible, which is what `public` records.
-        //
-        // The platform is the one the resolution *selected* for this package,
-        // never the frame's requested platform: a root reached from the store
-        // and a root pulled on the spot must not describe the same artefact
-        // differently.
+        // The selected platform, never the frame's request, or a stored and a freshly pulled root differ.
         if let Some(mut descriptor) = project(
             info.identifier(),
             Placement {
@@ -1140,11 +855,7 @@ fn descriptors(inputs: &RecordInputs<'_>) -> Vec<ResourceDescriptor> {
             &admitted,
             &mut seen,
         ) {
-            // A deferred root composes as an `InstallInfo` with no package
-            // directory and no content on disk. Without this key its descriptor
-            // is indistinguishable from a package that exists — same digest,
-            // same purl — which is a claim the record cannot support.
-            // Only a root can be deferred; a dependency is reached through one.
+            // Without this key a deferred root reads as a package present on disk.
             if info.deferred().is_some() {
                 descriptor
                     .annotations
@@ -1156,10 +867,7 @@ fn descriptors(inputs: &RecordInputs<'_>) -> Vec<ResourceDescriptor> {
 
     for info in inputs.packages {
         for dependency in &info.resolved().dependencies {
-            // A dependency is reachable here as an identifier, not as an
-            // install, so its selected platform is not in hand — and the
-            // frame's requested platform is a different fact. Omit rather than
-            // guess; the digest still names the exact bits.
+            // Its selected platform is not in hand, and the frame's request is a different fact.
             if let Some(descriptor) = project(
                 &dependency.identifier,
                 Placement {
@@ -1177,14 +885,7 @@ fn descriptors(inputs: &RecordInputs<'_>) -> Vec<ResourceDescriptor> {
     }
 
     for provenance in inputs.patch_companions {
-        // `interface`, and not because a companion declares it: the overlay
-        // composes a companion through `composer::compose_companion` with
-        // `self_view = false`, so its interface surface is definitionally the
-        // only thing that reached this environment.
-        //
-        // The platform is omitted for the same reason a dependency's is — the
-        // provenance names the companion, not the install that satisfied it, so
-        // the purl carries no `arch` qualifier either.
+        // `interface`: `composer::compose_companion` composes with `self_view = false`.
         if let Some(descriptor) = project(
             &provenance.pinned,
             Placement {
@@ -1203,9 +904,7 @@ fn descriptors(inputs: &RecordInputs<'_>) -> Vec<ResourceDescriptor> {
     descriptors
 }
 
-/// How one package sits in this closure — the three facts that vary by the pass
-/// [`descriptors`] found it in, as opposed to the facts carried by the package
-/// itself.
+/// The facts that vary by the [`descriptors`] pass a package was found in.
 struct Placement<'a> {
     /// `sh.ocx.role`: `root`, `dependency` or `companion`.
     role: &'a str,
@@ -1231,10 +930,7 @@ fn project(
     let digest = digest_map(&identifier.digest());
 
     let Some(uri) = package_url(identifier, placement.platform) else {
-        // A content-addressed placeholder carries no logical facts to annotate:
-        // its name, registry and repository are all local artefacts of how the
-        // frame reached the package, so the descriptor stays digest-only and
-        // says so.
+        // A placeholder's name, registry and repository are local artefacts: stay digest-only.
         annotations.insert("sh.ocx.identity".to_string(), Value::from("synthetic"));
         return Some(ResourceDescriptor {
             name: identifier.repository().to_string(),
@@ -1262,9 +958,7 @@ fn project(
         annotations.insert("sh.ocx.entrypoints".to_string(), Value::from(names.clone()));
     }
     if identifier.tag().is_some() {
-        // A tag survived into the pinned identifier, so this package was reached
-        // by resolving a floating tag rather than by a digest already pinned. It
-        // is half of the drift signal; `resolution.autoInstalled` is the other.
+        // A surviving tag means a floating tag was resolved; with `resolution.autoInstalled`, the drift signal.
         annotations.insert("sh.ocx.resolved-from".to_string(), Value::from("tag"));
     }
 
@@ -1286,10 +980,6 @@ fn binding_for<'a>(identifier: &PinnedPackageRef, scope: &'a Scope) -> Option<&'
 
 /// The executable names each package contributed to `PATH`, in composition
 /// order, keyed by the owning package's content identity.
-///
-/// Built once per record rather than rescanned per descriptor: the claim lists
-/// hold every name of every package in the closure, and the naive form scanned
-/// both of them twice for each descriptor.
 struct AdmittedIndex {
     binaries: HashMap<PinnedPackageRef, Vec<Value>>,
     entrypoints: HashMap<PinnedPackageRef, Vec<Value>>,
@@ -1304,12 +994,8 @@ impl AdmittedIndex {
     }
 }
 
-/// Group one claim list by owner.
-///
-/// Keyed on [`PinnedPackageRef::strip_advisory`] because attribution is content
-/// identity: the advisory tag must not split a package's claims from the
-/// package. That is the hash-lookup form of the `eq_content` comparison this
-/// replaces.
+/// Group one claim list by owner, keyed on [`PinnedPackageRef::strip_advisory`] so
+/// an advisory tag cannot split a package's claims from the package.
 fn claims_by_owner<T: std::fmt::Display>(claims: &[(PinnedPackageRef, T)]) -> HashMap<PinnedPackageRef, Vec<Value>> {
     let mut index: HashMap<PinnedPackageRef, Vec<Value>> = HashMap::new();
     for (owner, name) in claims {
@@ -1322,21 +1008,13 @@ fn claims_by_owner<T: std::fmt::Display>(claims: &[(PinnedPackageRef, T)]) -> Ha
 }
 
 /// Render a digest as the frozen `algorithm → bare lowercase hex` map.
-///
-/// The algorithm is the key, which is the point of the map: the value never
-/// carries `sha256:`, never a transport prefix, never uppercase. The prefixed
-/// form survives only inside the purl.
 fn digest_map(digest: &Digest) -> BTreeMap<String, String> {
     let (algorithm, hex) = digest.parts();
     BTreeMap::from([(algorithm.to_string(), hex.to_ascii_lowercase())])
 }
 
-/// Serialize a timestamp as RFC 3339, UTC, millisecond precision — the frozen
-/// `recordedAt` form (`2026-07-26T14:03:11.482Z`).
-///
-/// chrono's derived serializer picks its subsecond width from the value, which
-/// would emit `…:11Z` for a timestamp that happens to land on a whole second.
-/// The published form is fixed-width, so it is pinned here.
+/// Serialize as the frozen fixed-width `recordedAt` form (`2026-07-26T14:03:11.482Z`);
+/// chrono's default drops the subsecond on a whole-second value.
 fn serialize_rfc3339_millis<S: Serializer>(value: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&value.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
@@ -1663,7 +1341,7 @@ mod tests {
         );
     }
 
-    // ── R2 — the full closure, roles and order ──────────────────────────
+    // ── The full closure, roles and order ──────────────────────────
 
     #[test]
     fn closure_records_roots_then_dependencies_in_topological_order() {
@@ -1885,8 +1563,8 @@ mod tests {
         );
     }
 
-    /// RUL-82 / RUL-97 — a following-lane executable, spelled as the
-    /// `<home>/toolchain/links/<group>/<entry>` link C-065 puts on `PATH`, still
+    /// A following-lane executable, spelled as the
+    /// `<home>/toolchain/links/<group>/<entry>` link the following lane puts on `PATH`, still
     /// records as an ocx package.
     ///
     /// `which::which_in` keeps whichever spelling it resolved through, so from

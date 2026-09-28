@@ -2,11 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! Failure modes of the execution-record path.
-//!
-//! Every variant is reachable from a real operator misconfiguration, so each
-//! carries the exit code a wrapper script should branch on. The split between
-//! 74 and 78 is deliberate: an unwritable sink is an I/O fault, a malformed
-//! name template is a configuration fault the operator must edit a file to fix.
 
 use std::path::PathBuf;
 
@@ -25,11 +20,7 @@ pub enum RecordsError {
 
     /// A tier declared `required = true` while no tier declared a sink.
     ///
-    /// The plainest way an operator writes "recording is mandatory" is a
-    /// `[records]` block carrying nothing but `required = true`. Resolving that
-    /// to a policy with nothing to write to would make every child run
-    /// unrecorded, exit 0, no warning — the exact opposite of what was asked
-    /// for. Refused where the configuration is read, before any work.
+    /// Refused at config load, or every child runs unrecorded with exit 0.
     #[error("[records] required = true but no sink is configured; set [records] dir, OCX_RECORDS_DIR or --records-dir")]
     RequiredWithoutSink,
 
@@ -43,18 +34,11 @@ pub enum RecordsError {
     },
 
     /// The configured name template cannot produce a distinct name per record.
-    ///
-    /// A template with no varying component silently overwrites: every frame in
-    /// the same sink resolves to one path.
     #[error("record name template has no varying component; include {{time}}, {{pid}} or {{rand}}")]
     TemplateNotUnique,
 
     /// The name template, or the filename it rendered, is not a single plain
-    /// filename.
-    ///
-    /// A name carrying a path separator, or reducing to `.`/`..`, would put the
-    /// record somewhere other than the sink the operator designated — silently,
-    /// and on every invocation. Refused as the configuration fault it is.
+    /// filename, so the record would land outside the designated sink.
     #[error("record name '{name}' is not a plain filename; use a single filename with no path separator")]
     NameNotAFilename {
         /// The template or rendered name that is not a single path component.
@@ -63,9 +47,7 @@ pub enum RecordsError {
 
     /// The sink no longer resolves to the directory it was designated as.
     ///
-    /// Refused rather than followed: whoever swapped the sink for a symlink
-    /// would otherwise redirect an audit trail somewhere the operator never
-    /// designated.
+    /// Refused rather than followed, or a swapped-in symlink redirects the audit trail.
     #[error(
         "execution record sink '{path}' resolves through a symlink to a different directory; point [records] dir at a real directory",
         path = .path.display()

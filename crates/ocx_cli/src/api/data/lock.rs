@@ -38,15 +38,8 @@ pub struct LockReport {
 }
 
 impl LockEntry {
-    /// Build a report entry from an in-memory [`LockedTool`], selecting the
-    /// host-platform leaf as the primary `digest` column and projecting the
-    /// full available-only map into `platforms`.
-    ///
-    /// The primary digest is the host→`Any`-offer leaf; the full
-    /// available-only map surfaces in verbose / JSON output. When the host
-    /// leaf is absent OR ambiguous (the publisher does not ship this
-    /// platform, or two entries tie), the primary digest falls back to empty
-    /// rather than fabricating one or erroring out of a report command.
+    /// Builds a report entry from a [`LockedTool`]: `digest` is the host leaf, empty when that leaf
+    /// is absent or ambiguous rather than fabricated or an error.
     pub fn from_tool(tool: &ocx_project::LockedTool, host: &ocx_oci::Platform) -> Self {
         let digest = match ocx_project::lookup_host_leaf(&tool.platforms, host) {
             ocx_oci::Selection::Found((digest, _key)) => digest.to_string(),

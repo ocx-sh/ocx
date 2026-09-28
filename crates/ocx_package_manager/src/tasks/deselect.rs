@@ -8,10 +8,7 @@ use crate::{error::PackageError, error::PackageErrorKind};
 use super::super::PackageManager;
 
 impl PackageManager {
-    /// Removes the current-version symlink for `package`.
-    ///
-    /// Returns `Some(current_path)` when the current symlink existed and was
-    /// removed, or `None` when no current symlink was present (no-op).
+    /// Removes the current-version symlink for `package`; `None` when there was none.
     pub async fn deselect(&self, package: &ocx_oci::PackageRef) -> Result<Option<PathBuf>, PackageErrorKind> {
         log::debug!("Deselecting package '{}'.", package);
 
@@ -22,8 +19,7 @@ impl PackageManager {
         let rm = super::common::reference_manager(self.file_structure());
         let current_path = self.file_structure().symlinks.current(package);
 
-        // Hold the per-repo .select.lock for the entire teardown.
-        // See tasks/common.rs module docs.
+        // Named, not `_`: the per-repo `.select.lock` must span the teardown or a concurrent select races it.
         let _locks = super::common::acquire_selection_locks(self.file_structure(), package).await?;
 
         let removed_current = if ocx_util::fs::symlink::is_link(&current_path) {
@@ -35,10 +31,7 @@ impl PackageManager {
         };
 
         if removed_current.is_none() {
-            // Debug, not warn: absence is the ordinary state (nothing but an
-            // explicit `ocx package select` creates `current`), and the CLI
-            // reports it as `RemovedStatus::Absent` for a direct deselect.
-            // Matches the sibling branch in `tasks/uninstall.rs`.
+            // Debug, not warn: absence is the ordinary state (only `ocx package select` creates `current`).
             log::debug!(
                 "Package '{}' has no current symlink at '{}' — nothing to deselect.",
                 package,

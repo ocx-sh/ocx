@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Remote registry publishing facade.
-//!
-//! [`Publisher`] owns an OCI [`Client`](ocx_oci::Client) and exposes
-//! high-level push operations, including cascade tag management.
-//! It is the publishing counterpart to `PackageManager`,
-//! which handles local-store operations.
+//! Remote registry publishing facade, the registry-side counterpart to `PackageManager`.
 
 pub mod copy;
 pub mod publish_gate;
@@ -22,87 +17,40 @@ use std::path::Path;
 use crate::error::Error as PackageError;
 use crate::{description::Description, info::Info, version::Version};
 
-/// This tier's own result: the publisher is `ocx_package`'s write half, so
-/// its failures are the package tier's own (E1, plan DEC-27).
 type Result<T> = std::result::Result<T, PackageError>;
 use ocx_oci::client::ReadAddressing;
 
-/// Remote registry publishing facade.
-///
-/// Holds an OCI client and provides push operations with optional
-/// cascade tag management. Does not depend on local file structure
-/// or index — only on the remote registry via the client.
+/// Push operations against a remote registry, with optional cascade tag management.
 #[derive(Clone)]
 pub struct Publisher {
     client: ocx_oci::Client,
 }
 
-/// Outcome of a successful package push.
-///
-/// Surfaced so callers (notably the `ocx package push` command) can emit a
-/// structured report; `ocx-mirror pipeline push` parses this report to record
-/// the cascade tags written and to distinguish a real publish from a no-op.
-///
-/// `#[non_exhaustive]`: this is an in-process type, not a wire type — the
-/// parsed cross-tool contract is `PushReport`. But ocx-mirror takes `ocx_lib`
-/// as a path dependency, so a later field would break it at a struct literal.
-/// Construct through [`PushOutcome::new`] instead.
+/// Outcome of a successful package push; construct through [`PushOutcome::new`].
+// `#[non_exhaustive]` because ocx-mirror links this crate: a new field would break its struct literal.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct PushOutcome {
-    /// Digest of the pushed multi-platform image index. For a multi-platform
-    /// fan-out this is the primary tag's index digest after the LAST platform
-    /// merge — the final state of the tag.
+    /// The primary tag's image-index digest after the last platform merge.
     pub manifest_digest: ocx_oci::Digest,
-    /// Rolling cascade tags written in addition to the primary version tag
-    /// (e.g. `3.28`, `3`, `latest`). Empty for a non-cascade push. For a
-    /// multi-platform fan-out this is the ordered union across platforms.
+    /// Rolling cascade tags written besides the primary tag (`3.28`, `3`, `latest`), ordered
+    /// and deduped across platforms; empty for a non-cascade push.
     pub cascade_tags: Vec<String>,
-    /// Digest-named `__ocx.keep.<algorithm>-<hex>` tags written by this push, in push order,
-    /// deduped: one per *distinct platform manifest*, not one per `Info`. The
-    /// tag names the platform manifest's digest, and that manifest is the
-    /// metadata config blob plus the layers — the platform field is not part
-    /// of it. Two platforms built from identical metadata over identical
-    /// layers (a noarch bundle, a Rosetta alias) therefore share one manifest,
-    /// hence one tag. Empty under `--no-keep-tag`, and empty for any
-    /// platform whose entry the merged index did not carry.
+    /// `__ocx.keep.<algorithm>-<hex>` tags written, in push order, one per distinct platform
+    /// manifest (identical metadata and layers share one); empty under `--no-keep-tag`.
     pub keep_tags: Vec<String>,
-    /// The platform manifest digest each pushed platform landed on, in push
-    /// order. **Independent of keep tagging** — this is `push --sign`'s inline
-    /// signing input, so it is populated under `--no-keep-tag` exactly as it
-    /// is with the keep tag on.
-    ///
-    /// Never the index digest: [`manifest_digest`](Self::manifest_digest)
-    /// names the tag's image index, which is rewritten on every platform
-    /// merge, while a signature has to name the immutable object it covers.
-    ///
-    /// Two platforms built from identical metadata over identical layers share
-    /// one manifest and therefore one digest; the list keys on platform, so
-    /// both rows appear carrying the same value. A platform whose entry the
-    /// merged index did not carry is **omitted**, never faked — the same rule
-    /// [`keep_tags`](Self::keep_tags) already follows, and from the same
-    /// descriptor lookup.
+    /// The platform manifest digest each pushed platform landed on, in push order; the
+    /// `push --sign` input, so never the index digest a later merge rewrites. A platform
+    /// the merged index did not carry is omitted.
     pub platform_digests: Vec<(ocx_oci::Platform, ocx_oci::Digest)>,
-    /// Un-prefixed track tags this push aliased onto the variant it landed, in
-    /// write order (bare version first), deduped across platforms. Populated
-    /// only under `--default`, and only when the pushed version carries a
-    /// variant; empty otherwise.
-    ///
-    /// These name the *same* manifests `platform_digests` does: the aliases are
-    /// index writes over the digests this push already produced, never a second
-    /// upload.
+    /// Un-prefixed track tags aliased onto the pushed variant under `--default`, bare version
+    /// first, deduped; they name the manifests in `platform_digests`.
     pub aliases_written: Vec<String>,
-    /// Counts of layer-push outcomes (mounted/uploaded/verified), summed over
-    /// every platform this push fanned out to. Layer blobs only — the config
-    /// blob and manifest are not layers and are excluded. An `uploaded` count
-    /// may still have HEAD-skipped an already-present blob inside
-    /// `push_blob`'s blob-exists short-circuit.
+    /// Layer-push outcomes summed over every platform; config blob and manifest excluded.
     pub layer_counts: ocx_oci::LayerCounts,
 }
 
 impl PushOutcome {
-    /// Construct an outcome. The only constructor available outside this
-    /// crate, because the struct is `#[non_exhaustive]`.
     pub fn new(
         manifest_digest: ocx_oci::Digest,
         cascade_tags: Vec<String>,
@@ -131,10 +79,7 @@ impl Publisher {
         &self.client
     }
 
-    /// Pre-authenticate against the registry for `identifier` with Push scope.
-    ///
-    /// Call at the start of a publishing command to fail fast on credential
-    /// issues before reading files or doing any other preparation.
+    /// Pre-authenticates with Push scope, so a publishing command fails fast on credentials.
     pub async fn ensure_auth(&self, identifier: &ocx_oci::OciIdentifier) -> Result<()> {
         Ok(self
             .client
@@ -142,22 +87,8 @@ impl Publisher {
             .await?)
     }
 
-    /// Push one platform's package: its layers, its manifest, and the merge of
-    /// that manifest's platform entry into the primary tag's image index.
-    ///
-    /// The orchestration the registry client used to own. `Info` is the
-    /// publishing vocabulary — which repository, which platform, which metadata
-    /// — and it is assembled into a manifest here
-    /// ([`Info::manifest_builder`](crate::info::Info::manifest_builder))
-    /// so the client only ever receives an identifier, a layer list and a
-    /// half-built manifest.
-    ///
-    /// The call sequence is fixed and load-bearing: auth → layers → config blob
-    /// → manifest → index merge. Cascade tags extend it at the end; see
-    /// [`push_cascade`](Self::push_cascade).
-    ///
-    /// Returns the primary tag's image-index digest, the index itself as a
-    /// [`ocx_oci::Manifest`], and the layer-push counts.
+    /// Pushes one platform's layers and manifest and merges its entry into the primary tag's
+    /// index, returning that index, its digest and the layer counts.
     pub async fn push_package(
         &self,
         target: &ocx_oci::OciIdentifier,
@@ -179,35 +110,11 @@ impl Publisher {
         Ok((index_digest, ocx_oci::Manifest::ImageIndex(index), layer_counts))
     }
 
-    /// Push a package — one [`Info`] per target platform — with one or more
-    /// layers to the registry.
+    /// Pushes a package, one [`Info`] per target platform.
     ///
-    /// Each `LayerRef::File` is uploaded as a new blob. Each `LayerRef::Digest`
-    /// is verified to exist via HEAD. The manifest contains one descriptor per
-    /// layer in the order provided. Platforms are pushed **sequentially**:
-    /// the per-tag index merge is a read-modify-write, so concurrent merges
-    /// would race.
-    ///
-    /// Every info is written to `target`. When `build_meta` is `Some`, the
-    /// target's tag is parsed as a [`Version`] and the build segment is
-    /// attached before push, once, so every platform lands on the same tag. Errors if the tag does not parse, lacks `X.Y.Z` form, or
-    /// already carries build metadata.
-    ///
-    /// When `keep_tag` is `true` (the default from `ocx package push`),
-    /// each pushed platform manifest additionally gets a digest-named
-    /// `__ocx.keep.<algorithm>-<hex>` tag pointing directly at it — a pure registry-side
-    /// deletion safety net (`adr_index_indirection.md` Decision E). Applies
-    /// only to the platform manifest pushed by this call, never to
-    /// pre-existing entries the merge picks up from the registry.
-    ///
-    /// `annotations` are publisher-stated OCI annotations (`ocx package push
-    /// --annotation`) written onto the image index of every tag this push
-    /// touches. An empty map writes nothing at all.
-    ///
-    /// `default` re-tags the pushed version's own variant onto the un-prefixed
-    /// version track. Without cascading there are no rolling tags to mirror, so
-    /// it re-tags the bare version alone; a version carrying no variant writes
-    /// no alias.
+    /// With `build_meta`, `target`'s tag must be an `X.Y.Z` [`Version`] without build metadata.
+    /// `keep_tag` tags each platform manifest `__ocx.keep.<algorithm>-<hex>`
+    /// (`adr_index_indirection.md` Decision E); `default` aliases the variant onto the bare track.
     #[expect(
         clippy::too_many_arguments,
         reason = "one push: where it lands, what to publish, which tracks it moves, and what to stamp on every index it writes"
@@ -228,6 +135,7 @@ impl Publisher {
         let mut platform_digests: Vec<(ocx_oci::Platform, ocx_oci::Digest)> = Vec::new();
         let mut aliases_written: Vec<String> = Vec::new();
         let mut layer_counts = ocx_oci::LayerCounts::default();
+        // Sequential: the index merge is a read-modify-write, so concurrent platforms would race.
         for info in infos {
             log::info!(
                 "pushing package with identifier {} (platform {})",
@@ -237,14 +145,11 @@ impl Publisher {
             let platform = info.platform.clone();
             let (digest, manifest, counts) = self.push_package(&identifier, &info, layers, annotations).await?;
             layer_counts += counts;
-            // Hoisted out of the keep-tag branch on purpose: this is the same
-            // descriptor `push_keep_tag` reads, and `platform_digests` has to
-            // be there under `--no-keep-tag` too.
+            // Outside the keep-tag branch: `platform_digests` is needed under `--no-keep-tag` too.
             if let Some(platform_digest) = ocx_oci::manifest::platform_manifest_digest(&manifest, &platform) {
                 platform_digests.push((platform.clone(), platform_digest));
             }
-            // A tag that is not a version carries no variant to match, so it
-            // is the flag's no-op rather than a push-time refusal.
+            // A non-version tag carries no variant, so `--default` is a no-op, not a refusal.
             if let Some(version) = Version::parse(identifier.tag_or_latest()) {
                 let aliases = crate::cascade::write_default_variant_aliases(
                     &self.client,
@@ -281,19 +186,9 @@ impl Publisher {
         })
     }
 
-    /// Push a package — one [`Info`] per target platform — with cascade tag
-    /// management.
-    ///
-    /// `existing_versions` is the set of versions already in the registry,
-    /// used to compute which rolling tags each platform's push should update
-    /// (cascade blocker checks are platform-aware). The same `build_meta`
-    /// semantics as [`Self::push`] apply. The outcome's `cascade_tags` is the
-    /// ordered union across platforms. `keep_tag` and `annotations` have
-    /// the same meaning as in [`Self::push`].
-    ///
-    /// `default` also has the meaning it has there, with the bare track
-    /// additionally cascading: it writes the un-prefixed version plus whatever
-    /// rolling tags that version's own cascade clears.
+    /// [`Self::push`] with cascade tag management; `existing_versions` are the registry's
+    /// versions, which decide the rolling tags each platform moves. Under `default` the
+    /// bare track cascades too.
     #[expect(
         clippy::too_many_arguments,
         reason = "one push: what to publish, which tracks it moves, and what to stamp on every index it writes"
@@ -368,25 +263,15 @@ impl Publisher {
         })
     }
 
-    /// Push a complete description artifact to the `__ocx.desc` tag.
+    /// Pushes a complete description artifact to the `__ocx.desc` tag.
     pub async fn push_description(&self, identifier: &ocx_oci::OciIdentifier, description: &Description) -> Result<()> {
         log::debug!("Pushing description for {}", identifier);
         crate::description::transport::push_description(&self.client, identifier, description).await
     }
 
-    /// Pull the existing description from the `__ocx.desc` tag, from the
-    /// canonical registry.
-    ///
-    /// Returns `Ok(None)` if no description exists yet.
-    ///
-    /// Canonical because every caller of this form writes back what it returns —
-    /// `package copy --description`, `package description push --from`, and the merge in
-    /// `package description push` (invariant 5, `subsystem-oci.md`). A read that only
-    /// renders is [`pull_description_mirrored`](Self::pull_description_mirrored).
-    ///
-    /// Reads `identifier` where it names, unrouted: a push target's own
-    /// description, or a location an index already routed. A source a package
-    /// name was typed for is [`pull_source_description`](Self::pull_source_description).
+    /// Pulls the `__ocx.desc` description from the canonical registry, unrouted; `Ok(None)` if
+    /// none exists yet.
+    // Canonical, because every caller writes back what it returns (`subsystem-oci.md` invariant 5).
     pub async fn pull_description(
         &self,
         identifier: &ocx_oci::OciIdentifier,
@@ -397,7 +282,7 @@ impl Publisher {
 
     /// [`pull_description`](Self::pull_description) of `source`, read where
     /// `index` routes it ([`Index::route_for_dial`](ocx_index::Index::route_for_dial)):
-    /// an index-served namespace such as `ocx.sh` is not a registry (ocx#504).
+    /// an index-served namespace such as `ocx.sh` is not a registry.
     pub async fn pull_source_description(
         &self,
         index: &ocx_index::Index,
@@ -408,12 +293,8 @@ impl Publisher {
         self.pull_description(&routed, temp_dir).await
     }
 
-    /// [`pull_source_description`](Self::pull_source_description) served by a
-    /// configured mirror of the registry `index` routes `identifier` to.
-    ///
-    /// Only for a description nothing is written from — `ocx package description pull`
-    /// renders one and stops. Named rather than implied, because nothing in a
-    /// call site's shape says whether its answer will back a write.
+    /// [`pull_source_description`](Self::pull_source_description) served by a configured mirror;
+    /// only for a description nothing is written from.
     pub async fn pull_description_mirrored(
         &self,
         index: &ocx_index::Index,
@@ -430,18 +311,8 @@ impl Publisher {
         .await?)
     }
 
-    /// The cascade prelude: which tags the push target already publishes.
-    ///
-    /// Canonical, never a mirror. Callers feed these tags straight to
-    /// [`push_cascade`](Self::push_cascade), so this listing decides which
-    /// rolling tags get re-pointed on the canonical registry — deciding that
-    /// from a mirror is the Invariant #5 / CWE-345 fail-open the copy path
-    /// already fixed, and a stale mirror missing a repository the canonical
-    /// registry does publish would silently move `latest` backwards.
-    ///
-    /// A repository nobody has pushed to yet answers with a 404, which is the
-    /// empty list, not a failure — `Client::list_tags_or_empty_addressed`
-    /// carries why that fold is exactly this narrow.
+    /// The tags the push target already publishes; empty for a repository never pushed to.
+    // Canonical, never a mirror: a stale mirror would move `latest` backwards (CWE-345).
     pub async fn list_tags(&self, identifier: ocx_oci::OciIdentifier) -> Result<Vec<String>> {
         Ok(self
             .client
@@ -449,16 +320,14 @@ impl Publisher {
             .await?)
     }
 
-    /// Parses a list of tag strings into a set of valid versions,
-    /// skipping tags that are not valid versions.
+    /// The tags that parse as versions.
     pub fn parse_versions(tags: &[String]) -> BTreeSet<Version> {
         tags.iter().filter_map(|t| Version::parse(t)).collect()
     }
 }
 
-/// If `build_meta` is `Some`, parse `target`'s tag, attach the build segment,
-/// and return the target at the new tag. Computed once per push, so every
-/// platform of a fan-out lands on the same tag.
+/// `target` at its tag plus the `build_meta` segment, if any.
+// Computed once per push, so every platform of a fan-out lands on the same tag.
 fn apply_build_meta(target: &ocx_oci::OciIdentifier, build_meta: Option<&str>) -> Result<ocx_oci::OciIdentifier> {
     let Some(build) = build_meta else {
         return Ok(target.clone());

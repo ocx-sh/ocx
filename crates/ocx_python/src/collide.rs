@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Publish-time collision pre-check across a selected wheel set.
-//!
-//! A valid resolved lock is collision-free by construction, so OCX's
-//! overlap-free prefix-layer union composes a correct `site-packages`. This
-//! check is the guard that proves the invariant holds for a concrete wheel set
-//! *before* anything is pushed: if two repacked wheels claim the same installed
-//! path (post-relocation), the union would be ambiguous — a hard
-//! [`CollisionError`], failing before push rather than corrupting the registry.
+//! Publish-time collision pre-check across a selected wheel set, run before anything is pushed.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -17,17 +10,11 @@ use crate::repack::RepackedWheel;
 
 /// Verifies that no two wheels in the set share an installed path.
 ///
-/// Compares the `record_paths` of every [`RepackedWheel`]; PEP 420 namespace
-/// package directories are shared by design and are not collisions — a wheel's
-/// `RECORD` only ever lists files, never bare directories, so two wheels
-/// contributing distinct leaf files under the same namespace directory (e.g.
-/// `google/cloud/foo/__init__.py` vs `google/cloud/bar/__init__.py`) never
-/// produce equal path strings and never collide.
+/// PEP 420 namespace directories never collide: `RECORD` lists files only.
 ///
 /// # Errors
 ///
-/// Returns [`CollisionError::OverlappingPaths`] naming the conflicting path and
-/// the two wheels that both claim it.
+/// Returns [`CollisionError::OverlappingPaths`] naming the path and both wheels.
 pub fn check_collisions(wheels: &[RepackedWheel]) -> Result<(), CollisionError> {
     let mut claimed_by: HashMap<&str, &str> = HashMap::new();
     for wheel in wheels {

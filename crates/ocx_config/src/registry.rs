@@ -1,107 +1,58 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Per-registry configuration.
-//!
-//! Home for all `[registries.<name>]` settings: since
-//! `adr_index_indirection.md` F5a, the `index` field that selects the
-//! resolution protocol for this namespace. Every `[registries.<name>]` key is
-//! an identifier prefix, always — `[registry] default` takes a literal prefix
-//! only, never a hostname alias (§6 ratified simplification). Future
-//! per-registry fields (`location` rewrite, `timeout`, auth) land here too,
-//! without forcing migration of existing configs.
+//! Per-registry configuration: every `[registries.<name>]` key is an identifier prefix, never a
+//! hostname alias.
 
 use serde::Deserialize;
 
+// No `deny_unknown_fields`, for the fleet forward-compat reason stated on `crate::Config`.
 /// Configuration for a single `[registries.<name>]` entry.
 ///
-/// Re-exported from [`crate`] as `RegistryConfig`. No
-/// `deny_unknown_fields` — unknown keys are ignored, like every other config
-/// table (see [`crate::Config`]).
+/// Unknown keys are ignored, like in every other `config.toml` table.
 #[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
 pub struct RegistryConfig {
     /// Base URL of the `index.ocx.sh`-protocol index this namespace resolves
-    /// through (`adr_index_indirection.md` F5a), e.g.
-    /// `"https://index.ocx.sh"`. **Field presence is the kind marker**: a
-    /// `[registries."<ns>"]` entry that carries `index` resolves via the
-    /// ocx-index protocol (root → obs → `select_best`); an entry without
-    /// `index` (or no entry at all) resolves as plain OCI. There is exactly
-    /// one resolution protocol per namespace — no index-then-OCI-tags
-    /// fallback chain, no runtime format probing.
+    /// through, e.g. `"https://index.ocx.sh"`.
+    ///
+    /// **Field presence is the kind marker**: a `[registries."<ns>"]` entry
+    /// that carries `index` resolves via the ocx-index protocol; an entry
+    /// without `index` (or no entry at all) resolves as plain OCI, with no
+    /// fallback from one protocol to the other.
+    // Protocol selector design: `adr_index_indirection.md`.
     pub index: Option<String>,
 
     /// SSRF escape hatch for this namespace's physical registry hosts: exact
     /// hostnames or CIDR blocks whose resolved addresses skip the default-on
     /// private/loopback/link-local/metadata refusal.
     ///
-    /// An index root's `repository` pointer arrives in remote-controlled data,
-    /// so before OCX dereferences it into a physical fetch the target host must
-    /// not resolve to a forbidden range (ocx#218). A private corporate registry
-    /// legitimately lives on such a range, so listing it here (e.g.
-    /// `["10.0.0.0/8", "registry.corp"]`) restores access for exactly that
-    /// namespace without disabling the guard globally. The exemption is
-    /// per-entry and managed-tier distributable, so `system_locked` applies —
-    /// there is no CLI flag to widen a locked trust set.
+    /// Listing a private corporate registry here (e.g. `["10.0.0.0/8", "registry.corp"]`)
+    /// restores access for exactly that namespace without disabling the guard
+    /// globally. Distributable by the managed tier and locked by a SYSTEM-scope
+    /// entry — there is no CLI flag to widen a locked trust set.
+    // An index root's `repository` pointer is remote-controlled, so the refusal runs before any fetch.
     pub trusted_hosts: Option<Vec<String>>,
 
     /// Contact this registry over plain HTTP instead of HTTPS.
     ///
-    /// The per-registry spelling of what `OCX_INSECURE_REGISTRIES` says as a
-    /// flat list; the two are a **union** in the permissive direction —
-    /// declaring a host in either source adds it, so there is no "config says
-    /// secure, env says insecure" conflict to resolve. One source can subtract:
-    /// a SYSTEM-scope entry stating `insecure = false` locks that host shut
-    /// against the env list too. See
-    /// [`insecure_hosts`](crate::insecure::insecure_hosts) for the resolution rule.
-    ///
-    /// Matching is exact on the registry name as written, `host[:port]`
-    /// together: an entry for `registry.corp` does not cover
-    /// `registry.corp:5001`. The name must be the one references actually
-    /// carry, because that is the string the transport compares against.
-    ///
-    /// # What it reaches, stated in full
-    ///
-    /// Dropping TLS is a security decision, so the entry is managed-tier
-    /// distributable and `system_locked` applies.
-    ///
-    /// Beyond the registry's own traffic it reaches exactly one thing: which
-    /// **authentication realm** that registry may name. The transport accepts a
-    /// realm only when it is `https`, or shares the registry's own authority, or
-    /// sits on a host that itself carries a plain-HTTP allowance. So a cleartext
-    /// credential can only ever go somewhere the operator already declared
-    /// plaintext — an `insecure` entry for one host never licenses cleartext to a
-    /// host nobody named, for a realm or for registry traffic (CWE-319/CWE-522).
-    ///
-    /// The operator-visible consequence: a plain-HTTP registry whose **token
-    /// service sits on a different host or port** needs that host declared plain
-    /// HTTP too, or the probe is refused. Declaring the registry alone is enough
-    /// only when the realm is on the registry's own authority.
+    /// Unioned with `OCX_INSECURE_REGISTRIES` — declaring a host in either adds it — except that a
+    /// SYSTEM-scope entry stating `insecure = false` locks that host shut against the env list too.
+    /// Distributable by the managed tier and locked by a SYSTEM-scope entry. Matching is exact on
+    /// `host[:port]` as references carry it: `registry.corp` does not cover `registry.corp:5001`.
+    /// Beyond the registry's own traffic it reaches one thing, the **authentication realm**: a
+    /// cleartext credential only ever goes to a host the operator declared plaintext, so a
+    /// plain-HTTP registry whose **token service sits on a different host or port** needs that host
+    /// declared plain HTTP too, or the probe is refused.
     pub insecure: Option<bool>,
 
-    /// Runtime provenance marker: this entry was declared at the SYSTEM config
-    /// scope (`/etc/ocx/config.toml`), so it is NON-OVERRIDABLE by any lower
-    /// tier for this registry name. Mirrors [`MirrorConfig`](crate::MirrorConfig)'s
-    /// lock, but per-entry in the `[registries.<name>]` table.
-    ///
-    /// Never serialized — set by the loader via [`Self::lock_as_system`]
-    /// after parsing the system-scope file, not read from disk.
+    /// Set by the loader when declared at SYSTEM scope; no lower tier can override this entry.
     #[serde(skip)]
     #[schemars(skip)]
     pub system_locked: bool,
 
-    /// Runtime provenance marker: `index` here came from the compiled-in
-    /// defaults tier (`ConfigLoader::builtin_defaults`), not from a config
-    /// file. Cleared the moment any file tier restates `index` — including
-    /// with the same value.
-    ///
-    /// Read by the CLI's `build_index_sources` to decide whether an explicit
-    /// `[mirrors."<name>"]` entry suppresses the compiled-in index for this
-    /// namespace. An operator who has already declared where this namespace's
-    /// traffic goes must not silently gain a second host they never
-    /// allow-listed; an `index` they wrote themselves still wins, because
-    /// writing it clears this flag.
-    ///
-    /// Never serialized — set by the loader, not read from disk.
+    /// `index` came from `ConfigLoader::builtin_defaults`; any file tier restating `index` clears it.
+    // Lets an explicit `[mirrors."<name>"]` suppress the compiled-in index, or the operator
+    // silently gains a host they never allow-listed.
     #[serde(skip)]
     #[schemars(skip)]
     pub index_is_compiled_default: bool,
@@ -109,28 +60,14 @@ pub struct RegistryConfig {
 
 impl RegistryConfig {
     /// Mark this entry as system-locked — non-overridable by lower tiers.
-    ///
-    /// Called by the config loader on each entry of the system-scope file's
-    /// (`/etc/ocx/config.toml`) `[registries]` table, after parsing and before
-    /// folding higher tiers in. Unconditional: a `[registries.<name>]` entry
-    /// has no opt-out field to gate on, mirroring
-    /// [`MirrorConfig::lock_as_system`](crate::MirrorConfig::lock_as_system).
     pub fn lock_as_system(&mut self) {
         self.system_locked = true;
     }
 
-    /// Merge `other` into `self` field-by-field. `other`'s `Some` values
-    /// override `self`'s; `other`'s `None` values do not clobber `self`.
+    /// Merge `other` into `self`: `other`'s `Some` values win, unless `self` is system-locked.
     ///
-    /// A system-locked entry (`self.system_locked`) ignores ALL lower-tier
-    /// overrides, since `system_locked` is a per-entry lock, not a per-field
-    /// one. The locked flag stays on `self` (sticky) and is ADOPTED from
-    /// `other`: `Config::merge` reaches every `[registries.<name>]` entry
-    /// through `map.entry(name).or_default().merge(..)`, so the system tier is
-    /// never `self` on the fold that first carries it into the accumulator —
-    /// without adopting the flag, the lock `apply_system_locks` set would be
-    /// dropped on that very first fold and the entry would stay overridable by
-    /// the user tier and by the untrusted managed-config payload.
+    /// The lock is adopted from `other`, since `Config::merge` folds through `or_default()`; without
+    /// that, the user tier and the managed payload could override a system entry.
     pub fn merge(&mut self, other: RegistryConfig) {
         if self.system_locked {
             return;
@@ -138,9 +75,7 @@ impl RegistryConfig {
         self.system_locked = other.system_locked;
         if other.index.is_some() {
             self.index = other.index;
-            // Provenance travels with the value: a file tier restating `index`
-            // takes ownership of it, even when the string is byte-identical to
-            // the compiled-in default.
+            // Provenance travels with the value, even when byte-identical to the compiled-in default.
             self.index_is_compiled_default = other.index_is_compiled_default;
         }
         if other.trusted_hosts.is_some() {

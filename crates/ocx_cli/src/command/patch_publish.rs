@@ -2,12 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! `ocx patch publish` — push a patch descriptor to the registry.
-//!
-//! Reads a descriptor JSON file, validates it, and pushes it to the configured
-//! patch registry under either the reserved global repository (`--global`) or
-//! the package-specific sub-path for a given base identifier. The descriptor
-//! only references companion packages by identifier — publish those separately
-//! with `ocx package push`. Requires network access; fails in offline mode.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -48,37 +42,28 @@ pub struct PatchPublishArgs {
 
 impl PatchPublishArgs {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // ── Step 1: Resolve the effective patch tier (honours --registry). ──
         let patches = crate::command::patch_common::effective_patches(self.registry.as_deref(), &context)?;
 
-        // ── Step 2: Read + validate the descriptor JSON file. ──
         let descriptor_bytes = tokio::fs::read(&self.descriptor)
             .await
             .map_err(|error| ocx_util::error::FileError::new(&self.descriptor, error))
             .with_context(|| format!("reading descriptor file {}", self.descriptor.display()))?;
-        // Validate up front for a clear error before any network work.
+        // Validated before any network work, so a malformed file fails with its path named.
         ocx_package_manager::patch::PatchDescriptor::from_json_bytes(&descriptor_bytes)
             .with_context(|| format!("validating patch descriptor file {}", self.descriptor.display()))?;
 
-        // ── Step 3: Compute the target patch repo identifier. ──
-        //
-        // `base` is guaranteed present by `required_unless_present = "global"`
-        // when `--global` is absent; resolve its default registry here so the
-        // selection helper stays a pure function over already-resolved identifiers.
         let base_id = match &self.base {
             Some(base_raw) => Some(base_raw.with_domain(context.default_registry())?),
             None => None,
         };
         let patch_repo_id = select_publish_target(&patches, self.global, base_id.as_ref());
 
-        // ── Step 4: Publish via the lib orchestration method. ──
         let report = context
             .manager()
             .publish_patch_descriptor(&patch_repo_id, &descriptor_bytes)
             .await
             .map_err(anyhow::Error::new)?;
 
-        // ── Step 5: Report. ──
         context
             .api()
             .report(&crate::api::data::patch_publish::PatchPublishReport::new(report))?;
@@ -87,13 +72,7 @@ impl PatchPublishArgs {
     }
 }
 
-/// Select the patch repo identifier `ocx patch publish` targets.
-///
-/// `--global` targets the reserved global descriptor repository (applies to
-/// every base); otherwise the descriptor lands at the package-specific sub-path
-/// for `base_id`. `base_id` is `Some` whenever `global` is false (clap's
-/// `required_unless_present` guarantees it); when both are absent the global
-/// descriptor is used as a safe fallback so the function stays total.
+/// The patch repo `ocx patch publish` targets; without a base it falls back to the global descriptor.
 fn select_publish_target(
     patches: &ocx_config::patch::ResolvedPatchConfig,
     global: bool,
@@ -101,7 +80,6 @@ fn select_publish_target(
 ) -> ocx_oci::PackageRef {
     match (global, base_id) {
         (false, Some(base)) => patch_descriptor_id(patches, base),
-        // `--global`, or (defensively) no base supplied → the global descriptor.
         _ => global_descriptor_id(patches),
     }
 }
@@ -167,7 +145,7 @@ mod tests {
         );
     }
 
-    // --- Clap surface: --descriptor rename (C7), dead --platform removal (C8) ---
+    // --- Clap surface: --descriptor rename, dead --platform removal ---
 
     /// `--descriptor` parses and is threaded through to the args struct.
     #[test]
@@ -207,7 +185,7 @@ mod tests {
     }
 
     /// `--descriptor-file` is the OLD flag name — it must be an unknown flag
-    /// now that publish uses `--descriptor` (C7).
+    /// now that publish uses `--descriptor`.
     #[test]
     fn descriptor_file_flag_is_rejected() {
         use clap::Parser as _;
@@ -221,7 +199,7 @@ mod tests {
     }
 
     /// `--platform` was dead on publish (never consumed by
-    /// `select_publish_target`) and is removed entirely (C8).
+    /// `select_publish_target`) and is removed entirely.
     #[test]
     fn platform_flag_is_rejected() {
         use clap::Parser as _;

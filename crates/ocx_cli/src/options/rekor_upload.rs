@@ -4,29 +4,7 @@
 use ocx_sign::sign::SignErrorKind;
 
 /// Whether a signature is recorded in the Rekor transparency log.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add the paired
-/// `--rekor-upload` / `--no-rekor-upload` flags, POSIX last-wins
-/// (`overrides_with`) like every other flag pair here. Resolve with
-/// [`RekorUploadOpt::enabled`] and never read the two booleans directly.
-///
-/// The two key models are deliberately asymmetric, and the resolver is where
-/// that asymmetry lives:
-///
-/// * **Keyless always uploads.** A Fulcio certificate is valid for about ten
-///   minutes, and the log entry's timestamp is the only lasting proof the
-///   signature was made while it was. `--no-rekor-upload` is refused there, and
-///   configuration is ignored without a warning.
-/// * **A key pair does not upload unless asked.** The flag decides, then
-///   `[trust.sigstore] rekor_upload`, then off.
-///
-/// The keyless refusal is **not** clap `requires = "key"`. Clap would render
-/// "the following required arguments were not provided: --key", which inverts
-/// the real reason: the problem is not that a key is missing, it is that a
-/// keyless signature without a log entry cannot be verified once the
-/// certificate expires. [`Self::enabled`] returns that reason instead.
-///
-/// Arg ids: `rekor_upload`, `no_rekor_upload`.
+// Arg ids: `rekor_upload`, `no_rekor_upload`.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct RekorUploadOpt {
     /// Record the signature in the Rekor transparency log.
@@ -41,48 +19,22 @@ pub struct RekorUploadOpt {
     /// Only valid alongside `--key`. A keyless signature must be recorded: its
     /// Fulcio certificate is valid for about ten minutes, and the log entry's
     /// timestamp is the only lasting proof the signature was made while it was.
+    // Not clap `requires = "key"`, or clap reports a missing `--key` instead of why keyless needs the log.
     #[clap(long = "no-rekor-upload", overrides_with = "rekor_upload")]
     no_rekor_upload: bool,
 }
 
-/// # This block no longer carries `expect(dead_code)`
-///
-/// It did while nothing attached this group: `[workspace.lints.rust] warnings =
-/// "deny"` makes an uncalled inherent method a build failure, because the
-/// `clap::Args` derive keeps the *type* live through its foreign-trait impls
-/// but not its methods. `expect` rather than `allow` was the point -- an
-/// unfulfilled expectation is itself a build failure, so the suppression could
-/// not outlive its reason. Loop C attached the last resolver, the expectation
-/// went unfulfilled, and deleting the attribute became the only way to compile:
-/// exactly the self-cleaning the placement was chosen for.
-///
-/// The attribute sits on the **block**, never on the individual methods, and
-/// that placement is part of the frozen contract. A block-level `expect` stays
-/// fulfilled while any one item under it is still unattached, so a command that
-/// attaches only some of these resolvers compiles without editing this file;
-/// only the command attaching the last one sees the unfulfilled-expectation
-/// error, and at that point deleting the attribute is both correct and
-/// unavoidable. Per-method attributes would make *every* attaching command edit
-/// this file instead -- several authors writing to one frozen file, which is
-/// the collision the freeze exists to prevent.
-///
-/// `cfg_attr(not(test), ...)` because the tests below are callers, so the lint
-/// never fires in a test build and an unconditional `expect` would be
-/// unfulfilled there instead.
+// A future `#[expect(dead_code)]` goes on this block, never per method, or every attaching command edits this file.
 impl RekorUploadOpt {
-    /// Resolve whether a transparency record is created.
+    /// Resolve whether a transparency record is created: keyless always, a key
+    /// pair per the flag, then `configured`, then off.
     ///
-    /// `key_mode` is the caller's key model (`KeyOpt::is_key_mode`).
-    /// `configured` is `[trust.sigstore] rekor_upload`, which applies to key
-    /// mode **only**: under keyless it is ignored, and deliberately without a
-    /// warning. Erroring, or even warning, on every keyless signature because a
-    /// fleet-wide key-mode setting says `false` would let an unrelated
-    /// configuration key break the default signing path.
+    /// `configured` (`[trust.sigstore] rekor_upload`) is ignored under keyless,
+    /// without a warning, or a fleet-wide key-mode setting breaks keyless signing.
     ///
     /// # Errors
-    /// [`SignErrorKind::RekorUploadRequiredForKeyless`] when
-    /// `--no-rekor-upload` is given without a key. That variant carries the
-    /// reason, and exits 64.
+    /// [`SignErrorKind::RekorUploadRequiredForKeyless`] (exit 64) for
+    /// `--no-rekor-upload` without a key.
     pub fn enabled(&self, key_mode: bool, configured: Option<bool>) -> Result<bool, SignErrorKind> {
         if !key_mode {
             if self.no_rekor_upload {

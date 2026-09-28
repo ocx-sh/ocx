@@ -7,48 +7,33 @@ use super::{Digest, PackageRef};
 
 /// A validated [`PackageRef`] guaranteed to carry a digest.
 ///
-/// This is used in `resolve.json` to persist the fully resolved dependency
-/// graph at install time.  The digest guarantee means consumers never need
-/// fallback resolution logic.
-///
-/// Equality and hashing include all fields (registry, repository, tag, digest).
-/// When you need content-identity semantics that ignore the advisory tag, use
-/// [`eq_content`](Self::eq_content) for ad-hoc comparisons.
+/// Equality and hashing include the advisory tag; use
+/// [`eq_content`](Self::eq_content) or [`strip_advisory`](Self::strip_advisory) to ignore it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PinnedPackageRef(PackageRef);
 
 impl PinnedPackageRef {
-    /// Returns the digest.  Always present by construction.
     pub fn digest(&self) -> Digest {
         self.0.digest().expect("PinnedPackageRef always has a digest")
     }
 
-    /// Content-identity comparison: equal if registry, repository, and digest
-    /// match.  The advisory tag is ignored.
+    /// Equal if registry, repository and digest match; the advisory tag is ignored.
     pub fn eq_content(&self, other: &Self) -> bool {
         self.0.registry() == other.0.registry()
             && self.0.repository() == other.0.repository()
             && self.digest() == other.digest()
     }
 
-    /// Returns a copy with the advisory tag stripped.
-    ///
-    /// Use this before inserting into `HashMap`/`HashSet` when deduplication
-    /// should ignore the tag.
+    /// Returns a copy with the advisory tag stripped, for tag-blind dedup.
     pub fn strip_advisory(&self) -> Self {
         Self(self.0.without_tag())
     }
 
-    /// Returns a copy with the digest replaced. Tag (if any) is preserved.
+    /// Returns a copy with the digest replaced; the tag is preserved.
     pub fn clone_with_digest(&self, digest: Digest) -> Self {
         Self(self.0.clone_with_digest(digest))
     }
 
-    /// Returns a borrow of the inner [`PackageRef`].
-    ///
-    /// Prefer this over the `Deref` impl plus reference gymnastics
-    /// (e.g. `&**pinned`) when callers need an explicit `&PackageRef` —
-    /// for example, when constructing `crate::Repository::from(&PackageRef)`.
     pub fn as_identifier(&self) -> &PackageRef {
         &self.0
     }

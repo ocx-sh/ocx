@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Library surface for the JSON-Schema generator binary.
-//!
-//! `main.rs` is a thin shell that delegates to [`schema_for`]. The library
-//! layer exists so tests can exercise the generator output directly without
-//! shelling out to the compiled binary.
+//! Library surface for the JSON-Schema generator binary; `main.rs` delegates to [`schema_for`].
 
 use ocx_config::Config;
 use ocx_package::metadata::authoring::AuthoringMetadata;
@@ -16,55 +12,21 @@ use schemars::generate::SchemaSettings;
 
 pub mod reports;
 
-/// Top-level `$comment` injected into the project-lock schema. Flags the
-/// format as machine-generated and subject to evolution so consumers
-/// (taplo, schema-store) surface a hint not to hand-author `ocx.lock`.
-/// Mirrors the user-guide locking-subsection callout.
+/// Top-level `$comment` of the project-lock schema, telling editors not to hand-author `ocx.lock`.
 const PROJECT_LOCK_COMMENT: &str = "machine-generated; format may evolve across OCX versions — do not hand-edit";
 
-/// Top-level `$comment` injected into the execution-record schema. Names what
-/// the document is — output ocx writes, not input anyone authors — so a
-/// consumer that finds one in a sink knows it is describing a launch that
-/// already happened, and knows the record's own `schemaVersion` moves with
-/// this URL's version.
+/// Top-level `$comment` of the execution-record schema: a record ocx writes, never an authored input.
 const EXECUTION_RECORD_COMMENT: &str =
     "machine-generated; one record per tool launch, written before the launch — not an authored document";
 
-/// Generate a JSON Schema for the given schema kind.
+/// Generate the JSON Schema for `kind`, or `None` for an unknown kind.
 ///
-/// Returns `Some(json_string)` for known kinds and `None` for unknown kinds.
-/// Known kinds: `metadata`, `config`, `project`, `project-lock`, `patch`,
-/// `reports`, `execution-record`.
-///
-/// The output JSON has its `$id` set to the canonical published URL
-/// (`https://ocx.sh/schemas/<kind>/<version>.json`). Every schema is at
-/// `v1.json` except `project-lock`, which is at `v3.json` (in lock-step with
-/// `LockVersion::V3`). The `project-lock` schema additionally carries a
-/// top-level `$comment` flagging the format as machine-generated.
-///
-/// The `patch` schema describes the JSON document authored for
-/// `ocx patch publish --descriptor` (and carried in the `__ocx.patch`
-/// OCI artifact layer); the `[patches]` config tier itself is covered by the
-/// `config` schema.
-///
-/// The `execution-record` schema describes the pre-exec resolution record
-/// written per tool launch. Its URL version and the record's own in-band
-/// `schemaVersion` move in lockstep — the first incompatible change bumps
-/// both. The `[records]` config section that designates the sink is covered by
-/// the `config` schema, mirroring the `patch` / `[patches]` split above.
+/// Kinds: `metadata`, `config`, `project`, `project-lock`, `patch`, `reports`, `execution-record`.
+/// `$id` is `https://ocx.sh/schemas/<kind>/<version>.json`: `v1`, except `project-lock` at `v3`.
 pub fn schema_for(kind: &str) -> Option<String> {
     match kind {
-        // Per-layer strip/prefix layout lives in manifest layer-descriptor annotations
-        // (`sh.ocx.layer.*`), not on `Bundle` — do not add a `layers` field here.
-        //
-        // The metadata schema describes the AUTHORING form (the sidecar a
-        // publisher edits): the published wire form with one relaxation —
-        // dependency digests are optional, because `ocx package create`
-        // resolves them. Published blobs are therefore a valid subset and the
-        // same v1 URL keeps covering both. The platform a bundle was built for
-        // is not in either form: it lives in the OCI image index, and between
-        // create and push in an unschema'd build receipt.
-        // ADR: adr_dependency_manifest_pinning.md.
+        // Authoring form with digest-optional dependencies, so published blobs stay a valid subset of the
+        // same v1 URL (`adr_dependency_manifest_pinning.md § Schema`).
         "metadata" => Some(generate_schema::<AuthoringMetadata>(
             "https://ocx.sh/schemas/metadata/v1.json",
             None,
@@ -80,6 +42,7 @@ pub fn schema_for(kind: &str) -> Option<String> {
             None,
             Shape::Deserialized,
         )),
+        // `v3` moves with `LockVersion::V3`.
         "project-lock" => Some(generate_schema::<ProjectLock>(
             "https://ocx.sh/schemas/project-lock/v3.json",
             Some(PROJECT_LOCK_COMMENT),
@@ -90,34 +53,22 @@ pub fn schema_for(kind: &str) -> Option<String> {
             None,
             Shape::Deserialized,
         )),
+        // Bump this URL version and the record's in-band `schemaVersion` together.
         "execution-record" => Some(generate_schema::<ExecutionRecord>(
             "https://ocx.sh/schemas/execution-record/v1.json",
             Some(EXECUTION_RECORD_COMMENT),
             Shape::Serialized,
         )),
-        // Not a `generate_schema` call: the report contract is 48 roots over a
-        // shared `$defs` bag, and its `required` sets are corrected against
-        // serde's actual output. `reports` owns both.
         "reports" => Some(reports::reports_schema()),
         _ => None,
     }
 }
 
-/// Whether a generated schema describes a document ocx **reads** or one it
-/// **writes**.
-///
-/// The distinction is not cosmetic: schemars renders an `Option<T>` field as
-/// nullable-and-required, which is right for a document being parsed and wrong
-/// for one being written with `skip_serializing_if` — there the key is absent,
-/// never `null`. Only the writing side gets the correction.
+/// Whether ocx reads or writes the document; only a written one gets [`reports::normalize`].
 enum Shape {
-    /// Parsed by ocx (`config`, `metadata`, `project`, `project-lock`,
-    /// `patch`). schemars' own rendering is already what the reader accepts.
+    /// Parsed by ocx; schemars' rendering already matches the reader.
     Deserialized,
-    /// Written by ocx. Every `skip_serializing_if` field carries the
-    /// `x-ocx-absent-when-none` marker, and [`reports::normalize`] rewrites
-    /// `required` and strips the `null` alternative off each one — the same
-    /// pass the reports schema runs, on the same marker.
+    /// Written by ocx; `Option` fields are corrected to what serde emits.
     Serialized,
 }
 
@@ -128,9 +79,7 @@ fn generate_schema<T: schemars::JsonSchema>(id: &str, comment: Option<&str>, sha
     let generator = settings.into_generator();
     let schema = generator.into_root_schema_for::<T>();
 
-    // SAFETY: schemars' `RootSchema` is a derived struct of `serde_json`-
-    // friendly types (objects, arrays, scalars) — `to_value` cannot fail
-    // for it. Any failure here would be a bug in schemars, not user input.
+    // SAFETY: `RootSchema` is plain JSON-shaped data, so `to_value` cannot fail.
     let mut value =
         serde_json::to_value(&schema).expect("schemars RootSchema is always serializable to serde_json::Value");
     if matches!(shape, Shape::Serialized) {
@@ -143,8 +92,7 @@ fn generate_schema<T: schemars::JsonSchema>(id: &str, comment: Option<&str>, sha
         }
     }
 
-    // SAFETY: `value` is an in-memory `serde_json::Value` we just built;
-    // pretty-printing it cannot fail (no I/O, no fallible serializers).
+    // SAFETY: pretty-printing an in-memory `Value` cannot fail.
     serde_json::to_string_pretty(&value).expect("serde_json::Value is always serializable to a JSON string")
 }
 

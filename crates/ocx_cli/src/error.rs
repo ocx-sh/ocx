@@ -1,42 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The typed errors a command raises about its own input.
-//!
-//! These are CLI-input failures, not library failures: they are raised before
-//! any work is attempted, by the process that owns the argument grammar. That
-//! is why they live here rather than in `ocx_console`, which renders and knows
-//! nothing about what a flag means.
-//!
-//! Their exit-code classification is nonetheless in the *library* pass of
-//! [`crate::exit::classify_error`], not in its CLI-local first pass — see
-//! `exit::cli_input`. The two passes are a precedence contract, and moving
-//! these types across it would change the code of any chain that carries both
-//! kinds.
-//!
-//! Currently exposes a single variant family — [`UsageError`] — which maps
-//! to [`ExitCode::UsageError`](ocx_exit::ExitCode::UsageError) (`64`,
-//! `EX_USAGE`). Use it whenever a CLI
-//! command rejects its own input (bad flag value, mutually exclusive flags
-//! we want to validate ourselves rather than rely on clap's exit code, path
-//! containment violations, etc.).
+//! The typed errors a command raises about its own input, before any work.
 
-/// Bad CLI invocation that our code (not clap) detects.
+/// Bad CLI invocation our code (not clap) detects;
+/// always [`ExitCode::UsageError`](ocx_exit::ExitCode::UsageError) (`64`).
 ///
-/// Carries a single sentence-case message intended to print directly to the
-/// user as the outer context of the anyhow chain. Library-style lowercase
-/// rules don't apply: `UsageError` is consumed only by the CLI binary and
-/// its `Display` shows up at the terminal boundary alongside any inner
-/// cause.
-///
-/// Use [`UsageError::with_source`] when the rejection originates from a
-/// structured library error — this preserves the full `source()` chain so
-/// diagnostics tools and the exit-code classifier can walk the inner cause.
-/// (Identifier-parse errors and config-validation errors, for example, are
-/// wrapped this way.)
-///
-/// Always classifies to [`ExitCode::UsageError`](ocx_exit::ExitCode::UsageError)
-/// (`64`, mirrors `EX_USAGE`).
+/// The message is sentence-case: only the CLI shows it, as the chain's outer context.
 #[derive(Debug)]
 pub struct UsageError {
     message: String,
@@ -56,11 +26,7 @@ impl std::error::Error for UsageError {
 }
 
 impl UsageError {
-    /// Construct a usage error with the given message.
-    ///
-    /// Convention: name the offending flag or option (e.g. `"--platform"`,
-    /// `"--self"`) inside the message so users can `grep` stderr for the
-    /// failing option.
+    /// Construct a usage error; name the offending flag in the message so stderr can be grepped for it.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -68,12 +34,7 @@ impl UsageError {
         }
     }
 
-    /// Construct a usage error that wraps an inner cause.
-    ///
-    /// The wrapped error is surfaced via [`std::error::Error::source`] so that
-    /// chain-walking diagnostics and the exit-code classifier can inspect the
-    /// underlying error. Use this form whenever the rejection originates from a
-    /// structured library error rather than a pure formatting problem.
+    /// Construct a usage error keeping `source` in the chain the exit-code classifier walks.
     pub fn with_source(message: impl Into<String>, source: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self {
             message: message.into(),
@@ -82,21 +43,14 @@ impl UsageError {
     }
 }
 
-/// Failure modes of metadata-path resolution for `ocx package push` and
-/// `ocx package test`.
-///
-/// All variants classify to [`ExitCode::UsageError`](ocx_exit::ExitCode::UsageError)
-/// (`64`): they signal
-/// CLI-input problems the user must correct before any I/O can succeed.
+/// Metadata-path resolution failures for `ocx package push` and `ocx package test`; all exit `64`.
 #[derive(Debug)]
 pub enum MetadataResolutionError {
     /// No explicit `--metadata` and no file layers to infer a sibling from.
     Required,
-    /// File layers point at distinct candidate metadata paths; the caller
-    /// must disambiguate via explicit `--metadata`.
+    /// File layers point at distinct candidate metadata paths.
     Ambiguous { candidates: Vec<std::path::PathBuf> },
-    /// A file layer's path could not yield a metadata candidate (no parent,
-    /// no file stem, etc.).
+    /// A file layer's path could not yield a metadata candidate.
     InvalidLayerPath { layer: std::path::PathBuf, reason: String },
 }
 

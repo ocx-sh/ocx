@@ -10,62 +10,29 @@ const DOCKER_HUB_DOMAINS: &[&str] = &["docker.io", "index.docker.io"];
 
 /// A **physical** OCI location: the registry and repository a request dials.
 ///
-/// [`PackageRef`] is the package name a user, a lock or package metadata
-/// spells; it is logical and may be served by an index that points somewhere
-/// else entirely (`ocx.sh/cmake` → `ghcr.io/ocx-contrib/cmake`). Every
-/// [`Client`](crate::Client) read and write takes this type instead, so a
-/// package name cannot reach the wire without being routed first — dialling
-/// the logical host is the defect class of ocx#504, and here it does not
-/// compile.
-///
-/// There is no conversion from or to [`PackageRef`]: no `From`, `Into`,
-/// `AsRef`, `Deref` or `FromStr`. The ways to obtain one are:
-///
-/// - routing a package identifier through the index (`ocx_index::Index::route`,
-///   `route_for_dial`, `route_local`), which is the normal path;
-/// - [`parse_target`](Self::parse_target), for a write target the user named
-///   as a location (`--to`, `-i`, a managed-config source);
-/// - [`parse_repository_pointer`](Self::parse_repository_pointer), for an index
-///   root's `oci://host/path` pointer;
-/// - [`passthrough`](Self::passthrough) and [`from_parts`](Self::from_parts),
-///   for registry-backed identity inside the index and for fixtures.
-///
-/// A workspace ratchet (`oci_identifier_mint_ratchet`) pins every non-test call
-/// site of those four constructors, so a new one is a reviewed decision.
-///
-/// Serializes to the same `registry/repository[:tag][@digest]` string as
-/// [`PackageRef`], for reports. It deliberately does not deserialize: nothing
-/// OCX persists names a physical location in that grammar.
+/// No conversion to or from [`PackageRef`] exists, or a package name reaches the
+/// wire unrouted; obtain one from `ocx_index::Index::route*` or the constructors
+/// below, each call site pinned by `oci_identifier_mint_ratchet`. Never
+/// deserializes: nothing OCX persists names a physical location.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct OciIdentifier(PackageRef);
 
 impl OciIdentifier {
-    /// Parses a location the user named as a **write target** — `--to`, `-i`,
-    /// a managed-config source — using `default_registry` when the input names
-    /// no registry.
-    ///
-    /// The same grammar as [`PackageRef::parse_with_default_registry`]. The
-    /// input is taken as a location, not a package name: nothing routes it.
+    /// Parses a location the user named as a write target (`--to`, `-i`, a
+    /// managed-config source); nothing routes it.
     ///
     /// # Errors
     ///
-    /// [`IdentifierError`] exactly as the identifier grammar raises it.
+    /// [`IdentifierError`] as [`PackageRef::parse_with_default_registry`] raises it.
     pub fn parse_target(input: &str, default_registry: &str) -> Result<Self, IdentifierError> {
         PackageRef::parse_with_default_registry(input, default_registry).map(Self)
     }
 
-    /// Parses an index root's `repository` pointer (`oci://host/path`).
+    /// Parses an index root's `repository` pointer (`oci://host/path`), strictly
+    /// (`adr_index_indirection.md` C3).
     ///
-    /// Strict (`adr_index_indirection.md` C3): the `oci://` scheme is a wire
-    /// contract, so a missing or unknown scheme or an empty host or path is
-    /// refused. `host/path` is then re-parsed through the identifier grammar
-    /// and must round-trip **exactly** — the lowercase, character-class,
-    /// traversal and length checks every package identifier passes guard this
-    /// pointer too, and demanding the parsed registry and repository equal the
-    /// split host and path, with no tag and no digest, refuses a smuggled tag
-    /// (`repo:x`), digest (`repo@sha256:…`), whitespace, control character,
-    /// uppercase segment or stray colon. Host allowlisting stays index-side
-    /// governance; the SSRF floor runs where the pointer is dereferenced.
+    /// `host/path` must round-trip exactly through the identifier grammar, or a
+    /// remote-authored pointer smuggles a tag, digest or stray character in.
     ///
     /// # Errors
     ///
@@ -89,34 +56,22 @@ impl OciIdentifier {
         Ok(Self(parsed))
     }
 
-    /// The location of a **registry-backed** package: the package identifier
-    /// is its own location.
-    ///
-    /// For the index internals that decide a name is not rewritten. Anything
-    /// else wants `ocx_index::Index::route`, which reaches this only after
-    /// establishing that no index serves the name.
+    /// The package identifier as its own location — only once the index has
+    /// established nothing rewrites it; anything else wants `Index::route`.
     pub fn passthrough(identifier: &PackageRef) -> Self {
         Self(identifier.clone())
     }
 
-    /// A location from explicit repository and registry strings, with no tag
-    /// and no digest. No parsing is performed.
-    ///
-    /// For locations that arrive already split — a mirror spec's target — and
-    /// for fixtures.
+    /// A location from explicit repository and registry strings, unparsed and unversioned.
     pub fn from_parts(repository: impl Into<String>, registry: impl Into<String>) -> Self {
         Self(PackageRef::new_registry(repository, registry))
     }
 
-    /// This location at `logical`'s version: its tag and its digest, each
-    /// carried when present and dropped when absent.
-    ///
-    /// Derives rather than mints — the receiver is already a location. The
-    /// tag goes on first because [`clone_with_tag`](Self::clone_with_tag)
-    /// drops a digest.
+    /// This location at `logical`'s tag and digest, each dropped when absent.
     #[must_use]
     pub fn at_version_of(self, logical: &PackageRef) -> Self {
         let mut location = self.without_specifiers();
+        // Tag first: `clone_with_tag` drops a digest.
         if let Some(tag) = logical.tag() {
             location = location.clone_with_tag(tag);
         }
@@ -126,16 +81,13 @@ impl OciIdentifier {
         location
     }
 
-    /// This location at `pinned`'s version — [`at_version_of`](Self::at_version_of)
-    /// for a pinned package identifier, whose digest makes the result pinned
-    /// too.
+    /// [`at_version_of`](Self::at_version_of) for a pinned package identifier.
     #[must_use]
     pub fn at_pin_of(self, pinned: &PinnedPackageRef) -> PinnedOciIdentifier {
         self.at_version_of(pinned.as_identifier()).pinned_at(pinned.digest())
     }
 
-    /// This location pinned at `digest`, keeping its tag as advisory — the
-    /// blob or manifest a content read addresses inside this repository.
+    /// This location pinned at `digest`, keeping its tag as advisory.
     #[must_use]
     pub fn pinned_at(&self, digest: Digest) -> PinnedOciIdentifier {
         PinnedOciIdentifier {
@@ -144,69 +96,56 @@ impl OciIdentifier {
         }
     }
 
-    /// Returns the registry hostname (and optional port), e.g. `"ghcr.io"` or `"localhost:5000"`.
     pub fn registry(&self) -> &str {
         self.0.registry()
     }
 
-    /// Returns the repository path within the registry.
     pub fn repository(&self) -> &str {
         self.0.repository()
     }
 
-    /// Returns the tag if one was explicitly provided.
     pub fn tag(&self) -> Option<&str> {
         self.0.tag()
     }
 
-    /// Returns the tag if present, or `"latest"` as a default.
     pub fn tag_or_latest(&self) -> &str {
         self.0.tag_or_latest()
     }
 
-    /// Content-addressed digest, if pinned.
     pub fn digest(&self) -> Option<Digest> {
         self.0.digest()
     }
 
-    /// Returns a new location with the given tag, dropping any existing digest.
+    /// Drops any existing digest.
     #[must_use]
     pub fn clone_with_tag(&self, tag: impl Into<String>) -> Self {
         Self(self.0.clone_with_tag(tag))
     }
 
-    /// Clones with the given digest, preserving the existing tag.
     #[must_use]
     pub fn clone_with_digest(&self, digest: Digest) -> Self {
         Self(self.0.clone_with_digest(digest))
     }
 
-    /// Strips the digest, preserving registry, repository and tag.
     #[must_use]
     pub fn without_digest(&self) -> Self {
         Self(self.0.without_digest())
     }
 
-    /// Strips the tag, preserving registry, repository and digest.
     #[must_use]
     pub fn without_tag(&self) -> Self {
         Self(self.0.without_tag())
     }
 
-    /// Returns a new location with only registry and repository.
     #[must_use]
     pub fn without_specifiers(&self) -> Self {
         Self(self.0.without_specifiers())
     }
 
-    /// Builds the **canonical** transport reference for this location — host,
-    /// repository, tag and digest exactly as stored, with no mirror rewrite.
+    /// The canonical transport reference, with no mirror rewrite: the push seam.
     ///
-    /// This is the push seam. The read path must **not** call it: read-path
-    /// reference construction goes through
-    /// [`Client::transport_reference`](crate::Client::transport_reference) /
-    /// `transport_registry`, which apply the mirror map. That discipline is
-    /// enforced by review and the behavioural backstop, not the compiler.
+    /// Reads must use [`Client::transport_reference`](crate::Client::transport_reference)
+    /// instead, or they bypass the mirror map; no compiler check enforces this.
     pub fn canonical_reference(&self) -> native::Reference {
         let registry = self.registry().to_string();
         let repository = self.repository().to_string();
@@ -220,11 +159,7 @@ impl OciIdentifier {
         }
     }
 
-    /// The location a transport reference names.
-    ///
-    /// Crate-private on purpose: a `native::Reference` built outside this
-    /// crate is unvalidated text, and a public conversion would be a fifth,
-    /// unratcheted way to mint a location.
+    /// Crate-private: public, it would be an unratcheted way to mint a location from unvalidated text.
     pub(crate) fn from_native(reference: native::Reference) -> Result<Self, IdentifierError> {
         let registry = reference.registry().to_string();
         let input = reference.to_string();
@@ -259,19 +194,9 @@ impl Serialize for OciIdentifier {
     }
 }
 
-/// Builds the synthetic source reference a cross-repository blob mount needs.
-///
-/// A mount names its source repository in the `from=` query parameter of an
-/// upload POST addressed at the *target* repository, and `oci_client`'s
-/// `mount_blob` reads only `repository()` off this value — the registry and tag
-/// are never sent. `"latest"` is therefore an inert placeholder, and the
-/// registry is carried solely to keep the reference well-formed.
-///
-/// It lives beside [`OciIdentifier::canonical_reference`] because it is push-path
-/// construction: mounting happens during a push, and the push path is
-/// mirror-free by design (remote/proxy mirrors are read-only). Building it here
-/// rather than in the transport keeps `native::Reference` construction inside
-/// the two seam files the mirror-invariant gate allows.
+/// The source reference of a cross-repository blob mount; `mount_blob` reads only
+/// its repository, so `"latest"` is an inert placeholder.
+// Kept in this file: the mirror-invariant gate allows `native::Reference` construction in two seam files only.
 pub(crate) fn mount_source_reference(registry: &str, source_repository: &str) -> native::Reference {
     native::Reference::with_tag(registry.to_string(), source_repository.to_string(), "latest".into())
 }
@@ -289,11 +214,9 @@ impl schemars::JsonSchema for OciIdentifier {
     }
 }
 
-/// An [`OciIdentifier`] guaranteed to carry a digest — what a content read
-/// (`pull_manifest`, `pull_blob`, `pull_layer`) addresses.
+/// An [`OciIdentifier`] guaranteed to carry a digest — what a content read addresses.
 ///
-/// Deliberately **no serde**: a physical pin has no business in a lock file
-/// or in package metadata, which name the package ([`PinnedPackageRef`]).
+/// No serde: a lock file or metadata names the package ([`PinnedPackageRef`]), never a physical pin.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PinnedOciIdentifier {
     identifier: OciIdentifier,
@@ -301,12 +224,10 @@ pub struct PinnedOciIdentifier {
 }
 
 impl PinnedOciIdentifier {
-    /// Returns the digest. Always present by construction.
     pub fn digest(&self) -> Digest {
         self.digest.clone()
     }
 
-    /// Returns a copy with the digest replaced. The tag (if any) is preserved.
     #[must_use]
     pub fn clone_with_digest(&self, digest: Digest) -> Self {
         Self {
@@ -315,7 +236,6 @@ impl PinnedOciIdentifier {
         }
     }
 
-    /// Returns a borrow of the inner [`OciIdentifier`].
     pub fn as_oci_identifier(&self) -> &OciIdentifier {
         &self.identifier
     }

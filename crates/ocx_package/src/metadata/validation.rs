@@ -3,53 +3,9 @@
 
 //! Structural and publish-time validation for package metadata.
 //!
-//! The two are deliberately different layers (D14 —
-//! `adr_interpolation_token_grammar.md`). [`ValidMetadata::try_from`] runs on
-//! **every** ingress path, so it may only assert that a document is
-//! *structurally readable*:
-//!
-//! - `validate_env_modifier_types` — refuses an env var whose modifier `type`
-//!   this binary does not know, so a package built for a newer ocx fails closed
-//!   with a version remedy instead of running with a silently wrong environment.
-//! - `validate_env_list_entries` — enforces the wire contract for `list`
-//!   entries: a separator is present, foldable, and does not edge its value.
-//! - `validate_integrations` — the integrations *container*: the namespace
-//!   key grammar and the two size caps. Never the payload's contents. Runs
-//!   last: the two gates above each report a fault the reader cannot work
-//!   around, and an integrations fault is publisher hygiene that must not
-//!   shadow them.
-//!
-//! [`validate_for_publish`] is the strict gate on top of it, run by
-//! `ocx package create` / `ocx package push` where a publisher is present:
-//!
-//! - `validate_env_tokens` — scans every env var value and checks that each
-//!   `${deps.NAME.installPath}` token references a declared, non-ambiguous dep,
-//!   and that each `${self.env.KEY}` names exactly one var declared strictly
-//!   earlier. An unsupported field never reaches the reference check: the scan
-//!   itself refuses `${deps.NAME.version}`.
-//! - `validate_env_reserved_keys` — refuses an env key in the `OCX_*` /
-//!   `__OCX_*` namespace ocx reserves for its own configuration. Publish-time
-//!   only, deliberately: a package that already carries one must keep resolving
-//!   (the resolver skips the key with a warning), so the gate narrows what can
-//!   be minted without narrowing what can be read.
-//! - `validate_entrypoint_args` — scans every `args` element in every
-//!   entrypoint and refuses the token classes `Usage::EntryPointArgs` does not
-//!   permit.
-//! - `validate_integration_tokens` — the same scan over every string leaf of
-//!   every integrations payload. A payload is opaque to OCX, but its `${…}`
-//!   is not: the grammar is closed (D3), so a token OCX does not recognise is
-//!   refused there exactly as it is in an env value, and `$${…}` is how a
-//!   payload spells a literal `${…}` for its own consumer.
-//!
-//! Refusing an unrecognised token on a *read* path is what D14 removes: an ocx
-//! meeting a token it does not know still shows the package, and refuses only
-//! when something asks for the value. Compose and execute need no gate of their
-//! own — `TemplateResolver::resolve` cannot produce bytes for a token it does
-//! not recognise.
-//!
-//! Entrypoint uniqueness is enforced at construction time by
-//! [`super::entrypoint::Entrypoints::new`] (also from the serde path), so no
-//! publish-time entrypoint validation step is needed here.
+//! [`ValidMetadata::try_from`] runs on every ingress path and asserts only structural
+//! readability; [`validate_for_publish`] adds the strict checks where a publisher is
+//! present (`adr_interpolation_token_grammar.md`).
 
 use crate::error::Error as PackageError;
 use std::collections::HashMap;
@@ -61,19 +17,9 @@ use super::template::{AllowedTokens, TemplateError, Usage, first_disallowed_toke
 
 // ── ValidMetadata ─────────────────────────────────────────────────────────────
 
-/// Metadata this binary can structurally read.
+/// Metadata this binary can structurally read; derefs to [`Metadata`].
 ///
-/// Constructed exclusively via `TryFrom<Metadata>`, which verifies that every
-/// env var declares a modifier type this binary knows and that every `list`
-/// entry satisfies the separator contract — statements about the document's
-/// *grammar*, not about whether its values resolve.
-///
-/// It deliberately does **not** promise that the document's interpolation
-/// tokens are recognised or that its `${deps.*}` references resolve: that is
-/// [`validate_for_publish`]'s job at publish time, and
-/// `TemplateResolver::resolve`'s at compose time (D14).
-///
-/// Derefs to [`Metadata`] for read access without unwrapping.
+/// Promises nothing about tokens or `${deps.*}` references resolving.
 #[derive(Debug)]
 pub struct ValidMetadata(Metadata);
 
@@ -82,51 +28,33 @@ impl TryFrom<Metadata> for ValidMetadata {
 
     /// # Errors
     ///
-    /// Returns an error if an env var declares an unknown modifier `type`, if a
-    /// `list` entry is missing its separator, declares an unusable one, or
-    /// carries a value that separator edges, or if an integrations namespace
-    /// key is unusable or a payload is over its size cap.
+    /// An unknown env modifier `type`, a missing, invalid or edging `list` separator, an
+    /// unusable integrations namespace key, or an over-cap payload.
     fn try_from(metadata: Metadata) -> Result<Self, Self::Error> {
-        // Runs first: an unknown modifier type means the reader is too old for
-        // this package, which is the answer the user needs — reporting a
-        // complaint about a var whose grammar we cannot read would send them to
-        // fix the wrong thing.
+        // First: "your ocx is too old" must not be shadowed by a complaint about an unreadable var.
         validate_env_modifier_types(&metadata)?;
         validate_env_list_entries(&metadata)?;
-        // Runs last: the two gates above each report a fault the *reader*
-        // cannot work around (wrong ocx version, unfoldable list). A
-        // integrations fault is publisher hygiene and must not shadow either.
+        // Last: publisher hygiene must not shadow a fault the reader cannot work around.
         validate_integrations(&metadata)?;
         Ok(Self(metadata))
     }
 }
 
-/// The publish gate: structural readability **plus** every token check.
-///
-/// `ocx package create` and `ocx package push` call this instead of
-/// [`ValidMetadata::try_from`]. It is the one explicit enforcement point D14
-/// keeps — the publisher is present, and a typo must not reach a registry.
-/// Every other refusal is the resolver's own, at the operation that needs the
-/// value.
+/// The publish gate `ocx package create` / `push` call: structural readability plus every
+/// token check, so a typo never reaches a registry.
 ///
 /// # Errors
 ///
-/// Everything [`ValidMetadata::try_from`] returns, plus an env key in the
-/// reserved `OCX_*` / `__OCX_*` namespace, an unrecognised `${…}`, a
-/// `${deps.*}` token naming an undeclared or ambiguous dependency or an
-/// unsupported field, and a token class an entrypoint `args` element or a
-/// integrations payload may not carry.
+/// Everything [`ValidMetadata::try_from`] returns, plus a reserved `OCX_*` / `__OCX_*` env
+/// key, an unrecognised `${…}`, an undeclared or ambiguous `${deps.*}`, and a token class
+/// an entrypoint `args` element or integrations payload may not carry.
 pub fn validate_for_publish(metadata: Metadata) -> Result<ValidMetadata, PackageError> {
     let valid = ValidMetadata::try_from(metadata)?;
-    // Before the token scan: a reserved key is refused whatever its value says,
-    // so reporting a template fault in the value of a variable that may not
-    // exist at all would send the publisher to fix the wrong line.
+    // Before the token scan, or a value fault is reported on a var that may not exist at all.
     validate_env_reserved_keys(&valid)?;
     validate_env_tokens(&valid)?;
     validate_entrypoint_args(&valid)?;
-    // Last for the same reason `validate_integrations` is last in the
-    // structural chain: a payload fault is publisher hygiene, and must not
-    // shadow a fault in the env or entrypoint surfaces the package runs on.
+    // Last: a payload fault must not shadow one in the env or entrypoint surfaces.
     validate_integration_tokens(&valid)?;
     Ok(valid)
 }
@@ -146,11 +74,8 @@ impl std::ops::Deref for ValidMetadata {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/// Builds both the primary name map and the collision map from `Dependencies`.
-///
-/// The primary map maps dep names to the last dep with that name; the collision
-/// map records the name when two or more deps share it. Callers should reject
-/// any token whose name appears in the collision map.
+/// Maps each dependency name to its last dep, and each shared name to its first; callers
+/// reject any token whose name is in the collision map.
 fn build_name_and_collision_maps<'a>(
     deps: &'a Dependencies,
 ) -> (HashMap<String, &'a Dependency>, HashMap<String, &'a Dependency>) {
@@ -160,8 +85,6 @@ fn build_name_and_collision_maps<'a>(
     for dep in deps {
         let name = dep.name().to_string();
         if let Some(prev) = name_map.insert(name.clone(), dep) {
-            // `prev` is the first dep with this name; store it so callers can
-            // include both identifiers in the ambiguity error message.
             collision_map.insert(name, prev);
         }
     }
@@ -183,13 +106,8 @@ impl std::io::Write for ByteCounter {
     }
 }
 
-/// The compact-serialized byte length of `value`, measured without allocating
-/// it.
-///
-/// The size caps below need the length and nothing else, and they sit on
-/// [`ValidMetadata::try_from`] — every metadata load, once per admitted package
-/// per `ocx env` / `run` / `direnv export`. `serde_json::to_vec(…).len()` would
-/// heap-allocate the whole document there to throw it away.
+/// The compact-serialized byte length of `value`, measured without allocating it, since
+/// every metadata load pays for it.
 fn serialized_len<T: serde::Serialize + ?Sized>(value: &T) -> Result<usize, serde_json::Error> {
     let mut counter = ByteCounter(0);
     serde_json::to_writer(&mut counter, value)?;
@@ -198,16 +116,10 @@ fn serialized_len<T: serde::Serialize + ?Sized>(value: &T) -> Result<usize, serd
 
 /// Rejects the first env var whose modifier `type` this binary does not know.
 ///
-/// Parsing keeps such a var (as `Modifier::Unknown`) precisely so this gate can
-/// name it. Skipping it instead would run the package in an environment its
-/// publisher never published — the failure would surface downstream, in the
-/// tool, with nothing pointing back at ocx's version.
-///
 /// # Errors
 ///
-/// [`crate::error::Error::UnknownEnvModifier`] naming the var key, the
-/// unrecognized type, and the remedy. Declaration order decides which var is
-/// named when several are unreadable.
+/// [`crate::error::Error::UnknownEnvModifier`] for the first such var in declaration order.
+// Refused, not skipped: skipping runs the package in an env its publisher never published.
 pub(super) fn validate_env_modifier_types(metadata: &Metadata) -> Result<(), PackageError> {
     use super::super::error::Error;
     use super::env::modifier::Modifier;
@@ -228,19 +140,14 @@ pub(super) fn validate_env_modifier_types(metadata: &Metadata) -> Result<(), Pac
     Ok(())
 }
 
-/// Enforces the `list` wire contract on every list-typed env var.
-///
-/// The separator is **required** in package metadata, where no human is present
-/// to be told which one was assumed and a wrong guess fails silently in the
-/// consuming tool. Refusing it here rather than as a serde missing-field keeps
-/// the message on the variable the publisher has to go fix.
+/// Enforces the `list` wire contract, whose separator is required: a guessed one fails
+/// silently in the consuming tool.
 ///
 /// # Errors
 ///
 /// [`crate::error::Error::MissingListSeparator`],
 /// [`crate::error::Error::InvalidListSeparator`], or
-/// [`crate::error::Error::SeparatorEdgedListValue`] for the first
-/// offending var in declaration order.
+/// [`crate::error::Error::SeparatorEdgedListValue`] for the first offending var.
 pub(super) fn validate_env_list_entries(metadata: &Metadata) -> Result<(), PackageError> {
     use super::super::error::Error;
     use super::env::list;
@@ -263,9 +170,7 @@ pub(super) fn validate_env_list_entries(metadata: &Metadata) -> Result<(), Packa
                 separator: separator.to_string(),
             });
         }
-        // The authored bytes only — a value that resolves to an edged one is
-        // caught again by `EnvResolver`, which is the first place the resolved
-        // form exists.
+        // Authored bytes only; `EnvResolver` re-checks the resolved value.
         if list::is_separator_edged(&declared.value, separator) {
             return Err(Error::SeparatorEdgedListValue {
                 key: var.key.clone(),
@@ -278,24 +183,13 @@ pub(super) fn validate_env_list_entries(metadata: &Metadata) -> Result<(), Packa
     Ok(())
 }
 
-/// Rejects the first env var whose key falls in the `OCX_*` / `__OCX_*`
-/// namespace ocx reserves for its own configuration.
-///
-/// Publish-time only. `ocx package create` and `ocx package push` are where a
-/// publisher is present to rename the variable; every read path keeps accepting
-/// such a key and the resolver drops it with a warning, because already-published
-/// artifacts must keep resolving.
-///
-/// The refusal is a security control, not hygiene. Package metadata composes
-/// into the user's shell and is inherited by every child process, so a package
-/// declaring `OCX_CONSENT_NAMESPACES` would rewrite the whitelist that admitted
-/// it, and `OCX_NO_HOOK` would switch shell integration off for everyone
-/// downstream.
+/// Rejects the first env var keyed in the reserved `OCX_*` / `__OCX_*` namespace.
 ///
 /// # Errors
 ///
-/// [`crate::error::Error::ReservedEnvKey`] naming the first offending
-/// key in declaration order.
+/// [`crate::error::Error::ReservedEnvKey`] naming the first offending key.
+// Security control: a package could otherwise set `OCX_CONSENT_NAMESPACES` in the user's shell.
+// Publish-time only, since published artifacts must keep resolving.
 pub(super) fn validate_env_reserved_keys(metadata: &Metadata) -> Result<(), PackageError> {
     use super::super::error::Error;
 
@@ -304,10 +198,7 @@ pub(super) fn validate_env_reserved_keys(metadata: &Metadata) -> Result<(), Pack
     };
 
     for var in env {
-        // Through `ocx_util::env::is_reserved_ocx_key`, the same predicate that
-        // gates project `[env]`, `ocx exec --env`, the forwarded `OCX_ENV`
-        // payload and the resolver: a second spelling of "reserved" here would
-        // let the write path and the read path disagree about which keys exist.
+        // The shared predicate, or the write and read paths disagree about which keys exist.
         if ocx_util::env::is_reserved_ocx_key(&var.key) {
             return Err(Error::ReservedEnvKey { key: var.key.clone() });
         }
@@ -316,22 +207,10 @@ pub(super) fn validate_env_reserved_keys(metadata: &Metadata) -> Result<(), Pack
     Ok(())
 }
 
-/// Validates env var values: every `${…}` must be one of the four recognised
-/// tokens, every `${deps.NAME.installPath}` must name a declared, non-ambiguous
-/// dep, and every `${self.env.KEY}` must name exactly one var declared strictly
-/// earlier in this same document.
-///
-/// Recognition is [`scanner::scan`]'s — the one recogniser (D10) — so a token
-/// this gate refuses is exactly a token the resolver could not have rendered.
-/// Does not consult the filesystem; pure syntax + reference check.
-///
-/// **Why `${self.env.*}` is refused here and not only at compose time.** The
-/// reference is decidable from the document alone — no filesystem, no dep
-/// contexts, no install — which is the class the publish gate already handles
-/// for `${deps.*}`. Left to the composer, a forward or ambiguous reference
-/// publishes cleanly and then exits 65 on every consumer: a publishable artifact
-/// nobody can use. The direction is the safe one, too — the accept set may only
-/// grow, so refusing now and accepting later stays available.
+/// Validates env var values: every `${…}` recognised, every `${deps.NAME.installPath}` a
+/// declared, unambiguous dep, every `${self.env.KEY}` one var declared strictly earlier.
+// `${self.env.*}` is checked here too, or a forward reference publishes cleanly and then
+// exits 65 on every consumer.
 pub(super) fn validate_env_tokens(metadata: &Metadata) -> Result<(), PackageError> {
     use super::super::error::Error;
     use super::template::SelfEnvScope;
@@ -343,17 +222,11 @@ pub(super) fn validate_env_tokens(metadata: &Metadata) -> Result<(), PackageErro
         return Ok(());
     };
 
-    // The scope a `${self.env.KEY}` in the var being walked may name: the keys
-    // declared strictly earlier, in declaration order. The same prefix the
-    // composer's accumulator holds, without the values this gate has no way to
-    // resolve — so the two agree on which references are legal.
     let mut declared_before: SelfEnvScope<&str> = SelfEnvScope::new();
 
     for var in env {
         let Some(value) = var.value() else {
-            // No value template, no contribution: `Var::value()` is `None` only
-            // for a modifier type this binary cannot read, and the composer's
-            // accumulator skips such a var for the same reason.
+            // Only an unreadable modifier type has no value; the composer skips it too.
             continue;
         };
 
@@ -386,19 +259,7 @@ pub(super) fn validate_env_tokens(metadata: &Metadata) -> Result<(), PackageErro
     Ok(())
 }
 
-/// Checks one recognised token's `${deps.*}` reference against the declared
-/// direct dependencies.
-///
-/// Only the dependency reference lives here — shape recognition already happened
-/// in [`scanner::scan`], `${installPath}` always has a referent, and
-/// `${self.env.KEY}` is checked against the declaration prefix its caller
-/// carries, which this function has no view of.
-///
-/// The field is not re-checked either. `TokenShape::Dep` carries no field:
-/// `installPath` is the only leaf, so the scan refuses `${deps.cmake.version}`
-/// as [`TemplateError::UnknownField`] and a `Dep` token with an unsupported
-/// field cannot be constructed. A branch for it here would be a green that
-/// could never go red.
+/// Checks one token's `${deps.*}` reference against the declared direct dependencies.
 fn check_token_reference(
     token: &Token<'_>,
     name_map: &HashMap<String, &Dependency>,
@@ -410,8 +271,6 @@ fn check_token_reference(
         return Ok(());
     };
 
-    // Ambiguity first: a name two deps answer to is refused before the
-    // declared-name check can pick one of them.
     if let (Some(first), Some(second)) = (name_map.get(name.as_str()), collision_map.get(name.as_str())) {
         return Err(TemplateError::AmbiguousDependencyRef {
             ref_name: name.clone(),
@@ -421,9 +280,7 @@ fn check_token_reference(
     }
 
     if !name_map.contains_key(name.as_str()) {
-        // Read back off the `Dependency` rather than reparsing the map key, so
-        // the declared list needs no fallible step and no unreachable arm.
-        // Sorted, because the map's own order is hash noise in a message.
+        // Sorted, since hash order is noise in a message.
         let mut declared: Vec<_> = name_map.values().map(|dependency| dependency.name()).collect();
         declared.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         return Err(TemplateError::UnknownDependencyRef {
@@ -435,20 +292,12 @@ fn check_token_reference(
     Ok(())
 }
 
-/// Validates entrypoint `args` elements at publish time.
-///
-/// Every `${…}` in every `args` element must be recognised, and must belong to
-/// a token class `Usage::EntryPointArgs` permits — `${installPath}` and its
-/// `${self.installPath}` alias, nothing else. `${deps.*}` and `${self.env.*}`
-/// are refused as [`TemplateError::DisallowedToken`], never the misleading
-/// `UnknownDependencyRef`.
-///
-/// Pure syntax check — no filesystem access.
+/// Validates that entrypoint `args` carry only tokens `Usage::EntryPointArgs` permits.
 ///
 /// # Errors
 ///
-/// [`crate::error::Error::EntrypointArgInterpolation`] for the first
-/// arg element carrying an unrecognised or disallowed token.
+/// [`crate::error::Error::EntrypointArgInterpolation`] for the first arg carrying an
+/// unrecognised or disallowed token.
 pub(super) fn validate_entrypoint_args(metadata: &Metadata) -> Result<(), PackageError> {
     use super::super::error::Error;
 
@@ -480,21 +329,7 @@ pub(super) fn validate_entrypoint_args(metadata: &Metadata) -> Result<(), Packag
     Ok(())
 }
 
-/// Validates the integrations *container* — the namespace keys and the two
-/// size caps, never a payload's contents.
-///
-/// Per namespace, in lexicographic order: the key grammar, then the
-/// per-namespace size cap. The per-package cap is checked once at the end, so a
-/// single oversized namespace is always named ahead of a generic total.
-///
-/// Structural, which is why it runs on every ingress path rather than only at
-/// publish: a key the terminal cannot print safely and a payload over the cap
-/// are faults the *reader* meets too, and both caps sit on the read path (they
-/// are raise-only for exactly that reason). A payload's `${…}` tokens are the
-/// publish gate's concern instead — see [`validate_integration_tokens`],
-/// which is where an env value's tokens are checked as well (D14).
-///
-/// Pure syntax: no filesystem access, no network, no dependency resolution.
+/// Validates the integrations container (namespace keys, both size caps), never a payload.
 ///
 /// # Errors
 ///
@@ -502,6 +337,7 @@ pub(super) fn validate_entrypoint_args(metadata: &Metadata) -> Result<(), Packag
 /// [`crate::error::Error::IntegrationTooLarge`], or
 /// [`crate::error::Error::IntegrationsTooLarge`] for the first
 /// offending namespace.
+// The total is checked last, so an oversized namespace is named ahead of a generic total.
 pub(super) fn validate_integrations(metadata: &Metadata) -> Result<(), PackageError> {
     use super::super::error::Error;
     use super::integrations::{MAX_INTEGRATION_NAMESPACE_BYTES, MAX_INTEGRATIONS_BYTES, validate_namespace};
@@ -511,20 +347,12 @@ pub(super) fn validate_integrations(metadata: &Metadata) -> Result<(), PackageEr
         return Ok(());
     }
 
-    // The braces of the whole map. Each namespace below adds its own framing as
-    // it is measured, so the per-package total costs no second serialization
-    // pass over payloads this loop has already walked. The key goes through
-    // `serde_json` like any other value — only the punctuation a JSON object
-    // interposes (`{`, `:`, `,`, `}`) is counted here, never an escaping rule.
-    // Pinned byte-for-byte against `serde_json`'s own measurement by the
-    // per-package boundary pair in the tests below.
+    // Only object punctuation is counted by hand; the boundary tests pin it to `serde_json`.
     let mut total = "{}".len();
 
     for (position, (namespace, payload)) in integrations.iter().enumerate() {
         validate_namespace(namespace)?;
 
-        // Compact re-serialization, so the measurement is independent of the
-        // source document's whitespace and key ordering. Inclusive boundary.
         let size = serialized_len(payload)?;
         if size > MAX_INTEGRATION_NAMESPACE_BYTES {
             return Err(Error::IntegrationTooLarge {
@@ -548,30 +376,8 @@ pub(super) fn validate_integrations(metadata: &Metadata) -> Result<(), PackageEr
     Ok(())
 }
 
-/// Validates the `${…}` tokens inside integrations payloads at publish time.
-///
-/// Every token in every string **leaf** of every payload must be recognised by
-/// [`scanner::scan`], must belong to a class this surface permits, and — for
-/// `${deps.NAME.installPath}` — must name a declared, non-ambiguous direct
-/// dependency. Object keys, numbers, booleans and nulls are not leaves, so this
-/// can only fire where interpolation would actually run.
-///
-/// The recogniser is the one every other surface uses, which is the whole point:
-/// the grammar is closed (D3), so a payload's `${workspaceFolder}` is refused
-/// here exactly as an env value's is, and `$${workspaceFolder}` is how a payload
-/// publishes that literal for its own consumer. OCX still reads nothing about
-/// what the payload *means* — only its own vocabulary inside it.
-///
-/// `${self.env.KEY}` is refused as [`TemplateError::DisallowedToken`], by the
-/// same `INTEGRATION_TOKENS` capability set the compose-time resolvers carry:
-/// a private env value must not become an interface-surface JSON payload. The
-/// two share one constant because only compose is reachable for a package a
-/// hostile registry published — this gate is where a publisher's typo is caught,
-/// never where the rule is enforced. Refusing is also the reversible direction,
-/// since the accept set may only grow.
-///
-/// Pure syntax + reference check: no filesystem access, no network, no
-/// dependency resolution.
+/// Validates that every token in an integrations payload's string leaves is recognised,
+/// permitted, and names a declared, unambiguous direct dependency.
 ///
 /// # Errors
 ///
@@ -586,13 +392,7 @@ pub(super) fn validate_integration_tokens(metadata: &Metadata) -> Result<(), Pac
         return Ok(());
     }
 
-    // The same direct-only name map `validate_env_tokens` builds — a payload
-    // token resolves against the declaring package's own `dependencies`, never
-    // transitively.
     let (name_map, collision_map) = build_name_and_collision_maps(metadata.dependencies());
-    // The same constant the compose-time resolvers apply. This gate never runs
-    // against a package published by a hostile registry, so it is the copy that
-    // may not drift rather than the one that enforces.
     let allowed = INTEGRATION_TOKENS;
 
     for (namespace, payload) in integrations.iter() {

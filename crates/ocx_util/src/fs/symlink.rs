@@ -3,61 +3,33 @@
 
 //! Low-level symlink primitives (create, update, remove).
 //!
-//! These functions operate on a single symlink without any bookkeeping.
-//! For install symlinks (candidates and current under `symlinks/`), use
-//! `ReferenceManager` instead — it keeps the
-//! `refs/` back-references in sync, which is required for garbage collection.
-//!
-//! On Windows, NTFS junction points are used as a transparent fallback when
-//! the process lacks the `SeCreateSymbolicLinkPrivilege` required for native
-//! symlinks.  Junctions behave identically to directory symlinks for the
-//! purposes of this crate.
+//! No bookkeeping: install symlinks go through `ReferenceManager`, which keeps `refs/` in sync for GC.
 
 use std::path::Path;
 
 use crate::error::FileError;
 
-/// Validates that a symlink target resolves within `root`.
+/// Validates that a symlink target resolves within `root`; an absolute `target` is always refused.
 ///
-/// `link_path` is the absolute path where the symlink is (or will be) located.
-/// `target` is the raw symlink target (typically relative). Absolute targets
-/// are rejected unconditionally.
-///
-/// Used by the archive extractor (as the primary input-trust boundary) and by
-/// the layer assembly walker (as defence-in-depth against any path that
-/// populates `layers/.../content/` without going through the archive layer).
+/// `link_path` is where the link is (or will be); `target` is its raw, typically relative, target.
 pub fn validate_target(root: &Path, link_path: &Path, target: &Path) -> Result<(), crate::archive::Error> {
     let escape = || crate::archive::Error::SymlinkEscape {
         link: link_path.to_path_buf(),
         target: target.to_path_buf(),
     };
 
-    // 1. Absolute targets are rejected unconditionally — `join_under_root`
-    //    expects a relative candidate, and an absolute target cannot be
-    //    contained by a root it does not descend from.
     if target.is_absolute() {
         return Err(escape());
     }
 
-    // 2. Resolve where the target points — from the link's own directory — and
-    //    require it to land inside `root`. The resolution must be PHYSICAL, not
-    //    lexical: an intermediate component of the target (not just of the link's
-    //    parent) may be a symlink an earlier archive entry planted, and a lexical
-    //    fold of the target's `..`/components would disagree with the kernel and
-    //    accept a target that escapes THROUGH that planted link (`a -> .`, then
-    //    `e -> a/..` folds to the root lexically but physically climbs one level
-    //    up). `resolve_within_root` canonicalizes the longest existing prefix of
-    //    `parent/target` — following every symlink already on disk — and folds
-    //    only the not-yet-existing tail lexically (a path that does not exist
-    //    cannot be a symlink, so lexical and physical agree there). When `root`
-    //    itself is not on disk (a hypothetical / unit-test path) nothing can
-    //    redirect and this reduces to a plain lexical containment check.
+    // Physical, not lexical: after an earlier entry's `a -> .`, `e -> a/..` climbs above the root.
     let parent = link_path.parent().unwrap_or(root);
     let full = parent.join(target);
     match dunce::canonicalize(root) {
         Ok(canonical_root) => resolve_within_root(&canonical_root, &full)
             .map(|_| ())
             .ok_or_else(escape),
+        // `root` is not on disk: nothing can redirect, so a lexical check suffices.
         Err(_) => {
             let rel = full.strip_prefix(root).map_err(|_| escape())?;
             crate::fs::path::join_under_root(root, rel).map_err(|_| escape())?;
@@ -66,17 +38,9 @@ pub fn validate_target(root: &Path, link_path: &Path, target: &Path) -> Result<(
     }
 }
 
-/// Physically resolves `path` and returns it only when it lands inside
-/// `canonical_root` (an already-[`dunce::canonicalize`]d root).
+/// Physically resolves `path`, returning it only when it lands inside `canonical_root`.
 ///
-/// Canonicalizes the LONGEST EXISTING textual prefix of `path` — following any
-/// symlink on disk — verifies it is under the canonical root, then re-appends
-/// the not-yet-existing tail and rejects any lexical escape via
-/// [`join_under_root`](crate::fs::path::join_under_root). A tail
-/// component cannot be a symlink (it does not exist), so folding it lexically is
-/// exact; a planted symlink in the existing prefix that redirects outside the
-/// root is caught because its canonicalized location fails the `strip_prefix`.
-/// Returns `None` on escape or when no prefix (not even the root) resolves.
+/// Canonicalizes the longest existing prefix and folds the missing tail lexically, exact since a missing component is no symlink.
 fn resolve_within_root(canonical_root: &Path, path: &Path) -> Option<std::path::PathBuf> {
     let components: Vec<_> = path.components().collect();
     for split in (0..=components.len()).rev() {
@@ -95,11 +59,7 @@ fn resolve_within_root(canonical_root: &Path, path: &Path) -> Option<std::path::
     None
 }
 
-/// Returns `true` if `path` is a symlink or (on Windows) a junction point.
-///
-/// On Unix this is equivalent to [`Path::is_symlink`].  On Windows it also
-/// detects NTFS junction points (reparse points with tag `IO_REPARSE_TAG_MOUNT_POINT`),
-/// which [`Path::is_symlink`] does not report.
+/// Whether `path` is a symlink or a Windows junction, which [`Path::is_symlink`] misses.
 pub fn is_link(path: &std::path::Path) -> bool {
     #[cfg(windows)]
     {
@@ -116,12 +76,7 @@ pub fn is_link(path: &std::path::Path) -> bool {
     }
 }
 
-/// Creates or updates a symlink at `link_path` pointing to `target_path`.
-///
-/// No-op if `link_path` already resolves to `target_path`.
-/// Removes any existing symlink (including dangling ones) before creating anew.
-///
-/// For install symlinks, use `ReferenceManager::link` instead.
+/// Creates or updates a symlink at `link_path`; a no-op when it already points to `target_path`.
 pub fn update(
     target_path: impl AsRef<std::path::Path>,
     link_path: impl AsRef<std::path::Path>,
@@ -150,14 +105,9 @@ pub fn update(
     create(target_path, link_path)
 }
 
-/// Creates a new symlink at `link_path` pointing to `target`.
+/// Creates a symlink at `link_path` to directory `target`, creating parents; fails if `link_path` exists.
 ///
-/// Creates any missing parent directories. Fails if `link_path` already exists.
-/// The target is expected to be a directory (or a not-yet-existing path that
-/// will become a directory). On Windows, NTFS junction points are used which
-/// only support directory targets.
-///
-/// For install symlinks, use `ReferenceManager::link` instead.
+/// Directory targets only: Windows junctions support nothing else.
 pub fn create(target: impl AsRef<std::path::Path>, link_path: impl AsRef<std::path::Path>) -> Result<(), FileError> {
     let target = target.as_ref();
     let link_path = link_path.as_ref();
@@ -168,24 +118,9 @@ pub fn create(target: impl AsRef<std::path::Path>, link_path: impl AsRef<std::pa
     Ok(())
 }
 
-/// Crash-safe atomic symlink replace: create a temp symlink in the **same
-/// directory** as `link_path`, then `rename(2)` it onto `link_path`.
+/// Crash-safe symlink replace: stage a `.tmp-*` link beside `link_path`, then rename it over.
 ///
-/// Unlike [`update`] (which is remove-then-create and therefore transiently
-/// drops the link if the process crashes — or a concurrent reader observes —
-/// between the remove and the create), this operation is atomic: an observer
-/// sees either the old link or the new link, never an absent one. The temp
-/// name lives in the same directory so the `rename(2)` is an atomic same-dir
-/// rename on POSIX (`ReplaceFile`/equivalent on Windows). This is required by
-/// `ProjectRegistry::register` per ADR `adr_project_gc_symlink_ledger.md`
-/// (CODEX-BLOCK-2): a crash or concurrent `live_projects` between a
-/// remove-then-create would transiently drop a live GC root.
-///
-/// Creates any missing parent directories. The temp name is
-/// `.tmp-<pid>-<rand>` so a concurrent `ProjectRegistry::live_projects`
-/// readdir can skip in-flight staging entries.
-///
-/// For install symlinks, use `ReferenceManager::link` instead.
+/// Readers see the old or new link, never none, or `ProjectRegistry` drops a live GC root (`adr_project_gc_symlink_ledger.md`).
 pub fn replace_atomic(
     target: impl AsRef<std::path::Path>,
     link_path: impl AsRef<std::path::Path>,
@@ -195,21 +130,14 @@ pub fn replace_atomic(
 
     let parent = match link_path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
-        // No parent component (e.g. a bare relative name). The temp link must
-        // live in the same directory as the final name for the rename to be an
-        // atomic same-dir rename; with no parent that is the current dir.
+        // A bare name: the staging link must share its directory for an atomic rename.
         _ => Path::new("."),
     };
     std::fs::create_dir_all(parent).map_err(|error| FileError::new(parent, error))?;
 
-    // Stage the link at a `.tmp-<pid>-<unique>` name in the *same* directory so
-    // the rename below is an atomic same-dir rename (POSIX) /
-    // `ReplaceFile`-class (Windows). `live_projects` skips `.tmp-*` names so a
-    // concurrent readdir never observes the staging entry as a ledger link.
     let temp_path = parent.join(temp_link_name());
 
-    // Defensive: a previous crashed run may have left this exact staging name.
-    // Best-effort removal; a real failure surfaces from `create_link` below.
+    // A crashed run may have left this name; a real failure surfaces from `create_link`.
     if is_link(&temp_path) || temp_path.exists() {
         let _ = remove_link(&temp_path);
     }
@@ -226,13 +154,7 @@ pub fn replace_atomic(
     }
 }
 
-/// A process-and-call-unique staging name `.tmp-<pid>-<seq>-<nanos>`.
-///
-/// `live_projects` filters `.tmp-*` so this is never mistaken for a ledger
-/// link. No `rand` dependency exists in the crate; uniqueness within a process
-/// is guaranteed by a monotonic counter, and cross-process uniqueness by the
-/// pid plus a high-resolution timestamp (collision would require two processes
-/// to stage in the same nanosecond with the same pid — impossible).
+/// A process-and-call-unique staging name; `live_projects` skips `.tmp-*`, so it is never a ledger link.
 fn temp_link_name() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -245,53 +167,23 @@ fn temp_link_name() -> String {
     format!(".tmp-{}-{seq}-{nanos}", std::process::id())
 }
 
-/// Renames `from` onto `to`, replacing an existing `to`.
-///
-/// On POSIX `rename(2)` replaces the destination **atomically**: a concurrent
-/// reader observes either the old link or the new link, never an absent one.
-///
-/// On Windows `std::fs::rename` fails if the destination exists, so a
-/// junction/symlink at `to` is removed first, then the staging link is renamed
-/// onto it. This remove-then-rename has a **bounded non-atomic window**: a
-/// concurrent same-hash writer racing a reader between the remove and the rename
-/// can briefly expose no entry at `to`. The `.tmp-*` staging name does **not**
-/// cover this window — `ProjectRegistry::live_projects` and the GC root scan
-/// deliberately skip `.tmp-*` entries, so the staged link is invisible to a
-/// reader by design.
-///
-/// A concurrent *writer* that republishes `to` inside that window would make the
-/// loser's rename fail with `AlreadyExists`. Because install symlinks are
-/// idempotent (racers publish an equivalent link, or last-writer-wins on a
-/// mutable candidate under a tag advance), the loser **converges** on the
-/// existing link instead of surfacing the `EEXIST` that issue #179 fixes on
-/// POSIX. Only the reader-visibility window remains; a Windows FFI atomic
-/// replace (`MoveFileEx`/`ReplaceFile`) that would close it too is a deferred
-/// scope decision.
+/// Renames `from` onto `to`, atomically replacing an existing `to`.
 #[cfg(not(windows))]
 fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 
-/// Bounded retries for the Windows remove-then-rename publish window. Under
-/// heavy same-target contention (issue #179's 32-thread stress) a fault is
-/// benign and resolves within a few iterations; the ceiling is a livelock
-/// backstop plus enough budget to outlast a Defender-held handle.
+/// Livelock backstop for the Windows remove-then-rename window, long enough to outlast a Defender-held handle.
 #[cfg(windows)]
 const WINDOWS_RENAME_RACE_RETRIES: usize = 40;
 
-/// Returns `true` for the Windows transient FS errors seen under concurrent
-/// junction churn: `ERROR_ACCESS_DENIED` (5) and `ERROR_SHARING_VIOLATION`
-/// (32). A peer op — or Windows Defender real-time scanning — momentarily
-/// holding a handle on `to` or its parent makes a remove/rename fail; it heals
-/// on retry (same class `BlobStore::write_blob` retries; rattler precedent).
+/// `ERROR_ACCESS_DENIED` (5) or `ERROR_SHARING_VIOLATION` (32): a peer or Defender briefly holding a handle.
 #[cfg(windows)]
 fn is_transient_lock_error(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(5) | Some(32))
 }
 
-/// Sleeps a short jittered backoff before a retry (`attempt` ≥ 1). Exponential
-/// ramp capped at 128 ms with ±25% jitter derived from `SystemTime` subsecond
-/// nanos (no `rand` dependency), mirroring `persist_temp_file`.
+/// Sleeps an exponential backoff capped at 128 ms, with ±25% jitter.
 #[cfg(windows)]
 fn rename_race_backoff(attempt: usize) {
     use std::time::Duration;
@@ -304,11 +196,7 @@ fn rename_race_backoff(attempt: usize) {
     std::thread::sleep(Duration::from_secs_f64((base_ms as f64) * jitter_scale / 1000.0));
 }
 
-/// Retries a single idempotent junction syscall on the transient Windows lock
-/// class (`ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION`) with jittered
-/// backoff. `op` must be a *single* reparse-point create whose failure leaves no
-/// partial state, so re-running it is safe. Non-transient errors surface
-/// immediately; the budget outlasts a Defender-held handle before giving up.
+/// Retries `op` on the transient lock class; `op` must be one syscall that leaves no partial state on failure.
 #[cfg(windows)]
 fn with_transient_retry<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
     let mut last_error: Option<std::io::Error> = None;
@@ -325,26 +213,22 @@ fn with_transient_retry<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::i
     Err(last_error.unwrap_or_else(|| std::io::Error::other("junction op retries exhausted")))
 }
 
+/// Windows `rename_replace`: `rename` refuses an existing destination, so `to` is removed first.
+///
+/// That leaves a brief window with no entry at `to`; concurrent writers converge on an equivalent link.
 #[cfg(windows)]
 fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::io::ErrorKind;
 
-    // Windows has no atomic directory-junction replace (`MoveFileEx`
-    // REPLACE_EXISTING refuses a directory destination), so publish via
-    // remove-then-rename inside a bounded retry loop. Concurrent same-hash
-    // installers stage an *equivalent* junction, so every interleaving fault is
-    // benign — the slot converges on a valid link. `from` is uniquely named per
-    // call, so it is never the victim of a peer's remove.
+    // No atomic junction replace exists: `MoveFileEx` refuses a directory destination.
+    // `from` is unique per call, so a peer's remove never hits it.
     let mut last_error: Option<std::io::Error> = None;
     for attempt in 0..WINDOWS_RENAME_RACE_RETRIES {
         if attempt > 0 {
             rename_race_backoff(attempt);
         }
 
-        // Converge without touching `to` when it already resolves to the target
-        // we staged. A peer that published first left exactly the link we
-        // wanted; removing and re-renaming it would only thrash the winner and
-        // widen the reader-visibility window.
+        // A peer already published our target: converge, since re-renaming widens the reader window.
         if is_link(to) {
             match (std::fs::read_link(to), std::fs::read_link(from)) {
                 // An equivalent link is already published — drop our stage, done.
@@ -352,24 +236,14 @@ fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
                     let _ = remove_link(from);
                     return Ok(());
                 }
-                // `to` is a link to a *different* target — a genuine re-link
-                // (e.g. `ProjectRegistry` repointing a ledger entry). Fall
-                // through to the remove-then-rename replace below.
+                // A different target is a genuine re-link: replace below.
                 (Ok(_), Ok(_)) => {}
-                // A read raced a peer mid-republish. Do NOT fall through to
-                // removal: for concurrent *identical* installs (#179) `to` will
-                // settle into the equivalent link, and `remove_link` is a
-                // non-atomic two-step whose concurrent teardown is what surfaced
-                // `ERROR_NOT_A_REPARSE_POINT`. Back off and re-check instead.
+                // A read raced a peer: re-check, never remove, as concurrent `remove_link` teardown fails.
                 _ => continue,
             }
         }
 
-        // Clear any existing entry at `to`. Concurrent junction removal is racy:
-        // a peer that got there first leaves `to` already gone (any error, incl.
-        // `NotFound` or "not a reparse point"), which is exactly the state we
-        // want — re-check and proceed. A still-present `to` we could not remove
-        // is a transient lock we retry, or a hard error we surface.
+        // A removal error with `to` already gone means a peer won; only a still-present `to` counts.
         if is_link(to) || to.exists() {
             if let Err(error) = remove_link(to) {
                 if is_link(to) || to.exists() {
@@ -385,18 +259,13 @@ fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
 
         match std::fs::rename(from, to) {
             Ok(()) => return Ok(()),
-            // A peer republished `to` between our remove and rename. Recheck at
-            // the loop top: it either matches our target (converge) or is a
-            // stale different target we retry to replace.
+            // A peer republished `to` between remove and rename; the loop top converges or replaces.
             Err(_) if is_link(to) => continue,
-            // `to` is momentarily absent and our own stage is gone — a peer's
-            // remove consumed the window; nothing left to publish, converge.
+            // Our stage is gone too: a peer consumed the window, nothing left to publish.
             Err(error) if error.kind() == ErrorKind::NotFound && !is_link(from) && !from.exists() => {
                 return Ok(());
             }
-            // Any benign publish-race interleaving — a transient lock, a `to`
-            // that a peer removed (NotFound) or republished (AlreadyExists) —
-            // back off and retry; the slot converges within the budget.
+            // A transient lock or a peer's interleaving: back off and retry.
             Err(error)
                 if is_transient_lock_error(&error)
                     || matches!(error.kind(), ErrorKind::NotFound | ErrorKind::AlreadyExists) =>
@@ -408,8 +277,7 @@ fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
         }
     }
 
-    // Retries exhausted. If an equivalent link now occupies the slot, converge;
-    // otherwise surface the last observed error rather than loop forever.
+    // Exhausted: converge if a link now occupies the slot, else surface the last error.
     if is_link(to) {
         let _ = remove_link(from);
         return Ok(());
@@ -417,11 +285,7 @@ fn rename_replace(from: &Path, to: &Path) -> std::io::Result<()> {
     Err(last_error.unwrap_or_else(|| std::io::Error::other("rename retries exhausted")))
 }
 
-/// Removes the symlink at `link_path`.
-///
-/// No-op if `link_path` does not exist and is not a dangling symlink.
-///
-/// For install symlinks, use `ReferenceManager::unlink` instead.
+/// Removes the symlink at `link_path`; a no-op when nothing is there.
 pub fn remove(link_path: impl AsRef<std::path::Path>) -> Result<(), FileError> {
     let link_path = link_path.as_ref();
     if link_path.exists() || is_link(link_path) {
@@ -444,40 +308,22 @@ fn remove_link(link_path: &std::path::Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn create_link(target: &std::path::Path, link_path: &std::path::Path) -> std::io::Result<()> {
-    // Use NTFS junction points on Windows. They behave like directory
-    // symlinks but do not require elevated privileges or Developer Mode.
-    // Junction targets must be absolute paths.
-    //
-    // A relative target resolves against the LINK's own directory, not the
-    // process CWD: a symlink is `link -> target` interpreted relative to where
-    // the link lives, and `validate_target` (the archive trust boundary) checks
-    // containment on exactly that basis. Resolving against `current_dir()`
-    // instead would land an archive's `link -> .` as a junction to `$CWD`, so a
-    // later `link/newdir/file` mkdirs outside the extraction root even though the
-    // validator judged the link contained. Fall back to the CWD only when the
-    // link has no parent component and the join is still not absolute.
+    // Junctions need no elevation but must have absolute targets.
     let abs_target = if target.is_absolute() {
         target.to_path_buf()
     } else {
+        // Against the link's directory, as `validate_target` checks: CWD-based, `link -> .` escapes the extraction root.
         let joined = link_path.parent().map(|parent| parent.join(target));
         match joined {
             Some(joined) if joined.is_absolute() => joined,
             _ => std::env::current_dir()?.join(target),
         }
     };
-    // `junction::create` is a single reparse-point write, so a transient
-    // `ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION` (a peer or Defender holding
-    // the parent dir open under issue #179's concurrent-install storm) is safe to
-    // retry — the failed attempt created nothing. This covers both the staging
-    // junction in `replace_atomic` and the back-ref create in `ReferenceManager`,
-    // so the whole install-link path is resilient to the same lock class that
-    // `rename_replace` already retries.
+    // One reparse-point write, so a failed attempt created nothing and is safe to retry.
     with_transient_retry(|| junction::create(&abs_target, link_path))
 }
 
-/// Windows `ERROR_NOT_A_REPARSE_POINT` (0x1126): `junction::delete` raced a peer
-/// that already stripped the reparse data off this path. Benign under the
-/// concurrent junction teardown of issue #179 — the point is already gone.
+/// `ERROR_NOT_A_REPARSE_POINT`: `junction::delete` raced a peer that already stripped the reparse data.
 #[cfg(windows)]
 const ERROR_NOT_A_REPARSE_POINT: i32 = 4390;
 
@@ -487,12 +333,7 @@ fn remove_link(link_path: &std::path::Path) -> std::io::Result<()> {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
-    // Removing a directory junction is a non-atomic *two-step* (strip reparse
-    // data, then remove the now-empty dir). Under issue #179's 32-thread storm a
-    // peer runs the identical teardown on the same path, so every step must
-    // tolerate a concurrent racer having already completed it — otherwise a lost
-    // interleaving surfaces `ERROR_NOT_A_REPARSE_POINT` (4390) or a spurious
-    // `NotFound` to the caller.
+    // A non-atomic two-step a peer may run concurrently, so every step tolerates it having completed.
     let meta = match link_path.symlink_metadata() {
         Ok(meta) => meta,
         // A peer already removed the entry — nothing left to do.
@@ -500,9 +341,7 @@ fn remove_link(link_path: &std::path::Path) -> std::io::Result<()> {
         Err(error) => return Err(error),
     };
 
-    // `Metadata::is_dir()` returns false for junction points because Rust
-    // checks `!is_symlink() && is_directory()`. Check raw file attributes
-    // instead to correctly identify junctions and directory symlinks.
+    // Raw attributes: `Metadata::is_dir()` is false for junctions.
     if meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY == 0 {
         return match std::fs::remove_file(link_path) {
             Ok(()) => Ok(()),
@@ -511,14 +350,10 @@ fn remove_link(link_path: &std::path::Path) -> std::io::Result<()> {
         };
     }
 
-    // Junctions are empty directory entries — the contents live in the target.
-    // First strip the reparse data, then remove the empty dir. Using
-    // `remove_dir` (not `_all`) ensures we can never accidentally recurse into
-    // the target, regardless of future Rust behavior.
+    // Strip the reparse data, then `remove_dir` (never `_all`, which could recurse into the target).
     match junction::delete(link_path) {
         Ok(()) => {}
-        // A peer stripped the reparse point first (4390) or removed the entry
-        // outright (NotFound) — exactly the state we want; proceed.
+        // A peer stripped or removed it first: proceed.
         Err(error)
             if error.raw_os_error() == Some(ERROR_NOT_A_REPARSE_POINT) || error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error),
@@ -528,9 +363,7 @@ fn remove_link(link_path: &std::path::Path) -> std::io::Result<()> {
         Ok(()) => Ok(()),
         // A peer removed the directory first.
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        // A peer re-published a junction here between our reparse-strip and this
-        // removal. A freshly re-created link is the desired end state — never
-        // delete a valid link we did not stage; leave it in place.
+        // A peer re-published a junction here: never delete a link we did not stage.
         Err(_) if is_link(link_path) => Ok(()),
         Err(error) => Err(error),
     }

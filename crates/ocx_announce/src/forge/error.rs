@@ -5,10 +5,7 @@
 
 use super::{CapabilityName, ForgeKind, Redacted, WriteTransport};
 
-/// Failures raised by the forge client.
-///
-/// The token is never carried in any variant — messages reference URLs and
-/// HTTP status codes only, never the bearer credential (design register X6).
+/// Failures raised by the forge client; no variant carries the token.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ForgeError {
@@ -16,27 +13,19 @@ pub enum ForgeError {
     #[error("invalid repository coordinate {value}, expected [HOST/]NAMESPACE/PROJECT")]
     InvalidRepoCoordinate { value: String },
 
-    /// A coordinate names a nested namespace on a forge whose namespaces are a
-    /// single segment. Refused where the rule belongs — the coordinate type is
-    /// forge-neutral, so only the client knows its own forge cannot nest.
+    /// A nested namespace on a forge whose namespaces are a single segment.
     #[error("{forge} has no nested namespaces, but {namespace} is nested")]
     NestedNamespaceUnsupported { forge: String, namespace: String },
 
     /// A forge kind could not be derived from a host and none was given.
     ///
-    /// Deliberately not a probe: guessing a forge kind from an unknown hostname
-    /// and guessing wrong sends the announce credential to the wrong API in the
-    /// wrong header. The publisher declares it instead.
+    /// Never probed: a wrong guess sends the announce credential to the wrong API.
     #[error(
         "cannot tell which forge {host} is; pass --forge github or --forge gitlab, or write the host out if {host} is a group name (gitlab.com/{host}/...)"
     )]
     ForgeKindUnknown { host: String },
 
-    /// A fork was requested into the namespace that already owns the upstream.
-    ///
-    /// No forge can fork a repository into the namespace that owns it, so this
-    /// would fail deep inside the fork API with an opaque status. The fork-free
-    /// path is what this publisher wants.
+    /// A fork was requested into the namespace that already owns the upstream, which no forge can do.
     #[error(
         "{upstream} already lives under {namespace}, which cannot fork it: omit --fork to announce from a branch on the index repository itself"
     )]
@@ -44,11 +33,8 @@ pub enum ForgeError {
 
     /// `--fork` named a different host than `--index-repo`.
     ///
-    /// A fork always lives on the same instance as the repository it forks, and
-    /// the client is built for the index's host alone — so a differing fork host
-    /// was silently ignored and the fork addressed on the index's instance
-    /// instead, writing to a repository the operator did not name. Refused
-    /// rather than reinterpreted.
+    /// Refused, never reinterpreted: the client addresses the index's host, so the
+    /// fork would resolve to a repository the operator did not name.
     #[error(
         "--fork is on {fork_host} but --index-repo is on {index_host}; a fork lives on the same instance as its upstream"
     )]
@@ -69,21 +55,10 @@ pub enum ForgeError {
         source: reqwest::Error,
     },
 
-    /// The forge answered with a non-success HTTP status.
+    /// The forge answered with a non-success HTTP status; build `detail` with [`status_detail`].
     ///
-    /// `detail` carries the forge's own reason, which lives in the response body
-    /// (`{"message": "..."}`) and nowhere else — a bare status code sends the
-    /// reader to the forge's web UI to find out what a 422 meant. Build it with
-    /// [`status_detail`] so the body is trimmed, length-capped, and reduced to
-    /// the empty string when there is nothing worth showing.
-    ///
-    /// **The REST client is not the only producer.** `git` is an HTTP client
-    /// too, so a credential the forge rejects over the git write transport is
-    /// the same 401/403 arriving through a different reader — see
-    /// `git_stderr::credential_rejection_status`, which recovers the status from
-    /// what `git` printed. That producer supplies a fixed `detail` of its own
-    /// rather than a response body it never sees, because the bytes it *does*
-    /// hold are the ones a credential can arrive inside.
+    /// The git transport also raises this for a rejected credential, with a fixed
+    /// `detail`: the stderr it holds can carry the credential itself.
     #[error("forge returned HTTP status {status} for {url}{detail}")]
     Status { url: String, status: u16, detail: String },
 
@@ -106,8 +81,7 @@ pub enum ForgeError {
     #[error("forge response from {url} is missing the field {field}")]
     MissingField { url: String, field: String },
 
-    /// A fork's parent does not match the upstream repository — a same-named
-    /// stranger repository (design register X5, refuse before any write).
+    /// A fork's parent is not the upstream (a same-named stranger); refused before any write.
     #[error("fork parent {actual} does not match upstream {expected}")]
     ForkParentMismatch { expected: String, actual: String },
 
@@ -123,8 +97,7 @@ pub enum ForgeError {
     #[error("fork path {full_path} is not in namespace/project form")]
     MalformedForkFullName { full_path: String },
 
-    /// A verified fork is not owned by the requested owner (S12 shared-fork
-    /// path — the returned identity must live under the requested owner).
+    /// A verified fork is not owned by the requested owner.
     #[error("fork owner {actual} does not match the requested owner {expected}")]
     ForkOwnerMismatch { expected: String, actual: String },
 
@@ -133,117 +106,71 @@ pub enum ForgeError {
     ForkNotReady { deadline_secs: u64 },
 
     /// A compare response carried a `status` value the client does not model.
-    /// Ancestry is never guessed: an unmodelled value would otherwise read as
-    /// "not ahead" and strand a committed announce with no pull request
-    /// (design register C6 amendment).
+    /// Never guessed: read as "not ahead" it strands a committed announce with no pull request.
     #[error("forge compare {url} returned an unmodelled status {status}")]
     UnknownCompareStatus { url: String, status: String },
 
-    /// The credential cannot push a branch to the repository the fork-free
-    /// announce path commits to.
+    /// The credential cannot push to the repository the fork-free announce path commits to.
     ///
-    /// Raised by an up-front probe rather than by the first rejected write:
-    /// GitHub answers an unauthorised write with 404 as readily as 403, and a
-    /// 404 mid-sequence is indistinguishable from the fresh-fork provisioning
-    /// race [`super::GitHubForge::commit_files`] retries for.
+    /// Raised by an up-front probe, not the first rejected write: GitHub answers that
+    /// write with 404, indistinguishable mid-sequence from the fresh-fork race
+    /// [`super::GitHubForge::commit_files`] retries for.
     #[error("no push access to {repo}: the announce credential is missing write (push) permission on that repository")]
     PushAccessDenied { repo: String },
 
-    /// A fast-forward-only ref update was rejected — a concurrent announce
-    /// advanced the branch (design register C4, compare-and-swap). The caller
-    /// re-reads the new head, regenerates, and retries.
+    /// A fast-forward-only ref update was rejected because a concurrent announce
+    /// advanced the branch; the caller re-reads the head, regenerates, and retries.
     #[error("ref update for branch {branch} is not a fast-forward")]
     NonFastForward { branch: String },
 
-    /// A commit onto a fork exhausted its git-data retries on a 404 while its
-    /// base commit lived in another repository — what a fork left behind
-    /// upstream looks like from the git-data API, since the base object then
-    /// reaches the fork only through the shared fork network.
-    ///
-    /// Replaces the bare [`Self::Status`] this used to surface, which named an
-    /// endpoint and nothing else and so pointed every investigation at
-    /// credentials, permissions, or the index repository — none of which are
-    /// involved.
+    /// A commit onto a fork 404ed through its git-data retries while its base commit
+    /// lived in another repository, which is what a fork behind upstream looks like.
     #[error(
         "git write onto fork {fork} failed with 404: the base commit is not reachable there, which is what a fork behind upstream looks like — syncing {branch} from upstream reported: {sync}"
     )]
     ForkBaseUnreachable { fork: String, branch: String, sync: String },
 
-    /// A write transport this forge cannot serve was selected.
-    ///
-    /// Pure and up front: refused by [`super::ForgeKind::validate_transport`]
-    /// before any client is built and before any network call, so the operator
-    /// learns it from the command line rather than from a failed write.
+    /// A write transport this forge cannot serve, refused by
+    /// [`super::ForgeKind::validate_transport`] before any network call.
     #[error("the {transport} write transport is not supported on {forge}; drop --transport to write over the API")]
     TransportUnsupported {
         forge: ForgeKind,
         transport: WriteTransport,
     },
 
-    /// An operation the selected transport cannot perform was reached.
-    ///
-    /// Distinct from [`Self::TransportUnsupported`], which refuses the transport
-    /// as a whole: here the transport is legitimate and one operation on it is
-    /// not. The fork operations under the git transport are the live case — the
-    /// credential that transport exists for cannot reach the fork API at all.
+    /// One operation the selected transport cannot perform, such as a fork operation
+    /// over git; [`Self::TransportUnsupported`] refuses a whole transport.
     #[error("{operation} is not available over the {transport} write transport")]
     TransportOperationUnsupported {
         operation: String,
         transport: WriteTransport,
     },
 
-    /// The credential may not call the forge's users API at all.
+    /// The credential may not call the forge's users API at all (a GitLab CI job token).
     ///
-    /// A GitLab CI job token reads repository content but no user identities.
-    /// Deliberately **not** the same answer as an account that does not exist:
-    /// there is no lookup to be had, so a bare `LOGIN` can never become an id
-    /// and the operator must write the pair out.
+    /// Not "account not found": no lookup is possible, so the owner must be given as `LOGIN:ID`.
     #[error(
         "the forge users API is not reachable with this credential; give the owner as LOGIN:ID so no lookup is needed"
     )]
     UsersApiUnavailable,
 
-    /// `git` is absent, unusable, or older than the floor the git write
-    /// transport needs.
-    ///
-    /// Raised before any network call, so a run that cannot possibly succeed
-    /// costs nothing and reaches no forge.
+    /// `git` is absent, unusable, or older than the git transport's floor; raised before any network call.
     #[error("the git write transport cannot run: {reason}")]
     GitUnavailable { reason: String },
 
-    /// A rendered merge-request push option carried a value the git wire must
-    /// never be handed, and the push was refused before any process was spawned.
+    /// A rendered merge-request push option carried a value the git wire forbids.
     ///
-    /// Raised by the push-option renderer alone, so it is a *pre-spawn* refusal:
-    /// nothing reached a pkt-line, no ref moved, and no forge was contacted.
-    ///
-    /// **`reason` must never echo the offending value.** The guard fires exactly
-    /// when C-067's structured-values-only rule has already been broken upstream,
-    /// so at that moment the value is operator-influenced text — putting it in a
-    /// message re-injects it into the CI log, which for an ESC byte is a second,
-    /// actively hostile sink. Naming the key and the single offending codepoint
-    /// is diagnosis; reproducing the value is a leak.
-    ///
-    /// Deliberately **unclassified** (`classify` → `None` → exit 1), like
-    /// [`Self::GitCommandFailed`] and [`Self::GitPushFailed`]: under C-067 no
-    /// operator flag reaches this value, so a fire means an ocx-side invariant
-    /// broke. That is an internal error with no remedy a caller can branch on,
-    /// and emphatically not [`ExitCode::UsageError`](ocx_exit::ExitCode::UsageError)
-    /// — telling an operator to fix
-    /// their command line would be a lie.
+    /// `reason` must never echo the value: it is operator-influenced, and printing it
+    /// re-injects it into the CI log.
+    /// Unclassified (exit 1) like [`Self::GitCommandFailed`]: no flag reaches this value, so
+    /// [`ExitCode::UsageError`](ocx_exit::ExitCode::UsageError) would wrongly blame the command line.
     #[error("the push option {key} carries a value the git wire forbids: {reason}")]
     PushOptionRefused { key: &'static str, reason: String },
 
     /// A `git` plumbing step failed for a reason nothing models.
     ///
-    /// `stderr` is [`Redacted`], not `String`, and that is the whole guarantee:
-    /// `redact` is its only constructor, so the masking cannot be forgotten at
-    /// a construction site the way a doc comment asking for it can. It matters
-    /// here more than anywhere else in this taxonomy because `git`'s stderr is
-    /// the one channel where a secret arrives *inside* forge-controlled bytes —
-    /// a credential helper or a server echoing a request header back — rather
-    /// than beside them. Length-capping stays the capturing helper's, which
-    /// bounds the volume; the type bounds the content.
+    /// `stderr` stays [`Redacted`], never `String`: git's stderr can carry a secret
+    /// inside forge-controlled bytes, and `redact` is the only way to build one.
     #[error("git {command} failed with {status}: {stderr}")]
     GitCommandFailed {
         command: String,
@@ -253,40 +180,25 @@ pub enum ForgeError {
 
     /// `git push` failed for a reason the stderr classifier does not recognise.
     ///
-    /// The catch-all under the recognised refusals below, so an unmodelled
-    /// server message reaches the operator verbatim rather than being forced
-    /// into a category it does not belong to. "Verbatim" is exactly why the
-    /// type matters: `stderr` is [`Redacted`] and capped as for
-    /// [`Self::GitCommandFailed`], so the one variant that promises to pass a
-    /// server's own words through is also the one that cannot pass a secret
-    /// through with them.
+    /// The server's words pass through verbatim, so `stderr` stays [`Redacted`].
     #[error("git push failed ({status}): {stderr}")]
     GitPushFailed { status: String, stderr: Redacted },
 
-    /// A leased force-push was refused because the branch moved since it was
-    /// read.
-    ///
-    /// The git transport's spelling of the compare-and-swap
-    /// [`Self::NonFastForward`] expresses over REST: a concurrent run advanced
-    /// the branch between the fetch and the push, so the rebuild is regenerated
-    /// against the winning head rather than overwriting it.
+    /// A leased force-push was refused because the branch moved since it was read;
+    /// the git counterpart of [`Self::NonFastForward`].
     #[error("the branch {branch} moved since it was read, so the leased force-push was refused")]
     StaleLease { branch: String },
 
-    /// The server refused the push for a reason that is not a capability gate —
-    /// a protected branch, or a pre-receive hook.
+    /// The server refused the push for a reason that is not a capability gate
+    /// (a protected branch or a pre-receive hook).
     #[error("the push to {branch} was refused by the server: {reason}")]
     PushRefused { branch: String, reason: String },
 
-    /// A capability the selected write transport needs is disabled on the
-    /// project or unavailable on the instance.
+    /// A capability the selected write transport needs is disabled on the project
+    /// or unavailable on the instance.
     ///
-    /// The remedy is never in the caller's hands — an administrator changes a
-    /// project setting, or the instance is upgraded — which is what separates
-    /// this from a caller-side policy refusal and why it carries its own exit
-    /// code. `remedy` names the setting to change, and where the check compared
-    /// two projects it names both, since neither path alone tells an operator
-    /// which one to edit.
+    /// Only an administrator can fix it, hence its own exit code. `remedy` names the
+    /// setting, and both projects when the check compared two.
     #[error("{capability} is unavailable on {repo}: {remedy}")]
     WriteCapabilityUnavailable {
         capability: CapabilityName,
@@ -295,57 +207,30 @@ pub enum ForgeError {
     },
 
     /// The push succeeded but no merge request appeared within the confirmation
-    /// bound.
-    ///
-    /// The server creates a push-option merge request asynchronously, so a slow
-    /// instance outruns the poll while the branch is already published. Rerunning
-    /// picks up a request that arrived late; nothing is lost and nothing is
-    /// duplicated.
+    /// bound; a rerun picks up a late one without duplicating it.
     #[error(
         "the push succeeded but no merge request appeared within {deadline_secs}s; rerun the command to pick up one the server created late"
     )]
     MergeRequestUnconfirmed { deadline_secs: u64 },
 }
 
-/// Whether `status` is a forge-side fault — a 5xx the forge itself answered
-/// with, as opposed to a refusal of the request.
+/// Whether `status` is a forge-side fault (5xx) rather than a refusal.
 ///
-/// One range literal with two readers, deliberately. `ForgeError`'s
-/// `classify` impl, which the binary carries (`ocx::exit`),
-/// maps it to [`ExitCode::Unavailable`](ocx_exit::ExitCode::Unavailable), which
-/// tells a CI wrapper the forge is
-/// down and the run never happened. The merge-request confirmation poll
-/// (`git_workspace::confirm_merge_request`) needs the *same* predicate to reach
-/// the opposite conclusion: there, the push has already landed, so a fault is
-/// folded into "not yet" and the poll's own
-/// [`ForgeError::MergeRequestUnconfirmed`] is the answer. Two spellings of
-/// `500..=599` would be two rules, free to drift into disagreeing about which
-/// statuses mean the forge broke.
+/// The one spelling for the binary's exit classification and
+/// `git_workspace::confirm_merge_request`, so they cannot disagree on which statuses mean the forge broke.
 #[must_use]
 pub fn is_server_fault(status: u16) -> bool {
     (500..=599).contains(&status)
 }
 
-/// How many characters of a forge's error body [`status_detail`] keeps.
-///
-/// Enough for a forge's own JSON error message, capped so a forge returning
-/// something large — or hostile — cannot flood a CI log through an error path.
+/// Characters of a forge error body [`status_detail`] keeps, so a large or hostile body cannot flood a CI log.
 const STATUS_DETAIL_CAP: usize = 300;
 
-/// Render a non-success response body as the `detail` of [`ForgeError::Status`].
+/// Render a non-success response body as the `detail` of [`ForgeError::Status`], empty when the body is.
 ///
-/// Empty (not `"..."`, not `"<none>"`) when the body has nothing to say, so the
-/// message degrades exactly to the bare `status for url` form it replaced and is
-/// never *worse* than reporting the status alone. Truncation is on character
-/// boundaries — a body cut mid-UTF-8 would panic on slicing.
-///
-/// `token` is the announce credential, and every occurrence of it is replaced
-/// before anything else happens. The body is forge-controlled text: a reverse
-/// proxy or a hostile self-hosted endpoint can echo a request header back in an
-/// error body, and this value is rendered into `Display` and logged on the retry
-/// path. The cap bounds the volume of such a leak but not its content, so the
-/// secret is removed rather than merely shortened (design register X6). An empty
-/// token (the `--out` path) redacts nothing.
+/// `token` is replaced first: a forge-controlled body can echo a request header
+/// back, and the cap bounds the volume of that leak, not its content.
+/// Truncates on character boundaries; a byte slice mid-UTF-8 panics.
 #[must_use]
 pub fn status_detail(body: &[u8], token: &str) -> String {
     let body = String::from_utf8_lossy(body);

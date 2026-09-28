@@ -6,32 +6,21 @@ use serde::{Deserialize, Serialize};
 use crate::metadata::visibility::Visibility;
 use ocx_oci::PinnedPackageRef;
 
-/// A dependency in the transitive closure with its pre-computed visibility.
-///
-/// The `visibility` field encodes the effective visibility from the root
-/// package's perspective, computed via [`Visibility::through_edge`] through
-/// the dependency chain. Diamond deps use [`Visibility::merge`] (OR on
-/// each axis) — if ANY path makes a dep visible, it stays visible.
+/// A dependency in the transitive closure with its effective visibility from the root.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResolvedDependency {
     pub identifier: PinnedPackageRef,
     pub visibility: Visibility,
 }
 
-/// Persisted resolution state for an installed package.
+/// Persisted resolution state (`resolve.json`) for an installed package.
 ///
-/// Written to `resolve.json` in each object directory at install time.
-/// Contains the package's transitive dependency closure in topological order
-/// (deps before dependents). The root package's own identifier is **not**
-/// stored here — it is redundant with the caller context and would couple the
-/// identity of a shared, deduplicated package directory to whichever installer
-/// won the cross-repo race.
+/// The root identifier is not stored: the package directory is shared across
+/// repositories, so storing it would pin whichever installer won the race.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedPackage {
-    /// Transitive dependency closure with pre-computed visibility.
-    /// Deps before dependents. The root package itself is **not** included.
-    /// Leaf packages (no dependencies) have an empty vec.
+    /// Transitive closure, deps before dependents, root excluded.
     pub dependencies: Vec<ResolvedDependency>,
 }
 
@@ -43,34 +32,21 @@ impl ResolvedPackage {
         }
     }
 
-    /// Builds the transitive dependency closure from resolved direct deps.
-    ///
-    /// Each item is `(child_id, child_resolved, edge_visibility)`. The
-    /// identifier is supplied separately because [`ResolvedPackage`] no longer
-    /// carries its own root identifier — that would couple shared package
-    /// directories to whichever installer won the cross-repo race.
-    ///
-    /// Edge composition rule: if the child exports (consumer-visible), result =
-    /// edge via [`Visibility::through_edge`]; otherwise Sealed. Diamond deps
-    /// use [`Visibility::merge`] — if any path makes a dep visible, the final
-    /// visibility is the most open.
-    ///
-    /// Preserves topological order (deps before dependents) and deduplicates
-    /// by identity (advisory tags stripped).
+    /// Builds the transitive closure from `(child_id, child_resolved, edge_visibility)`
+    /// direct deps, deps before dependents, deduplicated by identity with advisory tags
+    /// stripped; a diamond keeps its most open visibility ([`Visibility::merge`]).
     pub fn with_dependencies(
         mut self,
         deps: impl IntoIterator<Item = (PinnedPackageRef, ResolvedPackage, Visibility)>,
     ) -> Self {
-        // Maps stripped identity → index in self.dependencies for OR dedup.
         let mut seen: std::collections::HashMap<PinnedPackageRef, usize> = std::collections::HashMap::new();
 
         for (dep_id, dep, edge) in deps {
-            // Bubble up transitive deps first (preserves topological order).
+            // Transitive deps before the direct dep, or the topological order breaks.
             for transitive in dep.dependencies {
                 let propagated = edge.through_edge(transitive.visibility);
                 let key = transitive.identifier.strip_advisory();
                 if let Some(&idx) = seen.get(&key) {
-                    // Diamond merge: take the most open visibility.
                     self.dependencies[idx].visibility = self.dependencies[idx].visibility.merge(propagated);
                 } else {
                     let idx = self.dependencies.len();
@@ -82,7 +58,6 @@ impl ResolvedPackage {
                 }
             }
 
-            // Then add the direct dep itself.
             let key = dep_id.strip_advisory();
             if let Some(&idx) = seen.get(&key) {
                 self.dependencies[idx].visibility = self.dependencies[idx].visibility.merge(edge);

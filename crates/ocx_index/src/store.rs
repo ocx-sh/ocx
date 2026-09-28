@@ -1,28 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Self-contained index store: the local index collection, holding the hosted
-//! `index.ocx.sh` served-tree layout verbatim (`adr_index_indirection.md`
-//! Decision A2) — `config.json`, the `c/index.json` catalog, per-repository
-//! root documents, and the digest-verified dispatch-object CAS. A tag/version
-//! resolves through root documents and dispatch objects here; genuine
-//! content-addressed blob bytes (config blobs, leaf platform manifests) are
-//! never stored in this collection — they live exclusively in the
-//! machine-global [`ocx_store::file_structure::BlobStore`] (`$OCX_HOME/blobs`, Decision B2).
-//!
-//! This module also hosts [`IndexStore::ensure_repository_contained`] (the
-//! CWE-22 containment guard every repository-keyed path builder runs through)
-//! and the shared verify-and-self-heal write/read bodies
-//! ([`IndexStore::write_verified_object`] / [`IndexStore::read_verified_object`])
-//! the dispatch-object CAS writers below reuse.
-//!
-//! The store is outside the GC reachability graph (Decision B1) — no `CasTier`
-//! variant, no locking beyond the per-source catalog transaction lock, no
-//! migration code (YAGNI, per the ADR's explicit scope cut).
-//!
-//! See the `// ── Wire-grammar store ──` divider further down this file for
-//! the write-order, locking, and durability contracts (`adr_index_indirection.md`
-//! Decisions A2/A3/A4/F1).
+//! The local index collection, holding the hosted `index.ocx.sh` served tree verbatim
+//! (`adr_index_indirection.md` § On-disk layout); blob bytes live only in the
+//! machine-global [`ocx_store::file_structure::BlobStore`]. Outside the GC graph.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -33,25 +14,13 @@ use ocx_oci::Digest;
 use ocx_util::fs::LockedFile;
 use ocx_util::result_ext::ResultExt;
 
-/// Max time to block waiting for another writer to release a source-scoped
-/// index lock (catalog transaction or derived-root read-modify-write). Long
-/// enough to survive a concurrent `ocx index update` against a slow registry,
-/// short enough that a stuck holder surfaces instead of hanging the CLI.
+/// How long to wait for another writer's source-scoped index lock before surfacing it instead of hanging.
 pub const SOURCE_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Self-contained index store rooted at the index home
-/// (`--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index` — home resolution is the
-/// caller's concern, not this store's).
+/// Self-contained index store rooted at the index home (`--index` ▸ `OCX_INDEX` ▸ `$OCX_HOME/index`).
 ///
-/// `locks_root` is deliberately *not* under `root`: the index home may be a
-/// user-committed or read-only shipped copy, so cross-process locks live in the
-/// machine-global `$OCX_HOME/locks` directory instead of as sidecars in the
-/// index tree. Both catalog-transaction and derived-root locks acquire through
-/// [`ocx_util::fs::lock_scoped`] keyed on the per-source directory's file
-/// identity. [`Self::new`] defaults `locks_root` to `root/locks`; the two
-/// production construction sites ([`ocx_store::file_structure::FileStructure`] and
-/// the `--index`/`OCX_INDEX` override in the CLI context) point it at the real
-/// machine-global `$OCX_HOME/locks` via [`Self::with_locks_root`].
+/// Production construction must call [`Self::with_locks_root`]: [`Self::new`]'s `root/locks`
+/// default puts lock files inside an index home that may be a read-only shipped copy.
 #[derive(Debug, Clone)]
 pub struct IndexStore {
     root: PathBuf,
@@ -65,31 +34,14 @@ impl IndexStore {
         Self { root, locks_root }
     }
 
-    /// Redirect the machine-global lock root away from the default `root/locks`.
-    ///
-    /// Locks must never land inside a redirected (`--index`/`OCX_INDEX`) or
-    /// shipped index home, so both real construction sites point this at
-    /// `$OCX_HOME/locks`.
+    /// Redirect the lock root away from the `root/locks` default.
     #[must_use]
     pub fn with_locks_root(mut self, locks_root: impl Into<PathBuf>) -> Self {
         self.locks_root = locks_root.into();
         self
     }
 
-    /// The default machine-local index collection of an OCX home.
-    ///
-    /// A first-class store sibling to `blobs/`/`layers/`/`packages/`, not
-    /// runtime state buried under `state/` (`adr_index_indirection.md` A1).
-    /// `--index` / `OCX_INDEX` redirect the whole collection at the CLI seam,
-    /// but its locks always stay machine-global under `$OCX_HOME/locks`.
-    ///
-    /// The derivation lives here rather than as a field of [`FileStructure`]
-    /// because the index sits *above* the store in the crate map: a store that
-    /// owned an `IndexStore` would close a cycle at the crate boundary.
-    /// `FileStructure` owns only where the collection lives under `$OCX_HOME`,
-    /// and this reads those two paths back out of it.
-    ///
-    /// [`FileStructure`]: ocx_store::file_structure::FileStructure
+    /// The default index collection of an OCX home, `<home>/index`, with locks under `$OCX_HOME/locks`.
     pub fn machine_local(file_structure: &ocx_store::file_structure::FileStructure) -> Self {
         Self::new(file_structure.root().join("index")).with_locks_root(file_structure.locks.clone())
     }
@@ -99,24 +51,15 @@ impl IndexStore {
         &self.root
     }
 
-    /// The machine-global lock root backing this store's cross-process locks
-    /// (never inside [`Self::root`]).
+    /// The lock root backing this store's cross-process locks.
     pub fn locks_root(&self) -> &Path {
         &self.locks_root
     }
 
-    /// Guards that `repository` cannot escape the source subtree when joined as
-    /// path components (CWE-22 defense-in-depth). The escape is a property of
-    /// `repository` alone — the source segment is slugified — so the check runs
-    /// against a fixed sentinel root: [`ocx_util::fs::path::join_under_root`]
-    /// rejects an absolute segment, a residual `..` escape, a Windows
-    /// drive/UNC/verbatim prefix, and a backslash-separated escape
-    /// host-independently, exactly the ways [`ocx_store::file_structure::repository_path`]'s
-    /// verbatim `/`-split could land a read or write outside the index home.
+    /// Refuses a `repository` that would escape its source subtree when joined as path components
+    /// (CWE-22); every repository-keyed read or write must call it, as nothing else guards that join.
     ///
-    /// This is the only boundary: nothing turns a remote catalog key into a
-    /// local path any more, so no repository-keyed read or write ever touches a
-    /// path outside its source subtree, whatever the caller.
+    /// A fixed sentinel root suffices: the source segment is slugified, so the escape depends on `repository` alone.
     pub(crate) fn ensure_repository_contained(repository: &str) -> Result<()> {
         ocx_util::fs::path::join_under_root(Path::new("/ocx-index-home"), Path::new(repository))
             .map(|_| ())
@@ -129,29 +72,12 @@ impl IndexStore {
             })
     }
 
-    /// Guards that a `source` name cannot resolve to a filesystem escape once
-    /// [`Self::wire_source_dir`] joins its slugified form under [`Self::root`]
-    /// (CWE-22 defense-in-depth) — the sibling check to
-    /// [`Self::ensure_repository_contained`] for the OTHER untrusted path
-    /// input every wire-grammar builder takes. [`ocx_store::file_structure::slugify`] replaces
-    /// `/` (so a smuggled path separator cannot survive it) but preserves
-    /// `.` — a `source` of exactly `".."` slugifies to `".."` verbatim, a
-    /// genuine parent-directory escape once joined. Checked against the same
-    /// fixed sentinel [`Self::ensure_repository_contained`] uses.
+    /// Refuses a `source` whose slug escapes the index home (CWE-22): [`ocx_store::file_structure::slugify`]
+    /// keeps `.`, so `..` stays a parent-directory escape.
     ///
-    /// ponytail: reuses [`ocx_store::file_structure::error::Error::RepositoryEscapesIndexHome`]
-    /// rather than adding a source-specific variant, to keep this fix inside
-    /// `index_store.rs` — `error.rs` is shared with `temp_store.rs`. Upgrade
-    /// to a dedicated `SourceEscapesIndexHome` variant if the "repository"
-    /// wording in the message ever needs to read accurately for a source
-    /// escape.
-    ///
-    /// `pub(crate)` because [`crate::regenerate_catalog`] must run
-    /// it before its own existence pre-flight: that pre-flight builds a path
-    /// through [`Self::source_config_path`], a pure builder with no guard, so
-    /// the check has to be reachable from outside this module rather than only
-    /// firing inside the store methods that come after it.
+    /// [`crate::regenerate_catalog`] must run it before its pre-flight through the unguarded [`Self::source_config_path`].
     pub(crate) fn ensure_source_contained(source: &str) -> Result<()> {
+        // ponytail: reuses `RepositoryEscapesIndexHome`; add a `SourceEscapesIndexHome` if the wording must fit a source.
         let slug = ocx_store::file_structure::slugify(source);
         ocx_util::fs::path::join_under_root(Path::new("/ocx-index-home"), Path::new(&slug))
             .map(|_| ())
@@ -164,13 +90,7 @@ impl IndexStore {
             })
     }
 
-    /// Shared verify-and-self-heal write body: recompute-and-verify (A3/A4)
-    /// against `claimed_digest`, then a tempfile + [`ocx_util::fs::persist_temp_file`]
-    /// atomic publish to `target`. Parameterized on the target path so every
-    /// wire-grammar dispatch-object CAS writer below
-    /// ([`Self::write_dispatch_object`]) shares one verify-write body instead
-    /// of copy-pasted logic — see each caller's doc comment for its own
-    /// path-construction contract.
+    /// Verify `bytes` against `claimed_digest`, then atomically publish them to `target`.
     async fn write_verified_object(&self, target: PathBuf, claimed_digest: &Digest, bytes: &[u8]) -> Result<()> {
         let computed = claimed_digest.algorithm().hash(bytes);
         if &computed != claimed_digest {
@@ -181,9 +101,7 @@ impl IndexStore {
             .into());
         }
 
-        // Verify-and-self-heal: re-hash any existing bytes before trusting
-        // them. A zero-byte crash artifact or a tampered file both fail this
-        // check and fall through to the overwrite below.
+        // Re-hash existing bytes before trusting them, so a crash artifact or tampered file is overwritten.
         if let Ok(existing) = tokio::fs::read(&target).await
             && claimed_digest.algorithm().hash(&existing) == computed
         {
@@ -206,16 +124,8 @@ impl IndexStore {
             tmp.as_file().sync_data()?;
             match ocx_util::fs::persist_temp_file(tmp, &target_for_blocking) {
                 Ok(()) => Ok(()),
-                // A failed persist is success ONLY when the object now on disk
-                // genuinely matches `claimed`. We reach this write in two cases:
-                // a first write (target absent) or a self-heal (target present
-                // but its bytes FAILED the verify above). In the self-heal case
-                // the target still holds the KNOWN-CORRUPT bytes after a failed
-                // rename, so a bare `exists()` check would report success while
-                // leaving corruption in place. Re-read and re-hash: a genuine
-                // concurrent CAS writer publishes byte-equivalent content that
-                // hashes to `claimed` (Ok); the corrupt bytes still there, or an
-                // unreadable target, propagate the original persist error.
+                // Success only if the on-disk object now hashes to `claimed`: a bare `exists()`
+                // would accept the corrupt bytes a failed self-heal rename left in place.
                 Err(err) => match std::fs::read(&target_for_blocking) {
                     Ok(current) if claimed.algorithm().hash(&current) == claimed => Ok(()),
                     _ => Err(err),
@@ -228,11 +138,7 @@ impl IndexStore {
         Ok(())
     }
 
-    /// Shared verify-on-read body: read `target`, recompute `sha256(bytes)`,
-    /// verify against `digest`. Parameterized on the target path so every
-    /// wire-grammar dispatch-object CAS reader below
-    /// ([`Self::read_dispatch_object`]) shares one verify-read body instead of
-    /// copy-pasted logic.
+    /// Read `target` and verify it against `digest`; `None` when absent.
     async fn read_verified_object(&self, target: PathBuf, digest: &Digest) -> Result<Option<Vec<u8>>> {
         let bytes = match tokio::fs::read(&target).await {
             Ok(bytes) => bytes,
@@ -252,107 +158,32 @@ impl IndexStore {
     }
 }
 
-// ── Wire-grammar store (A2) ─────────────────────────────────────────────────
-//
-// Each index source's subtree under the home is the hosted served tree,
-// byte-for-byte grammar (`adr_index_indirection.md` Decision A2):
-//
-// ```text
-// {root}/{slug(source)}/
-//   config.json                       — published indices only
-//   c/index.json                      — published indices only — the catalog
-//   p/{ns}/{pkg}.json                 — root doc
-//   p/{ns}/{pkg}/o/{algo}/{hex}.json  — dispatch object CAS (the OCI image
-//                                        index a tag resolved to, verbatim;
-//                                        never a leaf platform manifest — A3)
-// ```
-//
-// Locks are NOT sidecars in this tree: an index home may be a read-only shipped
-// copy. Every source-scoped lock (catalog transaction, derived-root
-// read-modify-write) lives in the machine-global `$OCX_HOME/locks`, keyed on the
-// per-source directory's file identity ([`IndexStore::lock_source`]).
-//
-// **Write-order contract (F1).** `ocx index update <pkg>` writes in a fixed,
-// idempotent order — never one atomic operation:
-//
-// 1. the dispatch object into `o/` ([`IndexStore::write_dispatch_object`] —
-//    CAS write by content hash; an orphan left by an aborted write is
-//    harmless, nothing points at it yet);
-// 2. the root `p/{ns}/{pkg}.json` ([`CatalogTransaction::write_root`] —
-//    tempfile + atomic rename);
-// 3. the package's `c/index.json` catalog entry (upserted into the same
-//    [`CatalogTransaction`], committed by [`CatalogTransaction::commit`]).
-//
-// A crash between any two steps is recoverable on the next read or update —
-// never rejected. [`IndexStore::read_root`] performs the read-path half of
-// that recovery (root/catalog digest disagreement self-heals by
-// re-derivation, logged at info/debug — never a hard error).
-//
-// **Locking contract.** Every catalog mutation for a source — a per-package
-// entry upsert and a whole-catalog reconcile-merge (F2 sync) alike — goes
-// through [`IndexStore::begin_catalog_transaction`],
-// which takes the source-scoped `"index-catalog"` lock (machine-global,
-// file-identity-keyed — [`IndexStore::lock_source`]) and re-reads the on-disk
-// catalog before handing it to the caller. All network work (fetching
-// a remote root, dispatch object, or catalog) MUST happen *before* opening a
-// transaction — the guard's lifetime should span only the local
-// read-mutate-write critical section. A wholesale replace of the catalog from
-// a pre-lock read is forbidden by construction: the map a caller mutates is
-// always the freshly-read, post-lock map, never a caller-held stale snapshot.
-//
-// **Durability scope.** The recovery guarantee above covers process-crash /
-// kill. Hard power-loss is accepted-open: [`ocx_util::fs::persist_temp_file`]
-// fsyncs file data, not the parent directory; a residual inconsistency after a
-// real power-loss event still self-heals by recompute on the next read, it is
-// just not guaranteed durable across that specific failure class
-// (`adr_index_indirection.md` Decision B1 lifecycle framing).
-//
-// **Layering.** This store stays grammar-agnostic — it moves bytes and knows
-// the wire *shapes* (via [`crate::IndexRoot`]) only enough to
-// parse a root doc and derive its catalog entry. Anything about what a
-// `repository` field *means* (the `oci://` scheme parse, C3) is the caller's
-// concern, injected through the `repository_check` hook on [`Self::read_root`]
-// and [`CatalogTransaction::write_root`].
+// ── Wire-grammar store ──────────────────────────────────────────────────────
 
 impl IndexStore {
-    /// Root directory for one index source under the collection home
-    /// (`{root}/{slug(source)}/`, A2). The source is a top-level directory
-    /// here, never nested under a shared `p/`.
+    /// One source's subtree, `{root}/{slug(source)}/`: the hosted served tree byte for byte.
     fn wire_source_dir(&self, source: &str) -> PathBuf {
         self.root.join(ocx_store::file_structure::slugify(source))
     }
 
-    /// Path to a published source's `config.json` (the `{"format_version":
-    /// 1}` version pin, A2). Absent for a derived (OCI-registry) source.
+    /// Path to a published source's `config.json`; absent for a derived source.
     pub fn source_config_path(&self, source: &str) -> PathBuf {
         self.wire_source_dir(source).join("config.json")
     }
 
-    /// Path to a source's `c/index.json` catalog (● `{"format_version": 1,
-    /// "packages": {"<ns>/<pkg>": "sha256:<root-digest>"}}`, A2/F1) —
-    /// per-source, unlike
-    /// [`Self::catalog_path`]'s single global file.
+    /// Path to a source's `c/index.json` catalog.
     pub fn source_catalog_path(&self, source: &str) -> PathBuf {
         self.wire_source_dir(source).join("c").join("index.json")
     }
 
-    /// Acquire an exclusive cross-process lock scoped to one source's subtree,
-    /// held for the returned guard's lifetime.
+    /// An exclusive cross-process lock on one source's subtree, held for the guard's lifetime.
     ///
-    /// The lock is keyed on the per-source directory's *file identity* under
-    /// the machine-global [`Self::locks_root`] (via
-    /// [`ocx_util::fs::lock_scoped`]) — never a sidecar inside the index
-    /// home, which may be a read-only shipped copy. `scope` separates lock
-    /// purposes that share a source directory (`"index-catalog"` for a
-    /// `c/index.json` mutation, `"index-root"` for a derived root's
-    /// read-modify-write); `discriminator` distinguishes locks within a scope.
-    /// The source directory is created first so it has a stable identity to key
-    /// on.
+    /// Keyed on the source directory's file identity under [`Self::locks_root`], never a sidecar
+    /// in the index home; writers that must exclude each other pass the same `scope` and `discriminator`.
     ///
     /// # Errors
     ///
-    /// Fails if the source directory cannot be created, or the lock cannot be
-    /// acquired within `timeout`.
+    /// The source directory cannot be created, or the lock is not acquired within `timeout`.
     pub async fn lock_source(
         &self,
         scope: &str,
@@ -370,7 +201,7 @@ impl IndexStore {
             .map_err(Into::into)
     }
 
-    /// Path to a repository's root document (`p/{ns}/{pkg}.json`, A2).
+    /// Path to a repository's root document (`p/{ns}/{pkg}.json`).
     pub fn root_document_path(&self, source: &str, repository: &str) -> PathBuf {
         self.wire_source_dir(source)
             .join("p")
@@ -378,12 +209,7 @@ impl IndexStore {
             .with_added_extension("json")
     }
 
-    /// Path to a dispatch object (`p/{ns}/{pkg}/o/{algo}/{hex}.json`, A2/A3).
-    ///
-    /// Carries a `.json` extension and lives under the repository's own
-    /// `p/{ns}/{pkg}/` directory — the object store holds **dispatch objects
-    /// only** (the OCI image index a tag resolved to, verbatim); a leaf platform
-    /// manifest is never written here (A3).
+    /// Path to a dispatch object (`p/{ns}/{pkg}/o/{algo}/{hex}.json`); the object store never holds a leaf manifest.
     pub fn dispatch_object_path(&self, source: &str, repository: &str, digest: &Digest) -> PathBuf {
         self.wire_source_dir(source)
             .join("p")
@@ -393,23 +219,13 @@ impl IndexStore {
             .join(format!("{}.json", digest.hex()))
     }
 
-    /// Writes `bytes` verbatim to the dispatch-object path for `(source,
-    /// repository, claimed_digest)` (A2/A3 — `p/{ns}/{pkg}/o/{algo}/{hex}.json`).
-    ///
-    /// Verify-and-self-heal write: recomputes `sha256(bytes)` and verifies it
-    /// equals `claimed_digest` **before** the write commits — a mismatch is a
-    /// hard error ([`ocx_store::file_structure::error::Error::DigestMismatch`], A3/A4 CWE-345
-    /// trust-boundary check), never a silent persist. If a file already exists
-    /// at the target, its bytes are re-hashed and short-circuit on a match; a
-    /// mismatch (zero-byte crash artifact, tampered file) falls through and
-    /// overwrites via tempfile + [`ocx_util::fs::persist_temp_file`]
-    /// atomic rename. Routed through the private [`Self::write_verified_object`]
-    /// helper shared by every dispatch-object CAS writer.
+    /// Writes `bytes` verbatim as the dispatch object for `claimed_digest`, the first step of an
+    /// update's write order (object, root, catalog entry), so an aborted write leaves a harmless orphan.
     ///
     /// # Errors
     ///
-    /// Returns [`ocx_store::file_structure::error::Error::DigestMismatch`] if the computed digest
-    /// disagrees with `claimed_digest`.
+    /// [`ocx_store::file_structure::error::Error::DigestMismatch`] when `bytes` do not hash to
+    /// `claimed_digest`; nothing is written.
     pub async fn write_dispatch_object(
         &self,
         source: &str,
@@ -423,15 +239,11 @@ impl IndexStore {
         self.write_verified_object(target, claimed_digest, bytes).await
     }
 
-    /// Reads the verbatim dispatch-object bytes for `(source, repository,
-    /// digest)` (A2/A3).
+    /// Reads a dispatch object's verbatim bytes, `Ok(None)` when absent.
     ///
-    /// Returns `Ok(None)` if the object is absent. If present, recomputes the
-    /// digest from the bytes on disk and verifies it against `digest` — a
-    /// byte-tampered object fails with [`ocx_store::file_structure::error::Error::DigestMismatch`],
-    /// never silently loads. Routed through the private
-    /// [`Self::read_verified_object`] helper shared by every dispatch-object
-    /// CAS reader.
+    /// # Errors
+    ///
+    /// [`ocx_store::file_structure::error::Error::DigestMismatch`] when the bytes on disk do not hash to `digest`.
     pub async fn read_dispatch_object(
         &self,
         source: &str,
@@ -444,36 +256,17 @@ impl IndexStore {
         self.read_verified_object(target, digest).await
     }
 
-    /// Derives the catalog-entry value for a root document's on-disk bytes:
-    /// `sha256:<hex>` of the bytes themselves.
-    ///
-    /// F1: "the catalog entry is derivable, not independently trusted... it
-    /// is exactly `sha256(root bytes)` and nothing more." A read-path
-    /// disagreement between a stored root and its catalog entry is therefore
-    /// an inconsistency, never evidence of tampering — see [`Self::read_root`].
+    /// The catalog-entry value for a root's bytes, `sha256:<hex>` and nothing more, so a
+    /// read-path mismatch is an inconsistency to re-derive, never tampering.
     pub fn root_catalog_entry(bytes: &[u8]) -> String {
         ocx_oci::Algorithm::Sha256.hash(bytes).to_string()
     }
 
-    /// Reads and parses a repository's root document (`p/{ns}/{pkg}.json`),
-    /// cross-checking it against its `c/index.json` catalog entry when this
-    /// source carries one and self-healing a mismatch by re-deriving the
-    /// entry from the on-disk root bytes and rewriting the catalog (F1 —
-    /// "re-derive the entry from the root bytes actually on disk and rewrite
-    /// the catalog to match... logged at info/debug, never rejected").
+    /// Reads and parses a root document; a mismatched `c/index.json` entry is re-derived and
+    /// rewritten, never rejected.
     ///
-    /// `repository_check` is the C3 cross-check hook: this store stays
-    /// grammar-agnostic about what a `repository` pointer means, so the
-    /// caller inspects the parsed root's `repository` field against its own
-    /// domain rules (e.g. the `oci://` scheme parse) and returns `Err` to
-    /// hard-fail a genuinely malformed physical reference.
-    ///
-    /// Returns `Ok(None)` when no root document exists yet. The only hard
-    /// failures (F1) are an unparseable root
-    /// ([`ocx_store::file_structure::error::Error::MalformedRootDocument`]) or a
-    /// `repository_check` failure — genuine corruption, never a bare
-    /// root/catalog digest disagreement, which always recovers instead of
-    /// erroring.
+    /// `repository_check` lets the caller hard-fail a malformed `repository` pointer. `Ok(None)` when
+    /// no root exists; only an unparseable root or a failed check is an error.
     pub async fn read_root(
         &self,
         source: &str,
@@ -485,15 +278,8 @@ impl IndexStore {
         };
 
         let derived_entry = Self::root_catalog_entry(&bytes);
-        // ponytail: each published resolve re-parses the whole `c/index.json`
-        // here to look up one entry — O(catalog) per resolve. Deferred, NOT
-        // memoized: a process-lifetime per-source catalog cache cannot be cleanly
-        // invalidated (a concurrent `ocx index update` process rewrites this file
-        // out-of-band, and `CatalogTransaction::commit` lives on `IndexStore`, not
-        // the `LocalIndex` that would hold the cache), and a stale catalog is a
-        // correctness bug (spurious recovery / missed staleness). This single read
-        // is already required for the F1 cross-check; the recovery re-read below is
-        // deliberately post-lock. Revisit only if profiling shows this dominates.
+        // ponytail: O(catalog) re-parse per resolve; not memoized, since a concurrent `ocx index update`
+        // rewrites the file out-of-band. Revisit if profiling shows it dominates.
         let on_disk_entry = self
             .read_source_catalog(source)
             .await?
@@ -507,14 +293,8 @@ impl IndexStore {
             }));
         }
 
-        // Absent or stale → self-heal under the source's transaction lock, but
-        // BEST-EFFORT: the re-derived `derived_entry` is already authoritative
-        // for THIS read; persisting it only spares the next read the same
-        // recovery. A read-only or otherwise unwritable index home — a shipped
-        // `.ocx/` copy or a `--index`/`OCX_INDEX` redirect resolved online —
-        // cannot land that write, so a lock/re-read/commit failure is logged at
-        // debug and swallowed rather than failing the resolve. A read-only home
-        // must still resolve a version choice (`adr_index_indirection.md` B1/B2).
+        // Best-effort: a read-only index home cannot land the write but must still resolve,
+        // so a failure is logged at debug and this read uses `derived_entry`.
         match self
             .persist_recovered_catalog_entry(source, repository, &repository_check, &bytes, &root)
             .await
@@ -544,21 +324,11 @@ impl IndexStore {
         }
     }
 
-    /// Persist the re-derived catalog entry for a root/catalog straddle (F1
-    /// read-path recovery), under the source transaction lock, returning the
-    /// (possibly fresher) bytes, parsed root, and recovered entry.
+    /// Persist the re-derived catalog entry under the catalog lock, returning the possibly fresher
+    /// bytes, root and entry; `prelock_*` are used only if the root vanished meanwhile.
     ///
-    /// A concurrent writer can commit a FRESHER root + catalog entry between the
-    /// caller's pre-lock read and this lock acquisition; the root is re-read
-    /// AFTER the lock is held and the recovered entry derived from THOSE bytes.
-    /// Deriving from the pre-lock read would silently clobber the concurrent
-    /// writer's newer entry back to stale (lost-update) — see
-    /// `read_root_recovery_never_clobbers_a_fresher_concurrently_committed_entry`.
-    ///
-    /// The `prelock_*` values are the caller's pre-lock read, used only when the
-    /// root vanished between it and the lock acquisition. This is a fallible
-    /// write; [`Self::read_root`] treats a failure as best-effort (a read-only
-    /// index home) and falls back to its pre-lock entry.
+    /// The root is re-read after the lock, or a fresher concurrent commit is clobbered back to stale
+    /// (`read_root_recovery_never_clobbers_a_fresher_concurrently_committed_entry`).
     async fn persist_recovered_catalog_entry(
         &self,
         source: &str,
@@ -580,29 +350,11 @@ impl IndexStore {
         Ok((bytes, root, recovered_entry))
     }
 
-    /// Read a root document without its catalog cross-check — the catalog-free
-    /// sibling of [`Self::read_root`]: read → parse → `repository_check` only,
-    /// no cross-check and no self-heal, returning
-    /// [`CatalogEntryStatus::NoCatalog`]. `Ok(None)` when no root exists yet.
+    /// Read a root with no catalog cross-check or self-heal ([`CatalogEntryStatus::NoCatalog`]);
+    /// `Ok(None)` when absent.
     ///
-    /// Two callers choose it, for two unrelated reasons.
-    /// [`crate::LocalIndex`] reads a DERIVED source this way
-    /// because such a source has no `c/index.json` at all (A2: its catalog is
-    /// the directory enumeration of `p/`), so there is nothing to cross-check;
-    /// provenance never enters this store, it is passed at the call site, so
-    /// that divergence stays caller-side (`adr_index_indirection.md` A2/H "two
-    /// ifs").
-    ///
-    /// [`crate::regenerate_catalog`] reads a PUBLISHED — and
-    /// possibly foreign — source this way, and its reason is **lock
-    /// re-entrancy, not provenance**: [`Self::read_root`]'s self-heal opens its
-    /// own [`Self::begin_catalog_transaction`], which would block against the
-    /// transaction `regenerate` holds across its whole run for the full
-    /// [`SOURCE_LOCK_TIMEOUT`] and then error — and [`Self::read_root`]
-    /// *swallows* that error as a best-effort self-heal, so the symptom is a
-    /// silent 60-second stall per straddled root, not a failure. "Correcting"
-    /// that caller to [`Self::read_root`] because its source has a catalog
-    /// deadlocks it.
+    /// [`crate::regenerate_catalog`] must never switch to [`Self::read_root`]: its self-heal blocks on the
+    /// catalog lock `regenerate` holds, a silent [`SOURCE_LOCK_TIMEOUT`] stall per straddled root.
     pub async fn read_root_uncatalogued(
         &self,
         source: &str,
@@ -619,15 +371,7 @@ impl IndexStore {
         }))
     }
 
-    /// Shared read → parse → `repository_check` core for [`Self::read_root`] and
-    /// [`Self::read_root_uncatalogued`]: reads the root-document bytes, parses
-    /// them into an [`crate::IndexRoot`], and runs the caller's C3
-    /// `repository` cross-check. Returns `Ok(None)` when no root exists yet.
-    ///
-    /// The only hard failures are an unparseable root
-    /// ([`ocx_store::file_structure::error::Error::MalformedRootDocument`]) or a `repository_check`
-    /// failure — genuine corruption. A catalog disagreement is never one of
-    /// these; that recovery lives in [`Self::read_root`].
+    /// Shared read → parse → `repository_check` core; `Ok(None)` when no root exists.
     async fn read_root_inner(
         &self,
         source: &str,
@@ -653,18 +397,8 @@ impl IndexStore {
         Ok(Some((bytes, root)))
     }
 
-    /// Reads this source's `c/index.json` catalog map (`Ok(None)` when absent
-    /// — a fresh source or a derived index that never gets one, A2).
-    ///
-    /// The on-disk document is the served [`CatalogDocument`] envelope, the same
-    /// bytes the hosted site serves — a local copy that reads one shape and
-    /// writes another would not be a copy. The version gate runs here, on read,
-    /// exactly as it does for a fetched catalog ([`CatalogDocument::into_packages`]).
-    ///
-    /// This is the offline listing source and the diff basis for the next
-    /// catalog sync (F2); the caller reads it before the network fetch, and the
-    /// reconcile-commit re-reads it under the lock before writing (never a
-    /// wholesale replace from this pre-lock read).
+    /// Reads this source's `c/index.json` map, version-gated like a fetched catalog;
+    /// `Ok(None)` when absent (a fresh or derived source).
     pub async fn read_source_catalog(&self, source: &str) -> Result<Option<CatalogIndex>> {
         Self::ensure_source_contained(source)?;
         let target = self.source_catalog_path(source);
@@ -677,23 +411,13 @@ impl IndexStore {
         Ok(Some(document.into_packages()?))
     }
 
-    /// Reads this source's `config.json` — the served format-version pin (A2)
-    /// — or `Ok(None)` when the tree carries none.
-    ///
-    /// Absence is not an error: a tree written before ocx wrote configs, or one
-    /// authored by another implementation, is a valid format-version-1 index.
-    /// Substituting [`IndexFormatConfig::assumed_v1`] for the absent document
-    /// belongs to the gating caller (C-005) — this reader reports what is on
-    /// disk and nothing more.
+    /// Reads this source's `config.json`, `Ok(None)` when absent; substituting
+    /// [`IndexFormatConfig::assumed_v1`] is the caller's job.
     ///
     /// # Errors
     ///
-    /// A present-but-unparseable document is
-    /// [`MalformedIndexDocument`](crate::error::Error::MalformedIndexDocument);
-    /// a present-but-unreadable one (EACCES, EISDIR) propagates its I/O error
-    /// and is **never** flattened to `Ok(None)` — reading a permission failure
-    /// as absence would promote an unreadable tree to a valid v1 index and
-    /// silently disable the version gate (C-003).
+    /// [`MalformedIndexDocument`](crate::error::Error::MalformedIndexDocument) when unparseable. An
+    /// unreadable file propagates its I/O error, never `Ok(None)`, which would silently disable the version gate.
     pub async fn read_source_config(&self, source: &str) -> Result<Option<IndexFormatConfig>> {
         Self::ensure_source_contained(source)?;
         let target = self.source_config_path(source);
@@ -709,41 +433,14 @@ impl IndexStore {
         Ok(Some(config))
     }
 
-    /// Writes `{"format_version": 1}` to this source's `config.json` when the
-    /// tree carries none, so a tree ocx just published declares itself an index
-    /// at the version this binary speaks.
+    /// Writes `{"format_version": 1}` to this source's `config.json` if absent, never updating an
+    /// existing one (an operator's `name_segments` stays byte-identical).
     ///
-    /// **Write-if-absent, never update.** An existing config is left
-    /// byte-identical, including the `name_segments` an operator declared in a
-    /// hosted tree — ocx cannot derive that value from a tree and never guesses
-    /// one (C-023).
-    ///
-    /// Published sources only, by construction: the single call site is
-    /// [`crate::LocalIndex`]'s `commit_published_root`, after the
-    /// catalog transaction commits (C-023). A derived source writes through
-    /// [`Self::write_root_document`] and never reaches it.
-    ///
-    /// **Call it only once [`CatalogTransaction::commit`] has consumed the
-    /// transaction guard.** Calling it while a transaction for the same source
-    /// is alive blocks on that same lock for the full [`SOURCE_LOCK_TIMEOUT`]
-    /// and then errors — the inverted order self-deadlocks.
-    ///
-    /// Takes the source-scoped `"index-catalog"` lock ([`Self::lock_source`])
-    /// for the write — re-acquired rather than inherited, because the write
-    /// sits outside the catalog transaction's scope. The discriminator is
-    /// `"c/index.json"`, the key [`Self::begin_catalog_transaction`] uses, and
-    /// **not** the name of the file being written: `lock_source` keys on scope
-    /// *and* discriminator, so a `"config.json"` discriminator would be an
-    /// independent lock, letting this write land inside a `regenerate` window
-    /// that C-008 requires to leave `config.json` byte-identical.
-    ///
-    /// A caller whose catalog work already committed should absorb a lock
-    /// timeout rather than fail — the tree is content-complete and config-less,
-    /// which the next update repairs. `commit_published_root` does exactly that.
+    /// Call only after [`CatalogTransaction::commit`] has consumed the guard: with a transaction for
+    /// the source alive it blocks for [`SOURCE_LOCK_TIMEOUT`], then errors.
     pub(crate) async fn ensure_source_config(&self, source: &str) -> Result<()> {
-        // `lock_source` runs the containment guard and creates the source
-        // directory, so the existence probe below is post-lock: a concurrent
-        // writer cannot land a config between the probe and the write.
+        // Keyed `"c/index.json"` like the catalog transaction: a `"config.json"` key would be an
+        // independent lock and let this write land inside a `regenerate` window.
         let _lock = self
             .lock_source("index-catalog", source, "c/index.json", SOURCE_LOCK_TIMEOUT)
             .await?;
@@ -758,21 +455,10 @@ impl IndexStore {
         Self::write_bytes_atomic(&target, bytes).await
     }
 
-    /// Writes `bytes` verbatim to a repository's root-document path
-    /// (`p/{ns}/{pkg}.json`, A2) with **no** catalog upsert — the catalog-free
-    /// root writer for a DERIVED (OCX-authored) source, whose catalog is the
-    /// directory enumeration of `p/` (A2), so there is no `c/index.json` to keep
-    /// in step. The catalog-carrying counterpart is
-    /// [`CatalogTransaction::write_root`]; the catalog-free read counterpart is
-    /// [`Self::read_root_document_bytes`].
+    /// Writes `bytes` verbatim as a derived source's root document, with no catalog upsert.
     ///
-    /// **Locking contract.** This is a bare atomic publish — it does **not**
-    /// serialize its own writes. A derived root is a shared multi-writer file
-    /// (concurrent `commit_root_tag` calls for distinct tags of one repository),
-    /// so a caller performing a read-modify-write MUST hold an exclusive lock on
-    /// `root_document_path(source, repository).with_added_extension("lock")`
-    /// across the read + write. Today's only caller,
-    /// [`crate::LocalIndex::commit_root_tag`], does exactly that.
+    /// Not serialized: a read-modify-write caller must hold `lock_source("index-root", source, repository, ..)`
+    /// across read and write, as [`crate::LocalIndex::commit_root_tag`] does, or concurrent tag upserts are lost.
     pub async fn write_root_document(&self, source: &str, repository: &str, bytes: &[u8]) -> Result<()> {
         Self::ensure_source_contained(source)?;
         Self::ensure_repository_contained(repository)?;
@@ -780,11 +466,7 @@ impl IndexStore {
         Self::write_bytes_atomic(&target, bytes.to_vec()).await
     }
 
-    /// Reads a repository's verbatim root-document bytes (`p/{ns}/{pkg}.json`,
-    /// A2), or `Ok(None)` when absent. Unlike [`Self::read_root`] /
-    /// [`Self::read_root_uncatalogued`] this neither parses nor cross-checks —
-    /// the raw bytes let a caller round-trip a derived root through its own
-    /// authoring shape ([`crate::LocalIndex::commit_root_tag`]).
+    /// Reads a root document's raw bytes, unparsed and unchecked; `Ok(None)` when absent.
     pub async fn read_root_document_bytes(&self, source: &str, repository: &str) -> Result<Option<Vec<u8>>> {
         Self::ensure_source_contained(source)?;
         Self::ensure_repository_contained(repository)?;
@@ -796,9 +478,8 @@ impl IndexStore {
         }
     }
 
-    /// Shared tempfile + atomic-rename publish body for this section's writers
-    /// ([`CatalogTransaction::write_root`] / [`CatalogTransaction::commit`] /
-    /// [`IndexStore::write_root_document`]).
+    /// Tempfile + atomic-rename publish; survives a process crash, not power loss (the parent
+    /// directory is not fsynced), and the next read's recompute self-heals the residue.
     async fn write_bytes_atomic(target: &Path, bytes: Vec<u8>) -> Result<()> {
         let parent = target
             .parent()
@@ -821,33 +502,17 @@ impl IndexStore {
         Ok(())
     }
 
-    /// Lists every repository under `source` via directory enumeration of
-    /// `p/` (`adr_index_indirection.md` A2 — a **derived** index's catalog IS
-    /// the directory enumeration; there is no `c/index.json` to read). Walks
-    /// `{root}/{slug(source)}/p/`, collecting every `*.json` root-document
-    /// file (stripped of its extension) as a `<ns>/<pkg>`-shaped repository
-    /// path, and never descends into an `o/` dispatch-object CAS directory
-    /// (its own `*.json` object files are not root documents). Sorted,
-    /// deduplicated. Returns an empty vec when the source directory does not
-    /// exist.
+    /// Lists every repository under `source` by enumerating `p/` for root documents, skipping `o/`
+    /// dispatch-object directories; sorted, deduplicated, empty when the source is absent.
     ///
     /// # Errors
     ///
-    /// A name under `p/` that is not valid UTF-8 is
-    /// [`ocx_store::file_structure::error::Error::NonUtf8WireName`] — never a skipped or
-    /// U+FFFD-transliterated entry. This enumeration is what
-    /// [`crate::regenerate_catalog`] replaces the catalog from, and
-    /// that replacement is wholesale, so a name dropped here is a package
-    /// deleted from `c/index.json` with its root document still on disk.
+    /// [`ocx_store::file_structure::error::Error::NonUtf8WireName`] for a non-UTF-8 name, never a skip:
+    /// [`crate::regenerate_catalog`] replaces the catalog wholesale from this list, so a dropped name
+    /// deletes a package from `c/index.json`.
     ///
-    /// Iterative `tokio::fs::read_dir` walk, never blocking the executor —
-    /// each directory is read exactly once (`entry.file_type()` from that one
-    /// listing decides both the recursion and the `.json`-item collection),
-    /// unlike a `DirWalker` classify hook here would: `DirWalker` already
-    /// performs its own `tokio::fs::read_dir` per directory to find children,
-    /// so a synchronous listing inside `classify` would read the same
-    /// directory twice per visit, once async and once blocking the worker
-    /// thread the classify closure runs on.
+    /// Not a `DirWalker`: a listing inside its `classify` hook would read each directory twice, once
+    /// blocking a worker thread.
     pub async fn list_wire_repositories(&self, source: &str) -> Result<Vec<String>> {
         use std::collections::VecDeque;
 
@@ -862,30 +527,8 @@ impl IndexStore {
         let mut repos = Vec::new();
         let mut queue: VecDeque<PathBuf> = VecDeque::from([root.clone()]);
         while let Some(dir) = queue.pop_front() {
-            // The dispatch-object CAS dir is always named "o" and always a DIRECT
-            // CHILD of a package dir (`p/<ns>/<pkg>/o/…`, module header layout).
-            // Two independent facts identify it, and a dir named "o" is pruned
-            // when EITHER holds — neither alone covers every real layout:
-            //
-            // 1. Its parent is a package dir, i.e. a sibling root-document file
-            //    exists at `{package-dir}.json` in that parent
-            //    (`root_document_path`) — `p/kitware/cmake/` pairs with
-            //    `p/kitware/cmake.json`. A fixed depth cannot anchor this: a
-            //    single-segment repository's package dir sits one level below
-            //    `p/`, a two-segment one two levels below.
-            // 2. Its own contents have the CAS shape `<algo>/<hex>.json`
-            //    ([`is_dispatch_object_cas_dir`]). A package can hold dispatch
-            //    objects with NO root document beside them: a `tag@digest` pull
-            //    persists the dispatch chain but commits no tag, which is
-            //    exactly how a patch companion is materialized (its pin is
-            //    patch-tier state, never a local-index tag pointer). Premise 1
-            //    alone would then walk into the CAS and emit an object filename
-            //    as a phantom repository.
-            //
-            // A namespace or package literally named "o" satisfies neither: its
-            // OWN sibling `.json` lives one level further up rather than beside
-            // itself, and it holds root documents rather than digest-named
-            // objects.
+            // Fact 1: an `o` child is the CAS when this dir has a sibling root `{dir}.json`; no fixed
+            // depth works, since repositories have one or two segments.
             let dir_is_a_package_dir = path_exists_lossy(&dir.with_extension("json")).await;
 
             let mut entries = tokio::fs::read_dir(&dir)
@@ -903,6 +546,8 @@ impl IndexStore {
                     .map_err(|e| super::error::file_error(&path, e))?;
 
                 if file_type.is_dir() {
+                    // Or fact 2, CAS-shaped contents: a `tag@digest` pull leaves objects with no root
+                    // beside them, which fact 1 alone would emit as phantom repositories.
                     let is_dispatch_object_dir = path.file_name().and_then(|name| name.to_str()) == Some("o")
                         && (dir_is_a_package_dir || is_dispatch_object_cas_dir(&path).await);
                     if !is_dispatch_object_dir {
@@ -933,23 +578,15 @@ impl IndexStore {
         Ok(repos)
     }
 
-    /// Takes the source-scoped `"index-catalog"` lock ([`Self::lock_source`],
-    /// machine-global + file-identity-keyed) and re-reads the on-disk catalog,
-    /// returning a guard over the freshest map (F1's "re-read + reconcile after
-    /// acquiring the lock, before committing" contract).
+    /// Takes the source's `"index-catalog"` lock and re-reads the catalog, returning a guard over
+    /// the freshest map.
     ///
-    /// This is the **single** entry point for every catalog mutation for
-    /// `source`, so no writer can bypass the re-read — see
-    /// [`CatalogTransaction::catalog`] for the three that go through it. All
-    /// network work (fetching a remote root or dispatch object) MUST happen
-    /// before this call.
+    /// The only entry point for catalog mutation, so no writer mutates a pre-lock read; do all
+    /// network work before calling it.
     pub async fn begin_catalog_transaction(&self, source: &str) -> Result<CatalogTransaction<'_>> {
         let lock = self
             .lock_source("index-catalog", source, "c/index.json", SOURCE_LOCK_TIMEOUT)
             .await?;
-        // Re-read AFTER acquiring the lock — the freshest on-disk map, never
-        // a caller-held stale pre-lock snapshot (F1's re-read-then-reconcile
-        // contract).
         let catalog = self.read_source_catalog(source).await?.unwrap_or_default();
         Ok(CatalogTransaction {
             store: self,
@@ -962,8 +599,7 @@ impl IndexStore {
 }
 
 /// One wire path component as `str`, or [`ocx_store::file_structure::error::Error::NonUtf8WireName`]
-/// naming `path` — the enclosing file or directory, which is what an operator
-/// needs to find a name their terminal cannot print.
+/// naming the enclosing `path`, which an operator can find even when the name cannot print.
 fn utf8_wire_name<'name>(name: &'name std::ffi::OsStr, path: &Path) -> Result<&'name str> {
     name.to_str().ok_or_else(|| {
         ocx_store::file_structure::error::Error::NonUtf8WireName {
@@ -973,28 +609,11 @@ fn utf8_wire_name<'name>(name: &'name std::ffi::OsStr, path: &Path) -> Result<&'
     })
 }
 
-/// Whether `dir` holds the dispatch-object CAS — at least one
-/// `<algo>/<hex>.json` object of a supported algorithm's digest length (A2/A3
-/// `o/<algo>/<hex>.json`).
+/// Whether `dir` holds the dispatch-object CAS: at least one `<algo>/<hex>.json` object of a
+/// supported digest length.
 ///
-/// The shape test exists because the cheaper "does a sibling root document
-/// exist" premise is falsified by a legitimate state: a `tag@digest` pull
-/// persists the dispatch chain without committing a tag, so a package
-/// directory can hold objects and no root document at all. Content, not
-/// position, is then the only thing separating the CAS from a namespace
-/// segment that happens to be named `o`.
-///
-/// **One conforming object is the whole test, not every child conforming.** A
-/// stray file anywhere in the CAS — a `README`, a `.DS_Store`, an interrupted
-/// rsync's `.partial` — must not un-prune it: the caller would walk in and emit
-/// `<ns>/<pkg>/o/<algo>/<hex>` as a repository, and
-/// [`crate::regenerate_catalog`] would then publish that dispatch
-/// object as a package in `c/index.json`. The strict reading rejected nothing
-/// extra — a directory of real objects that also holds junk is still the CAS —
-/// it only made the detector fail open on the tree shapes people actually have.
-///
-/// An unreadable directory answers `false` — the caller then walks it, which
-/// is the pre-existing, non-destructive behaviour.
+/// One conforming object suffices, so a stray file (`README`, `.DS_Store`, `.partial`) cannot
+/// un-prune the CAS and get an object published as a package. An unreadable directory answers `false`.
 async fn is_dispatch_object_cas_dir(dir: &std::path::Path) -> bool {
     async fn entries_of(dir: &std::path::Path) -> Option<Vec<tokio::fs::DirEntry>> {
         let mut reader = tokio::fs::read_dir(dir).await.ok()?;
@@ -1034,9 +653,7 @@ async fn is_dispatch_object_cas_dir(dir: &std::path::Path) -> bool {
     false
 }
 
-/// A root document read from disk: the verbatim bytes (needed for
-/// byte-identical re-serialization / catalog-entry re-derivation, A2) and the
-/// parsed wire shape.
+/// A root document read from disk: verbatim bytes and the parsed wire shape.
 #[derive(Debug, Clone)]
 pub struct RootReadResult {
     /// The verbatim on-disk bytes.
@@ -1047,78 +664,43 @@ pub struct RootReadResult {
     pub catalog_status: CatalogEntryStatus,
 }
 
-/// Outcome of cross-checking a root's derived catalog entry (F1 read-path
-/// recovery) against what was actually stored on disk.
+/// Outcome of cross-checking a root against its catalog entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CatalogEntryStatus {
-    /// This source carries no `c/index.json` catalog (a derived/OCI-authored
-    /// index, A2) — nothing to cross-check.
-    ///
-    /// Constructed by [`IndexStore::read_root_uncatalogued`], the catalog-free
-    /// sibling of [`IndexStore::read_root`]. This store stays
-    /// grammar-agnostic and has no signal of its own for "derived vs published"
-    /// source kind; the caller ([`crate::LocalIndex`]) selects the
-    /// uncatalogued read per source kind, so the A2 exemption is enforced
-    /// caller-side, never here.
+    /// The source has no `c/index.json` (a derived index); the caller picks this read per
+    /// source kind, since the store cannot tell.
     NoCatalog,
     /// The on-disk catalog entry already matched the root's derived entry.
     Consistent { entry: String },
-    /// The on-disk catalog entry disagreed with (or was absent for) the
-    /// root's derived entry; the catalog was rewritten to `entry`. Logged at
-    /// info/debug — an ordinary, benign straddle (F1), never a warn-worthy
-    /// event.
+    /// The entry was stale or absent and was rewritten to `entry`: a benign straddle, never warn-worthy.
     Recovered { entry: String },
 }
 
-/// A held catalog-transaction lock for one index source, together with the
-/// freshly re-read on-disk catalog map (F1's "re-read + reconcile after
-/// acquiring the lock, before committing" contract).
+/// A held catalog lock for one source plus the freshly re-read catalog map.
 ///
-/// Obtained via [`IndexStore::begin_catalog_transaction`] — the only way
-/// to reach a mutable [`CatalogIndex`] map, so no writer can skip the
-/// lock-then-reread step. Network work (fetching a remote root, dispatch
-/// object, or catalog) MUST happen before opening a transaction; this guard's
-/// lifetime should span only the local read-mutate-write critical section.
-///
+/// The only way to a mutable [`CatalogIndex`]; hold it across the local read-mutate-write only,
+/// never across network work.
 pub struct CatalogTransaction<'store> {
     store: &'store IndexStore,
     source: String,
-    /// Held purely for its `Drop` side effect — releases the exclusive
-    /// advisory lock when the transaction is committed or dropped. Never
-    /// read directly, so it needs an explicit dead-code allow.
+    /// Held only for its `Drop`, which releases the lock.
     #[allow(dead_code)]
     lock: LockedFile,
-    /// The post-lock map as read, before any mutation — so [`Self::commit`] can
-    /// tell a real change from a re-derivation of what is already on disk and
-    /// skip the write entirely.
+    /// The post-lock map before mutation, so [`Self::commit`] can skip a no-op write.
     original: CatalogIndex,
     catalog: CatalogIndex,
 }
 
 impl CatalogTransaction<'_> {
-    /// The freshly re-read (post-lock) catalog map.
-    ///
-    /// Three production writers reach the map, at three different scales.
-    /// [`Self::write_root`] upserts the single entry it derives from the root
-    /// bytes it just wrote, reaching the field directly rather than through
-    /// this accessor. [`IndexStore::persist_recovered_catalog_entry`] upserts
-    /// one re-derived entry on the **read** path ([`IndexStore::read_root`]'s
-    /// self-heal), also directly. [`crate::regenerate_catalog`]
-    /// replaces the whole map through this accessor — the only operation that
-    /// can drop a stale entry, since an upsert never removes one.
+    /// The post-lock catalog map; replacing it wholesale ([`crate::regenerate_catalog`]) is the
+    /// only way to drop a stale entry, since upserts never remove one.
     pub fn catalog(&mut self) -> &mut CatalogIndex {
         &mut self.catalog
     }
 
-    /// Writes `bytes` verbatim to the root-document path for `repository`
-    /// (`p/{ns}/{pkg}.json`, A2 — atomic tempfile+rename) and upserts its
-    /// derived entry ([`IndexStore::root_catalog_entry`]) into this
-    /// transaction's catalog map.
-    ///
-    /// `repository_check` carries the same C3 cross-check contract as
-    /// [`IndexStore::read_root`] — this store parses `bytes` only far
-    /// enough to run the caller's hook and derive the catalog entry; it does
-    /// not itself interpret `repository`.
+    /// Writes `bytes` verbatim as `repository`'s root document and upserts its derived entry into
+    /// this transaction's map, the second step of an update's write order; `repository_check` as
+    /// on [`IndexStore::read_root`].
     pub async fn write_root(
         &mut self,
         repository: &str,
@@ -1143,30 +725,13 @@ impl CatalogTransaction<'_> {
         Ok(())
     }
 
-    /// Publishes the (possibly mutated) catalog map atomically, still under the
-    /// held lock. Consumes the guard, releasing the lock on return.
+    /// Publishes the catalog map atomically and releases the lock, the last step of an update
+    /// (object, root, catalog entry); a crash between steps recovers on the next read or update.
     ///
-    /// **A commit that changes nothing writes nothing.** An `ocx index update`
-    /// against an unchanged remote catalog re-derives exactly the map already on
-    /// disk; rewriting it would be byte-identical but would still churn the
-    /// file's mtime, and this tree is a distributable artifact people commit to
-    /// repos and `rsync` (A2).
-    ///
-    /// Written as the [`CatalogDocument`] envelope, the one shape this format
-    /// has: what a local index writes is what the hosted site serves, so a
-    /// derived source's catalog and a mirrored one are the same document and
-    /// [`IndexStore::read_source_catalog`] needs no second branch to tell them
-    /// apart. Emitted through [`serialize_catalog`], the wire formatter the
-    /// hosted renderer's form is pinned against — `serde_json`'s pretty
-    /// printer writes the same document without its trailing newline, one byte
-    /// that diffs the whole file on every render of a shared tree (C-025).
+    /// An unchanged map writes nothing, so a committed or `rsync`ed tree keeps its mtime. Emitted
+    /// through [`serialize_catalog`]: `serde_json`'s pretty printer drops the trailing newline and diffs the whole file.
     pub async fn commit(self) -> Result<()> {
-        // Opportunistic cleanup: ocx used to persist an `index.json.etag`
-        // conditional-GET validator beside the catalog. Nothing reads or writes
-        // one any more, and it is the only per-machine file in a tree that is
-        // otherwise pure served wire content — drop it so it stops travelling in
-        // every copied and committed index tree. Failure is ignored on purpose:
-        // a read-only shipped copy simply keeps the stray file.
+        // Drop an older ocx's per-machine `index.json.etag`; failure is ignored (a read-only copy keeps it).
         let stale_etag = self
             .store
             .source_catalog_path(&self.source)
@@ -1179,18 +744,14 @@ impl CatalogTransaction<'_> {
         let catalog_path = self.store.source_catalog_path(&self.source);
         let catalog_bytes = serialize_catalog(&CatalogDocument::new(self.catalog));
         IndexStore::write_bytes_atomic(&catalog_path, catalog_bytes).await?;
-
-        // `self.lock` drops here, releasing the exclusive advisory lock — held
-        // across the whole read-mutate-write critical section.
         Ok(())
     }
 }
 
-/// Specification tests for the wire-grammar section (`adr_index_indirection.md`
-/// Decisions A2/A3/A4/F1/F2, `adr_servable_index_snapshot.md` C-003/C-022/
-/// C-023/C-025) — written from the design records' contracts, not from the
-/// bodies. Each test states the contract it pins in its own name and message;
-/// none of them describes a transient phase of the implementation.
+/// Specification tests for the wire-grammar section (`adr_index_indirection.md`,
+/// `adr_servable_index_snapshot.md`), written from the design records' contracts,
+/// not from the bodies. Each test states the contract it pins in its own name and
+/// message; none describes a transient phase of the implementation.
 #[cfg(test)]
 mod wire_grammar_tests {
     use std::ffi::OsStr;

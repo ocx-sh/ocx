@@ -10,11 +10,6 @@ pub trait StringExt {
     fn to_slug(&self) -> String;
 
     /// Relaxed slug: keeps `[a-zA-Z0-9._-]`, replaces the rest with `_`.
-    ///
-    /// Suitable for filesystem path components derived from OCI identifiers
-    /// (registry names, repository names, tags).  Preserves dots (needed for
-    /// domain names like `ghcr.io` and semantic versions like `3.28.1`) and
-    /// hyphens (common in package names).
     fn to_relaxed_slug(&self) -> String;
 }
 

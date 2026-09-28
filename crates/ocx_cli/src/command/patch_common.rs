@@ -8,16 +8,10 @@ use ocx_config::patch::ResolvedPatchConfig;
 
 use crate::error::UsageError;
 
-/// Resolve the effective patch tier for a maintainer command, honouring an
-/// optional ad-hoc `--registry` override.
+/// Resolve the effective patch tier, honouring an optional `--registry` override.
 ///
-/// - `Some(registry)`: target that registry directly. When a `[patches]` tier is
-///   already configured, its `path` template and `required` posture are kept and
-///   only the registry host is replaced; otherwise the tier defaults apply
-///   (default path template, `required = true`). This lets a maintainer bootstrap
-///   a brand-new patch registry (`registry.corp.example/ocx-patches`) without
-///   first writing a `[patches]` config block.
-/// - `None`: fall back to the configured tier; usage error (exit 64) when none.
+/// An override retargets the configured tier's host, keeping its `path` and `required`, or builds a default tier when none is configured.
+/// Errors with a usage error (exit 64) when the override is blank, or absent with no tier configured.
 pub fn effective_patches(
     registry_override: Option<&str>,
     context: &crate::app::Context,
@@ -25,8 +19,6 @@ pub fn effective_patches(
     resolve_effective_patches(registry_override, context.manager().patches().cloned())
 }
 
-/// Pure core of [`effective_patches`], split out so the override/fallback logic
-/// is unit-testable without constructing a `Context`.
 fn resolve_effective_patches(
     registry_override: Option<&str>,
     configured: Option<ResolvedPatchConfig>,
@@ -45,12 +37,10 @@ fn resolve_effective_patches(
     }
 
     Ok(match configured {
-        // Keep the configured path template + fail posture; retarget the host.
         Some(mut tier) => {
             tier.registry = registry.to_string();
             tier
         }
-        // No tier configured — construct one from defaults for the ad-hoc registry.
         None => ResolvedPatchConfig {
             registry: registry.to_string(),
             path_template: PatchConfig::DEFAULT_PATH_TEMPLATE.to_string(),

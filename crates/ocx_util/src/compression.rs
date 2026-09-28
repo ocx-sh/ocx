@@ -12,10 +12,7 @@ pub enum CompressionAlgorithm {
     Lzma,
     Gzip,
     Zstd,
-    /// Decode only. `.tar.bz2` is an accepted *input* to `ocx package create
-    /// --extract`; nothing in OCX writes bzip2, and no layer media type spells
-    /// it, so [`write_file`] refuses this variant rather than producing a
-    /// bundle that could never be published.
+    /// Decode only: no layer media type spells bzip2, so [`write_file`] refuses it.
     Bzip2,
 }
 
@@ -32,21 +29,13 @@ impl CompressionAlgorithm {
         }
     }
 
-    /// Identifies the compressor from a stream's leading bytes (its magic
-    /// number); `head` needs at most [`MAGIC_LEN`] bytes, fewer only near EOF.
-    ///
-    /// Content, not name: an upstream asset can be compressed without saying
-    /// so (`tool` holding a gzip stream) or say so without being an archive
-    /// (`tool.gz` holding a bare executable). No ELF, Mach-O, PE or `#!` file
-    /// starts with any of these, so a hit is unambiguous.
+    /// Identifies the compressor from a stream's leading bytes; `head` needs at most [`MAGIC_LEN`] bytes.
     pub(crate) fn from_magic(head: &[u8]) -> Option<Self> {
         match head {
             [0x1f, 0x8b, ..] => Some(CompressionAlgorithm::Gzip),
             [0xfd, b'7', b'z', b'X', b'Z', 0x00, ..] => Some(CompressionAlgorithm::Lzma),
             [0x28, 0xb5, 0x2f, 0xfd, ..] => Some(CompressionAlgorithm::Zstd),
-            // `BZh` alone is printable — a plain tar whose first entry is named
-            // `BZh…` would match — so require the block size digit and the
-            // first block's (or the empty stream's end-of-stream) magic too.
+            // `BZh` alone is printable (a tar entry named `BZh…`), so the block-size digit and block magic are required.
             [b'B', b'Z', b'h', b'1'..=b'9', 0x31, 0x41, 0x59, 0x26, 0x53, 0x59, ..]
             | [b'B', b'Z', b'h', b'1'..=b'9', 0x17, 0x72, 0x45, 0x38, 0x50, 0x90, ..] => {
                 Some(CompressionAlgorithm::Bzip2)
@@ -55,8 +44,7 @@ impl CompressionAlgorithm {
         }
     }
 
-    /// Identifies the compressor from the magic number `file` starts with,
-    /// by content rather than by name; `None` when it carries none of them.
+    /// Identifies the compressor from the magic number `file` starts with; `None` when it carries none.
     pub async fn from_file_magic(file: impl AsRef<std::path::Path>) -> Result<Option<Self>> {
         use tokio::io::AsyncReadExt as _;
 
@@ -122,10 +110,7 @@ impl From<CompressionLevel> for flate2::Compression {
 }
 
 impl CompressionLevel {
-    /// Maps to a zstd compression level. zstd accepts 1–22; `3` is zstd's own
-    /// default. Mirrors the xz/gzip preset intent: `Fast` = low CPU, `Best` =
-    /// max ratio (19 is the highest non-`--ultra` level), `Default` = library
-    /// default.
+    /// zstd level; 19 is the highest without `--ultra`.
     fn zstd_level(self) -> i32 {
         match self {
             CompressionLevel::Fast => 1,
@@ -135,22 +120,14 @@ impl CompressionLevel {
     }
 }
 
-/// Returns the default number of compression threads.
-/// Uses all available CPU cores, capped at 16 to limit memory on high-core machines.
-/// Falls back to 1 (single-threaded) if parallelism cannot be determined.
-/// Public so downstream thread-count defaults import this cap instead of copying it.
+/// Default compression threads: all cores, capped at 16 to limit memory; 1 when unknown.
 pub fn default_threads() -> u32 {
     std::thread::available_parallelism()
         .map(|n| (n.get() as u32).min(16))
         .unwrap_or(1)
 }
 
-/// Options for compression.
-///
-/// Thread semantics for LZMA (`threads` field):
-/// - `0` (default) = auto-detect (all available cores, capped at 16)
-/// - `1` = single-threaded
-/// - `n` where n > 1 = use n threads via `XzWriterMt`
+/// Options for compression; `threads == 0` means [`default_threads`].
 #[derive(Default)]
 pub struct CompressionOptions {
     pub algorithm: Option<CompressionAlgorithm>,
@@ -198,8 +175,6 @@ impl CompressionOptions {
         self
     }
 
-    /// Resolves the effective thread count.
-    /// `0` → `default_threads()`, otherwise returns the value as-is.
     pub(crate) fn threads_or_default(&self) -> u32 {
         if self.threads == 0 {
             default_threads()
@@ -210,11 +185,7 @@ impl CompressionOptions {
 }
 
 mod xz {
-    /// Wraps [`lzma_rust2::XzWriter`] and calls [`lzma_rust2::XzWriter::finish`] on drop.
-    ///
-    /// `XzWriter` does not implement `Drop` itself, so when it is erased to
-    /// `Box<dyn Write>` the XZ stream footer is never written unless `finish()` is
-    /// called explicitly.  This wrapper restores that guarantee.
+    /// Finishes on drop: `XzWriter` has no `Drop`, so a boxed writer would never write the XZ footer.
     pub(crate) struct WriterWrapper<W: std::io::Write>(pub Option<lzma_rust2::XzWriter<W>>);
 
     impl<W: std::io::Write> std::io::Write for WriterWrapper<W> {
@@ -255,12 +226,7 @@ mod xz {
     }
 }
 
-/// Opens a writer for the given file and compression options.
-/// If the algorithm is not specified, it will be inferred from the file extension of the output path.
-/// The file will be created if it does not exist, and truncated if it does exist.
-///
-/// For LZMA, uses `threads_or_default()` to resolve the thread count. When > 1, uses `XzWriterMt`
-/// for multi-threaded compression with a 4 MiB block size. Otherwise uses single-threaded compression.
+/// Opens a compressing writer, creating or truncating `file`; the algorithm defaults to the one its extension names.
 pub async fn write_file(
     file: impl AsRef<std::path::Path>,
     options: &CompressionOptions,
@@ -270,10 +236,8 @@ pub async fn write_file(
         Some(algorithm) => algorithm,
         None => CompressionAlgorithm::from_file(file).ok_or_else(|| error::Error::UnknownFormat(file.to_path_buf()))?,
     };
-    // bzip2 is decode-only (see `read_file`). Refused here, *before* the output
-    // file below is created and truncated, so a `--output pkg.tar.bz2` leaves
-    // nothing behind. The match arm below repeats the refusal rather than
-    // `unreachable!()`, so reordering this guard can never turn it into a panic.
+    // Refused before the output is created, so `--output pkg.tar.bz2` leaves nothing behind.
+    // The match arm below repeats it rather than `unreachable!()`, so reordering cannot panic.
     if matches!(algorithm, CompressionAlgorithm::Bzip2) {
         return Err(error::Error::DecodeOnly(algorithm));
     }
@@ -291,7 +255,6 @@ pub async fn write_file(
     let writer: Box<dyn std::io::Write + Send> = match algorithm {
         CompressionAlgorithm::Lzma if threads > 1 => {
             let mut xz_options: lzma_rust2::XzOptions = level.into();
-            // 4 MiB block size — matches pixz and xz --block-size defaults
             xz_options.set_block_size(Some(
                 std::num::NonZeroU64::new(4 * 1024 * 1024).expect("non-zero literal"),
             ));
@@ -311,18 +274,13 @@ pub async fn write_file(
         CompressionAlgorithm::Zstd => {
             let mut encoder = zstd::stream::write::Encoder::new(output, level.zstd_level())
                 .map_err(|e| error::Error::EngineInit(Box::new(e)))?;
-            // Threading parity with LZMA: spawn worker threads only when threads > 1.
-            // A zstd worker count of 0 means single-threaded; `multithread` requires
-            // the `zstdmt` crate feature to take effect. Must be set before the first
-            // write, so it is configured here right after construction.
+            // Must precede the first write; `multithread` only takes effect with the `zstdmt` feature.
             if threads > 1 {
                 encoder
                     .multithread(threads)
                     .map_err(|e| error::Error::EngineInit(Box::new(e)))?;
             }
-            // `auto_finish` writes the zstd frame epilogue on drop, restoring the
-            // same finish-on-drop guarantee the XZ `WriterWrapper` provides once the
-            // writer is erased to `Box<dyn Write>`.
+            // `auto_finish` writes the frame epilogue on drop, which a boxed writer otherwise skips.
             Box::new(encoder.auto_finish())
         }
         CompressionAlgorithm::Bzip2 => return Err(error::Error::DecodeOnly(algorithm)),
@@ -331,20 +289,10 @@ pub async fn write_file(
     Ok(writer)
 }
 
-/// Buffered-read capacity used by [`read_file`] to coalesce small reads from
-/// the decompressor into fewer filesystem syscalls.
-///
-/// 256 KiB matches the typical XZ block read-ahead size and keeps I/O
-/// syscall count low without increasing working-set memory significantly.
+/// Read buffer for [`read_file`], coalescing the decompressor's small reads.
 const READ_FILE_BUF_CAPACITY: usize = 256 * 1024;
 
-/// Opens a reader for the given file.
-/// If the algorithm is not specified, it will be tried to infer it from the file extension.
-///
-/// The compressed-format paths (Lzma, Gzip) wrap the underlying file in a
-/// [`std::io::BufReader`] with a 256 KiB buffer before handing it to the
-/// decoder. This coalesces the many small reads that decompressors issue into
-/// larger filesystem operations, reducing syscall count on large blobs.
+/// Opens a decompressing reader; the algorithm defaults to the one `file`'s extension names.
 pub async fn read_file(
     file: impl AsRef<std::path::Path>,
     algorithm: Option<CompressionAlgorithm>,
@@ -361,9 +309,7 @@ pub async fn read_file(
                 source: e,
             })?;
             let buffered = std::io::BufReader::with_capacity(READ_FILE_BUF_CAPACITY, handle);
-            // Multi-stream: `xz` appends a stream per invocation (`xz -c a >> f`),
-            // and `xz -d` decodes them all. Single-stream stopped after the
-            // first and reported success on a truncated payload.
+            // Multi-stream, as `xz -d`: single-stream reports success on a truncated concatenation.
             Ok(Box::new(lzma_rust2::XzReader::new(buffered, true)))
         }
         CompressionAlgorithm::Gzip => {
@@ -372,10 +318,7 @@ pub async fn read_file(
                 source: e,
             })?;
             let buffered = std::io::BufReader::with_capacity(READ_FILE_BUF_CAPACITY, handle);
-            // `MultiGzDecoder`, for the reason the bzip2 arm below uses
-            // `MultiBzDecoder`: `pigz --independent`, `bgzip` and `cat a.gz
-            // b.gz` produce several members, `gzip -d` decodes every one, and
-            // `GzDecoder` stopped after the first as if the file ended there.
+            // `MultiGzDecoder`: `GzDecoder` stops after the first `pigz`/`bgzip`/`cat` member as if the file ended.
             Ok(Box::new(flate2::read::MultiGzDecoder::new(buffered)))
         }
         CompressionAlgorithm::Zstd => {
@@ -384,10 +327,7 @@ pub async fn read_file(
                 source: e,
             })?;
             let buffered = std::io::BufReader::with_capacity(READ_FILE_BUF_CAPACITY, handle);
-            // `with_buffer` consumes the existing `BufReader` instead of wrapping it
-            // in a second one (which `Decoder::new` would do). The file is already
-            // open, so a failure here is decoder-context allocation, not file I/O —
-            // classified as `EngineInit` to match the zstd write path.
+            // The file is already open, so a failure here is context allocation: `EngineInit`, not I/O.
             let decoder = zstd::stream::read::Decoder::with_buffer(buffered)
                 .map_err(|e| error::Error::EngineInit(Box::new(e)))?;
             Ok(Box::new(decoder))
@@ -398,17 +338,7 @@ pub async fn read_file(
                 source: e,
             })?;
             let buffered = std::io::BufReader::with_capacity(READ_FILE_BUF_CAPACITY, handle);
-            // `MultiBzDecoder`, not `BzDecoder`: pbzip2 and lbzip2 write
-            // concatenated bzip2 streams, and `BzDecoder` stops at the end of
-            // the first one — which would silently truncate such a tarball to
-            // its first block instead of failing. `bzip2 -d` and `tar -xj`
-            // decode every stream, so this matches what the operator's own
-            // tools do with the same file.
-            //
-            // The `bufread` decoder takes the `BufRead` above as-is; its
-            // `read` sibling would wrap it in a second, 8 KiB `BufReader` —
-            // the same double buffering the zstd arm avoids with
-            // `Decoder::with_buffer`.
+            // `MultiBzDecoder`: `BzDecoder` stops after the first pbzip2/lbzip2 stream, silently truncating the tarball.
             Ok(Box::new(bzip2::bufread::MultiBzDecoder::new(buffered)))
         }
         CompressionAlgorithm::None => {

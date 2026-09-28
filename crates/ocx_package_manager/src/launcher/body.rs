@@ -1,88 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Launcher body templates (Unix `.sh`) and the Windows `.shim` / `.exec`
-//! sidecar bodies.
+//! Launcher body templates (Unix `.sh`) and the Windows `.shim` / `.exec` sidecar bodies.
 //!
-//! Body output is byte-stable per `adr_package_entry_points.md` — every
-//! literal substring is a One-Way Door commitment covered by the golden tests
-//! at the bottom of this file.
-//!
-//! Three wire vocabularies live here, one per kind of generated body:
-//!
-//! - `launcher exec` + the positional shape `<pkg-root> -- <argv0> [args...]`
-//!   — the launcher an *installed* package's entry points get.
-//! - `launcher shim` + the positional shape `<pinned-id> -- <argv0> [args...]`
-//!   — the shim a *deferred* tool's declared names get, which materializes the
-//!   package on first invocation.
-//! - a **root flag first**, then `exec` — `--project '<abs root>' exec --
-//!   <argv0> [args...]`, or `--global exec -- <argv0> [args...]` — the
-//!   toolchain **trampoline** a rendered `<home>/toolchain/active/bin/<name>` gets
-//!   (`plan_toolchain_activation.md` C-028, C-032). It bakes only the home
-//!   selector: no group, no entry, no digest, no flag beyond the selector.
-//!
-//! All three are ABI: presentation flags, self-view selection, and OCX binary
-//! pinning are hidden inside the subcommand, so bodies on disk are decoupled
-//! from future evolutions of those internals.
-//!
-//! Windows no longer emits a `.cmd` launcher: the native `.exe` shim
-//! (`crates/ocx_shim`) is the sole Windows launcher and reads a one-line
-//! sidecar to learn what to dispatch — [`shim_sidecar_body`] for a package
-//! root, [`exec_sidecar_body`] for a toolchain home. The shim is the second
-//! producer of every frozen wire string above (the `.sh` bodies are the
-//! first); see `subsystem-package-manager.md` "Wire-ABI canary rule".
-//!
-//! # Why every body resolves `argv0` with `${0##*/}`
-//!
-//! `$(basename "$0")` forks a subshell and performs an **ambient-`PATH`
-//! lookup for `basename` before the `exec` line runs** — on a `PATH` the
-//! launcher itself has not yet composed. `${0##*/}` is POSIX 2.6.2 parameter
-//! expansion: no fork, no lookup, identical output, equally portable across
-//! dash, ash, ksh and bash-as-sh (`plan_toolchain_activation.md` D-V3).
-//! Nothing rewrites launchers already on disk — each tree keeps the old form
-//! until it is regenerated — so the payoff is source-level, taken rather than
-//! knowingly leaving an ambient-`PATH` lookup in shipped code beside the safe
-//! form.
+//! Output is byte-stable wire ABI (`adr_package_entry_points.md`) that the native `.exe` shim
+//! produces too, so a changed literal must change both producers
+//! (`subsystem-package-manager.md` "Wire-ABI canary rule").
 
 use std::path::{Path, PathBuf};
 
 use super::safety::LauncherSafeString;
 
-/// Produces the body of a Unix `.sh` launcher.
-///
-/// The launcher bakes only `<pkg_root>` and calls
-/// `ocx launcher exec '<pkg_root>' -- "${0##*/}" "$@"`, which reads
-/// `metadata.json` from that root, composes the runtime env, and resolves the
-/// entrypoint name against the composed `PATH` at invocation time. No binary
-/// path is baked into the launcher body itself.
-///
-/// `${OCX_BINARY_PIN:-ocx}` pins the inner ocx to the binary that installed
-/// the package (set by the outer ocx via `Env::apply_ocx_config`),
-/// falling back to `$PATH` lookup when the launcher is invoked outside an
-/// outer ocx (manual call, scripts, etc.).
-///
-/// All presentation flags and self-view selection are hidden inside
-/// `launcher exec` — they are no longer baked into individual launchers.
-///
-/// Inputs are pre-validated [`LauncherSafeString`]s so this function is total
-/// (no `Result`); the unsafe-char check fires once, at the [`super::generate`]
-/// entry boundary, instead of being repeated per platform.
+/// Produces the body of a Unix `.sh` launcher, which bakes only `pkg_root`.
 pub(super) fn unix_launcher_body(pkg_root: &LauncherSafeString) -> String {
     let pkg_root = pkg_root.as_str();
-    // `${0##*/}` injects the launcher's own filename as argv0 after `--`
-    // (module docs: no fork, no ambient-`PATH` lookup for `basename`).
-    // `ocx launcher exec` receives the entrypoint name via argv0 and
-    // resolves the binary against the composed `PATH` from the package's `env`
-    // block — no binary path is baked into the launcher.
-    //
-    // `${OCX_BINARY_PIN:-ocx}` pins the inner ocx to the binary that installed
-    // the package (set by the outer ocx via `Env::apply_ocx_config`),
-    // falling back to `$PATH` lookup when the launcher is invoked outside an
-    // outer ocx (manual call, scripts, etc.).
-    //
-    // The `launcher exec` subcommand internally forces presentation flags
-    // (--log-level=off --color=never --format=plain) and self-view — these
-    // are no longer baked into the launcher template.
     format!(
         "#!/bin/sh\n\
          # Generated by ocx at install time. Do not edit.\n\
@@ -90,40 +21,14 @@ pub(super) fn unix_launcher_body(pkg_root: &LauncherSafeString) -> String {
     )
 }
 
-/// Produces the body of a Unix shim for one declared name of a **deferred**
-/// tool — a tool composed onto `PATH` without its content being materialized.
+/// Produces the body of a Unix shim for one name of a **deferred** tool, baking its pinned
+/// identifier for `launcher shim`.
 ///
-/// The sibling of [`unix_launcher_body`], and deliberately shaped like it:
-/// `${OCX_BINARY_PIN:-ocx}` pins the inner ocx, `${0##*/}` injects the
-/// invoked name as `argv0` after `--`, and `"$@"` forwards the user's args.
-/// The one difference is what is baked and which verb consumes it — a
-/// **pinned identifier** and `launcher shim`, not a package root and
-/// `launcher exec`. There is no package root to bake yet: the whole point of a
-/// shim is that no package directory exists until it runs.
-///
-/// The body carries no report or mode token by design. `lazy-report` governs
-/// what the materialization renders, and that decision belongs to the process
-/// doing the download — freezing a compose-time value into the body would make
-/// a generated shim answer for a setting the user changed since.
-///
-/// `identifier` is the pre-validated rendering of an
-/// [`ocx_oci::PinnedPackageRef`]. Taking a [`LauncherSafeString`] rather
-/// than the identifier itself keeps the unsafe-character check at the
-/// generator's entry boundary — one validator for every generated body — and
-/// keeps this function total, exactly as [`unix_launcher_body`] is.
-// Reached from outside this module through [`super::shim_body`], which owns
-// the `LauncherSafeString` boundary so the generation task
-// (`crate::tasks::prepare_lazy`) never handles a raw template.
+/// No report or mode token is baked: a compose-time value would override a `lazy-report`
+/// setting the user has since changed.
 pub(super) fn unix_shim_body(identifier: &LauncherSafeString) -> String {
     let identifier = identifier.as_str();
-    // Mirrors `unix_launcher_body` line for line, including the
-    // `# Generated by ocx at install time.` wording: the two bodies sit side by
-    // side in `bin/` directories a user greps together, and one comment is
-    // easier to recognize than two. Only the verb and the baked value differ.
-    //
-    // The `launcher shim` literal lives here and is restated independently by
-    // `launcher_shim_wire_token_is_bound_to_shim_producer` below — never a
-    // shared constant, which would make that canary unable to go red.
+    // Not a shared constant: `launcher_shim_wire_token_is_bound_to_shim_producer` restates this literal, or it can never go red.
     format!(
         "#!/bin/sh\n\
          # Generated by ocx at install time. Do not edit.\n\
@@ -131,23 +36,9 @@ pub(super) fn unix_shim_body(identifier: &LauncherSafeString) -> String {
     )
 }
 
-/// Which toolchain home a rendered trampoline hands back to `ocx` — the
-/// **only** thing a trampoline bakes (C-028).
-///
-/// No group, no entry, no digest and no flag beyond the selector: everything
-/// else is re-derived by the `ocx` the trampoline re-enters, so a trampoline on
-/// disk survives every change to how a home composes.
-///
-/// The variants are the two root-flag spellings, and the shape is why this is
-/// an enum rather than an `Option<PathBuf>`: `--global` takes **no value
-/// token**, so a `None` carrying "global" would have to be re-discriminated at
-/// every emit site.
+/// Which toolchain home a rendered trampoline hands back to `ocx` — the only thing it bakes,
+/// so a trampoline on disk survives every change to how a home composes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-// WP-7's `render_toolchain` is the sole consumer and lands one wave later, so this
-// surface has no non-test caller yet. `expect`, not `allow`: the moment WP-7 wires
-// it up the expectation goes unfulfilled and the compiler forces this line out —
-// an `allow` would linger silently. `not(test)` because the goldens below DO use
-// it, so the lint never fires in the test build.
 pub(crate) enum TrampolineTarget {
     /// A project home, selected by `--project '<abs root>'`.
     Project(PathBuf),
@@ -155,23 +46,14 @@ pub(crate) enum TrampolineTarget {
     Global,
 }
 
-/// The shell variable a POSIX trampoline assigns the baked absolute `ocx` to.
-///
-/// Lowercase and `__`-prefixed: it is a plain shell variable inside a fresh
-/// `#!/bin/sh` process, never exported and never visible to the `exec`ed child,
-/// so it cannot be confused with an `OCX_*` environment key.
+/// The unexported shell variable a POSIX trampoline assigns the baked absolute `ocx` to.
 const TRAMPOLINE_BINARY_VAR: &str = "__ocx_binary";
 
-/// The bare-name fallback baked when no absolute `ocx` install path exists at
-/// render time — a `PATH` lookup, exactly as the two shipped bodies do.
+/// The bare-name `PATH` lookup baked when no absolute `ocx` exists at render time.
 const TRAMPOLINE_BINARY_FALLBACK: &str = "ocx";
 
-/// Produces the body of a POSIX toolchain **trampoline** — the executable
-/// `<home>/toolchain/active/bin/<name>` a rendered toolchain puts on `PATH`
-/// (C-028, C-030).
-///
-/// # Shape
-///
+/// Produces the body of a POSIX toolchain **trampoline**, the executable
+/// `<home>/toolchain/active/bin/<name>` (`--global` for the global home):
 /// ```sh
 /// #!/bin/sh
 /// # ocx-toolchain-trampoline
@@ -179,88 +61,16 @@ const TRAMPOLINE_BINARY_FALLBACK: &str = "ocx";
 /// __ocx_binary='<abs ocx>'
 /// exec "${OCX_BINARY_PIN:-$__ocx_binary}" --project '<abs root>' exec -- "${0##*/}" "$@"
 /// ```
-///
-/// with `--global` (no value token) replacing `--project '<abs root>'` for the
-/// global home.
-///
-/// # The marker is line two, and that is an anchor
-///
-/// [`ocx_config::env::TRAMPOLINE_MARKER`] is **imported**, never re-spelled: WP-2
-/// owns the one canonical spelling beside the predicate that consumes it
-/// ([`ocx_config::env::is_ocx_trampoline`], D-V12). That predicate matches it as
-/// **exactly the second line**, compared whole — not "somewhere in the head" —
-/// so line two is a position this body must hit, not a budget it must stay
-/// under. Emit the marker on line three and C-069 is disarmed for *every*
-/// trampoline, at any checkout depth.
-///
-/// The read is additionally bounded to the first
-/// [`ocx_config::env::TRAMPOLINE_PROBE_BYTES`] bytes, which the anchor already
-/// satisfies here: line one is a fixed 9-byte shebang, so line two always
-/// starts at byte 10, whatever the baked root's length. The bound bites only in
-/// the other direction — it is why the marker may not be moved *after* the
-/// baked absolute root, where a deep checkout would push it past the window
-/// while every shallow-`tmp_path` test stayed green.
-///
-/// # The `unset` (S-009)
-///
-/// `OCX_GLOBAL` and `OCX_PROJECT` are cleared before the `exec` because the
-/// baked selector is the **only** selector. Without the `unset`, one exported
-/// `OCX_GLOBAL=1` in the caller's environment makes every trampoline on that
-/// `PATH` exit 64 from `check_global_project_exclusivity`, for flags the user
-/// never typed. The two shipped bodies deliberately carry no `unset`: they bake
-/// no tier selector, so they have nothing to shadow (D-V3).
-///
-/// # Why the absolute `ocx`, and why it is single-quoted
-///
-/// R-W12: a project may pin its own `ocx` (ADR D-4 removed the refusal), and in
-/// `bin` mode the interactive shell has `toolchain/active/bin` **prepended** while
-/// carrying no `OCX_BINARY_PIN`. A bare `${OCX_BINARY_PIN:-ocx}` fallback would
-/// then make `/bin/sh` re-resolve the trampoline as itself — an infinite loop
-/// **before any ocx process starts**, which no in-process guard can see
-/// (precedent: [asdf#2166](https://github.com/asdf-vm/asdf/issues/2166)). So
-/// the fallback is the absolute stable install path, as mise and rustup shims
-/// do; `OCX_BINARY_PIN` still overrides it; `None` degrades to the bare name
-/// only when that path does not exist at render time.
-///
-/// **Absoluteness of `ocx_binary` is the caller's to establish, and is not
-/// re-checked here.** The one producer is
-/// [`super::generate::trampoline_ocx_binary`], whose ladder refuses a relative
-/// candidate at every rung before it can reach this argument — the check has to
-/// live there anyway, since it is inseparable from the existence probe that
-/// decides which rung wins. Re-stating it here would be a second gate with no
-/// second input, and the project root's clause below exists only because that
-/// value arrives from `ocx.toml`, not from a probe.
-///
-/// It is assigned through a **single-quoted** shell variable rather than
-/// interpolated into `${OCX_BINARY_PIN:-…}` directly. Inside double quotes the
-/// `:-` *word* is still expanded, so an `$` or a backtick anywhere in
-/// `$OCX_HOME` would be a command substitution running at every trampoline
-/// invocation — and [`LauncherSafeString`] deliberately **admits** `$`,
-/// backtick, `\` and `%`. Assigning under single quotes and expanding
-/// `"${OCX_BINARY_PIN:-$__ocx_binary}"` makes that rejection set sufficient for
-/// *both* baked literals, which is exactly the argument C-030 makes for the
-/// project root.
+/// The marker must stay exactly line two, or trampoline detection is disarmed; `unset` stops an
+/// exported `OCX_GLOBAL=1` making every trampoline exit 64; a relative `ocx_binary` (only
+/// `trampoline_ocx_binary` checks) lets `/bin/sh` re-resolve the trampoline as itself, an
+/// infinite loop (`adr_toolchain_activation.md` § Rationale from code: launcher trampolines).
 ///
 /// # Errors
 ///
-/// - [`crate::Error::LauncherPathNotUtf8`], naming the offending path, when the
-///   project root **or** the resolved `ocx` path is not valid UTF-8. Both are
-///   baked verbatim, and a lossy conversion would bake a path that does not
-///   exist (RUL-37).
-/// - [`crate::Error::ToolchainHomeNotAbsolute`] when the project root is
-///   relative. A relative `--project` resolves against the **invoking
-///   process's** working directory, so one trampoline would select two
-///   different homes from two directories.
-/// - [`crate::Error::LauncherUnsafeCharacter`], naming the offending path and
-///   character, when the project root or the resolved `ocx` path carries any of
-///   `'`, `"`, `\n`, `\r` or `\0` — the refusal C-030 requires at render time,
-///   because a `'` would terminate the single-quoted literal and a newline would
-///   append a line to the body.
-// WP-7's `render_toolchain` is the sole consumer and lands one wave later, so this
-// surface has no non-test caller yet. `expect`, not `allow`: the moment WP-7 wires
-// it up the expectation goes unfulfilled and the compiler forces this line out —
-// an `allow` would linger silently. `not(test)` because the goldens below DO use
-// it, so the lint never fires in the test build.
+/// - [`crate::Error::LauncherPathNotUtf8`] when the project root or `ocx` path is not UTF-8.
+/// - [`crate::Error::ToolchainHomeNotAbsolute`] when the project root is relative.
+/// - [`crate::Error::LauncherUnsafeCharacter`] when either path holds a launcher-unsafe character.
 pub(crate) fn unix_trampoline_body(
     target: &TrampolineTarget,
     ocx_binary: Option<&Path>,
@@ -276,9 +86,7 @@ pub(crate) fn unix_trampoline_body(
         Some(path) => LauncherSafeString::new(utf8_baked_path(path)?)?,
         None => LauncherSafeString::new(TRAMPOLINE_BINARY_FALLBACK)?,
     };
-    // The marker constant is imported from `env.rs`; re-spelling it here would
-    // create a second canonical spelling for a predicate that reads exactly one
-    // (D-V12). The `{marker}` interpolation is what binds them.
+    // Imported, never re-spelled: the detection predicate reads exactly this constant.
     let marker = ocx_config::env::TRAMPOLINE_MARKER;
     let variable = TRAMPOLINE_BINARY_VAR;
     let binary = binary.as_str();
@@ -291,62 +99,15 @@ pub(crate) fn unix_trampoline_body(
     ))
 }
 
-/// Produces the body of a Windows `.exec` sidecar — the third sidecar grammar,
-/// read by `crates/ocx_shim` beside a trampoline's `<stem>.exe` (C-031).
+/// Produces a Windows `.exec` sidecar: line one the absolute project root or
+/// [`EXEC_SIDECAR_GLOBAL`], line two (only when `ocx_binary` is absolute) the baked `ocx.exe`.
 ///
-/// Contract: line one holds either the absolute project root or the literal
-/// [`EXEC_SIDECAR_GLOBAL`]; line two, written only when `ocx_binary` resolved,
-/// holds the absolute `ocx.exe` this render found. Each line ends in a single
-/// `\n` (LF), UTF-8 with no BOM.
-///
-/// # The second line is the Windows half of `__ocx_binary` (V-9)
-///
-/// [`unix_trampoline_body`] has always baked an absolute `ocx` and expanded it
-/// under an overridable pin. Windows had no equivalent, so its shim resolved
-/// the literal `ocx` and spawned with `lpApplicationName = NULL` — a search
-/// that begins at **the directory the calling image loaded from**,
-/// `<home>/toolchain/active/bin` itself. A package claiming the name `ocx` is
-/// admitted by design (ADR D-4 removed `ShimNameShadowsOcx`), so `ocx pull`
-/// renders `bin\ocx.exe` there and every trampoline beside it spawned *that* —
-/// unbounded, and independent of `PATH`.
-///
-/// `None` degrades to the one-line form rather than refusing, which is the
-/// same narrowing POSIX makes: `super::generate::trampoline_ocx_binary`
-/// answers `None` only when the running `ocx` cannot be resolved at all, and
-/// `super::generate`'s rung-ladder doc records that population's
-/// self-resolution loop as accepted. Refusing here would refuse a render POSIX
-/// performs.
-///
-/// A non-absolute candidate degrades the same way instead of being emitted:
-/// the read side refuses a relative second line, so writing one would make
-/// **every** trampoline in the home exit 78 — a hard break where POSIX, which
-/// applies no absoluteness check to its own baked binary, merely misbehaves.
-///
-/// The sidecar carries **no containment**: the home is a project *selector*,
-/// not a package root, so the shim's E3 allow-list has nothing to compare it
-/// against and `ocx` re-resolves it through the ordinary project chain.
+/// Without line two the shim spawns bare `ocx`, which Windows finds first in the trampoline's own
+/// `bin` and loops; a non-absolute line two would make every trampoline exit 78, so it degrades to one line.
 ///
 /// # Errors
 ///
-/// The same three refusals [`unix_trampoline_body`] applies to its root,
-/// through the same [`absolute_project_root`] — so a home that renders on one
-/// platform renders on both, and one that is refused is refused on both:
-///
-/// - [`crate::Error::LauncherPathNotUtf8`] when the project root **or the
-///   resolved `ocx`** is not valid UTF-8; the sidecar's own read side rejects
-///   non-UTF-8 bytes as E2, so a lossy write would produce a file the shim
-///   refuses at every invocation.
-/// - [`crate::Error::ToolchainHomeNotAbsolute`] when the project root is
-///   relative. Load-bearing beyond CWD-dependence here: it is what stops a
-///   project root spelled `global` from being read back as the global home.
-/// - [`crate::Error::LauncherUnsafeCharacter`] when the root or the resolved
-///   `ocx` carries a character the line grammar cannot express — the same set
-///   [`unix_trampoline_body`] refuses for its own baked binary.
-// WP-7's `render_toolchain` is the sole consumer and lands one wave later, so this
-// surface has no non-test caller yet. `expect`, not `allow`: the moment WP-7 wires
-// it up the expectation goes unfulfilled and the compiler forces this line out —
-// an `allow` would linger silently. `not(test)` because the goldens below DO use
-// it, so the lint never fires in the test build.
+/// The same three refusals as [`unix_trampoline_body`].
 pub(crate) fn exec_sidecar_body(target: &TrampolineTarget, ocx_binary: Option<&Path>) -> Result<String, crate::Error> {
     let home = match target {
         TrampolineTarget::Project(root) => absolute_project_root(root)?,
@@ -367,35 +128,18 @@ pub(crate) fn exec_sidecar_body(target: &TrampolineTarget, ocx_binary: Option<&P
     })
 }
 
-/// The literal a `.exec` sidecar carries for the global home, matched by the
-/// shim's read side with **byte equality** (C-031).
+/// The literal a `.exec` sidecar carries for the global home, matched by byte equality.
 ///
-/// A project root can never collide with it, because [`absolute_project_root`]
-/// refuses every non-absolute value **at render** and `global` is not absolute.
-/// That refusal is what makes this sentence true of the *writer* and not merely
-/// of the reader's accepted set: without it,
-/// `exec_sidecar_body(&Project("global"), _)` would emit a sidecar the shim reads
-/// back as the **global home**.
+/// Only [`absolute_project_root`]'s refusal of relative roots stops a project named `global`
+/// being read back as the global home.
 pub(crate) const EXEC_SIDECAR_GLOBAL: &str = "global";
 
-/// Validates a baked project root: representable first, then absolute, then
-/// launcher-safe.
-///
-/// All three refusals happen **at render**, before any body or sidecar exists,
-/// which is C-030's posture for the character set and the same posture the other
-/// two clauses need for the reasons in [`crate::Error::LauncherPathNotUtf8`] and
-/// [`crate::Error::ToolchainHomeNotAbsolute`].
-///
-/// The order is the diagnostic order, not an arbitrary one: a value that is not
-/// UTF-8 cannot be adjudicated as a path at all — every later clause would be
-/// reasoning about `to_string_lossy`'s substitution rather than about the root.
+/// Validates a baked project root: UTF-8, then absolute, then launcher-safe.
 ///
 /// # Errors
 ///
-/// - [`crate::Error::LauncherPathNotUtf8`] — the root is not valid UTF-8.
-/// - [`crate::Error::ToolchainHomeNotAbsolute`] — the root is relative.
-/// - [`crate::Error::LauncherUnsafeCharacter`] — the root carries `'`, `"`,
-///   `\n`, `\r` or `\0`.
+/// [`crate::Error::LauncherPathNotUtf8`], [`crate::Error::ToolchainHomeNotAbsolute`] or
+/// [`crate::Error::LauncherUnsafeCharacter`], in that order.
 fn absolute_project_root(root: &Path) -> Result<LauncherSafeString, crate::Error> {
     let root = utf8_baked_path(root)?;
     if !is_absolute_any_host(root) {
@@ -406,74 +150,23 @@ fn absolute_project_root(root: &Path) -> Result<LauncherSafeString, crate::Error
     LauncherSafeString::new(root)
 }
 
-/// The one conversion from a `Path` to the text a generated body bakes
-/// verbatim (RUL-37, E-10).
+/// The one conversion from a `Path` to text a generated file bakes verbatim.
 ///
-/// One rule, and the doors are named rather than counted — a number here goes
-/// stale on the next caller:
-///
-/// - the project root of a `.sh` trampoline and of its `.exec` sidecar, both
-///   through [`absolute_project_root`];
-/// - the trampoline's resolved absolute `ocx`, in [`unix_trampoline_body`];
-/// - the package root of an ordinary `.sh` launcher and of its `.shim`
-///   sidecar — one conversion in [`super::generate::generate`], since
-///   `unix_launcher_body` and `shim_sidecar_body` share the
-///   [`LauncherSafeString`] it builds.
-///
-/// Any `Path` whose text reaches a generated file goes through here first.
-///
-/// # Why not `to_string_lossy`
-///
-/// It substitutes U+FFFD for every invalid byte. U+FFFD is not in
-/// [`super::safety`]'s rejection set, so the lossy value passes
-/// [`LauncherSafeString`] and is baked — naming a path that does not exist.
-/// `/bin/sh` then reports a bare `ENOENT` for a path the operator never wrote,
-/// with nothing in the message pointing at the encoding. A refusal that names
-/// the value is strictly better than a silently-wrong baked selector.
-///
-/// Reachable on Unix, where a path is arbitrary bytes; on Windows the same
-/// refusal fires for an ill-formed UTF-16 name (an unpaired surrogate).
+/// Never `to_string_lossy`: its U+FFFD passes [`LauncherSafeString`] and bakes a path that does not exist.
 ///
 /// # Errors
 ///
-/// [`crate::Error::LauncherPathNotUtf8`], carrying the lossy rendering — the
-/// only printable form such a value has.
+/// [`crate::Error::LauncherPathNotUtf8`], carrying the lossy rendering.
 pub(super) fn utf8_baked_path(path: &Path) -> Result<&str, crate::Error> {
     path.to_str().ok_or_else(|| crate::Error::LauncherPathNotUtf8 {
         path: path.to_string_lossy().into_owned(),
     })
 }
 
-/// Whether `value` is an absolute path **on any host**, not on the host doing
-/// the rendering.
+/// Whether `value` is an absolute path on any host, not on the rendering one.
 ///
-/// # Why not `Path::is_absolute`
-///
-/// It is platform-conditional in exactly the direction that matters here: a
-/// POSIX `/w/proj` reports `false` on Windows (it has a root but no drive), and
-/// a `C:\w\proj` reports `false` on Unix. A cross-platform package renders both
-/// a `.sh` trampoline and a `.exec` sidecar from one target, so a host-dependent
-/// answer would refuse a legitimate home on one platform and accept it on the
-/// other.
-///
-/// # Why not `utility::fs::path::has_windows_prefix`
-///
-/// That helper answers a different question — "does this carry a Windows
-/// prefix", for a containment check — and admits a bare `C:`, i.e. the
-/// **drive-relative** `C:proj`, which resolves against the process's per-drive
-/// working directory. Admitting one here would reintroduce the very
-/// CWD-dependence this clause exists to refuse.
-///
-/// # The clauses, mirroring `ocx_shim::core::is_absolute_path`
-///
-/// `ocx_lib` cannot depend on the `ocx_shim` binary crate, so the read side and
-/// this write side are bound only by agreeing clause for clause — the same
-/// paired-golden situation as the wire tokens:
-///
-/// 1. UNC / device: leads with `\\` (`\\server\share`, `\\?\C:\x`).
-/// 2. Drive-absolute: `[A-Za-z]:` followed by `\` **or** `/` — the separator is
-///    required, which is what rejects `C:proj`.
-/// 3. POSIX-absolute: leads with `/`.
+/// Not `Path::is_absolute`: one target renders both a `.sh` and a `.exec`, and it answers per host.
+/// Must stay clause-for-clause equal to `ocx_shim::core::is_absolute_path`, which no crate edge binds.
 fn is_absolute_any_host(value: &str) -> bool {
     let bytes = value.as_bytes();
     if value.starts_with("\\\\") {
@@ -486,22 +179,11 @@ fn is_absolute_any_host(value: &str) -> bool {
     value.starts_with('/')
 }
 
-/// Produces the body of a Windows `.shim` sidecar.
-///
-/// Contract: exactly the absolute `pkg_root` followed by a single `\n`
-/// (LF), UTF-8 with no BOM. This is the One-Way-Door on-disk artifact the
-/// native `ocx-shim.exe` reads to learn `pkg_root`; its byte/encoding spec is
-/// frozen (see `adr_windows_exe_shim.md` §`.shim` Sidecar Format Contract).
-/// Inputs are pre-validated [`LauncherSafeString`]s — see [`unix_launcher_body`].
-// Only called from the cfg(windows) branch of `generate`; allow the dead_code
-// lint so non-Windows builds stay clean (same pattern as
-// `child_process::propagate_exit_status`).
+/// Produces a Windows `.shim` sidecar: exactly `pkg_root` plus one LF, UTF-8, no BOM — a frozen
+/// wire format (`adr_windows_exe_shim.md` §`.shim` Sidecar Format Contract).
+// Only the cfg(windows) branch of `generate` calls this.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn shim_sidecar_body(pkg_root: &LauncherSafeString) -> String {
-    // Exactly `<pkg_root>\n` — LF only, no BOM, no CRLF, pkg_root and nothing
-    // else. `pkg_root` is the already-validated `LauncherSafeString` (the
-    // `LAUNCHER_UNSAFE_CHARS` guard ran at the `generate` entry boundary);
-    // there is no second validator here (ADR Contract 2 / §`.shim` format).
     format!("{}\n", pkg_root.as_str())
 }
 
@@ -573,7 +255,7 @@ mod tests {
     /// user args. `ocx launcher exec` resolves the binary via the package's
     /// PATH env (set up from metadata).
     ///
-    /// **This golden flipped in WP-6 (D-V3)**: the argv0 form moved from
+    /// **This golden flipped once**: the argv0 form moved from
     /// `$(basename "$0")` to `${0##*/}`. Intended, not a regression — see the
     /// module docs for why the fork-and-lookup form was retired.
     #[test]
@@ -631,17 +313,17 @@ mod tests {
         );
     }
 
-    // ── Unix shim body — byte-exact golden (C-010) ────────────────────────
+    // ── Unix shim body — byte-exact golden ────────────────────────
     //
     // The shim body a *deferred* tool's declared names get. Written from
-    // C-010 plus its 2026-08-10 amendment, which fixes the golden as the
+    // the shim-body contract and its amendment, which fixes the golden as the
     // WHOLE FILE mirroring `unix_launcher_body` — shebang, the same
     // `# Generated by ocx…` comment verbatim, the `exec` line, one trailing
     // LF. A body without a shebang is not executable via `execve` at all, so
     // the first line is contract, not decoration.
 
     /// The pinned identifier a generated shim bakes. Tag-bearing on purpose:
-    /// C-010's amendment keeps the advisory tag, so the golden must carry one
+    /// The contract's amendment keeps the advisory tag, so the golden must carry one
     /// or it cannot distinguish "kept" from "stripped".
     const PINNED: &str =
         "ocx.sh/tool/cmake:3.28@sha256:0000000000000000000000000000000000000000000000000000000000000001";
@@ -662,7 +344,7 @@ mod tests {
     }
 
     /// The shebang and the single trailing LF, called out separately from the
-    /// golden because their failure modes are the ones a reader of C-010's
+    /// golden because their failure modes are the ones a reader of the contract's
     /// one-line `exec` statement would not think to check: no shebang means
     /// `execve` refuses the file outright, and a second LF is invisible in a
     /// diff.
@@ -704,7 +386,7 @@ mod tests {
         );
     }
 
-    /// C-010: the body carries no report or mode token. `lazy-report` is
+    /// The body carries no report or mode token. `lazy-report` is
     /// resolved by the process that performs the download, so freezing a
     /// compose-time value into the body would make a generated shim answer
     /// for a setting the user has since changed.
@@ -727,12 +409,12 @@ mod tests {
     }
 
     /// Wire-ABI canary for the SECOND verb — the sibling of
-    /// [`launcher_wire_token_is_bound_to_shim_producer`] (C-018).
+    /// [`launcher_wire_token_is_bound_to_shim_producer`].
     ///
     /// `ocx_lib` cannot depend on the `ocx_shim` binary crate, so the two
     /// producers of `launcher shim` are bound only by a paired golden: this
     /// restates the exact token from the `.sh` side, and the native shim's own
-    /// test restates it from `crates/ocx_shim/src/core.rs` (WP-11's half).
+    /// test restates it from `crates/ocx_shim/src/core.rs`.
     /// The constant is declared INSIDE the test on purpose — a production
     /// constant shared by body and canary would make the canary
     /// self-referential and unable to go red on a body change.
@@ -862,7 +544,7 @@ mod tests {
         );
     }
 
-    // ── POSIX trampoline body (C-028, C-030, D-V12, R-W12) ────────────────
+    // ── POSIX trampoline body ────────────────
     //
     // The third generated body. Everything it bakes is here: the marker on
     // line two, the `unset`, the single-quoted absolute `ocx`, and the single
@@ -871,7 +553,7 @@ mod tests {
     use super::{EXEC_SIDECAR_GLOBAL, TrampolineTarget, exec_sidecar_body, unix_trampoline_body};
     use std::path::{Path, PathBuf};
 
-    /// The absolute install path R-W12 bakes, in the shape
+    /// The absolute install path a trampoline bakes, in the shape
     /// `ocx_install_bin_path` computes:
     /// `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin/ocx`.
     const INSTALLED_OCX: &str = "/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx";
@@ -912,10 +594,10 @@ mod tests {
         );
     }
 
-    /// D-V12: the marker is [`ocx_config::env::TRAMPOLINE_MARKER`] verbatim, as
+    /// The marker is [`ocx_config::env::TRAMPOLINE_MARKER`] verbatim, as
     /// **exactly line two** — the position [`ocx_config::env::is_ocx_trampoline`]
     /// matches, compared whole. Not "somewhere in the probed head": that weaker
-    /// rule is the one E-21 rejected, because an operator-controlled path can
+    /// rule is rejected, because an operator-controlled path can
     /// spell the marker anywhere in a body's head.
     ///
     /// The bound is pinned too, but as the emitter's own obligation rather than
@@ -950,7 +632,7 @@ mod tests {
         );
     }
 
-    /// S-009: the baked selector is the only selector. Without the `unset`, one
+    /// The baked selector is the only selector. Without the `unset`, one
     /// exported `OCX_GLOBAL=1` makes every trampoline on that PATH exit 64 from
     /// `check_global_project_exclusivity`, for flags the caller never typed.
     #[test]
@@ -969,7 +651,7 @@ mod tests {
         }
     }
 
-    /// R-W12: the loop `ocx` → trampoline → `ocx` runs inside `/bin/sh`, before
+    /// The self-resolution loop `ocx` → trampoline → `ocx` runs inside `/bin/sh`, before
     /// any ocx process starts, so no in-process guard can see it. The absolute
     /// install path is what closes it; `OCX_BINARY_PIN` still overrides.
     #[test]
@@ -991,7 +673,7 @@ mod tests {
     }
 
     /// The one case that legitimately re-enters through `PATH`: no install path
-    /// existed at render time. Named separately because it is the state R-W12's
+    /// existed at render time. Named separately because it is the state the self-resolution
     /// loop needs, so it must be reachable *only* here.
     #[test]
     fn unix_trampoline_body_falls_back_to_a_bare_name_only_without_an_install_path() {
@@ -1023,7 +705,7 @@ mod tests {
         );
     }
 
-    /// C-030: the writer refuses at render, naming the path. A `'` would
+    /// The writer refuses at render, naming the path. A `'` would
     /// terminate the single-quoted literal; a newline would append a line to
     /// the body. Both are the reason the rejection set is sufficient at all.
     #[test]
@@ -1080,11 +762,11 @@ mod tests {
         );
     }
 
-    // ── C-034: the paired byte-exact golden for the `exec` wire vocabulary ──
+    // ── The paired byte-exact golden for the `exec` wire vocabulary ──
 
     /// Wire-ABI canary for the THIRD verb — the sibling of
     /// [`launcher_wire_token_is_bound_to_shim_producer`] and
-    /// [`launcher_shim_wire_token_is_bound_to_shim_producer`] (C-034).
+    /// [`launcher_shim_wire_token_is_bound_to_shim_producer`].
     ///
     /// The trampoline vocabulary has two producers and no compiler-visible
     /// binding: this `.sh` body, and `crates/ocx_shim`'s
@@ -1128,7 +810,7 @@ mod tests {
              side, so the two spellings must agree exactly"
         );
 
-        // The fifth shared token is a SHAPE, not a word (V-9): the baked `ocx`
+        // The fifth shared token is a SHAPE, not a word: the baked `ocx`
         // is line TWO of the sidecar, and the shim splits on the first newline
         // to find it. Restated here from the writer's side; `ocx_shim`'s
         // `parse_exec_sidecar_reads_the_baked_ocx_from_the_second_line` states
@@ -1141,7 +823,7 @@ mod tests {
         assert_eq!(lines.next(), None, "and there is no line three: {baked:?}");
     }
 
-    // ── `.exec` sidecar body golden (C-031) ───────────────────────────────
+    // ── `.exec` sidecar body golden ───────────────────────────────
 
     #[test]
     fn exec_sidecar_body_byte_exact_golden() {
@@ -1158,7 +840,7 @@ mod tests {
         );
     }
 
-    // ── V-9: the baked `ocx` is the second line ───────────────────────────
+    // ── The baked `ocx` is the second line ───────────────────────────
 
     /// The Windows half of the absolute `__ocx_binary` the `.sh` body bakes.
     ///
@@ -1265,7 +947,7 @@ mod tests {
         );
     }
 
-    // ── F-1: a baked home is refused at render unless it is absolute ──────
+    // ── A baked home is refused at render unless it is absolute ──────
 
     /// The collision the `EXEC_SIDECAR_GLOBAL` doc comment claims cannot
     /// happen. Without the absoluteness refusal `exec_sidecar_body` returns
@@ -1368,7 +1050,7 @@ mod tests {
         );
     }
 
-    // ── RUL-37 / E-10: a baked path that is not UTF-8 is refused at render ──
+    // ── A baked path that is not UTF-8 is refused at render ──
 
     /// The silent-corruption case `to_string_lossy` produces. `0xFF` is not a
     /// legal UTF-8 byte anywhere, so a lossy conversion turns `/w/pro\xFFj`
@@ -1381,7 +1063,7 @@ mod tests {
         PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
     }
 
-    /// RUL-37 (E-10), the project-root half: **both** writers refuse, and the
+    /// The project-root half: **both** writers refuse, and the
     /// refusal names the value.
     #[cfg(unix)]
     #[test]
@@ -1415,7 +1097,7 @@ mod tests {
         );
     }
 
-    /// RUL-37, the **second** baked literal. Without this row the resolved
+    /// The **second** baked literal. Without this row the resolved
     /// `ocx` path — derived from `$OCX_HOME`, which is equally free to be
     /// non-UTF-8 — would still be lossily converted and baked, and the
     /// trampoline would exec a binary that does not exist.
@@ -1463,7 +1145,7 @@ mod tests {
         }
     }
 
-    // ── C-030: the whole refusal set, and the whole admitted set ──────────
+    // ── The whole refusal set, and the whole admitted set ──────────
     //
     // The shipped rows cover `'` and `\n`. The character set is five, and the
     // three untested members are the ones a reader would assume rather than
@@ -1471,7 +1153,7 @@ mod tests {
     // invisible in every diff, and `"` is tolerated by the `.shim` READER yet
     // forbidden by the writer.
 
-    /// C-030 (E-3, E-4, E-5, with E-1/E-2 restated so the set is stated once):
+    /// Stated once for the whole set:
     /// every member of `LAUNCHER_UNSAFE_CHARS` is refused at render, and the
     /// refusal names both the offending path and the offending character.
     #[test]
@@ -1507,14 +1189,14 @@ mod tests {
         }
     }
 
-    /// C-030 (E-6): a root that is *only* the offending character. The
+    /// A root that is *only* the offending character. The
     /// assertions compare the whole value, never a `starts_with`/`ends_with`
     /// shape — a prefix-based check passes trivially on this input and would
     /// hide a refusal that named the wrong path.
     #[test]
     fn the_refusal_names_a_root_that_is_nothing_but_the_offending_character() {
         // Absoluteness is adjudicated first, so a bare `'` is refused for not
-        // being a path at all. It still names the value, which is what E-6 asks.
+        // being a path at all. It still names the value, which is what the refusal owes.
         match unix_trampoline_body(&project("'"), None) {
             Err(crate::Error::ToolchainHomeNotAbsolute { value }) => {
                 assert_eq!(value, "'", "the refusal names the whole root, verbatim");
@@ -1536,7 +1218,7 @@ mod tests {
         }
     }
 
-    /// C-030 (E-7, E-8): the deliberately **admitted** characters. Without this
+    /// The deliberately **admitted** characters. Without this
     /// row the refusal rows above are satisfied by a validator that refuses
     /// everything — and `$`, backtick, `\` and `%` are exactly the characters
     /// the single-quoted context exists to make safe rather than to ban.
@@ -1564,7 +1246,7 @@ mod tests {
         }
     }
 
-    /// RUL-20 / D-V21, the **trampoline** half. The shipped row covers the
+    /// The **trampoline** half. The shipped row covers the
     /// `.exec` writer, where the collision is byte-visible; the trampoline
     /// refuses the same root for the CWD-dependence reason, and both must
     /// refuse or a home renders on one platform and not the other.
@@ -1587,7 +1269,7 @@ mod tests {
         );
     }
 
-    /// RUL-13 / D-V19 (E-15): an install path containing a space. It is
+    /// An install path containing a space. It is
     /// assigned under single quotes and expanded inside double quotes, so it
     /// reaches `execve` as one token — the runtime half of this claim is
     /// [`executed::the_trampoline_execs_the_baked_absolute_ocx_verbatim`].
@@ -1605,7 +1287,7 @@ mod tests {
         );
     }
 
-    /// C-029 / D-V3, stated once over all three bodies: the new form is
+    /// Stated once over all three bodies: the new form is
     /// present **and** the string `basename` is absent. The absence is the
     /// contract — a body carrying both forms would satisfy a presence-only
     /// check while still forking.
@@ -1773,7 +1455,7 @@ exit 0
             }
         }
 
-        /// S-009, C-033, validation item 38 (E-52, E-53, E-54): the baked
+        /// The baked
         /// selector is the only selector. Three caller environments times both
         /// targets, all exit 0 — and the stub confirms neither name arrived.
         #[test]
@@ -1809,7 +1491,7 @@ exit 0
             }
         }
 
-        /// E-55, the **negative control** for the rows above. Same caller
+        /// The **negative control** for the rows above. Same caller
         /// environment, same invocation, against a body with line three
         /// deleted: the selector survives and `ocx` exits 64.
         ///
@@ -1844,7 +1526,7 @@ exit 0
             );
         }
 
-        /// RUL-14 / D-V20: the strip is scoped to the trampoline. A package
+        /// The strip is scoped to the trampoline. A package
         /// launcher and a lazy shim bake no tier selector, so they have nothing
         /// to shadow — a caller who deliberately exported a tier keeps it.
         #[test]
@@ -1868,7 +1550,7 @@ exit 0
             }
         }
 
-        /// D-V19 / RUL-13 (E-11, E-15, E-16 runtime halves): the body execs the
+        /// Runtime halves: the body execs the
         /// baked path **verbatim**. The install path carries both hazards at
         /// once — a space and a command substitution — so a body that expanded
         /// the `:-` word, or one that field-split it, runs something else or
@@ -1896,7 +1578,7 @@ exit 0
             );
         }
 
-        /// D-V19 (E-14): a **defined but empty** `OCX_BINARY_PIN` falls through
+        /// A **defined but empty** `OCX_BINARY_PIN` falls through
         /// to the baked path, because POSIX `${VAR:-word}` substitutes on unset
         /// *or* empty.
         ///
@@ -1924,7 +1606,7 @@ exit 0
             );
         }
 
-        /// D-V19 (E-13): `OCX_BINARY_PIN` still wins at runtime — the baked
+        /// `OCX_BINARY_PIN` still wins at runtime — the baked
         /// absolute path is the FALLBACK, not a hard-coding.
         #[test]
         fn ocx_binary_pin_overrides_the_baked_absolute_path_at_runtime() {
@@ -1952,8 +1634,8 @@ exit 0
             );
         }
 
-        /// D-V19 (E-12): with no install path at render time the body falls back
-        /// to a bare-name `PATH` lookup — the one state R-W12's self-resolution
+        /// With no install path at render time the body falls back
+        /// to a bare-name `PATH` lookup — the one state the self-resolution
         /// loop needs, so it must be reachable only here.
         ///
         /// The dangerous consequence is visible in the assertion: what runs is
@@ -1981,7 +1663,7 @@ exit 0
             );
         }
 
-        /// D-V3 (E-9): `${0##*/}` against the inputs whose answer is not
+        /// `${0##*/}` against the inputs whose answer is not
         /// obvious, measured against `basename` on the same input. Identical for
         /// every name a trampoline can be invoked under; the one divergence is
         /// `$0 = "/"`, which no `execve` can produce.

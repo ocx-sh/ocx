@@ -11,12 +11,9 @@ use crate::app::build_info::Provenance;
 /// Plain format: colored logo with key-value pairs alongside.
 ///
 /// JSON format: flat object with version + registry + platforms + libc +
-/// shell + home plus optional `channel`, `commit`, `build`, `ci` blocks
-/// merged from [`Provenance::current`]. The build-provenance fields are
-/// absent on local `cargo build` without git, matching `ocx version
-/// --format json` behaviour. `libc` is a JSON array of the detected libc
-/// `os.features` tags (e.g. `["libc.glibc"]`, `["libc.glibc","libc.musl"]`),
-/// empty when none were detected (non-Linux host, NixOS, or a failed probe).
+/// shell + home plus optional `channel`, `commit`, `build`, `ci` build-provenance
+/// blocks. The build-provenance fields are absent on local `cargo build`
+/// without git, matching `ocx version --format json` behaviour.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct About {
     pub version: String,
@@ -53,8 +50,7 @@ impl About {
         }
     }
 
-    /// Short commit summary for the info-table — `<short> (clean|dirty)`,
-    /// or `None` when no git metadata was baked in.
+    /// `<short> (clean|dirty)`, or `None` when no git metadata was baked in.
     pub fn commit_summary(&self) -> Option<String> {
         let commit = self.provenance.commit.as_ref()?;
         let dirty = if commit.dirty { "dirty" } else { "clean" };
@@ -64,8 +60,7 @@ impl About {
 
 impl Printable for About {
     fn print_plain(&self, _printer: &ocx_console::DataInterface) {
-        // Plain format is handled directly by the command (logo rendering).
-        // This is only called as a fallback.
+        // Fallback only: the command renders the plain form itself, with the logo.
         println!("Version:   {}", self.version);
         if let Some(commit) = self.commit_summary() {
             println!("Commit:    {commit}");

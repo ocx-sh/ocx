@@ -1,35 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx package claim` orchestration (ADR `adr_index_claim_command.md`).
+//! `ocx package claim` orchestration (see `adr_index_claim_command.md`).
 //!
-//! A publisher claims a package: claim renders the package's index root from
-//! structured flags, opens a pull request against `ocx-sh/index`, and leaves
-//! the merge to that repository's human governance gate. Announce refuses an
-//! **unclaimed** package at exit 79; claim over an **already-claimed** one is a
-//! re-claim, not a refusal ([#481], D-3) — it adds the caller's owners to the
-//! committed list and carries every other committed field through.
-//!
-//! Claim also observes the package's `__ocx.desc` artifact ([#482], D-2) and
-//! writes the description into the root it proposes, through
-//! `announce::pipeline::observe_desc` — the same function announce runs, so
-//! `desc` means one thing in the index whichever command wrote it. That makes
-//! claim a registry client: the SSRF pre-flight runs before the first registry
-//! request, exactly as it does on the announce path.
-//!
-//! [#481]: https://github.com/ocx-sh/ocx/issues/481
-//! [#482]: https://github.com/ocx-sh/ocx/issues/482
-//!
-//! Forge-neutral and transport-blind **by construction**: `commit_files` and
-//! `open_or_update_pull_request` dispatch on the transport *inside* the forge,
-//! and [`ClaimRequest`] carries no transport field, so the orchestration below
-//! behaves identically under `api` and `git`. The per-transport half of C-051 is
-//! an acceptance test, not a unit one.
-//!
-//! Claim never calls `pull_request_mergeability` (C-053): every divergent case
-//! resets onto the current index base, so the request is mergeable by
-//! construction. Announce, which appends, does call it — copying announce's
-//! `Diverged` arm here would reintroduce a read this design removed.
+//! Renders a package's index root and opens a pull request against `ocx-sh/index`. Over an
+//! already-claimed package it is a re-claim: it adds the caller's owners and carries every other
+//! committed field. `desc` is observed through `announce::pipeline::observe_desc`, so claim is a
+//! registry client, SSRF pre-flight first.
 
 pub mod error;
 pub mod owners;
@@ -59,17 +36,11 @@ use ocx_package::publisher::Publisher;
 /// committed root from, and the ref every claim commit is parented on.
 pub const INDEX_BASE_REF: &str = "main";
 
-/// The claim branch for `package` (C-054).
+/// The claim branch for `package`: `indexbot-claim-<namespace>-<package>`, distinct from announce's
+/// `indexbot-announce-…` so indexbot never classifies a claim as a refresh.
 ///
-/// `indexbot-claim-<namespace>-<package>`, deliberately distinct from announce's
-/// `indexbot-announce-…` so indexbot's G-04 `new-package` classification is never
-/// confused with a refresh. Derived **once** per run and carried on
-/// [`ClaimOutcome::branch`], so the reported branch and the ref actually written
-/// cannot diverge.
-///
-/// The `/`→`-` substitution collides `a-b/c` with `a/b-c`. That is pre-existing
-/// and identical on announce; fixing it here would diverge the two namings C-054
-/// exists to keep parallel.
+/// The `/`→`-` substitution collides `a-b/c` with `a/b-c` exactly as announce's does; fixing it on
+/// one side only diverges the two namings.
 #[must_use]
 pub fn claim_branch(package: &str) -> String {
     format!("indexbot-claim-{}", package.replace('/', "-"))
@@ -83,25 +54,15 @@ pub fn root_path(package: &str) -> String {
 
 /// Claim one package.
 ///
-/// `forge` is `Some` in every mode: `--out` still reads the committed root to
-/// rebuild from and still resolves owners. S-011's `push-access: skipped` under
-/// `--out` is satisfied by **not calling `ensure_push_access`** on that path — the
-/// rows then come from `PushAccess::skipped_all()` — never by a forge answering
-/// `skipped`, which on GitHub would mean an unreadable `permissions` and exit 80.
-///
-/// `publisher` is the registry client the `__ocx.desc` observation runs on
-/// (D-2). It is reached only after every zero-I/O refusal, and only behind
-/// `pipeline::guarded_physical`'s SSRF pre-flight.
+/// `forge` must be `Some` in every mode, `--out` included: it still reads the committed root and
+/// resolves owners. `publisher` serves the `__ocx.desc` observation, behind the SSRF pre-flight.
 ///
 /// # Errors
 ///
-/// Returns a [`ClaimError`] for a missing forge, a malformed `--repository`, a
-/// committed root naming another package ([`ClaimError::RootNameMismatch`]) or
-/// another physical repository ([`ClaimError::RepositoryMismatch`]), any
-/// owner-ladder refusal, any description-observation failure
-/// ([`ClaimError::Description`], which carries the announce taxonomy verbatim),
-/// a missing base ref, a race lost twice (`NonFastForward` under `api`,
-/// `StaleLease` under `git`), an `--out` write failure, or any forge failure.
+/// A [`ClaimError`] for a missing forge, a malformed `--repository`, a committed root naming another
+/// package or repository, an owner-ladder refusal, a description-observation failure, a missing base
+/// ref, a race lost twice (`NonFastForward` under `api`, `StaleLease` under `git`), an `--out` write
+/// failure, or any forge failure.
 pub async fn claim(
     request: ClaimRequest,
     forge: Option<&dyn Forge>,
@@ -110,31 +71,20 @@ pub async fn claim(
     let forge = forge.ok_or(ClaimError::ForgeRequired)?;
     let package = request.package.repository().to_string();
     let root_path = root_path(&package);
-    // Derived ONCE and carried onto the outcome, so the branch the report names
-    // and the ref actually written cannot diverge.
     let branch = claim_branch(&package);
     let repository = parse_repository(&request.repository)?;
     let name = root_name(&request.package);
 
-    // D-3 — the committed root is read from the index BASE ref, never the claim
-    // branch: an unmerged claim sitting on the branch is a re-run of *this*
-    // claim, not a committed one. Read in every mode, `--out` included, because
-    // it is what a re-claim rebuilds from.
+    // Read from the base ref, never the claim branch, or an unmerged claim is carried forward as committed.
     let committed_bytes = forge
         .get_file_contents(&request.index_repo, &root_path, INDEX_BASE_REF)
         .await?;
-    // A committed root that is not JSON is answered by the `name` refusal below
-    // rather than by a variant of its own: `get("name")` on `Value::Null` is
-    // `None`, which D-5 already rules a mismatch (`committed: ""`). A corrupt
-    // root in the published index is exactly the "two sides disagree, a human
-    // decides" case that refusal names, at the same exit 65.
+    // A non-JSON committed root becomes `Null` and so fails closed on the `name` refusal below.
     let committed: Option<Value> = committed_bytes
         .as_deref()
         .map(|bytes| serde_json::from_slice(bytes).unwrap_or(Value::Null));
 
     if let Some(committed) = &committed {
-        // D-5 (#477) — the expected value is `root_name`'s, the one spelling
-        // announce's sibling refusal also reads. An absent `name` fails closed.
         let committed_name = committed.get("name").and_then(Value::as_str).unwrap_or_default();
         if committed_name != name {
             return Err(ClaimError::RootNameMismatch {
@@ -142,9 +92,7 @@ pub async fn claim(
                 expected: name,
             });
         }
-        // D-3 — refused rather than updated: the pointer decides where a
-        // package's bytes come from, and repointing it must not be a side
-        // effect of adding an owner.
+        // Refused, never updated: repointing where a package's bytes come from must not ride on adding an owner.
         let committed_repository = committed.get("repository").and_then(Value::as_str).unwrap_or_default();
         if committed_repository != repository {
             return Err(ClaimError::RepositoryMismatch {
@@ -161,9 +109,6 @@ pub async fn claim(
         author_identity_source,
     } = resolve_owners(forge, &request.owners).await?;
     let owners = merge_owners(committed.as_ref(), resolved);
-    // C-072 — who this claims for, on stderr, BEFORE any write. The word is
-    // read from `source` here and again from `ClaimOutcome::owner_identity_source`
-    // by the report and the request body, so the three cannot disagree.
     log::info!(
         "claiming {name} for {} (owner identity source: {source})",
         owners
@@ -180,10 +125,8 @@ pub async fn claim(
         committed.as_ref(),
     );
 
-    // D-2 — the description. X3's pre-flight is resolved here and nowhere else,
-    // so it precedes the first registry request of the run by construction:
-    // `observe_desc` is the only registry caller on this path, and it takes the
-    // `Physical` this produced rather than resolving one of its own.
+    // `observe_desc` is this path's only registry caller and takes this `Physical`, so the SSRF
+    // pre-flight precedes every registry request.
     let physical = pipeline::guarded_physical(
         &request.repository,
         request.package.registry(),
@@ -192,24 +135,15 @@ pub async fn claim(
         &ocx_oci::ssrf::proxy_rules(),
     )
     .await?;
-    // The root just built carries the committed `desc` verbatim, so the
-    // floating-tag comparison inside is against what the index currently
-    // records — absent on a fresh claim, which makes any served description a
-    // move and ships it on the very first pull request.
+    // `root` carries the committed `desc`, so the observation compares against what the index records.
     let observed = pipeline::observe_desc(publisher, &physical, &root).await?;
     if let Some(updated) = &observed.desc
         && let Some(object) = root.as_object_mut()
     {
-        // Replacing an existing key keeps its position under `preserve_order`,
-        // and `build_root` always emits `desc`, so this never appends.
+        // `build_root` always emits `desc`, so under `preserve_order` this replaces in place, never appends.
         object.insert("desc".to_string(), updated.clone());
     }
     let root_bytes = ocx_index::serialize_root(&root);
-    // Owner mandate (§5 decisions C–E) — the objects the new root stops
-    // referencing leave the index in the commit that stops referencing them,
-    // diffed against the committed root at the ref the commit is parented on. A
-    // fresh claim references nothing and orphans nothing, answered without a
-    // single probe.
     let orphans = pipeline::orphan_paths(
         committed.as_ref(),
         &root,
@@ -219,15 +153,11 @@ pub async fn claim(
         INDEX_BASE_REF,
     )
     .await?;
-    // `observed: &[]` — claim never writes tags, so the only CAS objects it
-    // carries are the description's payload blobs, in the same atomic commit as
-    // the root (C15).
+    // `&[]`: claim never writes tags; its only CAS objects are the description's payload blobs.
     let files = pipeline::build_files(&root_path, &root_bytes, &package, &[], &observed.blobs, &orphans);
 
-    // `--out` writes the tree and stops: no branch exists to be unchanged
-    // against, so the run is ALWAYS `updated`, and `ensure_push_access` is not
-    // called at all — S-011's `push-access: skipped` comes from
-    // `PushAccess::skipped_all()`, never from a forge answering `skipped`.
+    // Always `Updated` (no branch to compare against). Push access is `skipped_all()`, never asked of
+    // the forge: GitHub answers an unreadable `permissions` with exit 80.
     if let ClaimTarget::Out(directory) = &request.target {
         let written_paths = write_out(directory, &files).await?;
         return Ok(ClaimOutcome {
@@ -246,11 +176,7 @@ pub async fn claim(
         });
     }
 
-    // D-3's no-op: the index already holds, byte for byte, what this claim
-    // would propose. No new blob and no orphan can hide behind that equality —
-    // a byte-identical root records the same `desc` digest, so its payload
-    // blobs are the ones the committed root already names, and `orphan_paths`
-    // over two equal roots is empty by construction.
+    // A byte-identical root records the same `desc` digest and orphans nothing, so nothing else is pending.
     if committed_bytes.as_deref() == Some(root_bytes.as_slice()) {
         return Ok(ClaimOutcome {
             package,
@@ -268,9 +194,7 @@ pub async fn claim(
         });
     }
 
-    // Where the claim branch lives right now: a fork that already exists, the
-    // index repository itself on the fork-free path. Read-only (`find_fork`),
-    // so an unchanged run provokes no fork create.
+    // `find_fork`, not `ensure_fork`: an unchanged run must not create a fork.
     let fork_target = match &request.target {
         ClaimTarget::Fork(target) => Some(target),
         ClaimTarget::Direct | ClaimTarget::Out(_) => None,
@@ -285,9 +209,7 @@ pub async fn claim(
         ClaimTarget::Out(_) => None,
     };
 
-    // C-051's state machine. `compare_branch` runs if and only if the branch
-    // exists — an absent branch has no second ref to compare, so the call is a
-    // contract and not an optimisation.
+    // `compare_branch` only on a live branch: an absent branch has no second ref to compare.
     let branch_head = match &branch_repo {
         Some(repo) => forge.get_ref_sha(repo, &head_ref(&branch)).await?,
         None => None,
@@ -305,34 +227,21 @@ pub async fn claim(
         Some(repo) => forge.find_open_pull_request(&request.index_repo, repo, &branch).await?,
         None => None,
     };
-    // `Behind` and `Diverged` are rebuilt on the current index base, so the ref
-    // is repointed with a lease; every other state fast-forwards, which is a
-    // real compare-and-swap. `pull_request_mergeability` is never consulted
-    // (C-053): the rebuild makes the request mergeable by construction.
-    //
-    // `Accumulate` rather than `FastForward`, and the difference is the parent
-    // rather than the ref update. A claim root is rendered wholly from the
-    // request — it is derived from `base_sha` in no way at all — so a branch
-    // merely `Ahead` of the base must be built on, not refused. `FastForward`
-    // means "the payload came from `base.sha`, so refuse any other head", which
-    // is announce's contract and would strand every `Ahead` re-claim here.
+    // `Behind`/`Diverged` are rebuilt on the current base and repointed with a lease; copying announce's
+    // `Diverged` arm would reintroduce a `pull_request_mergeability` read the rebuild makes needless.
     let update = match comparison {
         Some(BranchComparison::Behind | BranchComparison::Diverged) => RefUpdate::Reset,
+        // `Accumulate`, not announce's `FastForward`: a claim root never derives from `base_sha`, and
+        // `FastForward` would strand every `Ahead` re-claim.
         _ => RefUpdate::Accumulate,
     };
 
-    // The one state that may write nothing: a branch strictly ahead of the base
-    // already carrying byte-identical content. The comparison is on BYTES —
-    // `serde_json::Value`'s object is an `IndexMap` and `IndexMap::eq` is
-    // order-independent, so a value-level compare reports `unchanged` for a
-    // root whose fields a third party reordered.
+    // Compared as bytes: `Value` equality ignores key order, so a reordered root would read `unchanged`.
     if let Some(repo) = live_branch
         && comparison == Some(BranchComparison::Ahead)
         && forge.get_file_contents(repo, &root_path, &branch).await?.as_deref() == Some(root_bytes.as_slice())
     {
-        // Content already right AND a request already open ⇒ no write of any
-        // kind. Without one, the content is stranded, so the request is
-        // ensured — and nothing else is.
+        // Content already right: only ensure a request exists, or the content is stranded.
         let pull_request = match open_request {
             Some(pull_request) => pull_request,
             None => {
@@ -364,8 +273,7 @@ pub async fn claim(
         });
     }
 
-    // The write path. Push permission is verified before the first byte on the
-    // fork-free path only: a fork is the credential's own repository.
+    // Push permission is checked on the fork-free path only; a fork is the credential's own repository.
     let (commit_repo, fork, push_access) = match fork_target {
         Some(target) => {
             let fork = match existing_fork {
@@ -373,9 +281,7 @@ pub async fn claim(
                 None => forge.ensure_fork(&request.index_repo, Some(&target.namespace)).await?,
             };
             let coordinate = fork.coordinate(&request.index_repo);
-            // The commit parents off a SHA read from the upstream but is
-            // written to the fork, so land that object in the fork's own
-            // history first.
+            // The commit parents on an upstream SHA, so the fork needs that object first.
             forge.sync_fork(&coordinate, INDEX_BASE_REF).await;
             (coordinate, Some(fork), PushAccess::skipped_all())
         }
@@ -387,24 +293,11 @@ pub async fn claim(
 
     let message = request_title(&name);
     let body = request_body(&name, &repository, &branch, &owners, source);
-    // Every claim commit is BASED on the index base — the sha read here is the
-    // one handed to `commit_files`, on every transport and in every state. What
-    // the commit is PARENTED on is the transport's business and is not always
-    // this sha: under `Accumulate` the git workspace and GitLab's commits API
-    // both build on the branch head when the branch is already there. That is
-    // deliberate (see the `RefUpdate::Accumulate` reasoning above) — a claim
-    // root accumulates nothing, so an `Ahead` branch must be built on rather
-    // than refused, and reading the base here is what keeps `Behind`/`Diverged`
-    // mergeable.
+    // Based on the index base SHA (under `Accumulate` a transport may parent on the branch head), which
+    // keeps `Behind`/`Diverged` mergeable.
     let base_sha = read_base_sha(forge, &request.index_repo).await?;
-    // The commit and the pull request are **one unit of work** for the purposes
-    // of the race, because which of the two loses it depends on the transport
-    // (the same reasoning announce's C-056 retry is built on). Under `api` the
-    // commit's compare-and-swap is rejected. Under `git`, `commit_files`
-    // performs no network write at all — objects and a local ref only — and the
-    // push happens inside `open_or_update_pull_request`, so the rejection
-    // arrives there. Retrying around the commit alone would therefore give up
-    // under exactly the transport that needs the retry most.
+    // Commit and request retry as one unit: under `git` the push, and so the rejection, happens inside
+    // `open_or_update_pull_request`, so retrying the commit alone gives up where the retry is needed.
     let first_attempt = match forge
         .commit_files(
             &commit_repo,
@@ -436,24 +329,15 @@ pub async fn claim(
     };
     let pull_request = match first_attempt {
         Ok(pull_request) => pull_request,
-        // The two spellings of "the base moved under us", one per transport.
-        // `api` refuses the fast-forward; `git` loses the `--force-with-lease`
-        // and reports `StaleLease`. Matching only the first would retry under
-        // `api` and give up under `git` for the identical race — and since both
-        // classify to exit 75, no assertion on the outcome could tell the two
-        // behaviours apart.
+        // Both spellings of a lost race (`api` refuses the fast-forward, `git` loses the lease); matching
+        // one gives up under the other transport, and both exit 75, so no outcome test tells them apart.
         Err(ForgeError::NonFastForward { .. } | ForgeError::StaleLease { .. }) => {
-            // C-051: re-fetch, re-read the winning head and regenerate EXACTLY
-            // once — never a loop, or a second rejection is swallowed. A claim
-            // root is rendered wholly from the request, so "regenerate" adds
-            // nothing to merge; what the re-read buys is the refusal below.
+            // Retried exactly once, never looped, or a second rejection is swallowed.
             if let Some(repo) = &branch_repo
                 && forge.get_ref_sha(repo, &head_ref(&branch)).await?.is_some()
                 && forge.get_file_contents(repo, &root_path, &branch).await?.is_none()
             {
-                // The writer that won the race left no root at its head, so
-                // there is nothing to regenerate against. Committing the
-                // freshly-rendered root anyway would clobber them silently.
+                // The winner left no root at its head; committing ours anyway would silently clobber them.
                 return Err(ClaimError::MissingHeadRoot {
                     branch,
                     path: root_path,
@@ -474,9 +358,6 @@ pub async fn claim(
                     update,
                 )
                 .await?;
-            // One shot, by construction: a second rejection propagates rather
-            // than starting a third pass — still rejected is exit 75, and the
-            // caller reruns the command.
             forge
                 .open_or_update_pull_request(
                     &request.index_repo,
@@ -488,10 +369,7 @@ pub async fn claim(
                 )
                 .await?
         }
-        // Every other failure is settled, not raced. Widening this to `Err(_)`
-        // once two calls feed one `match` is the natural mistake and the costly
-        // one: `MergeRequestUnconfirmed` means the push already landed, so
-        // retrying pushes a second time.
+        // Never widen the retry to `Err(_)`: `MergeRequestUnconfirmed` means the push landed, so a retry pushes twice.
         Err(other) => return Err(ClaimError::Forge(other)),
     };
 
@@ -511,21 +389,17 @@ pub async fn claim(
     })
 }
 
-/// The git ref path for a branch.
-///
-/// [`Forge::get_ref_sha`] speaks ref paths (`heads/<branch>`), not bare branch
-/// names: GitHub builds `/git/ref/{ref}` from it verbatim and answers 404 for a
-/// bare name, while GitLab strips the prefix.
+/// The ref path `heads/<branch>`: [`Forge::get_ref_sha`] takes ref paths, and GitHub answers 404 for
+/// a bare branch name.
 fn head_ref(branch: &str) -> String {
     format!("heads/{branch}")
 }
 
-/// The commit parent every claim uses.
+/// The index base SHA every claim commit is based on.
 ///
 /// # Errors
 ///
-/// [`ClaimError::MissingBaseRef`] — never `unwrap_or_default`, which parents the
-/// commit on an empty string.
+/// [`ClaimError::MissingBaseRef`] when the ref is absent; defaulting would base the commit on `""`.
 async fn read_base_sha(forge: &dyn Forge, index_repo: &RepoCoordinate) -> Result<String, ClaimError> {
     forge
         .get_ref_sha(index_repo, &head_ref(INDEX_BASE_REF))
@@ -536,53 +410,28 @@ async fn read_base_sha(forge: &dyn Forge, index_repo: &RepoCoordinate) -> Result
         })
 }
 
-/// Write the claim's whole file set — the root and the description's payload
-/// blobs — under the `--out` directory.
+/// Write the claim's file set (the root and the description's payload blobs) under `--out`.
 ///
-/// The writer is announce's ([`pipeline::write_out`]): a `--out` claim and a
-/// `--out` announce must materialise the same entry shape, or the
-/// `claim --out dir && publish dir` pipeline ships a root naming a readme it
-/// never wrote.
-///
-/// The one thing not shared is the failure: announce's
-/// [`AnnounceError::OutputWrite`] is re-pointed onto [`ClaimError::OutputWrite`]
-/// so the envelope keeps its `output_write` slug rather than reporting a write
-/// failure as `description`. Both classify to exit 74 either way, which is why
-/// the slug is the whole of what this mapping buys.
+/// Announce's writer, or `claim --out dir && publish dir` ships a root naming a readme it never wrote.
 ///
 /// # Errors
 ///
-/// [`ClaimError::OutputWrite`] — its own variant rather than a bare
-/// `io::Error`, because `cli::classify` special-cases only `PermissionDenied`
-/// and everything else would land on exit 1.
+/// [`ClaimError::OutputWrite`], re-pointed from announce's so the envelope keeps its `output_write` slug.
 async fn write_out(directory: &Path, files: &BTreeMap<String, FileChange>) -> Result<Vec<String>, ClaimError> {
     pipeline::write_out(directory, files)
         .await
         .map_err(|error| match error {
             AnnounceError::OutputWrite { path, source } => ClaimError::OutputWrite { path, source },
-            // Unreachable: `pipeline::write_out` documents `OutputWrite` as its
-            // only failure. Carried rather than collapsed, so a variant added
-            // there keeps its own exit code instead of being relabelled an I/O
-            // error.
+            // Unreachable today; carried, not collapsed, so a variant added there keeps its own exit code.
             other => ClaimError::Description(other),
         })
 }
 
-/// The re-claim owner union (D-3): every committed owner first, in the order the
-/// committed root records them, then each resolved owner the committed list does
-/// not already hold.
+/// The re-claim owner union: committed owners in committed order, then each resolved owner not
+/// already held.
 ///
-/// **Dedupe is by `id`, never by login.** `claim::owners` already replaces a
-/// supplied spelling with the forge's canonical one, so two spellings of one
-/// account arrive here as one id — while two accounts can share no id. Matching
-/// on the login instead would append a second entry for the same account
-/// whenever the committed root spells it differently from the command line.
-///
-/// A committed entry that is not the contracted `{login, id}` object is skipped
-/// with a debug line rather than carried: [`ResolvedOwner`] is what every
-/// downstream surface reads (the rendered root, the request body, the report),
-/// so there is nowhere to put a foreign shape. `owners` is schema-typed, so the
-/// skip is unreachable against a root the index would accept.
+/// Deduped by `id`, never login, or an account the committed root spells differently from the
+/// forge's canonical login is appended twice.
 fn merge_owners(committed: Option<&Value>, resolved: Vec<ResolvedOwner>) -> Vec<ResolvedOwner> {
     let Some(entries) = committed.and_then(|root| root.get("owners")).and_then(Value::as_array) else {
         return resolved;
@@ -613,7 +462,7 @@ fn merge_owners(committed: Option<&Value>, resolved: Vec<ResolvedOwner>) -> Vec<
 /// owner-ladder tests share.
 ///
 /// `pub(crate)` rather than private, and deliberately: no `Forge` double existed
-/// anywhere in this crate before WP-9, and both this module and `claim::owners`
+/// anywhere in this crate before this module, and both this module and `claim::owners`
 /// need one. A second copy in `owners.rs` would be the same fixture maintained
 /// twice, drifting the moment the trait grows a method.
 #[cfg(test)]

@@ -5,8 +5,7 @@
 
 use clap_builder::builder::styling::{AnsiColor, Effects, Styles};
 
-/// Returns clap styles with colored headings and usage when color is enabled,
-/// or plain (no styling) when color is disabled.
+/// clap styles: colored headings and usage when `color`, plain otherwise.
 pub fn clap_styles(color: bool) -> Styles {
     if color {
         Styles::styled()

@@ -15,13 +15,7 @@ use crate::app::project_context::{load_project_for_mutate, materialize_lock, rec
 use crate::conventions;
 use crate::options;
 
-/// Arguments for `ocx update` (whole-file or scoped lock re-resolve).
-///
-/// The user-facing command overview renders from the `Command::Update`
-/// variant doc in `command.rs` — clap uses the variant doc as the subcommand
-/// `about`, so a top-level `///` here would be rustdoc-only. Per-mode detail
-/// lives on the `check` / `groups` / `names` argument docs below (those clap
-/// *does* render).
+/// Arguments for `ocx update`; its help text lives on `Command::Update`.
 #[derive(Parser, Clone)]
 pub struct Update {
     /// Verify the candidate lock would match the predecessor and exit.
@@ -71,57 +65,28 @@ pub struct Update {
 
 impl Update {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Errors propagate to the `main.rs` boundary (logged + classified).
         let guard = load_project_for_mutate(&context).await?;
 
-        // Stage as a lock-only mutation; the candidate config is
-        // byte-identical to the snapshot.
         let staged = guard.stage(|_cfg| Ok(()))?.lock_only();
 
-        // The predecessor the report diffs the candidate against. Cloned up
-        // front because `commit_and_render` consumes the guard below, and the
-        // whole point of this command's report is that both locks are in hand
-        // at the same moment. `None` only for a bare `ocx update` in a project
-        // that has no `ocx.lock` yet — every other path gates on it.
+        // Cloned up front: `commit_and_render` consumes the guard, and the report needs both locks.
         let previous = guard.previous_lock().cloned();
 
-        // Update-family routing: resolve tags live against the registry by
-        // default, capped by `--offline`/`--frozen`, and never commit tag
-        // pointers into the shared local index — `ocx.lock` is the canonical
-        // record (`adr_toolchain_update_family.md`).
+        // Resolves live and never commits tag pointers to the shared local index (`adr_toolchain_update_family.md`).
         let update_index = context.update_index();
         let resolve_index = &update_index;
 
-        // A `-g/--group` or a positional binding name switches update from
-        // the whole-file bump to a scoped bump: only the named bindings
-        // re-resolve, everything else is carried forward verbatim.
         let scoped = !self.groups.is_empty() || !self.names.is_empty();
 
-        // `examined` is the `(group, binding)` selection this run actually
-        // re-resolved — `None` for a whole-lock bump, which examines every
-        // binding. The report narrows its `unchanged` list to it, so a pin
-        // carried forward verbatim is never reported as checked.
+        // `examined` narrows the report's `unchanged` list, so a carried-forward pin is never reported as checked.
         let (new_lock, examined) = if scoped {
-            // Scoped mode carries untouched pins forward, so it needs a
-            // predecessor `ocx.lock` — there is nothing to freeze without one.
-            // Checked before any resolve so a missing lock is deterministic
-            // (exit 78) and never masked by a registry failure.
+            // Checked before any resolve, or a registry failure masks the exit 78.
             let Some(previous) = previous.as_ref() else {
                 return Err(missing_lock(guard.lock_path()).into());
             };
 
-            // Validate the `-g` / name selection and resolve it to concrete
-            // `(group, binding)` pairs. Unknown group / name -> exit 64.
             let touched = select_touched(guard.config(), &self.groups, &self.names)?;
 
-            // Re-resolve exactly the touched bindings against the live index
-            // and carry every other pin forward verbatim (V2 byte-identical /
-            // V1 exact-transcribe). Only the explicitly named pairs re-resolve
-            // (no laundering); untouched entries never live-re-resolve (no
-            // drift). This is a lock-only op, so the candidate config and the
-            // pre-mutation snapshot are the same value (`staged.config()` ==
-            // `guard.config()`). The freshness gate inside `resolve_lock_touched`
-            // refuses a drifted `ocx.toml` (exit 65) before any resolve.
             let lock = resolve_lock_touched(
                 staged.config(),
                 guard.config(),
@@ -133,43 +98,19 @@ impl Update {
             .await?;
             (lock, Some(touched))
         } else {
-            // ── --check missing-predecessor gate (spec §4.5) ───────────────
-            //
-            // For `--check`, verify a predecessor lock exists BEFORE the
-            // whole-file re-resolve. With no lock, the re-resolve would still
-            // hit the registry — a registry/auth/policy failure would then mask
-            // the intended exit 78 (and waste a network round-trip). Checking
-            // first makes "no lock to verify against" return ConfigError (78)
-            // deterministically, with no network attempted.
+            // Before the re-resolve, or a registry failure masks the exit 78.
             if self.check && previous.is_none() {
                 return Err(missing_lock(guard.lock_path()).into());
             }
 
-            // Whole-file bump (spec §4.5): bare `resolve_lock(&[])` re-resolves
-            // every declared tag. There is no subset, no carry-forward, nothing
-            // untouched — laundering and drift are impossible by construction.
             let lock = resolve_lock(staged.config(), resolve_index, &[], ResolveLockOptions::default()).await?;
             (lock, None)
         };
 
-        // The answer both paths report: which pins moved between the
-        // predecessor and the candidate, keyed by `(group, name, platform)`
-        // and compared as pull identifiers. Built here, while the guard still
-        // holds the declaration the tag column reads from — the commit below
-        // consumes it.
+        // Built while the guard still holds the declaration the tag column reads; the commit consumes it.
         let report = UpdateReport::diff(previous.as_ref(), &new_lock, guard.config(), examined.as_deref());
 
-        // ── --check verify-only path (both modes) ──────────────────────
-        //
-        // `--check` performs the re-resolve above and exits without writing:
-        // 0 when nothing would move, 65 when any pinned content or the
-        // load-bearing metadata would change (an advisory tag moved
-        // upstream). The report goes to stdout FIRST — data on stdout, the
-        // diagnostic on stderr, so a refusal names what moved instead of
-        // making the user re-run without `--check` to find out. The
-        // missing-predecessor case (78) is already handled above — the scoped
-        // branch requires a predecessor unconditionally, the whole-file branch
-        // gates `--check` on it — so a predecessor is guaranteed here.
+        // Reported before the exit-65 diagnostic, so a refusal names what moved.
         if self.check {
             let moved = report.moved();
             self.emit(&context, report)?;
@@ -184,14 +125,7 @@ impl Update {
             return Ok(ExitCode::SUCCESS);
         }
 
-        // C-054 / D-V8 — commit, then re-render the toolchain home the new lock
-        // describes, through the one shared orchestration. RUL-59: `-g` and the
-        // NAME filter scoped *resolution* above; the re-render is whole-home.
-        // `--no-pull` promises this invocation downloads nothing, and the
-        // render's metadata closure walk is a download. It therefore runs
-        // against the offline view (the shipped `--no-pull` idiom, as in
-        // `ocx env --no-pull`): a warm store still re-renders, a cold one
-        // degrades quietly and the deferred `ocx pull` renders instead.
+        // `-g`/NAME scope only the resolution, never the re-render; `--no-pull` renders from the offline view.
         let eager = self.pull.enabled(true);
         let render_manager = if eager {
             context.manager().clone()
@@ -214,17 +148,10 @@ impl Update {
             .await?
             .commit;
 
-        // Consent write seam (C-024, A-29) — one of the commands allowed to
-        // stamp, opting in explicitly. AFTER the commit, so the stamp records
-        // the source set the user just asked for rather than the one it
-        // replaced. Best-effort; never fails the mutation.
+        // After the commit, so the stamp records the new source set.
         record_activation_consent(&commit.config_path, &new_lock, None).await;
 
-        // Best-effort materialization AFTER the commit lands. A failure here
-        // does not roll back the lock — the declaration is committed; only
-        // the object-store population is deferred. Matches `add` semantics.
-        // The `--check` early-return above ensures this line is never reached
-        // on the verify-only path. `--no-pull` opts out.
+        // After the commit, so a failure here never rolls back the lock.
         materialize_lock(&context, &new_lock, eager, platform).await?;
 
         self.emit(&context, report)?;
@@ -232,9 +159,7 @@ impl Update {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// One report, two renderings: `--verbose` appends the pins that held
-    /// still. `VerboseUpdateReport` serializes as its inner report, so
-    /// `--format json` is byte-identical with and without the flag.
+    /// One report, two renderings: `--verbose` appends the unmoved pins to plain output only.
     fn emit(&self, context: &crate::app::Context, report: UpdateReport) -> anyhow::Result<()> {
         if self.verbose {
             context.api().report(&VerboseUpdateReport(report))
@@ -244,9 +169,7 @@ impl Update {
     }
 }
 
-/// Build the "no predecessor `ocx.lock`" error shared by the scoped gate and
-/// the whole-file `--check` gate — both require an existing lock (to carry
-/// untouched pins forward from, or to verify the candidate against).
+/// The exit-78 error for a missing predecessor `ocx.lock`.
 fn missing_lock(lock_path: &std::path::Path) -> CommandError {
     CommandError::new(
         format!(
@@ -257,25 +180,13 @@ fn missing_lock(lock_path: &std::path::Path) -> CommandError {
     )
 }
 
-/// Resolve the `-g/--group` + positional-name selection into the concrete
-/// `(group, binding)` pairs a scoped `ocx update` must re-resolve.
+/// Resolve the `-g` and name selection into the `(group, binding)` pairs a scoped `ocx update` re-resolves.
 ///
-/// Group scope: an empty `groups` means every group (the top-level `[tools]`
-/// table plus every `[group.*]`); a non-empty `groups` restricts to exactly
-/// those, with `all` expanding to the full set. Within that scope, an empty
-/// `names` selects every binding (the `-g GROUP` form); a non-empty `names`
-/// selects only the matching bindings. A binding name present in several
-/// in-scope groups is advanced in each of them (each against its own declared
-/// tag) — deliberate, no ambiguity error, unlike `ocx exec`'s compose path.
-///
-/// The config map keys are the binding names, so no `binding_key` derivation
-/// is needed here.
+/// A name in several in-scope groups advances in each, unlike `ocx exec`'s ambiguity error.
 ///
 /// # Errors
 ///
-/// Returns a [`CommandError`] classified [`ocx_exit::ExitCode::UsageError`] (exit
-/// 64) when a requested group is unknown (mirroring `ocx exec`) or a requested
-/// name matches no binding in scope.
+/// [`ocx_exit::ExitCode::UsageError`] for an unknown group or a name matching no binding in scope.
 fn select_touched(
     config: &ProjectConfig,
     groups: &[String],
@@ -283,9 +194,6 @@ fn select_touched(
 ) -> Result<Vec<(String, String)>, CommandError> {
     let usage = |message: String| CommandError::new(message, ocx_exit::ExitCode::UsageError);
 
-    // Validate + expand the group filter. `None` = every group. `default` and
-    // `all` are always valid reserved keywords; any other name must be a
-    // declared `[group.*]`.
     let scope: Option<Vec<String>> = if groups.is_empty() {
         None
     } else {
@@ -303,14 +211,10 @@ fn select_touched(
     };
 
     let in_scope = |group: &str| scope.as_ref().is_none_or(|s| s.iter().any(|g| g == group));
-    // `None` name filter = every binding in scope; `Some` = only these names.
     let name_filter: Option<HashSet<&str>> = (!names.is_empty()).then(|| names.iter().map(String::as_str).collect());
     let selected = |binding: &str| name_filter.as_ref().is_none_or(|f| f.contains(binding));
 
-    // Iterate the config structure once (each group visited once), so a
-    // duplicate group in `scope` never double-counts a binding. The
-    // deterministic order (default group first, then named groups
-    // alphabetically) matches the resolver's own ordering.
+    // Each group visited once, so a duplicate `-g` never double-counts a binding.
     let mut touched: Vec<(String, String)> = Vec::new();
     let mut matched: HashSet<String> = HashSet::new();
 
@@ -334,9 +238,6 @@ fn select_touched(
         }
     }
 
-    // Every explicitly requested name must have matched at least one in-scope
-    // binding — otherwise the user named a binding that does not exist (or is
-    // outside the `-g` scope). Mirrors `ocx exec`'s unknown-name usage error.
     for name in names {
         if !matched.contains(name) {
             return Err(usage(format!("binding '{name}' not found in the selected groups")));
@@ -493,8 +394,8 @@ mod tests {
         );
     }
 
-    /// A second `--platform` occurrence is a usage error (D4 of
-    /// `adr_platform_model_unification.md`).
+    /// A second `--platform` occurrence is a usage error, per the
+    /// single-platform-authoring decision in `adr_platform_model_unification.md`.
     #[test]
     fn rejects_repeated_platform_flag() {
         assert!(

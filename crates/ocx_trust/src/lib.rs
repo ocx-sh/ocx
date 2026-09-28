@@ -3,66 +3,10 @@
 
 //! Trust policy: identity-pinned verification config (`[[trust.policy]]`).
 //!
-//! A trust policy pins the expected signing identity (Fulcio certificate SAN)
-//! and OIDC issuer for a scope of packages, so `ocx package verify` can reject
-//! a typosquat that carries a valid-but-wrong Sigstore identity. Without
-//! identity pinning, an attacker who publishes to the same registry with their
-//! own valid GitHub Actions OIDC token passes signature verification.
-//!
-//! A policy accepts a **set** of signers: `signers = [...]`, each entry tagged
-//! `kind = "keyless"` or `kind = "key"`, while `scope` and the SLSA `builder`
-//! pin stay top-level because neither depends on which backend signed. Mixing
-//! kinds in one policy is legal and is how a fleet migrates between signing
-//! models without touching scope. See [`TrustPolicy`].
-//!
-//! **Adding a signer widens acceptance; it never narrows it.** The array is an
-//! ANY-of, so every entry is one more way for an artifact to pass. Most readers
-//! hear "add a key policy" as tightening, which is the opposite of what happens.
-//! Narrowing means *removing* entries — or, at the operator tier, a
-//! `system_locked` policy that displaces the lower tiers wholesale.
-//!
-//! Policies are declared as an array-of-tables (`[[trust.policy]]`) in the
-//! operator `config.toml` (system / user / `$OCX_HOME`, which array-append into
-//! one operator set) and in the project `ocx.toml`. Resolution is
-//! **operator-authoritative** ([`resolve_tiered`]): if any operator policy
-//! matches the target, only operator policies apply and the project `ocx.toml`
-//! is ignored for that package, so a project config can never override or weaken
-//! an operator pin. When no operator policy matches, the project tier applies
-//! and may *add* trust for scopes the operator has not governed. Within the
-//! chosen tier, resolution is most-specific-wins with **ANY-of** among
-//! equal-specificity scopes, which is what makes key/workflow rotation work —
-//! the old and new identity coexist during the overlap window and either one
-//! passes. Specificity is measured **against the target**
-//! ([`ScopeSpec::specificity_for`]): the literal prefix length for a string
-//! scope, and for an include/exclude set the longest literal prefix among the
-//! includes that actually matched.
-//!
-//! The operator tier itself pools three `config.toml` files, and one of them is
-//! privileged: a policy declared at the SYSTEM scope carries
-//! [`TrustPolicy::system_locked`], which makes it **admission-authoritative**
-//! for the scopes it matches (see [`resolve`]). Lower tiers — including the
-//! untrusted managed-config payload — can neither outbid it with a more
-//! specific scope nor join its ANY-of set at the same scope: a system pin names
-//! every identity that may sign, and rotation happens by editing the system
-//! config that declares it.
-//!
-//! This crate is a leaf with respect to the verification machinery that
-//! consumes it: the certificate-side matching that takes a resolved
-//! [`CompiledPolicy`] lives in `ocx_lib::oci::verify::identity`, and nothing
-//! here reaches back into it. The one permitted reference is [`key_ref`] — the
-//! `--key` grammar [`compile_key_signer`] speaks, itself a leaf that imports
-//! nothing from the rest of this crate. Sharing it is what keeps a key
-//! reference spelled the same way on the command line and in a policy; a
-//! second parser here would be the drift.
-//! See `.claude/artifacts/adr_trust_policy.md`.
-//!
-//! **Distinct from [`ocx_util::tls`].** This crate pins WHO may sign — a signer
-//! identity — after the TLS handshake that fetched the artifact already
-//! succeeded; `tls` governs WHICH CAs are trusted to authenticate that
-//! handshake in the first place (`extra_ca_certs`/`extra_ca_certs_pem`,
-//! ocx#448). The two never overlap: a wrong `[[trust.policy]]` rejects a
-//! validly-fetched, wrongly-signed artifact, while a wrong extra CA root fails
-//! the fetch before any signature is even read.
+//! A policy pins the signing identity (Fulcio SAN plus OIDC issuer, or a public key) for a scope of packages.
+//! `signers` is ANY-of: adding a signer widens acceptance, never narrows it. Resolution is operator-authoritative
+//! and a `system_locked` policy displaces lower tiers ([`resolve_tiered`], [`resolve`]). Certificate matching lives
+//! in `ocx_sign::verify::identity`; nothing here reaches back. See `adr_trust_policy.md`.
 
 use std::path::PathBuf;
 
@@ -71,8 +15,6 @@ use serde::{Deserialize, Serialize};
 use key_ref::MAX_KEY_PEM_BYTES;
 use ocx_util::fs::path::FileReference;
 
-// DEC-16: `trust.rs` stays a file and declares its child here, so its
-// `include_str!` depths are the ones they always were.
 pub mod key_ref;
 
 /// Container for the `[trust]` config section (`[[trust.policy]]` entries).
@@ -85,25 +27,18 @@ pub struct TrustConfig {
     /// Sigstore trust material for a self-hosted stack (`[trust.sigstore]`).
     ///
     /// Read from the operator `config.toml` tiers only. The project `ocx.toml`
-    /// also deserializes into [`TrustConfig`], but its `sigstore` sub-table is
-    /// never consulted: a repository that could name its own Fulcio CA would
-    /// verify its own signatures, which is the whole trust decision.
+    /// also accepts a `[trust]` table, but its `sigstore` sub-table is never
+    /// consulted.
+    // A repository that could name its own Fulcio CA would verify its own signatures.
     #[serde(default)]
     pub sigstore: Option<SigstoreTrust>,
 }
 
 impl TrustConfig {
-    /// Mark every declared policy as system-scope — see
-    /// [`TrustPolicy::system_locked`].
+    /// Mark every declared policy, and the sigstore sub-table, as system-scope; unconditional, like
+    /// `config::RegistryDefaults::lock_as_system`.
     ///
-    /// Called by the config loader on the system-scope file
-    /// (`/etc/ocx/config.toml`) after parsing and before folding higher tiers
-    /// in. Unconditional, like
-    /// `config::RegistryDefaults::lock_as_system`:
-    /// `[trust]` has no opt-out field, so a system-scope policy is
-    /// authoritative by itself. The flag rides on each entry rather than on the
-    /// section, because trust policies array-append across tiers — the section
-    /// itself does not survive the fold, the entries do.
+    /// The flag rides on each entry, not the section: policies array-append across tiers and only entries survive.
     pub fn lock_as_system(&mut self) {
         for policy in &mut self.policy {
             policy.system_locked = true;
@@ -113,15 +48,8 @@ impl TrustConfig {
         }
     }
 
-    /// Merge `other` (the higher-precedence tier) into `self`.
-    ///
-    /// The two halves of `[trust]` merge by opposite rules, which is why this
-    /// is a method and not a field-wise fold at the call site. `[[trust.policy]]`
-    /// **array-appends** — every tier's entries pool into one set and masking
-    /// happens at resolution time ([`resolve`]). `[trust.sigstore]` is scalar
-    /// and cannot: two Fulcio CAs is not a merge, it is an ambiguity, so it
-    /// **replaces** field-by-field and honours the system lock, following the
-    /// `config::RegistryDefaults` precedent.
+    /// Merge `other` (the higher-precedence tier) into `self`: `[[trust.policy]]` array-appends and is masked at
+    /// resolution ([`resolve`]); scalar `[trust.sigstore]` replaces field by field, honouring the system lock.
     pub fn merge(&mut self, other: TrustConfig) {
         self.policy.extend(other.policy);
         if let Some(other_sigstore) = other.sigstore {
@@ -137,10 +65,7 @@ impl TrustConfig {
 /// when the stack is self-hosted rather than the Sigstore public good.
 ///
 /// Every field is optional and the whole sub-table may be absent — omitting it
-/// reproduces the public-good behaviour exactly. Its purpose is fleet
-/// distribution: an operator running an internal Fulcio/Rekor publishes one
-/// `config.toml` through the `[managed]` tier and every machine verifies
-/// against the internal CA with no env var and no file copy.
+/// reproduces the public-good behaviour exactly.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SigstoreTrust {
     /// Path to a Sigstore trusted-root JSON, or a directory holding
@@ -149,16 +74,15 @@ pub struct SigstoreTrust {
     /// A relative path resolves against the directory of the `config.toml`
     /// that declared it — rewritten to absolute at load time, so the same
     /// value means the same file regardless of the process working directory.
-    /// Mutually exclusive with [`Self::trusted_root_json`].
+    /// Mutually exclusive with `trusted_root_json`.
     #[serde(default)]
     pub trusted_root: Option<PathBuf>,
 
     /// The trusted-root document inlined verbatim.
     ///
     /// This is the form a fleet receives: `ocx config push` reads a path-form
-    /// [`Self::trusted_root`] at publish time and inlines it here, because a
-    /// path on the operator's disk means nothing on a consumer's. Mutually
-    /// exclusive with [`Self::trusted_root`].
+    /// `trusted_root` at publish time and inlines it here. Mutually exclusive
+    /// with `trusted_root`.
     #[serde(default)]
     pub trusted_root_json: Option<String>,
 
@@ -172,67 +96,44 @@ pub struct SigstoreTrust {
     #[serde(default)]
     pub rekor_url: Option<String>,
 
+    // Off by default, unlike cosign: on, it would irreversibly publish a private artifact's digest and signer to the
+    // public Rekor on first run.
     /// Fleet-wide default for uploading a **key-mode** signature to the
     /// transparency log, when neither `--rekor-upload` nor `--no-rekor-upload`
-    /// is given. Absent means off.
+    /// is given.
     ///
-    /// **Key mode only.** Under keyless the upload is a *requirement*, not a
-    /// default — a Fulcio certificate is valid for about ten minutes, and the
-    /// Rekor timestamp is the only proof the signature happened inside that
-    /// window — so this field is ignored there, deliberately without a warning.
-    /// Erroring or warning on every keyless signature because a fleet-wide
-    /// key-mode setting says `false` would let an unrelated configuration key
-    /// break the default signing path.
-    ///
-    /// Off by default in key mode even though cosign uploads: `rekor_url`
-    /// defaults to the **public** Rekor, so an on-by-default key path would
-    /// publish the digest and signer of a private corporate artifact to a
-    /// world-readable append-only log on first run. That is irreversible; a
-    /// signature with no transparency record is fixed by re-signing.
+    /// Absent means off. **Key mode only**: keyless signing always uploads, and ignores this
+    /// field without a warning. `rekor_url` defaults to the **public** Rekor, where an upload
+    /// publishes the artifact's digest and signer to a world-readable log.
+    // Keyless must upload: a Fulcio cert lives ~ten minutes and the Rekor timestamp proves signing inside it.
+    // Ignored under keyless without a warning, or a fleet-wide `false` would break the default signing path.
     #[serde(default)]
     pub rekor_upload: Option<bool>,
 
-    /// Runtime provenance marker: declared at the SYSTEM config scope
-    /// (`/etc/ocx/config.toml`), making the whole sub-table non-overridable by
-    /// the user, home, or managed tiers.
-    ///
-    /// Never serialized on either side — set by the loader via
-    /// [`TrustConfig::lock_as_system`], not read from disk. The skip is the
-    /// security boundary: a managed-config payload writing
-    /// `system_locked = true` parses as an unknown key and is dropped, so it
-    /// cannot promote its own trust root to system authority.
+    /// Declared in the system config (`/etc/ocx/config.toml`), so lower tiers cannot override the sub-table; set by
+    /// `lock_as_system`, never serialized.
+    // The skip is the security boundary: a managed payload writing `system_locked = true` is dropped as an unknown key.
     #[serde(skip)]
     #[schemars(skip)]
     pub system_locked: bool,
 }
 
 impl SigstoreTrust {
-    /// Mark this sub-table as system-scope — non-overridable by lower tiers.
-    ///
-    /// Unconditional, like
-    /// `config::RegistryDefaults::lock_as_system`:
-    /// there is no opt-out field to gate on, and an operator who pins a trust
-    /// root at `/etc` has said everything that needs saying.
+    /// Mark this sub-table as system-scope, non-overridable by lower tiers.
     pub fn lock_as_system(&mut self) {
         self.system_locked = true;
     }
 
-    /// Merge `other` (higher precedence) into `self`, field-by-field.
+    /// Merge `other` (higher precedence) into `self`, field by field; a system-locked `self` ignores it whole.
     ///
-    /// A system-locked `self` ignores every lower-tier override — the lock is
-    /// per-table, not per-field. The flag is ADOPTED from `other` for the same
-    /// reason `config::RegistryConfig::merge`
-    /// adopts it: the system tier folds in as `other` on the very first merge,
-    /// so without the adoption the lock would be dropped before it ever
-    /// applied.
+    /// The lock is adopted from `other`: the system tier folds in as `other` on the first merge, so without the
+    /// adoption the lock never applies.
     pub fn merge(&mut self, other: SigstoreTrust) {
         if self.system_locked {
             return;
         }
         self.system_locked = other.system_locked;
-        // A trust root is one decision in two spellings: taking either field
-        // from a higher tier must drop the other, or a tier that switches from
-        // a path to an inline document would leave both set and trip the XOR.
+        // Take both trust-root fields together, or switching from path to inline leaves both set and trips the XOR.
         if other.trusted_root.is_some() || other.trusted_root_json.is_some() {
             self.trusted_root = other.trusted_root;
             self.trusted_root_json = other.trusted_root_json;
@@ -248,72 +149,32 @@ impl SigstoreTrust {
         }
     }
 
-    /// Resolve [`Self::trusted_root`] against `config_dir` — the directory of
-    /// the `config.toml` that declared it — through the shared
-    /// [`FileReference`] grammar.
-    ///
-    /// Called by the config loader once per file tier, so `/etc/ocx/config.toml`
-    /// and `$OCX_HOME/config.toml` each anchor their own relative paths and the
-    /// process working directory never enters into it. The relative rule and
-    /// the reason it is `!has_root()` rather than `is_relative()` both live in
-    /// [`FileReference::anchored_at`]; this is the seam that applies them.
-    ///
-    /// **Takes `file://` as well as a bare path.** It sat three lines from
-    /// `signers[].key` accepting a strictly smaller vocabulary for no stated
-    /// reason ([ocx-sh/ocx#379](https://github.com/ocx-sh/ocx/issues/379)); one
-    /// grammar now serves both. The stored value is always the resolved path,
-    /// so every reader below this seam sees a plain absolute path and none of
-    /// them learns about the spelling.
+    /// Resolve [`Self::trusted_root`] (bare or `file://`) against `config_dir`, the declaring `config.toml`'s
+    /// directory, via [`FileReference::anchored_at`]; called once per file tier, so the working directory never counts.
     pub fn anchor_relative_root(&mut self, config_dir: &std::path::Path) {
         if let Some(path) = self.trusted_root.as_ref() {
-            // `to_string_lossy` is exact here: the value is deserialized from a
-            // TOML string, so it is UTF-8 by construction.
+            // `to_string_lossy` is exact: the value came from a TOML string.
             let written = path.to_string_lossy().into_owned();
             self.trusted_root = Some(FileReference::parse(&written).anchored_at(config_dir));
         }
     }
 }
 
-/// The `scope` value of a `[[trust.policy]]` entry: one prefix pattern, or an
-/// include/exclude set of them.
+/// The `scope` value of a `[[trust.policy]]` entry: one prefix pattern, or an include/exclude set.
 ///
 /// ```toml
 /// scope = "ghcr.io/acme/*"
 /// scope = { include = ["ghcr.io/acme/*"], exclude = ["ghcr.io/acme/experimental/*"] }
 /// ```
 ///
-/// Both forms are built from the same per-pattern rule — a pattern with no `*`
-/// matches on `/`-separated path-segment boundaries, a pattern with one is a
-/// literal-prefix glob, an empty pattern matches everything (see
-/// [`pattern_matches`]). The set form only says how several of them combine: a
-/// target matches when it matches at least one `include` (or `include` is
-/// empty, which reads as a catch-all) and no `exclude`. `exclude` therefore
-/// beats `include` whenever both match, which is what makes the headline
-/// carve-out — govern a whole registry, exempt one subtree — expressible in one
-/// entry.
-///
-/// A table must carry `include` or `exclude`; one naming neither is refused
-/// rather than read as a catch-all. Unknown keys are still dropped (fleet
-/// forward-compat), so without that floor a typo'd `includ` would parse to an
-/// empty table and silently widen a narrow pin to every package — the failure
-/// direction that loses trust instead of failing loudly. `scope = ""`, or
-/// omitting `scope`, is the catch-all spelling.
-///
-/// No regex form: `identity_regexp` is the only regex surface in `[trust]`, and
-/// a scope pattern picks which packages a pin *covers*, where an over-broad
-/// pattern silently widens trust instead of failing loudly.
+/// A set matches an `include` (or has none) and no `exclude`; `scope = ""` or no `scope` is the catch-all. A table
+/// needs `include` or `exclude`: unknown keys are dropped, so a typo'd `includ` would widen a pin to every package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum ScopeSpec {
     /// The string form: one prefix pattern.
     Prefix(String),
-    /// The object form: patterns to cover, minus patterns to carve out.
-    ///
-    /// One of the two keys is required; the other defaults to empty. A table
-    /// carrying only keys a newer ocx understands is therefore refused, not
-    /// read as an accidental catch-all — the one place the fleet forward-compat
-    /// tolerance [`TrustConfig`] describes stops, because here dropping the
-    /// unknown key would *widen* trust rather than narrow it.
+    /// The object form: patterns to cover, minus patterns to carve out; one key is required.
     Set {
         /// Patterns the policy covers. Empty is a catch-all.
         include: Vec<String>,
@@ -328,14 +189,7 @@ impl schemars::JsonSchema for ScopeSpec {
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        // Hand-written for the same reason `ProjectEnv`'s is: a derive reads
-        // the Rust type, so it cannot see what the hand-rolled `Deserialize`
-        // above actually accepts. Two divergences would otherwise ship — the
-        // derive emits `anyOf` where the shared union helper emits `oneOf`,
-        // and it cannot express "one of `include`/`exclude` is required",
-        // which is the whole point of the refusal. An editor bound to this
-        // schema would then show no error for `scope = {}` and ocx would exit
-        // 78 on the same file.
+        // Hand-written: a derive cannot require `include` or `exclude`, so `scope = {}` would pass it yet exit 78.
         ocx_util::schema::string_or_table(
             "One scope pattern. Segment-bounded without a `*`, literal-prefix glob with one; the empty string is a catch-all.",
             serde_json::json!({
@@ -363,11 +217,8 @@ impl schemars::JsonSchema for ScopeSpec {
 }
 
 impl<'de> Deserialize<'de> for ScopeSpec {
-    /// Hand-written rather than `#[serde(untagged)]`, for two reasons the derive
-    /// cannot give: a malformed value reports what a scope may be instead of
-    /// `data did not match any variant of untagged enum ScopeSpec`, and a table
-    /// naming neither `include` nor `exclude` is refused instead of defaulting
-    /// both lists to empty and becoming a catch-all.
+    /// Hand-written so a malformed value names what a scope may be, and a table naming neither `include` nor
+    /// `exclude` is refused instead of becoming a catch-all.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -399,8 +250,7 @@ impl<'de> Deserialize<'de> for ScopeSpec {
                     match key.as_str() {
                         "include" => include = Some(map.next_value()?),
                         "exclude" => exclude = Some(map.next_value()?),
-                        // Fleet forward-compat, same as one level up: a key a
-                        // newer ocx added is dropped, never a hard failure.
+                        // Fleet forward-compat: a key a newer ocx added is dropped.
                         _ => {
                             map.next_value::<serde::de::IgnoredAny>()?;
                         }
@@ -423,14 +273,10 @@ impl<'de> Deserialize<'de> for ScopeSpec {
     }
 }
 
-/// Whether one scope pattern matches the canonical `registry/repository`
-/// target.
+/// Whether one scope pattern matches the canonical `registry/repository` target.
 ///
-/// A no-wildcard pattern matches on **path-segment boundaries**: `ghcr.io/acme`
-/// matches `ghcr.io/acme` and `ghcr.io/acme/tool`, but never `ghcr.io/acmecorp`.
-/// A `*` makes it a glob on the literal prefix before the wildcard
-/// (`ghcr.io/acme/*` covers the subtree; a bare `ghcr.io/acme*` is an
-/// intentional substring glob). An empty pattern is a catch-all.
+/// Without `*` it matches on path-segment boundaries (`ghcr.io/acme` matches `ghcr.io/acme/tool`, never
+/// `ghcr.io/acmecorp`); with one, it globs on the literal prefix before it. An empty pattern is a catch-all.
 #[must_use]
 pub fn pattern_matches(pattern: &str, target: &str) -> bool {
     if pattern.is_empty() {
@@ -442,9 +288,7 @@ pub fn pattern_matches(pattern: &str, target: &str) -> bool {
     }
 }
 
-/// The literal prefix of one scope pattern: everything before the first `*`
-/// (the whole pattern when there is no wildcard). Its length is the pattern's
-/// specificity.
+/// Everything before the first `*` of a scope pattern; its length is the pattern's specificity.
 fn pattern_literal_prefix(pattern: &str) -> &str {
     match pattern.find('*') {
         Some(index) => &pattern[..index],
@@ -465,16 +309,10 @@ impl ScopeSpec {
         }
     }
 
-    /// How specifically this scope matches `target` — the resolution rank
-    /// [`resolve`] takes its winning level from.
+    /// How specifically this scope matches `target`, the rank [`resolve`] takes its winning level from.
     ///
-    /// Per-target, not a property of the scope alone: a set can match one
-    /// target through a long `include` and another through a short one, and the
-    /// rank must reflect which pattern actually did the covering. For a string
-    /// scope that collapses to the literal-prefix length, unchanged. Excludes
-    /// never contribute — they subtract coverage, and letting a carve-out raise
-    /// a policy's rank would let one lower-tier `exclude` outbid the pin it was
-    /// carving out of.
+    /// Per-target: a set ranks by the `include` that actually matched. Excludes never count, or a lower-tier
+    /// `exclude` could outbid the pin it carves out of.
     #[must_use]
     pub fn specificity_for(&self, target: &str) -> usize {
         match self {
@@ -484,18 +322,14 @@ impl ScopeSpec {
                 .filter(|pattern| pattern_matches(pattern, target))
                 .map(|pattern| pattern_literal_prefix(pattern).len())
                 .max()
-                // No include matched: the set covered this target as a
-                // catch-all, which ranks 0 exactly like `scope = ""`.
+                // No include matched: a catch-all, ranking 0 like `scope = ""`.
                 .unwrap_or_default(),
         }
     }
 }
 
 impl std::fmt::Display for ScopeSpec {
-    /// Renders a scope for the one place it reaches a human: a
-    /// [`TrustPolicyError`]'s `scope` field, and the refused-entry debug log in
-    /// [`resolve`]. The string form is verbatim, so every existing diagnostic
-    /// reads exactly as before.
+    /// Renders a scope for diagnostics; the string form is verbatim.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Prefix(pattern) => formatter.write_str(pattern),
@@ -514,11 +348,8 @@ impl std::fmt::Display for ScopeSpec {
 /// A single `[[trust.policy]]` entry.
 ///
 /// One `signers` array names everyone this policy accepts, each entry tagged
-/// `kind = "keyless"` or `kind = "key"` ([`SignerSpec`]). Acceptance is ANY-of,
-/// so **adding a signer always widens what verifies, never narrows it**. There is no
-/// `[trust.policy.key]` sub-table and no `[trust.policy.keyless]` one — one
-/// canonical spelling. [`Self::scope`] and [`Self::builder`] stay top-level
-/// because neither depends on which backend produced the signature.
+/// `kind = "keyless"` or `kind = "key"`. Acceptance is ANY-of, so **adding a
+/// signer always widens what verifies, never narrows it**.
 ///
 /// ```toml
 /// [[trust.policy]]
@@ -533,54 +364,37 @@ impl std::fmt::Display for ScopeSpec {
 /// ]
 /// ```
 ///
-/// Every field is optional at the serde layer, for the same fleet
-/// forward-compat reason unknown keys are tolerated (see [`TrustConfig`]): an
-/// entry written by a newer ocx degrades to its known parts instead of failing
-/// the whole file. An unknown `kind` degrades the same way, through
-/// [`SignerSpec::Unknown`] — an internally-tagged enum would otherwise make it
-/// a parse error for the entire document. What a *resolved* policy is allowed
-/// to mean is narrowed at [`TrustPolicy::compile`] instead, which refuses a
-/// policy that leaves no backend behind: an absent or empty array with
-/// [`TrustPolicyError::NoSigners`], and one whose every entry named an unknown
-/// kind with [`TrustPolicyError::NoUsableSigner`]. That is also what makes a
-/// misspelled field loud — it parses as an unknown key, leaves the entry
-/// declaring nothing, and fails closed rather than widening.
+/// A policy left with no usable signer (an absent or empty `signers`, only unknown `kind`s, or a
+/// misspelled field that parses as an unknown key) is refused and fails closed, never widening.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+// Every field is optional so an entry from a newer ocx degrades to its known parts instead of failing the file.
 pub struct TrustPolicy {
-    /// Which packages this policy applies to — one prefix pattern, or an
-    /// include/exclude set of them ([`ScopeSpec`]).
+    /// Which packages this policy applies to: one prefix pattern, or an include/exclude set of them.
     ///
-    /// A pattern with no `*` matches the target's canonical
-    /// `registry/repository` on `/`-separated path-segment boundaries:
-    /// `ghcr.io/acme/tool` matches the exact repo `ghcr.io/acme/tool` and any
-    /// sub-path under it (`ghcr.io/acme/tool/plugin`), but NOT a sibling that
-    /// merely shares the prefix text — `ghcr.io/acme/tool` does **not** cover
-    /// `ghcr.io/acme/tool-cli`. A trailing `/*` covers the subtree; a mid-string
-    /// `*` is a literal-prefix substring glob (see [`pattern_matches`]).
+    /// A pattern with no `*` matches the target's canonical `registry/repository` on `/`-separated
+    /// path-segment boundaries: `ghcr.io/acme/tool` matches that exact repo and any sub-path under it
+    /// (`ghcr.io/acme/tool/plugin`), but **not** a sibling that merely shares the prefix text, such as
+    /// `ghcr.io/acme/tool-cli`. A trailing `/*` covers the subtree; a mid-string `*` is a literal-prefix
+    /// substring glob.
     ///
     /// ```toml
     /// scope = "ghcr.io/acme/*"
     /// scope = { include = ["ghcr.io/acme/*"], exclude = ["ghcr.io/acme/experimental/*"] }
     /// ```
     ///
-    /// Absent reads exactly like `""`: a catch-all. So does an object form with
-    /// an empty `include` and no `exclude`.
+    /// Absent reads exactly like `""`: a catch-all, as is an empty `include` with no `exclude`.
     #[serde(default)]
     pub scope: Option<ScopeSpec>,
 
     /// Expected SLSA provenance builder identity, matched against the
     /// provenance predicate during attestation verify.
     ///
-    /// Backend-independent — it names who *built* the artifact, not how the
-    /// signature was made — so it is a sibling of [`Self::scope`] rather than a
-    /// member of a backend sub-table. Inert in signature mode: a pin on a
-    /// policy that never verifies provenance is forward configuration, not an
-    /// error.
+    /// Ignored in signature mode, without an error.
     #[serde(default)]
     pub builder: Option<String>,
 
-    /// The signers this policy accepts — an **ANY-of** set, each entry tagged
-    /// `kind = "keyless"` or `kind = "key"` ([`SignerSpec`]).
+    /// The signers this policy accepts: an **ANY-of** set, each entry tagged
+    /// `kind = "keyless"` or `kind = "key"`.
     ///
     /// ```toml
     /// signers = [
@@ -589,30 +403,16 @@ pub struct TrustPolicy {
     /// ]
     /// ```
     ///
-    /// **Every entry added here widens what verifies.** The set is an ANY-of, so
-    /// a new signer is a new way to pass, never a new condition to satisfy.
-    ///
-    /// Absent reads as empty, and an empty set is a **configuration error**, not
-    /// a catch-all — a policy naming no acceptable signer accepts nothing, and
-    /// the permissive reading would turn a deleted line into a silent bypass.
-    /// That is also where a mis-spelled entry lands: unknown keys are tolerated
-    /// for the fleet forward-compat reason [`TrustPolicy`] states, so a typo
-    /// leaves no signer behind and fails closed at [`Self::compile`].
+    /// **Every entry added here widens what verifies**: a new signer is a new way to pass, never a new
+    /// condition to satisfy. Absent reads as empty, and an empty set is a **configuration error**, not a
+    /// catch-all. A mis-spelled entry leaves no signer behind and fails closed the same way.
+    // Never read an empty set as a catch-all: a deleted line would become a silent bypass.
     #[serde(default)]
     pub signers: Vec<SignerSpec>,
 
-    /// Runtime provenance marker: this policy was declared at the SYSTEM config
-    /// scope (`/etc/ocx/config.toml`), so it pins the specificity level for the
-    /// scopes it matches — a lower tier can join its ANY-of set only at equal
-    /// specificity, never outbid it with a narrower scope (see [`resolve`]).
-    /// Mirrors `config::RegistryDefaults`'s lock, and
-    /// is unconditional for the same reason: `[trust]` has no opt-out field.
-    ///
-    /// Never serialized on either side — set by the loader via
-    /// [`TrustConfig::lock_as_system`] after parsing the system-scope file, not
-    /// read from disk. The skip is the security boundary, not a formatting
-    /// choice: a managed-config payload that writes `system_locked = true` is
-    /// parsed as an unknown key and dropped, so it cannot promote itself.
+    /// Declared in the system config (`/etc/ocx/config.toml`), so this policy governs the targets it matches alone
+    /// (see [`resolve`]); set by `lock_as_system`, never serialized.
+    // The skip is the security boundary: a managed payload writing `system_locked = true` is dropped as an unknown key.
     #[serde(skip)]
     #[schemars(skip)]
     pub system_locked: bool,
@@ -621,19 +421,19 @@ pub struct TrustPolicy {
 /// A `kind = "keyless"` signer: which Sigstore identity may sign.
 ///
 /// Exactly one of `identity` / `identity_regexp` must be set — both or neither
-/// is a configuration error surfaced by [`TrustPolicy::compile`] (cosign's
-/// `--certificate-identity` / `--certificate-identity-regexp` precedent) — and
-/// `oidc_issuer` must be present. All three are `Option` at the serde layer and
-/// mandatory at compile, for the tolerance reason [`TrustPolicy`] states.
+/// is a configuration error — and `oidc_issuer` must be present.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+// `Option` at the serde layer for forward-compat; `TrustPolicy::compile` enforces presence.
 pub struct KeylessMatcher {
-    /// Exact expected certificate SAN (byte-equal). Mutually exclusive with
-    /// [`Self::identity_regexp`].
+    /// Exact expected certificate SAN (byte-equal).
+    ///
+    /// Mutually exclusive with `identity_regexp`.
     #[serde(default)]
     pub identity: Option<String>,
 
     /// Regex the certificate SAN must match in full (anchored `\A…\z`).
-    /// Mutually exclusive with [`Self::identity`].
+    ///
+    /// Mutually exclusive with `identity`.
     #[serde(default)]
     pub identity_regexp: Option<String>,
 
@@ -642,15 +442,8 @@ pub struct KeylessMatcher {
     pub oidc_issuer: Option<String>,
 }
 
-/// One entry of a policy's `signers = [...]` array.
-///
-/// The **config layer**. It compiles into a [`PolicyBackend`] exactly as
-/// [`KeylessMatcher`] compiles into [`CompiledKeyless`]: `PolicyBackend` holds a
-/// compiled [`regex::Regex`] and deliberately carries no serde derives, so it is
-/// never deserialized into directly.
-///
-/// Internally tagged on `kind` with newtype variants, so a signer's fields sit
-/// flat beside the tag and the keyless arm reuses [`KeylessMatcher`] verbatim:
+/// One entry of a policy's `signers = [...]` array, tagged on `kind` with the
+/// signer's fields flat beside the tag:
 ///
 /// ```toml
 /// [[trust.policy]]
@@ -661,16 +454,9 @@ pub struct KeylessMatcher {
 /// ]
 /// ```
 ///
-/// An empty array is a configuration error, never a catch-all — see
-/// [`validate_signers`]. `scope` and `builder` stay policy-level siblings for
-/// the reason [`TrustPolicy::builder`] gives: neither depends on which backend
-/// signed.
-///
-/// Reachable from `Config` through [`TrustPolicy::signers`], so the `JsonSchema`
-/// derive is what puts these entries in the published `config.toml` schema —
-/// which is where typo detection for a signer belongs, since the deserializer
-/// deliberately tolerates unknown keys (see [`TrustConfig`]).
+/// An empty array is a configuration error, never a catch-all.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+// The `JsonSchema` derive carries signer typo detection into the published schema; the deserializer tolerates typos.
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SignerSpec {
     /// `{ kind = "keyless", identity | identity_regexp, oidc_issuer }`.
@@ -680,97 +466,51 @@ pub enum SignerSpec {
 
     /// A `kind` this build does not know — an entry written by a newer ocx.
     ///
-    /// Without this arm an internally-tagged enum makes an unrecognised `kind`
-    /// a hard **parse** error for the whole file, and a managed payload that
-    /// does not parse is dropped entirely (`ConfigLoader` logs it and carries
-    /// on) — so one forward-looking signer would silently remove every trust
-    /// policy the fleet has. That is the one direction fleet forward-compat
-    /// must never take, for the same reason `[shell.consent]` carries the
-    /// opposite carve-out: dropping an unknown *narrowing* declaration widens
-    /// trust.
-    ///
-    /// It compiles to no backend, so it narrows — it accepts nobody, and a
-    /// sibling `keyless` entry in the same policy keeps working. A policy whose
-    /// signers are *all* unknown compiles to nothing at all and is refused by
-    /// name ([`TrustPolicyError::NoUsableSigner`]) rather than left to fail as
-    /// a confusing identity mismatch.
+    /// It narrows: it accepts nobody, and a sibling `keyless` entry in the same
+    /// policy keeps working. A policy whose signers are *all* unknown is refused
+    /// with an error naming it.
+    // Without this arm an unknown `kind` fails the whole file, and an unparseable managed payload is dropped
+    // entirely, so one forward-looking signer would silently remove every fleet trust policy.
     #[serde(other)]
     Unknown,
 }
 
 /// The `kind = "key"` signer: one public key, by reference or inline.
 ///
-/// `key` XOR `key_pem`, mirroring [`KeylessMatcher`]'s identity XOR — both
-/// `Option` at the serde layer for the fleet forward-compat reason
-/// [`TrustPolicy`] states, both narrowed at [`validate_signers`]. There is no
-/// `key_regexp`: a public key is a fixed value, not a pattern.
+/// Exactly one of `key` / `key_pem` must be set. There is no `key_regexp`: a
+/// public key is a fixed value, not a pattern.
 ///
-/// `ocx config push` inlines the reference form into `key_pem` at publish time,
-/// for the reason [`SigstoreTrust::trusted_root_json`] already gives — a path on
-/// the operator's disk means nothing on a consumer's.
+/// `ocx config push` inlines the reference form into `key_pem` at publish time.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+// `Option` at the serde layer for forward-compat; `validate_signers` enforces `key` XOR `key_pem`.
 pub struct KeyMatcher {
-    /// A key reference in the [`KeyRef`](key_ref::KeyRef) grammar
-    /// (`[scheme://]<rest>`) — the same spelling `--key` takes on the command
-    /// line, so a KMS entry later needs no config-format change. Mutually
-    /// exclusive with [`Self::key_pem`].
+    // Relative resolution is not a containment check: the author owns that filesystem.
+    /// A key reference (`[scheme://]<rest>`), the same spelling `--key` takes on the command line.
     ///
-    /// # Legal in a local tier, rejected in a managed payload
-    ///
-    /// A managed-config payload is a `config.toml` shipped as a package to a
-    /// fleet, so a `file:` reference in one names the *operator's* disk and
-    /// means nothing on any consumer. A published payload therefore accepts
-    /// [`Self::key_pem`] only, and the path form is refused with an error
-    /// naming `key_pem` as the fix — the same convention `trusted_root` /
-    /// `trusted_root_json` already follows, where
-    /// `package_manager::managed_config::publish::inline_trusted_root` reads the path form at
-    /// publish time and inlines it. Rejecting it removes an incoherent state
-    /// rather than adding a guard.
-    ///
-    /// **Local tiers (project / operator / user config on the author's own
-    /// disk) leave this unrestricted.** A relative reference resolves against
-    /// the directory of the config file that declared it — ordinary resolution
-    /// semantics so a relative path means what its author meant. That is *not*
-    /// a containment check and must not be described as one; the author owns
-    /// that filesystem.
-    ///
-    /// The refusal lives in
-    /// `package_manager::managed_config::publish::validate_managed_config_payload`,
-    /// beside its `trusted_root` twin. A managed payload that reaches a
-    /// consumer with this field set anyway — published by an older ocx — has it
+    /// Mutually exclusive with `key_pem`. Unrestricted in a local tier (project, operator or user
+    /// config on the author's own disk), where a relative reference resolves against the directory of
+    /// the config file that declared it. Refused in a managed-config payload: publishing fails with an
+    /// error naming `key_pem` as the fix, and a payload an older ocx published anyway has this field
     /// dropped at load time rather than read.
+    // The managed-payload refusal is `ocx_package_manager`'s `validate_managed_config_payload`.
     #[serde(default)]
     pub key: Option<String>,
 
-    /// Verbatim SPKI PEM. Mutually exclusive with [`Self::key`].
+    /// Verbatim SPKI PEM.
+    ///
+    /// Mutually exclusive with `key`.
     #[serde(default)]
     pub key_pem: Option<String>,
 }
 
-/// Validate a `signers` array's shape, independent of compiling it into
-/// backends.
+/// Validate a `signers` array's shape without reading key material; `scope` is the policy's rendered scope.
 ///
-/// Every entry must name a signer completely: the array is non-empty, every
-/// `key` entry declares exactly one of `key` / `key_pem`, and every `keyless`
-/// entry satisfies the identity XOR identity_regexp rule with an issuer set.
-/// The keyless half is not restated here — it runs through
-/// `compile_keyless_matcher`, the same function `TrustPolicy::compile_keyless`
-/// calls, and the compiled matcher is discarded. Reading the rule instead of
-/// calling it would be a second copy, and a `{ kind = "keyless" }` signer that
-/// names nobody must fail closed for the same reason `signers = []` does.
-///
-/// `scope` is the offending policy's rendered scope, as `TrustPolicy::scope_label`
-/// produces it — a config declares many policies, so a diagnostic that does not
-/// name one is unactionable.
+/// Keyless entries go through `compile_keyless_matcher`, as in `TrustPolicy::compile`, so the two cannot diverge.
 ///
 /// # Errors
-/// [`TrustPolicyError::NoSigners`] for an empty array — **fail closed, never a
-/// catch-all**: a policy that names no acceptable signer accepts nothing, and
-/// reading it as "anyone may sign" turns a deleted line into a silent bypass.
-/// [`TrustPolicyError::KeyConflict`] when both key forms are set;
-/// [`TrustPolicyError::KeyUnset`] when neither is. From a keyless entry,
-/// whatever `compile_keyless_matcher` raises:
-/// [`TrustPolicyError::IdentityConflict`], [`TrustPolicyError::IdentityUnset`],
+/// [`TrustPolicyError::NoSigners`] for an empty array (fail closed, never a catch-all);
+/// [`TrustPolicyError::KeyConflict`] / [`TrustPolicyError::KeyUnset`] for a key entry with both or neither form;
+/// from a keyless entry, [`TrustPolicyError::IdentityConflict`], [`TrustPolicyError::IdentityUnset`],
 /// [`TrustPolicyError::IssuerUnset`] or [`TrustPolicyError::InvalidRegex`].
 pub fn validate_signers(signers: &[SignerSpec], scope: &str) -> Result<(), TrustPolicyError> {
     if signers.is_empty() {
@@ -785,8 +525,7 @@ pub fn validate_signers(signers: &[SignerSpec], scope: &str) -> Result<(), Trust
                 continue;
             }
             SignerSpec::Key(key) => key,
-            // Nothing to validate: this build knows none of its fields. The
-            // narrowing happens at compile time, where it yields no backend.
+            // Nothing to validate; it yields no backend at compile time.
             SignerSpec::Unknown => continue,
         };
         match (&key.key, &key.key_pem) {
@@ -807,8 +546,7 @@ pub fn validate_signers(signers: &[SignerSpec], scope: &str) -> Result<(), Trust
 }
 
 impl TrustPolicy {
-    /// The declared scope rendered for a diagnostic, with an absent one read as
-    /// the empty catch-all.
+    /// The declared scope rendered for a diagnostic; absent reads as the empty catch-all.
     fn scope_label(&self) -> String {
         self.scope.as_ref().map(ScopeSpec::to_string).unwrap_or_default()
     }
@@ -827,25 +565,13 @@ impl TrustPolicy {
         self.scope.as_ref().map_or(0, |scope| scope.specificity_for(target))
     }
 
-    /// Resolve this entry into the ready-to-match [`CompiledPolicy`]: validate
-    /// the signer set, then compile every entry into a [`PolicyBackend`].
-    ///
-    /// Shape validation runs first, over the whole array, through the same
-    /// [`validate_signers`] a managed payload is checked with — so a policy that
-    /// would refuse at publish time refuses here too, for the same reason and
-    /// with the same message.
+    /// Compile this entry into a [`CompiledPolicy`], first through [`validate_signers`], so a policy refused at
+    /// publish is refused here with the same message.
     ///
     /// # Errors
-    /// [`TrustPolicyError::NoSigners`] when the array is empty or absent;
-    /// from a `kind = "keyless"` entry, [`TrustPolicyError::IdentityConflict`]
-    /// when both identity forms are set, [`TrustPolicyError::IdentityUnset`]
-    /// when neither is, [`TrustPolicyError::IssuerUnset`] when `oidc_issuer` is
-    /// absent, and [`TrustPolicyError::InvalidRegex`] when `identity_regexp`
-    /// does not compile; from a `kind = "key"` entry,
-    /// [`TrustPolicyError::KeyConflict`], [`TrustPolicyError::KeyUnset`],
-    /// [`TrustPolicyError::KeyReferenceInvalid`],
-    /// [`TrustPolicyError::KeyUnreadable`] and
-    /// [`TrustPolicyError::KeyMalformed`].
+    /// [`TrustPolicyError::NoSigners`] or [`TrustPolicyError::NoUsableSigner`] when no signer remains; otherwise the
+    /// first bad entry's error: `IdentityConflict`, `IdentityUnset`, `IssuerUnset`, `InvalidRegex`, `KeyConflict`,
+    /// `KeyUnset`, `KeyReferenceInvalid`, `KeyUnreadable` or `KeyMalformed`.
     pub fn compile(&self) -> Result<CompiledPolicy, TrustPolicyError> {
         let scope = self.scope_label();
         validate_signers(&self.signers, &scope)?;
@@ -857,9 +583,7 @@ impl TrustPolicy {
                     Some(compile_keyless_matcher(keyless, &scope).map(PolicyBackend::Keyless))
                 }
                 SignerSpec::Key(key) => Some(compile_key_matcher(key, &scope).map(PolicyBackend::Key)),
-                // Dropped, not refused: a signer this build cannot evaluate
-                // accepts nobody, which is the safe direction, and its siblings
-                // in the same policy still apply.
+                // Dropped, not refused: it accepts nobody, and its siblings still apply.
                 SignerSpec::Unknown => None,
             })
             .collect::<Result<Vec<_>, TrustPolicyError>>()?;
@@ -872,22 +596,10 @@ impl TrustPolicy {
         })
     }
 
-    /// Rewrite each relative path-form signer key to be absolute against
-    /// `config_dir` — the directory of the `config.toml` that declared it.
+    /// Anchor each relative path-form signer `key` at `config_dir`, the declaring config's directory; the twin of
+    /// [`SigstoreTrust::anchor_relative_root`], and not a containment check.
     ///
-    /// The twin of [`SigstoreTrust::anchor_relative_root`], called from the same
-    /// loader seam and once per file tier, so `/etc/ocx/config.toml` and
-    /// `$OCX_HOME/config.toml` each anchor their own values and the process
-    /// working directory never enters into it.
-    ///
-    /// **Ordinary path resolution, not a containment check.** A relative
-    /// reference means what its author meant, and the author owns that
-    /// filesystem; nothing here restricts where a key may live, and describing
-    /// it as a guard would invite someone to rely on it as one.
-    ///
-    /// Non-path references and unparseable ones are left untouched —
-    /// [`Self::compile`] is where a reference is judged, and rewriting one this
-    /// function cannot understand would corrupt the diagnostic it produces.
+    /// Non-path and unparseable references stay untouched, so [`Self::compile`] reports them as written.
     pub fn anchor_relative_keys(&mut self, config_dir: &std::path::Path) {
         for signer in &mut self.signers {
             let SignerSpec::Key(matcher) = signer else {
@@ -902,25 +614,15 @@ impl TrustPolicy {
             let Some(file) = parsed.as_file() else {
                 continue;
             };
-            // One rule, in one place — [`FileReference::anchored_at`], the same
-            // seam [`SigstoreTrust::anchor_relative_root`] goes through. Here
-            // the drift it prevents costs more than a moved path: a rooted
-            // `/etc/ocx/acme.pub` that came back joined to the config directory
+            // Only through `FileReference::anchored_at`: a rooted `/etc/ocx/acme.pub` joined to the config directory
             // would name a file its author never wrote.
             matcher.key = Some(file.anchored_at(config_dir).display().to_string());
         }
     }
 }
 
-/// Enforce the keyless invariants — identity XOR identity_regexp, and an
-/// issuer present — and compile the result.
-///
-/// The single implementation of that rule. It is a free function taking `scope`
-/// rather than a `TrustPolicy` method reading `self.scope_label()` because
-/// [`validate_signers`] enforces the same rule over a bare [`SignerSpec`], which
-/// has no policy to ask for a label. A second copy of the rule there is exactly
-/// how [`TrustPolicy::compile`] and [`validate_signers`] would drift into
-/// accepting different things.
+/// Enforce identity XOR identity_regexp and a present issuer, then compile; the one implementation, shared by
+/// [`validate_signers`] and [`TrustPolicy::compile`] so they cannot accept different things.
 ///
 /// # Errors
 /// [`TrustPolicyError::IdentityConflict`] when both identity forms are set,
@@ -960,32 +662,22 @@ fn compile_keyless_matcher(keyless: &KeylessMatcher, scope: &str) -> Result<Comp
 /// that hold whichever backend signed.
 #[derive(Debug, Clone)]
 pub struct CompiledPolicy {
-    /// The SLSA provenance builder identity this policy pins, if any. Enforced
-    /// by attestation verify; inert in signature mode.
+    /// The pinned SLSA provenance builder, if any; enforced by attestation verify, inert in signature mode.
     pub builder: Option<String>,
-    /// The verification backends this policy resolved to — an **ANY-of** set,
-    /// in declaration order. Never empty: [`validate_signers`] refuses an empty
-    /// `signers` array before a single backend is built.
+    /// The verification backends, an ANY-of set in declaration order; never empty.
     pub backends: Vec<PolicyBackend>,
 }
 
-/// One verification backend a compiled policy resolved to.
+/// One verification backend of a compiled policy.
 ///
-/// An enum rather than a set of optional fields so that a new backend is a
-/// compile error at every site that consumes a policy, instead of a silent
-/// `None` nobody handles. Deliberately not `#[non_exhaustive]`: the binary is
-/// the only consumer, and in-crate matches staying total is the whole point.
+/// No `#[non_exhaustive]`: a new backend must fail the build at every consuming match, not reach a `_` arm.
 #[derive(Debug, Clone)]
 pub enum PolicyBackend {
     /// Keyless Sigstore: a Fulcio certificate SAN plus its OIDC issuer.
     Keyless(CompiledKeyless),
-    /// A pinned public key: the artifact was signed with the matching private
-    /// key, and no certificate is involved.
+    /// A pinned public key; no certificate is involved.
     ///
-    /// Holds the parsed key directly rather than a wrapper struct — there is
-    /// nothing else to compile for a key. The algorithm was auto-detected from
-    /// the PEM at parse time, so a signature is checked by verifying it, never
-    /// by comparing a fingerprint.
+    /// The algorithm is auto-detected from the PEM, so a signature is checked by verifying it, never by fingerprint.
     Key(sigstore::crypto::CosignVerificationKey),
 }
 
@@ -999,10 +691,8 @@ pub struct CompiledKeyless {
 }
 
 impl CompiledPolicy {
-    /// Build a single exact keyless `(identity, issuer)` policy — the
-    /// flag-override path (`--certificate-identity` +
-    /// `--certificate-oidc-issuer`). It carries no builder pin: the flags name
-    /// a signer, not a build.
+    /// A single exact keyless `(identity, issuer)` policy with no builder pin, for the `--certificate-identity` +
+    /// `--certificate-oidc-issuer` override.
     #[must_use]
     pub fn exact(identity: String, issuer: String) -> Self {
         Self {
@@ -1015,11 +705,7 @@ impl CompiledPolicy {
     }
 }
 
-/// Compile a `--key` reference into a single-signer policy — the flag-override
-/// path for key mode, the twin of [`CompiledPolicy::exact`].
-///
-/// It carries no builder pin, for the same reason `exact` carries none: the flag
-/// names a signer, not a build.
+/// Compile a `--key` reference into a single-signer policy with no builder pin, the twin of [`CompiledPolicy::exact`].
 ///
 /// # Errors
 /// [`TrustPolicyError::KeyReferenceInvalid`] when the reference names a backend
@@ -1027,20 +713,16 @@ impl CompiledPolicy {
 /// cannot be read, and [`TrustPolicyError::KeyMalformed`] when its bytes are not
 /// an SPKI public key.
 pub fn compile_key_signer(key: &key_ref::KeyRef) -> Result<CompiledPolicy, TrustPolicyError> {
-    // `--key` names one signer with no scope, so the diagnostic names the flag
-    // rather than a policy that does not exist.
+    // `--key` has no policy scope, so the diagnostic names the flag.
     Ok(CompiledPolicy {
         builder: None,
         backends: vec![PolicyBackend::Key(compile_key_reference(key, "--key")?)],
     })
 }
 
-/// Compile a `kind = "key"` signer's declared material into a verification key.
+/// Compile a `kind = "key"` signer: `key_pem` verbatim, or `key` through [`KeyRef`](key_ref::KeyRef) and read.
 ///
-/// `key_pem` is taken verbatim; `key` is resolved through the shared
-/// [`KeyRef`](key_ref::KeyRef) grammar and read from disk. The XOR
-/// between them is [`validate_signers`]'s job and has already run by the time
-/// this is reached, so the unset case here is defensive rather than expected.
+/// `KeyUnset` here is defensive: [`validate_signers`] has already enforced the XOR.
 fn compile_key_matcher(
     matcher: &KeyMatcher,
     scope: &str,
@@ -1058,30 +740,20 @@ fn compile_key_matcher(
     compile_key_reference(&parsed, scope)
 }
 
-/// Read and parse the public key a resolved [`KeyRef`](key_ref::KeyRef)
-/// names.
+/// Read and parse the public key a resolved [`KeyRef`](key_ref::KeyRef) names.
 ///
-/// **Synchronous, and deliberately so.** [`compile_key_signer`]'s signature is
-/// sync, `TrustPolicy::compile` is sync, and both must resolve key material the
-/// same way — a second async twin is exactly the drift
-/// [`compile_keyless_matcher`] exists to prevent. The read is one config-scale
-/// PEM per policy resolution, on a path that is already parsing config files.
+/// Synchronous, like both callers: an async twin would let `--key` and a policy `key` resolve material differently.
 fn compile_key_reference(
     key: &key_ref::KeyRef,
     scope: &str,
 ) -> Result<sigstore::crypto::CosignVerificationKey, TrustPolicyError> {
-    // A recognised-but-unimplemented backend must say so by name. Reading its
-    // `rest` as a filename is how `awskms://alias/release` becomes "no such file
-    // or directory", which sends the operator to the wrong problem entirely.
+    // Any other scheme falls through to `UnsupportedBackend`; reading its `rest` as a file reports "no such file".
     if let Some(path) = key.as_path() {
         return read_key_file(path, scope).and_then(|pem| parse_verification_key(&pem, scope, KeyFault::FileBytes));
     }
     if let Some(variable) = key.as_env_var() {
-        // The same three rules the signing half applies (`read_key_env`), and
-        // the same two exit codes: nothing there is 74, something there that
-        // no key can be is 65. A `key = "env://VAR"` in a policy that answered
-        // differently from `--key env://VAR` would be the sign/verify drift
-        // the shared reader exists to prevent.
+        // Unset maps to 74 and too-large to 65, as on the signing side, or `key = "env://VAR"` and `--key env://VAR`
+        // answer with different exit codes.
         let pem = key_ref::read_key_env(variable).map_err(|error| {
             use key_ref::KeyEnvError;
 
@@ -1103,22 +775,10 @@ fn compile_key_reference(
     })
 }
 
-/// Read a public-key PEM, bounded and refusing anything that is not a regular
-/// file.
+/// Read a public-key PEM through [`read_bounded`](ocx_util::fs::read_bounded): capped, and refusing a non-regular file.
 ///
-/// Both guards live in [`read_bounded`](ocx_util::fs::read_bounded) — one
-/// implementation, shared with `oci::sign::key_backend`'s *private* half.
-/// Only the wording differs: this side names the offending signer's scope, the
-/// signing side says "cannot read key material".
-///
-/// They are load-bearing because this path is reachable from a **project**
-/// `ocx.toml` — a file a cloned repository supplies. `resolve_tiered` compiles a
-/// matched project policy on the `ocx package verify` / `ocx package sbom`
-/// trust-policy carve-out (auto-verify passes an empty project set today, #99),
-/// so `key = "/dev/zero"` in someone else's repository would otherwise read
-/// until memory ran out (CWE-400). The cap is not a containment check and must
-/// not be read as one: a local tier may name any path its author likes, and the
-/// *operator* tiers legitimately do.
+/// Both guards are load-bearing: a cloned repository's `ocx.toml` reaches this through `resolve_tiered`, and
+/// `key = "/dev/zero"` would read until memory ran out (CWE-400). Not a containment check: any path is allowed.
 fn read_key_file(path: &std::path::Path, scope: &str) -> Result<Vec<u8>, TrustPolicyError> {
     use ocx_util::fs::BoundedReadError;
 
@@ -1141,18 +801,14 @@ fn read_key_file(path: &std::path::Path, scope: &str) -> Result<Vec<u8>, TrustPo
     })
 }
 
-/// Parse SPKI PEM into a verification key. **No decryption anywhere**: verifying
-/// needs only the public half, so the encrypted cosign envelope never appears on
-/// this side.
+/// Parse SPKI PEM into a verification key; no decryption, since verifying needs only the public half.
 fn parse_verification_key(
     pem: &[u8],
     scope: &str,
     fault: KeyFault,
 ) -> Result<sigstore::crypto::CosignVerificationKey, TrustPolicyError> {
     sigstore::crypto::CosignVerificationKey::try_from_pem(pem).map_err(|error| {
-        // `KeyMalformed` carries a description, not a `#[source]`, so the
-        // sigstore error goes to the log rather than being flattened into a
-        // message an operator cannot act on.
+        // Logged, not flattened into the message: `KeyMalformed` carries a description, not a `#[source]`.
         log::debug!("public key for scope `{scope}` rejected by sigstore: {error}");
         TrustPolicyError::KeyMalformed {
             scope: scope.to_owned(),
@@ -1172,10 +828,7 @@ pub enum IdentityRule {
 }
 
 impl IdentityRule {
-    /// Compile a user regex into a full-match rule by anchoring it with
-    /// `\A(?:…)\z`, so the pattern must match the entire SAN (cosign's
-    /// `--certificate-identity-regexp` full-string semantics). Redundant
-    /// user-supplied `^`/`$` anchors stay harmless.
+    /// Compile `pattern` anchored as `\A(?:…)\z`, so it must match the whole SAN (cosign's full-string semantics).
     ///
     /// # Errors
     /// Returns the [`regex::Error`] when the pattern does not compile.
@@ -1194,26 +847,11 @@ impl IdentityRule {
     }
 }
 
-/// Resolve the applicable policies for a canonical `registry/repository`
-/// target: the matching policies at the **winning specificity level**, returned
-/// as a set for ANY-of evaluation. Empty when no scope matches.
+/// Resolve the policies at the winning [specificity][ScopeSpec::specificity_for] for a canonical
+/// `registry/repository` target, as an ANY-of set; empty when no scope matches.
 ///
-/// The winning level is the highest [per-target specificity][ScopeSpec::specificity_for]
-/// among the matching policies (most-specific-wins) — **unless** a
-/// [system-locked][TrustPolicy::system_locked] policy matches, in which case
-/// only the locked policies govern the target at all: the level is the highest
-/// specificity among them, and every unlocked match is dropped whatever its
-/// scope. A system pin is therefore
-/// admission-authoritative, not a specificity floor. Equal-scope array-append
-/// across tiers is otherwise a signer-enrollment channel — a user-writable
-/// `config.toml`, or the untrusted managed payload, could add its own identity
-/// to the operator's ANY-of set and every covered package would verify against
-/// it. Rotation for a locked scope is done in the system config that owns the
-/// pin, where old and new identity coexist as two locked entries.
-///
-/// The input is any iterator of policy references, so callers can chain every
-/// tier's entries (config.toml tiers ++ project ocx.toml) without allocating an
-/// intermediate pool.
+/// A matching [system-locked][TrustPolicy::system_locked] policy governs alone, dropping every unlocked match
+/// whatever its scope, or a user `config.toml` or managed payload could enrol a signer into the operator's set.
 #[must_use]
 pub fn resolve<'a>(policies: impl IntoIterator<Item = &'a TrustPolicy>, target: &str) -> Vec<&'a TrustPolicy> {
     let matching: Vec<&TrustPolicy> = policies
@@ -1228,10 +866,7 @@ pub fn resolve<'a>(policies: impl IntoIterator<Item = &'a TrustPolicy>, target: 
     let Some(level) = locked_max.or_else(|| matching.iter().map(|policy| policy.specificity_for(target)).max()) else {
         return Vec::new();
     };
-    // A matching system pin governs the target alone. Without the log the
-    // operator sees only an eventual IdentityMismatch, with nothing naming the
-    // pin that discarded the entry they authored. Silent on the no-op path: a
-    // pin that drops nothing is the ordinary case.
+    // Logged, or the operator sees only an `IdentityMismatch` naming no pin; silent when nothing is dropped.
     if let Some(pin) = locked_pin {
         let refused: Vec<String> = matching
             .iter()
@@ -1256,28 +891,15 @@ pub fn resolve<'a>(policies: impl IntoIterator<Item = &'a TrustPolicy>, target: 
         .collect()
 }
 
-/// Resolve and compile the effective policies for a canonical
-/// `registry/repository` target under **cross-tier precedence**.
+/// Resolve and compile the effective policies for a canonical `registry/repository` target under cross-tier precedence.
 ///
-/// Operator-tier policies (the merged `config.toml` — system / user /
-/// `$OCX_HOME`) are **authoritative**: if any operator policy matches the
-/// target, only operator policies are considered and the project `ocx.toml` is
-/// ignored for that package, so a project config can never override or weaken
-/// an operator pin (security ruling — see `adr_trust_policy.md`). When no
-/// operator policy matches, the `project` tier applies (it may *add* trust for
-/// scopes the operator has not governed). Within the chosen tier: most-specific
-/// scope wins, ANY-of among equal (rotation) — except that a system-locked
-/// policy pins the specificity level for its scopes, so the lower `config.toml`
-/// tiers pooled into `operator` cannot outbid it either ([`resolve`]).
-///
-/// Empty result = no configured identity for the target (the verify boundary
-/// maps this to a usage error).
+/// If any operator-tier policy (the merged `config.toml`) matches, the project `ocx.toml` is ignored, so a project
+/// can never override or weaken an operator pin (`adr_trust_policy.md`); otherwise the project tier may add trust.
+/// Within a tier, [`resolve`] applies. Empty means no configured identity.
 ///
 /// # Errors
-/// Returns the first [`TrustPolicyError`] among the *matched* policies (both or
-/// neither identity form set, or an uncompilable `identity_regexp`). Non-matching
-/// policies are never validated, so a malformed entry for an unrelated scope
-/// never fails an unrelated verify.
+/// The first [`TrustPolicyError`] among the matched policies; unmatched ones are never validated, so a malformed
+/// entry for an unrelated scope never fails a verify.
 pub fn resolve_tiered(
     operator: &[TrustPolicy],
     project: &[TrustPolicy],
@@ -1292,22 +914,11 @@ pub fn resolve_tiered(
     chosen.into_iter().map(TrustPolicy::compile).collect()
 }
 
-/// Extract `[[trust.policy]]` from an `ocx.toml` document leniently: sections
-/// other than `[trust]` (`[tools]`, `[group.*]`, `[package.*]`, including
-/// semantically-invalid entries) are ignored, so an unrelated malformed section
-/// never fails trust extraction. Only a TOML *syntax* error fails.
+/// Extract `[[trust.policy]]` from an `ocx.toml` leniently, ignoring every other section, even an invalid one; the
+/// full `ProjectConfig` parse would validate `[tools]` and deny unknown fields.
 ///
-/// This is the narrow OCI-tier carve-out reader for `ocx package verify` — it
-/// deliberately does NOT run the full `ProjectConfig` parse (which validates
-/// `[tools]` identifiers and denies unknown fields).
-///
-/// `config_dir` is the directory of the `ocx.toml` the text came from, and
-/// every relative `file:` signer key is anchored against it before the policies
-/// are returned — the same rule `Config::anchor_relative_paths` applies to the
-/// `config.toml` tiers. It is a **parameter rather than a later call** because
-/// which public key admits a signature must not depend on where the operator
-/// happened to `cd`, and an anchoring step a caller can forget is how that
-/// dependency gets reintroduced.
+/// `config_dir` anchors relative `file:` signer keys here, as a parameter, not a later call a caller could forget:
+/// which key admits a signature must not depend on the working directory.
 ///
 /// # Errors
 /// [`TrustPolicyError::DocumentInvalid`] when the document is not valid TOML,
@@ -1360,9 +971,7 @@ pub enum TrustPolicyError {
         #[source]
         source: regex::Error,
     },
-    /// A policy declares `signers = []`. Refused rather than read as a
-    /// catch-all: an empty set of acceptable signers accepts nothing, so the
-    /// permissive reading would turn a deleted line into "anyone may sign".
+    /// A policy declares `signers = []`; refused, never read as a catch-all.
     #[error(
         "policy for scope `{scope}` declares an empty `signers` array; an empty set of signers accepts nothing \
          and is a configuration error, not a catch-all"
@@ -1371,13 +980,9 @@ pub enum TrustPolicyError {
         /// The offending policy's scope.
         scope: String,
     },
-    /// Every signer in the policy declares a `kind` this build does not know,
-    /// so the policy compiles to no backend at all.
+    /// Every signer names a `kind` this build does not know, so the policy compiles to no backend.
     ///
-    /// Distinct from [`Self::NoSigners`]: the array is not empty, the operator
-    /// wrote signers, and this ocx is simply too old to evaluate any of them.
-    /// Naming that is the difference between "upgrade ocx" and "your config is
-    /// wrong".
+    /// Distinct from [`Self::NoSigners`]: the fix is upgrading ocx, not the config.
     #[error(
         "policy for scope `{scope}` declares no signer this build understands; every entry names a `kind` this \
          version of ocx does not implement"
@@ -1400,12 +1005,8 @@ pub enum TrustPolicyError {
         /// The offending policy's scope.
         scope: String,
     },
-    /// A `key` reference is not one this build can resolve — most usefully, a
-    /// recognised KMS scheme with no implementation.
-    ///
-    /// Distinct from [`Self::KeyUnreadable`] on purpose: `awskms://alias/release`
-    /// is not a missing file, and reporting it as one sends the operator to
-    /// their filesystem instead of to the unimplemented backend.
+    /// A `key` reference this build cannot resolve, typically an unimplemented KMS scheme; kept distinct from
+    /// [`Self::KeyUnreadable`] so it is never reported as a missing file.
     #[error("signer for scope `{scope}` names a key reference this build cannot resolve")]
     KeyReferenceInvalid {
         /// The offending policy's scope.
@@ -1426,15 +1027,9 @@ pub enum TrustPolicyError {
         #[source]
         source: std::io::Error,
     },
-    /// The project `ocx.toml` carrying `[[trust.policy]]` is not valid TOML, or
-    /// an entry is malformed at the field level.
+    /// The project `ocx.toml` carrying `[[trust.policy]]` is not valid TOML, or an entry is malformed.
     ///
-    /// Typed rather than surfaced as a bare `toml::de::Error`: the classifier's
-    /// downcast ladder has no rung for a foreign type, so the bare error fell
-    /// through to exit 1 `internal` and reported an operator's typo as an ocx
-    /// bug — while the identical malformation in `config.toml` has always
-    /// exited 78. One malformed trust policy, one exit code, whichever file it
-    /// is written in.
+    /// Typed, never a bare `toml::de::Error`: the classifier has no rung for it, so it would exit 1, not 78.
     #[error("project config declares a `[[trust.policy]]` section that is not valid TOML")]
     DocumentInvalid {
         /// What TOML rejected, and where.
@@ -1448,50 +1043,27 @@ pub enum TrustPolicyError {
         scope: String,
         /// What about the material was rejected.
         reason: String,
-        /// Which of the three things was unusable — the exit code follows this
-        /// and nothing else.
+        /// Which thing was unusable; the exit code follows this alone.
         fault: KeyFault,
     },
 }
 
-/// Which thing a [`TrustPolicyError::KeyMalformed`] found unusable.
-///
-/// One rule, keyed on *what failed* rather than on who called: a path that is
-/// not a readable file is an I/O problem, bytes that are not a key are a data
-/// problem, and config text that is not a key is a config problem. Carrying it
-/// on the error is what lets one variant answer all three without the
-/// classifier having to know which door it came through.
+/// Which thing a [`TrustPolicyError::KeyMalformed`] found unusable, keyed on what failed, never on the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyFault {
-    /// The path named something that is not a readable regular file. 74
-    /// `io_error` — the same code `--config` already answers for a path that
-    /// "exists but cannot be read (permission denied, not a regular file)".
+    /// Not a readable regular file: 74 `io_error`, as `--config` answers.
     Path,
-    /// A regular file was read, and its bytes are not a key. 65 `data_error`,
-    /// matching what `ocx package sign` answers for the same file.
+    /// A read file's bytes are not a key: 65 `data_error`, as `ocx package sign` answers.
     FileBytes,
-    /// An inline `key_pem` in a config document is not a key. 78
-    /// `config_error`: the config text itself is what is wrong.
+    /// An inline `key_pem` is not a key: 78 `config_error`.
     ConfigText,
 }
 
 impl TrustPolicyError {
-    /// Whether this refusal is the unsupported-key-backend verdict wearing a
-    /// second hat.
+    /// Whether this is the unsupported-key-backend verdict, so a `config.toml` or managed-payload signer answers 85
+    /// `unsupported_key_backend` like `--key`, not 78.
     ///
-    /// `--key awskms://alias/release`, `key = "awskms://alias/release"` in a
-    /// `config.toml` signer, and the same line in a managed-config payload are
-    /// the **same error through three doors**: all build
-    /// [`key_ref::KeyRefError::UnsupportedBackend`], and the flag door answers 85
-    /// `unsupported_key_backend`. Each of the other two flattened onto 78
-    /// `config_error`, which tells a fleet script "your config is malformed"
-    /// for a backend that is simply not built yet — the one distinction 85
-    /// exists to make, and the one it could never fire on.
-    ///
-    /// A method on the error rather than a predicate copied into each
-    /// classifier: an exit code that drifts from its own slug is the failure
-    /// mode a second copy invites, and this initiative has produced three
-    /// Blocks from two spellings of one concept.
+    /// A method, not a predicate copied into each classifier, so an exit code cannot drift from its slug.
     #[must_use]
     pub fn names_unsupported_backend(&self) -> bool {
         matches!(

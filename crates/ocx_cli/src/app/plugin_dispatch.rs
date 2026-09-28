@@ -1,23 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Git-style plugin dispatch for `ocx <name>` → `ocx-<name>` on PATH.
+//! Git-style plugin dispatch: `ocx <name> args` runs `ocx-<name> args` from PATH, before
+//! `Context::try_init`. See `.claude/artifacts/adr_cli_plugin_pattern.md`.
 //!
-//! "Git-style" specifically in the argument convention: the subcommand name is
-//! dropped, not re-passed (`ocx mirror sync` → `ocx-mirror sync`), so a plugin
-//! is just a normal CLI. See `build_plugin_command`.
-//!
-//! Wired from [`crate::app::App::run`] before `Context::try_init` to bypass
-//! library context setup that plugins don't need. See
-//! `.claude/artifacts/adr_cli_plugin_pattern.md`.
-//!
-//! ## Trust model
-//!
-//! Plugins run in OCX's trust boundary: they inherit the parent env (PATH,
-//! HOME, auth tokens, etc.) verbatim, matching cargo / git / kubectl plugin
-//! conventions. This is by design — plugins are first-party or user-vetted
-//! extensions of `ocx`, not arbitrary user packages running via `ocx exec`.
-//! Use `ocx exec` or `ocx package exec` when you need clean-env execution semantics.
+//! Plugins inherit the parent env like cargo/git plugins, minus bearer credentials;
+//! `ocx exec` and `ocx package exec` run with a clean env.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -32,38 +20,20 @@ use ocx_util::child_process::propagate_exit_code;
 
 use crate::app::context_options::ContextOptions;
 
-/// Dispatch entry point. Called from `App::run` for `Command::External(argv)`.
-///
-/// `argv[0]` is the unrecognized subcommand name (clap guarantee). Resolves
-/// `ocx-<name>` on PATH, forwards environment via `Env::apply_ocx_config`,
-/// execs the plugin, and propagates its exit status.
-///
-/// Initializes a minimal stderr log subscriber so that any error returned from
-/// this function is printed by the `main.rs` `log::error!` boundary.
-/// `Context::try_init` is never reached on this path, so there is no risk of
-/// double-init.
+/// Runs the plugin for `Command::External(argv)`, `argv[0]` being the unrecognized
+/// subcommand name, and propagates its exit status.
 pub async fn dispatch(argv: Vec<OsString>, opts: &ContextOptions) -> anyhow::Result<ExitCode> {
-    // Initialize a minimal subscriber here because this path bypasses
-    // `Context::try_init` (which normally sets up logging). Errors returned
-    // from `dispatch` are then visible at the `main.rs` `log::error!` boundary.
-    // `.ok()` is correct here: a second `ocx` invocation inside a plugin would
-    // find the global subscriber already set; silencing that error is intentional.
+    // This path skips `Context::try_init`'s logging setup; without it `app::finish` logs returned errors nowhere.
     LogSettings::default().with_console_level(opts.log_level).init().ok();
 
-    // Rewrite `[help, X]` → `[X, --help]` before dispatch so `ocx help foo`
-    // produces `ocx-foo --help` rather than looking for `ocx-help`.
     let argv = rewrite_help_invocation(argv);
 
-    // clap guarantees argv[0] is the unrecognized subcommand name, but guard
-    // defensively so an empty argv produces a clean usage error instead of a panic.
+    // An empty argv must be a usage error, never a panic.
     let Some(name) = argv.first() else {
         return Err(UsageError::new("no subcommand name provided").into());
     };
 
-    // Bare `ocx help` (no subcommand argument) → print top-level help, exit 0.
-    // Without this, `disable_help_subcommand = true` on `Cli` routes bare `help`
-    // into External; we must NOT then look for `ocx-help` on PATH. Tested by
-    // `test_help_survives_invalid_ambient_config` and `test_bare_help_prints_top_level`.
+    // `disable_help_subcommand` routes bare `ocx help` here; print top-level help, never look up `ocx-help`.
     if argv.len() == 1 && name == "help" {
         crate::app::Cli::command().print_help()?;
         // clap's print_help() omits trailing newline
@@ -71,13 +41,7 @@ pub async fn dispatch(argv: Vec<OsString>, opts: &ContextOptions) -> anyhow::Res
         return Ok(ExitCode::SUCCESS);
     }
 
-    // After `rewrite_help_invocation`, `[help, X]` becomes `[X, --help]`.
-    // If X is a real built-in subcommand, route to clap's help printer instead
-    // of dispatching to a non-existent `ocx-<builtin>` binary.  Without this,
-    // `ocx help package` would print a misleading install hint for a built-in
-    // that ships in core.  External subcommands registered via
-    // `#[command(external_subcommand)]` are not findable by `find_subcommand`,
-    // so they correctly fall through to the plugin path below.
+    // `ocx help <built-in>` prints clap help, not an install hint for a missing `ocx-<built-in>`.
     let name_str = name.to_string_lossy();
     if argv.get(1).map(|a| a == "--help").unwrap_or(false)
         && let Some(mut sub) = crate::app::Cli::command().find_subcommand(&*name_str).cloned()
@@ -88,8 +52,6 @@ pub async fn dispatch(argv: Vec<OsString>, opts: &ContextOptions) -> anyhow::Res
         return Ok(ExitCode::SUCCESS);
     }
 
-    // Resolve `ocx-<name>` on PATH, surfacing a user-friendly install hint on failure.
-    // `which::which` is sync filesystem I/O; move it off the async executor.
     let bin_name = format!("ocx-{name_str}");
     let binary = tokio::task::spawn_blocking(move || which::which(bin_name))
         .await?
@@ -101,15 +63,7 @@ pub async fn dispatch(argv: Vec<OsString>, opts: &ContextOptions) -> anyhow::Res
     Ok(propagate_exit_code(status))
 }
 
-/// Build the not-found hint shown when `ocx <name>` matches no built-in and no
-/// `ocx-<name>` binary is on PATH.
-///
-/// Deliberately does not over-promise: only first-party plugins are published
-/// at `ocx.sh/ocx/<name>`, so the `add` form is framed as the official-plugin
-/// path, with the generic PATH convention as the fallback for third-party
-/// plugins. The OCI registry is `ocx.sh` and the identifier is three-segment
-/// (`ocx.sh/ocx/<name>`) — distinct from the `ocx-sh` GitHub org slug and from
-/// the `ocx-<name>` binary name.
+/// The hint shown when `ocx <name>` matches no built-in and no `ocx-<name>` binary is on PATH.
 fn unknown_subcommand_hint(name: &str) -> String {
     format!(
         "unknown subcommand '{name}'; if `ocx-{name}` is an official OCX plugin, \
@@ -118,11 +72,7 @@ fn unknown_subcommand_hint(name: &str) -> String {
     )
 }
 
-/// Rewrite `[help, X]` → `[X, --help]`; otherwise return `argv` unchanged.
-///
-/// Without this, `ocx help foo` produces `External(["help", "foo"])` which
-/// would dispatch to `ocx-help foo` — wrong. This rewrites it to dispatch
-/// `ocx-foo --help` instead.
+/// Rewrites `[help, X]` to `[X, --help]`, so `ocx help foo` runs `ocx-foo --help`, not `ocx-help foo`.
 fn rewrite_help_invocation(argv: Vec<OsString>) -> Vec<OsString> {
     if argv.len() == 2 && argv[0] == "help" {
         vec![argv[1].clone(), OsString::from("--help")]
@@ -131,65 +81,29 @@ fn rewrite_help_invocation(argv: Vec<OsString>) -> Vec<OsString> {
     }
 }
 
-/// Build a `tokio::process::Command` for the resolved plugin binary.
-///
-/// Git-style argument convention: the subcommand name (`argv[0]`) is dropped,
-/// so the plugin receives only the user args (`argv[1..]`). `ocx mirror sync`
-/// and `ocx help mirror` reach `ocx-mirror` as `sync` and `--help` — identical
-/// to running the standalone binary directly. (Cargo re-passes the name as
-/// `argv[1]`; OCX deliberately does not, so a plain clap plugin like
-/// `ocx-mirror` needs no `mirror` wrapper subcommand to avoid rejecting its own
-/// name.) Applies `Env::apply_ocx_config` for resolution-affecting environment
-/// forwarding. Inherits stdio.
+/// Builds the plugin command: the user args after the subcommand name (git style, not cargo's
+/// re-passed name), resolution-affecting config forwarded, bearer credentials removed.
 fn build_plugin_command(
     binary: &Path,
     argv: &[OsString],
     opts: &ContextOptions,
 ) -> anyhow::Result<tokio::process::Command> {
-    // Capture the absolute path of the running ocx so any child `ocx`
-    // invocations inside the plugin pin to the same binary via OCX_BINARY_PIN.
-    // Degrading to "ocx" on failure matches Context::try_init's pattern: the
-    // child launcher's `${OCX_BINARY_PIN:-ocx}` form then falls back to PATH lookup.
+    // Pins child `ocx` calls inside the plugin to this binary via `OCX_BINARY_PIN`; on failure they fall back to PATH.
     let self_exe = std::env::current_exe().unwrap_or_else(|e| {
         log::warn!("could not resolve current exe: {e}");
         PathBuf::from("ocx")
     });
     let config_view = opts.as_view(self_exe);
 
-    // Forward the running ocx's resolution-affecting config to the plugin so
-    // any child `ocx` invocations inside the plugin see the same policy flags
-    // (offline, remote, config, index, binary pin).
-    //
-    // `Env::new()` — full ambient — and NOT `Env::inherited()`, which is what
-    // `run`, `exec`, `package test` and `patch test` moved to. Ruled
-    // correct-as-is, so do not "align" it: those four take an explicit env
-    // selection from the user, and honouring what the user declared is the
-    // whole of the principle behind `inherited()`. A plugin invocation
-    // declares nothing — it is an extension of this ocx process, launched from
-    // the user's own shell, and narrowing its environment would break plugins
-    // for a rule that has no declaration to enforce.
-    //
-    // The decision rests on that principle and not on any PATH mechanic:
-    // `apply_ocx_config` (`env.rs`) pins `OCX_BINARY_PIN` to an absolute path,
-    // so a plugin's child `ocx` resolves without needing the reconciled PATH
-    // either way.
+    // Full ambient `Env::new()`, not `Env::inherited()`: plugins inherit the parent env (module doc).
     let mut env = Env::new();
     env.apply_ocx_config(&config_view);
 
     let mut cmd = tokio::process::Command::new(binary);
-    // Git convention: drop the subcommand name (argv[0]) and forward only the
-    // user args (argv[1..]). `Command::new` sets the OS argv[0] to the binary
-    // path, so the plugin sees `ocx-mirror <user args>` — identical to a direct
-    // invocation. Re-passing the name (cargo style) would make a plain clap
-    // plugin reject its own name as an unrecognized subcommand. `get(1..)`
-    // tolerates an empty argv defensively (the caller guarantees argv[0]).
+    // Re-passing the name (cargo style) makes a plain clap plugin reject it as an unknown subcommand.
     cmd.args(argv.get(1..).unwrap_or(&[]));
     cmd.envs(env);
-    // `envs` only adds and overrides, so dropping a key from the map cannot
-    // unset one this process inherited — and a plugin is third-party code. The
-    // ambient environment is forwarded deliberately (see above), but a bearer
-    // credential never is: `apply_ocx_config` removed these from the map, and
-    // this is what makes the removal reach the child.
+    // `envs` cannot unset an inherited key, so without this a bearer credential reaches the plugin.
     for credential in ocx_config::env::keys::CREDENTIAL_KEYS {
         cmd.env_remove(credential);
     }

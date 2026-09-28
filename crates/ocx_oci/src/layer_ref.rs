@@ -7,31 +7,18 @@ use std::path::PathBuf;
 
 use crate::media_type::{MEDIA_TYPE_TAR_GZ, MEDIA_TYPE_TAR_XZ, MEDIA_TYPE_TAR_ZSTD};
 
-/// Supported archive media types for digest layer references.
-///
-/// The OCI distribution spec does not expose a layer's media type via
-/// blob HEAD, so when pushing a cross-package digest reference the
-/// publisher must re-declare the format. This closed enum makes the
-/// set of acceptable values total — `FromStr` and `Display` round-trip
-/// without any runtime fallback — and prevents stringly-typed drift in
-/// callers constructing `LayerRef::Digest` directly.
+/// Archive media type a digest layer reference declares, since blob HEAD does not expose one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveMediaType {
-    /// `application/vnd.oci.image.layer.v1.tar+gzip`
     TarGz,
-    /// `application/vnd.oci.image.layer.v1.tar+xz`
     TarXz,
-    /// `application/vnd.oci.image.layer.v1.tar+zstd`
     TarZstd,
 }
 
 impl ArchiveMediaType {
-    /// All supported archive media types. The single source of truth
-    /// for iteration — `FromStr` walks this set when resolving an
-    /// extension suffix back to a variant.
+    /// Every variant; `FromStr` and the bare-digest hint walk it, so a variant missing here is unparseable.
     pub const ALL: &'static [Self] = &[Self::TarGz, Self::TarXz, Self::TarZstd];
 
-    /// Returns the OCI media type string for the manifest descriptor.
     pub fn as_media_type(self) -> &'static str {
         match self {
             Self::TarGz => MEDIA_TYPE_TAR_GZ,
@@ -40,11 +27,8 @@ impl ArchiveMediaType {
         }
     }
 
-    /// Filename extensions (without the leading dot) that map to this
-    /// media type. The first entry is the canonical form; any
-    /// additional entries are accepted aliases. `FromStr` tries them
-    /// in order, so the canonical form wins when a string could match
-    /// multiple.
+    /// Filename extensions without the leading dot; the first is canonical and
+    /// `FromStr` tries them in order.
     pub fn extensions(self) -> &'static [&'static str] {
         match self {
             Self::TarGz => &["tar.gz", "tgz"],
@@ -53,7 +37,6 @@ impl ArchiveMediaType {
         }
     }
 
-    /// Returns the canonical filename extension (without the leading dot).
     pub fn canonical_extension(self) -> &'static str {
         self.extensions()[0]
     }
@@ -69,26 +52,12 @@ impl std::fmt::Display for ArchiveMediaType {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LayerRefParseError {
-    /// A bare digest (`sha256:abc...`) was supplied without a media
-    /// type extension suffix. Digest references must spell out the
-    /// original archive format because the OCI distribution spec does
-    /// not return a usable media type from a blob HEAD.
     #[error("{}", format_bare_digest(.0))]
     BareDigest(String),
 
-    /// The optional `:strip=…,prefix=…` layout tail could not be parsed
-    /// (unknown key, non-`u8` strip, duplicate key, empty value, or an entry
-    /// missing its `=` separator). A bad `prefix` value is reported separately
-    /// via [`MalformedPrefix`](Self::MalformedPrefix), which carries the
-    /// structured cause.
     #[error("malformed layer layout '{spec}': {reason}")]
     MalformedLayout { spec: String, reason: String },
 
-    /// The `prefix=…` layout value is not a valid bounded, non-escaping relative
-    /// path. Carries the [`PathEscapeError`](ocx_util::fs::path::PathEscapeError)
-    /// cause via `#[source]` so callers can recover the precise reason
-    /// (absolute, Windows-prefixed, escaping, or over-long) instead of a
-    /// flattened string.
     #[error("malformed layer layout '{spec}': invalid prefix '{prefix}'")]
     MalformedPrefix {
         spec: String,
@@ -98,9 +67,6 @@ pub enum LayerRefParseError {
     },
 }
 
-/// Renders the bare-digest error message, enumerating every accepted
-/// extension from [`ArchiveMediaType::ALL`] so adding a new archive
-/// format updates the hint automatically.
 fn format_bare_digest(digest: &str) -> String {
     let extensions: Vec<String> = ArchiveMediaType::ALL
         .iter()
@@ -116,33 +82,16 @@ fn format_bare_digest(digest: &str) -> String {
     )
 }
 
-/// A reference to a layer in a multi-layer package.
-///
-/// Layers are ordered: index 0 is the base layer, index N is the top
-/// layer. With overlap-free semantics, order doesn't affect the
-/// assembled result, but it determines error messages and manifest
-/// descriptor order.
+/// A reference to a layer in a multi-layer package; list order is manifest descriptor order.
 #[derive(Debug, Clone)]
 pub enum LayerRef {
-    /// An archive file to upload as a new layer. Media type is
-    /// inferred from the file extension at push time. `layout` carries
-    /// optional per-layer strip + output prefix (default: none).
-    /// `mount_from` carries an optional source repository to attempt a
-    /// cross-repository blob mount from before falling back to upload
-    /// (default: none).
+    /// An archive file to upload; `mount_from` is a repository to try a cross-repository mount from first.
     File {
         path: PathBuf,
         layout: crate::LayerLayoutSpec,
         mount_from: Option<String>,
     },
-    /// An existing layer already present in the registry, referenced
-    /// by digest. The `media_type` is declared by the caller because
-    /// the OCI spec does not expose it via blob HEAD; see the
-    /// [`FromStr`](std::str::FromStr) impl for the CLI syntax. `layout`
-    /// carries optional per-layer strip + output prefix (default: none).
-    /// `mount_from` carries an optional source repository to attempt a
-    /// cross-repository blob mount from before falling back to a
-    /// blob-existence check (default: none).
+    /// A layer already in the registry, by digest.
     Digest {
         digest: crate::Digest,
         media_type: ArchiveMediaType,
@@ -178,10 +127,7 @@ impl std::fmt::Display for LayerRef {
     }
 }
 
-/// Renders the `:strip=…,prefix=…,from=…` layout tail, emitting only fields
-/// the publisher set (order: strip, prefix, from). Returns an empty string
-/// for the default (no layout, no mount source) so an unadorned ref
-/// round-trips to today's output.
+/// Renders the layout tail with only the fields set, empty for none, so `Display` round-trips through `FromStr`.
 fn layout_suffix(layout: &crate::LayerLayoutSpec, mount_from: Option<&str>) -> String {
     let mut parts = Vec::new();
     if let Some(strip) = layout.strip {
@@ -200,10 +146,7 @@ fn layout_suffix(layout: &crate::LayerLayoutSpec, mount_from: Option<&str>) -> S
     }
 }
 
-/// Splits off an optional `:strip=…,prefix=…,from=…` layout tail per the
-/// commit rule: the split point is the **last** `:` whose tail begins with
-/// `strip=`, `prefix=`, or `from=`. Returns `(ref, tail)` when such a `:`
-/// exists, else `None` (the whole string is the ref).
+/// Splits at the last `:` whose tail begins with a layout key, or `None`.
 fn split_layout_tail(s: &str) -> Option<(&str, &str)> {
     let mut search_end = s.len();
     while let Some(idx) = s[..search_end].rfind(':') {
@@ -216,12 +159,7 @@ fn split_layout_tail(s: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Checks that a `from=` value is a plausible OCI repository path: nonempty,
-/// restricted to `[a-z0-9._/-]`, and without a leading or trailing `/`.
-///
-/// This is a syntax-only check (mirrors the repository-name character class
-/// the OCI distribution spec expects) — it does not verify the repository
-/// exists.
+/// Syntax-only check that a `from=` value is a plausible OCI repository path.
 fn validate_mount_from(value: &str) -> Result<(), String> {
     if value.starts_with('/') || value.ends_with('/') {
         return Err("must not start or end with '/'".to_string());
@@ -235,15 +173,8 @@ fn validate_mount_from(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Parses a committed layout tail (`strip=N`, `prefix=P`, `from=REPO`,
-/// comma-separated) into a [`crate::LayerLayoutSpec`] plus an optional mount
-/// source repository. `full` is the original ref string, echoed in the error
-/// for context.
-///
-/// Once the tail is committed to layout parsing (see [`split_layout_tail`]), any
-/// invalid value — non-`u8` strip, escaping/over-long prefix, malformed `from`
-/// repository, unknown key, duplicate key, or empty value — is a hard
-/// [`LayerRefParseError::MalformedLayout`], never a silent fallback to a file ref.
+/// Parses a committed layout tail; an invalid entry is a hard error, never a
+/// silent fallback to a file ref named after the whole string.
 fn parse_layout_tail(full: &str, tail: &str) -> Result<(crate::LayerLayoutSpec, Option<String>), LayerRefParseError> {
     let malformed = |reason: String| LayerRefParseError::MalformedLayout {
         spec: full.to_string(),
@@ -283,11 +214,8 @@ fn parse_layout_tail(full: &str, tail: &str) -> Result<(crate::LayerLayoutSpec, 
                         source,
                     }
                 })?;
-                // A value that lexically normalizes to the containment root (`.`,
-                // `./`, `a/..`) parses to an empty `RelativePath`, which `Display`
-                // would render as `:prefix=` and re-parsing would reject as an
-                // empty value. Reject it here so the Display→FromStr round-trip
-                // stays total, mirroring the literal-empty-string rejection above.
+                // A prefix normalizing to the root (`.`, `a/..`) would `Display` as
+                // `:prefix=`, which re-parses as an error.
                 if prefix.is_empty() {
                     return Err(malformed("prefix resolves to the package root; omit it".to_string()));
                 }
@@ -313,37 +241,14 @@ fn parse_layout_tail(full: &str, tail: &str) -> Result<(crate::LayerLayoutSpec, 
 impl std::str::FromStr for LayerRef {
     type Err = LayerRefParseError;
 
-    /// Parses a string as a `LayerRef`.
+    /// Parses `sha256:<hex>.<ext>` as a digest ref and anything else (or a
+    /// `./`-prefixed name) as a file, each with an optional
+    /// `:strip=N,prefix=P,from=REPO` tail.
     ///
-    /// Recognised shapes, in order:
-    ///
-    /// 1. **`sha256:<hex>.<ext>`** — a layer digest with an archive
-    ///    extension suffix declaring the media type. Accepted
-    ///    extensions are every extension declared by
-    ///    [`ArchiveMediaType::ALL`] (`tar.gz`, `tgz`, `tar.xz`, `txz`,
-    ///    `tar.zst`, `tzst`, `tar.zstd`). Produces [`LayerRef::Digest`].
-    ///
-    /// 2. **Bare digest** (`sha256:<hex>` with no suffix) — rejected
-    ///    with [`LayerRefParseError::BareDigest`]. Fabricating a media
-    ///    type here would break consumers that pull a reused
-    ///    non-gzip layer, so OCX requires the caller to spell it out.
-    ///
-    /// 3. **Anything else** — treated as a file path and produces
-    ///    [`LayerRef::File`]. To force file interpretation of a
-    ///    pathological filename that happens to match shape 1, prefix
-    ///    it with `./` (standard Unix disambiguation).
-    ///
-    /// Either shape may carry an optional `:strip=N,prefix=P,from=REPO` layout
-    /// tail (all three keys optional, comma-separated, order-independent on
-    /// input). `from=REPO` names a source repository to attempt a
-    /// cross-repository blob mount from before falling back to upload
-    /// (populates the `mount_from` field of the returned variant).
+    /// A bare digest is refused: guessing its media type breaks a consumer
+    /// pulling a reused non-gzip layer.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // Split off an optional `:strip=…,prefix=…,from=…` layout tail first.
-        // Once a tail is committed to layout parsing, an invalid value is a
-        // hard error (never a silent fallback to a file ref). A string with no
-        // such tail is the whole ref, preserving today's behaviour (incl.
-        // bare-digest S1).
+        // Once a tail is committed to, an invalid value is a hard error, never a silent fallback to a file ref.
         let (ref_str, layout, mount_from) = match split_layout_tail(s) {
             Some((base, tail)) => {
                 let (layout, mount_from) = parse_layout_tail(s, tail)?;
@@ -352,11 +257,7 @@ impl std::str::FromStr for LayerRef {
             None => (s, crate::LayerLayoutSpec::default(), None),
         };
 
-        // Pathological filename escape: a leading `./` or `/` means
-        // "definitely a file path," even if the remainder would
-        // otherwise parse as a digest+ext. This is the standard Unix
-        // convention for disambiguating filenames that resemble
-        // special tokens.
+        // A leading `./` or `/` is always a file path, even when the rest would parse as a digest.
         let looks_like_path = ref_str.starts_with("./") || ref_str.starts_with('/');
 
         if !looks_like_path {

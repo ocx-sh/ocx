@@ -10,9 +10,9 @@
 //! made it shared; the first two were the same fixture drifting apart already
 //! (one carried a blob map and a concurrency probe, the other did not).
 //!
-//! It stays inside `package_manager` rather than moving to `ocx_test_support`
-//! (D-063): it implements [`IndexImpl`], so a home in the shared test crate
-//! would give that crate an `ocx_*` dependency, which C-025 forbids.
+//! It stays inside `package_manager` rather than moving to `ocx_test_support`:
+//! it implements [`IndexImpl`], so a home in the shared test crate
+//! would give that crate an `ocx_*` dependency, which the crate map forbids.
 
 use std::collections::HashMap;
 
@@ -61,9 +61,9 @@ impl Drop for ConcurrencyProbeGuard {
 /// distinct seam from manifest resolution).
 ///
 /// Used with `ChainMode::Default` so a resolve that needs leaf content recovers
-/// it through the same absent-dispatch recovery path a live registry would — a
-/// leaf platform manifest is never locally cached (`adr_index_indirection.md`
-/// A3), so an offline-only pre-seeded fixture cannot answer a lookup for one.
+/// it through the absent-dispatch path a live registry would: a leaf manifest is
+/// never locally cached (`adr_index_indirection.md` § "The object store holds
+/// dispatch objects only"), so an offline-only fixture cannot answer for one.
 #[derive(Clone, Default)]
 pub struct FakeManifestSource {
     entries: HashMap<String, (Vec<u8>, Digest, ocx_oci::Manifest)>,

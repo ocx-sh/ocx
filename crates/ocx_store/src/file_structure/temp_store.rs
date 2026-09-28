@@ -14,21 +14,12 @@ use std::path::{Path, PathBuf};
 
 use ocx_util::fs::LockedFile;
 
-/// [`Result`](std::result::Result) over the one failure this tier's file
-/// operations can raise. `From<FileError>` for the crate-wide error yields
-/// exactly `InternalFile(path, cause)`, one conversion later than it was.
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
 const LOCK_EXTENSION: &str = "lock";
 
-/// Deterministic temporary directory for in-progress downloads.
+/// Deterministic staging directories for in-progress downloads.
 ///
-/// Each identifier with a digest maps to a unique, flat directory under the
-/// root. The directory name is a truncated SHA-256 hash of the full
-/// identifier (registry + repository + digest), making paths both
-/// deterministic and compact.
-///
-/// Layout:
 /// ```text
 /// {root}/
 ///   {32-hex-char-hash}.lock   ← sibling lock file (outside the dir)
@@ -39,12 +30,7 @@ const LOCK_EXTENSION: &str = "lock";
 ///     manifest.json
 /// ```
 ///
-/// The lock file lives as a sibling of the temp directory so the directory
-/// can be atomically moved (renamed) while the lock is still held.
-///
-/// Both the `install` task and the `clean` command use [`TempStore::try_acquire`]
-/// to lock and prepare temp directories. A successful acquire clears any
-/// leftover artifacts from a previous interrupted download.
+/// The `.lock` file sits beside its directory, never inside, so the directory can be renamed away while locked.
 #[derive(Debug, Clone)]
 pub struct TempStore {
     root: PathBuf,
@@ -55,32 +41,23 @@ impl TempStore {
         Self { root: root.into() }
     }
 
-    /// The root directory of the temp store.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Scratch root `ocx package test` materialises packages into.
-    ///
-    /// Named here, not joined at each call site, because the path is shared by
-    /// a writer and a guard: `ocx package test` materialises here, and a
-    /// generated launcher inside such a package bakes this path as its
-    /// `pkg-root`, which `ocx launcher exec` allow-lists. Two spellings of the
-    /// literal would let the two drift, and the drift shows up as a usage error
-    /// on an otherwise valid invocation.
+    /// Scratch root `ocx package test` materialises into; `ocx launcher exec` allow-lists it, so never re-spell the join.
     pub fn package_test_root(&self) -> PathBuf {
         self.root.join("test")
     }
 
-    /// Scratch root `ocx patch test` composes into. Allow-listed as a launcher
-    /// `pkg-root` prefix for the same reason as [`Self::package_test_root`].
+    /// Scratch root `ocx patch test` composes into; allow-listed like [`Self::package_test_root`].
     pub fn patch_test_root(&self) -> PathBuf {
         self.root.join("patch-test")
     }
 
-    /// Returns the temp directory path for the given identifier.
+    /// # Errors
     ///
-    /// Requires the identifier to carry a digest; returns an error otherwise.
+    /// `identifier` carries no digest.
     pub fn path(&self, identifier: &ocx_oci::PackageRef) -> std::result::Result<PathBuf, super::error::Error> {
         let digest = identifier
             .digest()
@@ -88,15 +65,11 @@ impl TempStore {
         Ok(self.root.join(Self::dir_name(identifier, &digest)))
     }
 
-    /// Returns the sibling lock file path for a given temp directory path.
     pub fn lock_path_for(dir: &Path) -> PathBuf {
         dir.with_extension(LOCK_EXTENSION)
     }
 
-    /// Lists all temp entries currently present.
-    ///
-    /// Discovers entries from both `.lock` files and directories in the root.
-    /// Returns an empty vec if the root does not exist.
+    /// Lists entries found as a `.lock` file, a directory, or both; empty if the root does not exist.
     pub fn list_all(&self) -> Result<Vec<TempEntry>> {
         if !self.root.exists() {
             return Ok(Vec::new());
@@ -106,7 +79,6 @@ impl TempStore {
             Err(_) => return Ok(Vec::new()),
         };
 
-        // Collect unique base names from both .lock files and directories.
         let mut bases = HashSet::new();
         let mut lock_bases = HashSet::new();
         let mut dir_bases = HashSet::new();
@@ -139,18 +111,9 @@ impl TempStore {
         Ok(result)
     }
 
-    /// Tries to exclusively lock a temp directory (non-blocking).
+    /// Non-blocking exclusive lock that clears leftovers on success; `None` when another process holds it.
     ///
-    /// If the lock is acquired, any leftover artifacts (from a previous
-    /// interrupted download) are cleared. Returns `None` if the lock is
-    /// held by another process.
-    ///
-    /// Used by both `install` (to prepare a clean temp dir before downloading)
-    /// and `clean` (to detect and remove stale dirs).
-    ///
-    /// Uses [`LockedFile::try_exclusive_blocking`] — the sync, non-blocking
-    /// constructor — because callers (`stale_entries`, sync tests) run
-    /// outside a Tokio runtime and cannot await the async API.
+    /// Sync on purpose: `stale_entries` runs outside a Tokio runtime.
     pub fn try_acquire(&self, path: &Path) -> Result<Option<TempAcquireResult>> {
         let lock_path = Self::lock_path_for(path);
         match LockedFile::try_exclusive_blocking(&lock_path) {
@@ -168,8 +131,6 @@ impl TempStore {
         Self::finish_acquire(path, lock)
     }
 
-    /// Shared post-lock logic: create the content directory, check for and
-    /// clean leftover artifacts.
     fn finish_acquire(dir_path: &Path, lock: LockedFile) -> Result<TempAcquireResult> {
         std::fs::create_dir_all(dir_path).map_err(|e| ocx_util::error::FileError::new(dir_path, e))?;
         let dir = TempDir {
@@ -182,11 +143,7 @@ impl TempStore {
         Ok(TempAcquireResult { lock, dir, was_cleaned })
     }
 
-    /// Returns all stale temp entries (those whose lock is not held, plus orphans).
-    ///
-    /// For entries with a lock file, acquires the lock to prevent races with
-    /// concurrent installs. Dirs that are actively locked are skipped.
-    /// Directories without a lock file are returned as orphans.
+    /// Entries whose lock this call acquired, plus lock-less orphans; a held lock is skipped.
     pub fn stale_entries(&self) -> Result<Vec<StaleEntry>> {
         let entries = self.list_all()?;
         let mut result = Vec::new();
@@ -195,22 +152,14 @@ impl TempStore {
                 if let Some(acquired) = self.try_acquire(&entry.dir)? {
                     result.push(StaleEntry::Locked(acquired));
                 }
-                // else: another process holds the lock, skip
             } else {
-                // No lock file → orphan directory, safe to clean directly.
                 result.push(StaleEntry::Orphan(entry.dir));
             }
         }
         Ok(result)
     }
 
-    /// Returns the temp directory path for a layer extraction.
-    ///
-    /// Layers are not repository-scoped at the CAS level — two packages in
-    /// different repositories may share the same layer digest. The middle
-    /// component is therefore a fixed `__layer__` sentinel rather than a
-    /// repository name. Null-byte delimiters keep the keyspace disjoint from
-    /// any legitimate repository path (which cannot contain NUL).
+    /// Staging directory for a layer extraction; the NUL-delimited `__layer__` key cannot collide with a package's.
     pub fn layer_path(&self, registry: &str, digest: &ocx_oci::Digest) -> PathBuf {
         use sha2::{Digest as _, Sha256};
         let input = format!("{registry}\0__layer__\0{digest}");
@@ -218,13 +167,7 @@ impl TempStore {
         self.root.join(&hash[..32])
     }
 
-    /// Hash of the CAS identity into a flat 32-char hex directory name.
-    ///
-    /// Keyed by `registry + digest` only (no repository) so the temp lock
-    /// matches the final `PackageStore::path` which is also repo-agnostic.
-    /// Two processes installing the same digest from different repositories
-    /// must serialize on the same lock to avoid the late finisher clobbering
-    /// the early finisher's `refs/` back-references via `move_dir`.
+    // No repository in the key: installs of one digest from two repositories must share a lock, or `move_dir` clobbers `refs/`.
     fn dir_name(identifier: &ocx_oci::PackageRef, digest: &ocx_oci::Digest) -> String {
         use sha2::{Digest as _, Sha256};
         let input = format!("{}\0{}", identifier.registry(), digest);

@@ -2,27 +2,15 @@
 // Copyright 2026 The OCX Authors
 
 //! Atomic landing of an already-populated temp layer directory into the layer store.
-//!
-//! Both `pull` (registry source) and `pull_local` (filesystem source) finish a layer
-//! materialization with the same 5-step dance: ensure parent, atomic rename, recover
-//! from concurrent-winner race, drop the temp on success or race. This module owns
-//! that dance so the two pipelines stay byte-identical.
 
 use std::path::Path;
 
 use crate::error::PackageErrorKind;
 use ocx_store::file_structure;
 
-/// Atomic-rename `temp_path` into `layers/{registry}/{digest}/`, recovering from a
-/// concurrent-winner race by discarding the temp directory.
+/// Renames `temp_path` into `layers/{registry}/{digest}/`; losing a concurrent race discards the temp and is `Ok`.
 ///
-/// **Caller contract**: `temp_path` must already contain the layer's `content/` tree
-/// and a `digest` file (see [`file_structure::write_digest_file`]).
-///
-/// **Race semantics**: when the rename fails AND `layer_content` exists,
-/// another task already extracted the same layer; the helper logs at debug, removes
-/// `temp_path` best-effort, and returns `Ok(())`. Stale temps that survive the
-/// best-effort cleanup are reclaimed by `TempStore::try_acquire` on subsequent runs.
+/// `temp_path` must already hold the layer's `content/` tree and a `digest` file.
 pub(super) async fn finalize_layer_dir(
     fs: &file_structure::FileStructure,
     registry: &str,
@@ -31,10 +19,7 @@ pub(super) async fn finalize_layer_dir(
 ) -> Result<(), PackageErrorKind> {
     let layer_path = fs.layers.path(registry, digest);
     let layer_content = fs.layers.content(registry, digest);
-    // Fast path for the concurrent-winner race: on Windows a rename onto an
-    // existing directory reports ERROR_ACCESS_DENIED — the same code the
-    // transient retry targets — so without this probe a lost race would burn
-    // the full backoff schedule before the post-rename guard below catches it.
+    // Without this probe a lost race burns the Windows rename retry's whole backoff (same ERROR_ACCESS_DENIED).
     if ocx_util::fs::path_exists_lossy(&layer_content).await {
         log::debug!("Layer {} already exists (race), cleaning up temp.", digest);
         let _ = tokio::fs::remove_dir_all(temp_path).await;

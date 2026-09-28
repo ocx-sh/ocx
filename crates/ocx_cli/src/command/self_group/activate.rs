@@ -21,24 +21,10 @@ use crate::app::ContextOptions;
 use crate::conventions::resolve_shell_arg;
 use crate::options;
 
-/// Emit shell activation lines for the current OCX installation.
+/// Emit eval-safe activation lines: PATH prepends, inline completions and the global toolchain env.
 ///
-/// Prints eval-safe shell lines to stdout that:
-/// - Prepend the absolute resolved `$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin`
-///   path to `PATH`.
-/// - Inject shell completions (unless `OCX_NO_COMPLETIONS=1`).
-/// - Evaluate the global toolchain env (`ocx --global env --shell=NAME`).
-///
-/// Intended to be sourced from `$OCX_HOME/env.sh` at shell startup.
-/// `env.sh` sets `OCX_HOME` before invoking `ocx self activate`, so the
-/// absolute path is resolved from the binary's perspective — no shell-level
-/// `$OCX_HOME` variable reference is emitted.
-///
-/// ```sh
-/// if command -v ocx >/dev/null 2>&1; then
-///     eval "$(ocx self activate --shell=sh)"
-/// fi
-/// ```
+/// `$OCX_HOME` is resolved here, so the stream never references it shell-side.
+// Rustdoc only: clap renders `ocx self activate --help` from the `SelfGroup::Activate` variant.
 #[derive(Parser)]
 pub struct SelfActivate {
     /// Target shell for activation output.
@@ -63,9 +49,7 @@ pub struct SelfActivate {
     /// Shell-completion injection policy.
     ///
     /// `--completion` forces completions on, `--no-completion` off; with
-    /// neither, completions load only for an interactive session, and every
-    /// shim states that shell-side with `--interactive`/`--no-interactive`
-    /// rather than leaving the binary to probe a descriptor it has redirected.
+    /// neither, completions load only for an interactive session.
     #[clap(flatten)]
     completion: options::Completion,
 
@@ -79,10 +63,8 @@ pub struct SelfActivate {
 
     /// Session interactivity, as the calling shell measured it.
     ///
-    /// Feeds the auto rung of both policies above, and nothing else — a shim
-    /// that spelled its answer as `--hook` would take rung 2 and revoke
-    /// `OCX_NO_HOOK` and `[shell] hook` for every shell it starts. With neither
-    /// flag the binary falls back to its own terminal probe.
+    /// Feeds the auto rung of both policies above; with neither flag the binary probes its own terminal.
+    // Only the auto rung: a shim answering with `--hook` would override `OCX_NO_HOOK` and `[shell] hook` everywhere.
     #[clap(flatten)]
     interactive: options::Interactive,
 
@@ -90,26 +72,15 @@ pub struct SelfActivate {
     ///
     /// The per-prompt entry point the emitted hook body invokes. Hidden: it is
     /// machine surface, not something to type.
-    // The `hide = true` precedent is flag-level, as on `command/login.rs:42`.
     #[clap(long = "reconcile", hide = true)]
     reconcile: bool,
 }
 
 impl SelfActivate {
-    /// Context-free execution path — called from `app.rs` before `Context::try_init`.
-    ///
-    /// `self activate` runs on every shell startup and must not pay the full
-    /// `Context::try_init` cost (ConfigLoader file walk, OCI client, OciIndex,
-    /// PackageManager). It only needs a `FileStructure` to resolve the absolute
-    /// `$OCX_HOME/symlinks/…/bin` path. `FileStructure::new()` reads `OCX_HOME`
-    /// from the environment and is cheap to construct — no I/O beyond the env
-    /// lookup.
+    /// Called from `app.rs` before `Context::try_init`, which a shell start and a stat-only prompt must not pay.
     pub async fn execute(&self, options: &ContextOptions, color_config: ColorModeConfig) -> anyhow::Result<ExitCode> {
         if self.reconcile {
-            // C-051 — the hook path exits 0, always. Malformed state degrades,
-            // logs once at debug, and the prompt renders. Nothing reaches the
-            // binary's stderr that a user would see anyway: the emitted body
-            // discards it (A-21).
+            // Always exit 0 so the prompt renders; failures log at debug, and the emitted body discards stderr anyway.
             let carrier = ocx_util::env::var(CARRIER_KEY);
             if let Err(error) = self
                 .run_reconcile(options, color_config, &FileStructure::new(), carrier.as_deref())
@@ -122,76 +93,32 @@ impl SelfActivate {
         self.run_startup(options).await
     }
 
-    /// Resolve the target shell.
-    ///
-    /// Bare `--shell` (`Some(None)`) or absent (`None`) both trigger
-    /// autodetect; explicit `--shell=bash` (`Some(Some)`) passes through. The
-    /// `self activate` bare-absent case differs from `ocx env` / `ocx package
-    /// env`, where absent means "use the default format path".
-    ///
-    /// `self.shell.or(Some(None))` collapses both "absent" and "bare" into
-    /// `Some(_)`, so `resolve_shell_arg` always returns `Some` here. The
-    /// `.expect()` documents that invariant — `unreachable!()` masked it as an
-    /// arm of the outer match (Q-W3).
+    /// Resolve the target shell: absent and bare `--shell` both autodetect, unlike `ocx env`'s report path.
     fn target_shell(&self) -> anyhow::Result<Shell> {
         let shell_arg = self.shell.or(Some(None));
         Ok(resolve_shell_arg(shell_arg)?
             .expect("resolve_shell_arg(Some(_)) always returns Some; see shell_arg remap above"))
     }
 
-    /// The shell-start path: emit the activation stream, and nothing else.
+    /// The shell-start path: emit the activation stream and no diagnostic at all.
     ///
-    /// **No diagnostic of any kind is emitted here** (A-21). Not a suppressed
-    /// one — the channel does not exist on this path. The summary line, the
-    /// inert-project hint, the over-cap line, the direnv/mise yield line and the
-    /// managed-strip reason all ride the first `--reconcile` run, which the
-    /// first prompt of every shell always performs (C-051): layer 2's fast path
-    /// has no recorded fingerprint to compare against, and "no record" counts as
-    /// changed.
+    /// Every diagnostic rides the first `--reconcile` run, which always fires because no fingerprint is recorded yet.
     async fn run_startup(&self, options: &ContextOptions) -> anyhow::Result<ExitCode> {
         let shell = self.target_shell()?;
 
-        // Resolve the absolute install bin path from the OCX CLI symlink.
-        // `env.sh` guarantees OCX_HOME is set before running `ocx self activate`,
-        // so `FileStructure::new()` already knows the correct root via OCX_HOME.
-        // Constructing FileStructure directly avoids the full Context::try_init
-        // overhead (OCI client, OciIndex, PackageManager) on every shell startup.
+        // `env.sh` sets `OCX_HOME` first, so `FileStructure::new()` resolves the right root.
         let file_structure = FileStructure::new();
         let bin_path = file_structure.ocx_install_bin_path();
-        // C-001 — the store owns the spelling; never a literal `toolchain/active/bin`
-        // join here.
+        // Never a literal `toolchain/active/bin` join: the store owns that spelling.
         let toolchain_bin = file_structure.toolchain.bin();
 
-        // A-12's other half. The per-prompt hook has resolved this ladder since
-        // 2026-09-06 (`global_prompt_entries`); the login stream did not, so a
-        // global `activate = "bin"` still composed a full env envelope on every
-        // shell start — the very symptom A-12 records as closed. The gate sits
-        // here, at the emitter, for A-12's own reason: the resolver's other
-        // caller is `ocx --global env` / `ocx --global exec`, an explicit user
-        // request that composes under any mode.
-        //
-        // One small TOML parse on the startup path, next to the `ConfigLoader`
-        // pass `load_shell_config` already makes. It cannot fail: a missing,
-        // unreadable or unparseable `$OCX_HOME/ocx.toml` leaves the file tier
-        // absent and falls through to `OCX_TOOLCHAIN_ACTIVATE` and then the
-        // `env` floor, so a corrupt file still composes and no login ever
-        // breaks over it.
+        // Gated here, not in the resolver: explicit `ocx --global env`/`exec` must compose under any `activate` mode.
         let activate = global_activate_mode(file_structure.root()).await;
 
-        // C-042 Option C — `[shell]` is read **once**, here, through one
-        // `ConfigLoader` pass. Not baked into the shim (byte-identical across
-        // installs), not exported as `OCX_NO_HOOK=1` (an exported toggle leaks
-        // into every child), not flags-and-env-only (that fails
-        // `self setup --[no-]hook`).
+        // Read here, not baked into the byte-identical shim nor exported, which would leak into every child.
         let (shell_config, tiers) = load_shell_config(options).await;
-        // C-038 rung 5's input, in one place for both ladders: the shim's own
-        // `--interactive`/`--no-interactive`, and only failing that the probe.
         let interactive = self.interactive.resolve_probed();
 
-        // Generate the shell-completion script to emit inline when completions
-        // are enabled for this session (see `Completion::enabled`). The auto
-        // signal is `interactive` above, when neither `--completion` nor
-        // `--no-completion` is passed.
         let load_completions = self
             .completion
             .enabled(interactive, shell_config.as_ref().and_then(|shell| shell.completions));
@@ -200,11 +127,9 @@ impl SelfActivate {
         let hook_enabled = self
             .hook
             .enabled(interactive, shell_config.as_ref().and_then(|shell| shell.hook));
-        // Discovery happens here and is recorded into the emitted body: the
-        // per-prompt path stats this list and parses nothing (C-019, C-042).
+        // Discovered here and baked into the emitted body, so the per-prompt path only stats this list.
         let watch = if hook_enabled {
-            // No ledger exists at shell start, so the determinacy distinction
-            // cannot arise here: there is no scope to retain.
+            // No ledger at shell start, so there is no scope an indeterminate walk could retain.
             let project = match resolve_walk(options, &Ledger::empty()).await {
                 Walk::Resolved(project) => Some(project),
                 Walk::Determinate | Walk::Indeterminate => None,
@@ -236,24 +161,10 @@ impl SelfActivate {
     }
 }
 
-/// The per-prompt path.
-///
-/// Two properties are contractual and easy to lose:
-///
-/// - **`--reconcile` bypasses [`options::Hook::enabled`] entirely** (C-041). It
-///   runs in a fresh process with no `configured` value, and reading one would
-///   violate C-042's zero-config rule. Consequence, stated so it is discovered
-///   here and not in a bug report: `OCX_NO_HOOK=1` exported mid-session takes
-///   effect at the **next shell start**, not the next prompt.
-/// - **The fast path reads no config at all** — flags, env, the ledger's
-///   fingerprint and watch-set stats only. `ConfigLoader` runs again only once
-///   the fingerprint has already decided a recomposition is needed.
+/// The per-prompt path: it never consults [`options::Hook::enabled`], and its fast path reads no config.
 impl SelfActivate {
-    /// `file_structure` and `carrier` are parameters rather than ambient reads
-    /// so the C-042 ordering is observable from a test: the short-circuit has to
-    /// be provably *reached before* `Context::try_init`, and a test cannot force
-    /// that through `$OCX_HOME` and `$__OCX_ENV_STATE` without mutating the
-    /// process environment out from under every other test in the binary.
+    /// `file_structure` and `carrier` are parameters so a test can prove the stat-only exit precedes
+    /// `Context::try_init` without mutating the process environment.
     async fn run_reconcile(
         &self,
         options: &ContextOptions,
@@ -263,26 +174,15 @@ impl SelfActivate {
     ) -> anyhow::Result<()> {
         let shell = self.target_shell()?;
 
-        // The carrier is untrusted input (C-007): decoding it names the revert
-        // set and supplies the equality operand. Nothing below builds a path
-        // from it.
+        // The carrier is untrusted: it names the revert set and an equality operand, never a path.
         let ledger = carrier.and_then(Ledger::decode).unwrap_or_else(Ledger::empty);
 
-        // C-028 — the only project bytes read before consent is established are
-        // the CWD walk's `stat` calls and (below) the `ocx.lock` parse the
-        // source-set predicate requires. `ProjectConfig` deserialization comes
-        // after, inside `Context::try_init`'s composition.
+        // Before consent only `stat` calls and the `ocx.lock` parse may read project bytes; `ocx.toml` is parsed later.
         let walk = resolve_walk(options, &ledger).await;
-        // A-11 — an indeterminate walk retains the scope and emits nothing. The
-        // alternative is tearing down a correctly-applied environment because a
-        // `.git` probe returned `EACCES` for one prompt, and then rebuilding it
-        // on the next: PATH flapping, which is the failure class this whole
-        // design exists to remove. Emitting nothing also leaves the stamp
-        // unrefreshed, so the next prompt retries rather than latching.
+        // Emit nothing, not even the checkpoint: a one-prompt `.git` `EACCES` must not flap PATH,
+        // and a stale stamp retries.
         if matches!(walk, Walk::Indeterminate) {
             log::debug!("the project walk was indeterminate; retaining the recorded scope unchanged");
-            // Deliberately no checkpoint: the stamp stays stale so the next
-            // prompt retries rather than latching on a transient probe error.
             return Ok(());
         }
         let project = match walk {
@@ -293,31 +193,20 @@ impl SelfActivate {
             file_structure,
             project.as_ref().map(|project| project.config_path.as_path()),
             project.as_ref().map(|project| project.key.as_str()),
-            // A-13 — the recorded list, seeded by the shell-start pass that saw
-            // `--config`. Empty means no record yet; `watch_paths` re-derives.
+            // Recorded by the shell-start pass that saw `--config`; empty means `watch_paths` re-derives.
             (!ledger.tiers.is_empty()).then_some(ledger.tiers.as_slice()),
         );
         let project_dir = project.as_ref().map(|project| project.dir.clone());
-        // Pure — the ordered path list, no `stat` — so it costs nothing on the
-        // stat-only path below, which returns before ever reading it.
         let watch_fingerprint = reconcile::watch_set_fingerprint(&watch);
         let fingerprint = {
             let watch = watch.clone();
             let project_dir = project_dir.clone();
-            // One blocking hop for the whole watch set rather than a
-            // `spawn_blocking` per `stat`: the point of C-044 is that this is
-            // cheaper than the exec that reached it.
             tokio::task::spawn_blocking(move || reconcile::current_fingerprint(&watch, project_dir.as_deref())).await?
         };
 
-        // C-042 — the negative-consent cache. A fresh clone with no grant would
-        // otherwise pay a full loader pass plus a lock parse on **every**
-        // prompt. Only the negative verdict is cached: an `Activate` verdict is
-        // always re-derived, because caching it would make the ledger a consent
-        // input, which C-007 forbids.
+        // Only a negative verdict is cached: caching `Activate` would make the untrusted carrier a consent input.
         if activation::is_stat_only(&ledger, &fingerprint) {
-            // Nothing to apply, but the guard did fire, so the stamp still has
-            // to advance or every prompt execs (C-044).
+            // The stamp must still advance, or every prompt execs.
             emit(hook::checkpoint(shell));
             return Ok(());
         }
@@ -326,19 +215,14 @@ impl SelfActivate {
             options,
             color_config,
             crate::app::ManagedConfigGate {
-                // The prompt is not the place to refuse over a missing managed
-                // snapshot, and it is not the place to adopt a new one either.
+                // A prompt neither refuses over a missing managed snapshot nor adopts a new one.
                 enforce_required: false,
                 onboarding: false,
             },
         )
         .await?;
 
-        // A-44 — the ocx home toolchain is ALWAYS consented, so it is resolved
-        // here, ahead of the session: before the walk's project, before the lock
-        // read, before `evaluate_with_stamp`. It stays in this crate because the
-        // login exporter owns it — `--env` overrides and group selection are
-        // argv concerns a prompt never has.
+        // The ocx home is always consented, so the global tier resolves ahead of the session and its consent check.
         let target = crate::conventions::platform_or_default(None);
         let global = global_prompt_entries(&context, &target).await?;
         let session = activation::session(SessionInput {
@@ -354,38 +238,21 @@ impl SelfActivate {
         .await;
         let outcome = match session {
             Ok(outcome) => outcome,
-            // A-21 — these two are the user's to fix, and propagating them
-            // exits 65 with an empty stdout and a stderr the emitted hook
-            // discards: edit `ocx.toml`, forget `ocx lock`, and from then on
-            // every prompt silently stops tracking the project with no line
-            // printed. Report them on the prompt instead.
+            // Propagated, a lock error exits 65 into a discarded stderr and the project silently stops tracking.
             Err(error @ SessionError::Lock(_)) => {
                 for line in refusal_lines(shell, &ledger, &error) {
                     println!("{line}");
                 }
-                // No checkpoint, exactly as the indeterminate walk above: the
-                // stamp stays stale so the next prompt retries rather than
-                // latching on a lock the user is about to regenerate.
+                // No checkpoint: the stale stamp retries once the user regenerates the lock.
                 return Ok(());
             }
             Err(error) => return Err(error.into()),
         };
-        // `plan_for` reaches `std::fs::canonicalize`, once per owned prefix
-        // (`owned_spellings`) — blocking work on the runtime thread, and not a
-        // GC path. It hops, like the fingerprint fold above. The three values
-        // travel in and back out rather than being cloned: `Env`, `Ledger` and
-        // `Outcome` all deep-copy, and every one of them is read again below.
+        // `plan_for` canonicalizes, so it hops; the values move in and back out because each one deep-copies.
         let owned_root = file_structure.root().to_path_buf();
         let (plan, ledger, outcome, current) = tokio::task::spawn_blocking(move || {
             let current = Env::new();
-            // C-063 — the owned set is `$OCX_HOME` plus the consented, in-scope
-            // project's own toolchain home, and nothing else. `owned_prefixes` is
-            // read by `repair_owned_segments` as a **deletion authority over a
-            // live shell's PATH**, so a prefix listed here is a promise that
-            // every segment under it either comes from this prompt's desired set
-            // or is removed. `Outcome::owned_home` is `None` on every arm that
-            // did not reach a `ConsentProof`, which is what keeps the widening
-            // strictly after consent rather than merely usually after it.
+            // An owned prefix is a deletion authority over the live PATH, so `owned_home` stays `None` until consent.
             let plan = {
                 let mut owned: Vec<&Path> = vec![owned_root.as_path()];
                 owned.extend(outcome.owned_home.as_deref());
@@ -396,45 +263,17 @@ impl SelfActivate {
         .await?;
 
         if matches!(options.format.mode(), options::FormatMode::Json) {
-            // C-048 — nushell's channel: the `Plan` itself, not shell text. It
-            // carries no carrier and no gate: nushell's hook is inlined in its
-            // shim and has no baked watch set to go stale (A-24).
+            // Nushell applies the `Plan` as data; its inlined hook has no baked watch set, so no carrier or gate.
             emit_plan_json(&plan);
             return Ok(());
         }
 
-        // #347 — the gate is baked at emission time, so a watch set that grew a
-        // member (entering a project is the headline case) leaves the shell
-        // gating on the list it was handed at startup. Compared here, redefined
-        // below, and recorded as `ws` in the same breath by `reconcile_lines` —
-        // a `ws` that advanced without the emission would describe a gate the
-        // shell does not have, and the staleness would then be permanent.
+        // The gate is baked at emission, so `ws` advances only with a redefinition, or a stale gate is permanent.
         let regate = watch_fingerprint != ledger.ws;
         let gate = regate
             .then(|| hook::redefinition(shell, &ocx_binary_path(&file_structure.ocx_install_bin_path()), &watch))
             .flatten();
-        // The summary line's ink is decided here and passed down resolved, so
-        // `reconcile::summary` asks the environment nothing (A-21).
-        //
-        // `relayed`, not `stderr`: this process does not print that line. It
-        // writes shell source on a stdout the hook captures in a command
-        // substitution, and the *shell* prints the line on its own stderr when
-        // it evaluates it — while this process's stderr is `/dev/null`, because
-        // every emitted hook redirects it (`shell::hook`, POSIX / fish / pwsh).
-        // So `Auto`'s per-stream tty fallback answers `false` in every real
-        // terminal, and gating on it would ship a decision that can never be
-        // told from never having run. `options::Interactive::resolve_probed`
-        // records the same trap costing the same mistake one module over.
-        //
-        // What makes the terminal-bound default *right* rather than merely
-        // convenient: the hook's own existence is the interactivity proof.
-        // `Hook::enabled`'s last rung is the shell's own answer, stated by the
-        // shim through `--interactive` / `--no-interactive`, and a
-        // non-interactive shell never registers the per-prompt hook. If
-        // `--reconcile` is running at all, its output is bound for an
-        // interactive shell's stderr by construction — stronger evidence than
-        // any descriptor this process can stat. Every deliberate refusal still
-        // decides: `--color never`, `NO_COLOR`, `CLICOLOR=0`, `TERM=dumb`.
+        // `relayed`, not `stderr`: the hook captures this process's streams, so a tty probe would always read `false`.
         let theme = Theme::new(color_config.relayed);
         for line in reconcile_lines(
             shell,
@@ -448,34 +287,17 @@ impl SelfActivate {
         ) {
             println!("{line}");
         }
-        // After the plan and the carrier, before the checkpoint: the redefined
-        // body is what the *next* prompt runs, and the checkpoint below is what
-        // makes that next prompt quiet.
+        // Before the checkpoint: the redefined body is what the next prompt runs.
         emit(gate);
-        // Last, and only on the path that got here: a degraded run returns
-        // early above and emits no checkpoint, so its stamp stays stale and the
-        // next prompt retries (D2 — every prompt re-converges).
+        // Last: a degraded run returns early without it, so its stale stamp makes the next prompt retry.
         emit(hook::checkpoint(shell));
         Ok(())
     }
 }
 
-/// What a prompt emits when the consenting project's lock is absent or stale
-/// (A-21).
+/// What a prompt emits when the consenting project's lock is absent or stale: no plan, so the scope is retained.
 ///
-/// **No plan, and that is the whole design.** `session`'s contract for an `Err`
-/// is "emit nothing at all", which is the fail-safe outcome and not a degraded
-/// one: a lock that is momentarily stale mid-`git checkout` must retain the
-/// project scope rather than tear it down, and a plan built from a `desired`
-/// missing that scope would revert it — the direction A-11 refuses for an
-/// indeterminate walk, for the same reason. So the environment is left exactly
-/// as it stands and only the sentence changes.
-///
-/// The carrier is re-emitted **unchanged but for `messages_fp`**: it records
-/// that the line has been said without moving the fingerprint, the verdict or
-/// either scope. Without it the message would print before every prompt until
-/// the user runs `ocx lock`, which is the noise `messages_fp` exists to stop; a
-/// fresh shell has an empty carrier and so is told once on its own first prompt.
+/// The carrier changes only `messages_fp`, or the message reprints every prompt until `ocx lock` runs.
 fn refusal_lines(shell: Shell, previous: &Ledger, error: &SessionError) -> Vec<String> {
     let message = format!("ocx: {error}");
     let announced = activation::announcing(previous, std::slice::from_ref(&message));
@@ -486,10 +308,7 @@ fn refusal_lines(shell: Shell, previous: &Ledger, error: &SessionError) -> Vec<S
     lines
 }
 
-/// Every line one reconcile emits, in order (C-011, A-21).
-///
-/// Built as a `Vec` rather than printed inline so the emission order is a
-/// contract a unit test can read — the ordering is the whole product here.
+/// Every line one reconcile emits, in order; a `Vec` so a unit test can read the order.
 #[expect(
     clippy::too_many_arguments,
     reason = "the emission's inputs: where it goes, what it replaces, and what it renders"
@@ -504,13 +323,9 @@ fn reconcile_lines(
     current: &Env,
     theme: &Theme,
 ) -> Vec<String> {
-    // C-018's capture ordering lives inside `next_ledger`, which is handed the
-    // pre-global environment and derives the post-global one itself.
+    // `current` is the pre-global environment; `next_ledger` derives the post-global one itself.
     let mut next = activation::next_ledger(previous, fingerprint, outcome, current);
-    // #347 — `Some` exactly when the caller is emitting a redefined gate for
-    // this membership. `next_ledger` carries the old value forward, so a caller
-    // that reconciled without touching the gate records the gate the shell
-    // still has.
+    // `next_ledger` carries `ws` forward; overwrite it only when a redefined gate is emitted.
     if let Some(membership) = regated {
         next.ws = membership.to_owned();
     }
@@ -520,25 +335,14 @@ fn reconcile_lines(
     lines
 }
 
-/// Render the `Plan` as shell code.
+/// Render the `Plan` as shell code: sets, then restores, then removes.
 ///
-/// **`restores` precedes `removes`, and the order is load-bearing.** The three
-/// sets are key-disjoint only pairwise from `sets`; `removes` and `restores` can
-/// name the **same key** whenever the two scopes disagreed about its kind — a
-/// global path-kind entry and a project constant sharing a key, both retiring in
-/// one prompt. The project's prior was captured *after* global applied (C-018),
-/// so it still contains global's element. Emitting the removal first runs it
-/// against the constant's live value, where the element is not present, and the
-/// restore then writes the retired element straight back. Restoring first puts
-/// the prior in place and lets the removal do its job on it.
-///
-/// `sets` still leads: it shares no key with either of the other two, because
-/// `plan` only retires an element or a constant `desired` no longer declares.
+/// Restore before remove: both can name one key whose kind the scopes disagreed on, and removing first lets the
+/// restore write the retired element straight back.
 fn plan_lines(shell: Shell, plan: &Plan) -> Vec<String> {
     let mut lines: Vec<String> = plan.sets.iter().filter_map(|entry| set_line(shell, entry)).collect();
     lines.extend(plan.restores.iter().filter_map(|(key, prior)| match prior {
-        // A-05 — `Some("")` is a set-but-empty prior and restores through
-        // `export_constant`, never `unset`.
+        // `Some("")` is a set-but-empty prior: export it, never `unset`.
         Some(value) => shell.export_constant(key, value),
         None => shell.unset(key),
     }));
@@ -550,12 +354,7 @@ fn plan_lines(shell: Shell, plan: &Plan) -> Vec<String> {
     lines
 }
 
-/// One apply line for one desired entry.
-///
-/// Deliberately not `conventions::emit_lines`: that helper prints, and its
-/// `None` arms write `# ocx:` diagnostics to a stderr the emitted hook body
-/// discards unconditionally (A-21). Every entry reaching here has already passed
-/// `plan`'s A-10 gate, so those arms are unreachable on this path anyway.
+/// One apply line for one desired entry; not `conventions::emit_lines`, which prints and warns to a discarded stderr.
 fn set_line(shell: Shell, entry: &ocx_package::metadata::env::entry::Entry) -> Option<String> {
     use ocx_package::metadata::env::list::DEFAULT_SEPARATOR;
     use ocx_package::metadata::env::modifier::ModifierKind;
@@ -571,33 +370,22 @@ fn set_line(shell: Shell, entry: &ocx_package::metadata::env::entry::Entry) -> O
     }
 }
 
-/// Emit `__OCX_ENV_STATE` for the next prompt, plus A-01's over-cap marker line.
+/// Emit `__OCX_ENV_STATE` for the next prompt, plus one over-cap line per transition into that state.
 ///
-/// A-01 wants **one line per transition into the over-cap state**, not one per
-/// prompt: without the comparison against `previous`, every `cd` inside an
-/// over-cap project reprints an abandonment the user was told about on entry.
-/// The previous state is the decoded carrier's own `over_cap` list — the
-/// marker `encode` wrote last prompt — so the transition is observed from the
-/// record rather than inferred.
+/// The transition is read from `previous.over_cap`, or every `cd` in an over-cap project reprints the notice.
 fn ledger_lines(shell: Shell, previous: &Ledger, next: &Ledger) -> Vec<String> {
     let Some(encoded) = next.encode() else {
-        // Even the marker failed to encode: omit the variable entirely rather
-        // than carry a value the next prompt cannot decode (C-006 then treats
-        // the ledger as absent, which is the fail-safe direction).
+        // Omit the variable rather than carry a value the next prompt cannot decode.
         return shell.unset(CARRIER_KEY).into_iter().collect();
     };
 
     let mut lines: Vec<String> = shell.export_constant(CARRIER_KEY, &encoded).into_iter().collect();
-    // A-01 — the abandoned scope is read back from the marker the carrier still
-    // carries, never inferred from an absent carrier.
     for scope in Ledger::decode(&encoded)
         .map(|ledger| ledger.over_cap)
         .unwrap_or_default()
     {
         if previous.over_cap.contains(&scope) {
-            // Already announced on the prompt that abandoned it. Re-announcing
-            // is not new information, and a prompt is the one place a repeated
-            // line is read as a new event.
+            // Already announced: a prompt reads a repeated line as a new event.
             continue;
         }
         let name = match scope {
@@ -611,13 +399,8 @@ fn ledger_lines(shell: Shell, previous: &Ledger, next: &Ledger) -> Vec<String> {
     lines
 }
 
-/// Every deferred diagnostic, as shell code that prints to stderr when eval'd
-/// (A-21).
-///
-/// Each rides that arm's own value escaper and travels as a `printf` **format
-/// argument, never the format string** — `Shell::emit_message` is the primitive
-/// that guarantees both. `Batch` hosts no hook and returns `None` for all of
-/// them.
+/// Every deferred diagnostic as stderr-printing shell code, through `Shell::emit_message`, which escapes each one
+/// and never passes it as the `printf` format string.
 fn message_lines(
     shell: Shell,
     outcome: &Outcome,
@@ -627,19 +410,11 @@ fn message_lines(
     theme: &Theme,
 ) -> Vec<String> {
     let mut messages: Vec<String> = Vec::new();
-    // The same "already announced on the prompt that did it" rule `ledger_lines`
-    // applies to the over-cap marker, and for the same reason: a prompt is the
-    // one place a repeated line is read as a new event. Every one of these
-    // states a *condition* — direnv manages this directory, the `[env]` channel
-    // is withheld, the managed tier dropped a consent payload — and a condition
-    // that has not moved since the last prompt is not news. Without the
-    // comparison the direnv line prints before every prompt for as long as the
-    // shell sits in a direnv directory, which is the shell's whole life.
+    // Conditions are announced once: unchanged, the direnv line would otherwise print every prompt.
     if next.messages_fp != previous.messages_fp {
         messages.extend(outcome.messages.iter().cloned());
     }
-    // The summary is exempt: it is already a delta between the two ledgers and
-    // is `None` on a prompt that changed nothing.
+    // The summary is already a delta, `None` on a prompt that changed nothing.
     messages.extend(reconcile::summary(plan, previous, next, theme));
     messages
         .into_iter()
@@ -647,60 +422,20 @@ fn message_lines(
         .collect()
 }
 
-/// The global toolchain tier's contribution to one prompt, gated on the global
-/// toolchain's own `activate` mode (ADR `adr_toolchain_activation.md` D-3).
+/// The global tier's env entries for one prompt; `bin`/`none` compose none, while the session directories stay
+/// desired elsewhere, or `repair_owned_segments` deletes what `ocx self setup` registered.
 ///
-/// D-3 makes the user's own `$OCX_HOME/ocx.toml` the control for the clean-shell
-/// case, so `activate` governs this tier exactly as a project's own file governs
-/// the project tier.
-///
-/// # The gate is here, not in the resolver
-///
-/// [`resolve_global_pinned_env`](crate::command::toolchain_env::resolve_global_pinned_env)
-/// has a second caller — `ocx --global env` / `ocx --global exec`, an **explicit
-/// user request**. `activate` decides how a toolchain reaches a shell
-/// *automatically*; it never decides what a command the user typed prints. So
-/// the gate sits at this call site, the automatic one, and the resolver keeps
-/// both its second caller and its never-fail posture unchanged.
-///
-/// # `bin` and `none` are the same `PATH` at this tier
-///
-/// C-059 makes the two global session directories
-/// ([`FileStructure::ocx_install_bin_path`] and `$OCX_HOME/toolchain/active/bin`) desired
-/// unconditionally, in every mode — they are session-level facts, and dropping
-/// them would have `repair_owned_segments` delete the registration `ocx self
-/// setup` just wrote. So at the **global** tier `bin` and `none` both compose
-/// nothing and produce an identical `PATH`: under either, a global tool resolves
-/// through its trampoline in `$OCX_HOME/toolchain/active/bin`. The two modes differ
-/// only at the project tier. That is a consequence of C-059, not a gap.
-///
-/// # Cost
-///
-/// Skipping the resolver also skips the global lock read, the offline manager
-/// clone and the per-tool `find`, so a `bin`/`none` prompt is strictly cheaper
-/// than an `env` one.
+/// Gated here, not in [`resolve_global_pinned_env`](crate::command::toolchain_env::resolve_global_pinned_env),
+/// whose explicit-request caller must always compose.
 async fn global_prompt_entries(
     context: &crate::app::Context,
     target: &ocx_oci::Platform,
 ) -> anyhow::Result<Vec<ocx_package::metadata::env::entry::Entry>> {
-    // The `env` arm parses `$OCX_HOME/ocx.toml` a second time, inside
-    // `resolve_global_pinned_env`, and that is deliberate. Threading this
-    // parsed config into that resolver would change its signature and its
-    // never-fail contract — the two things that keep the explicit-request path
-    // (`ocx --global env` / `ocx --global exec`) and this gate's regression
-    // guard honest about where the gate sits. The `bin`/`none` arm meanwhile
-    // *removes* a lock read, an offline manager clone and the per-tool `find`,
-    // so the net per-prompt cost is favourable; one more small TOML parse is
-    // noise against `RECONCILE_BUDGET_MS`. Do not "optimise" this away.
+    // The resolver reparses `ocx.toml` to keep its signature and never-fail contract; do not thread it in.
     match global_activate_mode(context.file_structure().root()).await {
         ocx_project::activate::ActivateMode::Env => {
             Ok(
-                // No CLI tier: the per-prompt hook is not an invocation of
-                // `ocx --global env`, so it has no `--pinned`/`--no-pinned` to
-                // pass. `None` is "neither flag was given", which leaves the
-                // global `ocx.toml`'s `pinned` key and `OCX_TOOLCHAIN_PINNED`
-                // deciding the lane exactly as they did before the resolver
-                // took the argument at all.
+                // The hook has no `--pinned`, so `None` leaves `pinned` and `OCX_TOOLCHAIN_PINNED` deciding.
                 crate::command::toolchain_env::resolve_global_pinned_env(context, target, &[], &[], None)
                     .await?
                     .map_or_else(Vec::new, |(entries, ..)| entries),
@@ -710,23 +445,9 @@ async fn global_prompt_entries(
     }
 }
 
-/// Resolve the `activate` ladder over `$OCX_HOME/ocx.toml` — the global tier's
-/// own file, read through the one resolver both tiers share.
+/// Resolve the global tier's `activate` ladder over `$OCX_HOME/ocx.toml`.
 ///
-/// [`activation::activate_mode`] is called rather than a re-spelled
-/// `Ladder { .. }.resolve(ACTIVATE_FLOOR)`: `ocx_project::activate`'s module doc
-/// names a second spelling of the floor as drift, and one resolver with two
-/// callers is the point.
-///
-/// # Never fails
-///
-/// A missing, unreadable or unparseable global `ocx.toml` yields
-/// [`ProjectConfig::default`], whose `activate` is `None` — so the **file tier
-/// is absent** and the ladder falls through to `OCX_TOOLCHAIN_ACTIVATE` and then
-/// to `ACTIVATE_FLOOR` (`env`), so a corrupt global file still composes — the
-/// same posture `resolve_global_pinned_env` takes over the very same bytes
-/// (`Err(_) =>` empty). This is the per-prompt path: it must not turn a
-/// malformed file into an error, a warning on the prompt, or a silent `none`.
+/// Never fails: a missing or malformed file falls through to `OCX_TOOLCHAIN_ACTIVATE`, then `env`.
 async fn global_activate_mode(home: &Path) -> ocx_project::activate::ActivateMode {
     let config = ocx_project::ProjectConfig::from_path(&ocx_project::ProjectConfig::global_manifest_path(home))
         .await
@@ -741,51 +462,33 @@ fn emit(line: Option<String>) {
     }
 }
 
-/// Serialize the `Plan` for the nushell channel (C-011, C-048).
+/// Serialize the `Plan` for the nushell channel.
 fn emit_plan_json(plan: &Plan) {
     match serde_json::to_string(plan) {
         Ok(json) => println!("{json}"),
-        // A prompt never fails over a serialization error; nushell's applier
-        // reads an absent `v` as "apply nothing this prompt" (A-23).
+        // Never fail a prompt; nushell reads an absent `v` as "apply nothing".
         Err(error) => log::debug!("could not serialize the reconcile plan: {error}"),
     }
 }
 
-/// What one CWD walk decided (A-11, C-019).
+/// What one CWD walk decided: resolved, determinately absent, or indeterminate.
 ///
-/// **Three outcomes, not two.** `ConfigLoader::project_path` collapses a
-/// non-`NotFound` candidate error, a fail-closed `.git` boundary and a genuine
-/// miss into the same `Ok(None)`, so the walk's return value cannot tell them
-/// apart — and reverting a correctly-applied project scope because a `.git`
-/// probe momentarily returned `EACCES` is exactly the PATH-flapping failure this
-/// design exists to prevent. A-11 therefore requires one determinacy check
-/// before any revert.
+/// `ConfigLoader::project_path` folds errors and a genuine miss into `Ok(None)`, so a miss is checked for
+/// determinacy before any revert, or a transient `.git` `EACCES` flaps PATH.
 enum Walk {
-    /// The walk resolved a project. Determinate by construction: the walk
-    /// demonstrably worked, so a *different* hit is a genuine switch (C-018)
-    /// and needs no further check.
+    /// A project resolved; a different hit than last prompt is a genuine switch.
     Resolved(Box<ProjectIdentity>),
-    /// No hit, and the previously recorded scope is genuinely gone — a real
-    /// leave, a real deletion, or `OCX_NO_PROJECT=1`. Revert normally.
+    /// No hit and the recorded scope is gone (a leave, a deletion, or `OCX_NO_PROJECT=1`): revert.
     Determinate,
-    /// No hit, but the previously recorded scope still looks alive. The walk's
-    /// answer is **indeterminate**: retain the scope unchanged and emit nothing.
+    /// No hit, but the recorded scope still looks alive: retain it and emit nothing.
     Indeterminate,
 }
 
-/// Resolve the project tier's identity **without deserializing `ocx.toml`**
-/// (C-028), classifying a miss by A-11's determinacy rule.
-///
-/// `ConfigLoader::project_path` is the CWD walk and nothing else — `stat` calls
-/// against the precedence chain. Any failure degrades at debug level, never to a
-/// broken prompt (C-051).
+/// Resolve the project's identity without deserializing `ocx.toml`, classified per [`Walk`]; failures degrade at debug.
 async fn resolve_walk(options: &ContextOptions, ledger: &Ledger) -> Walk {
     let cwd = match ocx_util::env::current_dir() {
         Ok(cwd) => Some(cwd),
-        // A-11 — the CWD itself was unlinked. Degrade to "no project resolved
-        // this prompt", log at debug, and **never** fall back to a cached CWD.
-        // With no CWD the ancestor test cannot be evaluated at all, which is the
-        // definition of indeterminate.
+        // Never fall back to a cached CWD: with none, the ancestor test cannot run.
         Err(error) => {
             log::debug!("the working directory is unreadable, so no project resolved this prompt: {error}");
             None
@@ -806,17 +509,12 @@ async fn resolve_walk(options: &ContextOptions, ledger: &Ledger) -> Walk {
     if let Some(config_path) = resolved {
         match ProjectIdentity::resolve(config_path).await {
             Ok(identity) => return Walk::Resolved(Box::new(identity)),
-            // The walk found an `ocx.toml` but the filesystem would not resolve
-            // it. That is a transient failure about a project that demonstrably
-            // exists, so it is the indeterminate case, not a leave.
+            // A found `ocx.toml` with no usable identity is no proof of a leave; the determinacy probe decides.
             Err(error) => log::debug!("the resolved project has no usable identity this prompt: {error}"),
         }
     }
 
-    // A-11's determinacy probe reaches `std::fs::symlink_metadata`, so it hops
-    // like every other filesystem read on this path. Only the recorded
-    // directory crosses, not the whole ledger — the predicate reads nothing
-    // else, and a `Ledger` clone would deep-copy both scopes on every revert.
+    // The probe calls `symlink_metadata`, so it hops; only the recorded directory crosses, not a deep-copied `Ledger`.
     let recorded_dir = ledger.scopes.project.as_ref().map(|scope| scope.dir.clone());
     let has_recorded = recorded_dir.is_some();
     let indeterminate = match tokio::task::spawn_blocking(move || {
@@ -825,8 +523,7 @@ async fn resolve_walk(options: &ContextOptions, ledger: &Ledger) -> Walk {
     .await
     {
         Ok(indeterminate) => indeterminate,
-        // Unknowable is the fail-safe answer, exactly as for an unreadable CWD:
-        // retain a recorded scope rather than tear it down over a join error.
+        // Unknowable is the fail-safe answer: retain a recorded scope.
         Err(error) => {
             log::debug!("the determinacy probe task failed: {error}");
             has_recorded
@@ -839,23 +536,10 @@ async fn resolve_walk(options: &ContextOptions, ledger: &Ledger) -> Walk {
     }
 }
 
-/// Read `[shell]` — and the config-tier path list — through the one
-/// `ConfigLoader` pass C-042 allows.
+/// Read `[shell]` and the config-tier path list in one `ConfigLoader` pass.
 ///
-/// Shared with `ocx shell completion --if-enabled`, which resolves the same
-/// completions ladder in its own process: the POSIX and elvish shims inject
-/// completions through a second invocation rather than this stream, and that
-/// invocation needs rung 4 from the same place this one reads it.
-///
-/// This is the **only** run that knows the `--config` overlay: the emitted hook
-/// body invokes `--reconcile` with no `--config`, so the tier list has to be
-/// recorded here or the explicit consent channel (A-33) is invisible from every
-/// prompt after this one.
-///
-/// A malformed ambient config must not break a shell start: `self activate` is
-/// dispatched before `Context::try_init` precisely so it survives one, and this
-/// pass keeps that property by degrading to "no tier set the rung" (which is
-/// rung 5, auto) rather than propagating.
+/// Shared with `ocx shell completion --if-enabled`. Only this run sees `--config`, so the tier list is recorded
+/// here or `--reconcile` loses that consent channel; a malformed config degrades to the auto rung.
 pub(crate) async fn load_shell_config(options: &ContextOptions) -> (Option<ShellConfig>, Vec<PathBuf>) {
     let cwd = ocx_util::env::current_dir().ok();
     let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
@@ -873,80 +557,32 @@ pub(crate) async fn load_shell_config(options: &ContextOptions) -> (Option<Shell
     }
 }
 
-/// The seed carrier the startup path exports, carrying **only** the config-tier
-/// list (A-13, A-33).
+/// The seed carrier the startup path exports, holding only the config-tier list; `None` when there is none.
 ///
-/// The explicit `--config` tier is a consent-bearing channel, and this process
-/// is the only one that ever sees it: the emitted hook body invokes
-/// `--reconcile` with no `--config`. Handing the list forward through the
-/// carrier is what lets every later prompt stat it, so a grant added to that
-/// file expires the cached `inert` verdict at the next prompt instead of at the
-/// next shell start.
-///
-/// It is env-setting shell code, not a diagnostic, so A-21's "no message on the
-/// startup path" is untouched. It also does not make the first prompt skip its
-/// reconcile: `fp` is empty, so it can never equal a real fingerprint, and the
-/// shell-side guard still fires on the unset `__ocx_pwd`. `Ledger::decode` of
-/// this value yields empty scopes, so the first prompt plans against exactly
-/// what C-005 specifies.
-///
-/// `None` when there is nothing worth recording, so no carrier is exported.
+/// It lets a grant added to the `--config` file expire a cached `inert` verdict at the next prompt; its empty `fp`
+/// never matches, so the first reconcile still fires.
 fn seed_carrier(tiers: &[PathBuf], watch: &[PathBuf]) -> Option<String> {
     if tiers.is_empty() {
         return None;
     }
     Ledger {
         tiers: tiers.to_vec(),
-        // The membership this very stream is about to bake into the gate
-        // (#347). Without it the first prompt of every shell would compare
-        // against an empty `ws`, decide the gate was stale, and redefine a hook
-        // body byte-identical to the one just emitted.
+        // This stream's own gate membership, or the first prompt redefines a byte-identical hook body.
         ws: reconcile::watch_set_fingerprint(watch),
         ..Ledger::empty()
     }
     .encode()
 }
 
-/// The resolved absolute `ocx` binary inside `bin_path`.
-///
-/// A-34 — resolution is through `current`, unconditionally: `OCX_BINARY_PIN` has
-/// no effect on the emitted hook. The pin's three consumers are all re-entrant
-/// invocations where a running ocx pins a child back to its own `current_exe()`;
-/// the interactive shell's own top-level resolution is upstream of that
-/// mechanism and structurally cannot consult it.
+/// The `ocx` binary inside `bin_path`; `OCX_BINARY_PIN` never applies, since only re-entrant invocations consult it.
 fn ocx_binary_path(bin_path: &Path) -> PathBuf {
     bin_path.join(if cfg!(windows) { "ocx.exe" } else { "ocx" })
 }
 
-/// The `ocx` the emitted **wrapper function** calls.
+/// The `ocx` the emitted wrapper function calls: the pinned global toolchain's, else the installed binary.
 ///
-/// A global toolchain may pin `ocx` — D-4 removed the refusal that used to stop
-/// it — and after C-060's re-ordering `$OCX_HOME/toolchain/active/bin` sits in front of
-/// the installed binary, so a bare `ocx` on `PATH` resolves the pin. The wrapper
-/// is a shell *function* of the same name, and a function shadows `PATH`
-/// outright: left on the install path it would quietly re-introduce, for exactly
-/// the interactive shells the pin is typed in, the precedence the ordering just
-/// removed.
-///
-/// Resolved once at login rather than per call. C-045 requires every emitted
-/// invocation to name an absolute binary, and the alternative — a
-/// `PATH`-resolving `command ocx` written four times, once per shell dialect —
-/// trades that contract away. A pin added after the shell started therefore
-/// lands at the next login, like every other decision this stream bakes.
-///
-/// Falls back to the installed binary whenever the toolchain renders no `ocx`,
-/// which is the ordinary case.
-///
-/// # Why the probe is on the physical directory (C-080)
-///
-/// `Path::is_file` follows **every** component, including the final one, so a
-/// probe on [`ToolchainStore::bin`](ocx_store::file_structure::ToolchainStore::bin)
-/// would resolve through the `active` link and answer about whatever that link
-/// currently names. The answer is then baked as the absolute program behind a
-/// shell *function* — which shadows `PATH` outright — for every login on the
-/// **global** tier, so a repoint would substitute the program rather than merely
-/// reorder a lookup. Both the probe and the value it yields are therefore the
-/// physical `shells/<shell>/bin`, which no link can redirect.
+/// The wrapper shadows `PATH`, so it must follow the pin or the toolchain loses its precedence; the probe stats the
+/// physical `shell_bin`, never the `active` link, or a later repoint is baked into the function.
 fn wrapper_binary_path(file_structure: &FileStructure, install_bin: &Path) -> PathBuf {
     let pinned = ocx_binary_path(
         &file_structure
@@ -961,53 +597,30 @@ fn wrapper_binary_path(file_structure: &FileStructure, install_bin: &Path) -> Pa
 }
 
 /// Everything one login stream is built from.
-///
-/// A borrowed request struct rather than eight positional parameters, the same
-/// shape and for the same reason as
-/// [`RenderRequest`](ocx_package_manager::tasks::render_toolchain::RenderRequest):
-/// a positional list of two paths, two `Option<&str>`s, an `Option<&Path>`, a
-/// slice and a mode reads as nothing at the call site, and `clippy::too_many_arguments`
-/// says so at seven.
 struct LoginStream<'a> {
     /// The shell whose idiom every emitted line is written in.
     shell: Shell,
 
-    /// The installed `ocx`'s own `bin` directory — [`FileStructure::ocx_install_bin_path`]'s
-    /// answer, prepended first so it lands **behind** the toolchain trampolines
-    /// on `PATH`: it is the floor a bare `ocx` falls back to, not a lid over a
-    /// toolchain that pins one (C-060).
+    /// The installed `ocx`'s `bin`, prepended first so it lands behind the toolchain trampolines as the fallback.
     bin_path: &'a Path,
 
-    /// The global rendered toolchain's trampolines, `$OCX_HOME/toolchain/active/bin`
-    /// — [`ToolchainStore::bin`](ocx_store::file_structure::ToolchainStore::bin)'s
-    /// answer, never a literal join (C-001). Prepended last, so it lands
-    /// frontmost of the two.
+    /// The global trampolines, [`ToolchainStore::bin`](ocx_store::file_structure::ToolchainStore::bin)'s answer;
+    /// prepended last, so frontmost.
     toolchain_bin: &'a Path,
 
     /// The **global** tier's resolved mode. Gates exactly one line, the global
     /// env eval; neither `PATH` prepend consults it.
     activate: ActivateMode,
 
-    /// The generated completion script to emit inline, or `None` when
-    /// completions are disabled, the session is non-interactive, or the shell
-    /// has no completion backend (see [`generate_completion_inline`]).
+    /// The completion script to emit inline, or `None` when disabled or unsupported.
     completion: Option<&'a str>,
 
-    /// The absolute binary the per-prompt hook body invokes, or `None` when the
-    /// hook is disabled for this session.
+    /// The binary the per-prompt hook invokes, or `None` when the hook is disabled.
     ///
-    /// Deliberately **not** [`Self::wrapper_binary`]: the hook runs
-    /// `self activate --reconcile` on every prompt, speaking the private
-    /// `__OCX_ENV_STATE` ledger protocol, so a toolchain-pinned `ocx` of another
-    /// version — or a broken one — would break the prompt of every shell rather
-    /// than one command.
+    /// Not [`Self::wrapper_binary`]: a toolchain-pinned `ocx` of another version would break every prompt.
     hook_binary: Option<&'a Path>,
 
-    /// The absolute binary the emitted `ocx` **wrapper function** invokes, or
-    /// `None` when the hook is disabled (the wrapper is emitted only with it).
-    ///
-    /// See [`wrapper_binary_path`] for why this follows the toolchain pin where
-    /// [`Self::hook_binary`] does not.
+    /// The binary the `ocx` wrapper function invokes (see [`wrapper_binary_path`]); `None` without the hook.
     wrapper_binary: Option<&'a Path>,
 
     /// The watch set the emitted hook body stats on each prompt.
@@ -1024,15 +637,7 @@ fn emit_activation(request: &LoginStream<'_>) {
     }
 }
 
-/// The activation stream, in emission order.
-///
-/// Built as a `Vec` rather than printed inline: the order **is** the contract
-/// here, and a test that reads it needs the stream as a value.
-///
-/// `activate` is the **global** tier's resolved mode, and it gates exactly one
-/// line: the global-env eval. `toolchain_bin` is emitted in every mode — see
-/// the two blocks below for why the asymmetry is the contract rather than an
-/// oversight.
+/// The activation stream in emission order, as a `Vec` a test can read; `activate` gates only the global-env eval.
 fn activation_lines(request: &LoginStream<'_>) -> Vec<String> {
     let &LoginStream {
         shell,
@@ -1047,92 +652,40 @@ fn activation_lines(request: &LoginStream<'_>) -> Vec<String> {
     } = request;
     let mut lines = Vec::new();
     // ── Shell completions (emitted FIRST) ────────────────────────────────────
-    // The completion block must lead the stream: clap_complete's PowerShell
-    // output opens with `using namespace`, which `Invoke-Expression` (the pwsh
-    // shim's loader) accepts only as the *first* statement — any earlier line
-    // makes pwsh reject the whole script. Other shells are order-insensitive
-    // here, and no completion block references `ocx` at definition time, so
-    // emitting it before the PATH prepend is safe.
+    // pwsh's `using namespace` must be the first statement, or `Invoke-Expression` rejects the whole script.
     if let Some(script) = completion {
         lines.push(script.to_owned());
     }
 
     // ── PATH prepend ─────────────────────────────────────────────────────────
-    // Use the absolute resolved path — no $VAR references, so Shell::export_path
-    // is safe here: each arm's own value escaper leaves a path carrying no shell
-    // metacharacters byte-identical.
-    //
-    // Two session directories, in the order C-059/C-060 give them: the install
-    // bin first so the later `toolchain_bin` prepend lands in front of it,
-    // exactly as the reconciler's desired fold leaves them
-    // (`SessionPath::install_bin` is "backmost of the three on PATH, so it is
-    // emitted first"). A global toolchain that pins `ocx` therefore wins over
-    // the installed binary, which is the whole point of being allowed to pin it
-    // (D-4). Both are **unconditional in every mode** — dropping either in
-    // `bin`/`none` would leave a login shell with no global tools at all
-    // wherever the OS session-registration channel `ocx self setup` writes is
-    // absent or ignored (a container, a host without systemd user env,
-    // `--no-modify-path`, a non-interactive `sh` that never renders a prompt to
-    // be repaired at).
+    // Absolute paths with no `$VAR`, so `export_path` is safe; install bin first so a pinned global toolchain wins.
+    // Both in every mode: the session registration `ocx self setup` writes may be absent (container, no systemd, `sh`).
     lines.extend(path_prepend_line(shell, bin_path));
     lines.extend(path_prepend_line(shell, toolchain_bin));
 
     // ── Global toolchain env ─────────────────────────────────────────────────
-    // Evaluate the global toolchain env — in `env` mode only. `bin` and `none`
-    // compose nothing here and reach their tools through the trampolines in the
-    // `toolchain/active/bin` prepended above, which is the whole point of the mode; the
-    // per-prompt arm has drawn this same line since A-12 (`global_prompt_entries`),
-    // and a login stream that composed anyway is what made a global
-    // `activate = "bin"` look inert for a whole session.
-    //
-    // In `env` mode the eval carries NO `OCX_ACTIVATED` state guard, and the
-    // gate above is not one: it is a property of the toolchain's own manifest,
-    // not of shell state, so it is identical for every shell of a session. The
-    // emitted env lines never duplicate on a re-source — PATH uses idempotent
-    // move-to-front (cmd included, via substring-delete; see
-    // `Shell::export_path`), constants are absolute sets — and an *exported*
-    // guard would leak into child processes (e.g. a VS Code Remote server whose
-    // terminals inherit it) and wrongly suppress activation in a shell that
-    // needs it. Re-sourcing still picks up a changed global toolchain.
+    // No `OCX_ACTIVATED` guard: re-sourcing is idempotent, and an exported guard would leak into children.
     if activate == ActivateMode::Env {
         lines.push(format_global_env_eval(shell, &ocx_binary_path(bin_path)));
     }
 
     // ── Per-prompt hook + wrapper (emitted LAST) ─────────────────────────────
-    // Last on purpose, and the ordering is load-bearing in both directions: the
-    // hook body invokes the resolved absolute binary, so it must not run before
-    // the PATH prepend has settled the stream it shares, and pwsh's
-    // `using namespace` must still be the first statement of the whole stream.
-    //
-    // Registration is append-only and idempotent — re-sourcing an activation
-    // stream registers nothing twice — and every arm that hosts no prompt hook
-    // (batch, elvish, the strict-POSIX family, nushell) returns `None` here and
-    // is a silent no-op.
+    // Last: the hook must follow the settled PATH prepend, and pwsh's `using namespace` must stay first.
     if let Some(binary) = hook_binary {
-        // Before the registration: the hook body reads the carrier, so the seed
-        // has to be in place by the time the first prompt fires.
+        // Seed first: the hook body reads the carrier on the first prompt.
         if let Some(seed) = seed {
             lines.extend(shell.export_constant(CARRIER_KEY, seed));
         }
         lines.extend(hook::registration(shell, binary, watch));
-        // C-045 — a latency optimization for same-command-line chaining, never
-        // the correctness floor. Every way of escaping the function name
-        // degrades to next-prompt correctness rather than breaking.
-        //
-        // `wrapper_binary`, not `binary`: the wrapper is a shell function named
-        // `ocx`, so it shadows `PATH` outright and has to follow the same
-        // precedence `PATH` now gives — see [`wrapper_binary_path`].
+        // `wrapper_binary`, not `binary`: a function named `ocx` shadows `PATH`,
+        // so it must follow the precedence `PATH` gives.
         lines.extend(hook::wrapper(shell, wrapper_binary.unwrap_or(binary)));
     }
 
     lines
 }
 
-/// The PATH prepend line for the given shell using an absolute `bin_path`.
-///
-/// Uses [`Shell::export_path`] since the value is an absolute filesystem path
-/// containing no shell variable references or metacharacters.
-/// The PATH prepend line, or `None` when the arm cannot express it.
+/// The PATH prepend line for an absolute `bin_path`, or `None` when the arm cannot express it.
 fn path_prepend_line(shell: Shell, bin_path: &std::path::Path) -> Option<String> {
     shell.export_path("PATH", &*bin_path.to_string_lossy())
 }
@@ -1147,26 +700,13 @@ fn completion_clap_shell(shell: Shell) -> Option<clap_complete::Shell> {
         Shell::Fish => Clap::Fish,
         Shell::Elvish => Clap::Elvish,
         Shell::PowerShell => Clap::PowerShell,
-        // ash/ksh/dash/batch/nushell have no clap_complete backend.
         _ => return None,
     })
 }
 
-/// Generate the shell-completion script to emit inline into the activation
-/// stream, or `None` when the shell has no completion backend.
+/// The completion script to emit inline, or `None` when the shell has no completion backend.
 ///
-/// Emitted directly into the eval'd activation stream rather than written to a
-/// file: the stream is already `eval`/`Invoke-Expression`'d by the shim, so a
-/// `complete -F` / `compdef` / `Register-ArgumentCompleter` block installs
-/// completions with no file to manage, version-stamp, or read.
-///
-/// Delegates to [`crate::command::shell_completion::render_completion_script`]
-/// — the single generator shared with `ocx shell completion`, which adds the
-/// zsh `compinit` guard so the script registers wherever it is sourced. The one
-/// activation-specific concern is order: PowerShell's `using namespace` must be
-/// the first statement of the stream, which [`emit_activation`] guarantees by
-/// emitting this block before the PATH prepend (verified on Windows PowerShell
-/// 5.1 and PowerShell 7).
+/// Shares [`crate::command::shell_completion::render_completion_script`] with `ocx shell completion`.
 fn generate_completion_inline(shell: Shell) -> Option<String> {
     let clap_shell = completion_clap_shell(shell)?;
     let mut cmd = crate::app::Cli::command();
@@ -1176,35 +716,10 @@ fn generate_completion_inline(shell: Shell) -> Option<String> {
     ))
 }
 
-/// Format the global-env-eval line for `shell` without emitting.
+/// The global-env-eval line for `shell`, guarded only by an existence probe on the absolute `binary`.
 ///
-/// On every shell this runs `<binary> --global env` guarded only by an
-/// existence probe — PATH uses idempotent move-to-front (cmd included, via
-/// substring-delete) and constants are absolute sets, so there is no
-/// `OCX_ACTIVATED` state guard (an exported guard would leak into child shells,
-/// e.g. a VS Code Remote server whose terminals inherit it, and suppress
-/// activation where it is needed).
-///
-/// **C-045 — every invocation names the resolved absolute `binary`, and the
-/// probe is a path test, never a name lookup.** The wrapper this same stream
-/// emits is a shell *function* named `ocx`, and `command -v ocx` / `type -q ocx`
-/// / `Get-Command ocx` all find functions — so a bare call inside the `$(…)`
-/// here would execute the wrapper, capture its output into the env stream, and
-/// eval it. A probe that consults the function table is the same defect as the
-/// call, which is why both halves move together.
-///
-/// Two arms keep the bare form because neither can host the hazard:
-/// [`Shell::Batch`] (cmd.exe has no functions at all) and [`Shell::Nushell`]
-/// (hosts no wrapper — `shell::hook::wrapper` returns `None`, so no `ocx`
-/// definition ever exists to shadow the call).
-///
-/// [`Shell::Elvish`] was in that list on a premise that stopped being true the
-/// moment it gained a wrapper: `edit:add-var ocx~` puts a *function* named `ocx`
-/// in the REPL namespace, and `has-external ocx` is a name lookup. Every shim
-/// runs this stream unconditionally on each shell start, so the second source of
-/// a session would have found the wrapper and captured its output into the env
-/// stream — the exact defect C-045 names, arriving through a wrapper the arm did
-/// not have when the exemption was written.
+/// The probe is a path test, never a name lookup: `command -v`/`type -q`/`Get-Command` would find the `ocx`
+/// wrapper function this stream defines. Only `Batch` and `Nushell`, which host no wrapper, keep the bare name.
 fn format_global_env_eval(shell: Shell, binary: &Path) -> String {
     let shell_name = shell_name_for_eval(shell);
     let path = binary.to_string_lossy();
@@ -1217,54 +732,26 @@ fn format_global_env_eval(shell: Shell, binary: &Path) -> String {
             let quoted = escape::fish_single_quoted(&path);
             format!("if test -x '{quoted}'; '{quoted}' --global env --shell={shell_name} | source; end")
         }
-        // Capture the exporter output into a variable and only evaluate it when
-        // non-empty. `& ocx …` yields `$null` when the command emits nothing
-        // (no global toolchain yet), and `Invoke-Expression $null` throws
-        // "Cannot bind argument to parameter 'Command' because it is null".
-        // `| Out-String` also collapses the multi-line export output into one
-        // string with newlines preserved — passing the raw object array to
-        // `Invoke-Expression` would join lines with spaces and corrupt the
-        // script. Works in both Windows PowerShell 5.1 and PowerShell 7+.
+        // Evaluate only non-empty output (`Invoke-Expression $null` throws); `Out-String` keeps the newlines
+        // `Invoke-Expression` would otherwise join with spaces.
         Shell::PowerShell => {
             let quoted = escape::single_quoted_doubled(&path);
             format!(
                 "if (Test-Path -LiteralPath '{quoted}' -PathType Leaf) {{ $__ocx_global_env = (& '{quoted}' --global env --shell={shell_name} | Out-String); if ($__ocx_global_env) {{ Invoke-Expression $__ocx_global_env }} }}"
             )
         }
-        // CMD: `FOR /F` evaluates each line of the subprocess output. `delims=`
-        // is required so `%i` is the WHOLE line — the default whitespace split
-        // would leave `%i` as just the first token (`SET`), executing a bare
-        // `SET` and dropping the assignment. Batch PATH emission is now idempotent
-        // move-to-front (single-statement substring-delete, see
-        // `Shell::export_path`), so like every other shell it runs unguarded —
-        // no `OCX_ACTIVATED` session guard, no marker.
+        // `delims=` makes `%i` the whole line; the default split would keep only `SET` and drop the assignment.
         Shell::Batch => {
             format!("FOR /F \"usebackq delims=\" %i IN (`ocx --global env --shell={shell_name}`) DO @%i")
         }
-        // Elvish — capture the exporter output and pass it to `eval` as a
-        // POSITIONAL argument: `eval (… | slurp)`. The older pipe form
-        // `… | slurp | eval` gives `eval` zero positional args and raises
-        // "arity mismatch: arguments must be 1 value, but is 0 values" on every
-        // start (so the global toolchain env never applied). Empty output is
-        // safe: `eval ""` is a no-op.
+        // `eval` needs the output as a positional argument: piping into it raises an arity error on every start.
         Shell::Elvish => {
-            // `?(test -x …)` and not `has-external`: the probe must be a path
-            // test for the same reason the call must be a path call. `?(…)`
-            // turns the external's non-zero exit into a falsey value instead of
-            // an exception, the idiom the shipped `env.elv` shim already uses.
+            // `?(test -x …)`, not `has-external`: a path test, and `?(…)` turns a non-zero exit into false.
             let quoted = escape::single_quoted_doubled(&path);
             format!("if ?(test -x '{quoted}') {{ eval ('{quoted}' --global env --shell={shell_name} | slurp) }}")
         }
-        // Nushell has no string `eval` and `source` needs a parse-time-const path
-        // (it reads the file at PARSE time), so global env output cannot be
-        // evaluated the way every other shell does. Apply it as DATA instead:
-        // parse `--format json` and apply each entry by modifier type via the
-        // shared `NU_ENV_APPLY_LOOP` (path -> move-to-front prepend, constant ->
-        // replace). `--shell=nushell` output is deliberately NOT used here. The
-        // loop is shared verbatim with `$OCX_HOME/env.nu` so the two cannot drift;
-        // `ocx` is already on PATH (the preceding prepend), guarded by `which ocx`.
-        // No `{shell_name}` interpolation: the global env is read as JSON via the
-        // root `--format json` flag, not a `--shell=NAME` channel.
+        // Nushell has no string `eval`, so its JSON output is applied as data through `NU_ENV_APPLY_LOOP`,
+        // shared with `$OCX_HOME/env.nu` so the two cannot drift.
         Shell::Nushell => [
             "if (which ocx | length) > 0 { try { let _ocx_json = (ocx --format json --global env | from json); ",
             ocx_setup::shims::NU_ENV_APPLY_LOOP,
@@ -1298,7 +785,7 @@ mod tests {
 
     use super::{completion_clap_shell, format_global_env_eval, generate_completion_inline, path_prepend_line};
 
-    /// The resolved absolute binary every emitted invocation must name (C-045).
+    /// The resolved absolute binary every emitted invocation must name.
     fn test_binary() -> PathBuf {
         PathBuf::from("/tmp/ocx_home/symlinks/ocx_sh/ocx/cli/current/content/bin/ocx")
     }
@@ -1477,7 +964,7 @@ mod tests {
     /// missing binary simply emits nothing.
     #[test]
     fn global_env_eval_probes_ocx_existence() {
-        // C-045 — the five wrapper-hosting families probe the resolved **path**,
+        // The five wrapper-hosting families probe the resolved **path**,
         // never the command name: `command -v` / `type -q` / `Get-Command` all
         // find the shell function named `ocx` that this same stream defines, so
         // a name probe would report "present" for the wrapper rather than for
@@ -1495,7 +982,7 @@ mod tests {
                 Shell::PowerShell,
                 format!("Test-Path -LiteralPath '{binary}' -PathType Leaf"),
             ),
-            // C-045 — a path test, not a name lookup: elvish hosts an `ocx`
+            // A path test, not a name lookup: elvish hosts an `ocx`
             // wrapper function, and `has-external` would find it.
             (Shell::Elvish, format!("?(test -x '{binary}')")),
             (Shell::Nushell, "which ocx".to_owned()),
@@ -1687,7 +1174,7 @@ mod reconcile_tests {
 
     fn outcome(global: Vec<Entry>, project: Vec<Entry>, slot: Option<ProjectIdentity>) -> Outcome {
         Outcome {
-            // C-059's two session directories, spelled as literals here on
+            // The two session directories, spelled as literals here on
             // purpose: these tests own no `FileStructure`, and what they assert
             // is the *rendering* of an outcome, never how one is minted.
             session: SessionPath {
@@ -1709,18 +1196,18 @@ mod reconcile_tests {
         PathBuf::from("/tmp/ocx_home/symlinks/ocx_sh/ocx/cli/current/content/bin")
     }
 
-    /// The other of C-059's two session directories — `$OCX_HOME/toolchain/active/bin`,
+    /// The other of the two session directories — `$OCX_HOME/toolchain/active/bin`,
     /// the global rendered toolchain's trampolines.
     fn toolchain_bin_dir() -> PathBuf {
         PathBuf::from("/tmp/ocx_home/toolchain/bin")
     }
 
-    /// The `PATH` a shell holds once C-059's two session directories are
+    /// The `PATH` a shell holds once the two session directories are
     /// already applied — i.e. every prompt after a session's first, and what
     /// `ocx self setup` leaves behind at session level.
     ///
     /// Spelled in the order the desired set's fold leaves them
-    /// (`$OCX_HOME/toolchain/active/bin` frontmost, C-060/RUL-62), because that is what
+    /// (`$OCX_HOME/toolchain/active/bin` frontmost), because that is what
     /// makes the fold a genuine no-op: `plan`'s settling test asks whether
     /// applying the desired set to this environment changes it, and an
     /// environment holding the same two directories in the other order still
@@ -1757,9 +1244,9 @@ mod reconcile_tests {
         })
     }
 
-    // ── C-041: grammar ──────────────────────────────────────────────────────
+    // ── grammar ──────────────────────────────────────────────────────
 
-    /// C-041 — the flag surface parses: `--reconcile` (hidden), and the paired
+    /// The flag surface parses: `--reconcile` (hidden), and the paired
     /// `--hook` / `--no-hook`, which are POSIX last-wins rather than an error.
     #[test]
     fn c041_the_flag_surface_parses_with_posix_last_wins() {
@@ -1776,7 +1263,7 @@ mod reconcile_tests {
         SelfActivate::parse_from(["self-activate", "--shell=bash", "--hook", "--no-hook"]);
     }
 
-    /// C-041 — `--reconcile` is hidden at flag level, following the shipped
+    /// `--reconcile` is hidden at flag level, following the shipped
     /// `command/login.rs` precedent. It is machine surface: the emitted hook
     /// body types it, a user never does.
     #[test]
@@ -1789,7 +1276,7 @@ mod reconcile_tests {
         assert!(hidden, "--reconcile must be hidden (C-041)");
     }
 
-    /// C-038 rung 5, end to end from argv: the flag the shims emit reaches the
+    /// Rung 5, end to end from argv: the flag the shims emit reaches the
     /// auto rung's input, and the probe still decides when no flag arrives.
     ///
     /// The struct-level ladder is pinned in `options/interactive.rs`; what this
@@ -1826,7 +1313,7 @@ mod reconcile_tests {
         );
     }
 
-    /// C-038 — both interactivity flags are hidden: machine surface the shims
+    /// Both interactivity flags are hidden: machine surface the shims
     /// emit, never something a user types.
     #[test]
     fn c038_the_interactivity_pair_is_hidden_from_help() {
@@ -1842,9 +1329,9 @@ mod reconcile_tests {
         }
     }
 
-    // ── C-043/C-046: startup emission order ─────────────────────────────────
+    // ── startup emission order ─────────────────────────────────
 
-    /// C-043 — the completion block must **lead** the stream: clap_complete's
+    /// The completion block must **lead** the stream: clap_complete's
     /// PowerShell output opens with `using namespace`, which
     /// `Invoke-Expression` accepts only as the first statement.
     #[test]
@@ -1857,7 +1344,7 @@ mod reconcile_tests {
         );
     }
 
-    /// C-043 — order across the whole stream: completion, then the PATH
+    /// Order across the whole stream: completion, then the PATH
     /// prepend, then the global env eval, then the per-prompt hook, then the
     /// wrapper. The hook body invokes the resolved binary, so it must not
     /// precede the PATH prepend it shares a stream with.
@@ -1886,7 +1373,7 @@ mod reconcile_tests {
         assert!(hook < wrapper, "the wrapper follows its own hook");
     }
 
-    /// C-038 — with the hook disabled, the activation stream carries neither a
+    /// With the hook disabled, the activation stream carries neither a
     /// registration nor a wrapper, and the rest of the stream is unchanged.
     #[test]
     fn c038_a_disabled_hook_emits_no_registration_and_no_wrapper() {
@@ -1912,9 +1399,9 @@ mod reconcile_tests {
         );
     }
 
-    // ── A-21: the startup path emits no diagnostics at all ─────────────────
+    // ── the startup path emits no diagnostics at all ─────────────────
 
-    /// A-21 — **no** message rides the startup path, on any arm. Not a
+    /// **No** message rides the startup path, on any arm. Not a
     /// conditionally suppressed one: the channel does not exist there. p10k
     /// treats any console output during zsh initialisation as an error, and
     /// pwsh's `$ErrorActionPreference = 'Stop'` is the same class; deferring
@@ -1948,12 +1435,12 @@ mod reconcile_tests {
         }
     }
 
-    // ── C-041 / A-34: cross-version safety ─────────────────────────────────
+    // ── cross-version safety ─────────────────────────────────
 
-    /// C-041 — the emitted hook **probe-guards the binary** and **discards the
-    /// reconcile call's stderr**. A rollback to a pre-hook ocx (S-030) then
+    /// The emitted hook **probe-guards the binary** and **discards the
+    /// reconcile call's stderr**. A rollback to a pre-hook ocx then
     /// prints nothing at all instead of a clap usage error once per prompt in
-    /// every open terminal, and a deleted binary (S-029) is a silent no-op.
+    /// every open terminal, and a deleted binary is a silent no-op.
     #[test]
     fn c041_s029_s030_the_emitted_hook_probe_guards_and_discards_stderr() {
         let stream = startup_stream(Shell::Bash, true).join("\n");
@@ -1972,7 +1459,7 @@ mod reconcile_tests {
         );
     }
 
-    /// A-34 — the hook resolves through `current`, unconditionally. No emitted
+    /// The hook resolves through `current`, unconditionally. No emitted
     /// line reads `OCX_BINARY_PIN`: the pin's consumers are all re-entrant
     /// invocations, and the interactive shell's own top-level resolution is
     /// upstream of that mechanism.
@@ -1987,10 +1474,10 @@ mod reconcile_tests {
         }
     }
 
-    /// C-041 — the hook invokes the **resolved absolute** binary, never the
+    /// The hook invokes the **resolved absolute** binary, never the
     /// bare name: the wrapper is named `ocx` and `command -v ocx` finds
     /// functions, so a bare call inside the emitted stream would run the
-    /// wrapper inside a command substitution (C-045).
+    /// wrapper inside a command substitution.
     #[test]
     fn c045_the_hook_and_wrapper_call_the_resolved_absolute_binary() {
         let binary = ocx_binary_path(&bin_dir());
@@ -2001,9 +1488,9 @@ mod reconcile_tests {
         );
     }
 
-    // ── C-042: the negative-consent cache ──────────────────────────────────
+    // ── the negative-consent cache ──────────────────────────────────
 
-    /// C-042 — an unchanged fingerprint **and** a cached `inert` verdict make
+    /// An unchanged fingerprint **and** a cached `inert` verdict make
     /// the prompt stat-only. A fresh clone with no grant would otherwise pay a
     /// full loader pass plus a lock parse on every prompt.
     #[test]
@@ -2019,7 +1506,7 @@ mod reconcile_tests {
         );
     }
 
-    /// C-042 / C-007 — **only** the negative verdict is cached. An `Activate`
+    /// **Only** the negative verdict is cached. An `Activate`
     /// verdict is re-derived every prompt; reading one back from the carrier
     /// would make the ledger a consent input.
     /// EC-FP-007 — the verdict is recomputed every prompt; nothing caches it across runs.
@@ -2059,11 +1546,11 @@ mod reconcile_tests {
         );
     }
 
-    /// A-10 — `L ⊆ emittable(D)`: the ledger records only what an arm can emit.
+    /// `L ⊆ emittable(D)`: the ledger records only what an arm can emit.
     ///
     /// `plan` refuses these entries, so nothing about them ever reaches the
     /// shell. A ledger that recorded them anyway would claim ocx owns a key it
-    /// can never remove — and for `PATH` (A-02) it would hand the whole
+    /// can never remove — and for `PATH` it would hand the whole
     /// variable's restore to a prior captured from an apply that never happened.
     ///
     /// Red state: build `global`/`applied` from `outcome.global` /
@@ -2071,7 +1558,7 @@ mod reconcile_tests {
     #[test]
     fn a010_the_ledger_records_only_what_an_arm_can_emit() {
         let refused = vec![
-            // A-02 — a forged or mistaken constant claim on the one variable
+            // A forged or mistaken constant claim on the one variable
             // whose restore would overwrite everything the shell holds.
             constant("PATH", "/only/mine"),
             // The four `is_emittable` classes: an invalid key, a path-kind value
@@ -2180,9 +1667,9 @@ mod reconcile_tests {
         assert!(!is_stat_only(&ledger, "fp-1"));
     }
 
-    // ── C-049 / A-37: the yield behaviour ──────────────────────────────────
+    // ── the yield behaviour ──────────────────────────────────
 
-    /// C-049 + A-37, **renderer half only** — one info line per observed tool.
+    /// **Renderer half only** — one info line per observed tool.
     ///
     /// This hand-builds its `Yield` and never calls `coexistence::detect`, so it
     /// pins exactly one property: the renderer fans out over every observation
@@ -2227,10 +1714,10 @@ mod reconcile_tests {
         );
     }
 
-    /// C-049 — yielding narrows `desired` to the **global** scope and reverts
+    /// Yielding narrows `desired` to the **global** scope and reverts
     /// the project scope already applied. No new planner arm is needed:
-    /// narrowing `desired` and leaving the slot empty makes C-016's retirement
-    /// rule retire the project's recorded constants subtractively.
+    /// narrowing `desired` and leaving the slot empty makes the existing
+    /// retirement rule retire the project's recorded constants subtractively.
     #[test]
     fn c049_a_yield_narrows_desired_to_global_and_reverts_the_project_scope() {
         // Prompt 1: global sets JAVA_HOME; the project additionally sets a key
@@ -2272,18 +1759,18 @@ mod reconcile_tests {
         let lines = reconcile_lines(Shell::Bash, &ledger, "fp-2", None, &yielded, &plan, &current, &plain());
         assert!(
             lines.iter().any(|line| line.contains("direnv manages this directory")),
-            "the yield line rides the reconcile run (A-21); got: {lines:#?}"
+            "the yield line rides the reconcile run; got: {lines:#?}"
         );
     }
 
-    /// A-21 — a deferred diagnostic is announced on the prompt that produced
+    /// A deferred diagnostic is announced on the prompt that produced
     /// it and **not** on the ones that merely still hold the same condition.
     ///
     /// Run over all three of the reconciler's message sources, because they
     /// reach `message_lines` through one field and a fix for one is a fix for
     /// all of them: the direnv/mise yield line, the withheld-`[env]` hint, and
     /// the managed tier's dropped-consent-payload reason. None of the three
-    /// rides a cacheable verdict — an `Activate` verdict never is (C-007) and a
+    /// rides a cacheable verdict — an `Activate` verdict never is and a
     /// yield hangs off an env sentinel `fp` does not fold — so the reconciler
     /// genuinely recomposes and re-derives every one of them every prompt. This
     /// repo's own `.envrc` puts the first case in front of the owner.
@@ -2380,14 +1867,14 @@ mod reconcile_tests {
         }
     }
 
-    /// A-21 — a stale or absent project lock is **reported**, not exited on,
+    /// A stale or absent project lock is **reported**, not exited on,
     /// and reporting it does not tear the applied scope down.
     ///
     /// Both halves matter and neither implies the other. Propagating the error
     /// exits 65 with an empty stdout and a stderr the emitted hook discards, so
     /// the environment stops tracking the project with nothing said — but
     /// recovering by planning against an outcome that has no project scope
-    /// would *revert* it, which is the mid-`git checkout` teardown A-11 refuses
+    /// would *revert* it, which is the same mid-`git checkout` teardown refused
     /// for an indeterminate walk. So: the line is emitted, the carrier comes
     /// back with the project scope intact, and no plan line is written at all.
     ///
@@ -2453,9 +1940,9 @@ mod reconcile_tests {
         );
     }
 
-    // ── C-015/C-018: prior capture ordering ────────────────────────────────
+    // ── prior capture ordering ────────────────────────────────
 
-    /// C-018 — the ordering is apply global, capture the project's priors,
+    /// The ordering is apply global, capture the project's priors,
     /// apply project. A prior captured at project entry therefore holds
     /// **global's** value; capturing before global's apply would silently tear
     /// down global's constants when leaving a project that never owned them.
@@ -2508,7 +1995,7 @@ mod reconcile_tests {
         );
     }
 
-    /// C-015 rules 3-4 for the global scope: on every later prompt the live
+    /// For the global scope: on every later prompt the live
     /// value **is** ocx's own, so a re-capture would overwrite the user's value
     /// with ocx's and make the revert a no-op. The recorded prior carries
     /// forward instead, exactly as the project scope's does.
@@ -2580,7 +2067,7 @@ mod reconcile_tests {
 
     /// The compounding half, end to end: a project constant shadows a global
     /// one and both retire in the same prompt. The project prior holds
-    /// **global's** value by construction (C-018), so restoring it verbatim
+    /// **global's** value by construction, so restoring it verbatim
     /// would leave a value no scope declares any more.
     #[test]
     fn r1_two_scopes_retiring_together_restore_the_users_value_end_to_end() {
@@ -2620,7 +2107,7 @@ mod reconcile_tests {
         );
     }
 
-    /// C-015 rules 3-4 — leaving a project restores the value the user's own
+    /// Leaving a project restores the value the user's own
     /// environment held before ocx touched it. This is the assertion the
     /// `capture_priors` fault injection must flip: without the captured prior
     /// there is nothing to restore, and the user's `PYENV_ROOT` is lost for the
@@ -2650,7 +2137,7 @@ mod reconcile_tests {
         );
     }
 
-    /// A-05 — a variable that did not exist before ocx set it reverts by
+    /// A variable that did not exist before ocx set it reverts by
     /// **unset**, and set-ness is read through the environment, never
     /// truthiness.
     #[test]
@@ -2680,7 +2167,7 @@ mod reconcile_tests {
     ///
     /// `removes` and `restores` are **not** key-disjoint: a global path-kind
     /// entry and a project constant can share a key and retire in one prompt.
-    /// The project's prior was captured after global applied (C-018), so it
+    /// The project's prior was captured after global applied, so it
     /// still contains global's element. With `removes` emitted first, the
     /// removal runs against the constant's live value — where the element is
     /// absent, so it is a no-op — and the restore then writes the retired
@@ -2775,7 +2262,7 @@ mod reconcile_tests {
         );
     }
 
-    /// R3 / A-01 — one abandonment line per **transition into** the over-cap
+    /// One abandonment line per **transition into** the over-cap
     /// state, not one per prompt.
     ///
     /// Without the comparison against the previous ledger, every `cd` inside an
@@ -2825,9 +2312,9 @@ mod reconcile_tests {
         );
     }
 
-    // ── C-002/C-004: the carrier ───────────────────────────────────────────
+    // ── the carrier ───────────────────────────────────────────
 
-    /// C-002 — every reconcile emits the next ledger, and it round-trips: what
+    /// Every reconcile emits the next ledger, and it round-trips: what
     /// the prompt exports is what the next prompt decodes.
     #[test]
     fn c002_the_emitted_carrier_round_trips() {
@@ -2922,7 +2409,7 @@ mod reconcile_tests {
         );
     }
 
-    /// **The eval-safety invariant for the coloured line (A-21).** No escape
+    /// **The eval-safety invariant for the coloured line.** No escape
     /// may reach the emitted stream except inside a message statement's own
     /// quoted literal.
     ///
@@ -2988,7 +2475,7 @@ mod reconcile_tests {
         }
     }
 
-    /// #347 — the recorded membership must move **only** with the emission that
+    /// The recorded membership must move **only** with the emission that
     /// redefines the gate, and must move **with** it.
     ///
     /// Both halves matter and fail in opposite directions. Recording it without
@@ -3049,11 +2536,11 @@ mod reconcile_tests {
         Ledger::decode(encoded).expect("the emitted carrier must decode")
     }
 
-    /// C-051 / A-21 — a reconcile that changed nothing emits no summary line;
+    /// A reconcile that changed nothing emits no summary line;
     /// the summary exists to explain a change, not to narrate a no-op.
     ///
-    /// The live environment is [`settled_env`], not `Env::clean()`: C-059 makes
-    /// the two session directories part of the desired set on **every** prompt,
+    /// The live environment is [`settled_env`], not `Env::clean()`: the two
+    /// session directories are part of the desired set on **every** prompt,
     /// so a shell that does not already hold them is one this reconcile
     /// genuinely changes — the premise the assertion needs is "nothing left to
     /// do", and an empty `PATH` is not that shell.
@@ -3080,9 +2567,9 @@ mod reconcile_tests {
     }
 }
 
-/// C-045 — no emitted snippet may ever call bare `ocx`.
+/// No emitted snippet may ever call bare `ocx`.
 ///
-/// The hazard is concrete and this WP created it: the activation stream defines
+/// The hazard is concrete and this stream created it: the activation stream defines
 /// a shell **function** named `ocx`, and `command -v ocx` / `type -q ocx` /
 /// `Get-Command ocx` all find functions. A bare call inside the stream's own
 /// `$(…)` would therefore execute the wrapper, capture its output — including
@@ -3125,7 +2612,7 @@ mod bare_ocx_tests {
         PathBuf::from("/tmp/ocx_home/symlinks/ocx_sh/ocx/cli/current/content/bin")
     }
 
-    /// C-059's other session directory — the global toolchain's trampolines.
+    /// The other session directory — the global toolchain's trampolines.
     fn toolchain_bin_dir() -> PathBuf {
         PathBuf::from("/tmp/ocx_home/toolchain/bin")
     }
@@ -3139,7 +2626,7 @@ mod bare_ocx_tests {
     /// must be written `\\` or fish eats it, so the needle has to carry it too.
     /// On POSIX the path holds no backslash and this is the identity.
     ///
-    /// Escaper *correctness* is `escape.rs`'s own contract; what C-045 guards
+    /// Escaper *correctness* is `escape.rs`'s own contract; the guard here
     /// is that an invocation names the absolute binary, never a bare `ocx`.
     fn quoted_binary(shell: Shell, binary: &Path) -> String {
         let path = binary.to_string_lossy();
@@ -3221,19 +2708,19 @@ mod bare_ocx_tests {
         }
     }
 
-    /// C-060 / D-4 — the wrapper follows a global `ocx` pin; without one it is
+    /// The wrapper follows a global `ocx` pin; without one it is
     /// the installed binary.
     ///
     /// The wrapper is a shell *function* named `ocx`, so it shadows `PATH`
     /// outright: left on the install path it would re-introduce, at exactly the
-    /// interactive prompt the pin is typed at, the precedence C-060's re-order
+    /// interactive prompt the pin is typed at, the precedence the re-order
     /// removed everywhere else.
     ///
     /// Both branches in one test, because either alone is satisfiable by a
     /// constant — a body that always answers the trampoline passes the pinned
     /// row, and today's shipped body passes the unpinned one.
     ///
-    /// C-080's second amendment: the probe is on the **physical**
+    /// The probe is on the **physical**
     /// `shells/<shell>/bin`, never on `bin()`. `Path::is_file` follows every
     /// component, and this answer is baked as the absolute program behind a
     /// login-emitted `ocx` shell *function* — which shadows `PATH` outright —
@@ -3265,7 +2752,7 @@ mod bare_ocx_tests {
         );
     }
 
-    /// C-080 — the probe never resolves through `active`.
+    /// The probe never resolves through `active`.
     ///
     /// Nothing is rendered: the physical `shells/<shell>/bin` does not exist.
     /// Only `<root>/active` does, as an ordinary directory holding an `ocx` —
@@ -3375,7 +2862,7 @@ mod ordering_tests {
     use super::SelfActivate;
     use crate::app::Cli;
 
-    /// C-042 — the per-prompt fast path reaches its short-circuit **before**
+    /// The per-prompt fast path reaches its short-circuit **before**
     /// `Context::try_init`, so a stat-only prompt reads no config at all.
     ///
     /// Observable because the config it would read is deliberately unparseable:
@@ -3470,7 +2957,7 @@ mod ordering_tests {
         );
     }
 
-    /// C-028 — consent is evaluated before anything project-controlled is
+    /// Consent is evaluated before anything project-controlled is
     /// parsed, and the ordering is enforced by the type system rather than by
     /// statement order.
     ///
@@ -3590,7 +3077,7 @@ mod ordering_tests {
         }
     }
 
-    /// A-13 / A-33 — a grant made through the `--config` overlay expires the
+    /// A grant made through the `--config` overlay expires the
     /// cached `inert` verdict at the **next prompt**, not the next shell start.
     ///
     /// The explicit tier is a consent-bearing channel, and the emitted hook body
@@ -3681,7 +3168,7 @@ mod ordering_tests {
         );
     }
 
-    /// A-11 — an indeterminate walk retains the recorded scope; a determinate
+    /// An indeterminate walk retains the recorded scope; a determinate
     /// one reverts it.
     ///
     /// Red state: make `walk_is_indeterminate` return `false` unconditionally
@@ -3753,23 +3240,21 @@ mod ordering_tests {
 }
 
 // ---------------------------------------------------------------------------
-// WP-9 — Specify phase: the emitted `PATH`, read out of a real shell
+// The emitted `PATH`, read out of a real shell
 // ---------------------------------------------------------------------------
 
-/// C-059, C-060, RUL-62, RUL-87 — the session directories as a live shell sees
-/// them.
+/// The session directories as a live shell sees them.
 ///
 /// **The assertion is the `PATH` a real `bash` ends up holding**, not the
-/// desired vector and not the plan. RUL-62 is explicit about why: `export_path`
-/// prepends, so the desired vector runs backwards relative to `PATH`, and an
-/// implementation that copied `setup::session_path_directories`' slice verbatim
-/// satisfies every assertion made on the vector while emitting exactly the
-/// order C-060 forbids. The only operand that cannot lie is the shell's own
-/// answer.
+/// desired vector and not the plan: `export_path` prepends, so the desired
+/// vector runs backwards relative to `PATH`, and an implementation that copied
+/// `setup::session_path_directories`' slice verbatim satisfies every assertion
+/// made on the vector while emitting exactly the forbidden order. The only
+/// operand that cannot lie is the shell's own answer.
 ///
 /// `bash` is required rather than skipped-when-absent: it is present on every
-/// unix cargo leg, and a skip here would make the C-059 red — a live defect on
-/// `goat` — indistinguishable from a run that never happened.
+/// unix cargo leg, and a skip here would make a live defect on
+/// `goat` indistinguishable from a run that never happened.
 #[cfg(test)]
 #[cfg(unix)]
 mod emitted_path_tests {
@@ -3877,7 +3362,7 @@ mod emitted_path_tests {
             .unwrap_or_else(|| panic!("{needle} must be on PATH; got {path:#?}"))
     }
 
-    /// **C-059 — the live defect on `goat`, driven through the shell.**
+    /// **The session-PATH deletion defect, driven through the shell.**
     ///
     /// `ocx self setup` registers `ocx_install_bin_path` at session level; the
     /// per-prompt reconciler owns `$OCX_HOME` and removes every segment under it
@@ -3919,14 +3404,14 @@ mod emitted_path_tests {
         position(&path, &global_bin());
     }
 
-    /// **C-060, RUL-62, RUL-87 — the order, read off the shell's own `PATH`.**
+    /// **The order, read off the shell's own `PATH`.**
     ///
     /// Front to back: the project's composed entries, then
     /// `ocx_install_bin_path`, then the project's `<home>/toolchain/active/bin`, then
     /// `$OCX_HOME/toolchain/active/bin`, then the global tier's composed entries.
     ///
-    /// The last comparison is RUL-87's: a splice that put the global tier after
-    /// the session block would let a globally installed tool shadow the
+    /// The last comparison matters because a splice that put the global tier
+    /// after the session block would let a globally installed tool shadow the
     /// project's own trampoline.
     ///
     /// Red state: emit the session directories in their documented `PATH` order
@@ -3968,7 +3453,7 @@ mod emitted_path_tests {
         );
     }
 
-    /// C-059 — a shell whose `PATH` lost both session directories gets them
+    /// A shell whose `PATH` lost both session directories gets them
     /// back on the next prompt. The reconciler contributes them; it does not
     /// merely refrain from deleting them.
     ///
@@ -4001,7 +3486,7 @@ mod emitted_path_tests {
     }
 }
 
-/// D-3 — the global toolchain tier honours its own `activate` setting.
+/// The global toolchain tier honours its own `activate` setting.
 ///
 /// Two halves, split by what they need: the ladder over `$OCX_HOME/ocx.toml`
 /// (pure, a path and a tempdir), and the gate that consumes it (a real
@@ -4210,14 +3695,14 @@ mod global_activate_tests {
         unsafe { std::env::remove_var("OCX_HOME") };
     }
 
-    // ── A-12's other half: the LOGIN stream ─────────────────────────────────
+    // ── the other half: the LOGIN stream ─────────────────────────────────
 
     /// The install-bin directory a login stream is built over.
     fn bin_dir() -> std::path::PathBuf {
         std::path::PathBuf::from("/tmp/ocx_home/symlinks/ocx_sh/ocx/cli/current/content/bin")
     }
 
-    /// C-059's other session directory — the global toolchain's trampolines.
+    /// The other session directory — the global toolchain's trampolines.
     fn toolchain_bin_dir() -> std::path::PathBuf {
         std::path::PathBuf::from("/tmp/ocx_home/toolchain/bin")
     }
@@ -4268,13 +3753,13 @@ mod global_activate_tests {
         stream.iter().any(|line| line.contains(needle))
     }
 
-    /// A-12's other half — the **login** stream composes the global env in
+    /// The other half — the **login** stream composes the global env in
     /// `env` mode only.
     ///
-    /// A-12 (2026-09-06) gated the per-prompt arm and recorded the gap as
-    /// closed, but two emitters put a global environment into a shell and only
-    /// one was gated: `$OCX_HOME/env.sh` runs `ocx self activate`, whose stream
-    /// pushed the eval in every mode. A global `activate = "bin"` therefore
+    /// Two emitters put a global environment into a shell, and gating the
+    /// per-prompt arm left the other one ungated: `$OCX_HOME/env.sh` runs
+    /// `ocx self activate`, whose stream pushed the eval in every mode. A
+    /// global `activate = "bin"` therefore
     /// looked inert — repaired at the first prompt in an interactive shell, and
     /// never in a script, an `ssh host cmd`, a git hook or a plain `sh`, which
     /// register no hook at all.
@@ -4304,7 +3789,7 @@ mod global_activate_tests {
         }
     }
 
-    /// C-059 — both session directories reach a login shell in **every** mode.
+    /// Both session directories reach a login shell in **every** mode.
     ///
     /// `$OCX_HOME/toolchain/active/bin` is a session-level fact, not a composition:
     /// the reconciler holds it desired unconditionally
@@ -4345,9 +3830,9 @@ mod global_activate_tests {
         );
     }
 
-    /// The two session directories arrive in C-060's order: the global
+    /// The two session directories arrive in order: the global
     /// trampolines in front of the installed `ocx`, so a global toolchain that
-    /// pins `ocx` is the one a login shell resolves (D-4).
+    /// pins `ocx` is the one a login shell resolves.
     ///
     /// Red state: swap the two `path_prepend_line` calls in `activation_lines`.
     #[test]

@@ -3,11 +3,7 @@
 
 //! OCI referrer manifest (image manifest carrying a `subject` descriptor).
 //!
-//! Phase 1 stub — shape only. The `ReferrerManifest` represents an OCI 1.1
-//! image manifest whose `subject` field points at the target being referred
-//! to (signature, SBOM, attestation). See
-//! [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md)
-//! for the full push-side state machine.
+//! Push-side state machine: [`adr_oci_referrers_signing_v1.md`](../../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md).
 
 use std::collections::BTreeMap;
 
@@ -20,61 +16,31 @@ use crate::annotations::CREATED;
 use crate::{Descriptor, OCI_IMAGE_MEDIA_TYPE};
 
 /// OCI 1.1 image manifest carrying a `subject` descriptor.
-///
-/// Serializes to an OCI image manifest (`application/vnd.oci.image.manifest.v1+json`)
-/// with `artifactType` set to the referrer's media type (e.g.
-/// [`SIGSTORE_BUNDLE_V03`](super::media_types::SIGSTORE_BUNDLE_V03)) and a
-/// `subject` descriptor identifying the manifest being referred to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReferrerManifest {
-    /// OCI schema version (always `2` for OCI 1.x manifests).
     #[serde(rename = "schemaVersion")]
     pub schema_version: u8,
 
-    /// Top-level media type (`application/vnd.oci.image.manifest.v1+json`).
     #[serde(rename = "mediaType")]
     pub media_type: String,
 
-    /// Artifact-specific type (e.g., [`SIGSTORE_BUNDLE_V03`](super::media_types::SIGSTORE_BUNDLE_V03)).
     #[serde(rename = "artifactType")]
     pub artifact_type: String,
 
-    /// Empty-config descriptor per OCI empty-descriptor convention.
     pub config: Descriptor,
 
-    /// Referrer payload layers (e.g., the Sigstore bundle blob).
     pub layers: Vec<Descriptor>,
 
-    /// Descriptor of the subject this referrer refers to.
     pub subject: Descriptor,
 
-    /// Sigstore bundle annotations (ADR D1), built by [`bundle_annotations`].
-    ///
-    /// `skip_serializing_if` is load-bearing, not tidiness: [`Self::to_canonical_json`]
-    /// is a plain `serde_json::to_vec(self)` and the registry addresses the
-    /// referrer by the SHA-256 of exactly those bytes. Without it every
-    /// manifest built with `None` would gain `"annotations": null` and change
-    /// digest. `BTreeMap` for byte-stable key order (DATA-DET-01).
+    /// Without `skip_serializing_if`, `None` serializes as `"annotations": null`
+    /// and changes the referrer's digest; `BTreeMap` keeps the bytes stable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<BTreeMap<String, String>>,
 }
 
 impl ReferrerManifest {
     /// Build a referrer manifest for the given subject with a single payload layer.
-    ///
-    /// `artifact_type` is the referrer's media type (e.g.
-    /// [`SIGSTORE_BUNDLE_V03`](super::media_types::SIGSTORE_BUNDLE_V03)).
-    /// `payload` is the descriptor of the pushed payload blob. The config is the
-    /// OCI empty-config descriptor per the empty-descriptor convention.
-    /// `annotations` is [`bundle_annotations`]' output for a bundle referrer,
-    /// or `None` — which serializes the key away entirely, leaving the bytes
-    /// byte-identical to a manifest built before the field existed.
-    ///
-    /// cosign additionally stamps `config.artifactType` with the same value as
-    /// the top-level `artifactType`. OCX does not: the day-1 spike (cosign
-    /// v3.1.1 against zot) confirmed cosign's own read path discriminates by
-    /// parsed bundle content and never reads `config.artifactType`, so omitting
-    /// it breaks interop in neither direction.
     pub fn build(
         subject: Descriptor,
         artifact_type: &str,
@@ -105,23 +71,16 @@ impl ReferrerManifest {
     ///
     /// # Errors
     ///
-    /// Returns the [`serde_json::Error`] verbatim when serialization fails.
-    /// The referrer manifest is a plain OCI shape with no signing opinion of
-    /// its own, so it raises the serializer's error rather than a sign-side
-    /// one; the two pipelines that push it wrap it as
-    /// `ocx_lib::oci::sign::error::SignErrorKind::Internal` (still in
-    /// `ocx_lib`) at their own boundary (ADR 1.18).
+    /// The [`serde_json::Error`] when serialization fails.
     pub fn to_canonical_json(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(self)
     }
 }
 
-/// Build the Sigstore bundle annotation set cosign writes (ADR D1).
+/// Build the Sigstore bundle annotation set cosign writes.
 ///
-/// `created` is [`bundle_created`]'s output, taken as an argument so the map
-/// stays a pure function of its inputs. Every referrer carries a
-/// `predicate_type` since D2: a signature is a DSSE Statement too, so its
-/// predicateType is what tells it from an attestation in a listing.
+/// A signature carries `predicate_type` too: it is what tells it from an
+/// attestation in a listing.
 pub fn bundle_annotations(created: &str, content: &str, predicate_type: &str) -> BTreeMap<String, String> {
     let mut annotations = BTreeMap::new();
     annotations.insert(CREATED.to_string(), created.to_string());
@@ -133,63 +92,37 @@ pub fn bundle_annotations(created: &str, content: &str, predicate_type: &str) ->
 /// The one instant a bundle push is stamped with: `SOURCE_DATE_EPOCH` when set,
 /// else the wall clock.
 ///
-/// Returned as a `DateTime` rather than a formatted string because the
-/// attestation path needs the same instant twice — once as the
-/// [`CREATED`] value and once inside the signed cosign predicate
-/// wrapper. Two independent clock reads would let one of them stop honouring
-/// `SOURCE_DATE_EPOCH` without anything noticing.
+/// Read once and reused for [`CREATED`] and the signed predicate, or one of two
+/// clock reads can silently stop honouring `SOURCE_DATE_EPOCH`.
 pub fn bundle_now() -> chrono::DateTime<chrono::Utc> {
     pinned_instant().unwrap_or_else(chrono::Utc::now)
 }
 
-/// The instant `SOURCE_DATE_EPOCH` pins, or `None` when it is unset, blank, or
+/// The instant `SOURCE_DATE_EPOCH` pins, or `None` when unset, blank, or
 /// malformed.
 ///
-/// The single reader of `SOURCE_DATE_EPOCH` across every instant OCX stamps —
-/// the sign/attest bundle ([`bundle_now`]) and the CI push annotations
-/// (`ocx_shell::ci::annotations`, still in `ocx_lib`) both call it, so a blank or malformed value
-/// warns and falls back to the clock identically on both paths rather than
-/// warning on one and staying silent on the other. Read through
-/// [`ocx_util::env::var`] (the one runtime reader, which already warns on a
-/// non-UTF-8 value) rather than `std::env::var_os`, so both callers observe the
-/// same value and the same test seam.
+/// The single reader of the variable (also `ocx_shell::ci::annotations`), or a
+/// malformed value warns on one path and stays silent on the other.
 pub fn pinned_instant() -> Option<chrono::DateTime<chrono::Utc>> {
     let raw = ocx_util::env::var("SOURCE_DATE_EPOCH")?;
     let parsed = created_from_epoch(&raw);
     if parsed.is_none() {
-        // Reproducible-builds says a builder SHOULD reject a malformed value.
-        // Refusing here would need a new error variant on the sign path for a
-        // field with no security role, so we fall back to the clock and make
-        // the lost determinism visible instead of silent. An empty value is
-        // set-but-unusable and takes the same branch. The key alone, never the
-        // value: a CI job log is durable and read by more parties than the
-        // process environment.
+        // Log the key, never the value: a CI job log reaches more readers than the environment.
         log::warn!("ignoring malformed SOURCE_DATE_EPOCH; using the current time");
     }
     parsed
 }
 
-/// Formats [`bundle_now`]'s instant for [`CREATED`].
-///
-/// RFC 3339, second precision, explicit `Z` — byte-identical to the Go
-/// `time.RFC3339` layout cosign formats with. Pure, so the format is
-/// assertable against a literal without touching the environment or the clock.
+/// Formats [`bundle_now`]'s instant for [`CREATED`], byte-identical to cosign's
+/// Go `time.RFC3339` layout (second precision, explicit `Z`).
 pub fn bundle_created(now: chrono::DateTime<chrono::Utc>) -> String {
     now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// Parses a `SOURCE_DATE_EPOCH` value: decimal seconds since the Unix epoch,
-/// surrounding whitespace tolerated. Split out from [`pinned_instant`] so the
-/// epoch path is reachable from a test without mutating the process
-/// environment (TEST-05). [`pinned_instant`] is the single reader of the
-/// variable, so one function decides what it means across every instant OCX
-/// stamps.
-///
-/// `None` for anything else, an out-of-range timestamp included — the caller
-/// reports it and falls back to the clock.
+/// surrounding whitespace tolerated; `None` otherwise, out-of-range included.
 pub fn created_from_epoch(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    // .ok(): a parse failure and an out-of-range timestamp are one outcome
-    // here, and the caller reports it.
+    // .ok(): the caller reports the failure.
     raw.trim()
         .parse::<i64>()
         .ok()

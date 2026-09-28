@@ -4,33 +4,18 @@
 use ocx_project::lazy;
 
 /// The `--lazy-mode` tier of the lazy-loading resolution ladder.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add `--lazy-mode <MODE>`.
-/// Deliberately *not* a `--X`/`--no-X` pair (the `options::Pull` /
-/// `options::BinScan` shape): a paired toggle can only express a closed two-
-/// or three-valued set, and this mode is an open-ended strategy enum. Resolve
-/// through [`LazyMode::mode`] — never read the field at a call site.
-///
-/// What [`LazyMode::mode`] returns is the ladder's **top tier**, not the
-/// answer: `None` means "the flag was absent", which is what lets `ocx.toml`
-/// and `OCX_LAZY_MODE` speak. Feed it to [`lazy::LazyModeLadder::cli`] and
-/// call `resolve()`; the floor lives there and nowhere else.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct LazyMode {
     /// Control when a package's content downloads: now, or on first use.
     ///
-    /// `never` composes eagerly, so a package's content is materialized before
-    /// its binaries reach `PATH`. `always` composes a shim instead: the package's
-    /// declared names are on `PATH` immediately, and its content downloads
-    /// the first time one of those names runs.
+    /// `never` composes eagerly: a package's content is materialized before its
+    /// binaries reach `PATH`. `always` composes a shim: the declared names are on
+    /// `PATH` immediately and the content downloads when one of them first runs.
     ///
-    /// When omitted, the value is read from `ocx.toml` (the package entry
-    /// first, then the group, then the top-level `lazy-mode` key), then from
-    /// the `OCX_LAZY_MODE` environment variable, and finally defaults to
-    /// `never`. Passing the flag overrides all of them.
-    ///
-    /// See https://ocx.sh/docs/reference/command-line#arg-lazy-mode for the
-    /// full resolution order.
+    /// When omitted, read from `ocx.toml` (the package entry, then the group,
+    /// then the top-level `lazy-mode` key), then `OCX_LAZY_MODE`, else `never`;
+    /// the flag overrides all of them. Resolution order in full:
+    /// https://ocx.sh/docs/reference/command-line#arg-lazy-mode
     #[clap(long = "lazy-mode", value_enum, value_name = "MODE")]
     lazy_mode: Option<lazy::LazyMode>,
 }
@@ -38,10 +23,7 @@ pub struct LazyMode {
 impl LazyMode {
     /// Resolves `--lazy-mode` to the CLI tier of [`lazy::LazyModeLadder`].
     ///
-    /// `None` means the flag was absent, so the tier is **inherited** from
-    /// the next-less-specific one — it never means [`lazy::LazyMode::Never`].
-    /// Collapsing absence into the floor here would make `--lazy-mode`
-    /// silently outrank every `ocx.toml` tier on every invocation.
+    /// `None` inherits the next tier; mapping it to [`lazy::LazyMode::Never`] would outrank every `ocx.toml` tier.
     pub fn mode(&self) -> Option<lazy::LazyMode> {
         self.lazy_mode
     }

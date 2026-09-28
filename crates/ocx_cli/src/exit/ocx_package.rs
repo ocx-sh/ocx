@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Exit-code classification for the package, metadata and publisher error family — the `ocx_package` rung of the
-//! ladder, here rather than in that crate because classification is `ocx_cli`'s alone.
+//! Exit-code classification for the `ocx_package` error family.
 
 use ocx_exit::ExitCode;
 
@@ -21,19 +20,7 @@ use ocx_package::publisher::PublishGateError;
 use super::{ClassifyErrorKind, ClassifyExitCode, downcast_arm};
 
 impl ClassifyExitCode for CopyError {
-    /// Delegates to the kind, except for the pass-through arm.
-    ///
-    /// [`CopyErrorKind::Registry`] means "no copy-specific code fits this", so
-    /// it asks the cause it wraps — a registry 404 keeps 79, a missing
-    /// Referrers API keeps 84, a 401 keeps 80, rather than all three being
-    /// flattened. Without this impl every structural refusal would classify as
-    /// the generic `Failure` (1) and a pipeline could not tell a bad invocation
-    /// from an unreachable registry.
-    ///
-    /// It must delegate explicitly rather than return `None` and leave it to
-    /// the chain walker: the arm is `#[error(transparent)]`, which forwards
-    /// `source()` *past* the inner error instead of to it, so a walk starting
-    /// here never visits the one value that knows its own code.
+    /// `Registry` is `#[error(transparent)]`, so only this explicit arm reaches its cause; the walker would exit 1.
     fn classify(&self) -> Option<ExitCode> {
         use ClassifyErrorKind;
         match &self.kind {
@@ -50,20 +37,14 @@ impl ClassifyErrorKind for CopyErrorKind {
             Self::IndexNamedByDigest
             | Self::PlatformRequired
             | Self::PlatformAmbiguous
-            // Naming a platform the source does not publish is an invocation
-            // fault: the index is intact and the request is what has to change.
             | Self::NoMatchingPlatform { .. } => ExitCode::UsageError,
-            // Never reached through `CopyError::classify`, which asks the
-            // wrapped cause for its own code instead. Only a caller that
-            // classifies a bare kind, with the cause discarded, lands here —
-            // and at that point there is nothing left to be more specific.
+            // Only a bare kind with its cause discarded lands here; `CopyError::classify` asks the cause.
             Self::Registry(_) => ExitCode::Failure,
         }
     }
 
     fn kind_detail(&self) -> &'static str {
-        // Frozen contract: the snake_case parallel of the variant name.
-        // Exhaustive — adding a variant forces a new arm here.
+        // Frozen contract: never rename a slug.
         match self {
             Self::IndexNamedByDigest => "index_named_by_digest",
             Self::PlatformRequired => "platform_required",
@@ -76,8 +57,6 @@ impl ClassifyErrorKind for CopyErrorKind {
 
 impl ClassifyExitCode for LayerRefParseError {
     fn classify(&self) -> Option<ExitCode> {
-        // A layer-ref string comes from the CLI (publish side); a bad one is a
-        // usage error (64), whether a bare digest or a malformed layout tail.
         Some(ExitCode::UsageError)
     }
 }
@@ -89,11 +68,7 @@ impl ClassifyExitCode for PublishGateError {
                 Some(ExitCode::DataError)
             }
             PublishGateError::DependencyManifestNotFound { .. } => Some(ExitCode::NotFound),
-            // Delegate to the inner cause (auth → 80, network → 69, a missing
-            // dependency tag → 79 via the wrapped `ocx_lib::Error`).
             PublishGateError::Verification { .. } | PublishGateError::AnyPinProvenanceUnavailable { .. } => None,
-            // The index error answers: an SSRF refusal is 78, an index outage
-            // 69, a malformed root 65 — none of them is the gate's to decide.
             PublishGateError::Routing { .. } => None,
         }
     }
@@ -102,14 +77,10 @@ impl ClassifyExitCode for PublishGateError {
 impl ClassifyExitCode for BinScanError {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            // Input-data trouble: the declared claim disagrees with the
-            // content tree, the scanned set itself is malformed, or this
-            // host cannot produce a trustworthy scan for the target platform.
             Self::UndeclaredBinary { .. }
             | Self::DeclaredNotExecutable { .. }
             | Self::Binary(_)
             | Self::UnsupportedHostScan { .. } => Some(ExitCode::DataError),
-            // Delegate to the inner cause via the chain walker.
             Self::Scan(_) => None,
         }
     }
@@ -122,8 +93,6 @@ impl ClassifyExitCode for DependencyPinningError {
             DependencyPinningError::NoCompatiblePlatform { .. }
             | DependencyPinningError::AmbiguousPlatform { .. }
             | DependencyPinningError::DirectDigestPinInAnyTarget { .. } => Some(ExitCode::DataError),
-            // Delegate to the inner index/client cause via the chain walker
-            // (offline/frozen policy blocks classify to 81 there).
             DependencyPinningError::Index(_) => None,
         }
     }
@@ -149,16 +118,6 @@ impl ClassifyExitCode for PackageError {
             Self::EnvVarInterpolation { source, .. } => source.classify(),
             Self::EntrypointArgInterpolation { source, .. } => source.classify(),
             Self::IntegrationInterpolation { source, .. } => source.classify(),
-            // The four E1 stand-ins. `From<PackageError> for ocx_lib::Error`
-            // reconstructs each into the crate-wide variant it replaced, and
-            // that `From` is the only producer of `Error::Package`, so none of
-            // them reaches this classifier today. They are written to agree
-            // with that reconstruction rather than left to a catch-all: `File`
-            // answers what `Error::InternalFile` answers, `SerializationFailure`
-            // what `Error::SerializationFailure` answers, and the two wrappers
-            // delegate exactly as `Error::OciClient` / `Error::OciIndex` do. An
-            // arm that agrees by construction cannot drift into a second
-            // opinion about the same value.
             Self::File(_) => Some(ExitCode::IoError),
             Self::Archive(e) => e.classify(),
             Self::Digest(e) => e.classify(),
@@ -173,22 +132,14 @@ impl ClassifyExitCode for PackageError {
 impl ClassifyExitCode for LibcLintError {
     fn classify(&self) -> Option<ExitCode> {
         match self {
-            // Input-data trouble, and deliberately the same code the
-            // *resolution* side already returns for the mirror-image failure:
-            // `SelectResult::FeatureMismatch` -> `PackageErrorKind::
-            // FeatureMismatch` -> `DataError`. One number for both ends of
-            // the os.features contract, whether the mismatch is caught at
-            // publish time or at install time. Matches the sibling compile
-            // step (`BinScanError`) too.
+            // Must match `PackageErrorKind::FeatureMismatch` (65), the install-time side of the same contract.
             Self::UndeclaredLibc { .. }
             | Self::AgnosticPlatformClaim { .. }
             | Self::UnparseableElf { .. }
             | Self::UnrecognizedInterpreter { .. }
             | Self::UnresolvableScanScope { .. }
             | Self::ModifierBearingScanScope { .. } => Some(ExitCode::DataError),
-            // A file we could not read is an I/O fault, not bad data.
             Self::Read { .. } => Some(ExitCode::IoError),
-            // Delegate to the inner cause via the chain walker.
             Self::Scan(_) => None,
         }
     }
@@ -196,14 +147,12 @@ impl ClassifyExitCode for LibcLintError {
 
 impl ClassifyExitCode for AuthoringError {
     fn classify(&self) -> Option<ExitCode> {
-        // Malformed / incomplete metadata is input-data trouble: DataError (65).
         Some(ExitCode::DataError)
     }
 }
 
 impl ClassifyExitCode for MetadataDependencyError {
     fn classify(&self) -> Option<ExitCode> {
-        // Every variant is malformed/oversized input data: DataError (65).
         Some(ExitCode::DataError)
     }
 }

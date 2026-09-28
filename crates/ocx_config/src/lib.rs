@@ -3,11 +3,6 @@
 
 //! Resolved settings from files and environment: the four config tiers, the
 //! managed tier, env-var vocabulary and validation.
-//!
-//! This was `ocx_lib::config` plus the two modules that sat beside it,
-//! `ocx_lib::env` and `ocx_lib::managed_config`. The crate root is the old
-//! `config.rs`, so what read `crate::loader` reads `crate::loader`
-//! here and `ocx_config::loader` from outside.
 
 pub mod edit;
 pub mod env;
@@ -23,11 +18,6 @@ pub mod patch;
 pub mod records;
 pub mod registry;
 pub mod shell;
-// `pub` at last. Inside `ocx_lib` this was `pub(crate)` because `config` was a
-// private module, so a `pub mod` here counted as an `unreachable_pub` against
-// the lint ratchet while its thirteen siblings were already in that backlog.
-// The extraction is what the comment said would change it: this is a crate
-// root now, and `ocx_config::tls` has to be reachable from outside.
 pub mod tls;
 
 use std::collections::HashMap;
@@ -43,15 +33,9 @@ pub use self::patch::PatchConfig;
 pub use self::registry::RegistryConfig;
 pub use self::shell::ShellConfig;
 
-/// Which `config.toml` tier a value came from (C-032).
+/// Which `config.toml` tier a value came from; runtime provenance only, never serialized.
 ///
-/// Runtime provenance only — never parsed from a file, never serialized. The
-/// loader stamps it per file; [`ShellConfig::merge`] carries it alongside the
-/// scalar it describes, so a consumer can report the tier that **actually**
-/// decided a setting rather than asserting one (A-32).
-///
-/// Ordered lowest- to highest-precedence, which is also the fold order:
-/// `System` → `User` → `Home` → `Managed` → `Explicit`.
+/// Variants are listed lowest- to highest-precedence, the loader's fold order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConfigTier {
     /// `/etc/ocx/config.toml`.
@@ -67,8 +51,6 @@ pub enum ConfigTier {
 }
 
 impl std::fmt::Display for ConfigTier {
-    /// Renders the tier as the name a user would recognise it by — the flag or
-    /// the path, never the Rust variant.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::System => "system config.toml",
@@ -80,59 +62,36 @@ impl std::fmt::Display for ConfigTier {
     }
 }
 
-/// Root configuration struct.
+// No `deny_unknown_fields` anywhere in this tree, or a newer managed payload bricks every older
+// binary in the fleet (`adr_managed_config_tier.md`).
+/// The `config.toml` document.
 ///
-/// No `deny_unknown_fields` anywhere in this tree — unknown sections AND
-/// unknown keys inside a known section are silently ignored. The reason is
-/// fleet forward-compat, not convenience: one `config.toml` is read by many
-/// ocx versions at once (the `[managed]` tier ships an operator's payload to
-/// every binary in a fleet), so a file written for a newer ocx must degrade to
-/// "the parts I understand" on an older one. The alternative — rejecting the
-/// file — takes the WHOLE payload out of service on every older binary, which
-/// is how a central rollout bricks a fleet.
-///
-/// The cost is that a typo'd key silently no-ops. When a change genuinely
-/// cannot degrade (a key whose meaning or value shape changed), the escape
-/// hatch is the tier's own OCI tag: publish the new payload under a new tag
-/// and move fleets onto it as they upgrade — see the 2026-07-31 amendment in
-/// `adr_managed_config_tier.md` and `website/src/docs/user-guide.md`
-/// ("Rolling out an incompatible change").
+/// Unknown sections and unknown keys inside a known section are ignored, so a file written for a
+/// newer ocx degrades to the parts an older one understands; the cost is that a typo'd key
+/// silently does nothing. A change that cannot degrade (a key whose meaning or value shape
+/// changed) ships as a managed payload under a new OCI tag, and fleets move onto it as they
+/// upgrade — see "Rolling out an incompatible change" in the user guide.
 #[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
 pub struct Config {
     /// Global registry-subsystem settings (`[registry]` section).
-    ///
-    /// In v1 contains only `default`, but reserved for future global settings
-    /// (timeout, retry policy, default-credential-provider, etc.).
     pub registry: Option<RegistryDefaults>,
 
     /// Named per-registry configuration tables (`[registries.<name>]`).
     ///
-    /// The plural name is deliberate: it matches Cargo's convention and avoids
-    /// a TOML collision with the singular `[registry]` global-settings section.
-    ///
     /// Every key is an identifier prefix, always — `[registry] default`
-    /// never dereferences through this table (§6 ratified simplification).
-    /// Future extensions (location rewrite, timeout, auth) drop into the same
-    /// entry struct without breaking existing configs.
+    /// never dereferences through this table.
     pub registries: Option<HashMap<String, RegistryConfig>>,
 
     /// Per-traffic-host mirrors (`[mirrors."<host>"]`).
     ///
-    /// Maps a canonical upstream traffic host (e.g. `"ghcr.io"`,
-    /// `"index.ocx.sh"`) to replacement endpoint(s) so OCX routes read
-    /// traffic to a corporate mirror instead of the firewall-blocked origin.
-    /// Each value is a union (`adr_index_indirection.md` F5b): a bare string
-    /// rewrites both traffic roles for that host; a `{registry?, index?}`
-    /// table splits per role — `registry` rewrites OCI distribution traffic
-    /// only, `index` rewrites index-tree traffic only. Replace semantics: no
-    /// origin fallback. The canonical identifier and content-addressed digest
-    /// stay unchanged, so an `ocx.lock` produced behind the mirror remains
-    /// valid with direct egress and vice versa.
-    ///
-    /// Deserialized via [`mirror::deserialize_mirrors_table`] (hand-rolled,
-    /// value-first) rather than a plain derive, so a malformed entry raises a
-    /// named per-host error instead of an opaque `#[serde(untagged)]`
-    /// variant-mismatch.
+    /// Maps a canonical upstream traffic host (e.g. `"ghcr.io"`, `"index.ocx.sh"`) to replacement
+    /// endpoint(s), so read traffic goes to a corporate mirror instead of the firewall-blocked
+    /// origin. A bare string rewrites both traffic roles for that host; a `{registry?, index?}`
+    /// table splits per role — `registry` rewrites OCI distribution traffic only, `index`
+    /// index-tree traffic only. Replace semantics: no origin fallback. The canonical identifier
+    /// and content-addressed digest stay unchanged, so an `ocx.lock` produced behind the mirror
+    /// remains valid with direct egress and vice versa.
+    // Hand-rolled deserializer so a malformed entry names its host, not an opaque untagged mismatch.
     #[serde(default, deserialize_with = "mirror::deserialize_mirrors_table")]
     pub mirrors: Option<HashMap<String, MirrorConfig>>,
 
@@ -140,9 +99,7 @@ pub struct Config {
     ///
     /// Points at an operator-controlled patch registry that provides companion
     /// packages (CA bundles, proxy env vars, license-server endpoints) layered
-    /// onto unmodified upstream packages at compose time. The patch tier is the
-    /// execution-env twin of `[mirrors]`: `[mirrors]` adapts transport, patches
-    /// adapt the execution environment.
+    /// onto unmodified upstream packages at compose time.
     ///
     /// Absent → no patch tier configured (opt-in, not required).
     pub patches: Option<PatchConfig>,
@@ -152,8 +109,7 @@ pub struct Config {
     /// Points at an operator-controlled OCI artifact that supplies a plain
     /// `config.toml` payload — mirrors, patches pointer, default registry —
     /// synced into local state and merged above the user config every
-    /// invocation. See `crate::managed_config` for the fetch/persist domain
-    /// layer and `adr_managed_config_tier.md`.
+    /// invocation.
     ///
     /// Absent → no managed tier configured (opt-in, seeded by
     /// `ocx self setup --managed-config`).
@@ -162,22 +118,20 @@ pub struct Config {
     /// Identity-pinned verification policies (`[[trust.policy]]`).
     ///
     /// Unlike every other section, trust policies **array-append** across the
-    /// `config.toml` tiers rather than replace (see [`Config::merge`]) — the
-    /// operator (config.toml) trust set is the union of system/user/`$OCX_HOME`.
-    /// At verify time this operator set takes precedence over the project
-    /// `ocx.toml` (`ocx_trust::resolve_tiered`). Consumed by
-    /// `ocx package verify`. See `ocx_trust` and `adr_trust_policy.md`.
+    /// `config.toml` tiers rather than replace — the operator trust set is the
+    /// union of system, user and `$OCX_HOME`. At verify time this operator set
+    /// takes precedence over the project `ocx.toml`. Consumed by
+    /// `ocx package verify`.
     pub trust: Option<ocx_trust::TrustConfig>,
 
     /// Shell-integration settings (`[shell]`) — the per-prompt hook and
     /// completions toggles, plus the activation consent whitelist.
     ///
-    /// **Never contributed by the project tier.** `ConfigLoader` strips
-    /// `shell` from any project-tier contribution explicitly (C-033), because
-    /// consent material read from a repo's own `ocx.toml` would let a clone
+    /// **Never read from a project's `ocx.toml`**, only from `config.toml`
+    /// tiers: consent read from a repository's own file would let a clone
     /// consent to itself. Consumed by `ocx self activate`, `ocx self setup`
-    /// and `ocx shell state`. See `adr_shell_env_overhaul.md` Decisions 4, 5
-    /// and 7.
+    /// and `ocx shell state`.
+    // `ConfigLoader` must strip `shell` from project-tier input, or a clone consents to itself.
     pub shell: Option<ShellConfig>,
 
     /// Execution-record sink (`[records]`).
@@ -185,84 +139,42 @@ pub struct Config {
     /// Designates where OCX writes one JSON resolution record per tool launch —
     /// the resolved package closure with digests, plus the resolved executable.
     /// Declared at SYSTEM scope it clamps: no lower tier can redirect or
-    /// disable it, which is what lets an operator make recording a fleet
-    /// property instead of a wrapper-script convention.
+    /// disable it.
     ///
     /// Absent → no records written (opt-in).
     pub records: Option<records::RecordsOptions>,
 
-    // C-016, S-004 — and every Rust cross-reference this field has. They live
-    // in this `//` comment rather than in the `///` block below because
-    // schemars copies that block verbatim into the `description` of the
-    // published `config.toml` schema (RUL-30): an intra-doc link renders there
-    // as literal brackets, and a contract identifier means nothing to the
-    // person the schema is written for.
-    //
-    // The neighbours a Rust reader wants: `ToolchainRoot::resolve` is the only
-    // path from this declared value to a root a home may be built on — reading
-    // this field and handing it straight to
-    // `crate::project::resolve_toolchain_home` is the bypass R-W2 exists to
-    // close. That function performs the `<root>/<project-key>/` join;
-    // `ocx_store::reference_manager::ReferenceManager::name_for_path` derives the
-    // key. The global home is `ocx_store::file_structure::FileStructure::toolchain`,
-    // built under `$OCX_HOME` and unaffected by this key.
-    /// Root directory under which each project's toolchain tree is rendered.
+    // Reach a home root only through `ToolchainRoot::resolve`; using the field directly skips every refusal.
+    /// Root directory holding every project's toolchain tree, each at `<root>/<project-key>/toolchain/`.
     ///
-    /// A project's tree lands at `<root>/<project-key>/toolchain/`, so this
-    /// names one directory holding many projects, not a single project's
-    /// toolchain home. The global toolchain home ignores this key entirely: it
-    /// is always `$OCX_HOME/toolchain`.
-    ///
-    /// A leading `~` expands against the home directory, and nothing else is
-    /// expanded — a `%VAR%` reference is taken literally on every platform,
-    /// Windows included. The value must be absolute and must not contain a
-    /// `..` component.
-    ///
-    /// The directory it resolves to must sit inside the home directory or
-    /// inside `$OCX_HOME`, must not be either of those two directories itself,
-    /// and must not be inside `$OCX_HOME/toolchain`. It must not be a
-    /// filesystem root or a system location such as `/usr`, `/etc`, `/var/lib`
-    /// or `C:\Program Files`. On Linux and macOS it must additionally be owned
-    /// by the invoking user and writable by neither group nor world; Windows
-    /// checks no ownership. ocx exits 78 when any of that fails. It does not
-    /// have to exist yet — the directory is created when a toolchain is first
-    /// rendered.
-    ///
-    /// Available in every configuration tier, a managed-configuration payload
-    /// included, so one fleet rollout can place every host's project trees on a
-    /// chosen volume.
+    /// The global toolchain home ignores this key: it is always `$OCX_HOME/toolchain`. Settable in
+    /// every tier, a managed payload included. Only a leading `~` expands, against the home directory;
+    /// a `%VAR%` reference stays literal on every platform. The value must be absolute with no `..`
+    /// component, and must resolve inside the home directory or `$OCX_HOME` — not either of those
+    /// itself, not inside `$OCX_HOME/toolchain`, and not a filesystem root or a system location such
+    /// as `/usr`, `/etc`, `/var/lib` or `C:\Program Files`. On Linux and macOS it must be owned by the
+    /// invoking user and writable by neither group nor world; Windows checks no ownership. ocx exits
+    /// 78 when any of that fails. It need not exist yet: the first toolchain render creates it.
     #[serde(default)]
     pub toolchain_dir: Option<PathBuf>,
 
-    // C-001 — the extra CA roots field pair, and the ADR amendment it
-    // forwards to: `adr_managed_config_tier.md` "Amendment (2026-09-13)"
-    // records the residual TLS-impersonation risk an unpinned managed
-    // publisher gains by setting this key. Lives here, not in the `///`
-    // block below, for the same reason `toolchain_dir`'s neighbour comment
-    // above does: schemars copies that block verbatim into the published
-    // schema, where an intra-doc link renders as literal brackets and an
-    // artifact filename means nothing to the reader.
-    /// Extra CA certificate(s) trusted for OCI registry, index and forge
-    /// traffic, as a path to a PEM file (a bundle of one or more
-    /// concatenated `CERTIFICATE` blocks is accepted) additional to the
-    /// platform trust store.
+    /// Path to a PEM file of extra CA certificate(s), trusted for OCI registry, index and forge
+    /// traffic in addition to the platform trust store.
     ///
-    /// A relative path resolves against the directory of the `config.toml`
-    /// that declared it — rewritten to absolute at load time, so the same
-    /// value means the same file regardless of the process working
-    /// directory. Mutually exclusive with `extra_ca_certs_pem`: declaring
-    /// both in one file is refused. A managed payload never carries this
-    /// form: a path on the publisher's disk means nothing on a consumer's, so
-    /// the managed tier drops it with a warning — publish with `ocx config
-    /// push`, which inlines the file as `extra_ca_certs_pem`.
+    /// A bundle of one or more concatenated `CERTIFICATE` blocks is accepted. A relative path
+    /// resolves against the directory of the `config.toml` that declared it, so the same value
+    /// means the same file regardless of the process working directory. Mutually exclusive with
+    /// `extra_ca_certs_pem`: declaring both in one file is refused. A managed payload never carries
+    /// this form: a path on the publisher's disk means nothing on a consumer's, so the managed tier
+    /// drops it with a warning — publish with `ocx config push`, which inlines the file as
+    /// `extra_ca_certs_pem`.
     #[serde(default)]
     pub extra_ca_certs: Option<PathBuf>,
 
     /// The extra CA certificate bundle inlined verbatim (PEM text).
     ///
     /// This is the form a fleet receives: `ocx config push` reads a
-    /// path-form `extra_ca_certs` at publish time and inlines it here,
-    /// because a path on the operator's disk means nothing on a consumer's.
+    /// path-form `extra_ca_certs` at publish time and inlines it here.
     /// Mutually exclusive with `extra_ca_certs`. From the managed tier it is
     /// honoured for registry, index and forge traffic as published; Sigstore
     /// traffic honours a managed-tier root set only behind a digest-pinned
@@ -270,11 +182,11 @@ pub struct Config {
     #[serde(default)]
     pub extra_ca_certs_pem: Option<String>,
 
-    /// Runtime provenance marker (ocx#469): the extra-CA pair above was
+    /// Runtime provenance marker: the extra-CA pair above was
     /// declared at the SYSTEM config scope (`/etc/ocx/config.toml`), so it is
     /// NON-OVERRIDABLE — every lower tier's pair and `OCX_EXTRA_CA_CERTS` are
     /// ignored with a warning, and the pair survives `OCX_NO_CONFIG`. Mirrors
-    /// [`RegistryDefaults::system_locked`], but for a pair of root-level
+    /// `RegistryDefaults::system_locked`, but for a pair of root-level
     /// scalars rather than a table, so it lives on `Config` itself.
     ///
     /// Never serialized — set by the loader's `apply_system_locks` iff the
@@ -287,26 +199,24 @@ pub struct Config {
 
 /// Global registry-subsystem settings (`[registry]` section).
 ///
-/// No `deny_unknown_fields` — unknown keys are ignored, like every other
-/// config table (see [`Config`]).
+/// Unknown keys are ignored, like in every other `config.toml` table.
 #[derive(Debug, Default, Clone, Deserialize, schemars::JsonSchema)]
 pub struct RegistryDefaults {
     /// Default registry for bare identifiers (e.g. `cmake:3.28` expands to
-    /// `<default>/cmake:3.28`). Overridden by the `OCX_DEFAULT_REGISTRY`
-    /// environment variable.
+    /// `<default>/cmake:3.28`).
     ///
-    /// Always a literal prefix (e.g. `"ghcr.io"`, `"ocx.sh"`) — never
-    /// resolved through the `[registries.<name>]` table (§6 ratified
-    /// simplification).
+    /// Overridden by the `OCX_DEFAULT_REGISTRY` environment variable. Always a
+    /// literal prefix (e.g. `"ghcr.io"`, `"ocx.sh"`) — never resolved through
+    /// the `[registries.<name>]` table.
     pub default: Option<String>,
 
     /// Runtime provenance marker: this tier was declared at the SYSTEM config
     /// scope (`/etc/ocx/config.toml`), so it is NON-OVERRIDABLE by any lower
-    /// tier. Mirrors [`PatchConfig`]'s C7 lock, but unconditional — unlike
-    /// `[patches].required`, `[registry]` has no opt-out field, so any
+    /// tier. Mirrors `PatchConfig`'s required-enforcement lock, but unconditional —
+    /// unlike `[patches].required`, `[registry]` has no opt-out field, so any
     /// system-scope declaration is authoritative by itself.
     ///
-    /// Never serialized — set by the loader via [`Self::lock_as_system`]
+    /// Never serialized — set by the loader via `lock_as_system`
     /// after parsing the system-scope file, not read from disk.
     #[serde(skip)]
     #[schemars(skip)]
@@ -314,11 +224,7 @@ pub struct RegistryDefaults {
 }
 
 impl Config {
-    /// Merge `other` into `self`. `other` has higher precedence — its set
-    /// fields override `self`'s.
-    ///
-    /// Scalars: `other` wins when present (`Some`).
-    /// Tables: merged key-by-key.
+    /// Merge higher-precedence `other` into `self`: set scalars win, tables merge key-by-key.
     pub fn merge(&mut self, other: Config) {
         if let Some(other_registry) = other.registry {
             match self.registry.as_mut() {
@@ -350,35 +256,13 @@ impl Config {
                 None => self.managed = Some(other_managed),
             }
         }
-        // Trust policies APPEND across tiers at storage level (union): this
-        // extends the vec, it never drops or replaces an earlier tier's entry
-        // outright. Masking happens at resolution time instead, in
-        // `ocx_trust::resolve`, which keeps only the matches at the winning
-        // specificity level — so a later tier's MORE SPECIFIC scope displaces
-        // an earlier tier's broader pin, and only entries at *equal*
-        // specificity combine as ANY-of (rotation).
-        //
-        // The system tier is exempt: `apply_system_locks` marks its entries
-        // `system_locked`, and a locked policy that matches the target FIXES
-        // the specificity level, so a `ghcr.io/acme/tool` entry from the user
-        // tier (or the untrusted managed payload) can no longer mask a
-        // system-tier `ghcr.io/acme/*` pin — it may only join that pin's
-        // ANY-of set by declaring the same scope. Non-system tiers still mask
-        // each other by specificity as above.
-        //
-        // `[trust.sigstore]` is the opposite case and merges by the opposite
-        // rule — replace-and-lock, per `TrustConfig::merge`. Two Fulcio CAs is
-        // not a pooled ANY-of set, it is an ambiguity.
+        // Trust policies append across tiers; `[trust.sigstore]` replaces, since two Fulcio CAs are ambiguous.
         if let Some(other_trust) = other.trust {
             match self.trust.as_mut() {
                 Some(self_trust) => self_trust.merge(other_trust),
                 None => self.trust = Some(other_trust),
             }
         }
-        // `[shell]` is neither a plain scalar-wins section nor a plain append:
-        // `hook`/`completions` are scalars, `consent.paths` appends and
-        // `consent.namespaces` accumulates into one spec. `ShellConfig::merge`
-        // owns that split (C-032); this arm only routes to it.
         if let Some(other_shell) = other.shell {
             match self.shell.as_mut() {
                 Some(self_shell) => self_shell.merge(other_shell),
@@ -391,20 +275,7 @@ impl Config {
                 None => self.records = Some(other_records),
             }
         }
-        // A plain scalar (C-016): the higher tier wins when it declares one, and
-        // its `None` never clobbers a lower tier's value — the same rule
-        // `RegistryDefaults::merge` applies to `[registry] default`. An **empty**
-        // value is absent rather than a declaration, the rule `declared_root`
-        // applies at the tier ladder: without this filter `toolchain_dir = ""`
-        // in a higher tier silently erases a lower tier's real value, which is
-        // the one thing "a `None` never clobbers" was written to prevent.
-        //
-        // No system lock, and that is a plain gap rather than a design: the ADR
-        // states the key exists so one fleet rollout can place every host's
-        // trees on a chosen volume, which is operator policy by definition. It
-        // is unlocked because no ruling in this work package granted a lock,
-        // and every tier's value faces the identical [`ToolchainRoot::resolve`]
-        // refusals whichever tier won.
+        // Empty is absent, or `toolchain_dir = ""` in a higher tier erases a lower tier's real value.
         if other
             .toolchain_dir
             .as_deref()
@@ -412,44 +283,21 @@ impl Config {
         {
             self.toolchain_dir = other.toolchain_dir;
         }
-        // Two spellings of one CA-trust decision (C-001, D-1): the XOR
-        // mirrors `SigstoreTrust::merge`'s handling of `trusted_root` /
-        // `trusted_root_json` (`trust.rs:225-228`) one-for-one. Taking
-        // either field from `other` must drop the other, or a tier that
-        // switches from a path to an inline bundle would leave both set on
-        // the MERGED `Config` for the resolver to trip over.
-        // That is a different case from the per-file ambiguity refusal
-        // (S-005, `ConfigLoader::guard_extra_ca_certs_ambiguity`), which runs
-        // before this merge and can never see the accumulator — it catches
-        // both keys in ONE file, not a switch introduced across tiers.
-        //
-        // A system-locked pair (ocx#469) ignores every lower tier's, and the
-        // lock is ADOPTED from `other` for the reason `RegistryConfig::merge`
-        // gives: the loader folds the system tier into a default accumulator,
-        // so the system tier is `other`, never `self`, on the fold that first
-        // carries it in. The loader warns for the dropped tier
-        // (`system_lock_drops_extra_ca`); this arm only enforces.
+        // Take both fields together, or a path-to-inline switch across tiers leaves both set on the merged `Config`.
         if !self.extra_ca_certs_system_locked && (other.extra_ca_certs.is_some() || other.extra_ca_certs_pem.is_some())
         {
             self.extra_ca_certs = other.extra_ca_certs;
             self.extra_ca_certs_pem = other.extra_ca_certs_pem;
+            // Adopted from `other`: the system tier folds into a default accumulator, so it arrives as `other`.
             self.extra_ca_certs_system_locked = other.extra_ca_certs_system_locked;
         }
     }
 
-    /// Resolve [`Self::extra_ca_certs`] against `config_dir` — the directory
-    /// of the `config.toml` that declared it — through the shared
-    /// [`FileReference`] grammar.
-    ///
-    /// Called by [`crate::loader::ConfigLoader`]'s per-tier anchoring
-    /// pass, mirroring
-    /// [`SigstoreTrust::anchor_relative_root`](ocx_trust::SigstoreTrust::anchor_relative_root)
-    /// one-for-one (C-001): same grammar, same relative rule, so `extra_ca_certs`
-    /// never resolves differently depending on which subsystem reads it.
+    /// Resolve [`Self::extra_ca_certs`] against the declaring `config.toml`'s directory, with the
+    /// same [`FileReference`] grammar as `SigstoreTrust::anchor_relative_root`.
     pub fn anchor_relative_extra_ca_certs(&mut self, config_dir: &Path) {
         if let Some(path) = self.extra_ca_certs.as_ref() {
-            // `to_string_lossy` is exact here: the value is deserialized from
-            // a TOML string, so it is UTF-8 by construction.
+            // Lossless: the value came from a TOML string, so it is UTF-8.
             let written = path.to_string_lossy().into_owned();
             self.extra_ca_certs = Some(FileReference::parse(&written).anchored_at(config_dir));
         }
@@ -461,53 +309,31 @@ impl Config {
         self.trust.as_ref().map_or(&[], |trust| trust.policy.as_slice())
     }
 
-    /// Return [`RegistryDefaults::default`] as a literal prefix.
-    ///
-    /// `[registry] default` is always a literal identifier prefix (e.g.
-    /// `"ghcr.io"`, `"ocx.sh"`) — it never dereferences through the
-    /// `[registries.<name>]` table (§6 ratified simplification). Returns
-    /// `None` only when no default is configured at all.
+    /// Return [`RegistryDefaults::default`] as a literal prefix, never dereferenced through `[registries]`.
     #[must_use]
     pub fn resolved_default_registry(&self) -> Option<&str> {
         self.registry.as_ref()?.default.as_deref()
     }
 
-    /// The `toolchain_dir` root **as the merged tiers declared it** (C-016), or
-    /// `None` when no tier set one.
+    /// The `toolchain_dir` as the merged tiers declared it, unvalidated.
     ///
-    /// Deliberately unvalidated: this is what a file said, and a file may say
-    /// `../x`, `/usr`, or a directory anyone can write to. Use it to *report*
-    /// configuration; use [`ToolchainRoot::resolve`] to obtain a root a
-    /// toolchain home may be built on. Passing this value to
-    /// `resolve_toolchain_home` is the
-    /// bypass R-W2 exists to close.
+    /// For reporting only: building a home on it skips every [`ToolchainRoot::resolve`] refusal.
     #[must_use]
     pub fn toolchain_dir(&self) -> Option<&Path> {
         self.toolchain_dir.as_deref()
     }
 }
 
-/// Which tier declared a `toolchain_dir` value (R-W2).
-///
-/// Reached only through [`ToolchainRootError`]: a refusal has to name the input
-/// whoever hit it can actually change, or a message blames a `config.toml` for a
-/// value an exported environment variable supplied — the exact confusion S-011
-/// tests for.
+/// Which tier declared a `toolchain_dir` value, so a refusal names the input to change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolchainRootTier {
-    /// The merged `config.toml` chain's root-level `toolchain_dir` key. The
-    /// `[managed]` payload folds into that same chain, so a fleet-pushed value
-    /// reports as this tier too — the operator's remedy is to edit the payload,
-    /// which is still a `config.toml`.
+    /// The merged `config.toml` chain's `toolchain_dir` key, a managed payload included.
     ConfigFile,
-    /// The `OCX_TOOLCHAIN_DIR` environment variable
-    /// (`env::keys::OCX_TOOLCHAIN_DIR`).
+    /// The `OCX_TOOLCHAIN_DIR` environment variable.
     Environment,
 }
 
 impl std::fmt::Display for ToolchainRootTier {
-    /// Renders the tier as the thing a user would edit — the key or the
-    /// variable, never the Rust variant. Mirrors [`ConfigTier`]'s `Display`.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::ConfigFile => "config.toml `toolchain_dir`",
@@ -516,30 +342,13 @@ impl std::fmt::Display for ToolchainRootTier {
     }
 }
 
-/// Why a declared `toolchain_dir` was refused (C-017, C-018, C-019, R-W1, R-W2,
-/// RUL-4, RUL-5).
+/// Why a declared `toolchain_dir` was refused; every variant exits 78.
 ///
-/// Every variant classifies as `ExitCode::ConfigError`
-/// (78), and every variant
-/// names the tier that declared the value alongside the path that failed — the
-/// failing property alone does not tell an operator which of two inputs to
-/// change.
-///
-/// **A root that does not exist is not in here.** RUL-5 accepts it: the ADR's own
-/// worked example is `toolchain_dir = "~/.cache/ocx/toolchain"`, which does not
-/// exist on a fresh machine, and the renderer (WP-7) creates the directory. What
-/// C-019 checks in that case is the nearest existing ancestor, which is why the
-/// two ownership variants carry `checked` beside `resolved`.
+/// A missing root is accepted (the renderer creates it); ownership checks inspect the nearest
+/// existing ancestor, reported as `checked`.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolchainRootError {
-    /// A leading `~` that could not be expanded — `~user` (unsupported) or a
-    /// machine with no resolvable home directory.
-    ///
-    /// `defect` is the shipped [`EntryDefect`](crate::shell::EntryDefect)
-    /// that `config::shell`'s expander returned, not a second vocabulary for the
-    /// same two conditions. Only `UnsupportedTildeUser` and `UnresolvableHome`
-    /// are reachable through this path; the wildcard shapes belong to consent
-    /// entries, which run more checks than expansion.
+    /// A leading `~` that could not be expanded (`~user`, or no resolvable home directory).
     #[error("{tier} declares {}, whose leading '~' cannot be expanded: {defect}", declared.display())]
     Unexpandable {
         tier: ToolchainRootTier,
@@ -547,9 +356,7 @@ pub enum ToolchainRootError {
         defect: crate::shell::EntryDefect,
     },
 
-    /// R-W2 — a relative value, tested **after** `~` expansion. Canonicalising
-    /// one uses the process working directory, so the same project would resolve
-    /// a different home from every directory ocx is invoked from.
+    /// A relative value after `~` expansion.
     #[error(
         "{tier} is the relative path {}; a toolchain_dir root must be absolute, or one project resolves a different home from every working directory",
         declared.display()
@@ -558,46 +365,23 @@ pub enum ToolchainRootError {
 
     /// A `..` component anywhere in the value.
     ///
-    /// Refused outright rather than normalised away, following the shipped
-    /// consent-entry rule
-    /// ([`EntryDefect::ParentDirComponent`](crate::shell::EntryDefect)):
-    /// lexical `..` removal and POSIX resolution disagree the moment a preceding
-    /// component is a symlink (`$HOME/link/../x` is lexically `$HOME/x` and
-    /// actually `/x`), so a normalising containment check can admit a root
-    /// outside `$HOME` that the config never named. No ADR example uses `..`.
+    /// Refused, not normalised: past a symlink, lexical `..` removal admits a root outside `$HOME`.
     #[error(
         "{tier} declares {}, which contains a '..' component; write the directory the root actually names",
         declared.display()
     )]
     ParentDirComponent { tier: ToolchainRootTier, declared: PathBuf },
 
-    /// Neither `$HOME` / `%USERPROFILE%` nor `$OCX_HOME` could be resolved, so
-    /// C-017 has no anchor to compare against and every value is refused.
-    ///
-    /// Its own variant rather than [`Self::OutsideHome`]: "outside both anchors"
-    /// would name two directories that do not exist, sending an operator to look
-    /// for the wrong fault.
+    /// Neither the home directory nor `$OCX_HOME` could be resolved, so every value is refused.
     #[error(
         "{tier} declares {}, but neither a home directory nor $OCX_HOME could be resolved to contain it",
         declared.display()
     )]
     NoContainmentAnchor { tier: ToolchainRootTier, declared: PathBuf },
 
-    /// The root resolves to a containment anchor **itself** rather than to a
-    /// directory beneath one — `$OCX_HOME` (RUL-4) or the home directory.
+    /// The root is `$OCX_HOME` or the home directory itself; containment admits only descendants.
     ///
-    /// `$OCX_HOME` exactly would put every project's 16-hex key directly beside
-    /// `packages/`, `blobs/` and `toolchain/` in the ocx root; the home directory
-    /// exactly litters `$HOME` with the same opaque keys. C-017 says *descendant*,
-    /// and neither anchor is a descendant of itself.
-    ///
-    /// `anchor` can name a directory that is not literally `resolved`: the
-    /// comparison folds ASCII case (see `eq_ignoring_ascii_case`), so on a
-    /// case-**sensitive** host `$HOME=/home/u` with `toolchain_dir = /home/U`
-    /// reports two genuinely different directories as one. The refusal is still
-    /// the right answer — `/home/U` fails C-017 anyway — but the diagnosis is
-    /// the cost of folding a refusal rather than probing the filesystem for the
-    /// volume's case behaviour, which RUL-5 forbids here.
+    /// `anchor` can differ from `resolved` in ASCII case, since the compare folds case.
     #[error(
         "{tier} resolves to {}, which is the containment anchor {} itself; name a directory beneath it",
         resolved.display(),
@@ -609,26 +393,20 @@ pub enum ToolchainRootError {
         anchor: PathBuf,
     },
 
-    /// C-017 — the load-bearing containment refusal. After expansion and
-    /// canonicalisation the root must be a descendant of `$HOME` /
-    /// `%USERPROFILE%` or of `$OCX_HOME`, compared component-wise.
+    /// The canonical root is not a descendant of the home directory or `$OCX_HOME`.
     #[error(
         "{tier} resolves to {}, which is outside both the home directory and $OCX_HOME",
         resolved.display()
     )]
     OutsideHome { tier: ToolchainRootTier, resolved: PathBuf },
 
-    /// C-018 — a filesystem root or a system prefix. Defence in depth for an
-    /// absurd `$HOME`, which would otherwise satisfy C-017 on its own — so this
-    /// check runs even when containment passed, never only as its fallback.
+    /// A filesystem root or a system prefix.
+    ///
+    /// Checked even when containment passed, or an absurd `$HOME` admits a system location.
     #[error("{tier} resolves to the system location {}", resolved.display())]
     SystemPrefix { tier: ToolchainRootTier, resolved: PathBuf },
 
-    /// R-W1 — a root at or under `$OCX_HOME/toolchain`. It passes C-017 (it *is*
-    /// under `$OCX_HOME`) and is a data-loss path: project homes would land at
-    /// `$OCX_HOME/toolchain/<project-key>/toolchain`, where `<project-key>` is
-    /// indistinguishable from a group directory, so a bare global `ocx pull`'s
-    /// whole-directory reconcile prunes other projects' trees as orphan groups.
+    /// A root at or under `$OCX_HOME/toolchain`, where a global `ocx pull` prunes project trees as orphan groups.
     #[error(
         "{tier} resolves to {}, inside the global toolchain home {}; a global `ocx pull` would prune other projects' trees there",
         resolved.display(),
@@ -640,15 +418,7 @@ pub enum ToolchainRootError {
         global_home: PathBuf,
     },
 
-    /// An I/O failure while inspecting the path chain — canonicalising the
-    /// nearest existing ancestor, or reading its metadata. `EACCES`, `ELOOP` and
-    /// their kin.
-    ///
-    /// **Not** "the root does not exist", nor "a component is not a directory":
-    /// RUL-5 accepts an absent root, and an ancestor always exists to walk up
-    /// to, so a failure here is a real I/O fault rather than the ordinary
-    /// fresh-machine case; `ENOTDIR` is walked past to the ancestor that does
-    /// exist, and lands on [`Self::NotADirectory`].
+    /// An I/O failure inspecting the nearest existing ancestor (`EACCES`, `ELOOP`); never absence.
     #[error(
         "{tier} resolves to {}, whose nearest existing directory {} cannot be inspected",
         resolved.display(),
@@ -662,19 +432,7 @@ pub enum ToolchainRootError {
         source: std::io::Error,
     },
 
-    /// The checked path exists and is **not a directory** — a `toolchain_dir`
-    /// naming a regular file, a socket, a FIFO or a device node.
-    ///
-    /// `checked` follows [`Self::NotOwnerOwned`]'s rule, so this fires both for
-    /// a root that *is* the file (`~/notes.txt`) and for one whose nearest
-    /// existing ancestor is (`~/notes.txt/sub`). Neither reaches C-019's
-    /// ownership half: a regular file owned by the effective user at mode
-    /// `0600` satisfies both of its clauses, so without this variant the root
-    /// resolves and the renderer's `create_dir_all` fails later, naming a
-    /// directory the operator never wrote.
-    ///
-    /// Unlike C-019's two, this refusal runs on **every** platform — nothing
-    /// about `is_dir` is Unix-specific.
+    /// The checked path exists and is not a directory; checked on every platform.
     #[error(
         "{tier} resolves to {}, whose nearest existing path {} is not a directory",
         resolved.display(),
@@ -686,20 +444,7 @@ pub enum ToolchainRootError {
         checked: PathBuf,
     },
 
-    /// C-019 — the checked directory is not owned by the effective user.
-    ///
-    /// `checked` is the root when it exists and its nearest existing ancestor
-    /// when it does not (RUL-5): naming only `resolved` would report a property
-    /// of a directory that was never inspected.
-    ///
-    /// `owner` and `effective_user` are rendered forms, not a numeric type,
-    /// because the two platforms answer with different things — a decimal uid on
-    /// Unix (`st_uid` against `geteuid`), a security identifier on Windows.
-    ///
-    /// **Unix only today.** The Windows arm of C-019 is not implemented: reading
-    /// a directory's owner SID needs `GetNamedSecurityInfoW`, whose `windows-sys`
-    /// feature this work package does not own. See
-    /// [`ToolchainRoot::resolve`]'s *Windows* section for the exact gap.
+    /// The checked directory is not owned by the effective user (Unix only; ids rendered as strings).
     #[error(
         "{tier} resolves to {}, whose nearest existing directory {} is owned by {owner} rather than by the effective user {effective_user}",
         resolved.display(),
@@ -713,13 +458,8 @@ pub enum ToolchainRootError {
         effective_user: String,
     },
 
-    /// C-019 — the checked directory's mode carries `0o020` or `0o002`, so
-    /// another account can plant a trampoline in a tree that lands on a PATH.
-    ///
-    /// `checked` follows [`Self::NotOwnerOwned`]'s rule. Unix only, and
-    /// deliberately so: a Windows directory's permissions are an ACL rather than
-    /// three mode triples, so there is no mode to read and this variant is never
-    /// constructed there.
+    /// The checked directory is group- or world-writable, so another account can plant a trampoline
+    /// on a PATH (Unix only).
     #[error(
         "{tier} resolves to {}, whose nearest existing directory {} has mode {mode:04o}, granting write to group or world",
         resolved.display(),
@@ -733,167 +473,22 @@ pub enum ToolchainRootError {
     },
 }
 
-/// A `toolchain_dir` root that has passed every C-016–C-019 refusal.
+/// A `toolchain_dir` root that has passed every refusal [`Self::resolve`] performs.
 ///
-/// **The funnel, enforced by the type and not by memory (R-W2).** The inner path
-/// is private and [`Self::resolve`] is the only constructor — there is no
-/// `new`, no `From<PathBuf>`, no public field and no `Deref`. So, **to any
-/// module outside `crate`**, a value of this type cannot exist without
-/// having been expanded, canonicalised, contained inside `$HOME` or `$OCX_HOME`
-/// component-wise, checked against the system-prefix set, checked against
-/// `$OCX_HOME/toolchain`, confirmed to be a directory as far as it exists, and
-/// checked for owner-ownership and group/world writability. Whatever tier
-/// supplied it.
-///
-/// The qualifier is exact, not defensive: `root` is module-private, so
-/// `config/loader.rs` and every other `config/*.rs` descendant could write the
-/// struct literal directly and skip every refusal. Nothing does. Moving the type
-/// to its own `config/toolchain_root.rs` would make the module boundary the
-/// funnel and remove even that; it costs one file and is the upgrade path if a
-/// second `config` module ever needs to hold one of these.
-///
-/// [`Self::resolve`] reads the `OCX_TOOLCHAIN_DIR` environment variable itself
-/// rather than taking it as a parameter, and resolves `$HOME` / `$OCX_HOME`
-/// itself through the shipped
-/// [`home_dir`](ocx_util::env::home_dir) and
-/// [`default_ocx_root`](crate::home::default_ocx_root). So a caller
-/// **outside `crate`** has no way to hand in an unchecked value for
-/// either the input or the containment anchors — which is what makes
-/// `OCX_TOOLCHAIN_DIR=/tmp/x` refuse exactly like the identical `config.toml`
-/// value (S-011) instead of bypassing the check.
-///
-/// The qualifier carries the same weight as the struct-literal one above, and
-/// for the same reason: RUL-26 granted `Self::resolve_with_anchors`, which is
-/// module-private, so `config/loader.rs` and every other `config/*.rs`
-/// descendant can name its own anchors. Nothing outside this file does — the
-/// seam exists so a test can produce the two anchor states no process
-/// environment can (no home directory at all; a symlinked one).
-///
-/// The one bypass this type cannot close is
-/// [`Config::toolchain_dir`], which by C-016's mandated signature hands back a
-/// bare `Option<&Path>` that
-/// `resolve_toolchain_home` would
-/// accept. That accessor's contract says so in as many words; feeding it to a
-/// home resolver is a review finding, not a compile error.
-///
-/// # What "checked for owner-ownership" means per platform
-///
-/// On Unix, both halves of C-019 run: `st_uid` against `geteuid`, and the mode
-/// against `0o020` / `0o002`. **On Windows neither runs.** The mode half has
-/// nothing to read — permissions are an ACL — and the owner half needs
-/// `GetNamedSecurityInfoW` from `windows-sys`'s `Win32_Security_Authorization`
-/// feature, which is not enabled in this workspace and which this work package's
-/// file set does not include. So on Windows the guarantee above is containment,
-/// the system-location set, directory-ness and a `checked` path that can be
-/// stat'd — the one metadata read runs on every platform, so
-/// [`ToolchainRootError::Inaccessible`] is reachable there too — and nothing
-/// about who owns the directory.
-///
-/// The directory-ness refusal is on the other side of that platform line:
-/// `metadata.is_dir()` needs no platform API, so
-/// [`ToolchainRootError::NotADirectory`] fires everywhere.
+/// [`Self::resolve`] must stay the only constructor (no `new`, `From<PathBuf>`, public field or `Deref`),
+/// or a value can skip every refusal (`adr_toolchain_activation.md` § Rationale from code: ocx_config).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolchainRoot {
-    /// Absolute, past every refusal, and canonical **as far as it exists**:
-    /// the longest ancestor present on disk is canonicalised and the absent
-    /// tail is re-joined verbatim, so a root that does not exist yet is not a
-    /// canonical path and cannot be — there is nothing to resolve. Private to
-    /// `crate`: reachable from outside only through
-    /// [`ToolchainRoot::as_path`], written only by [`ToolchainRoot::resolve`].
+    // Any module in this crate can write this literal and so skip every refusal; none may.
+    /// Absolute, and canonical as far as it exists (the absent tail is re-joined verbatim).
     root: PathBuf,
 }
 
 impl ToolchainRoot {
-    /// Resolve the effective `toolchain_dir` root, or `None` when no tier
-    /// declared one (the in-project `<project>/.ocx/toolchain` default).
+    /// Resolve the effective `toolchain_dir` root, or `None` when no tier declared one.
     ///
-    /// # Tiers
-    ///
-    /// `config.toml` first, `OCX_TOOLCHAIN_DIR` second, matching C-007's rule for
-    /// the sibling toolchain keys: **the environment variable is the weakest
-    /// tier, not an override** (RUL-3). The variable is written by
-    /// [`Env::apply_ocx_config`](crate::env::Env::apply_ocx_config)(crate::env::Env::apply_ocx_config) from
-    /// `OcxConfigView.toolchain_dir` — intended as a parent ocx's already-resolved
-    /// root, though that field is a plain `Option<PathBuf>` and nothing in the
-    /// type system holds the producer to it — so a child that can read its own
-    /// configuration prefers that, and the variable supplies continuity exactly
-    /// where the child cannot (`OCX_NO_CONFIG=1`, a different `--config`).
-    ///
-    /// Read through [`ocx_util::env::var`], never `std::env::var`, so the
-    /// `#[cfg(test)]` override seam applies and unit tests of this ladder are not
-    /// order-dependent inside one nextest process. An **empty** value in either
-    /// tier reads as absent, not as invalid — the rule
-    /// `ActivateMode::from_env` states and
-    /// `OCX_CONFIG=""` already follows.
-    ///
-    /// # Resolution order — no filesystem side effect at any step
-    ///
-    /// 1. Expand a **leading** `~` through `config::shell`'s shipped expander,
-    ///    the one seam the consent path already uses. `~user` and an unresolvable
-    ///    home are [`ToolchainRootError::Unexpandable`]. Expansion comes first
-    ///    because `Path::new("~/.cache/ocx/toolchain").is_absolute()` is `false` —
-    ///    testing absoluteness before expanding would refuse the ADR's own worked
-    ///    example.
-    /// 2. **No `%VAR%` expansion, on any platform.** The ADR's Windows line is
-    ///    commented out, and a literal `%LOCALAPPDATA%\ocx\toolchain` simply fails
-    ///    the checks below and exits 78 naming the path, which is diagnosable. Do
-    ///    not add an expander for it here or anywhere.
-    /// 3. Refuse a **relative** value ([`ToolchainRootError::Relative`], R-W2),
-    ///    then a `..` component ([`ToolchainRootError::ParentDirComponent`]). In
-    ///    that order, so `../tc` — which is both — has one answer on record
-    ///    (RUL-29).
-    /// 4. Normalise lexically, then apply C-018's system locations, RUL-4's
-    ///    anchor-itself refusal, R-W1's `$OCX_HOME/toolchain` exclusion,
-    ///    RUL-25's "no anchor resolved" and C-017 containment — in that order,
-    ///    most specific diagnosis first (RUL-28), and **component-wise**
-    ///    ([`Path::starts_with`], which is already component-wise; never a
-    ///    string prefix). C-018 runs even when C-017 passed, and ahead of it: an
-    ///    absurd `$HOME` of `/usr` is exactly the case it is defence in depth
-    ///    for. The two refusing comparisons run ahead of the fail-closed arm
-    ///    because they hold whether or not the anchor resolves — see
-    ///    `Containment`.
-    /// 5. Canonicalise the **nearest existing ancestor**, re-join the tail, and
-    ///    re-run step 4 on the result — that re-run is what catches a root whose
-    ///    own last component is a symlink out of `$HOME`. The anchors are
-    ///    canonicalised too, or a symlinked `$HOME` mis-refuses a legitimate
-    ///    root. `dunce::canonicalize`, never `std::fs::canonicalize`.
-    /// 6. Refuse a checked path that exists and is **not a directory**
-    ///    ([`ToolchainRootError::NotADirectory`]), then apply C-019 — to the
-    ///    root when it exists, and to the **nearest existing ancestor** when it
-    ///    does not (RUL-5). That ancestor is the directory the renderer will
-    ///    create under, so it is the one whose permissions decide whether
-    ///    another account could plant a trampoline; and a regular file there is
-    ///    owner-owned at mode `0600`, so C-019 alone would admit it.
-    ///
-    /// # An absent root is accepted
-    ///
-    /// RUL-5: `~/.cache/ocx/toolchain` on a fresh machine resolves, and the
-    /// renderer (WP-7) creates the directory. `resolve` itself creates nothing —
-    /// no `create_dir_all`, no probe file, nothing observable on disk.
-    ///
-    /// The **global** home never consults any of this: it is
-    /// `FileStructure::toolchain` under
-    /// `$OCX_HOME`, whatever this resolves to (C-016).
-    ///
-    /// # Windows
-    ///
-    /// Step 4 is complete there. C-018's `%SystemRoot%`, `C:\Program Files`,
-    /// `C:\Program Files (x86)` and `C:\ProgramData` are checked, through
-    /// `windows_system_prefixes` and the injectable
-    /// `is_system_location_among` — which is what lets a Linux CI runner
-    /// exercise the clause, since those directories are a host property no
-    /// POSIX machine has. A bare drive root and a UNC share root are covered by
-    /// the parentless test, as `C:\` cannot be spelled as a constant.
-    ///
-    /// Step 6's directory-ness refusal runs there; its **C-019 half** does
-    /// not — see this type's *What "checked for owner-ownership" means per
-    /// platform*. That remains the one gap, and it is one change away:
-    /// `windows-sys`'s `Win32_Security_Authorization` feature, in a workspace
-    /// `Cargo.toml` outside this work package's file set.
-    ///
-    /// Blocking: canonicalisation and one metadata read. Async callers wrap it in
-    /// `spawn_blocking`, the same note and the same reason as
-    /// `resolve_toolchain_home`.
+    /// No filesystem side effect; an absent root is accepted uncreated. Blocking: async callers
+    /// use `spawn_blocking`.
     ///
     /// # Errors
     ///
@@ -902,19 +497,8 @@ impl ToolchainRoot {
         Self::resolve_with_anchors(config, &ContainmentAnchors::from_environment())
     }
 
-    /// [`Self::resolve`] against an explicit anchor pair.
-    ///
-    /// `anchors` is a parameter for the reason `config::shell`'s
-    /// [`expand_against`](crate::shell) states for its own `home`
-    /// parameter: the interesting branches are the machine with no home
-    /// directory at all and the machine whose home is a symlink, and a test
-    /// cannot produce either without mutating the process environment out from
-    /// under every concurrent test. `$OCX_HOME` alone is injectable through
-    /// [`ocx_util::env::var`]; the home directory is not.
-    ///
-    /// The tier ladder still reads `OCX_TOOLCHAIN_DIR` from the environment —
-    /// that variable *is* injectable, so leaving it here keeps the one input a
-    /// caller must not be able to forge (S-011) out of the signature.
+    /// [`Self::resolve`] against explicit anchors, for tests; must stay private, or a caller naming
+    /// its own anchors admits any root.
     ///
     /// # Errors
     ///
@@ -924,9 +508,7 @@ impl ToolchainRoot {
             return Ok(None);
         };
 
-        // Step 1 — a leading `~`, through the one shipped expander. Before the
-        // absoluteness test, because `~/.cache/ocx/toolchain` is not absolute
-        // until it has expanded and that value is the ADR's worked example.
+        // Before the absoluteness test: `~/...` is not absolute until expanded.
         let expanded = shell::expand_against(&declared, anchors.home.as_deref()).map_err(|defect| {
             ToolchainRootError::Unexpandable {
                 tier,
@@ -935,11 +517,7 @@ impl ToolchainRoot {
             }
         })?;
 
-        // Step 2 is a non-step: nothing expands `%VAR%`, on any platform.
-
-        // Step 3 — relative first (RUL-29), so `../tc`, which is both relative
-        // and `..`-bearing, reports `Relative` rather than depending on which
-        // check happens to run first.
+        // `%VAR%` is never expanded; a literal one fails as relative.
         if !expanded.is_absolute() {
             return Err(ToolchainRootError::Relative { tier, declared });
         }
@@ -950,17 +528,11 @@ impl ToolchainRoot {
             return Err(ToolchainRootError::ParentDirComponent { tier, declared });
         }
 
-        // Step 4, first pass — lexical. `..` is already refused and `.` is
-        // dropped by `Path::components`, so normalising is re-collecting the
-        // components; it exists so the value carried into the refusals is the
-        // one a reader would write, not `/a/./b`.
         let lexical: PathBuf = expanded.components().collect();
         let containment = Containment::around(anchors);
         containment.refuse_uncontained(tier, &declared, &lexical)?;
 
-        // Step 5 — canonicalise what exists, re-join what does not, re-run the
-        // whole of step 4. Only this pass sees through a symlink, and it is the
-        // one that decides.
+        // Only this canonical pass sees through a symlink, so it must run even after the lexical one passed.
         let nearest = NearestExisting::of(&lexical).map_err(|(checked, source)| ToolchainRootError::Inaccessible {
             tier,
             resolved: lexical.clone(),
@@ -969,46 +541,23 @@ impl ToolchainRoot {
         })?;
         containment.refuse_uncontained(tier, &declared, &nearest.resolved)?;
 
-        // Step 6 — against the directory that actually exists.
         refuse_unsound_root(tier, &nearest.resolved, &nearest.existing)?;
 
         Ok(Some(Self { root: nearest.resolved }))
     }
 
-    /// The validated root, for
-    /// `resolve_toolchain_home`'s
-    /// `toolchain_dir` parameter.
+    /// The validated root; it may not exist yet.
     ///
-    /// The only way out of the funnel: absolute, canonical below its nearest
-    /// existing ancestor, and past every refusal [`Self::resolve`] performs.
-    ///
-    /// **The directory may not exist** (RUL-5), and creating it is the caller's
-    /// obligation, not this type's — `resolve` writes nothing. Create it mode
-    /// `0o700` on Unix: C-019 was checked against the nearest *existing*
-    /// ancestor, so a new directory inheriting a permissive umask would hand
-    /// away exactly the group- or world-write that check refused one level up.
+    /// A caller creating it must use mode `0o700` on Unix, or a permissive umask grants the
+    /// group/world write refused one level up.
     #[must_use]
     pub fn as_path(&self) -> &Path {
         &self.root
     }
 
-    /// A root taken as already validated — **test builds only**.
+    /// A root taken as already validated, test builds only.
     ///
-    /// Forced by R-W20: `resolve_toolchain_home` now takes `Option<&Self>` so an
-    /// unvalidated path cannot be spelled at the one call site that builds a
-    /// home, and [`Self::resolve`] — the only other writer — refuses anything
-    /// outside `$HOME`/`$OCX_HOME`, which no `tempfile` scratch directory
-    /// satisfies. Its own anchor-injecting sibling is private to this module, so
-    /// a unit test in another module has no other way to hold one.
-    ///
-    /// Never `feature = "__testing"`: this bypasses C-017–C-019 wholesale, so
-    /// it must not exist in any build an acceptance test can invoke. Inside
-    /// `ocx_lib` that was `#[cfg(test)]`, which carried the guarantee for free
-    /// because nothing outside the crate could select it. Across a crate
-    /// boundary it carries nothing — `ocx_lib`'s own unit tests could not
-    /// reach it at all — so the guarantee is restated as
-    /// `__test_scaffolding`, a feature `ocx`'s `__testing` does not forward
-    /// and only a dev edge turns on.
+    /// Never `__testing`, which reaches the acceptance binary: this bypasses every refusal.
     #[cfg(any(test, feature = "__test_scaffolding"))]
     pub fn from_validated(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -1017,14 +566,7 @@ impl ToolchainRoot {
 
 /// The tier that declared a `toolchain_dir`, and what it declared.
 ///
-/// `config.toml` beats `OCX_TOOLCHAIN_DIR` (RUL-3): the environment variable is
-/// the weakest tier, so a child that can read its own configuration prefers
-/// that and the variable supplies continuity only where the child cannot.
-///
-/// An **empty** value is absent rather than invalid, at both tiers (RUL-24) —
-/// the rule `ActivateMode::from_env` states and `OCX_CONFIG=""` already follows.
-/// So an empty `config.toml` value falls through to the environment exactly as a
-/// missing key does; "absent" is one condition, not two.
+/// `config.toml` beats `OCX_TOOLCHAIN_DIR`; an empty value at either tier is absent, not invalid.
 fn declared_root(config: &Config) -> Option<(ToolchainRootTier, PathBuf)> {
     if let Some(declared) = config
         .toolchain_dir
@@ -1033,24 +575,16 @@ fn declared_root(config: &Config) -> Option<(ToolchainRootTier, PathBuf)> {
     {
         return Some((ToolchainRootTier::ConfigFile, declared.clone()));
     }
-    // `ocx_util::env::var`, never `std::env::var`: the `#[cfg(test)]` override seam
-    // lives there, and a direct process read would make every unit test of this
-    // ladder order-dependent inside one nextest process.
+    // Never `std::env::var`, or the test override seam is bypassed and these tests turn order-dependent.
     ocx_util::env::var(crate::env::keys::OCX_TOOLCHAIN_DIR)
         .filter(|value| !value.is_empty())
         .map(|value| (ToolchainRootTier::Environment, PathBuf::from(value)))
 }
 
-/// The two directories C-017 admits a `toolchain_dir` root beneath, as the
-/// environment spells them.
-///
-/// Declared spellings, not canonical ones — [`Containment::around`] canonicalises.
-/// Keeping the raw form here is what lets a test inject a *symlinked* anchor and
-/// observe that its descendants are still admitted.
+/// The two directories containment admits a root beneath, as declared (not canonicalised).
 #[derive(Debug, Clone)]
 struct ContainmentAnchors {
-    /// `$HOME`, or `%USERPROFILE%` on Windows. Also the directory a leading `~`
-    /// expands against, so one value answers both questions.
+    /// `$HOME`, or `%USERPROFILE%` on Windows; also what `~` expands against.
     home: Option<PathBuf>,
     /// `$OCX_HOME`, else `~/.ocx`.
     ocx_home: Option<PathBuf>,
@@ -1058,10 +592,6 @@ struct ContainmentAnchors {
 
 impl ContainmentAnchors {
     /// The anchors this process resolves.
-    ///
-    /// Read here rather than taken from a caller: a caller able to name its own
-    /// anchor could admit any root at all, which is the bypass the whole type
-    /// exists to close (S-011).
     fn from_environment() -> Self {
         Self {
             home: ocx_util::env::home_dir(),
@@ -1070,30 +600,16 @@ impl ContainmentAnchors {
     }
 }
 
-/// The anchor set a candidate is compared against, in every spelling that
-/// counts — split by the **role** each spelling plays.
+/// The anchor spellings a candidate is compared against, split by role.
 ///
-/// The two roles pull in opposite directions, which is why they are separate
-/// fields rather than one list consulted twice. An anchor that cannot be
-/// canonicalised must stop *admitting* — RUL-25, since a directory that does
-/// not resolve contains nothing — and must keep on *refusing*, because a
-/// refusal that evaporates when its target does not exist is backwards.
-/// `$OCX_HOME` is `~/.ocx`, absent on precisely the fresh machine the ADR's
-/// worked example targets; dropping it from both roles would admit
-/// `$OCX_HOME/toolchain` itself there, which is the one location R-W1 exists
-/// to keep a project tree out of.
+/// An anchor that cannot be canonicalised stops admitting but keeps refusing, or an absent
+/// `$OCX_HOME` admits `$OCX_HOME/toolchain` itself.
 struct Containment {
-    /// **Admitting** (C-017). Each resolvable anchor as declared *and* as
-    /// canonicalised — both, because step 4 runs twice, once on the value as
-    /// written and once on the canonicalised value, and a symlinked anchor
-    /// spells those differently. An anchor with no canonical form contributes
-    /// nothing at all (RUL-25), failing closed.
+    /// Admitting: each resolvable anchor as declared and canonicalised, since both passes compare.
     anchors: Vec<PathBuf>,
-    /// **Refusing** (RUL-4). The anchors themselves, present whether or not
-    /// they exist.
+    /// Refusing: the anchors themselves, whether or not they exist.
     anchor_identities: Vec<PathBuf>,
-    /// **Refusing** (R-W1). `$OCX_HOME/toolchain` in each of `$OCX_HOME`'s
-    /// spellings, present whether or not `$OCX_HOME` exists.
+    /// Refusing: `$OCX_HOME/toolchain` in each spelling, whether or not it exists.
     global_toolchain_homes: Vec<PathBuf>,
 }
 
@@ -1125,42 +641,24 @@ impl Containment {
         }
     }
 
-    /// C-018, RUL-4, R-W1, RUL-25 and C-017, applied to one candidate in the
-    /// order RUL-28 fixes: the most specific diagnosis wins. The system-location
-    /// refusal beats "that is the anchor itself", which beats "that is the
-    /// global toolchain home", which beats the fail-closed "nothing anchors",
-    /// which beats plain containment.
-    ///
-    /// The two refusing comparisons fold ASCII case and the admitting one does
-    /// not — see [`starts_with_ignoring_ascii_case`] for why that asymmetry is
-    /// the safe direction.
-    ///
-    /// `declared` appears only in the refusals that describe an *input* rather
-    /// than a resolved location — there is no resolved location to name when no
-    /// anchor resolved.
+    /// The containment refusals for one candidate, most specific first.
     ///
     /// # Errors
     ///
-    /// One [`ToolchainRootError`] per contract above.
+    /// The first [`ToolchainRootError`] that applies.
     fn refuse_uncontained(
         &self,
         tier: ToolchainRootTier,
         declared: &Path,
         candidate: &Path,
     ) -> Result<(), ToolchainRootError> {
-        // C-018 — first, and unconditionally. Gating it behind a C-017 failure
-        // would admit `/usr/tc` on a host whose `$HOME` is `/usr`, which is the
-        // one case C-018 exists for.
+        // Unconditional, or `/usr/tc` is admitted on a host whose `$HOME` is `/usr`.
         if is_system_location(candidate) {
             return Err(ToolchainRootError::SystemPrefix {
                 tier,
                 resolved: candidate.to_path_buf(),
             });
         }
-        // RUL-4 — C-017 admits *descendants*, and no directory is a descendant
-        // of itself. Ahead of RUL-25's fail-closed arm because this refusal
-        // holds whether or not the anchor resolves, and naming the anchor is
-        // the more useful answer than "nothing anchors".
         if let Some(anchor) = self
             .anchor_identities
             .iter()
@@ -1172,8 +670,7 @@ impl Containment {
                 anchor: anchor.clone(),
             });
         }
-        // R-W1 — passes C-017 by construction, so it needs its own check, and
-        // for the same reason as RUL-4 it runs ahead of the fail-closed arm.
+        // `$OCX_HOME/toolchain` passes containment by construction, so it needs its own check.
         if let Some(global_home) = self
             .global_toolchain_homes
             .iter()
@@ -1185,18 +682,13 @@ impl Containment {
                 global_home: global_home.clone(),
             });
         }
-        // RUL-25 — nothing anchors, so nothing is contained.
         if self.anchors.is_empty() {
             return Err(ToolchainRootError::NoContainmentAnchor {
                 tier,
                 declared: declared.to_path_buf(),
             });
         }
-        // C-017 — the load-bearing one. `Path::starts_with` compares one path
-        // component at a time, which is the entire contract: `$HOME` of
-        // `/home/u` must NOT contain `/home/ufoo`, and a `str::starts_with` or
-        // `to_string_lossy().starts_with(..)` on the same two values says it
-        // does.
+        // `Path::starts_with` compares components; a string prefix admits `/home/ufoo` under `/home/u`.
         if !self.anchors.iter().any(|anchor| candidate.starts_with(anchor)) {
             return Err(ToolchainRootError::OutsideHome {
                 tier,
@@ -1207,11 +699,7 @@ impl Containment {
     }
 }
 
-/// An anchor as declared and as canonicalised, deduplicated — or nothing at all
-/// when it cannot be canonicalised (RUL-25).
-///
-/// The **admitting** spelling set. [`refusal_spellings_of`] is its refusing
-/// counterpart, and never returns nothing.
+/// The admitting spellings: declared and canonical, or nothing when uncanonicalisable (fail closed).
 fn spellings_of(anchor: &Path) -> Vec<PathBuf> {
     let Ok(canonical) = dunce::canonicalize(anchor) else {
         return Vec::new();
@@ -1223,13 +711,7 @@ fn spellings_of(anchor: &Path) -> Vec<PathBuf> {
     }
 }
 
-/// The same anchor for the **refusing** comparisons, which never drop it.
-///
-/// [`NearestExisting::of`] resolves whatever prefix does exist and re-joins the
-/// rest, so an absent `$OCX_HOME` still yields a spelling that sees through a
-/// symlinked ancestor; when even that fails — an unreadable ancestor — the
-/// lexically normalised value stands alone. Never empty for an anchor the
-/// environment named, which is the whole difference from [`spellings_of`].
+/// The refusing spellings: lexical plus nearest-existing-resolved; never empty, unlike [`spellings_of`].
 fn refusal_spellings_of(anchor: &Path) -> Vec<PathBuf> {
     let lexical: PathBuf = anchor.components().collect();
     let mut spellings = vec![lexical.clone()];
@@ -1241,22 +723,10 @@ fn refusal_spellings_of(anchor: &Path) -> Vec<PathBuf> {
     spellings
 }
 
-/// Whether `path` sits at or under `prefix`, comparing one component at a time
-/// and folding ASCII case.
+/// Whether `path` sits at or under `prefix`, component-wise, folding ASCII case.
 ///
-/// The refusing comparisons use this; the admitting one deliberately does not.
-/// macOS's default volume and every NTFS volume are case-**insensitive**: there
-/// `$OCX_HOME/TOOLCHAIN` and `$OCX_HOME/toolchain` name one directory, and a
-/// byte-wise compare walks an attacker-chosen spelling straight past R-W1 and
-/// RUL-4 (CWE-178). Folding widens a *refusal*, which stays sound on a
-/// case-sensitive filesystem — the extra match names a directory that is merely
-/// a different directory, and refusing it costs a diagnosable exit 78. Folding
-/// the *admitting* compare would widen what is accepted, the one direction this
-/// must not take, so C-017 stays byte-wise.
-///
-/// ASCII-only, and no filesystem probe: RUL-5 forbids a side effect here, and a
-/// `cfg!(windows)` branch would be a rule no test on this host could reach
-/// (RUL-26).
+/// Refusing comparisons only: byte-wise, a case-insensitive volume lets another spelling past
+/// them (CWE-178); folding the admitting compare instead would widen what is accepted.
 fn starts_with_ignoring_ascii_case(path: &Path, prefix: &Path) -> bool {
     let mut candidate = path.components();
     prefix.components().all(|expected| {
@@ -1274,24 +744,10 @@ fn eq_ignoring_ascii_case(left: &Path, right: &Path) -> bool {
     starts_with_ignoring_ascii_case(left, right) && left.components().count() == right.components().count()
 }
 
-/// C-018's system locations matched as **subtrees** — a candidate at or under
-/// any of these is refused.
+/// System locations matched as subtrees: a candidate at or under any is refused.
 ///
-/// A constant rather than an inline literal so the specification test asserts
-/// parity against it instead of transcribing the same list a second time
-/// (RUL-31): a prefix deleted here then reds a row rather than silently running
-/// one iteration fewer.
-///
-/// `/` and `/var` are **not** here; they are matched by identity, in
-/// [`SYSTEM_LOCATIONS_MATCHED_EXACTLY`]. `/var` because an ostree-composed
-/// Fedora — Silverblue, Kinoite, CoreOS, Bazzite — puts every user's home at
-/// `/var/home/<user>`: `/home` is a symlink to `var/home` and the passwd entry
-/// canonicalises there. A bare `/var` subtree prefix therefore refuses *every*
-/// `toolchain_dir` on those hosts, `~/.cache/ocx/toolchain` included — the
-/// ADR's own worked example, on a shipping desktop distribution. The
-/// directories C-018 is actually defending are listed one by one below; there
-/// is no exemption mechanism and no configuration key that opts out of any of
-/// them.
+/// `/var` is never a prefix: ostree Fedora homes live at `/var/home/<user>`, so its defended
+/// subdirectories are listed one by one.
 const SYSTEM_PREFIXES: [&str; 23] = [
     "/usr",
     "/bin",
@@ -1318,22 +774,11 @@ const SYSTEM_PREFIXES: [&str; 23] = [
     "/private",
 ];
 
-/// C-018's system locations matched by **identity** — the directory itself is
-/// refused, its descendants are not.
-///
-/// `/` for RUL-27's reason: `Path::new("/x").starts_with("/")` is `true`, as it
-/// must be since `/` is every absolute path's first component, so matching it
-/// as a prefix would refuse every absolute path there is. `/var` for the ostree
-/// reason [`SYSTEM_PREFIXES`] states — the directory itself is no place for a
-/// toolchain tree, but `/var/home/alice` is somebody's home.
+/// System locations matched by identity: as prefixes, `/` would refuse every absolute path and
+/// `/var` every ostree home.
 const SYSTEM_LOCATIONS_MATCHED_EXACTLY: [&str; 2] = ["/", "/var"];
 
-/// C-018's Windows half, read from the environment with the shipped defaults.
-///
-/// Through [`ocx_util::env::var`], never `std::env::var`, for the reason the tier
-/// ladder states: that is the seam a test can inject through. The fallbacks are
-/// the paths Windows installs to, so a host that unset `%SystemRoot%` is still
-/// covered and a host that relocated it is covered by the variable.
+/// The Windows system locations, from the environment with the default install paths as fallback.
 fn windows_system_prefixes() -> Vec<PathBuf> {
     [
         ("SystemRoot", r"C:\Windows"),
@@ -1344,51 +789,24 @@ fn windows_system_prefixes() -> Vec<PathBuf> {
     .into_iter()
     .map(|(key, fallback)| {
         ocx_util::env::var(key)
-            // Empty is absent, the rule the tier ladder applies. POSIX-absolute
-            // is absent too, and that one is load-bearing: `ocx_util::env::var`'s
-            // override arm is `#[cfg(test)]`, so on a POSIX host this is a live
-            // `std::env::var` read, and a cross-compilation shell
-            // (`cargo-xwin`, which `verify-deep.yml` runs; `msvc-wine`) can
-            // export `ProgramFiles=/home/u`. Without the filter that lands in
-            // the prefix list and refuses the operator's own home directory,
-            // naming it "the system location" — the same wrong message the
-            // bare `/var` entry used to produce.
+            // POSIX-absolute is absent: a cross-compilation shell can export `ProgramFiles=/home/u`,
+            // which would refuse the operator's own home.
             .filter(|value| !value.is_empty() && !value.starts_with('/'))
             .map_or_else(|| PathBuf::from(fallback), PathBuf::from)
     })
     .collect()
 }
 
-/// Whether `path` is a filesystem root or sits at or under a C-018 system
-/// location.
-///
-/// Component-wise throughout — never a string prefix.
+/// Whether `path` is a filesystem root or sits at or under a system location.
 fn is_system_location(path: &Path) -> bool {
     is_system_location_among(path, &windows_system_prefixes())
 }
 
-/// [`is_system_location`] against an explicit Windows prefix set.
-///
-/// `windows_prefixes` is a parameter for the reason
-/// [`ToolchainRoot::resolve_with_anchors`] takes its anchors (RUL-26): the
-/// POSIX half is spelled by literal constants and reads the same on every host,
-/// but `%SystemRoot%` and the three `Program*` directories are a *host*
-/// property, and the machine that compiles and runs these rows on every pull
-/// request is a Linux runner with none of them. Injecting the list is what
-/// makes C-018's Windows clause testable at all.
+/// [`is_system_location`] against an explicit Windows prefix set, so Linux tests reach that clause.
 fn is_system_location_among(path: &Path, windows_prefixes: &[PathBuf]) -> bool {
-    // A filesystem root has no parent: `/` on Unix, and on Windows a bare drive
-    // root such as `C:\` or a UNC share root, neither of which is spellable as
-    // a constant because the drive or server name is a host property.
     if path.parent().is_none() {
         return true;
     }
-    // Folded, like every other refusal: macOS's default volume is
-    // case-insensitive, so `/USR`, `/library` and `/VAR` name the directories
-    // C-018 lists. Pass 2 does canonicalise a *resolvable* spelling back to the
-    // on-disk one, but pass 1 runs on the lexical value and C-018 is defence in
-    // depth precisely for the state where the other checks are satisfied
-    // (CWE-178).
     if SYSTEM_LOCATIONS_MATCHED_EXACTLY
         .iter()
         .map(Path::new)
@@ -1403,43 +821,18 @@ fn is_system_location_among(path: &Path, windows_prefixes: &[PathBuf]) -> bool {
     {
         return true;
     }
-    // The Windows arm runs on every platform and is inert off Windows: no POSIX
-    // path's first component can equal `C:`. Both sides go through the shipped
-    // `lexical_normalize`, which rewrites `\` to `/` — without it
-    // `C:\Windows\tc` is a *single* component on a Linux host and no
-    // component-wise compare can see inside it. The compare then folds ASCII
-    // case, because every NTFS volume is case-insensitive.
+    // Normalised so `\` splits components, or on Linux `C:\Windows\tc` is one opaque component.
     let normalized = ocx_util::fs::path::lexical_normalize(path);
     windows_prefixes
         .iter()
         .any(|prefix| starts_with_ignoring_ascii_case(&normalized, &ocx_util::fs::path::lexical_normalize(prefix)))
 }
 
-/// A fresh temporary directory usable as a `toolchain_dir` containment anchor,
-/// or `None` having reported on stderr why this host cannot supply one.
+/// A fresh temporary directory usable as a containment anchor, or `None` (reason on stderr)
+/// when the host's temp root is a system location, as macOS's `/private/var` is.
 ///
-/// The temp root has to be a *usable* anchor. On macOS `std::env::temp_dir()` is
-/// `$TMPDIR` under `/var/folders/…`, and `/var` is a symlink to `private/var`,
-/// so pass 2 canonicalises anything beneath it to `/private/var/folders/…` —
-/// and `/private` is a live `SYSTEM_PREFIXES` entry. An "accepted because it
-/// is under `$OCX_HOME`" assertion built there passes or fails for the wrong
-/// reason, and on `verify-deep.yml`'s `macos-latest` leg it fails.
-///
-/// The guard asks `is_system_location` itself rather than transcribing a
-/// prefix list, so it cannot drift from what `resolve` actually refuses — a
-/// second transcription would be a second thing to keep true.
-///
-/// At crate scope rather than inside `toolchain_root_tests`, because
-/// `loader`'s tests mint anchors too, and since WP-26 so does `ocx_store`'s
-/// `toolchain_store`, across the crate boundary. That is the whole reason this
-/// reasoning ships at one site and not three.
-///
-/// One function, not the `anchor_sandbox` / `sandbox_or_skip` pair it was:
-/// the pair's inner half returned `Result<_, String>`, and under a feature
-/// gate — which, unlike `#[cfg(test)]`, the armed-error scan reads as
-/// production — a bare `String` is an error type crossing a boundary that no
-/// `downcast_arm!` can ever register. Folding the two removes the boundary
-/// rather than exempting it.
+/// One function, never split: the armed-error scan reads a feature gate as production, and a
+/// `Result<_, String>` half would be an unregistrable error.
 #[cfg(any(test, feature = "__test_scaffolding"))]
 pub fn sandbox_or_skip() -> Option<tempfile::TempDir> {
     let skip = |reason: String| -> Option<tempfile::TempDir> {
@@ -1463,21 +856,12 @@ pub fn sandbox_or_skip() -> Option<tempfile::TempDir> {
     Some(sandbox)
 }
 
-/// A candidate root split at the boundary between what exists and what does not
-/// (RUL-5 step 5).
+/// A candidate root split at the boundary between what exists and what does not.
 struct NearestExisting {
-    /// The longest ancestor that exists, canonicalised — which is `path`
-    /// itself when `path` exists. C-019's subject: an absent root has no owner
-    /// or mode, and this is then the directory the renderer will create it
-    /// under.
-    ///
-    /// Existence, not directory-ness: a `toolchain_dir` naming an existing
-    /// **regular file** canonicalises here and is carried out intact.
-    /// Refusing it is [`refuse_unsound_root`]'s job, at the one stat this
-    /// resolution performs — [`ToolchainRootError::NotADirectory`].
+    /// The longest existing ancestor, canonicalised; may be a regular file, which
+    /// [`refuse_unsound_root`] refuses.
     existing: PathBuf,
-    /// [`Self::existing`] with the absent tail re-joined — the value the caller
-    /// asked about, expressed through resolved symlinks.
+    /// [`Self::existing`] with the absent tail re-joined.
     resolved: PathBuf,
 }
 
@@ -1486,19 +870,11 @@ impl NearestExisting {
     ///
     /// # Errors
     ///
-    /// The directory whose canonicalisation failed, and why, for any failure
-    /// that is neither "no such file or directory" nor "not a directory". Both
-    /// of those mean the cursor is not the longest existing ancestor yet, so
-    /// they walk up; `EACCES` and `ELOOP` are real faults and stop here.
+    /// The directory whose canonicalisation failed, and why, for any failure other than
+    /// `NotFound` / `NotADirectory`, which walk up.
     ///
-    /// `ENOTDIR` walks up because `~/notes.txt/sub` has a longest existing
-    /// ancestor — `~/notes.txt` — and this type's job is to find it. Stopping
-    /// there instead would report a structural fact about the path as an I/O
-    /// fault, and would hide it from [`refuse_unsound_root`], which is what
-    /// says the useful thing about it. Both spellings are in the set because a
-    /// host answers that shape with either — `ENOTDIR` here, and one of
-    /// `ERROR_PATH_NOT_FOUND` / `ERROR_DIRECTORY` on Windows, which map to
-    /// `NotFound` and `NotADirectory` respectively.
+    /// `NotADirectory` must walk up too, or `~/notes.txt/sub` reports an I/O fault instead of
+    /// reaching [`refuse_unsound_root`]'s `NotADirectory` refusal.
     fn of(path: &Path) -> Result<Self, (PathBuf, std::io::Error)> {
         let mut absent_tail: Vec<&std::ffi::OsStr> = Vec::new();
         let mut cursor = path;
@@ -1518,10 +894,6 @@ impl NearestExisting {
                     return Err((cursor.to_path_buf(), error));
                 }
                 Err(error) => {
-                    // Walk up one component. `file_name` and `parent` are both
-                    // `None` only at a filesystem root, and a root that reports
-                    // `NotFound` is a host we cannot say anything more useful
-                    // about than the error it just gave us.
                     let (Some(name), Some(parent)) = (cursor.file_name(), cursor.parent()) else {
                         return Err((cursor.to_path_buf(), error));
                     };
@@ -1533,19 +905,8 @@ impl NearestExisting {
     }
 }
 
-/// Step 6 — `checked` must be a directory (every platform), owned by the
-/// effective user and granting write to neither group nor world (Unix, C-019).
-///
-/// One `metadata` read serves both halves, which is why the directory-ness
-/// check lives here rather than at a second stat: [`NearestExisting::of`]
-/// canonicalises but never inspects a file type, and this is the only place in
-/// the resolution path that reads a path's metadata. Every caller routes through
-/// [`ToolchainRoot::resolve_with_anchors`], so guarding here covers a root that
-/// *is* a regular file and a root whose nearest existing ancestor is one.
-///
-/// `resolved` is carried only so the refusal can report the root the tier
-/// declared alongside the path actually inspected; naming one without the other
-/// reports a property of a directory nobody asked about.
+/// `checked` must be a directory (every platform), owned by the effective user and writable by
+/// neither group nor world (Unix).
 ///
 /// # Errors
 ///
@@ -1569,11 +930,7 @@ fn refuse_unsound_root(tier: ToolchainRootTier, resolved: &Path, checked: &Path)
     refuse_unsound_ownership(tier, resolved, checked, &metadata)
 }
 
-/// C-019 — `checked` must be owned by the effective user and grant write to
-/// neither group nor world.
-///
-/// Takes the `metadata` [`refuse_unsound_root`] already read, so the resolution
-/// path stats `checked` exactly once.
+/// `checked` must be owned by the effective user and grant write to neither group nor world.
 ///
 /// # Errors
 ///
@@ -1588,8 +945,7 @@ fn refuse_unsound_ownership(
 ) -> Result<(), ToolchainRootError> {
     use std::os::unix::fs::MetadataExt;
 
-    // SAFETY: `geteuid` reads the calling process's own credentials. It takes no
-    // arguments, touches no memory, and is documented as always succeeding.
+    // SAFETY: `geteuid` takes no arguments, touches no memory, and always succeeds.
     let effective_user = unsafe { libc::geteuid() };
     if metadata.uid() != effective_user {
         return Err(ToolchainRootError::NotOwnerOwned {
@@ -1601,8 +957,6 @@ fn refuse_unsound_ownership(
         });
     }
     let mode = metadata.mode() & 0o7777;
-    // The two write bits C-019 names, and only those: `0o750` and `0o755` are
-    // admitted, so the check is not "anything but 0700".
     if mode & (0o020 | 0o002) != 0 {
         return Err(ToolchainRootError::GroupOrWorldWritable {
             tier,
@@ -1614,17 +968,8 @@ fn refuse_unsound_ownership(
     Ok(())
 }
 
-/// C-019 is **not implemented** off Unix.
-///
-/// The mode half has nothing to read — Windows permissions are an ACL, not three
-/// mode triples. The owner half needs `GetNamedSecurityInfoW`, which lives
-/// behind `windows-sys`'s `Win32_Security_Authorization` feature; that feature
-/// is not enabled in this workspace, and the workspace `Cargo.toml` is not in
-/// this work package's file set. Returning `Ok` states the truth: this platform
-/// performs no ownership check.
-///
-/// [`refuse_unsound_root`]'s directory-ness refusal is **not** part of this gap
-/// — it reads `metadata.is_dir()` and runs everywhere.
+/// The ownership check is not implemented off Unix: the owner SID needs a `windows-sys`
+/// feature this workspace does not enable.
 ///
 /// # Errors
 ///
@@ -1640,24 +985,14 @@ fn refuse_unsound_ownership(
 }
 
 impl RegistryDefaults {
-    /// Mark this tier as system-locked — non-overridable by lower tiers.
-    ///
-    /// Called by the config loader on the system-scope file
-    /// (`/etc/ocx/config.toml`) after parsing and before folding higher tiers
-    /// in. Unconditional: unlike [`PatchConfig::lock_as_system`], `[registry]`
-    /// has no opt-out field to gate on — a system-scope declaration of
-    /// `[registry]` is always authoritative.
+    /// Mark this tier as system-locked, non-overridable by lower tiers.
     pub fn lock_as_system(&mut self) {
         self.system_locked = true;
     }
 
-    /// Merge `other` into `self` field-by-field. `other`'s `Some` values
-    /// override `self`'s; `other`'s `None` values do not clobber `self`.
+    /// Merge `other`'s set fields into `self`, unless `self` is system-locked.
     ///
-    /// A system-locked tier (`self.system_locked`) ignores ALL lower-tier
-    /// overrides. The locked flag stays on `self` (sticky). The loader folds
-    /// the system tier in FIRST as the accumulator base, so `self` is the
-    /// system tier when locked.
+    /// The lock is checked on `self` only: the loader must fold the system tier in first as the base.
     pub fn merge(&mut self, other: RegistryDefaults) {
         if self.system_locked {
             return;
@@ -2232,7 +1567,7 @@ mod tests {
                     && system.dir == Some(PathBuf::from("/var/log/ocx/records"))
                     && system.required == Some(true)
             }),
-            // The root-level pair (ocx#469): locked on `Config` itself. The
+            // The root-level pair: locked on `Config` itself. The
             // lower tier switches to the OTHER spelling, so a merge that
             // honoured it would show as a cleared `_pem`, not only a changed one.
             ("extra_ca_certs / extra_ca_certs_pem", || {
@@ -2261,50 +1596,31 @@ mod tests {
     }
 }
 
-// ── WP-4 · `toolchain_dir` specification tests ──────────────────────────────
+// ── `toolchain_dir` specification tests ─────────────────────────────────────
 
-/// Specification tests for the `toolchain_dir` root.
+/// Specification tests for the `toolchain_dir` root, written from
+/// `adr_toolchain_activation.md` (§ *`config.toml` placement key*, validation
+/// item 18), never from an implementation.
 ///
-/// Written from `plan_toolchain_activation.md` (C-016–C-019, S-004, S-011,
-/// R-W1, R-W2), `adr_toolchain_activation.md` (§ *`config.toml` placement key*
-/// and validation item 18) and rulings RUL-3/RUL-4/RUL-5 — never from an
-/// implementation. At the commit these were written [`ToolchainRoot::resolve`]
-/// and [`Config::toolchain_dir`] are `unimplemented!()`, so every test calling
-/// either fails with that panic. Each test names the identifier it covers.
-///
-/// # Anchors — what this module can inject, and what it can only read
-///
-/// `$OCX_HOME` resolves through [`ocx_util::env::var`]
-/// ([`default_ocx_root`](crate::home::default_ocx_root)), so
-/// [`ocx_util::env::overrides`] injects it and every `$OCX_HOME`-anchored row is
-/// hermetic.
-///
-/// `$HOME` does **not**. It is
-/// [`home_dir`](ocx_util::env::home_dir), which is
-/// `std::env::home_dir()`, and no in-process seam redirects it — the only
-/// alternative, `std::env::set_var`, is precisely what `ocx_util::env::overrides`
-/// exists to avoid. The home-anchored rows therefore *read* the real home:
-/// refusal rows touch no filesystem and are unaffected, and the rows that must
-/// be **accepted** first check that this host can host them, skipping with the
-/// uid and mode they actually observed otherwise.
-///
-/// Rows needing an anchor the home cannot supply — a symlinked anchor (RUL-5
-/// step 5), an anchor that is itself a system prefix (C-018 winning over
-/// C-017) — run against `$OCX_HOME` instead, which C-017 treats identically.
-/// Every such substitution is stated on the row.
+/// `$OCX_HOME` is injectable through [`ocx_util::env::overrides`]; `$HOME` is
+/// `std::env::home_dir()`, which no in-process seam redirects. Home-anchored
+/// refusal rows touch no filesystem; rows that must be **accepted** first check
+/// the host can host them, else skip naming the uid and mode seen. Rows needing
+/// a symlinked or system-prefix anchor run against `$OCX_HOME`, which
+/// containment treats identically; each such row says so.
 #[cfg(test)]
 mod toolchain_root_tests {
     use super::*;
     use crate::env::keys::OCX_TOOLCHAIN_DIR;
     use ocx_util::env::overrides::EnvLock;
 
-    /// C-018's prefix set, written out here rather than read from the
-    /// implementation.
+    /// The system-location prefix set, written out here rather than read from
+    /// the implementation.
     ///
     /// A table driven by the production constant is vacuous the moment a
     /// prefix is deleted from it — the loop just runs one row fewer. This list
-    /// is transcribed from the contract (`plan_toolchain_activation.md`, C-018)
-    /// and from the ADR's § *`config.toml` placement key* check 2, so dropping
+    /// is transcribed from `adr_toolchain_activation.md` § *`config.toml`
+    /// placement key* check 2, so dropping
     /// a prefix in the implementation reds the row that names it.
     const C018_PREFIXES: [&str; 23] = [
         "/usr",
@@ -2332,11 +1648,11 @@ mod toolchain_root_tests {
         "/private",
     ];
 
-    /// C-018's locations matched by identity rather than as subtrees,
+    /// The system locations matched by identity rather than as subtrees,
     /// transcribed for the same reason as [`C018_PREFIXES`].
     const C018_EXACT_LOCATIONS: [&str; 2] = ["/", "/var"];
 
-    /// C-018's Windows locations, and the environment variables that name them.
+    /// The Windows system locations, and the environment variables naming them.
     ///
     /// Transcribed from the contract, like the two lists above. The value
     /// column is what the implementation falls back to when the variable is
@@ -2355,7 +1671,7 @@ mod toolchain_root_tests {
     /// Every value below is injected through this seam, which only
     /// [`ocx_util::env::var`] consults — so a `resolve` reading `std::env::var`
     /// directly would fail these rows rather than pass them by accident
-    /// (C-007's idiom, as `ActivateMode::from_env` states it).
+    /// (the idiom `ActivateMode::from_env` states).
     fn anchored_env(anchor: &Path) -> EnvLock {
         let env = ocx_util::env::overrides::lock();
         env.set("OCX_HOME", anchor.to_str().expect("anchor path is utf-8"));
@@ -2367,8 +1683,7 @@ mod toolchain_root_tests {
     ///
     /// The `[managed]` tier folds into the same field, so this fixture is both
     /// tiers as far as [`ToolchainRoot::resolve`] can see; the `[managed]`
-    /// payload's own journey into this field is pinned in `config/loader.rs`
-    /// (S-004).
+    /// payload's own journey into this field is pinned in `config/loader.rs`.
     fn config_tier(value: impl Into<PathBuf>) -> Config {
         Config {
             toolchain_dir: Some(value.into()),
@@ -2395,8 +1710,8 @@ mod toolchain_root_tests {
         dunce::canonicalize(path).unwrap_or_else(|error| panic!("canonicalise {}: {error}", path.display()))
     }
 
-    /// The first ancestor of `path` that exists — the directory RUL-5 step 6
-    /// checks when the root itself does not exist.
+    /// The first ancestor of `path` that exists — the directory the owner/mode
+    /// check reads when the root itself does not exist.
     // Only `host_can_accept` calls this, and that is `#[cfg(unix)]`, so off
     // Unix the function is dead under the workspace's denied warnings.
     #[cfg(unix)]
@@ -2404,8 +1719,8 @@ mod toolchain_root_tests {
         path.ancestors().find(|candidate| candidate.exists())
     }
 
-    /// `Ok(())` when `path`'s nearest existing ancestor satisfies C-019 on this
-    /// host; otherwise the uid and mode actually observed.
+    /// `Ok(())` when `path`'s nearest existing ancestor passes the owner/mode check
+    /// on this host; otherwise the uid and mode actually observed.
     ///
     /// Used only by rows anchored on the **real** home directory, which no
     /// in-process seam can redirect. It decides whether the *host* can host the
@@ -2457,9 +1772,9 @@ mod toolchain_root_tests {
             .unwrap_or_else(|error| panic!("set mode {mode:04o} on {}: {error}", path.display()));
     }
 
-    // ── C-017 · containment, component-wise ─────────────────────────────────
+    // ── containment, component-wise ─────────────────────────────────────────
 
-    /// C-017 · RUL-4 — an anchor is not a descendant of itself. `$HOME`
+    /// An anchor is not a descendant of itself. `$HOME`
     /// exactly would litter the home with opaque project keys; `$OCX_HOME`
     /// exactly would land them beside `packages/` and `blobs/` inside the tree
     /// `ocx clean` and the GC walk own.
@@ -2479,7 +1794,7 @@ mod toolchain_root_tests {
         }
     }
 
-    /// C-017 — a direct child of either anchor is the ordinary accepted shape.
+    /// A direct child of either anchor is the ordinary accepted shape.
     /// The `$HOME` arm is the only row that inherits this host's real home, so
     /// it checks the host can host it first.
     #[test]
@@ -2510,12 +1825,12 @@ mod toolchain_root_tests {
         );
     }
 
-    /// C-017 — **the string-prefix trap.** `$HOME` is `/home/u` and the value
+    /// **The string-prefix trap.** `$HOME` is `/home/u` and the value
     /// is `/home/ufoo`: a `to_string_lossy().starts_with(..)` containment check
     /// admits it, a component-wise one refuses it. The single row this contract
     /// exists for, asserted against both anchors.
     ///
-    /// Both anchors are **injected** through RUL-26's seam rather than read from
+    /// Both anchors are **injected** as parameters rather than read from
     /// the environment. The ambient form carried an unstated premise — that the
     /// temp root lies outside the real home directory — which `TMPDIR` decides:
     /// this repository's own gate points it at `$HOME/.cache/ocx-test-tmp`, and
@@ -2552,7 +1867,7 @@ mod toolchain_root_tests {
         }
     }
 
-    /// C-017 — a `..` component is refused outright rather than normalised
+    /// A `..` component is refused outright rather than normalised
     /// away. Lexical removal and POSIX resolution disagree whenever a preceding
     /// component is a symlink (`$HOME/link/../x` is lexically `$HOME/x` and
     /// actually `/x`), which would admit a root outside `$HOME` that the config
@@ -2577,7 +1892,7 @@ mod toolchain_root_tests {
         }
     }
 
-    /// R-W1 — a root at or under `$OCX_HOME/toolchain` passes C-017 (it *is*
+    /// A root at or under `$OCX_HOME/toolchain` passes containment (it *is*
     /// under `$OCX_HOME`) and is a data-loss path: project homes would land at
     /// `$OCX_HOME/toolchain/<project-key>/toolchain`, where a bare global
     /// `ocx pull`'s whole-directory reconcile prunes them as orphan groups.
@@ -2597,7 +1912,7 @@ mod toolchain_root_tests {
         }
     }
 
-    /// C-017 — a sibling of `$OCX_HOME/toolchain` whose name merely starts with
+    /// A sibling of `$OCX_HOME/toolchain` whose name merely starts with
     /// `toolchain` is **not** inside it. The component-wise rule again, one
     /// level down, and the non-vacuity control for the row above: a string
     /// prefix would refuse this one too.
@@ -2615,12 +1930,12 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-5 step 5 — the root's own last component is a symlink out of the
+    /// The root's own last component is a symlink out of the
     /// anchor. Only the canonicalise-and-re-check step catches it: every
     /// lexical check above passes, because the declared path *is* under the
     /// anchor.
     ///
-    /// The anchor is **injected** through RUL-26's seam, for the reason
+    /// The anchor is **injected** as a parameter, for the reason
     /// [`refuses_a_sibling_whose_path_bytes_merely_start_with_an_anchor`] gives:
     /// "outside the anchor" has to mean outside a directory this row controls,
     /// not outside wherever `TMPDIR` happens to place the temp root relative to
@@ -2652,7 +1967,7 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-5 step 5 — the positive control for the row above: a symlink that
+    /// The positive control for the row above: a symlink that
     /// stays inside the anchor is accepted. Without it, "refuse anything whose
     /// last component is a symlink" would pass the escape row too.
     #[cfg(unix)]
@@ -2674,14 +1989,14 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-5 step 5 — **the anchors are canonicalised too.** `$OCX_HOME` is a
+    /// **The anchors are canonicalised too.** `$OCX_HOME` is a
     /// symlink; a root beneath it must still be accepted. Canonicalising only
     /// the candidate mis-refuses a legitimate root, because the canonical
     /// candidate is under the anchor's *target* and the anchor is still spelled
     /// as the link.
     ///
     /// Stands in for the symlinked `$HOME` the ADR's containment paragraph
-    /// implies: C-017 treats the two anchors identically and only `$OCX_HOME`
+    /// implies: containment treats the two anchors identically and only `$OCX_HOME`
     /// is injectable in-process.
     #[cfg(unix)]
     #[test]
@@ -2702,12 +2017,12 @@ mod toolchain_root_tests {
         );
     }
 
-    /// S-011 — `/tmp/ocx-tc`, owner-owned and mode 0700, still exits 78.
+    /// `/tmp/ocx-tc`, owner-owned and mode 0700, still exits 78.
     /// Containment, not permissions, is what refuses it: the root satisfies
-    /// C-019 exactly. The ADR's decisive red is this row — drop the containment
+    /// the owner/mode check exactly. The ADR's decisive red is this row — drop the containment
     /// check and watch it pass.
     ///
-    /// On macOS `/tmp` canonicalises to `/private/tmp` and C-018 refuses it
+    /// On macOS `/tmp` canonicalises to `/private/tmp` and the system-location refusal fires
     /// first, so the expected variant differs there.
     #[cfg(unix)]
     #[test]
@@ -2741,7 +2056,7 @@ mod toolchain_root_tests {
     /// uses the process working directory, so the same project would resolve a
     /// different home from every directory ocx is invoked from.
     ///
-    /// `../tc` is both relative and `..`-bearing; RUL-29 settled which answer
+    /// `../tc` is both relative and `..`-bearing; one ruling settles which answer
     /// it gets, and `reports_a_relative_parent_dir_root_as_relative` below is
     /// the row that pins it.
     #[test]
@@ -2758,10 +2073,10 @@ mod toolchain_root_tests {
         }
     }
 
-    /// RUL-29 — `../tc` reports **`Relative`**, not `ParentDirComponent`.
+    /// `../tc` reports **`Relative`**, not `ParentDirComponent`.
     ///
-    /// RUL-5 step 3 names both refusals in one breath; RUL-29 settled it
-    /// afterwards. One answer on record is worth a row of its own: the two
+    /// The resolution rules name both refusals in one breath; a later ruling
+    /// settled it. One answer on record is worth a row of its own: the two
     /// refusals send an operator to different fixes —
     /// "write an absolute path" against "write the directory this actually
     /// names" — and a value that is both should not pick between them by
@@ -2838,9 +2153,9 @@ mod toolchain_root_tests {
         );
     }
 
-    // ── RUL-5 steps 1-2 · `~` expands, `%VAR%` never does ───────────────────
+    // ── `~` expands, `%VAR%` never does ─────────────────────────────────────
 
-    /// RUL-5 step 1 and ADR validation item 18 — `~/.cache/ocx/toolchain` is
+    /// `~/.cache/ocx/toolchain` is
     /// **accepted**. It is the ADR's own worked example, and
     /// `Path::new("~/.cache/ocx/toolchain").is_absolute()` is `false`, so an
     /// implementation testing absoluteness before expanding refuses the
@@ -2871,7 +2186,7 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-5 step 1 — only a **leading** `~` expands. `<anchor>/~/tc` names a
+    /// Only a **leading** `~` expands. `<anchor>/~/tc` names a
     /// directory literally called `~`, which is a legal name; rewriting it
     /// would be the same widening the shipped expander refuses to do.
     #[test]
@@ -2889,7 +2204,7 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-5 step 1 — `~user` is unsupported, surfaced as the shipped
+    /// `~user` is unsupported, surfaced as the shipped
     /// [`EntryDefect`](crate::shell::EntryDefect) rather than a second
     /// vocabulary for the same condition.
     #[test]
@@ -2910,7 +2225,7 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-5 step 2 — **no `%VAR%` expansion on any platform.** A literal
+    /// **No `%VAR%` expansion on any platform.** A literal
     /// `%LOCALAPPDATA%` value falls through to the checks above and exits 78,
     /// which is diagnosable.
     ///
@@ -2946,12 +2261,12 @@ mod toolchain_root_tests {
         }
     }
 
-    // ── C-018 · system prefixes ─────────────────────────────────────────────
+    // ── system prefixes ─────────────────────────────────────────────────────
 
-    /// C-018 — every listed prefix is refused **even when containment admits
-    /// it**. `$OCX_HOME` is `/` for this row, so C-017 passes on every value
-    /// and only C-018 can produce the refusal: the check runs in its own right,
-    /// never as containment's fallback.
+    /// Every listed prefix is refused **even when containment admits it**.
+    /// `$OCX_HOME` is `/` for this row, so containment passes on every value and
+    /// only the system-location list can refuse: that check runs in its own
+    /// right, never as containment's fallback.
     #[cfg(unix)]
     #[test]
     fn refuses_every_system_prefix_even_when_containment_admits_it() {
@@ -2966,7 +2281,7 @@ mod toolchain_root_tests {
         }
     }
 
-    /// C-018 — the subtree, not just the prefix itself. `/usr/local/tc` is the
+    /// The subtree, not just the prefix itself. `/usr/local/tc` is the
     /// shape an operator would actually write.
     #[cfg(unix)]
     #[test]
@@ -2982,14 +2297,14 @@ mod toolchain_root_tests {
         }
     }
 
-    /// C-018 — **the order-pinning row.** The containment anchor is itself
-    /// `/usr`, so C-017 admits `/usr/tc` outright; C-018 is the only thing left
-    /// to refuse it. This is the "absurd `$HOME`" case the ADR names as C-018's
-    /// entire reason, and it reds the moment C-018 is gated behind a C-017
-    /// failure.
+    /// **The order-pinning row.** The containment anchor is itself `/usr`, so
+    /// containment admits `/usr/tc` outright and the system-location refusal is
+    /// the only thing left to refuse it. This is the "absurd `$HOME`" case the
+    /// ADR names as that refusal's entire reason, and it reds the moment the
+    /// refusal is gated behind a containment failure.
     ///
-    /// `$OCX_HOME` stands in for the absurd `$HOME` the ADR describes: C-017
-    /// treats the two anchors identically and only this one is injectable.
+    /// `$OCX_HOME` stands in for the absurd `$HOME` the ADR describes:
+    /// containment treats the two anchors identically and only this one is injectable.
     #[cfg(unix)]
     #[test]
     fn refuses_a_system_prefix_that_the_containment_anchor_itself_names() {
@@ -3004,13 +2319,13 @@ mod toolchain_root_tests {
         }
     }
 
-    /// C-018 · BLOCK 3 — **`/var` is refused by identity, not as a subtree.**
+    /// **`/var` is refused by identity, not as a subtree.**
     ///
     /// An ostree-composed Fedora (Silverblue, Kinoite, CoreOS, Bazzite) makes
     /// `/home` a symlink to `var/home`, so every passwd entry canonicalises
     /// under `/var`. A bare `/var` subtree prefix therefore refuses *every*
     /// `toolchain_dir` on those hosts — `~/.cache/ocx/toolchain` included,
-    /// which is the ADR's own worked example. The directories C-018 defends are
+    /// which is the ADR's own worked example. The directories the refusal defends are
     /// named one by one instead.
     ///
     /// Red against `SYSTEM_PREFIXES` carrying a bare `"/var"`: the first
@@ -3043,7 +2358,7 @@ mod toolchain_root_tests {
         }
     }
 
-    /// C-018 — **`/private` stays a subtree prefix.** Recorded decision, not an
+    /// **`/private` stays a subtree prefix.** Recorded decision, not an
     /// open question.
     ///
     /// It names the macOS system firmlink and is what keeps `/etc` refused
@@ -3073,11 +2388,11 @@ mod toolchain_root_tests {
         );
     }
 
-    /// C-018 — the POSIX arms fold ASCII case, like every other refusal.
+    /// The POSIX arms fold ASCII case, like every other refusal.
     ///
     /// macOS's default volume is case-insensitive, so `/USR`, `/library` and
-    /// `/VAR` name the directories C-018 lists. Pass 2 canonicalises a spelling
-    /// that *resolves*, but pass 1 runs on the lexical value and C-018 is
+    /// `/VAR` name the listed directories. Pass 2 canonicalises a spelling
+    /// that *resolves*, but pass 1 runs on the lexical value and this refusal is
     /// defence in depth for exactly the state where every other check passed
     /// (CWE-178).
     ///
@@ -3098,13 +2413,13 @@ mod toolchain_root_tests {
         );
     }
 
-    /// C-018 · BLOCK 4 — **the Windows clause, exercised on this host.**
+    /// **The Windows clause, exercised on this host.**
     ///
     /// `%SystemRoot%` and the three `Program*` directories exist on no POSIX
     /// machine, and the runner that compiles and runs these rows on every pull
     /// request (`.github/workflows/verify-basic.yml`,
     /// `.github/workflows/verify-deep.yml`) is Linux. So the prefix list is a
-    /// parameter — RUL-26's shape, the same reason `resolve_with_anchors` takes
+    /// parameter — for the same reason `resolve_with_anchors` takes
     /// its anchors — and the matching is asserted directly.
     ///
     /// Two reds, both reachable from here. Drop `lexical_normalize` and every
@@ -3147,7 +2462,7 @@ mod toolchain_root_tests {
         }
     }
 
-    /// C-018 · BLOCK 4 — the prefix list itself comes from the environment,
+    /// The prefix list itself comes from the environment,
     /// with the shipped paths as fallbacks.
     ///
     /// A Windows host that relocated `%ProgramFiles%` is covered by the
@@ -3211,7 +2526,7 @@ mod toolchain_root_tests {
     /// A `toolchain_dir` naming an existing **regular file** is refused, and so
     /// is one whose nearest existing ancestor is that file.
     ///
-    /// C-019 alone admits both: `tempfile`'s file is owner-owned and its mode
+    /// The owner/mode check alone admits both: `tempfile`'s file is owner-owned and its mode
     /// carries neither `0o020` nor `0o002`, so the ownership half passes and
     /// the renderer's `create_dir_all` would become the diagnosis. Asserts the
     /// exit code through the route a binary takes (`ToolchainRootError` →
@@ -3251,9 +2566,9 @@ mod toolchain_root_tests {
         }
     }
 
-    // ── C-019 · owner and mode ──────────────────────────────────────────────
+    // ── owner and mode ──────────────────────────────────────────────────────
 
-    /// C-019 — an existing owner-owned root that grants write to neither group
+    /// An existing owner-owned root that grants write to neither group
     /// nor world is accepted. `0750` and `0755` are the non-vacuity controls:
     /// they prove the check tests the two write bits rather than "anything but
     /// 0700".
@@ -3277,7 +2592,7 @@ mod toolchain_root_tests {
         }
     }
 
-    /// C-019 — group- or world-writable is refused, naming the mode. Another
+    /// Group- or world-writable is refused, naming the mode. Another
     /// account could otherwise plant a trampoline in a tree that lands on a
     /// PATH.
     #[cfg(unix)]
@@ -3309,8 +2624,8 @@ mod toolchain_root_tests {
         }
     }
 
-    /// RUL-5 step 6 — an **absent** root is accepted, and C-019 falls to the
-    /// nearest existing ancestor: the directory the renderer will create under.
+    /// An **absent** root is accepted, and the owner/mode check
+    /// falls to the nearest existing ancestor: the directory the renderer will create under.
     /// The ADR's `~/.cache/ocx/toolchain` on a fresh machine is exactly this
     /// case.
     #[cfg(unix)]
@@ -3329,7 +2644,7 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-5 step 6 — an absent root whose nearest existing ancestor is
+    /// An absent root whose nearest existing ancestor is
     /// world-writable is refused, and the refusal names **the ancestor**, not
     /// the root. Naming `resolved` alone would report a property of a directory
     /// that was never inspected.
@@ -3375,7 +2690,7 @@ mod toolchain_root_tests {
         }
     }
 
-    /// RUL-5 — a genuine I/O failure while walking the path chain is its own
+    /// A genuine I/O failure while walking the path chain is its own
     /// refusal, and it is **not** "the root does not exist": an absent root is
     /// accepted, and an ancestor always exists to walk up to, so a failure here
     /// is a real fault. An ancestor the user cannot traverse (`EACCES`) is the
@@ -3402,7 +2717,7 @@ mod toolchain_root_tests {
         );
     }
 
-    /// C-019 — a checked directory owned by another account is refused.
+    /// A checked directory owned by another account is refused.
     ///
     /// Creating a directory owned by a second uid needs privileges this suite
     /// does not have, so the row borrows an existing one. When the host has
@@ -3410,7 +2725,7 @@ mod toolchain_root_tests {
     /// cause it did not see.
     ///
     /// "Other-owned" is necessary but **not sufficient**, and assuming it was
-    /// is what made this row red on macOS. C-018 runs before C-019, so a
+    /// is what made this row red on macOS. System locations are refused before ownership, so a
     /// candidate that is also a system location is refused for *that* —
     /// correctly, and to a different question. macOS resolves `/home` through
     /// the autofs map to `/System/Volumes/Data/home`, which is under
@@ -3460,7 +2775,7 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-5 — **`resolve` has no filesystem side effect.** Creating the root
+    /// **`resolve` has no filesystem side effect.** Creating the root
     /// is the renderer's job (R-W19); a `create_dir_all` here would make the
     /// permission check meaningless, since a directory ocx just created always
     /// passes it.
@@ -3488,10 +2803,10 @@ mod toolchain_root_tests {
         );
     }
 
-    // ── RUL-3 · tier precedence ─────────────────────────────────────────────
+    // ── tier precedence ─────────────────────────────────────────────────────
 
-    /// RUL-3 — `config.toml` beats `OCX_TOOLCHAIN_DIR`. The environment
-    /// variable is the **weakest** tier, matching C-007's rule for the sibling
+    /// `config.toml` beats `OCX_TOOLCHAIN_DIR`. The environment
+    /// variable is the **weakest** tier, matching the rule for the sibling
     /// toolchain keys, not an override.
     #[test]
     fn prefers_the_config_file_over_the_environment_variable() {
@@ -3510,7 +2825,7 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-3 — an **invalid** environment value is never reached when the
+    /// An **invalid** environment value is never reached when the
     /// config file declares one, so it never refuses. Non-obvious, and pinned
     /// so nobody turns it into an eager validation of a tier that lost.
     #[test]
@@ -3579,9 +2894,9 @@ mod toolchain_root_tests {
         );
     }
 
-    // ── C-016 · the key, its merge, and what ignores it ─────────────────────
+    // ── the key, its merge, and what ignores it ─────────────────────────────
 
-    /// C-016 — the higher tier wins and a `None` never clobbers a lower tier's
+    /// The higher tier wins and a `None` never clobbers a lower tier's
     /// value, the rule `RegistryDefaults::merge` applies to `[registry]
     /// default`.
     #[test]
@@ -3602,7 +2917,7 @@ mod toolchain_root_tests {
             "a higher tier that declares nothing must not clobber a lower tier's root"
         );
 
-        // RUL-24 — an empty value is absent at the tier ladder, so it has to be
+        // An empty value is absent at the tier ladder, so it has to be
         // absent at the merge too. Without this the two disagree: `merge` would
         // record `Some("")`, `declared_root` would then skip it, and the lower
         // tier's real root would be gone with nothing to show for it.
@@ -3615,7 +2930,7 @@ mod toolchain_root_tests {
         );
     }
 
-    /// C-016 — the accessor reports the merged value, unvalidated. It is what a
+    /// The accessor reports the merged value, unvalidated. It is what a
     /// file said; `/usr` reaches a caller unchanged, which is why passing it to
     /// a home resolver is the bypass R-W2 exists to close.
     #[test]
@@ -3624,17 +2939,17 @@ mod toolchain_root_tests {
         assert_eq!(config_tier("/usr").toolchain_dir(), Some(Path::new("/usr")));
     }
 
-    // ── RUL-7 · the refusal has to reach the process exit code ──────────────
+    // ── the refusal has to reach the process exit code ──────────────────────
 
-    // ── RUL-26 · the anchors as a parameter ─────────────────────────────────
+    // ── the anchors as a parameter ──────────────────────────────────────────
     //
     // Every row below reaches `resolve_with_anchors`, the testable core, and
     // supplies an anchor pair no in-process seam can produce. They are the rows
     // the module doc names as unreachable while the home directory was read
     // rather than passed.
 
-    /// RUL-25 — **fail closed when nothing anchors.** With neither a home
-    /// directory nor `$OCX_HOME` resolvable, C-017 has nothing to compare
+    /// **Fail closed when nothing anchors.** With neither a home
+    /// directory nor `$OCX_HOME` resolvable, containment has nothing to compare
     /// against, and the refusal says that rather than claiming the value is
     /// outside two directories that do not exist.
     #[test]
@@ -3646,7 +2961,7 @@ mod toolchain_root_tests {
             ocx_home: None,
         };
 
-        // Absolute *to this host's parser*, and not a C-018 system location —
+        // Absolute *to this host's parser*, and not a listed system location —
         // both refusals rank ahead of the fail-closed arm, so a POSIX literal
         // here would report `Relative` on Windows and never reach the rule
         // under test.
@@ -3662,7 +2977,7 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-25 — an anchor that cannot be canonicalised is **dropped**, and the
+    /// An anchor that cannot be canonicalised is **dropped**, and the
     /// other one still admits its own descendants. `$OCX_HOME` is `~/.ocx`,
     /// which does not exist on a fresh machine, so treating an unresolvable
     /// anchor as fatal would refuse every root on exactly the hosts the ADR's
@@ -3690,13 +3005,13 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-25 as corrected · BLOCK 1 — **the fail-closed drop applies only to
+    /// **The fail-closed drop applies only to
     /// the admitting anchor set.**
     ///
     /// `$OCX_HOME` is `~/.ocx`, which does not exist on a fresh machine. An
-    /// anchor dropped from the *refusing* roles there stops refusing exactly
-    /// what RUL-4 and R-W1 exist to refuse — and the home directory, which does
-    /// exist, then admits both values through C-017.
+    /// anchor dropped from the *refusing* roles there stops refusing `$OCX_HOME`
+    /// itself and its `toolchain` subtree — and the home directory, which does
+    /// exist, then admits both values through containment.
     ///
     /// Red against one dropped-when-absent spelling set: `resolve` returns
     /// `Ok(Some(..))` for both candidates.
@@ -3730,13 +3045,13 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-4 · R-W1 · BLOCK 2 — **the refusing comparisons fold ASCII case.**
+    /// **The refusing comparisons fold ASCII case.**
     ///
     /// macOS's default volume and every NTFS volume are case-**insensitive**:
     /// there `$OCX_HOME/TOOLCHAIN` and `$OCX_HOME/toolchain` are one directory,
     /// and a byte-wise compare walks the second spelling straight past both
     /// refusals (CWE-178). The home directory is the surrounding anchor, so
-    /// C-017 admits every candidate below and only these two refusals can
+    /// containment admits every candidate below and only these two refusals can
     /// produce the answer.
     ///
     /// Red against `Path::eq` / `Path::starts_with`: every spelling but the
@@ -3777,7 +3092,7 @@ mod toolchain_root_tests {
         }
     }
 
-    /// RUL-5 step 5 — **a symlinked home directory contains its own
+    /// **A symlinked home directory contains its own
     /// descendants.** The shipped row proves this against `$OCX_HOME` because
     /// that is the only anchor `ocx_util::env::overrides` can redirect; with the anchors
     /// passed in, the home directory itself can carry the symlink.
@@ -3813,7 +3128,7 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-5 step 1 — a machine with **no** home directory cannot expand a
+    /// A machine with **no** home directory cannot expand a
     /// leading `~`, and reports the shipped
     /// [`EntryDefect`](crate::shell::EntryDefect) rather than inventing a
     /// second vocabulary for it. `$OCX_HOME` still resolves, so the refusal is
@@ -3841,7 +3156,7 @@ mod toolchain_root_tests {
         );
     }
 
-    /// RUL-31 — the list transcribed at the top of this module and the one the
+    /// The list transcribed at the top of this module and the one the
     /// implementation actually consults must name the same locations.
     ///
     /// Transcribing the contract twice is what makes the per-prefix rows above

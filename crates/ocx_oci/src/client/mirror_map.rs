@@ -1,23 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Per-host registry mirror lookup applied on the OCI client read path.
-//!
-//! [`MirrorMap`] is the parsed, client-side form of the `[mirrors."<host>"]`
-//! config table, and [`ParsedMirror`] is the value it is built from. Parsing
-//! and validation stay in the config layer (`config::mirror::parse_url`
-//! produces this type and enforces the plain-HTTP gate); only the parsed shape
-//! lives here, so the client never imports the config layer — mirroring the
-//! `plain_http_registries(Vec<String>)` precedent on [`super::ClientBuilder`].
+//! Per-host registry mirror lookup on the OCI client read path (`[mirrors."<host>"]`).
 
 use std::collections::HashMap;
 
-/// A parsed mirror endpoint: scheme split out as `protocol`, the host, and the
-/// optional repository-key path prefix.
-///
-/// Produced by `ocx_config::mirror::parse_url` in
-/// the config layer so the OCI client receives an already-parsed value and never imports
-/// `crate::config`.
+/// A mirror endpoint as parsed and validated by `ocx_config::mirror::parse_url`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedMirror {
     /// URL scheme without the `://` separator, e.g. `"https"` or `"http"`.
@@ -29,22 +17,14 @@ pub struct ParsedMirror {
     pub path_prefix: String,
 }
 
-/// Resolves an upstream registry host to its configured mirror, rewriting the
-/// transport host and repository path on the OCI client read path only.
-///
-/// Construction takes a parsed map; an empty map is the identity (no host is
-/// mirrored). The default value is the empty map.
+/// Maps an upstream registry host to its mirror; the default, empty map mirrors nothing.
 #[derive(Debug, Default, Clone)]
 pub struct MirrorMap {
     entries: HashMap<String, ParsedMirror>,
 }
 
 impl MirrorMap {
-    /// Builds a mirror map from already-parsed entries.
-    ///
-    /// Each entry is `(upstream host, parsed mirror endpoint)`. Parsing and the
-    /// `url`-required validation happen in the config layer before this point,
-    /// so this constructor is infallible.
+    /// Builds a mirror map from `(upstream host, parsed mirror)` entries.
     pub fn new(entries: impl IntoIterator<Item = (String, ParsedMirror)>) -> MirrorMap {
         MirrorMap {
             entries: entries.into_iter().collect(),
@@ -63,21 +43,10 @@ impl MirrorMap {
         self.entries.get(registry)
     }
 
-    /// Rewrites `(registry, repository)` to the mirror's
-    /// `(host, <path-prefix>/<repository>)` when `registry` has a configured
-    /// mirror; returns `None` (identity — no mirror for this host) otherwise.
+    /// Rewrites `(registry, repository)` to the mirror's `(host, <path-prefix>/<repository>)`; `None` when unmirrored.
     ///
-    /// The repository is appended verbatim after the path prefix — OCX does no
-    /// `library/` short-name expansion. A host-only mirror (empty prefix)
-    /// yields the repository unchanged.
-    ///
-    /// An **empty** `repository` (the registry-scoped catalog case, fed by
-    /// [`Client::transport_registry`](super::Client)) yields the path prefix
-    /// alone, with no trailing slash. The naive `format!("{prefix}/{repository}")`
-    /// join would otherwise produce `"<prefix>/"`, which the OCI distribution
-    /// auth flow stamps into the token scope as `repository:<prefix>/:pull` — a
-    /// malformed scope that can break catalog auth against a mirror keying
-    /// tokens off the repo-key path segment.
+    /// An empty `repository` (catalog) yields the bare prefix, or the token scope `repository:<prefix>/:pull`
+    /// breaks catalog auth.
     #[must_use]
     pub fn rewrite_repository(&self, registry: &str, repository: &str) -> Option<(String, String)> {
         let mirror = self.entries.get(registry)?;

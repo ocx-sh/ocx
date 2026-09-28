@@ -3,21 +3,17 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The separator assumed where one may be omitted.
-///
-/// Only the human-facing surfaces (`ocx.toml`, `ocx exec --env`) may omit it —
-/// and only when no other contributor to the same key established one. Package
-/// metadata is the wire, where no human is present to be told, so it must spell
-/// the separator out.
+/// The separator assumed where `ocx.toml` or `ocx exec --env` omit one and no
+/// other contributor to the key set one; package metadata must spell it out.
 pub const DEFAULT_SEPARATOR: &str = " ";
 
+// The consumer resolving duplicates last-wins is what the append direction serves.
 /// A list-type environment variable.
 ///
 /// List variables are appended to any existing value of the environment
 /// variable, with every earlier occurrence of the same contribution removed
 /// first, so re-applying moves the contribution to the back rather than
-/// duplicating it. The consumer resolving duplicates last-wins is what the
-/// direction serves. Interpolation tokens in `value` are replaced at
+/// duplicating it. Interpolation tokens in `value` are replaced at
 /// resolution time.
 ///
 /// The contribution is opaque: ocx never splits it into elements, so a value
@@ -25,19 +21,17 @@ pub const DEFAULT_SEPARATOR: &str = " ";
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct List {
+    // Missing in package metadata is refused by `ValidMetadata` rather than by
+    // serde, so the message names the variable instead of a field offset.
     /// The string joining this contribution to the variable's existing value —
     /// a single space for `JDK_JAVA_OPTIONS`, a comma for `GODEBUG`.
     ///
-    /// Required in package metadata, and refused there by `ValidMetadata`
-    /// rather than by serde, so the message names the variable instead of a
-    /// field offset. Typed as optional because `ocx.toml` and `ocx exec --env`
-    /// may omit it.
-    ///
-    /// Deliberately no `skip_serializing_if`, unlike the tree's other optional
-    /// wire fields: schemars drops a skipped field from `required`, and the
-    /// published schema is the write contract where "a list needs a separator"
-    /// has to be enforceable. The only value that would be written as `null` is
-    /// one `ValidMetadata` refuses to publish.
+    /// Required in package metadata; `ocx.toml` and `ocx exec --env` may omit it.
+    // Deliberately no `skip_serializing_if`, unlike the tree's other optional
+    // wire fields: schemars drops a skipped field from `required`, and the
+    // published schema is the write contract where "a list needs a separator"
+    // has to be enforceable. The only value that would be written as `null` is
+    // one `ValidMetadata` refuses to publish.
     #[schemars(required)]
     pub separator: Option<String>,
 
@@ -48,33 +42,19 @@ pub struct List {
     pub value: String,
 }
 
-/// A separator ocx can fold with: non-empty, and free of `=`, newline and
-/// carriage return.
+/// A separator ocx can fold with: non-empty, and free of `=`, `\n` and `\r`.
 ///
-/// An empty separator degrades the flank match in
-/// [`append_unique`](ocx_util::list::append_unique) to a bare substring
-/// scan, which would delete text from the middle of unrelated elements. `=`
-/// is excluded because `ocx exec --env KEY:list:SEP=VALUE` splits on the first
-/// `=`, and one grammar that accepts what another cannot express is a trap.
-/// `\n` and `\r` are excluded because every export surface downstream is
-/// line-oriented — a CI env file, a shell snippet, a JSON-lines record — and a
-/// separator that ends a line is an injection primitive, not a delimiter any
-/// real consumer asks for.
-///
-/// Carries no message of its own: each surface folds the verdict into its own
-/// typed error (65 from metadata, 78 from `ocx.toml`, 64 from `--env`).
+/// Empty turns [`append_unique`](ocx_util::list::append_unique) into a substring
+/// scan that deletes text from unrelated elements; `ocx exec --env
+/// KEY:list:SEP=VALUE` splits on the first `=`; a line break injects lines into
+/// every line-oriented export.
 pub fn separator_is_valid(separator: &str) -> bool {
     !separator.is_empty() && !separator.contains(['=', '\n', '\r'])
 }
 
-/// `true` when `value` starts or ends with its own `separator`.
-///
-/// Such a value makes the fold's flank match ambiguous — its leading or
-/// trailing separator fuses with the one the algorithm wraps around it — so
-/// every parse boundary refuses it, and [`EnvResolver`] refuses it again after
-/// template resolution: parse-time sees the authored bytes, and
-/// `${installPath}` with separator `/` resolves to a `/`-edged value no parse
-/// gate could have seen.
+/// `true` when `value` starts or ends with its own `separator`, which makes the
+/// fold's flank match ambiguous; [`EnvResolver`] rechecks after template
+/// resolution, since `${installPath}` can produce an edge no parse gate saw.
 ///
 /// [`EnvResolver`]: super::resolver::EnvResolver
 pub fn is_separator_edged(value: &str, separator: &str) -> bool {

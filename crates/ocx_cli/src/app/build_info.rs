@@ -1,29 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Compile-time-baked build provenance.
+//! Build provenance baked by `build.rs`; every field is optional and omitted from JSON when absent.
 //!
-//! [`Provenance::current`] returns the build metadata embedded into the
-//! binary by [`build.rs`](../../build.rs): git commit + dirty flag, build
-//! timestamp + profile + target + rustc version, GitHub Actions run URL
-//! (when built in CI), and release channel. Every field is [`Option`]
-//! because a tarball checkout without `.git/` or a local `cargo build`
-//! outside CI cannot populate the missing piece, and an absent field must
-//! omit cleanly from `ocx version --format json`.
-//!
-//! ## Hermetic-subprocess invariant
-//!
-//! Every value here is `option_env!()` — resolved at compile time and
-//! baked into the binary as `&'static str` constants. None of these
-//! accessors read from runtime `std::env`, so the
-//! `query_installed_version` subprocess path
-//! (`update_check.rs::query_installed_version`, which uses `env_clear()`
-//! before spawning `ocx --format json version`) still receives the same
-//! values it would in any other invocation.
+//! Every value is `option_env!()`, never the runtime env, or the update check's
+//! `env_clear()` spawn of `ocx version` loses them.
 
 use serde::Serialize;
 
-/// Length of the abbreviated git SHA shown to humans (8 hex chars).
 const SHORT_SHA_LEN: usize = 8;
 
 /// Full build provenance for the running binary.
@@ -101,8 +85,7 @@ pub struct CiInfo {
 }
 
 impl Provenance {
-    /// Build the [`Provenance`] for the running binary by reading the
-    /// compile-time-baked env vars.
+    /// Provenance baked into the running binary.
     pub fn current() -> Self {
         Self {
             channel: option_env!("__OCX_BUILD_CHANNEL"),

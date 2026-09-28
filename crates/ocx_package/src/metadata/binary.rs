@@ -12,23 +12,13 @@ use serde::{Deserialize, Serialize};
 use super::slug::SLUG_MAX_LEN;
 use super::visibility::Visibility;
 
-/// A validated executable-name claim.
-///
-/// Bare name (never `.exe`), case-preserving, ASCII printable, no
-/// whitespace. Looser than [`super::entrypoint::EntrypointName`]'s slug
-/// grammar — admits names like `python3.13`, `c++`, `MSBuild`. Enforced at
-/// construction and deserialization. Grammar: `adr_declared_binaries_metadata.md` §5.
+/// A validated executable-name claim: bare (never `.exe`), case-preserving,
+/// ASCII printable, no whitespace. Grammar: `adr_declared_binaries_metadata.md` §5.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct BinaryName(String);
 
 impl BinaryName {
-    /// Maximum byte length of a binary name.
-    ///
-    /// Mirrors [`SLUG_MAX_LEN`] — the same upper bound as
-    /// [`super::entrypoint::EntrypointName`] and
-    /// [`super::dependency::DependencyName`], though `BinaryName` does not
-    /// reuse the slug character class (see module docs).
     pub const MAX_LEN: usize = SLUG_MAX_LEN;
 
     pub fn as_str(&self) -> &str {
@@ -42,14 +32,10 @@ impl AsRef<str> for BinaryName {
     }
 }
 
-/// Windows-reserved filename characters, forbidden outright — `ocx`
-/// materializes binary names as real files on Windows. `/` and `\` close
-/// the npm/pnpm bin-field path-traversal CVE family (ADR §5): no
-/// scoped/nested names exist to normalize.
+/// Windows-reserved filename characters; `/` and `\` also close path traversal.
 const FORBIDDEN_CHARS: &[char] = &['/', '\\', '<', '>', ':', '"', '|', '?', '*'];
 
-/// Reserved Windows device names, checked case-insensitively against the
-/// basename before the first `.` (ADR §5).
+/// Reserved Windows device names, matched case-insensitively before the first `.`.
 const RESERVED_DEVICE_NAMES: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT0",
     "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
@@ -62,19 +48,13 @@ impl TryFrom<String> for BinaryName {
         if value.is_empty() {
             return Err(BinaryError::Empty);
         }
-        // Length checked before the character scan to avoid iterating a
-        // pathologically long input (mirrors EntrypointName's precedent).
         if value.len() > Self::MAX_LEN {
             return Err(BinaryError::TooLong { name: value });
         }
         if value.chars().any(char::is_whitespace) {
             return Err(BinaryError::Whitespace { name: value });
         }
-        // Forbidden-character check runs before the leading/trailing-dot
-        // rule below: a `/`-or-`\`-bearing traversal vector (e.g.
-        // `../../etc/passwd`) must report InvalidCharacter, not the dot
-        // rule, even though it also starts with `.` (ADR §5 correctness
-        // anchor).
+        // Before the dot rule, so `../../etc/passwd` reports `InvalidCharacter`.
         if value
             .chars()
             .any(|c| FORBIDDEN_CHARS.contains(&c) || !c.is_ascii_graphic())
@@ -85,8 +65,7 @@ impl TryFrom<String> for BinaryName {
             return Err(BinaryError::LeadingDash { name: value });
         }
         if value.starts_with('.') || value.ends_with('.') {
-            // Closes bare `..` traversal: no `/` present, so this rule (not
-            // the forbidden-character rule) is the anchor (ADR §5).
+            // The only rule that rejects a bare `..`.
             return Err(BinaryError::LeadingOrTrailingDot { name: value });
         }
         let basename = value.split('.').next().unwrap_or(value.as_str());
@@ -131,27 +110,15 @@ impl<'de> Deserialize<'de> for BinaryName {
     }
 }
 
-/// Sorted, unique collection of [`BinaryName`] claims.
-///
-/// Write side always serializes as a plain array of bare strings (derived
-/// [`Serialize`]). Read side accepts an untagged `string | object` element
-/// union via a custom [`Deserialize`] impl (see [`BinaryElement`]), so a
-/// reader of this version tolerates a hypothetical future per-binary object
-/// shape without hard-failing. See `adr_declared_binaries_metadata.md` §1.
+/// Sorted, unique collection of [`BinaryName`] claims; writes bare strings,
+/// reads `string | object` elements for forward compatibility.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct Binaries(BTreeSet<BinaryName>);
 
 impl Binaries {
-    /// The visibility a binaries claim carries as a surface carrier.
-    ///
-    /// Binaries have no publisher-declared visibility field; they name raw
-    /// executables in `bin/`, invocable by consumers *and* by the package's
-    /// own shims and entry-point launchers (a launcher's target IS one of
-    /// these). That is [`Visibility::PUBLIC`]: both axes — so under the
-    /// composer's surface algebra a claim crosses wherever its owning node
-    /// is admitted, which is the admission rule
-    /// `adr_declared_binaries_metadata.md` §4 records.
+    /// The visibility a binaries claim carries as a surface carrier: consumers
+    /// and the package's own launchers both invoke them.
     pub const IMPLICIT_VISIBILITY: Visibility = Visibility::PUBLIC;
 
     pub fn is_empty(&self) -> bool {
@@ -162,7 +129,6 @@ impl Binaries {
         self.0.len()
     }
 
-    /// Iterates declared binary names in sorted order.
     pub fn iter(&self) -> impl Iterator<Item = &BinaryName> + use<'_> {
         self.0.iter()
     }
@@ -171,14 +137,8 @@ impl Binaries {
 impl TryFrom<BTreeSet<BinaryName>> for Binaries {
     type Error = BinaryError;
 
-    /// Validates case-fold uniqueness across the set: two names differing
-    /// only by case (`Cmake` vs `cmake`) collide on a case-insensitive
-    /// target filesystem even though they are distinct `BTreeSet` keys.
-    /// Exact-duplicate names never reach here — `BTreeSet` insertion already
-    /// collapsed them with zero information loss. Shared by the hand-authored
-    /// deserialize path (via [`BinaryElement`]) and the create-time scan
-    /// path (`bin_scan::scan_interface_binaries`) — one validation function,
-    /// two callers, per `adr_declared_binaries_metadata.md` §5 Decision B.
+    /// Refuses names that collide once case-folded, as they would on a
+    /// case-insensitive filesystem.
     fn try_from(names: BTreeSet<BinaryName>) -> Result<Self, Self::Error> {
         let mut seen_folds: BTreeMap<String, BinaryName> = BTreeMap::new();
         for name in &names {
@@ -195,13 +155,7 @@ impl TryFrom<BTreeSet<BinaryName>> for Binaries {
     }
 }
 
-/// Deserialize-only element shape for a `binaries` array entry.
-///
-/// Accepts either a bare string (the only shape `ocx` ever writes) or an
-/// object carrying at least a `name` key — forward-compat with a
-/// hypothetical future per-binary object shape; unknown object keys are
-/// ignored via the flattened map. Never constructed by the writer — see
-/// [`Binaries`]'s derived `Serialize` impl.
+/// Read-only element shape: a bare string, or an object whose other keys are ignored.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum BinaryElement {
@@ -240,10 +194,7 @@ impl schemars::JsonSchema for Binaries {
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        // Write contract only: `ocx` always emits a plain array of bare
-        // strings. The read-side string|object leniency (`BinaryElement`)
-        // is an internal Rust affordance that never appears in the
-        // published schema.
+        // Write contract only; the read-side object leniency stays unpublished.
         schemars::json_schema!({
             "type": "array",
             "description": "Publisher-declared, unverified claim of interface-surface executable names exposed on PATH by this package. Absent means undeclared; an empty array means the publisher asserts zero interface binaries. On Windows the claim reflects the default executable-resolution set (.exe/.com/.bat/.cmd); a customized child PATHEXT may resolve fewer.",
@@ -253,42 +204,31 @@ impl schemars::JsonSchema for Binaries {
     }
 }
 
-/// Errors validating a [`BinaryName`] or constructing a [`Binaries`]
-/// collection.
+/// Errors validating a [`BinaryName`] or a [`Binaries`] collection.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BinaryError {
-    /// Empty name.
     #[error("binary name must not be empty")]
     Empty,
-    /// Contains a character outside the allowed ASCII-printable set, or one
-    /// of the Windows-reserved filename characters `/ \ < > : " | ? *`.
+    /// A non-printable-ASCII or Windows-reserved filename character.
     #[error("invalid binary name '{name}': contains a disallowed character")]
     InvalidCharacter { name: String },
-    /// Contains whitespace anywhere in the name.
     #[error("invalid binary name '{name}': must not contain whitespace")]
     Whitespace { name: String },
-    /// Starts with `-` (shell flag-lookalike hazard).
+    /// Starts with `-`, which reads as a flag.
     #[error("invalid binary name '{name}': must not start with '-'")]
     LeadingDash { name: String },
-    /// Starts or ends with `.` (Unix hidden-file ambiguity / Windows silent
-    /// strip → on-disk collision).
+    /// Starts or ends with `.`, which Windows strips into a collision.
     #[error("invalid binary name '{name}': must not start or end with '.'")]
     LeadingOrTrailingDot { name: String },
     /// Exceeds [`BinaryName::MAX_LEN`] bytes.
-    // The literal `64` must stay in sync with `BinaryName::MAX_LEN` (=
-    // slug::SLUG_MAX_LEN); serde/thiserror `#[error]` attributes cannot
-    // interpolate a const at compile time.
+    // The literal `64` must track `BinaryName::MAX_LEN`; `#[error]` cannot interpolate a const.
     #[error("invalid binary name '{name}': exceeds the 64 byte limit")]
     TooLong { name: String },
-    /// The basename before the first `.` case-insensitively matches a
-    /// reserved Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM0`–
-    /// `COM9`, `LPT0`–`LPT9`).
+    /// The basename before the first `.` is a reserved Windows device name.
     #[error("invalid binary name '{name}': '{reserved}' is a reserved Windows device name")]
     ReservedWindowsDeviceName { name: String, reserved: String },
-    /// Two declared names collide once case-folded — a hazard on a
-    /// case-insensitive target filesystem even though the raw strings
-    /// differ.
+    /// Two declared names collide once case-folded.
     #[error("binary names '{first}' and '{second}' collide case-insensitively")]
     CaseFoldCollision { first: BinaryName, second: BinaryName },
 }

@@ -18,8 +18,7 @@ use flavor::Flavor;
 pub enum CiFlavor {
     /// GitHub Actions: appends to the `$GITHUB_PATH` and `$GITHUB_ENV` files.
     GitHubActions,
-    /// GitLab CI/CD: writes JSON-lines to an export file (or stdout) consumed
-    /// by later pipeline steps.
+    /// GitLab CI/CD: writes JSON lines to an export file or stdout.
     GitLab,
 }
 
@@ -35,12 +34,9 @@ impl CiFlavor {
         None
     }
 
-    /// Writes pre-resolved environment variable entries into the CI system's
-    /// runtime channel.
+    /// Writes resolved entries into the CI system's runtime channel.
     ///
-    /// `export_file` selects an explicit GitLab output path; it is ignored for
-    /// GitHub Actions (which infers its two-file sink from `$GITHUB_ENV` /
-    /// `$GITHUB_PATH`) and the caller is expected to reject the combination.
+    /// `export_file` is the GitLab output path; GitHub ignores it, so the caller must reject that combination.
     pub fn export(self, entries: &[entry::Entry], export_file: Option<PathBuf>) -> Result<(), crate::ci::error::Error> {
         let mut target: Box<dyn Flavor> = match self {
             Self::GitHubActions => Box::new(github_flavor::GitHubFlavor::from_env()?),
@@ -56,30 +52,8 @@ impl CiFlavor {
     }
 }
 
-/// Computes the final value for a path-type variable shared by both CI flavors.
-///
-/// Reads the existing process value of `key` and folds each buffered package
-/// value from `values` (in accumulation order) through
-/// [`move_to_front`](ocx_util::path::move_to_front) — the same
-/// operation `Env::add_path` applies once per entry on the in-process
-/// `ocx exec` path. This is the one place the env-read + move-to-front
-/// semantics live for CI export, so GitHub's `$GITHUB_ENV` path case and
-/// GitLab's flattened path case stay byte-identical *and* agree with
-/// `ocx exec`'s in-process precedence.
-///
-/// **Last-applied wins, landing at the front.** `values` accumulate in the
-/// same order `write_entry` is called (earliest-processed package or stage
-/// first). Folding `move_to_front` in that order means the value applied
-/// *last* ends up closest to the front — a value already present (in an
-/// earlier `values` entry, or in `existing`) is removed from its old position
-/// and kept at the new front. Empty segments are dropped. Re-running an
-/// export against an already-exported variable therefore does not grow it.
-///
-/// **Direction fixed by `adr_project_env_declaration.md` C1a.** This used to
-/// prepend the whole buffered block and keep the *first* occurrence, so the
-/// *first*-applied value held the front — the inverse of `Env::add_path`'s
-/// `ocx exec` semantics. Under `--ci=github`/`--ci=gitlab` a later stage could
-/// not override an earlier one; it now can, matching `ocx exec`.
+/// Folds `values` onto the process value of path variable `key` with the same
+/// [`move_to_front`](ocx_util::path::move_to_front) `ocx exec` uses, so CI precedence matches it.
 fn prepend_existing(key: &str, values: &[String]) -> String {
     use std::ffi::{OsStr, OsString};
 
@@ -93,27 +67,8 @@ fn prepend_existing(key: &str, values: &[String]) -> String {
     result.to_string_lossy().into_owned()
 }
 
-/// Computes the final value for a list-type variable shared by both CI flavors.
-///
-/// The append-direction sibling of [`prepend_existing`]: reads the existing
-/// process value of `key` and folds each buffered package value from `values`
-/// (in accumulation order) through
-/// [`append_unique`](ocx_util::list::append_unique) — the same
-/// operation [`Env::add_list`](ocx_config::env::Env::add_list) applies once per
-/// entry on the in-process `ocx exec` path.
-///
-/// **Last-applied wins, landing at the BACK** — the opposite end from
-/// `prepend_existing`'s front, matching `list`'s move-to-back operator
-/// (`adr_env_modifier_types.md` D1) instead of `path`'s move-to-front. A value
-/// already present (in an earlier `values` entry, or in `existing`) is removed
-/// from its old position and re-appended at the new back, so re-running an
-/// export against an already-exported variable does not grow it.
-///
-/// `separator` is the entry's own fold separator. By the time entries reach
-/// this call, [`reconcile_list_separators`](ocx_package::metadata::env::apply::reconcile_list_separators)
-/// has already settled it across every contributor to `key` at the CLI
-/// finalize sites — a bare `" "` default here is exactly what a caller-side
-/// `None` legitimately reconciles to, not a value left undecided.
+/// Folds `values` onto the process value of list variable `key` with the same
+/// [`append_unique`](ocx_util::list::append_unique) `ocx exec` uses, so CI precedence matches it.
 fn append_existing(key: &str, values: &[String], separator: &str) -> String {
     use ocx_util::list::append_unique;
 

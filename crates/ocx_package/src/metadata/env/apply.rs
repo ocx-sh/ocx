@@ -4,16 +4,6 @@
 //! Applying resolved [`Entry`] vectors to a process [`Env`], and the
 //! `OCX_ENV` forwarding envelope that carries the caller-contributed tail
 //! across a launcher hop.
-//!
-//! This is the package-aware half of environment composition. It lives beside
-//! the entry vocabulary it folds rather than in `ocx_config::env`, because `Env`
-//! itself is a domain-free map of keys to values: the moment it learns what an
-//! [`Entry`] is, the configuration layer depends on the package layer and the
-//! dependency runs backwards (design spec § A.2, plan C-035).
-//!
-//! [`EnvEntriesExt`] is the seam. `Env` keeps `set` / `add_path` / `add_list`
-//! and the private `package_path` bookkeeping; everything that reads an
-//! [`Entry`] to decide which of those to call is here.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -24,35 +14,16 @@ use super::modifier::ModifierKind;
 use ocx_config::env::{Env, EnvKey, OcxConfigView, keys};
 use ocx_util::env::{is_reserved_ocx_key, is_valid_env_key, var};
 
-/// The two entry slices [`EnvEntriesExt::apply_child_env`] needs, as named fields.
-///
-/// They are different slices and confusing them produces a wrong child
-/// environment with no error anywhere:
-///
-/// - `composed` is everything the parent resolved — the package-composed set,
-///   the patch companion overlay, and (project tier) the project / group
-///   `[env]` plus `--env`. This is what the child process itself runs with.
-/// - `forwarded` is ONLY the caller-contributed tail: project `[env]`, group
-///   `[env]`, `--env`. A launcher re-entry re-derives the package-composed part
-///   from the package itself, so forwarding the whole set would make it apply
-///   that part twice and bloat the payload for no gain.
-///
-/// Both are `&[Entry]`, so two positional parameters would transpose silently.
-/// Named fields at every call site are the entire reason this struct exists —
-/// it carries no behaviour of its own.
+/// The two entry slices [`EnvEntriesExt::apply_child_env`] needs, named so they cannot transpose.
 pub struct ChildEnv<'a> {
     /// The full composed environment the child process runs with.
     pub composed: &'a [Entry],
-    /// The caller-contributed entries only, forwarded over [`keys::OCX_ENV`].
+    /// Only the caller-contributed tail (project/group `[env]`, `--env`); a
+    /// launcher re-entry re-derives the package part, so forwarding it would apply it twice.
     pub forwarded: &'a [Entry],
 }
 
 /// Folding resolved [`Entry`] vectors onto an [`Env`].
-///
-/// An extension trait rather than inherent methods on [`Env`]: the two are
-/// implemented here, in the crate that owns [`Entry`], so `Env`'s own module
-/// never names the package vocabulary. Import it wherever you compose a child
-/// environment.
 pub trait EnvEntriesExt {
     /// Applies resolved environment entries to this environment.
     fn apply_entries(&mut self, entries: &[Entry]);
@@ -63,49 +34,24 @@ pub trait EnvEntriesExt {
 }
 
 impl EnvEntriesExt for Env {
-    /// Applies resolved environment entries to this environment.
+    /// Applies resolved environment entries, noting each composed `PATH`
+    /// directory via [`Env::note_package_path`].
     ///
-    /// This is the bridge from [`entry::Entry`](Entry)
-    /// (the canonical resolved env var) to the process environment used by `exec`.
-    ///
-    /// Entries reach here already filtered of the reserved `OCX_*` / `__OCX_*`
-    /// namespace: the gate is at the `resolve_env*` seam that produced them,
-    /// not here, because `conventions::emit_lines` builds an eval'd shell
-    /// stream from the same vector without ever calling this method.
-    ///
-    /// Every `PATH` directory a composed entry contributes is additionally
-    /// recorded through [`Env::note_package_path`], so
-    /// [`Env::resolve_test_command`] can tell a directory the package under
-    /// test shipped from one the host happened to have. That method folds it in
-    /// with the same [`move_to_front`](ocx_util::path::move_to_front)
-    /// used for the real `PATH`, so the two orders stay identical by
-    /// construction.
-    ///
-    /// The order inside the `Path` arm is contracted: `add_path` first, then
-    /// the note. `add_path` is what the child process sees; the note is
-    /// resolution bookkeeping derived from it, and a note taken before the
-    /// value is on `PATH` would record a directory the env does not yet offer.
+    /// Reserved `OCX_*` keys are filtered upstream at `resolve_env*`, not here,
+    /// because `emit_lines` feeds an eval'd shell stream from the same vector.
     fn apply_entries(&mut self, entries: &[Entry]) {
         let path_key = EnvKey::new("PATH");
         for entry in entries {
             match entry.kind {
                 ModifierKind::Path => {
+                    // Before the note, which derives from the value already on `PATH`.
                     self.add_path(&entry.key, &entry.value);
-                    // Key equality under `EnvKey` (case-insensitive on Windows)
-                    // is what excludes the other path-shaped variables —
-                    // LD_LIBRARY_PATH, PKG_CONFIG_PATH, MANPATH — which
-                    // contribute no executables.
                     if EnvKey::new(entry.key.as_str()) == path_key {
                         self.note_package_path(OsStr::new(entry.value.as_str()));
                     }
                 }
                 ModifierKind::Constant => self.set(&entry.key, &entry.value),
                 ModifierKind::List => {
-                    // A `None` here is one that survived
-                    // [`reconcile_list_separators`] — no contributor to this key
-                    // established a separator — so the human-surface default is
-                    // the honest reading, not a guess over someone's explicit
-                    // choice.
                     let separator = entry.separator.as_deref().unwrap_or(list::DEFAULT_SEPARATOR);
                     self.add_list(&entry.key, &entry.value, separator);
                 }
@@ -113,53 +59,22 @@ impl EnvEntriesExt for Env {
         }
     }
 
-    /// Builds the environment for a child process: the composed entries, the
-    /// running ocx's resolution-affecting config, and the forwarded
-    /// caller-contributed payload — in that order.
+    /// Builds a child process's environment: composed entries, the running
+    /// ocx's config, then the forwarded payload.
     ///
-    /// **Every command that composes an environment and then spawns must go
-    /// through this seam.** The three steps are one operation, not three
-    /// independent ones, and the order between them is load-bearing:
-    ///
-    /// 1. [`EnvEntriesExt::apply_entries`] lays down what the parent composed.
-    /// 2. [`Env::apply_ocx_config`] runs after [`Env::clean`] / [`Env::new`]
-    ///    so the outer ocx's parsed state is the sole authority for `OCX_*` keys
-    ///    on the child env — no ambient parent-shell export can override it. It
-    ///    also unconditionally strips any inherited [`keys::OCX_ENV`].
-    /// 3. The forwarded payload is written *after* that strip. Doing it in the
-    ///    other order would write the payload and then delete it.
-    ///
-    /// Forwarding is what keeps a per-invocation override alive across a
-    /// launcher hop. A package that declares entrypoints resolves THROUGH its
-    /// generated launcher on the ordinary spawn path — `composer` pushes the
-    /// synthetic `entrypoints/` PATH entry last precisely so it shadows `bin/`.
-    /// That launcher re-enters `ocx launcher exec`, a process with no
-    /// `ProjectConfig` by construction: it builds a fresh `Env` from the
-    /// inherited environment and re-applies the package's own entries on top,
-    /// silently reverting exactly the overrides the caller declared. Only the
-    /// package-composed entries are re-derived on the child side; the forwarded
-    /// ones are not, which is why they must travel over [`keys::OCX_ENV`].
-    ///
-    /// Skipping step 3 is not a degraded mode — it is a silent wrong answer, so
-    /// the payload is not optional here and [`keys::OCX_ENV`] cannot be written
-    /// from outside this module.
+    /// Every compose-then-spawn command must go through here, or a launcher
+    /// re-entry silently reverts the caller's overrides.
     fn apply_child_env(&mut self, env: ChildEnv<'_>, config: &OcxConfigView) {
         self.apply_entries(env.composed);
+        // Set-or-removes every `OCX_*` key it knows, so no ambient export or entry beats this ocx's parsed config.
         self.apply_ocx_config(config);
+        // After `apply_ocx_config`, which strips `OCX_ENV`, or the payload is deleted.
         set_forwarded_env(self, env.forwarded);
     }
 }
 
-/// Writes the forwarded project/group `[env]` payload onto this env as
-/// [`keys::OCX_ENV`], so a generated entrypoint launcher's re-entry
-/// (`ocx launcher exec`) can re-apply it after the package entries.
-///
-/// Private to this module, and called only from
-/// [`EnvEntriesExt::apply_child_env`], which guarantees the mandatory
-/// [`Env::apply_ocx_config`] strip runs first. The two halves are deliberate:
-/// `apply_ocx_config` guarantees no stale value survives, this function writes
-/// the payload of the invocation that actually has one. An empty slice leaves
-/// the key absent.
+/// Writes the forwarded payload as [`keys::OCX_ENV`] for a launcher re-entry;
+/// an empty slice leaves the key absent.
 fn set_forwarded_env(env: &mut Env, entries: &[Entry]) {
     match encode_forwarded_env(entries) {
         Some(json) => env.set(keys::OCX_ENV, json),
@@ -172,63 +87,34 @@ fn set_forwarded_env(env: &mut Env, entries: &[Entry]) {
 #[non_exhaustive]
 pub enum ListSeparatorError {
     /// Two entries for one key declare different separators.
-    ///
-    /// Fail-closed rather than first-wins: the two contributors disagree about
-    /// the grammar of a value they are both writing, and either choice
-    /// silently corrupts one of them for the consuming tool.
     #[error(
         "env var '{key}' is contributed as a list with conflicting separators {first:?} and {second:?}; every contributor to one key must agree"
     )]
     Conflict {
-        /// The env-var name both contributors write.
         key: String,
         /// The separator established first, in composition order.
         first: String,
-        /// The conflicting separator that arrived later.
         second: String,
     },
 
-    /// A value is edged by the separator agreement settled on it.
-    ///
-    /// Parse boundaries can only edge-check a separator the author *wrote*;
-    /// one that arrives by inheritance is first known here.
+    /// A value is edged by the separator settled on it.
     #[error("env var '{key}' has a list value starting or ending with its separator {separator:?}: {value:?}")]
     EdgedValue {
-        /// The env-var name.
         key: String,
-        /// The separator the entry ended up folding with.
         separator: String,
-        /// The offending value.
         value: String,
     },
 }
 
-/// Settles which separator every `list` entry for a key folds with, before any
-/// of them is applied.
+/// Settles the separator each `list` key folds with: the first explicit one is
+/// inherited by later `None` entries, and a key nobody set keeps `None` (the default).
 ///
-/// One separator per key per composition: the first entry carrying an explicit
-/// separator **establishes** the key's, and a later entry with `None`
-/// **inherits** it. A key nobody established keeps `None`, which
-/// [`EnvEntriesExt::apply_entries`] reads as the default separator.
-///
-/// Without this, a package appending `GODEBUG` with `","` plus a project entry
-/// omitting the separator would render `gctrace=1 madvdontneed=1` — a value
-/// the consumer silently ignores, which is exactly the silent-wrong-separator
-/// failure an explicit separator exists to prevent.
-///
-/// Call it once per composition, after the last contributor has been appended;
-/// entries are read in iteration order, which is composition order.
-///
-/// Takes an iterator rather than a slice because a caller's entries are not
-/// necessarily one contiguous `Vec` — `ocx exec` composes the package set and
-/// forwards the project set as separate vectors, and agreement has to span
-/// both. Chain them: `composed.iter_mut().chain(project.iter_mut())`.
+/// Call once, after the last contributor.
 ///
 /// # Errors
 ///
-/// [`ListSeparatorError::Conflict`] when two entries for one key declare
-/// *different* explicit separators; [`ListSeparatorError::EdgedValue`] when the
-/// separator an entry ends up with edges its value.
+/// [`ListSeparatorError::Conflict`] when one key has two explicit separators;
+/// [`ListSeparatorError::EdgedValue`] when the settled separator edges a value.
 pub fn reconcile_list_separators<'a>(
     entries: impl IntoIterator<Item = &'a mut Entry>,
 ) -> Result<(), ListSeparatorError> {
@@ -266,10 +152,7 @@ pub fn reconcile_list_separators<'a>(
         }
     }
 
-    // Only now is every entry's effective separator known. A parse boundary
-    // edge-checks the separator the author wrote; an inherited one — and the
-    // `" "` default for a key nobody declared — first exists here, and an
-    // edged value fuses with the fold's wrapper and degrades dedup.
+    // Edge-checked here: an inherited or defaulted separator first exists at this point.
     for entry in entries.iter() {
         if entry.kind != ModifierKind::List {
             continue;
@@ -289,24 +172,19 @@ pub fn reconcile_list_separators<'a>(
 
 /// Failure modes of decoding the forwarded [`keys::OCX_ENV`] payload.
 ///
-/// Every variant is a hard error: the payload is untrusted input and the decode
-/// fails closed on the **whole** envelope rather than filtering the offending
-/// entry. A partially-applied payload would silently produce an environment
-/// that matches neither what the parent composed nor what the user declared.
+/// Each rejects the whole envelope: a partially applied payload matches neither
+/// what the parent composed nor what the user declared.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ForwardedEnvError {
     /// The value was present but not valid JSON.
     #[error("malformed OCX_ENV env value")]
     MalformedJson {
-        /// The underlying JSON parse failure.
         #[source]
         source: serde_json::Error,
     },
 
-    /// The mandatory `entries` array is absent or not an array. This is the
-    /// envelope sentinel — its presence is what proves the payload came from
-    /// `set_forwarded_env` rather than an injected value.
+    /// The mandatory `entries` sentinel is absent or not an array.
     #[error("OCX_ENV 'entries' field is absent or not an array")]
     MissingEntries,
 
@@ -318,13 +196,8 @@ pub enum ForwardedEnvError {
         index: usize,
     },
 
-    /// An entry's `type` is not a recognized modifier.
-    ///
-    /// The one place [`ocx_config::patch::patches_from_env`]'s leniency must
-    /// NOT be copied. A forged `no_patches` can only *suppress* an overlay; a
-    /// misread modifier actively sets a value with the wrong combination
-    /// semantics — replacing where it should prepend — and produces a wrong
-    /// environment with no signal.
+    /// An entry's `type` is not a recognized modifier; never lenient, since a
+    /// misread modifier sets a value with the wrong combination semantics.
     #[error("OCX_ENV entry '{key}' has unrecognized modifier type '{found}'")]
     UnknownKind {
         /// The entry's env-var name.
@@ -333,35 +206,29 @@ pub enum ForwardedEnvError {
         found: String,
     },
 
-    /// An entry's key is outside the POSIX environment-name grammar
-    /// ([`is_valid_env_key`]).
+    /// An entry's key fails [`is_valid_env_key`].
     #[error("OCX_ENV entry '{key}' is not a valid environment variable name")]
     InvalidKey {
         /// The offending env-var name.
         key: String,
     },
 
-    /// An entry's key is in the reserved `OCX_*` / `__OCX_*` namespace
-    /// ([`is_reserved_ocx_key`]).
+    /// An entry's key is reserved ([`is_reserved_ocx_key`]).
     #[error("OCX_ENV entry '{key}' is reserved; OCX_* and __OCX_* keys cannot be forwarded")]
     ReservedKey {
         /// The offending env-var name.
         key: String,
     },
 
-    /// A `list` entry arrives without the separator it folds with.
-    ///
-    /// Not defaulted: the parent that wrote the payload had the answer, so an
-    /// absent separator means the payload is wrong. Silently choosing a space
-    /// would re-join a comma list unparseably for its consumer.
+    /// A `list` entry has no separator; never defaulted, since the parent always
+    /// writes one and a guessed space would re-join a comma list.
     #[error("OCX_ENV entry '{key}' is a list without a separator")]
     MissingSeparator {
         /// The entry's env-var name.
         key: String,
     },
 
-    /// A `list` entry's separator cannot be folded with — empty, or carrying
-    /// the `=` that the `--env` grammar reserves.
+    /// A `list` entry's separator fails [`list::separator_is_valid`].
     #[error("OCX_ENV entry '{key}' has unusable list separator {separator:?}")]
     InvalidSeparator {
         /// The entry's env-var name.
@@ -370,32 +237,16 @@ pub enum ForwardedEnvError {
         separator: String,
     },
 
-    /// A `list` entry's value starts or ends with its own separator, which
-    /// makes the append fold's flank match ambiguous.
+    /// A `list` entry's value starts or ends with its own separator.
     #[error("OCX_ENV entry '{key}' has a list value starting or ending with its separator {separator:?}: {value:?}")]
     SeparatorEdgedValue {
-        /// The entry's env-var name.
         key: String,
-        /// The entry's separator.
         separator: String,
-        /// The offending value as received.
         value: String,
     },
 }
 
-/// Serializes resolved project/group env entries into the JSON envelope written
-/// to [`keys::OCX_ENV`].
-///
-/// Returns `None` for an empty slice so `set_forwarded_env` removes the
-/// key rather than writing an empty envelope.
-///
-/// Envelope shape follows [`ocx_config::patch::encode_patches`]: one
-/// mandatory sentinel field (`entries`) plus room for additive optional fields,
-/// and no version discriminator. A version field would buy nothing — the
-/// envelope is not where this breaks across versions. The one field that cannot
-/// evolve additively is a per-entry `kind`, and an older ocx rejecting an
-/// unknown `kind` outright is strictly better than being told "this is newer
-/// than me" and having no better response available.
+/// Serializes entries into the [`keys::OCX_ENV`] envelope; `None` for an empty slice.
 fn encode_forwarded_env(entries: &[Entry]) -> Option<String> {
     if entries.is_empty() {
         return None;
@@ -406,19 +257,9 @@ fn encode_forwarded_env(entries: &[Entry]) -> Option<String> {
             let mut object = serde_json::json!({
                 "key":   entry.key,
                 "value": entry.value,
-                // `type`, not `kind`: the same spelling `ocx --format json env`
-                // already emits for an entry, the `[env]` table already accepts
-                // in `ocx.toml`, and `Modifier` already carries as its serde
-                // tag. One vocabulary for one concept. (`kind` is taken on the
-                // JSON surface — it discriminates `EntrySource`.)
                 "type":  entry.kind.to_string(),
             });
-            // Every list entry is forwarded with the separator it will actually
-            // fold with, defaulted here rather than on the far side. The
-            // human-facing surfaces let an author omit it, and the parent is
-            // the last process that knows what "omitted" resolved to — the
-            // launcher re-entry only has the payload, so the decoder treats a
-            // missing separator as a forged one.
+            // Defaulted here, never on the far side: the decoder refuses a missing separator.
             if entry.kind == ModifierKind::List
                 && let Some(fields) = object.as_object_mut()
             {
@@ -440,29 +281,14 @@ fn encode_forwarded_env(entries: &[Entry]) -> Option<String> {
     }
 }
 
-/// Parses [`keys::OCX_ENV`] back into the project/group env entries the parent
-/// composed, for a generated launcher's re-entry to re-apply on top of the
-/// package entries.
+/// Parses [`keys::OCX_ENV`] back into the forwarded entries; absent or empty yields none.
 ///
-/// An absent or empty value yields an empty vector — a direct launcher
-/// invocation with no `ocx exec` parent legitimately has no payload.
-///
-/// **The payload is untrusted input.** Each entry passes the same two gates the
-/// `ocx.toml` parse path applies — [`is_valid_env_key`] for the name grammar and
-/// [`is_reserved_ocx_key`] for the `OCX_*` namespace — and any failure rejects
-/// the **whole** envelope. Filtering the bad entry and keeping the rest would
-/// hand an attacker a way to shape the surviving set.
-///
-/// Honest scoping: a process that can set `OCX_ENV` already controls the child's
-/// environment outright, so the gate grants no new capability against that
-/// attacker. It exists to keep the forwarded map out of ocx's *own* resolution
-/// surface — [`Env::apply_ocx_config`] overwrites only the keys it knows, so a
-/// forged `OCX_DEFAULT_REGISTRY` arriving this way would otherwise survive into
-/// the child and reach any grandchild ocx.
+/// The payload is untrusted: the reserved-key gate keeps a forged `OCX_*` key
+/// out of a grandchild ocx, since [`Env::apply_ocx_config`] overwrites only keys it knows.
 ///
 /// # Errors
 ///
-/// Returns [`ForwardedEnvError`] — see that type; every variant is fail-closed.
+/// [`ForwardedEnvError`] for any malformed entry.
 pub fn forwarded_env() -> Result<Vec<Entry>, ForwardedEnvError> {
     let Some(raw) = var(keys::OCX_ENV) else {
         return Ok(Vec::new());
@@ -473,9 +299,6 @@ pub fn forwarded_env() -> Result<Vec<Entry>, ForwardedEnvError> {
     let envelope = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw)
         .map_err(|source| ForwardedEnvError::MalformedJson { source })?;
 
-    // Mandatory sentinel: a value not produced by `encode_forwarded_env` is
-    // corrupted or externally injected. Same fail-closed role `registry` plays
-    // in the `OCX_PATCHES` envelope.
     let array = envelope
         .get("entries")
         .and_then(serde_json::Value::as_array)
@@ -499,9 +322,6 @@ pub fn forwarded_env() -> Result<Vec<Entry>, ForwardedEnvError> {
         if is_reserved_ocx_key(key) {
             return Err(ForwardedEnvError::ReservedKey { key: key.to_string() });
         }
-        // Through `ModifierKind`'s own `FromStr` rather than a hand-rolled
-        // match: the vocabulary has one home, and a second copy here would go
-        // on rejecting a type the rest of the binary already executes.
         let kind = kind
             .parse::<ModifierKind>()
             .map_err(|error| ForwardedEnvError::UnknownKind {
@@ -509,11 +329,6 @@ pub fn forwarded_env() -> Result<Vec<Entry>, ForwardedEnvError> {
                 found: error.found,
             })?;
 
-        // Fail closed on every list-shape fault. Defaulting an absent separator
-        // here would silently re-join a comma list with spaces on the far side
-        // of the launcher hop — the payload came from a parent that had the
-        // answer, so its absence means the payload is wrong, not that a default
-        // applies.
         let separator = if kind == ModifierKind::List {
             let Some(separator) = object.get("separator").and_then(serde_json::Value::as_str) else {
                 return Err(ForwardedEnvError::MissingSeparator { key: key.to_string() });
@@ -524,8 +339,6 @@ pub fn forwarded_env() -> Result<Vec<Entry>, ForwardedEnvError> {
                     separator: separator.to_string(),
                 });
             }
-            // The same post-resolution check `EnvResolver` runs: these values
-            // are already resolved, and an edged one folds ambiguously.
             if list::is_separator_edged(value, separator) {
                 return Err(ForwardedEnvError::SeparatorEdgedValue {
                     key: key.to_string(),

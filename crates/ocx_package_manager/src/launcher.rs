@@ -14,30 +14,23 @@ mod safety;
 
 pub use generate::generate;
 
-/// R-W18(a) — a `pub(crate)` item inside a private `mod` does not escape it,
-/// so WP-6's trampoline surface is unreachable without a re-export here.
-///
-/// Exactly the four items `crate::tasks::render_toolchain` calls, and
-/// no more: re-exporting an item nothing imports is an `unused_imports` error
-/// under `-D warnings`, so this line grows with its consumers rather than ahead
-/// of them. `EXEC_SIDECAR_GLOBAL` is deliberately still absent — the renderer
-/// never spells that literal, [`body::exec_sidecar_body`] does.
+/// A `pub(crate)` item inside a private `mod` does not escape it, so the
+/// trampoline surface `crate::tasks::render_toolchain` calls needs this
+/// re-export. It lists exactly those items: re-exporting one nothing imports is
+/// an `unused_imports` error under `-D warnings`. `EXEC_SIDECAR_GLOBAL` stays
+/// absent because only [`body::exec_sidecar_body`] spells that literal.
 pub(crate) use body::{TrampolineTarget, exec_sidecar_body, unix_trampoline_body};
 pub(crate) use generate::trampoline_ocx_binary;
 
 /// The generated Unix shim body for one declared interface name of a
-/// **deferred** tool — a tool composed onto `PATH` without its content being
-/// materialized.
+/// **deferred** tool — composed onto `PATH` without its content materialized.
+/// Name-independent: `${0##*/}` carries the invoked name, so one
+/// rendering serves every name in a shim directory's `bin/`.
 ///
-/// The body is name-independent: `$(basename "$0")` carries the invoked name,
-/// so one rendering serves every name in a shim directory's `bin/`.
-///
-/// Exists so the generation task (`crate::tasks::prepare_lazy`) can
-/// reach [`body::unix_shim_body`] — C-018 sanctions exactly two producers of
-/// the `launcher shim` wire token, and this is not a third one — while the
-/// unsafe-character check stays at this module's entry boundary, exactly where
-/// [`generate`] applies it. That keeps [`safety::LauncherSafeString`] the one
-/// validator for every generated body and out of the caller's vocabulary.
+/// Lets `crate::tasks::prepare_lazy` reach [`body::unix_shim_body`] without a
+/// third producer of the `launcher shim` wire token (exactly two are sanctioned),
+/// while the unsafe-character check stays at this module's boundary as in
+/// [`generate`], keeping [`safety::LauncherSafeString`] the one validator.
 ///
 /// # Errors
 ///

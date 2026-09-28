@@ -9,64 +9,34 @@ use ocx_oci::{
     tag::parse_keep,
 };
 
-/// Semantic classification of an OCI tag string.
-///
-/// Parsed from a raw tag string via `Tag::from(String)`. The parse order is:
-/// 1. `"latest"` → [`Latest`](Tag::Latest)
-/// 2. The `__ocx` namespace → [`Internal`](Tag::Internal) — this is where the
-///    keep tag `__ocx.keep.<algorithm>-<hex>` is classified, at step 2 and so
-///    ahead of every digest-shaped arm below; it never reaches
-///    [`is_referrer_fallback_tag`]
-/// 3. Version-parseable (digit-first or variant-prefixed) → [`Version`](Tag::Version)
-/// 4. The frozen legacy keep-tag form (`sha256.<hex>`) → [`LegacyKeep`](Tag::LegacyKeep)
-/// 5. Anything else → [`Other`](Tag::Other)
-///
-/// Bare variant names (e.g., `"debug"`, `"canary"`) fall into [`Other`](Tag::Other).
-/// Variant semantics are determined at a higher layer (mirror spec, package
-/// annotations) where declared variants are known — the `Tag` enum is purely
-/// syntactic and does not guess intent.
+/// Semantic classification of an OCI tag string; `Tag::from(String)` tries the variants
+/// in declaration order and the first match wins.
 #[derive(Debug, Clone)]
 pub enum Tag {
     /// The literal `"latest"` tag — latest version of the default variant.
     Latest,
-    /// An OCX-internal tag in the `__ocx` namespace. Used for metadata artifacts
-    /// like package descriptions. Excluded from user-facing tag listings.
+    /// An OCX-internal tag in the `__ocx` namespace, excluded from user-facing listings.
     Internal(InternalTag),
-    /// A semantic version, optionally with a variant prefix.
-    /// Examples: `"3.28.1"`, `"3.28.1-alpha_b1"`, `"debug-3.12.5"`.
+    /// A semantic version, optionally variant-prefixed (`"debug-3.12.5"`).
     Version(version::Version),
-    /// The **frozen legacy keep-tag form**: a tag naming a platform manifest by
-    /// its own digest, spelled `"sha256.abcdef…"`.
-    ///
-    /// This is a read arm and nothing else. OCX never writes this form — a keep
-    /// tag written today is [`InternalTag::Keep`]
-    /// (`__ocx.keep.<algorithm>-<hex>`). The arm stays because already-published
-    /// repositories carry these tags, and they must keep classifying as reserved
-    /// so they are never read back as a version.
-    ///
-    /// The parts are carried separately rather than as an [`ocx_oci::Digest`]
-    /// because a tag spells them `<algorithm>.<hex>` — OCI forbids `:` in a tag,
-    /// which is the separator `Digest`'s `Display` emits.
+    /// The frozen legacy keep-tag form `"sha256.<hex>"`, read only; published repositories
+    /// still carry it, and it must classify as reserved, never as a version.
+    // Not an `ocx_oci::Digest`: its `Display` emits `:`, which an OCI tag forbids.
     LegacyKeep {
         /// The digest algorithm the tag names.
         algorithm: Algorithm,
-        /// The lower- or upper-case hex digest body, verbatim as tagged.
+        /// The hex digest body, verbatim as tagged.
         hex: String,
     },
-    /// Any tag that doesn't match the above patterns.
-    /// Includes bare variant names (`"debug"`) and arbitrary user-chosen tags (`"custom-tag"`).
+    /// Any other tag, including bare variant names (`"debug"`).
     Other(String),
 }
 
 const LATEST_STR: &str = "latest";
 
 impl Tag {
-    /// Returns `true` if this tag is not a version pointer: the OCX-internal
-    /// namespace (which carries the keep tag), the frozen legacy keep-tag form
-    /// naming a platform manifest by its own digest, or an OCI Referrers
-    /// fallback / `cosign` signature-artifact tag
-    /// ([`is_referrer_fallback_tag`]). None of these may appear as a version
-    /// in the index.
+    /// Returns `true` for a tag that must never appear as a version in the index:
+    /// internal, legacy keep, or a referrers-fallback/`cosign` tag.
     pub fn is_reserved(&self) -> bool {
         match self {
             Tag::Internal(_) | Tag::LegacyKeep { .. } => true,
@@ -75,16 +45,8 @@ impl Tag {
         }
     }
 
-    /// `&str` convenience wrapper over [`Tag::is_reserved`] for listing filters.
-    ///
-    /// Delegates to [`is_reserved_tag`], the version-free spelling of the same
-    /// rule that lives beside the registry conventions it is made of. No parse,
-    /// no allocation: a listing filter asks only for the verdict, and the parsed
-    /// [`Tag`] it used to build was thrown away.
-    ///
-    /// The two must answer identically for every string, and
-    /// `crates/ocx_package/tests/tag_verdicts.rs` asserts exactly that over the
-    /// vendored corpus plus the shapes the version grammar could collide with.
+    /// [`Tag::is_reserved`] on a `&str`, without parsing.
+    // Must answer as `is_reserved` does for every string; `crates/ocx_package/tests/tag_verdicts.rs` asserts it.
     pub fn is_reserved_str(tag: &str) -> bool {
         is_reserved_tag(tag)
     }

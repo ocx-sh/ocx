@@ -4,12 +4,7 @@
 //! The predicate-type vocabulary: cosign's `--type` alias table, the
 //! `CosignPredicate` wrapper, and the SLSA builder-identity accessor.
 //!
-//! The alias table is cosign's, verbatim. It is a pure lookup with no policy in
-//! it: bare `slsaprovenance` resolves to v0.2 here exactly as it does in cosign,
-//! and the `>= v1.0` attach-side floor is enforced by the attest pipeline
-//! instead. Diverging in the table would silently produce a different
-//! `predicateType` than cosign for the same flag value — two tools, one word,
-//! two meanings.
+//! The alias table is cosign's verbatim, or one flag value yields a different `predicateType` than cosign.
 
 use std::str::FromStr;
 
@@ -32,9 +27,7 @@ const URI_CUSTOM: &str = "https://cosign.sigstore.dev/attestation/v1";
 
 /// cosign's `--type` vocabulary, plus a full URI passed through unchanged.
 ///
-/// Deliberately not `#[non_exhaustive]`: the variant set is a closed
-/// vocabulary, and `ocx_cli` matches on it from another crate — an added alias
-/// should break those matches rather than fall into a wildcard.
+/// Not `#[non_exhaustive]`: an added alias must break `ocx_cli`'s matches, not fall into a wildcard.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PredicateType {
     CycloneDx,
@@ -85,28 +78,18 @@ impl PredicateType {
     /// Wraps `predicate` the way cosign wraps a custom predicate, or returns it
     /// unchanged for every other type.
     ///
-    /// The wrapper is built around the verbatim slice, so the wrapped form
-    /// embeds the caller's original bytes too — whatever whitespace, key order
-    /// and number spelling the predicate file held is what gets signed.
-    ///
-    /// The decision is made on the resolved URI rather than the variant, so a
-    /// caller spelling `--type https://cosign.sigstore.dev/attestation/v1` in
-    /// full gets the same wrapper the `custom` alias gets, as it does in cosign.
+    /// Decided on the resolved URI, so a full custom URI wraps like the `custom` alias, as in cosign.
     ///
     /// # Errors
     ///
-    /// [`serde_json::Error`] if the wrapper cannot be serialized. Unreachable
-    /// for the shape written here — a borrowed [`RawValue`] and a `String` — but
-    /// returned rather than asserted, because the alternative is a panic in
-    /// library code.
+    /// [`serde_json::Error`] if the wrapper cannot be serialized (unreachable in practice).
     pub fn wrap(&self, predicate: &RawValue, now: DateTime<Utc>) -> Result<Box<RawValue>, serde_json::Error> {
         if self.uri() != URI_CUSTOM {
             return Ok(predicate.to_owned());
         }
         serde_json::value::to_raw_value(&CosignPredicate {
             data: predicate,
-            // Seconds precision and a literal `Z`, which is what Go's
-            // `time.RFC3339` produces on the cosign side.
+            // Seconds and a literal `Z`, matching Go's `time.RFC3339` on the cosign side.
             timestamp: now.to_rfc3339_opts(SecondsFormat::Secs, true),
         })
     }
@@ -127,10 +110,7 @@ impl FromStr for PredicateType {
             "vuln" => Self::Vuln,
             "openvex" => Self::OpenVex,
             "custom" => Self::Custom,
-            // Parsed only to establish that this is an absolute URI; the
-            // caller's own spelling is what gets stored, because `Url` would
-            // normalize it (a bare host gains a trailing slash) and the
-            // predicateType is published, annotated and hashed.
+            // Store the caller's spelling: `Url` normalizes it, and the predicateType is published and hashed.
             _ if url::Url::parse(value).is_ok() => Self::Uri(value.to_owned()),
             _ => {
                 return Err(PredicateTypeParseError {
@@ -141,10 +121,7 @@ impl FromStr for PredicateType {
     }
 }
 
-/// cosign's wrapper for a custom predicate.
-///
-/// The field names are capitalized because Go marshals exported struct fields
-/// under their own names and this shape is on the wire.
+/// cosign's wrapper for a custom predicate; the capitalized names are Go's wire shape.
 #[derive(Debug, Serialize)]
 struct CosignPredicate<'a> {
     #[serde(rename = "Data")]
@@ -153,41 +130,17 @@ struct CosignPredicate<'a> {
     timestamp: String,
 }
 
-/// Returns the SLSA builder identity, dispatched on the resolved provenance
-/// version.
-///
-/// v0.2 puts it at `builder.id`; v1 moved it to `runDetails.builder.id`. The two
-/// schemas share no path, so a single accessor would be wrong for one of the two
-/// shapes verify accepts. `None` means the field is absent or unreadable, which
-/// a `builder`-carrying policy must treat as a refusal rather than a skip —
-/// otherwise the pin is silently inert on exactly the documents it exists for.
 /// Whether `predicate_type` names a SLSA provenance predicate.
 ///
-/// Dispatches on the resolved URI, not the variant, so a caller spelling
-/// `Uri("https://slsa.dev/provenance/v0.2")` in full is provenance exactly as
-/// the `slsaprovenance02` alias is — the same rule [`builder_id`] and
-/// [`PredicateType::wrap`] follow.
-///
-/// Separate from `builder_id(..).is_some()`, which cannot tell "not provenance"
-/// from "provenance carrying no readable builder". The trust policy's `builder`
-/// pin needs both answers and treats them oppositely: the first is out of the
-/// pin's scope, the second is a refusal.
+/// Not `builder_id(..).is_some()`: a `builder` pin skips non-provenance but refuses provenance without a builder.
 pub fn is_provenance(predicate_type: &PredicateType) -> bool {
     matches!(predicate_type.uri(), URI_SLSA_PROVENANCE_V02 | URI_SLSA_PROVENANCE_V1)
 }
 
-/// Whether `predicate_type` resolves to a SLSA provenance URI **below** v1.0.
+/// Whether `predicate_type` resolves to a SLSA provenance URI below v1.0 — the attach-side floor.
 ///
-/// The attach-side floor ([#102](https://github.com/ocx-sh/ocx/issues/102),
-/// checklist row 21) refuses exactly this set. It lives here rather than in the
-/// pipeline so the URI literals stay in one file: `slsaprovenance`,
-/// `slsaprovenance02` and a full `Uri("https://slsa.dev/provenance/v0.2")` all
-/// resolve to the same URI, and a floor matching on variants would let the
-/// third through.
-///
-/// Narrower than [`is_provenance`], which the verify-side `builder` pin uses:
-/// verify still accepts v0.2 from external producers, because cosign writes it.
-/// The floor is attach-only.
+/// Matches the URI, not variants, or a full v0.2 URI slips past the floor.
+/// Attach-only: verify still accepts v0.2, which cosign writes.
 pub(crate) fn is_provenance_below_v1(predicate_type: &PredicateType) -> bool {
     predicate_type.uri() == URI_SLSA_PROVENANCE_V02
 }
@@ -195,17 +148,8 @@ pub(crate) fn is_provenance_below_v1(predicate_type: &PredicateType) -> bool {
 /// The `artifactType` an **unsigned** SBOM referrer carries for this predicate
 /// type, or `None` when the type is not an SBOM at all.
 ///
-/// An unsigned attach has no DSSE envelope to carry a `predicateType`, so the
-/// referrer is typed by the document's own media type instead — what `cosign
-/// attach sbom`, `oras attach` and `syft` all write. `None` is the entire floor
-/// on that path: a predicate with no SBOM media type has nowhere to record what
-/// it is, and is refused rather than published as an untyped blob.
-///
-/// The one dispatch in this file that reads the **variant** rather than the
-/// resolved URI, and it has to: `spdx` and `spdxjson` share one predicateType
-/// URI and do not share a serialization, so the URI cannot tell tag-value text
-/// from JSON. A full-URI spelling of the SPDX predicate resolves to the JSON
-/// form — the one every producer in the wild writes.
+/// `None` is the whole unsigned-attach floor: a non-SBOM predicate is refused, not published untyped.
+/// Reads the variant, not the URI: `spdx` and `spdxjson` share a URI but not a serialization.
 pub(crate) fn sbom_artifact_type(predicate_type: &PredicateType) -> Option<&'static str> {
     match predicate_type {
         PredicateType::Spdx => Some(SBOM_SPDX_TEXT),
@@ -221,17 +165,7 @@ pub(crate) fn sbom_artifact_type(predicate_type: &PredicateType) -> Option<&'sta
 /// The `predicateType` URI an unsigned referrer's `artifactType` stands for, or
 /// `None` when it is not an SBOM type.
 ///
-/// The inverse of [`sbom_artifact_type`] over the URIs it can express — not over
-/// its inputs, because the two SPDX serializations collapse onto one URI. This
-/// is what labels an unverified listing entry and what `--type` narrows against,
-/// so an unsigned entry is narrowed by exactly the value a signed one carries.
-///
-/// **Wider than [`sbom_artifact_type`]'s range on purpose.** Reading is parity
-/// with what is in registries, writing is a wire format OCX owns: cosign's own
-/// two extra spellings are accepted here (`media_types`' measured table) and
-/// never emitted. A serialization the URI cannot express is not lost by that —
-/// `predicateType` names the *document kind*, and the layer's media type stays
-/// the statement of how it is serialized.
+/// Wider than [`sbom_artifact_type`]'s range on purpose: cosign's two extra spellings are read, never emitted.
 pub(crate) fn sbom_predicate_type_uri(artifact_type: &str) -> Option<&'static str> {
     match artifact_type {
         SBOM_CYCLONEDX | COSIGN_SBOM_CYCLONEDX_XML => Some(URI_CYCLONEDX),
@@ -240,6 +174,9 @@ pub(crate) fn sbom_predicate_type_uri(artifact_type: &str) -> Option<&'static st
     }
 }
 
+/// Returns the SLSA builder identity, dispatched on the resolved provenance version.
+///
+/// A `builder`-pinning caller must refuse on `None` (absent or unreadable), or the pin is silently inert.
 pub fn builder_id<'a>(predicate_type: &PredicateType, predicate: &'a serde_json::Value) -> Option<&'a str> {
     match predicate_type.uri() {
         URI_SLSA_PROVENANCE_V1 => predicate.get("runDetails")?.get("builder")?.get("id")?.as_str(),
@@ -249,10 +186,6 @@ pub fn builder_id<'a>(predicate_type: &PredicateType, predicate: &'a serde_json:
 }
 
 /// The spelling `--type` carried, when it was neither a cosign alias nor a URI.
-///
-/// Carries `found` structurally rather than pre-formatting a message, so a
-/// caller can fold it into its own typed error. Today there is one: clap's
-/// value parser, which renders this as a usage failure (exit 64).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unknown predicate type `{found}`: expected an absolute URI or one of {known}", known = PredicateType::ALIASES.join(", "))]
 pub struct PredicateTypeParseError {

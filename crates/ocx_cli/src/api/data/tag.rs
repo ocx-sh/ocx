@@ -41,9 +41,7 @@ impl Tags {
     }
 }
 
-/// Collect a package map into a `BTreeMap` (sorted keys) with each value list
-/// sorted lexically, so both the table renderer and the JSON serializer emit a
-/// deterministic, reproducible order regardless of the incoming hash order.
+/// Sorts keys and value lists so table and JSON output do not follow hash order.
 fn into_sorted(packages: HashMap<String, impl IntoIterator<Item = String>>) -> BTreeMap<String, Vec<String>> {
     packages
         .into_iter()
@@ -65,8 +63,6 @@ pub enum TagsData {
 }
 
 impl Tags {
-    /// The plain table's second-column header — the only thing the three
-    /// [`TagsData`] variants disagree about.
     fn plain_header(&self) -> &'static str {
         match &self.packages {
             TagsData::Tags(_) => "Tag",
@@ -75,24 +71,14 @@ impl Tags {
         }
     }
 
-    /// The plain table's column-major rows, already neutralized (CWE-150).
-    ///
-    /// Package names and tag/platform/variant values are read off a source's
-    /// index documents, so they are foreign-authored. Split out of
-    /// [`Printable::print_plain`] so a hostile fixture can be asserted on the
-    /// rows themselves rather than on a count of sanitizer calls in the source.
-    ///
-    /// `theme` is taken as an argument because the second column is themed: the
-    /// sanitizer runs on the value going **in**, never on `theme.tag`'s output,
-    /// which is the theme's own ANSI and would be stripped instead of the
-    /// attack. A test passes the plain theme so the rows carry no escapes of
-    /// their own.
+    /// Column-major rows, neutralized (CWE-150): names and values are index-authored.
     fn plain_rows(&self, theme: &ocx_console::Theme) -> [Vec<String>; 2] {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         let (TagsData::Tags(packages) | TagsData::Platforms(packages) | TagsData::Variants(packages)) = &self.packages;
         for (package, values) in packages {
             for value in values {
                 rows[0].push(sanitize_for_terminal(package));
+                // Sanitize before `theme.tag`, never after, or its own ANSI is stripped instead of the attack.
                 rows[1].push(theme.tag(sanitize_for_terminal(value)));
             }
         }

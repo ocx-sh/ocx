@@ -2,18 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! The `RunResult` value returned by `ocx.run`.
-//!
-//! Exposed to scripts as a typed Starlark value with attributes `exit_code`,
-//! `stdout`, `stderr`, `duration_ms`, `truncated`. Immutable. `truncated` is
-//! `true` iff stdout or stderr hit the capture cap. A signal-killed child
-//! reports the conventional `128 + signal` exit code.
-//!
-//! Two pieces:
-//! - [`RunResult`] — internal data carrier, used by the host (`HostState`,
-//!   `RunSummary`).
-//! - [`RunResultValue`] — Starlark wrapper. `#[starlark_value]` impl exposes
-//!   the five attributes via `get_attr` with declared shape; replaces the
-//!   anonymous `AllocStruct` path the host fn used previously.
 
 use std::fmt;
 
@@ -21,16 +9,10 @@ use allocative::{Allocative, Visitor};
 use starlark::any::ProvidesStaticType;
 use starlark::values::{AllocValue, Heap, NoSerialize, StarlarkValue, Value, starlark_value};
 
-/// Maximum bytes captured per stream (stdout/stderr) before truncation.
-///
-/// Output beyond this cap is discarded and [`RunResult::truncated`] is set so
-/// a runaway child can never OOM the interpreter.
+/// Maximum bytes captured per stream; the cap keeps a runaway child from exhausting memory.
 pub(super) const OUTPUT_CAP_BYTES: usize = 10 * 1024 * 1024;
 
 /// Captured outcome of one `ocx.run` invocation.
-///
-/// The fields are the v1 contract surface; the Starlark wrapper that exposes
-/// them as typed attributes is [`RunResultValue`].
 #[derive(Debug, Clone)]
 pub(super) struct RunResult {
     /// Child exit code (or `128 + signal` when signal-killed).
@@ -46,10 +28,7 @@ pub(super) struct RunResult {
 }
 
 impl RunResult {
-    /// Builds a captured run result. Callers cap `stdout`/`stderr` at
-    /// [`OUTPUT_CAP_BYTES`] and pass `truncated=true` when either stream hit
-    /// the cap (the cap + truncation flag are computed by the spawn path, not
-    /// re-derived here — this constructor only carries the values).
+    /// Builds a run result; the caller has already applied [`OUTPUT_CAP_BYTES`] and set `truncated`.
     pub(super) fn new(exit_code: i32, stdout: String, stderr: String, duration_ms: u64, truncated: bool) -> Self {
         Self {
             exit_code,
@@ -60,9 +39,7 @@ impl RunResult {
         }
     }
 
-    /// Allocates this result as a typed Starlark value with attribute access
-    /// (`r.exit_code`, `r.stdout`, …). Wraps a [`RunResultValue`] — the
-    /// declared shape replaces the previous anonymous `AllocStruct` path.
+    /// Allocates this result as a typed Starlark value.
     pub(super) fn alloc<'v>(&self, heap: &'v starlark::values::Heap) -> starlark::values::Value<'v> {
         heap.alloc(RunResultValue {
             exit_code: self.exit_code,
@@ -75,13 +52,6 @@ impl RunResult {
 }
 
 /// Starlark-facing wrapper around a captured [`RunResult`].
-///
-/// Exposes the five v1 contract attributes via `get_attr`; `dir_attr` lists
-/// them for tooling that wants to enumerate. `Allocative` is implemented
-/// manually (cheap: a `String` already reports its own allocation via
-/// `enter_field`, but the strings are author-supplied script output and the
-/// whole value lives for one `ocx.run`-to-end-of-script duration — the simple
-/// `enter_self_sized` shape is enough for the firewall use case).
 #[derive(Clone, Debug, ProvidesStaticType, NoSerialize)]
 pub(super) struct RunResultValue {
     exit_code: i32,

@@ -1,37 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Layer assembly walker.
-//!
-//! Mirrors a layer's `content/` directory tree into a destination directory
-//! (typically `packages/{P}/content/`) using hardlinks for files and
-//! recreated symlinks for Unix symlinks. Windows symlinks in layers are
-//! currently unsupported — see issue for "Windows layer symlink support".
-//!
-//! ## Invariant: Target Preservation
-//!
-//! The walker MUST preserve symlink target strings byte-for-byte from the
-//! layer. It never dereferences a layer symlink to compute an absolute path,
-//! never rewrites a relative target, and never constructs a target from the
-//! destination path (which would break after the `temp → packages/` atomic
-//! rename). See `symlink_with_temp_path_in_target_breaks_after_rename` in
-//! `symlink.rs` for a unit test that locks in why this matters.
-//!
-//! ## Invariant: Hardlink Sharing
-//!
-//! After assembly, every regular file in the destination shares an inode
-//! with its source in `layers/{digest}/content/`. This dedup is the whole
-//! point of the walker — verified by `hardlink_survives_directory_rename`
-//! in `hardlink.rs` and by E12/E13 acceptance tests in the plan.
-//!
-//! ## Concurrency
-//!
-//! The walker processes directories in parallel via a semaphore-bounded
-//! JoinSet. Each task owns one `(src_dir, dest_dir)` pair and processes its
-//! entries sequentially — hardlink syscalls are fast and serializing inside
-//! a single directory keeps per-task state tiny. Concurrent tasks never
-//! write to the same destination path because distinct tasks are rooted at
-//! distinct `dest_dir`s.
+//! Mirrors layer `content/` trees into a package with hardlinked files and verbatim Unix symlinks.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -47,17 +17,9 @@ use ocx_util::fs::path::LayerPlacement;
 
 type Result<T> = std::result::Result<T, AssembleError>;
 
-/// What assembling a layer's content tree can fail with.
-///
-/// Two shapes, because assembly classifies two ways. Nearly every site names a
-/// path and an io cause and became `crate::Error::InternalFile` — a flat
-/// `IoError` (74). The one exception is the destination symlink-safety check,
-/// which delegated through `Error::SymlinkWalk` so an ancestor-symlink refusal
-/// stays a `UsageError` (64). `From<AssembleError> for crate::Error`
-/// reconstructs exactly those two variants, so no exit code moves.
+/// Failure assembling a layer tree; `SymlinkWalk` stays its own arm so a symlink refusal exits 64, not 74.
 #[derive(Debug, thiserror::Error)]
 pub enum AssembleError {
-    /// A file operation failed on a named path — the `InternalFile` shape.
     #[error(transparent)]
     File(#[from] FileError),
 
@@ -66,96 +28,58 @@ pub enum AssembleError {
     #[error(transparent)]
     SymlinkWalk(ocx_util::fs::SymlinkWalkError),
 
-    /// A symlink target failed the escape check the archive extractor owns.
     #[error(transparent)]
     Archive(#[from] ocx_util::archive::Error),
 }
 
-/// `crate::error::file_error`'s shape, narrowed to this module's own error.
-///
-/// Every call site below named a path and an io cause; keeping the spelling
-/// keeps the move mechanical, and the `From` impl above puts the value back
-/// into the variant those sites used to build directly.
 fn file_error(path: impl AsRef<std::path::Path>, cause: std::io::Error) -> AssembleError {
     AssembleError::File(FileError::new(path, cause))
 }
 
-/// Typed errors for the layer assembly walker.
-///
-/// Each variant represents a distinct failure mode that callers can
-/// programmatically distinguish without parsing error messages. All
-/// variants are wrapped into [`AssembleError::File`] at the
-/// public API boundary so the walker's return type stays `Result`.
+/// Walker failures, carried inside [`AssembleError::File`] via `io::Error::other`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum AssemblyError {
-    /// The `source_content` path is not a directory.
     #[error("source_content must be a directory")]
     SourceNotDirectory,
 
-    /// The parent of `dest_content` does not exist.
     #[error("dest_content.parent() must exist")]
     DestinationParentMissing,
 
-    /// The walker processed more entries than the configured cap.
     #[error("walker entry limit exceeded")]
     EntryLimitExceeded,
 
-    /// The directory tree exceeds the maximum nesting depth.
     #[error("walker depth exceeded")]
     DepthExceeded,
 
-    /// The scheduler channel closed unexpectedly.
     #[error("walker scheduler closed")]
     SchedulerClosed,
 
-    /// A spawned walker task panicked.
     #[error("walker task panicked: {0}")]
     TaskPanicked(#[source] tokio::task::JoinError),
 
-    /// Two layers — or one layer's two post-strip subtrees — contribute
-    /// conflicting entries at the same destination path. The inner
-    /// `LayerOverlapKind` distinguishes an intra-layer self-collapse from a
-    /// cross-layer overlap (F1) so the message names the layer(s) at fault; it
-    /// never affects the fail-closed policy or placement.
+    /// Two layers, or one layer's two post-strip subtrees, contribute the same destination path.
     #[error("layer overlap: {0}")]
     LayerOverlap(LayerOverlapKind),
 
-    /// Layer symlinks are not supported on Windows.
     #[error("layer symlinks are not supported on Windows")]
     WindowsSymlinksUnsupported,
 
-    /// The per-layer placement array length does not match the source count —
-    /// an internal caller-invariant violation for
-    /// [`assemble_from_layers_with_layouts`].
     #[error("layer placement arity mismatch: {placements} placements for {sources} sources")]
     LayoutArityMismatch { sources: usize, placements: usize },
 }
 
-/// Which shape of layer overlap fired. Used purely to word the
-/// [`AssemblyError::LayerOverlap`] message (F1) — the fail-closed collision
-/// policy is identical for both.
+/// Which overlap fired; wording only, the fail-closed policy is identical.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LayerOverlapKind {
-    /// One layer's two post-strip subtrees collapse onto a single destination
-    /// path (e.g. `a/bin/tool` + `b/bin/tool` under `strip=1`). The strip depth
-    /// that produced the collapse is named so the publisher can reduce it or
-    /// restructure the layer.
     #[error("intra-layer collision — layer {layer_idx} collapses two subtrees onto one path after strip={strip}")]
     IntraLayer { layer_idx: usize, strip: u8 },
 
-    /// Two or more distinct layers contribute the same destination path. Layers
-    /// merge, never override, so the publisher must strip or prefix them apart.
     #[error("cross-layer collision — layers {layer_indices:?} contribute the same path")]
     CrossLayer { layer_indices: Vec<usize> },
 }
 
-/// Classifies an overlap as intra- or cross-layer from the colliding
-/// contributors' originating layer indices (F1 — error message only). One
-/// distinct layer ⇒ intra-layer self-collapse (the strip depth that produced it
-/// is read from the contributors, all of which share that layer's strip); two or
-/// more ⇒ cross-layer.
 fn overlap_kind(contributors: &[Contributor]) -> LayerOverlapKind {
     let mut layer_indices: Vec<usize> = contributors.iter().map(|c| c.layer_idx).collect();
     layer_indices.sort_unstable();
@@ -169,40 +93,21 @@ fn overlap_kind(contributors: &[Contributor]) -> LayerOverlapKind {
     }
 }
 
-/// Maximum number of filesystem entries the walker will process per
-/// `assemble_from_layer` call. Layers already extract to disk via `archive`
-/// (which has its own entry cap); this is a defence-in-depth bound that
-/// prevents a malformed layer from amplifying during assembly.
+/// Defence-in-depth bound so a malformed layer cannot amplify during assembly.
 const MAX_WALK_ENTRIES: usize = 10_000_000;
 
-/// Maximum depth of the directory walk (nesting budget). A layer that pushes
-/// past this bound is rejected rather than allowed to consume unbounded
-/// walker state.
 const MAX_WALK_DEPTH: usize = 4096;
 
-/// Default number of directory-level tasks allowed to run concurrently.
-/// Mirrors the `utility::fs::dir_walker` default — directory fan-out is
-/// IO-bound, so 50 in-flight tasks keeps the scheduler saturated without
-/// exhausting file descriptors.
 const DEFAULT_CONCURRENCY: usize = 50;
 
-/// Summary of what the walker did during a single `assemble_from_layer`
-/// invocation. Useful for progress reporting and as a test observable.
+/// What one assembly did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AssemblyStats {
-    /// Regular files placed via `hardlink::create`.
     pub files_hardlinked: usize,
-    /// Intra-layer symlinks recreated verbatim in the destination (Unix).
     pub symlinks_recreated: usize,
-    /// Real directories created in the destination tree.
     pub dirs_created: usize,
-    /// Total bytes across the files that were hardlinked. Informational.
     pub bytes_hardlinked: u64,
-    /// Files and symlinks dropped because a package-wide `strip` collapsed
-    /// their path to empty (entry at depth ≤ `strip`). Zero on the verbatim
-    /// (`strip == 0`) path. Populated by the strip-aware assembler; a whole
-    /// layer that strips to nothing surfaces here as a non-zero drop count
-    /// with an empty destination contribution.
+    /// Files and symlinks at depth ≤ `strip`, dropped because their path stripped to empty.
     pub entries_stripped_to_empty: usize,
 }
 
@@ -216,98 +121,40 @@ impl AssemblyStats {
     }
 }
 
-/// Walks `source_content` depth-first and mirrors its tree into
-/// `dest_content`. Regular files are hardlinked; directories are created as
-/// real directories; symlinks are recreated verbatim on Unix.
+/// Mirrors `source_content` into `dest_content`, creating it if missing (its parent must exist).
 ///
-/// `source_content` is typically `layers/{digest}/content/` and
-/// `dest_content` is typically a not-yet-existing `content/` directory
-/// inside a package's temp directory (which is later renamed into
-/// `packages/`).
-///
-/// `dest_content` itself is created by the walker if missing. Its parent
-/// must already exist. `dest_content` may already contain entries from a
-/// previous `assemble_from_layer` call against a different source layer —
-/// the walker merges non-overlapping trees. If two layers contribute the
-/// same path the walker errors with `AlreadyExists`: files collide via
-/// `hardlink::create` (underlying `link(2)` returns `EEXIST`), symlinks
-/// collide via `symlink::create`, and a directory colliding with a non-
-/// directory is detected explicitly and surfaces a "layer overlap" error.
-///
-/// On error, `dest_content` may contain partially-assembled files; callers
-/// should assemble into a temp directory they can discard.
-///
-/// Returns an [`AssemblyStats`] summarizing what was placed.
+/// On error `dest_content` may hold partial output, so assemble into a directory you can discard.
 ///
 /// # Errors
 ///
-/// - `Error::InternalFile` wrapping the underlying `io::Error` if a
-///   filesystem operation fails. Cross-device hardlink attempts surface as
-///   `io::ErrorKind::CrossesDevices` — see the `$OCX_HOME` single-volume
-///   invariant in the plan.
-/// - Walker invariant violations (entry cap, depth cap, scheduler failure)
-///   surface as `Error::InternalFile` wrapping an [`AssemblyError`] via
-///   `io::Error::other`. Callers can downcast the `io::Error` source to
-///   `AssemblyError` for programmatic matching.
-/// - Windows-only: [`AssemblyError::WindowsSymlinksUnsupported`] if the
-///   walker encounters a symlink inside the layer.
+/// A filesystem failure (a cross-device hardlink is `CrossesDevices`), or an [`AssemblyError`] inside [`AssembleError::File`].
 pub async fn assemble_from_layer(source_content: &Path, dest_content: &Path) -> Result<AssemblyStats> {
     assemble_from_layers(&[source_content], dest_content).await
 }
 
-/// Assembles multiple overlap-free layers into a single destination tree.
+/// Assembles layers as a merged union: directories merge, a file or symlink must come from exactly one layer.
 ///
-/// Walks all layers as a merged union — at each directory level, entries
-/// from all contributing layers are read, merged by name, and placed into
-/// `dest_content`. Non-directory entries (files, symlinks) must appear in
-/// exactly one layer; directories merge across layers and recurse with
-/// only the layers that contribute them.
-///
-/// `sources` ordering is preserved: layer 0 is the base, layer N is the
-/// top. With overlap-free semantics ordering doesn't affect the result,
-/// but it determines error messages and enables future shadowing.
-///
-/// Known limitation: on case-insensitive filesystems (macOS HFS+/APFS),
-/// entries differing only in case (e.g., `Bin/tool` vs `bin/tool`) are
-/// not detected as overlaps by the in-memory merge — the collision
-/// surfaces as `AlreadyExists` from the filesystem instead of a clean
-/// `LayerOverlap` error.
+/// On a case-insensitive filesystem a case-only overlap surfaces as `AlreadyExists`, not `LayerOverlap`.
 ///
 /// # Errors
 ///
-/// - `AssemblyError::LayerOverlap` — two layers contribute same non-directory entry or type mismatch
-/// - `AssemblyError::SourceNotDirectory` — any source path is not a directory
-/// - `AssemblyError::DestinationParentMissing` — `dest_content.parent()` doesn't exist
-/// - `AssemblyError::EntryLimitExceeded` / `DepthExceeded` — resource caps
-/// - `AssemblyError::WindowsSymlinksUnsupported` — symlink in any layer on Windows
+/// As [`assemble_from_layer`], plus [`AssemblyError::LayerOverlap`].
 pub async fn assemble_from_layers(sources: &[&Path], dest_content: &Path) -> Result<AssemblyStats> {
     assemble_from_layers_with_cap(sources, dest_content, MAX_WALK_ENTRIES).await
 }
 
-/// Assembles overlap-free layers, applying each layer's [`LayerPlacement`]
-/// (strip then output prefix) before the overlap merge.
+/// [`assemble_from_layers`] after applying each layer's [`LayerPlacement`] (strip, then prefix); overlap is judged post-placement.
 ///
-/// Supersedes the Part-1 scalar strip entrypoint. `placements.len()` must equal
-/// `sources.len()` — the per-layer array makes arity meaningful, so a mismatch
-/// is [`AssemblyError::LayoutArityMismatch`]. Each `placements[i].strip` drops
-/// the leading path components of `sources[i]`; each non-empty
-/// `placements[i].prefix` places the layer's post-strip tree under a validated
-/// subdirectory. Overlap detection runs on the already-transformed destination
-/// paths.
+/// Post-strip collisions fail closed: the tar order that would pick a winner is gone by now.
 ///
 /// # Errors
 ///
-/// Same as [`assemble_from_layers`], plus [`AssemblyError::LayoutArityMismatch`]
-/// when `placements.len() != sources.len()`, and [`AssemblyError::LayerOverlap`]
-/// when two transformed destinations collide (cross-layer or one layer's two
-/// post-strip subtrees). Post-strip collisions fail closed because assemble-time
-/// strip has lost the tar archive order that would define a deterministic winner.
+/// As [`assemble_from_layers`], plus [`AssemblyError::LayoutArityMismatch`] when the slices differ in length.
 pub async fn assemble_from_layers_with_layouts(
     sources: &[&Path],
     placements: &[LayerPlacement],
     dest_content: &Path,
 ) -> Result<AssemblyStats> {
-    // The per-layer array makes arity meaningful — a mismatch is a caller bug.
     if placements.len() != sources.len() {
         return Err(file_error(
             dest_content,
@@ -320,37 +167,27 @@ pub async fn assemble_from_layers_with_layouts(
 
     prepare_destination(sources, dest_content).await?;
 
-    // ── Early return: no sources to walk, empty content/ is the result. ─────
     if sources.is_empty() {
         return Ok(AssemblyStats::default());
     }
 
     let max_entries = MAX_WALK_ENTRIES;
-    // Shared across the strip expansion below and the merge walker, so a
-    // malformed layer cannot amplify across either phase.
+    // One counter across expansion and merge, or a malformed layer amplifies between the phases.
     let entries_seen = Arc::new(AtomicUsize::new(0));
     let mut stats = AssemblyStats::default();
     let mut seed_roots: Vec<LayerSource> = Vec::new();
 
     for (layer_idx, (src, placement)) in sources.iter().zip(placements).enumerate() {
-        // Guard a non-empty prefix BEFORE any create_dir/hardlink runs (D9):
-        // re-validate it against the destination root (registries are untrusted,
-        // D10) and refuse a destination whose ancestor chain resolves through a
-        // symlink. This runs before the walker, so nothing is written when it
-        // fails.
+        // Validated before anything is written: the prefix comes from an untrusted registry.
         let virtual_prefix: Vec<OsString> = if placement.prefix.is_empty() {
             Vec::new()
         } else {
             let resolved = ocx_util::fs::path::join_under_root(dest_content, placement.prefix.as_path())
                 .map_err(|e| file_error(dest_content, std::io::Error::other(e)))?;
-            // Bound the walk at `dest_content`: OCX's store root above it is
-            // trusted (a symlinked `$OCX_HOME` is a supported setup); only the
-            // untrusted prefix-created portion below it is checked. Route the
-            // error through the delegating `Error::SymlinkWalk` variant so a
-            // symlinked-intermediate-dir refusal classifies as UsageError (64),
-            // not the IoError (74) that `file_error`/`io::Error::other` forced.
+            // Bounded at `dest_content`, or a symlinked `$OCX_HOME` is refused.
             ocx_util::fs::refuse_if_symlink_in_path(&resolved, Some(dest_content))
                 .await
+                // `SymlinkWalk`, not `file_error`, or the refusal exits 74 instead of 64.
                 .map_err(AssembleError::SymlinkWalk)?;
             placement
                 .prefix
@@ -360,8 +197,6 @@ pub async fn assemble_from_layers_with_layouts(
                 .collect()
         };
 
-        // Apply the layer's strip, then tag each post-strip root with the
-        // prefix to synthesize above it.
         let (roots, dropped) = expand(layer_idx, src, placement.strip, &entries_seen, max_entries).await?;
         stats.entries_stripped_to_empty += dropped;
         for (idx, path) in roots {
@@ -379,23 +214,11 @@ pub async fn assemble_from_layers_with_layouts(
     Ok(stats)
 }
 
-/// Bounded seed-time strip expansion for a single layer.
-///
-/// Drops the leading `strip` path components of `src`, returning
-/// `(post_strip_roots, entries_stripped_to_empty)`. Each root directory is
-/// tagged with the *original* `layer_idx` (used only to word intra- vs
-/// cross-layer overlap errors — never for placement). For `strip == 0` the
-/// single root is `src` itself and nothing is read. Files and symlinks
-/// encountered at depth ≤ `strip` strip to an empty path and are skipped; each
-/// is counted (both into the returned drop count and against
-/// `entries_seen`/`max_entries`) so a malformed layer cannot amplify during
-/// expansion. Expansion depth is bounded by `strip` (`u8`).
+/// Drops `strip` leading components of `src`, returning `(post_strip_roots, entries_stripped_to_empty)`.
 ///
 /// # Errors
 ///
-/// [`AssemblyError::EntryLimitExceeded`] when the entry cap is exceeded, or an
-/// I/O error (wrapped in [`crate::Error::InternalFile`]) if a directory read
-/// fails.
+/// [`AssemblyError::EntryLimitExceeded`], or a failed directory read.
 async fn expand(
     layer_idx: usize,
     src: &Path,
@@ -403,8 +226,6 @@ async fn expand(
     entries_seen: &AtomicUsize,
     max_entries: usize,
 ) -> Result<(Vec<(usize, PathBuf)>, usize)> {
-    // Base case: no more components to strip — `src` itself is a post-strip
-    // root. Not read here; the merge walker reads it and counts its entries.
     if strip == 0 {
         return Ok((vec![(layer_idx, src.to_path_buf())], 0));
     }
@@ -425,9 +246,7 @@ async fn expand(
 
         let child = entry.path();
 
-        // Classify like `process_directory`: a symlink (incl. NTFS junction)
-        // is a non-directory even when `file_type()` reports a directory. A
-        // non-directory at depth ≤ strip strips to empty and is dropped.
+        // `is_link` first: a Windows junction reports as a directory but must not be descended.
         if ocx_util::fs::symlink::is_link(&child) {
             dropped += 1;
             continue;
@@ -436,7 +255,6 @@ async fn expand(
         let file_type = entry.file_type().await.map_err(|e| file_error(&child, e))?;
 
         if file_type.is_dir() {
-            // Recurse one level deeper; async recursion needs an explicit box.
             let (child_roots, child_dropped) =
                 Box::pin(expand(layer_idx, &child, strip - 1, entries_seen, max_entries)).await?;
             roots.extend(child_roots);
@@ -444,24 +262,12 @@ async fn expand(
         } else if file_type.is_file() {
             dropped += 1;
         }
-        // Other entry types (sockets, fifos, devices) are skipped silently, as
-        // in `process_directory` — OCI layers should never contain them.
     }
 
     Ok((roots, dropped))
 }
 
-/// Validates every source is an existing directory and prepares `dest_content`.
-///
-/// `dest_content` is created if absent (its parent must already exist), even for
-/// zero sources — callers rely on `content/` existing after assembly (e.g.
-/// config-only packages with no layers).
-///
-/// # Errors
-///
-/// - [`AssemblyError::SourceNotDirectory`] if any source is not a directory.
-/// - [`AssemblyError::DestinationParentMissing`] if `dest_content.parent()`
-///   does not exist.
+/// Creates `dest_content` even for zero sources: layerless packages still need `content/`.
 async fn prepare_destination(sources: &[&Path], dest_content: &Path) -> Result<()> {
     for src in sources {
         let meta = tokio::fs::metadata(src).await.map_err(|e| file_error(src, e))?;
@@ -490,8 +296,6 @@ async fn prepare_destination(sources: &[&Path], dest_content: &Path) -> Result<(
     Ok(())
 }
 
-/// Internal multi-layer walker entry point with configurable entry cap.
-/// Exposed for tests so resource-limit checks can be exercised.
 async fn assemble_from_layers_with_cap(
     sources: &[&Path],
     dest_content: &Path,
@@ -499,14 +303,10 @@ async fn assemble_from_layers_with_cap(
 ) -> Result<AssemblyStats> {
     prepare_destination(sources, dest_content).await?;
 
-    // ── Early return: no sources to walk, empty content/ is the result. ─────
     if sources.is_empty() {
         return Ok(AssemblyStats::default());
     }
 
-    // Seed with the root directory set. Each root source is tagged with its
-    // layer index (its position in `sources`); the tag rides through recursion.
-    // Verbatim assembly applies no strip and no prefix (`LayerSource::rooted`).
     let seed_roots: Vec<LayerSource> = sources
         .iter()
         .enumerate()
@@ -516,16 +316,7 @@ async fn assemble_from_layers_with_cap(
     run_merge_walker(seed_roots, dest_content, entries_seen, max_entries).await
 }
 
-/// Runs the semaphore-bounded, directory-parallel merge walker over a set of
-/// layer-tagged root directories, mirroring them into `dest_content`.
-///
-/// `seed_roots` is the initial [`LayerSource`] set fed to the root level —
-/// either the verbatim layer roots (via [`LayerSource::rooted`]) or the
-/// post-strip, prefix-tagged roots built by [`assemble_from_layers_with_layouts`].
-/// Each source carries its own `strip` (error wording only, F1) and
-/// `virtual_prefix`. The shared `entries_seen` counter enforces `max_entries`
-/// across the whole walk (and, for the strip path, across the preceding
-/// expansion).
+/// Semaphore-bounded, directory-parallel merge of `seed_roots` into `dest_content`.
 async fn run_merge_walker(
     seed_roots: Vec<LayerSource>,
     dest_content: &Path,
@@ -545,7 +336,6 @@ async fn run_merge_walker(
     })
     .expect("rx alive");
 
-    // Walk-invariant context, cloned into each spawned directory task.
     let ctx = WalkContext {
         dest_root: dest_root.clone(),
         entries_seen,
@@ -556,7 +346,6 @@ async fn run_merge_walker(
     let mut stats = AssemblyStats::default();
 
     loop {
-        // Drain all pending spawn requests, subject to the semaphore.
         while let Ok(req) = rx.try_recv() {
             let permit = semaphore
                 .clone()
@@ -571,12 +360,10 @@ async fn run_merge_walker(
             });
         }
 
-        // Termination: no tasks running and no pending requests.
         if join_set.is_empty() {
             break;
         }
 
-        // Wait for either a task to complete OR a new request to arrive.
         tokio::select! {
             biased;
             Some(req) = rx.recv() => {
@@ -613,10 +400,6 @@ async fn run_merge_walker(
     Ok(stats)
 }
 
-/// Internal single-layer entry point with a configurable entry cap.
-/// Delegates to the multi-layer walker — single-layer is just `&[source]`.
-/// Exposed for tests so the resource-limit check can be exercised without
-/// materializing `MAX_WALK_ENTRIES` files on disk.
 #[cfg(test)]
 async fn assemble_from_layer_with_cap(
     source_content: &Path,
@@ -626,11 +409,6 @@ async fn assemble_from_layer_with_cap(
     assemble_from_layers_with_cap(&[source_content], dest_content, max_entries).await
 }
 
-/// Classification of a directory entry after `file_type()` resolution.
-///
-/// Used by `process_directory` to record each entry's kind during
-/// the collection phase so that the merge phase can pattern-match without
-/// redundant syscalls.
 #[derive(Debug)]
 enum EntryKind {
     Dir,
@@ -638,19 +416,9 @@ enum EntryKind {
     Symlink,
 }
 
-/// One source directory contributing to a destination level.
+/// One source directory at a destination level; `layer_idx` and `strip` word errors only, never placement.
 ///
-/// Carries the *original* `layer_idx` it descends from (preserved through
-/// recursion so the merge phase can word an overlap error as intra- vs
-/// cross-layer (F1) — never for placement), the layer's `strip` depth (used only
-/// to word an intra-layer collision message), and the output-prefix components
-/// still to be synthesized as virtual directories above it.
-///
-/// When `virtual_prefix` is non-empty the source does **not** read its `path`;
-/// instead it contributes a single synthetic directory entry named by the first
-/// remaining component, which merges by name with real directories and other
-/// synthetic dirs through the existing name-grouping walker. Once
-/// `virtual_prefix` is exhausted the source reads `path` as a real directory.
+/// While `virtual_prefix` is non-empty, `path` is not read: the source contributes one synthetic directory per component.
 #[derive(Debug)]
 struct LayerSource {
     layer_idx: usize,
@@ -660,8 +428,6 @@ struct LayerSource {
 }
 
 impl LayerSource {
-    /// A source rooted directly at `path` with no strip and no prefix to
-    /// synthesize (the verbatim `assemble_from_layers` seed).
     fn rooted(layer_idx: usize, path: PathBuf) -> Self {
         Self {
             layer_idx,
@@ -672,13 +438,6 @@ impl LayerSource {
     }
 }
 
-/// One contributor to a merged destination name during
-/// [`process_directory`]'s grouping phase.
-///
-/// Carries everything needed to (a) word an overlap error (`layer_idx`, `strip`)
-/// and (b) reconstruct a child [`LayerSource`] for a directory (`src_path`,
-/// `virtual_prefix`). `virtual_prefix` is non-empty only for a synthetic
-/// output-prefix directory; real entries always carry an empty one.
 #[derive(Debug)]
 struct Contributor {
     layer_idx: usize,
@@ -688,8 +447,6 @@ struct Contributor {
     virtual_prefix: Vec<OsString>,
 }
 
-/// Work item for the scheduler. Each request represents one directory level
-/// that needs to be walked across one or more source layers.
 #[derive(Debug)]
 struct SpawnRequest {
     src_dirs: Vec<LayerSource>,
@@ -697,12 +454,6 @@ struct SpawnRequest {
     depth: usize,
 }
 
-/// Walk-invariant context shared by every `process_directory` task: the
-/// destination root (error paths + symlink containment), the shared entry
-/// counter and its cap, and the scheduler channel for posting child directory
-/// levels. Per-layer `strip` rides on each [`LayerSource`] (error wording only,
-/// F1), not here. Cloned once per spawned task — every field is cheap to clone
-/// (an `Arc`, a sender handle, one `PathBuf`, and one scalar).
 #[derive(Clone)]
 struct WalkContext {
     dest_root: PathBuf,
@@ -711,11 +462,7 @@ struct WalkContext {
     join_set_tx: tokio::sync::mpsc::UnboundedSender<SpawnRequest>,
 }
 
-/// Processes one directory level across one or more source layers.
-///
-/// Reads entries from all `src_dirs`, merges by name into a `BTreeMap`,
-/// detects overlaps, and places files/symlinks. Directories are posted
-/// back to the scheduler with only the contributing layers.
+/// Merges one directory level across its source layers; each task owns a distinct `dest_dir`, so tasks never race on a path.
 async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<AssemblyStats> {
     let SpawnRequest {
         src_dirs,
@@ -730,19 +477,12 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
     } = ctx;
     let mut stats = AssemblyStats::default();
 
-    // ── Phase 1: Collect entries from all source layers. ────────────────────
     let mut merged: BTreeMap<OsString, Vec<Contributor>> = BTreeMap::new();
 
     for source in &src_dirs {
         let layer_idx = source.layer_idx;
         let strip = source.strip;
 
-        // A source that still has output-prefix components to synthesize does
-        // NOT read its directory: it contributes a single synthetic directory
-        // entry named by the first remaining component (carrying the tail), so
-        // the layer's tree lands under the prefix. That synthetic dir merges by
-        // name with real dirs and other synthetic dirs through the same grouping
-        // below — nested/overlapping cross-layer prefixes merge (or collide).
         if let Some((first, rest)) = source.virtual_prefix.split_first() {
             let prev = entries_seen.fetch_add(1, Ordering::Relaxed);
             if prev + 1 > max_entries {
@@ -776,9 +516,7 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
             let src_path = entry.path();
             let file_name = entry.file_name();
 
-            // `symlink::is_link` handles NTFS junctions on Windows, which
-            // `DirEntry::file_type` reports as plain directories — checking
-            // it first prevents misclassification.
+            // `is_link` first: `file_type` reports a Windows junction as a directory.
             if ocx_util::fs::symlink::is_link(&src_path) {
                 merged.entry(file_name).or_default().push(Contributor {
                     layer_idx,
@@ -810,18 +548,12 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
                     virtual_prefix: Vec::new(),
                 });
             }
-            // Other entry types (sockets, fifos, block/char devices) are
-            // skipped silently — OCI layers should never contain them.
         }
     }
 
-    // ── Phase 2: Process merged entries. ────────────────────────────────────
     for (name, contributors) in &merged {
         let dest_path = dest_dir.join(name);
 
-        // Partition into dirs and non-dirs. Directory contributors carry the
-        // fields needed to rebuild a child `LayerSource` (layer index, strip,
-        // real path, and any remaining synthetic prefix).
         let mut dirs: Vec<&Contributor> = Vec::new();
         let mut non_dirs: Vec<&Contributor> = Vec::new();
 
@@ -832,9 +564,6 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
             }
         }
 
-        // Overlap checks. Fail closed on any non-dir/non-dir duplicate or
-        // dir/non-dir mix (B2/F1). The colliding contributors' distinct layer
-        // indices word the error as intra- vs cross-layer.
         if non_dirs.len() > 1 || (!dirs.is_empty() && !non_dirs.is_empty()) {
             return Err(file_error(
                 &dest_path,
@@ -843,15 +572,9 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
         }
 
         if let Some(contributor) = non_dirs.first() {
-            // Single non-directory entry (always a real entry — synthetic prefix
-            // contributors are directories).
             match &contributor.kind {
                 EntryKind::File { size } => {
-                    // `dest_dir` is always pre-created: subdirectories are
-                    // created in the Dir branch below (or by the pre-condition
-                    // setup for the root `dest_content` dir). Skip the
-                    // `create_dir_all` inside `hardlink::create` to avoid one
-                    // redundant no-op syscall per file.
+                    // Safe only because every `dest_dir` is created before its request is posted.
                     crate::hardlink::create_in_existing_parent(&contributor.src_path, &dest_path)?;
                     stats.files_hardlinked += 1;
                     stats.bytes_hardlinked += size;
@@ -862,12 +585,7 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
                 EntryKind::Dir => unreachable!("dirs filtered out above"),
             }
         } else if !dirs.is_empty() {
-            // All contributors are directories (real and/or synthetic prefix) —
-            // create the merged directory. Handle AlreadyExists: dest may
-            // contain directories from a prior assemble_from_layer call
-            // (sequential multi-layer usage) or from manual pre-population.
-            // Accept if existing entry is a directory; error if it's a
-            // non-directory (type mismatch).
+            // An existing directory is accepted: a prior `assemble_from_layer` call may have created it.
             match tokio::fs::create_dir(&dest_path).await {
                 Ok(()) => {
                     stats.dirs_created += 1;
@@ -882,7 +600,6 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
                             std::io::Error::other(AssemblyError::LayerOverlap(overlap_kind(contributors))),
                         ));
                     }
-                    // Directory already exists — don't increment dirs_created.
                 }
                 Err(e) => return Err(file_error(&dest_path, e)),
             }
@@ -894,8 +611,6 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
                 ));
             }
 
-            // Post subdirectory request with only the contributing layers,
-            // preserving each one's layer index, strip, and remaining prefix.
             let child_src_dirs: Vec<LayerSource> = dirs
                 .iter()
                 .map(|contributor| LayerSource {
@@ -924,25 +639,9 @@ async fn process_directory(req: SpawnRequest, ctx: WalkContext) -> Result<Assemb
     Ok(stats)
 }
 
-/// Recreates a layer symlink in the destination tree.
+/// Copies the target verbatim, never rewritten, or a target built from the temp path dangles after the rename into `packages/`.
 ///
-/// On Unix, the target string is read verbatim from the layer and stored
-/// in the new symlink — no canonicalization, no parent-join, no rewriting.
-/// This preserves the target byte-for-byte so both relative and absolute
-/// symlinks behave identically before and after the `temp → packages/`
-/// atomic rename.
-///
-/// Defence-in-depth: the target is re-validated against `dest_root` via
-/// [`ocx_util::fs::symlink::validate_target`]. The archive extractor already rejects
-/// escaping symlinks at ingestion time, but revalidating here keeps the
-/// walker safe if any future code path populates `layers/.../content/`
-/// without going through `archive::extract`.
-///
-/// On Windows, intra-layer symlinks are currently unsupported. Both file and
-/// directory symlinks return [`AssemblyError::WindowsSymlinksUnsupported`] —
-/// native symlinks require `SeCreateSymbolicLinkPrivilege` / Developer Mode,
-/// and NTFS junctions are absolute-only and cannot preserve the walker's
-/// verbatim target-preservation invariant.
+/// Refused on Windows: native symlinks need a privilege and junctions cannot hold a relative target.
 #[cfg_attr(windows, allow(unused_variables))]
 async fn handle_symlink_entry(
     src_path: &Path,
@@ -952,19 +651,10 @@ async fn handle_symlink_entry(
 ) -> Result<()> {
     #[cfg(unix)]
     {
-        // Read the target string verbatim from the layer symlink.
         let target = tokio::fs::read_link(src_path)
             .await
             .map_err(|e| file_error(src_path, e))?;
-        // Defence-in-depth: relative targets that escape `dest_root` via
-        // `..` traversal are rejected. Absolute targets are left as-is —
-        // OCI layers legitimately use them to reference system libraries,
-        // and they cannot "escape" a destination root that does not
-        // contain them in the first place. The archive extractor is the
-        // primary trust boundary that filters absolute targets at layer
-        // ingestion; this check catches any relative traversal that slips
-        // through (or any future path that populates `layers/.../content/`
-        // without going through `archive::extract`).
+        // Defence behind the archive extractor for layers filled another way; absolute targets pass, layers use them for system libraries.
         if !target.is_absolute() {
             ocx_util::fs::symlink::validate_target(dest_root, dest_path, &target)?;
         }

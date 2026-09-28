@@ -1,18 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Hidden `launcher` subcommand group.
+//! Hidden `launcher` group, used only by generated entry-point launchers (`exec`) and shims (`shim`).
 //!
-//! This group is hidden from `ocx --help` (`#[command(hide = true)]`) — it is
-//! an internal-only API used exclusively by generated launchers and shims.
-//! Hiding prevents it from appearing in user-facing help output while still
-//! allowing `ocx launcher --help` to work for debugging.
-//!
-//! Two verbs, one per kind of generated body: `exec` for an installed
-//! package's entry-point launcher, `shim` for a deferred tool's shim. Each is a
-//! two-token wire commitment (`launcher` + the verb) plus its positional shape;
-//! all implementation details (presentation flags, self-view selection, binary
-//! pinning, lazy-loading policy) are encapsulated behind that interface.
+//! Each verb is a wire commitment (`launcher`, the verb, its positional shape); everything else stays
+//! behind that interface.
 
 use std::process::ExitCode;
 

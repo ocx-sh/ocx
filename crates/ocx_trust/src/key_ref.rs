@@ -1,40 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `--key` reference grammar: `[scheme://]<rest>`, in cosign's spelling.
+//! `--key` reference grammar: `[scheme://]<rest>`, in cosign's spelling; the grammar is on [`KeyRef::parse`].
 //!
-//! One parser serves `ocx package sign`, `attest`, `verify` **and** the
-//! `signers` entry in a trust policy, so nothing here may depend on CLI types.
-//!
-//! Two vocabularies live side by side on purpose ([`Scheme`] and
-//! [`KeyBackendKind`], plan D-13): [`Scheme`] is what a *key reference* can
-//! name, and it can never be `Keyless` — that would be a lie about what a key
-//! reference is. [`KeyBackendKind`] is the reported `signatures[].key_backend`
-//! value, which must be able to say `keyless`. `impl From<Scheme>` is the one
-//! bridge, and it lives in this file so the two spellings cannot drift.
-//!
-//! # Grammar, in evaluation order
-//!
-//! 1. The value contains `://` — the text before the **first** `://` is the
-//!    scheme token, and `rest` is the remainder verbatim.
-//! 2. Otherwise the whole value is a bare file path — [`Scheme::File`]. This is
-//!    cosign's only file spelling, and there is no second one. `env://VAR` is
-//!    the exception that proves it: the variable holds the key PEM itself, not
-//!    a path to one — cosign's spelling, and the one shape that keeps a key
-//!    out of the filesystem on a runner with no writable disk.
-//! 3. Except `file:` with a single colon — [`KeyRefError::FileColonPrefix`],
-//!    whose message names the bare path as the fix. cosign resolves that string
-//!    to a file *literally named* `file:…`, so honouring it as a prefix made one
-//!    value name two different files depending on which tool read it. A file
-//!    genuinely named that is still addressable, as `file://file:…`.
-//! 4. A scheme token outside [`Scheme::SPELLINGS`] — [`KeyRefError::UnknownScheme`].
-//! 5. A recognised but unimplemented scheme — [`KeyRefError::UnsupportedBackend`].
-//! 6. An empty `rest` — [`KeyRefError::Empty`].
-//!
-//! Rule 1 keys on `://`, never on a bare `:`, so a Windows drive path
-//! (`C:\keys\cosign.pub`) is a bare path and not a scheme. Rule 3 keys on the
-//! one token that used to mean something else here; every other single-colon
-//! value (`awskms:alias/x`) is a bare path, as it is to cosign.
+//! One parser serves `ocx package sign`, `attest`, `verify` and a trust policy's `signers`, so nothing here may
+//! depend on CLI types. [`Scheme`] is what a key reference can name (never keyless); [`KeyBackendKind`] is the
+//! reported `signatures[].key_backend`, which can say `keyless`; `impl From<Scheme>` is the one bridge.
 
 use std::fmt;
 use std::path::Path;
@@ -43,41 +14,21 @@ use serde::{Deserialize, Serialize};
 
 use ocx_util::fs::path::FileReference;
 
-/// The largest a key PEM may be, on either side of the pair.
+/// The largest a key PEM may be, bounding the read on both sides of the sign/verify pair.
 ///
-/// A cosign encrypted P-256 private key is under a kilobyte and an SPKI public
-/// key is ~180 bytes, so the cap is orders of magnitude of headroom and exists
-/// only to bound the read.
-///
-/// **One constant, not two.** The sign-side reader
-/// (`oci::sign::key_backend::read_key_pem`) and the verify-side one
-/// (`trust::read_key_file`) bound the same operator-typed file, and their
-/// agreement is what makes sign and verify answer with the same exit code for
-/// an over-cap key. The readers stay separate — they raise different error
-/// types, and each names its own half in the message — but the bound they
-/// enforce cannot be, so it lives here, in the module that owns the `--key`
-/// grammar that named the file. A second definition anywhere is the drift.
+/// One constant: `ocx_sign::sign::key_backend::read_key_pem` and this crate's `read_key_file` must answer an
+/// over-cap key with the same exit code.
 pub const MAX_KEY_PEM_BYTES: u64 = 64 * 1024;
 
 /// Why the environment variable an `env://` reference names yielded no key.
 ///
-/// Two causes, because the two sides of the pair answer them with different
-/// exit codes and must answer them with the *same* ones: nothing to read is an
-/// I/O-class fault (74), the code a missing key **file** already gets, and
-/// something present that no key can be is a data-class one (65). That is the
-/// split [`read_bounded`](ocx_util::fs::read_bounded) already makes for a
-/// file; this type is what lets an env-held key make it identically.
+/// Two causes, two exit codes shared by sign and verify: nothing to read is I/O (74), an over-cap value is data
+/// (65), the split [`read_bounded`](ocx_util::fs::read_bounded) makes for a file.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-// Deliberately NOT `#[non_exhaustive]`. `ocx_lib`'s sign and verify error
-// mappers match this enum exhaustively, and since WP-25 that match crosses a
-// crate boundary — where the attribute stops being inert and forces a `_` arm.
-// A variant added later would then reach that arm silently instead of failing
-// the build, and each variant here answers with its own exit code. The crate is
-// `publish = false`, so there is no downstream to break.
+// No `#[non_exhaustive]`: `ocx_sign` matches this exhaustively, so a new variant must fail its build rather than
+// reach a `_` arm with the wrong exit code.
 pub enum KeyEnvError {
-    /// The variable is unset or empty. A name an environment cannot hold (one
-    /// containing `=` or NUL) also lands here, because that is what the
-    /// platform reports for it.
+    /// The variable is unset or empty; a name no environment can hold (`=` or NUL) also lands here.
     #[error("environment variable `{name}` is unset or empty")]
     Unset {
         /// The variable the reference named.
@@ -93,26 +44,10 @@ pub enum KeyEnvError {
     },
 }
 
-/// Read a key PEM out of the environment variable `name`, bounded by
-/// [`MAX_KEY_PEM_BYTES`].
+/// Read a key PEM out of the environment variable `name`, bounded by [`MAX_KEY_PEM_BYTES`].
 ///
-/// **One reader, both halves of the pair.** The sign side wants a private PEM
-/// and the verify side a public one, but "unset is not a key", "empty is not a
-/// key" and the cap are the same three rules for both, and a second copy of
-/// them is how sign and verify come to answer one bad `env://` with two exit
-/// codes — the drift [`MAX_KEY_PEM_BYTES`] is written the way it is to prevent.
-/// Each caller keeps its own **wording**, mapping [`KeyEnvError`] into its own
-/// error type; only the rules are shared.
-///
-/// Routed through [`ocx_util::env::var`] rather than `std::env::var`, which is
-/// what makes this testable without `unsafe` or a mutated process
-/// environment. That wrapper reports a non-UTF-8 value as absent (logging a
-/// warning that names the variable), and a PEM is ASCII, so the two collapse
-/// onto one message here on purpose.
-///
-/// The value is not zeroized: it already lives in this process's environment
-/// block, so wiping a copy of it protects nothing — the same reasoning
-/// `oci::sign::key_backend::key_password` records.
+/// The one reader for sign and verify, so one bad `env://` answers with one exit code; callers keep their own
+/// wording. A non-UTF-8 value reads as absent. Not zeroized: the value already sits in the environment block.
 ///
 /// # Errors
 ///
@@ -131,18 +66,13 @@ pub fn read_key_env(name: &str) -> Result<String, KeyEnvError> {
     Ok(value)
 }
 
-/// A key-backend scheme in cosign's spelling.
-///
-/// The serde spelling is pinned to [`Scheme::as_str`] rather than left at the
-/// derive default: a second spelling for one concept is the drift this file
-/// exists to prevent, and `Kubernetes` renders `k8s` on both channels.
+/// A key-backend scheme in cosign's spelling; serde is pinned to [`Scheme::as_str`]'s (`Kubernetes` is `k8s`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Scheme {
     /// A key read from the filesystem.
     File,
-    /// A key PEM held **in** an environment variable (`env://VAR`) — the
-    /// variable carries the material, never a path to it.
+    /// A key PEM held in an environment variable (`env://VAR`), never a path to one.
     Env,
     /// AWS KMS (`awskms://`).
     AwsKms,
@@ -158,8 +88,7 @@ pub enum Scheme {
 }
 
 impl Scheme {
-    /// Every recognised spelling, in table order — the vocabulary an error
-    /// message names.
+    /// Every recognised spelling, in table order, as an error message names them.
     pub const SPELLINGS: &'static [&'static str] =
         &["file", "env", "awskms", "gcpkms", "azurekms", "hashivault", "k8s"];
 
@@ -176,25 +105,18 @@ impl Scheme {
         }
     }
 
-    /// Whether OCX implements this backend. [`Scheme::File`] and
-    /// [`Scheme::Env`] — the two that read a PEM this process can already see.
+    /// Whether OCX implements this backend: [`Scheme::File`] and [`Scheme::Env`].
     ///
-    /// **Not exhaustive, and no compiler will say so.** A backend added to the
-    /// enum but forgotten here is refused as
-    /// [`KeyRefError::UnsupportedBackend`] (exit 85) with no build error
-    /// anywhere, so `every_implemented_scheme_is_reachable_end_to_end` asserts
-    /// the membership by hand rather than trusting the shape of the `match`.
+    /// Not exhaustive: a backend forgotten here is refused as [`KeyRefError::UnsupportedBackend`] (exit 85) with no
+    /// build error; `only_the_file_and_env_backends_are_implemented` pins the membership.
     pub const fn is_implemented(self) -> bool {
         matches!(self, Self::File | Self::Env)
     }
 
-    /// Parse a scheme token. `None` for an unrecognised one.
+    /// Parse a scheme token; `None` for an unrecognised one.
     ///
-    /// The `_ => None` arm is the second non-exhaustive site in this file (see
-    /// [`Scheme::is_implemented`]): a variant added to the enum and forgotten
-    /// here falls through to [`KeyRefError::UnknownScheme`] while its own
-    /// spelling sits in [`Scheme::SPELLINGS`]. `key_backend_kind_slug_matches_scheme_spelling`
-    /// round-trips every spelling through this function for exactly that reason.
+    /// Not exhaustive either: a variant forgotten here fails as [`KeyRefError::UnknownScheme`];
+    /// `key_backend_kind_slug_matches_scheme_spelling` round-trips every spelling.
     pub fn parse(token: &str) -> Option<Self> {
         match token {
             "file" => Some(Self::File),
@@ -217,10 +139,7 @@ impl fmt::Display for Scheme {
 
 /// A `--key` value: `[scheme://]<rest>`.
 ///
-/// Constructed only by [`KeyRef::parse`], so the scheme is always one OCX
-/// implements — a recognised-but-unimplemented backend is refused at the
-/// parse boundary, naming itself, and never reaches a caller as a path that
-/// then fails with "no such file or directory".
+/// Built only by [`KeyRef::parse`], so an unimplemented backend is refused there by name, never read as a missing file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyRef {
     scheme: Scheme,
@@ -230,13 +149,17 @@ pub struct KeyRef {
 impl KeyRef {
     /// Parse `[scheme://]<rest>`.
     ///
+    /// A value containing `://` splits at the **first** one into scheme and verbatim `rest`; a bare `:` never
+    /// splits, so `C:\keys\cosign.pub` is a path. Any other value is a bare file path ([`Scheme::File`]).
+    ///
+    /// The single-colon `file:` prefix is refused: cosign reads it as a file literally named `file:…`, reachable
+    /// here as `file://file:…`. Any other single-colon value (`awskms:alias/x`) is a bare path, as in cosign.
+    ///
     /// # Errors
     ///
-    /// [`KeyRefError::UnsupportedBackend`] for a recognised scheme with no
-    /// implementation (exit 85); [`KeyRefError::UnknownScheme`] for an
-    /// unrecognised one; [`KeyRefError::FileColonPrefix`] for the single-colon
-    /// `file:` spelling; [`KeyRefError::Empty`] when nothing follows the
-    /// scheme.
+    /// [`KeyRefError::UnsupportedBackend`] for a recognised but unimplemented scheme (exit 85),
+    /// [`KeyRefError::UnknownScheme`] for an unrecognised one, [`KeyRefError::FileColonPrefix`] for `file:`, and
+    /// [`KeyRefError::Empty`] when nothing follows the scheme.
     pub fn parse(value: &str) -> Result<Self, KeyRefError> {
         let (scheme, rest) = match value.split_once("://") {
             Some((token, rest)) => {
@@ -248,10 +171,6 @@ impl KeyRef {
                 }
                 (scheme, rest)
             }
-            // No `://`. The one value that is not a bare path is a `file:`
-            // prefix — a near-miss for rule 1 that cosign reads as a literal
-            // filename, so it names its fix rather than silently meaning a
-            // different file here than it does there.
             None => match value.strip_prefix("file:") {
                 Some("") => return Err(KeyRefError::Empty),
                 Some(path) => {
@@ -276,53 +195,29 @@ impl KeyRef {
 
     /// Everything after the scheme, verbatim.
     ///
-    /// **Production-dead on purpose — do not delete.** Every caller is a test,
-    /// and the one in `trust.rs`
-    /// (`a_key_signers_reference_is_the_same_grammar_the_key_flag_parses`) is
-    /// what pins a `key` in a trust policy and a `--key` on the command line to
-    /// **one grammar, one parser**. A dead-code sweep that removes this
-    /// accessor takes that assertion with it, and two spellings of one grammar
-    /// drifting apart is the defect this subsystem has already shipped three
-    /// times: `keyid` with two producers, `SignErrorKind` classified at one
-    /// call site and unwrapped at six, and the cosign sidecar tag formatted in
-    /// two places. The metric is not worth the guard.
+    /// Only tests call it; do not delete: `a_key_signers_reference_is_the_same_grammar_the_key_flag_parses` uses it
+    /// to pin a policy `key` and `--key` to one parser.
     pub fn rest(&self) -> &str {
         &self.rest
     }
 
     /// The local-file reference this names, for [`Scheme::File`] only.
     ///
-    /// The file arm, and only the file arm, is a thin layer over the shared
-    /// [`FileReference`] grammar — one parser for `signers[].key`,
-    /// `[registries.<ns>] index` and `[trust.sigstore] trusted_root`
-    /// ([ocx-sh/ocx#379](https://github.com/ocx-sh/ocx/issues/379)). It is
-    /// [`FileReference::bare`], never `parse`: rule 1 above already consumed
-    /// `<scheme>://` and hands back `rest` **verbatim**, which is the whole
-    /// reason `file://file:x` can still name a file called `file:x`.
-    ///
-    /// [`Scheme::Env`] deliberately does not reach here — its `rest` is a
-    /// variable name holding the key PEM, not a path to one, and resolving it
-    /// as a path is how an `env://` reference would come to report "no such
-    /// file or directory" for a variable that is merely unset.
+    /// [`FileReference::bare`], never `parse`: `rest` is already past `<scheme>://`, so `file://file:x` names a file
+    /// called `file:x`. Never for [`Scheme::Env`]: a variable name read as a path reports "no such file" when unset.
     pub fn as_file(&self) -> Option<FileReference<'_>> {
         (self.scheme == Scheme::File).then(|| FileReference::bare(self.rest.as_str()))
     }
 
-    /// The filesystem path, for [`Scheme::File`] only — as written, resolved
-    /// against the process working directory if relative.
+    /// The path as written, for [`Scheme::File`] only; a relative one resolves against the working directory.
     ///
-    /// The policy for a `--key` typed at a shell. A `key` in a `config.toml`
-    /// outlives the directory it is read from and takes the other one,
-    /// [`FileReference::anchored_at`], through [`Self::as_file`].
+    /// Right for a shell-typed `--key`; a config `key` anchors through [`Self::as_file`] and
+    /// [`FileReference::anchored_at`] instead.
     pub fn as_path(&self) -> Option<&Path> {
         self.as_file().map(|file| file.as_written())
     }
 
-    /// The environment variable **name**, for [`Scheme::Env`] only.
-    ///
-    /// The name, never the value: reading it is the caller's job, through
-    /// [`read_key_env`], so the bound and the unset/empty rule have one
-    /// implementation on both sides of the sign/verify pair.
+    /// The environment variable name, for [`Scheme::Env`] only; read the value through [`read_key_env`].
     pub fn as_env_var(&self) -> Option<&str> {
         (self.scheme == Scheme::Env).then_some(self.rest.as_str())
     }
@@ -340,12 +235,8 @@ impl fmt::Display for KeyRef {
 
 /// Why a `--key` value could not be turned into a [`KeyRef`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-// Deliberately NOT `#[non_exhaustive]`. `ocx_lib`'s sign and verify error
-// mappers match this enum exhaustively, and since WP-25 that match crosses a
-// crate boundary — where the attribute stops being inert and forces a `_` arm.
-// A variant added later would then reach that arm silently instead of failing
-// the build, and each variant here answers with its own exit code. The crate is
-// `publish = false`, so there is no downstream to break.
+// No `#[non_exhaustive]`: `ocx_sign` matches this exhaustively, so a new variant must fail its build rather than
+// reach a `_` arm with the wrong exit code.
 pub enum KeyRefError {
     /// A real backend OCX recognises but has not implemented. Exit 85.
     #[error("unsupported key backend `{scheme}`; only file-based keys are implemented")]
@@ -363,10 +254,7 @@ pub enum KeyRefError {
     /// Nothing followed the scheme. Exit 64 — not "file not found".
     #[error("key reference is empty")]
     Empty,
-    /// `file:<path>` — the removed single-colon prefix form. Exit 64.
-    ///
-    /// There is no deprecation window for it, so the message **is** the
-    /// migration: it names the bare path the author meant.
+    /// `file:<path>`, the removed single-colon prefix. Exit 64; the message names the bare path to write instead.
     #[error("key reference `file:{path}` is not a supported spelling; write the path on its own as `{path}`")]
     FileColonPrefix {
         /// Everything after `file:` — the path the author meant.
@@ -374,8 +262,9 @@ pub enum KeyRefError {
     },
 }
 
+// The vocabulary is frozen by design_spec_cosign_parity.md § `--format json`.
 /// What produced or verified a signature — the frozen `signatures[].key_backend`
-/// vocabulary (`design_spec_cosign_parity.md` §"--format json").
+/// vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyBackendKind {
@@ -403,18 +292,14 @@ pub enum KeyBackendKind {
 }
 
 impl KeyBackendKind {
-    /// The frozen wire slug — the same word serde emits.
+    /// The frozen wire slug, the same word serde emits.
     ///
-    /// Added by loop C, which reports a key-mode signature's backend in a
-    /// plain-text table as well as in JSON. Derived from [`Scheme::as_str`]
-    /// wherever a scheme exists, so the flag grammar, the config spelling and
-    /// the reported word cannot drift into three answers;
+    /// Derived from [`Scheme::as_str`] so flag, config and report spellings agree;
     /// `the_display_slug_is_the_serde_slug` pins it against serde.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            // The one kind with no `Scheme`: keyless is the absence of a key
-            // reference, not a backend a `--key` value can name.
+            // Keyless is the absence of a key reference, so it has no `Scheme`.
             Self::Keyless => "keyless",
             Self::File => Scheme::File.as_str(),
             Self::Env => Scheme::Env.as_str(),

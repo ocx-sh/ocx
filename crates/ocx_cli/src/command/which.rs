@@ -18,30 +18,14 @@ use crate::{api, conventions, options};
 
 /// Resolve one or more packages and print their package root paths.
 ///
-/// The package root is the directory containing the package's `content/` and
-/// `entrypoints/` subdirectories (alongside `metadata.json`, `manifest.json`,
-/// and other per-package files). Consumers traverse into `<root>/content/`
-/// for installed files or `<root>/entrypoints/` for generated launchers.
-///
-/// By default, the content-addressed object-store package root is returned.
-/// Use `--candidate` or `--current` to return the stable install symlink path
-/// instead — useful when the path is embedded in editor configs, Makefiles,
-/// or shell scripts that should not change on every package update. The
-/// install symlinks themselves target the package root, so traversal into
-/// `content/` or `entrypoints/` works identically through them.
-///
-/// No downloading is performed — the package must already be installed.
-///
-/// Every entry also reports which kind of directory it found: `package` for a
-/// materialized package root, `shim` for a package composed with `--lazy-mode
-/// always` whose content has not downloaded yet. Once such a package has been used
-/// once, its content is on disk and the entry reports `package` again.
-/// `--candidate` and `--current` always report `package`, because the install
-/// symlinks they resolve are only ever written for materialized content.
-///
-/// Useful for scripting (use `--format json` for machine-readable output):
-///
-///   cmake_root=$(ocx package which --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"].path')
+/// The package root holds `content/` (installed files), `entrypoints/`
+/// (generated launchers) and per-package files such as `metadata.json`.
+/// `--candidate` or `--current` return the stable install symlink instead,
+/// for editor configs, Makefiles or scripts; it targets the same root. Nothing
+/// is downloaded. Each entry reports `package` for a materialized root, or
+/// `shim` for a `--lazy-mode always` package whose content has not downloaded
+/// yet; the install symlinks only ever resolve to `package`. Scripting:
+/// `ocx package which --candidate --format json cmake:3.28 | jq -r '.["cmake:3.28"].path'`
 #[derive(Parser)]
 pub struct Which {
     #[clap(flatten)]
@@ -66,15 +50,8 @@ impl Which {
         let fs = context.file_structure();
 
         let entries: Vec<api::data::paths::LocatedPath> = if let Some(kind) = self.content_path.symlink_kind() {
-            // Validate the symlink resolves and the package is installed,
-            // then report the symlink anchor itself (the stable per-repo
-            // path that targets the package root). Consumers traverse into
-            // `<anchor>/content` or `<anchor>/entrypoints` as needed.
-            //
-            // Always `PathKind::Package`, and `--lazy-mode` has nothing to
-            // change here: `install` and `select` are the only commands that
-            // write this namespace and they never accept the flag, so an anchor
-            // can only ever target a materialized package root.
+            // Always `PathKind::Package`: `install` and `select`, this namespace's only writers,
+            // never accept `--lazy-mode`.
             let _ = manager.find_symlink_all(identifiers.clone(), kind).await?;
             self.packages
                 .iter()
@@ -87,8 +64,7 @@ impl Which {
                 .collect()
         } else {
             let platform = conventions::platform_or_default(self.platform.platform.clone());
-            // Two tiers, not five: an OCI-tier command reads no `ocx.toml`, and
-            // on Windows this resolves to `Never` whatever the tiers say.
+            // Two tiers, not five: an OCI-tier command reads no `ocx.toml`.
             let mode = lazy_mode_for_package(self.lazy_mode.mode());
             let located = locate_all(manager, fs, &identifiers, &platform, mode).await?;
             self.packages
@@ -108,53 +84,26 @@ impl Which {
     }
 }
 
-/// One located package: the directory to report, and which kind of directory it
-/// is. Named so the fan-out's `JoinSet` type stays readable.
+/// One located package: the directory to report, and which kind of directory it is.
 type Located = (PathBuf, PathKind);
 
-/// Which on-disk directory `ocx package which` reports for one package, given
-/// the resolved `lazy-mode` and what the two probes found (contract C-016,
-/// scenario S-007).
-///
-/// `None` means neither form is present, which the caller turns into
-/// [`PackageErrorKind::NotFound`] — exit 79.
-///
-/// The whole of the policy lives here, so [`locate`] stays I/O and this stays a
-/// total function over its results.
+/// Which directory `ocx package which` reports for one package; `None` becomes [`PackageErrorKind::NotFound`].
 fn located_directory(mode: LazyMode, package_root: Option<PathBuf>, shim_root: Option<PathBuf>) -> Option<Located> {
-    // A materialized package wins under either policy. Once its content is on
-    // disk its `entrypoints/` and `bin/` shadow the shim on `PATH` (S-004), so
-    // naming the shim would point at a directory the caller's own environment
-    // has stopped routing through.
+    // A materialized package wins under either policy: its `entrypoints/` and `bin/` shadow the shim on `PATH`.
     if let Some(root) = package_root {
         return Some((root, PathKind::Package));
     }
     match mode {
-        // Under this policy a published shim tree IS the tool's on-disk form:
-        // its `bin/` is what composed onto `PATH`, and the package directory
-        // does not exist yet.
         LazyMode::Always => shim_root.map(|root| (root, PathKind::Shim)),
-        // Under `never` the caller asked to be pointed at materialized content.
-        // A shim tree is not that, and this command materializes nothing to
-        // make it so.
         LazyMode::Never => None,
     }
 }
 
-/// Locates one package: probes the object store, then — when nothing is
-/// materialized — the shim store, and applies [`located_directory`].
-///
-/// **Never materializes** (C-016): no `find_or_install`, no `prepare_lazy`, no
-/// store write of any kind. That is what makes `--lazy-mode` meaningful on a
-/// command whose whole job is to report what is already there.
+/// Locates one package in the object store, then the shim store; never materializes anything.
 ///
 /// # Errors
 ///
-/// - [`PackageErrorKind::NotFound`] — neither a package directory nor (under
-///   [`LazyMode::Always`]) a published shim directory exists for this
-///   identifier.
-/// - Anything else `find` or `resolve` raises, propagated verbatim so the exit
-///   code stays the one this command produced before the lazy policy existed.
+/// [`PackageErrorKind::NotFound`] when neither form exists; anything else `find` or `resolve` raises, verbatim.
 async fn locate(
     manager: &PackageManager,
     file_structure: &FileStructure,
@@ -168,37 +117,25 @@ async fn locate(
         Err(kind) => return Err(kind),
     };
 
-    // Only under `always`, which is the only policy `located_directory` can
-    // return a shim for. `never` is the ladder's floor and therefore the
-    // default, so probing there would spend a second `resolve` — a second
-    // network round trip under `--remote` — on a value the next line discards.
+    // Only under `always`: probing under the default `never` spends a network round trip on a discarded value.
     let shim_root = if package_root.is_some() || mode != LazyMode::Always {
         None
     } else {
         let resolved = manager.resolve(package, platform).await?;
         let shim = file_structure.shims.shim_dir(&resolved.pinned);
-        // The published directory's existence is its completeness signal:
-        // `prepare_lazy` stages the whole tree and publishes it by one rename,
-        // so no consumer needs a second probe (C-020).
+        // `prepare_lazy` publishes the whole tree by one rename, so existence is completeness.
         path_exists_lossy(shim.root()).await.then(|| shim.root().to_path_buf())
     };
 
     located_directory(mode, package_root, shim_root).ok_or(PackageErrorKind::NotFound)
 }
 
-/// Locates every requested package concurrently, preserving request order.
-///
-/// Fans out one [`locate`] per identifier the way every other multi-package CLI
-/// command that does per-item network work does (`package description pull`, `index
-/// update`, `pull --dry-run`): an index-tagged `JoinSet`, results placed by
-/// index, failures sorted by index so the surfaced error — and therefore the
-/// exit code — is deterministic across runs.
+/// Locates every requested package concurrently, preserving request order so the exit code is deterministic.
 ///
 /// # Errors
 ///
-/// [`Error::FindFailed`](ocx_package_manager::error::Error::FindFailed) carrying one
-/// [`PackageError`] per failed identifier, in request order — the same envelope
-/// `find_all` produced before this command resolved packages one at a time.
+/// [`Error::FindFailed`](ocx_package_manager::error::Error::FindFailed) with one [`PackageError`] per
+/// failed identifier, in request order.
 async fn locate_all(
     manager: &PackageManager,
     file_structure: &FileStructure,
@@ -261,7 +198,7 @@ mod tests {
         PathBuf::from("/store/shims/example")
     }
 
-    // ── S-007: the four policy × state cells ─────────────────────────────────
+    // ── The four policy × state cells ─────────────────────────────────
     //
     // The scenario's expected results, in its own order:
     //   not-found 79 / real path / shim path / real path.
@@ -321,8 +258,8 @@ mod tests {
 
     /// `always` with neither form present is still nothing: the policy *admits*
     /// a published shim as an answer, it does not invent a path to one that was
-    /// never generated. `which` never materializes (C-016), so it can only
-    /// report directories that already exist.
+    /// never generated. `which` never materializes, so it can only report
+    /// directories that already exist.
     #[test]
     fn lazy_policy_with_nothing_on_disk_locates_nothing() {
         assert_eq!(located_directory(LazyMode::Always, None, None), None);
@@ -331,8 +268,8 @@ mod tests {
     /// Both forms present: the package root wins.
     ///
     /// Once the first invocation has materialized the tool, its `entrypoints/`
-    /// and `bin/` shadow the shim on `PATH` (S-004), so reporting the shim would
-    /// name a directory the caller's own environment no longer routes through.
+    /// and `bin/` shadow the shim on `PATH`, so reporting the shim would name
+    /// a directory the caller's own environment no longer routes through.
     #[test]
     fn a_materialized_package_outranks_its_own_shim() {
         assert_eq!(
@@ -343,7 +280,7 @@ mod tests {
 
     /// The "nothing located" the cells above produce is the kind that exits 79.
     ///
-    /// Binds S-007's `not-found 79` to the classifier rather than to prose: the
+    /// Binds the cells' `not-found 79` to the classifier rather than to prose: the
     /// cells assert `None`, `locate` maps `None` onto this kind, and this pins
     /// what the kind is worth at the process boundary.
     #[test]

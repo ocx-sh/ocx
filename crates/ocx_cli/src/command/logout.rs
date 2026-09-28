@@ -20,8 +20,6 @@ pub struct Logout {
     registry: Option<String>,
 }
 
-// `--format` inherited from `Cli` root (see Login note).
-
 impl Logout {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let registry = self
@@ -32,9 +30,7 @@ impl Logout {
         let ui = context.ui();
         ui.status("Logging out", &registry);
 
-        // No store can be constructed (no HOME, no $DOCKER_CONFIG) -> there is
-        // nothing to log out from. True noop. Exit 0 to match `docker logout` /
-        // `oras logout` / `helm registry logout` for absent-state.
+        // No store (no HOME, no $DOCKER_CONFIG) means nothing to log out from: exit 0, as `docker logout`.
         let store = match DockerCredentialStore::new(StoreOptions {
             allow_plaintext_put: false,
             detect_default_native_store: false,
@@ -47,10 +43,7 @@ impl Logout {
             }
         };
 
-        // Surface real failures. `auth::logout` returns Ok(()) for the
-        // "not-logged-in" case (delegated to the store's `delete`, which
-        // mirrors oras-go semantics). Any Err here is a genuine helper /
-        // I/O failure that means revocation did NOT complete.
+        // Not-logged-in is `Ok`; an `Err` means revocation did not complete and must not be swallowed.
         logout(&registry, &store).await?;
 
         ui.success(format!("Logged out of {registry}"));

@@ -3,12 +3,7 @@
 
 use crate::IndexStore;
 
-/// Construction inputs for [`super::LocalIndex`].
-///
-/// A single self-contained [`IndexStore`] rooted at the index home holds
-/// both the per-repository root documents and the verbatim,
-/// digest-verified dispatch-object CAS (`o/sha256/<hex>.json`) — see
-/// `adr_index_indirection.md` Decision A1.
+/// Construction inputs for [`super::LocalIndex`] (`adr_index_indirection.md#a1`).
 pub struct Config {
     pub index_store: IndexStore,
 }

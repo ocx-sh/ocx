@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Pure decision logic + the registry observe loop for the announce pipeline.
-//!
-//! Everything a forge is *not* needed for lives here so it can be unit-tested
-//! without a network: curated-tag resolution (C3/C5/D7), the regenerate step
-//! that preserves `observed` timestamps for unmoved digests (C6), the
-//! yank/unyank rules (C7), physical-repository extraction, and the
-//! SSRF-before-any-registry-request ordering (X3). The forge-touching
-//! orchestration (root read, fork/commit/PR dispatch) lives in the parent
-//! [`super`] module.
+//! Pure decision logic and the registry observe loop for the announce pipeline;
+//! the forge-touching orchestration lives in [`super`].
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -26,15 +19,11 @@ use ocx_oci::tag::InternalTag;
 use ocx_package::publisher::Publisher;
 use ocx_package::tag::Tag;
 
-/// One curated tag's freshly observed state — the registry's own image-index
-/// bytes and the digest the registry served them under (the tag's `content`
-/// pointer and its CAS filename).
+/// One curated tag's freshly observed state, verbatim from the registry.
 ///
-/// Both fields are verbatim registry output: announce stores what it fetched
-/// and never re-encodes it, so the CAS payload is byte-identical to the
+/// Never re-encoded, or the CAS payload stops being byte-identical to the
 /// artifact the publisher pushed.
 pub struct Observed {
-    /// The curated tag name.
     pub tag: String,
     /// The image-index digest the registry served (the tag's new `content`).
     pub content: ocx_oci::Digest,
@@ -45,30 +34,20 @@ pub struct Observed {
 /// The observed `__ocx.desc` artifact: the rebuilt `desc` object when it moved,
 /// plus the payload blobs the root points at.
 pub struct ObservedDesc {
-    /// The new `desc` object in the index bot's field order (CONTRACTS §14):
-    /// `digest`, `title`, `description`, `keywords`, then `readme`, then `logo`
-    /// when the artifact carries one. An absent logo omits the key outright —
-    /// the index schema types it as a digest string, so `null` is not a form it
-    /// has.
-    ///
-    /// `None` when the `__ocx.desc` tag digest did not move (D6) — the
-    /// committed `desc` then rides through verbatim.
+    /// The new `desc` object in the index bot's field order, or `None` when the
+    /// `__ocx.desc` digest did not move and the committed `desc` rides through.
+    /// An absent logo omits the key: the index schema has no `null` form for it.
     pub desc: Option<Value>,
     /// The readme blob, and the logo blob when there is one, verbatim.
     ///
-    /// Carried on **every** run of a package that publishes a description, not
-    /// only the runs where it moved, exactly as the curated tags' CAS objects
-    /// are. `--out` materializes the whole entry per run (`announce --out dir &&
-    /// publish dir`), so a root naming a `desc.readme` object the run did not
-    /// write is a dangling CAS reference the index rejects.
+    /// Carried on every run, not only when `desc` moved, or `--out` writes a root
+    /// naming a `desc.readme` object it never wrote and the index rejects it.
     pub blobs: Vec<DescBlob>,
 }
 
 /// One `__ocx.desc` payload blob, stored as this package's own CAS object.
 pub struct DescBlob {
-    /// The index's own SHA-256 over `bytes`, deliberately independent of the
-    /// registry's blob digest for the same content (a different digest
-    /// namespace, mirroring the tag `content` pointer).
+    /// The index's own SHA-256 over `bytes`, not the registry's blob digest.
     pub digest: ocx_oci::Digest,
     /// The CAS filename extension: `md` for the readme, `png`/`svg` for a logo.
     pub extension: &'static str,
@@ -80,7 +59,7 @@ pub struct DescBlob {
 pub struct ResolvedTags {
     /// The curated tags to observe, in resolution order.
     pub tags: Vec<String>,
-    /// Reserved tags dropped from the selection (D7), in resolution order.
+    /// Reserved tags dropped from the selection, in resolution order.
     pub reserved_dropped: Vec<String>,
 }
 
@@ -91,26 +70,18 @@ pub struct Physical {
     pub host: String,
     /// The registry port (443 unless the pointer carried an explicit `:port`).
     pub port: u16,
-    /// The physical `<registry>/<repository>` identifier the observe loop fetches
-    /// tags against.
     pub identifier: ocx_oci::OciIdentifier,
     /// The verbatim `oci://…` pointer, echoed in observe error messages.
     pub display: String,
 }
 
-/// The `observed` timestamp used for new/changed tags in this announce run.
-///
-/// Computed once per run and threaded so a tag map is internally consistent.
-/// Delegates to [`ocx_index::current_timestamp`] (C-005/C-007) — this module
-/// holds no clock of its own, so announce and a claim rendered in the same run
-/// carry the same instant.
+/// The `observed` timestamp for new or changed tags; computed once per run so a
+/// tag map is internally consistent.
 pub fn current_timestamp() -> String {
     ocx_index::current_timestamp()
 }
 
-/// Require a committed root: a `None` read means the package has no root at
-/// `base_ref`, an unclaimed package that must go through the human lane
-/// (design register C10, reference parity).
+/// Require a committed root at `base_ref`.
 ///
 /// # Errors
 ///
@@ -128,7 +99,7 @@ pub fn require_root(
     })
 }
 
-/// The tag names present in the committed root, in on-disk (insertion) order.
+/// The tag names in the committed root, in on-disk order.
 pub fn committed_tag_names(root: &Value) -> Vec<String> {
     root.get("tags")
         .and_then(Value::as_object)
@@ -136,57 +107,15 @@ pub fn committed_tag_names(root: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Resolve the curated tag set from the selection and the committed tags
-/// (design register C3/C5). `Replace` is the universe as given; `UnionFile`
-/// unions the committed set (order-preserving) with file additions; `Refresh`
-/// re-observes the committed set; `FromRegistry` unions the committed set with
-/// `discovered` (the tags the physical repository currently holds, already
-/// filtered — see below). Duplicates are dropped, first occurrence wins.
+/// Resolve the curated tag set from the selection, the committed tags and
+/// `discovered` (the registry's tags, used only by `FromRegistry`).
 ///
-/// `discovered` is empty for every selection other than
-/// [`TagSelection::FromRegistry`], which is the only one that reaches the
-/// registry to decide *which* tags exist.
-///
-/// This is where the reserved-tag rule applies (D7), and it applies **here**
-/// rather than at any of the caller-supplied selection sources: only after the
-/// collapse is the tag universe concrete. `--refresh` and `--tags-file`
-/// start from the committed root, so they are carriers — neither can introduce a
-/// reserved tag, but either would re-announce one forever once it landed. A
-/// reserved tag is not a version, so it is dropped and reported, never refused:
-/// refusing would make announce police how a publisher tags their own
-/// repository. A *caller-named* selection that is entirely reserved collapses
-/// into the existing [`AnnounceError::NoCuratedTags`] — the empty-set case, no
-/// separate variant — carrying the dropped names, because that path returns no
-/// outcome for the CLI's drop notice to read and the names would otherwise
-/// vanish.
-///
-/// **The empty set is a refusal only for the selections that name tags**
-/// ([#487]). [`TagSelection::Replace`] and [`TagSelection::UnionFile`] are the
-/// publisher saying which versions the index should carry, so resolving to
-/// nothing means the invocation asked for nothing and the refusal guards
-/// against a retraction nobody typed. [`TagSelection::Refresh`] and
-/// [`TagSelection::FromRegistry`] derive their universe from state instead, and
-/// empty state is legitimate: a freshly claimed root carries `"tags": {}`
-/// (`claim/root.rs`), so `--refresh` over it collapsed to the empty set and
-/// exited 64 before the description was ever observed. Both now return an empty
-/// [`ResolvedTags`] and let the pipeline run on to `observe_desc`, which is what
-/// makes a description-only refresh possible. Reserved drops then ride out on
-/// [`AnnounceOutcome::reserved_tags_dropped`](super::AnnounceOutcome::reserved_tags_dropped)
-/// rather than on an error message.
-///
-/// [#487]: https://github.com/ocx-sh/ocx/issues/487
-///
-/// `discovered` is the one source filtered *before* the collapse, by
-/// [`list_registry_tags`], and it is filtered silently. `reserved_dropped`
-/// reports what the **caller** named that turned out not to be a version; a
-/// registry listing names nothing — `__ocx.keep.<algorithm>-<hex>` tags are
-/// pushed by default, so reporting them would drown a real drop under one line per
-/// published version. A reserved tag that is nonetheless *committed* still
-/// reaches the collapse through `committed` and is still dropped and reported.
+/// Duplicates drop, first occurrence wins. Reserved tags are dropped and
+/// reported in `reserved_dropped`, never refused.
 ///
 /// # Errors
 ///
-/// [`AnnounceError::NoCuratedTags`] when nothing survives resolution under
+/// [`AnnounceError::NoCuratedTags`] when nothing survives under
 /// [`TagSelection::Replace`] or [`TagSelection::UnionFile`].
 pub fn resolve_curated_tags(
     selection: &TagSelection,
@@ -199,40 +128,23 @@ pub fn resolve_curated_tags(
         TagSelection::Refresh => dedup_in_order(committed),
         TagSelection::FromRegistry => union_onto_committed(committed, discovered),
     };
+    // After the collapse, or a reserved tag already in the committed root is
+    // re-announced forever by `--refresh` and `--tags-file`.
     let (reserved_dropped, tags): (Vec<String>, Vec<String>) =
         resolved.into_iter().partition(|tag| Tag::is_reserved_str(tag));
-    // Spelled as the two positives rather than `!Refresh && !FromRegistry`: a
-    // negation opts a total match out of the exhaustiveness the compiler would
-    // otherwise give it, so a fifth selection would silently join the refusing
-    // set. Same reasoning as the `dropped_committed_tags` guard's spelling in
-    // `super::observe_and_rebuild`.
+    // `Refresh` and `FromRegistry` may run empty: a fresh claim writes `"tags": {}`.
+    // Named positively so a new selection cannot silently join the permissive side.
     if tags.is_empty() && matches!(selection, TagSelection::Replace(_) | TagSelection::UnionFile(_)) {
         return Err(AnnounceError::NoCuratedTags { reserved_dropped });
     }
     Ok(ResolvedTags { tags, reserved_dropped })
 }
 
-/// The committed tags a regenerated root would delete.
+/// The committed tags a regenerated root would delete, minus `reserved_dropped`
+/// (`adr_announce_diverged_branch_rebuild.md § The invariant, restated`).
 ///
-/// The measurable half of the invariant
-/// `adr_announce_diverged_branch_rebuild.md` states — *no tag announced into an
-/// open pull request is ever lost*. Three routes to breaking it have been found
-/// in production ([#228], [#399], [#436]), each after a silent loss and none
-/// resembling the last, so the answer here is a tripwire rather than another
-/// case: whatever the next route is, it still has to delete a tag to matter.
-///
-/// `reserved_dropped` is excluded because D7 removes those on purpose, and the
-/// caller excludes [`TagSelection::Replace`](crate::announce::TagSelection::Replace)
-/// for the same reason. Empty means nothing was lost.
-///
-/// The comparison is only as good as `committed`: it must be the root the
-/// commit will actually be parented on, which is what
-/// [`RefUpdate::FastForward`](crate::forge::RefUpdate::FastForward) now
-/// guarantees for announce.
-///
-/// [#228]: https://github.com/ocx-sh/ocx/issues/228
-/// [#399]: https://github.com/ocx-sh/ocx/issues/399
-/// [#436]: https://github.com/ocx-sh/ocx/issues/436
+/// `committed` must be the root the commit is parented on, or the check passes
+/// on a tree the commit never lands on.
 pub fn dropped_committed_tags(committed: &[String], regenerated: &Value, reserved_dropped: &[String]) -> Vec<String> {
     let kept = committed_tag_names(regenerated);
     committed
@@ -242,10 +154,7 @@ pub fn dropped_committed_tags(committed: &[String], regenerated: &Value, reserve
         .collect()
 }
 
-/// The additive merge shared by `--tags-file` and `--tags-from-registry`: the
-/// committed set in its on-disk order, then whatever `additions` contributes
-/// that is not already there. A committed tag is never dropped by either — only
-/// [`TagSelection::Replace`] removes.
+/// The committed set in on-disk order, then the new `additions`.
 fn union_onto_committed(committed: &[String], additions: &[String]) -> Vec<String> {
     let mut union = dedup_in_order(committed);
     for tag in additions {
@@ -256,20 +165,16 @@ fn union_onto_committed(committed: &[String], additions: &[String]) -> Vec<Strin
     union
 }
 
-/// List the tags the physical repository currently holds, dropping the reserved
-/// ones (D7) at the source.
+/// List the physical repository's tags, silently dropping reserved ones.
 ///
-/// The caller must have run the SSRF pre-flight for `physical` already — this is
-/// the first registry request of a `--tags-from-registry` run, so validating
-/// after it would validate nothing.
+/// `physical` must come from [`guarded_physical`]: this is the run's first
+/// registry request. Reserved tags are not reported, or every published
+/// version's keep tag floods `reserved_dropped`.
 ///
 /// # Errors
 ///
-/// [`AnnounceError::ListTags`] when the registry listing fails. An empty
-/// repository is not an error here, and — since `--tags-from-registry` derives
-/// its universe from state rather than naming it — an empty repository beside
-/// an empty committed set is not an error at the collapse either: the run
-/// proceeds to the description observation with no curated tag at all.
+/// [`AnnounceError::ListTags`] when the listing fails; an empty repository is
+/// not an error.
 pub async fn list_registry_tags(publisher: &Publisher, physical: &Physical) -> Result<Vec<String>, AnnounceError> {
     let tags = publisher
         .list_tags(physical.identifier.clone())
@@ -286,13 +191,7 @@ fn dedup_in_order(tags: &[String]) -> Vec<String> {
     tags.iter().filter(|tag| seen.insert((*tag).clone())).cloned().collect()
 }
 
-/// Dereference an `oci://host/path` pointer into its physical registry target,
-/// applying the strict parse (design register C3).
-///
-/// Takes the pointer rather than the document that carried it: claim holds a
-/// `--repository` value straight off the command line and has no root to read
-/// it out of, so lifting the field is the caller's one line (announce raises
-/// [`AnnounceError::RootMissingField`] there).
+/// Strictly parse an `oci://host/path` pointer into its physical registry target.
 pub fn extract_physical(pointer: &str) -> Result<Physical, AnnounceError> {
     let identifier = ocx_oci::OciIdentifier::parse_repository_pointer(pointer).map_err(|_| {
         AnnounceError::MalformedPhysicalRepository {
@@ -308,29 +207,17 @@ pub fn extract_physical(pointer: &str) -> Result<Physical, AnnounceError> {
     })
 }
 
-/// Resolve and validate the physical host (X3) before any registry request.
+/// Resolve and SSRF-validate the physical host before any registry request.
 ///
-/// Split out of [`observe_curated`] because the observe loop is no longer the
-/// only thing that talks to the registry: `--tags-from-registry` lists tags
-/// first, so a pre-flight living inside the observe loop would leave that
-/// listing unguarded. One `Physical` is resolved once and threaded to both, so
-/// the guarded target and the requested target cannot diverge.
+/// Thread the one returned `Physical` to every registry call, or the guarded host
+/// and the requested host can diverge. `insecure_hosts` picks the dial scheme,
+/// which decides whether `HTTP_PROXY` or `HTTPS_PROXY` applies.
 ///
-/// The pre-flight is route-aware because under a configured HTTP proxy the
-/// process resolves only the proxy — the physical registry is literal text in
-/// the `CONNECT` line — so resolving it here fails on a proxy-only-DNS network
-/// and judges addresses nothing connects to (ocx#407). `insecure_hosts` picks
-/// the dial **scheme**, which is what decides whether `HTTP_PROXY` or
-/// `HTTPS_PROXY` applies and therefore whether a proxy intercepts at all.
-///
-/// A proxied route yields no addresses to pin, so the [`Physical`] is returned
-/// on either route; the floor's verdict is the whole point of the call.
 /// # Errors
 ///
 /// [`AnnounceError::MalformedPhysicalRepository`] if `pointer` is not an
 /// `oci://host/path` reference; [`AnnounceError::Ssrf`] if the host is
-/// forbidden or unresolvable — naming `namespace`, the `[registries."<ns>"]`
-/// key the `trusted_hosts` fix goes into.
+/// forbidden or unresolvable.
 pub async fn guarded_physical(
     pointer: &str,
     namespace: &str,
@@ -354,33 +241,24 @@ pub async fn guarded_physical(
     Ok(physical)
 }
 
-/// How many curated tags are observed against the registry at once.
-///
-/// Each observation is one latency-bound manifest fetch — the same shape, against
-/// the same registries, as [`LocalIndex::refresh_tags`](ocx_index::LocalIndex)'
-/// dispatch-object persist, so it carries that path's cap rather than inventing a
-/// second number. A mirror with a hundred versions is one round instead of a
-/// hundred; the cap is what keeps the burst under a registry's `429` threshold.
+/// How many curated tags are observed at once; raising it risks a registry `429`.
 const OBSERVE_CONCURRENCY: usize = 64;
 
 /// Observe every curated tag against the physical repository.
 ///
-/// `physical` must come from [`guarded_physical`] — this function makes registry
-/// requests and runs no pre-flight of its own.
+/// `physical` must come from [`guarded_physical`]; this runs no pre-flight.
 ///
 /// # Errors
 ///
-/// [`AnnounceError::UnresolvedTag`] if a curated tag does not resolve (a
-/// publisher typo); or an [`AnnounceError::Observe`] transport failure.
+/// [`AnnounceError::UnresolvedTag`] if a curated tag does not resolve;
+/// [`AnnounceError::Observe`] on a transport failure.
 pub async fn observe_curated(
     publisher: &Publisher,
     physical: &Physical,
     curated: &[String],
 ) -> Result<Vec<Observed>, AnnounceError> {
-    // `buffered`, not `buffer_unordered`: the rebuilt root's tag order — and the
-    // first error a caller sees — must not depend on which request finished
-    // first. Ordered output keeps the failure the lowest-indexed curated tag's,
-    // exactly as the former sequential loop reported it.
+    // `buffered`, not `buffer_unordered`, or the root's tag order and the
+    // reported error depend on which request finished first.
     stream::iter(
         curated
             .iter()
@@ -391,17 +269,10 @@ pub async fn observe_curated(
     .await
 }
 
-/// Observe a single curated tag: fetch what the registry serves and keep it.
-///
-/// The bytes and the digest ride out of here untouched — the index stores the
-/// publisher's own image index, it does not derive a second document from it.
-/// The one judgement made here is document kind: the index records image
-/// indices only, so a bare image manifest is refused (D4(a)).
+/// Observe a single curated tag, refusing a bare image manifest.
 async fn observe_one_tag(publisher: &Publisher, physical: &Physical, tag: &str) -> Result<Observed, AnnounceError> {
     let tagged = physical.identifier.clone_with_tag(tag);
-    // Mirrored is inherited, not chosen: these bytes become the published
-    // index's record of the tag, so Invariant #5 argues for Canonical here.
-    // Changing the host announce observes from is its own decision.
+    // Mirrored is inherited, not chosen, though these bytes become the published record.
     let fetched = publisher
         .client()
         .fetch_manifest_raw_bytes_addressed(&tagged, ReadAddressing::Mirrored)
@@ -412,8 +283,6 @@ async fn observe_one_tag(publisher: &Publisher, physical: &Physical, tag: &str) 
             source: Box::new(source),
         })?;
     let Some((bytes, content, manifest)) = fetched else {
-        // A curated tag that does not resolve is a publisher typo — hard error,
-        // never a silent drop (reference parity).
         return Err(AnnounceError::UnresolvedTag {
             tag: tag.to_string(),
             repository: physical.display.clone(),
@@ -432,34 +301,16 @@ async fn observe_one_tag(publisher: &Publisher, physical: &Physical, tag: &str) 
     })
 }
 
-/// Observe the `__ocx.desc` artifact against the physical repository (D6).
+/// Observe the `__ocx.desc` artifact, comparing its tag digest with the
+/// committed `desc.digest`.
 ///
-/// The comparison is a **floating-tag** one: the `__ocx.desc` tag digest the
-/// registry currently serves against the committed root's `desc.digest`. Equal
-/// — both-absent included — means the description did not move, so the
-/// committed `desc` rides through verbatim ([`ObservedDesc::desc`] is `None`).
-///
-/// The payload blobs are fetched regardless, whenever the registry serves a
-/// description at all: [`ObservedDesc::blobs`] is the *file set* half, not the
-/// *change* half, and the `--out` contract writes the whole entry every run.
-/// A package with no `__ocx.desc` costs one HEAD and nothing else.
-///
-/// `desc.digest` is that observed tag digest itself, never a recomputed content
-/// hash; `desc.readme` / `desc.logo` are the opposite — this index's own SHA-256
-/// over the exact bytes the registry served, which is what the index CI
-/// re-derives from the committed CAS objects.
-///
-/// `physical` must come from [`guarded_physical`]: this makes registry requests
-/// and runs no pre-flight of its own.
+/// `physical` must come from [`guarded_physical`]; this runs no pre-flight.
 ///
 /// # Errors
 ///
 /// [`AnnounceError::DescDisappeared`] when the committed root records a
-/// description the registry no longer serves — retraction semantics are
-/// unspecified, so the run stops loudly rather than silently clearing `desc`
-/// back to null (reference parity). [`AnnounceError::ObserveDesc`] for any
-/// transport failure, and for a malformed artifact: a manifest that is not a
-/// description, or one carrying no markdown readme layer.
+/// description the registry no longer serves; [`AnnounceError::ObserveDesc`] on
+/// a transport failure or a malformed description artifact.
 pub async fn observe_desc(
     publisher: &Publisher,
     physical: &Physical,
@@ -470,8 +321,7 @@ pub async fn observe_desc(
         .and_then(|desc| desc.get("digest"))
         .and_then(Value::as_str);
     let desc_identifier = physical.identifier.clone_with_tag(InternalTag::DESCRIPTION_TAG);
-    // Mirrored is inherited, not chosen — same Invariant #5 question as
-    // `observe_one_tag`: this digest is written into the published index.
+    // Mirrored is inherited, as in `observe_one_tag`.
     let observed = publisher
         .client()
         .probe_manifest_digest_addressed(&desc_identifier, ReadAddressing::Mirrored)
@@ -488,7 +338,6 @@ pub async fn observe_desc(
                 digest: committed_digest.to_string(),
             });
         }
-        // No description on either side — the overwhelmingly common case.
         return Ok(ObservedDesc {
             desc: None,
             blobs: Vec::new(),
@@ -496,10 +345,7 @@ pub async fn observe_desc(
     };
     let moved = Some(observed_digest.as_str()) != committed_digest;
 
-    // The one description fetcher in the codebase: it applies the artifact-type
-    // and readme-layer rules and hands back the decoded payload. It downloads
-    // the layers through a temporary directory, so announce supplies a private
-    // one rather than sharing filenames with a concurrent run.
+    // Private scratch dir, or a concurrent run's layer downloads collide on filenames.
     let temporary = tempfile::tempdir().map_err(|source| AnnounceError::OutputWrite {
         path: std::env::temp_dir().display().to_string(),
         source,
@@ -515,8 +361,7 @@ pub async fn observe_desc(
         repository: physical.display.clone(),
         source: Box::new(source),
     })?
-    // The tag answered the HEAD and was gone by the GET — the same
-    // retraction the branch above refuses, one round trip later.
+    // Gone between the HEAD and the GET: the same retraction as above.
     .ok_or_else(|| AnnounceError::DescDisappeared {
         repository: physical.display.clone(),
         digest: observed_digest.clone(),
@@ -526,9 +371,6 @@ pub async fn observe_desc(
     let readme = description.readme.into_bytes();
     let readme_digest = ocx_oci::Algorithm::Sha256.hash(&readme);
     let logo = description.logo.map(|logo| {
-        // The layer's own media type names the extension. The reference tool
-        // sniffs the PNG magic number instead, having dropped the media type by
-        // this point; the two agree for the two media types the format allows.
         let extension = if logo.media_type == ocx_oci::media_type::MEDIA_TYPE_PNG {
             "png"
         } else {
@@ -572,31 +414,17 @@ pub async fn observe_desc(
     })
 }
 
-/// A manifest annotation as a JSON string, empty when absent — `description` is
-/// a required field of a non-null `desc`, so it may not be omitted just because
-/// the publisher left the annotation off.
+/// A manifest annotation as a JSON string, empty when absent: a non-null `desc`
+/// requires `description`.
 fn annotation(annotations: &BTreeMap<String, String>, key: &str) -> Value {
     Value::String(annotations.get(key).cloned().unwrap_or_default())
 }
 
-/// The `desc.title`: the `org.opencontainers.image.title` annotation, falling
-/// back to the last segment of the root's own `name`, then of the physical
-/// repository.
+/// The `desc.title`: the title annotation, else the last segment of the root's
+/// `name`, else of the physical repository.
 ///
-/// `title` is required *and* typed `minLength: 1` by the index root schema, so
-/// the empty string is not a value it has. A root carrying one passes the pull
-/// request checks — neither `indexbot validate` nor the claim re-derivation
-/// looks at title length — and then fails `schema:validate:rendered`, blocking
-/// the deploy for every package in the index. `ocx package description push --readme`
-/// over a readme with no frontmatter title pushes exactly that artifact, so the
-/// annotation is genuinely optional and the fallback carries the invariant.
-///
-/// The *last segment* rather than the whole name: a title is the display name
-/// of one package, and the card that renders it already shows the namespace
-/// beside it — `ocx.sh/bazelbuild/bazelisk` reads as a path, `bazelisk` reads as
-/// a name. The repository closes the last hole: `name` is schema-required of
-/// every real root, but reading a non-empty title out of remote data that merely
-/// *ought* to carry one is the same bet this function exists to stop making.
+/// Never empty: an empty title passes the pull request checks, then fails
+/// schema validation and blocks the index deploy for every package.
 fn title(annotations: &BTreeMap<String, String>, committed_root: &Value, physical: &Physical) -> String {
     let annotated = annotations
         .get(annotations::TITLE)
@@ -612,19 +440,16 @@ fn title(annotations: &BTreeMap<String, String>, committed_root: &Value, physica
             return candidate.to_string();
         }
     }
-    // Unreachable via `guarded_physical`: an `oci://host/repo` pointer with no
-    // repository does not parse. Never emit the one value the schema refuses.
+    // Unreachable via `guarded_physical`; never emit the empty title.
     physical.display.clone()
 }
 
-/// The part after the last `/`, or the whole string when it holds none. A
-/// trailing slash yields the empty string, which the caller's chain then skips.
+/// The part after the last `/`, or the whole string when it holds none.
 fn last_segment(path: &str) -> &str {
     path.rsplit_once('/').map_or(path, |(_, last)| last)
 }
 
-/// Split the comma-separated `sh.ocx.keywords` annotation: each keyword
-/// trimmed, empties dropped, an absent annotation yielding the empty array.
+/// Split the comma-separated `sh.ocx.keywords` annotation.
 fn parse_keywords(raw: Option<&String>) -> Vec<Value> {
     raw.map(String::as_str)
         .unwrap_or_default()
@@ -635,31 +460,15 @@ fn parse_keywords(raw: Option<&String>) -> Vec<Value> {
         .collect()
 }
 
-/// Carry a stale announce branch's tag delta onto the index base's root (ADR
-/// `adr_announce_diverged_branch_rebuild.md` D1): every key of `branch_tags` the
-/// base does not already hold is appended, in the branch's own order, after the
-/// base's set.
+/// Append every `branch_tags` key the base root lacks, in branch order, after
+/// the base's tags (`adr_announce_diverged_branch_rebuild.md`).
 ///
-/// Tag order is byte-visible — [`serialize_root`](ocx_index::serialize_root)
-/// emits the map as it stands and never sorts — so "base order first" is a wire
-/// contract, not cosmetics. `tags` also stays the root's LAST key (CONTRACTS
-/// §14): replacing an existing key keeps its position under `preserve_order`,
-/// and a root carrying no `tags` gets one appended, which is the same place.
-///
-/// **The base entry wins on a shared key**, and the reason is yank governance
-/// rather than freshness: [`regenerate`] overwrites `content` and `observed` on
-/// any digest move, so this tie-break only ever decides `yanked`. The base's
-/// yank is merged, CI-validated state that a branch nobody reviewed must not
-/// revert; an unmerged branch-side yank costs one `--yank` re-run.
-///
-/// A non-object on either side is a no-op: the caller's own root-shape checks
-/// refuse that document, and this is not the place to raise it a second time.
-//
-// ponytail: union, not a 3-way merge. A tag the base dropped through a `--tags`
-// replace while the branch still carried it is therefore re-proposed. Upgrade
-// path is a 3-way against the compare API's merge base (`merge_base_commit` on
-// GitHub, `/repository/merge_base` on GitLab) — worth it only once someone
-// actually hits the re-proposal.
+/// Tag order is byte-visible ([`serialize_root`](ocx_index::serialize_root)
+/// never sorts), so base order first is a wire contract.
+// ponytail: union, not a 3-way merge — a tag the base dropped through a `--tags`
+// replace while the branch still carried it is re-proposed. Upgrade: a 3-way
+// against the compare API's merge base (`merge_base_commit` on GitHub,
+// `/repository/merge_base` on GitLab), once someone hits the re-proposal.
 pub fn carry_branch_tags(base: &mut Value, branch_tags: &Value) {
     let Some(branch_tags) = branch_tags.as_object() else {
         return;
@@ -668,20 +477,18 @@ pub fn carry_branch_tags(base: &mut Value, branch_tags: &Value) {
         return;
     };
     let mut merged = root.get("tags").and_then(Value::as_object).cloned().unwrap_or_default();
+    // The base entry wins, or an unreviewed branch reverts the base's merged yank.
     for (tag, entry) in branch_tags {
         merged.entry(tag.clone()).or_insert_with(|| entry.clone());
     }
     root.insert("tags".to_string(), Value::Object(merged));
 }
 
-/// Rebuild the root's `tags` map from the observed curated set (design register
-/// C3/C6). A tag whose observed digest equals its committed `content` keeps its
-/// entry verbatim — same `observed` timestamp, same yank marker — so a no-op
-/// re-observe is byte-identical (drives the C6 short-circuit). A new or
-/// changed-digest tag gets `observed = now`, preserving any existing yank
-/// marker (human-governed, survives a content change). A committed tag absent
-/// from the curated set is dropped. Every non-`tags` field rides through
-/// verbatim.
+/// Rebuild the root's `tags` map from the observed curated set.
+///
+/// An unmoved digest keeps its committed entry verbatim, or a no-op re-observe
+/// stops being byte-identical and the unchanged check never fires. A moved
+/// digest gets `observed = now` and keeps its yank marker.
 pub fn regenerate(committed: &Value, observed: &[Observed], now: &str) -> Value {
     let committed_tags = committed.get("tags").and_then(Value::as_object);
     let mut new_tags = Map::new();
@@ -692,46 +499,28 @@ pub fn regenerate(committed: &Value, observed: &[Observed], now: &str) -> Value 
             .and_then(|committed| committed.get("content"))
             .and_then(Value::as_str);
         let regenerated = if committed_content == Some(content.as_str()) {
-            // Unmoved digest — carry the committed entry verbatim (no churn).
             committed_entry
                 .cloned()
                 .unwrap_or_else(|| new_tag_entry(&content, now, None))
         } else {
-            // New or changed digest — fresh timestamp, keep any yank marker.
             let yanked = committed_entry.and_then(|committed| committed.get("yanked")).cloned();
             new_tag_entry(&content, now, yanked)
         };
         new_tags.insert(entry.tag.clone(), regenerated);
     }
+    // Remove `variants`, or a stale committed set rides through and the index
+    // bot's gate rejects every announce once it stops matching `tags`.
     let mut new_root = committed.clone();
     if let Some(root) = new_root.as_object_mut() {
-        // `variants` is the index bot's to derive from `tags`; it no longer
-        // reads a stored field, and its pull-request gate always accepts an
-        // absent one. ocx therefore records none — and must actively *remove*
-        // the key rather than merely stop writing it, because `committed` is
-        // cloned verbatim: a stored set would ride through unchanged, and the
-        // first time a variant's last tag left upstream it would stop matching
-        // the derivation and the gate would reject every announce.
-        //
-        // `shift_remove`, never `remove`: under `preserve_order` the latter is
-        // `swap_remove`, which fills the hole from the end. Today that is
-        // indistinguishable — `variants` sits immediately before `tags`, the
-        // last key, so both spellings produce the same document and no test
-        // here can tell them apart. `shift_remove` is chosen because it stays
-        // correct without that coincidence: it does not depend on `variants`
-        // being second-to-last, which is a contract of the *bot's* serializer,
-        // not something this function is in a position to check.
+        // `shift_remove`, never `remove`: `swap_remove` refills the hole from the
+        // end and reorders the serialized root.
         root.shift_remove("variants");
-        // Replacing an existing key keeps its position (preserve_order), so
-        // `tags` stays the last field per CONTRACTS §14.
         root.insert("tags".to_string(), Value::Object(new_tags));
     }
     new_root
 }
 
-/// A fresh `{content, observed}` tag entry, carrying a preserved yank marker
-/// when one existed. Field order matches the index bot's `TagEntry` (CONTRACTS
-/// §14): `content`, `observed`, then `yanked`.
+/// A fresh tag entry in the index bot's `TagEntry` field order.
 fn new_tag_entry(content: &str, now: &str, yanked: Option<Value>) -> Value {
     let mut entry = Map::new();
     entry.insert("content".to_string(), Value::String(content.to_string()));
@@ -742,10 +531,7 @@ fn new_tag_entry(content: &str, now: &str, yanked: Option<Value>) -> Value {
     Value::Object(entry)
 }
 
-/// Apply yank/unyank markers to the regenerated root's curated tags (design
-/// register C7). Owner action only: a tag named to both lists, or a tag outside
-/// the curated set, is a hard input error — never a silent no-op. `--refresh`
-/// callers pass empty lists, so existing markers are untouched.
+/// Apply yank/unyank markers to the regenerated root's curated tags.
 ///
 /// # Errors
 ///
@@ -791,8 +577,7 @@ pub fn apply_yank_markers(
     Ok(())
 }
 
-/// Count observed CAS objects not already referenced by a committed tag's
-/// `content` — a component of the C6 "no new CAS objects" short-circuit.
+/// Count observed CAS objects no committed tag's `content` references.
 pub fn new_cas_count(committed: &Value, observed: &[Observed]) -> usize {
     let committed_contents: HashSet<&str> = committed
         .get("tags")
@@ -809,26 +594,19 @@ pub fn new_cas_count(committed: &Value, observed: &[Observed]) -> usize {
         .count()
 }
 
-/// A CAS object's wire path under its package (design register A2/A3). The
-/// extension is descriptive only — the index derives a CAS file's claimed
-/// digest from the filename's hex half alone.
+/// A CAS object's wire path under its package.
 ///
-/// The digest is a parsed [`ocx_oci::Digest`] rather than a string, which is
-/// what makes the path safe to build from a root document: both halves come
-/// from the algorithm enum and a validated hex run, so no component of remote
-/// data reaches the path verbatim.
+/// Takes a parsed [`ocx_oci::Digest`], never a string, or remote root data
+/// reaches the path verbatim.
 fn object_path(package_repo: &str, digest: &ocx_oci::Digest, extension: &str) -> String {
     let (algorithm, hex) = digest.parts();
     format!("p/{package_repo}/o/{algorithm}/{hex}.{extension}")
 }
 
-/// Every CAS object a root references, paired with the extension its path
-/// carries: `tags[].content` (`json`), `desc.readme` (`md`), and `desc.logo`,
-/// whose extension the root does not record (`None` — the caller probes).
+/// Every CAS object a root references, with its path extension (`None` for the
+/// logo, whose extension the root does not record).
 ///
-/// A reference that is not a well-formed `<algorithm>:<hex>` digest is dropped
-/// with a debug line rather than carried: a root document is remote data, and
-/// the only thing this function's output is used for is building paths.
+/// Malformed digests are dropped: the output builds paths from remote data.
 fn referenced_objects(root: &Value) -> Vec<(ocx_oci::Digest, Option<&'static str>)> {
     let mut objects = Vec::new();
     let mut push = |raw: Option<&Value>, extension: Option<&'static str>| {
@@ -851,27 +629,14 @@ fn referenced_objects(root: &Value) -> Vec<(ocx_oci::Digest, Option<&'static str
     objects
 }
 
-/// The objects `previous_root` referenced that `new_root` does not — the
-/// deletions an announce carries so the published index does not accumulate a
-/// dispatch object per digest move and a readme per description edit (owner
-/// mandate, design decision C/D).
+/// The object paths `previous_root` referenced that `new_root` does not.
 ///
-/// Diffing two referenced sets replaces a directory listing: every object in the
-/// repository was written as some root's referenced set, and the index refuses a
-/// root naming an absent object, so the set difference *is* the unreachable set.
-/// The logo is the one reference whose extension the root does not record, so it
-/// is probed — `<hex>.png`, then `<hex>.svg` — at `base_ref`, the commit this
-/// run's payload is parented on (design decision E). Neither answering is a
-/// silent skip; a transport failure is not.
-///
-/// `previous_root` is `None` for a fresh claim, which references nothing and
-/// therefore orphans nothing — answered without a single probe.
+/// A logo is probed as `.png` then `.svg` at `base_ref`; neither existing is a
+/// silent skip.
 ///
 /// # Errors
 ///
-/// [`AnnounceError::Forge`] when a logo probe fails. An orphan left behind
-/// because a read failed is still an orphan, so the run says so rather than
-/// committing a half-swept tree.
+/// [`AnnounceError::Forge`] when a logo probe fails.
 pub(crate) async fn orphan_paths(
     previous_root: Option<&Value>,
     new_root: &Value,
@@ -907,14 +672,8 @@ pub(crate) async fn orphan_paths(
     Ok(paths)
 }
 
-/// Assemble the atomic file set for an announce: the root, one CAS object per
-/// observed tag, the description's payload blobs, and a removal for every object
-/// the new root stopped referencing (design register C15 — one commit).
-///
-/// A path both written and orphaned is unrepresentable: the map is keyed by
-/// path and the writes go in first, so `Put` wins. It cannot arise anyway — an
-/// object the new root references is in `referenced(new)` and therefore not in
-/// the orphan set by construction.
+/// Assemble the announce's atomic file set: root, CAS objects, description
+/// blobs and orphan removals. A path both written and orphaned keeps its `Put`.
 pub fn build_files(
     root_path: &str,
     root_bytes: &[u8],
@@ -943,15 +702,10 @@ pub fn build_files(
     files
 }
 
-/// Write the announce file set under `dir`, returning the written relative
-/// paths (sorted — the `BTreeMap` iterates in key order).
+/// Write the announce file set under `dir`, returning the sorted relative paths
+/// written.
 ///
-/// A [`FileChange::Delete`] removes the path under `dir` and is reported in
-/// neither the return value nor an error when it was not there — the same
-/// no-op the forge drivers owe, so `--out` renders the file set a commit would
-/// have produced rather than a superset of it. `dir` is ordinarily fresh, where
-/// every removal is that no-op; the arm matters for a caller pointing `--out`
-/// at a directory a previous run filled.
+/// A [`FileChange::Delete`] removes the path and is a no-op when it is absent.
 ///
 /// # Errors
 ///

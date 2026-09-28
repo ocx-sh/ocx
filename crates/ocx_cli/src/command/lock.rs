@@ -16,25 +16,8 @@ use crate::options;
 
 /// Resolve package tags to digests and write `ocx.lock`.
 ///
-/// Walks the nearest `ocx.toml` and reconciles the whole `ocx.lock` with
-/// it. When the lock is already current (its `declaration_hash` matches the
-/// config) the existing pins are carried forward verbatim — a byte-identical,
-/// idempotent no-op that never advances a moving tag. When the config drifted,
-/// every declared tag is re-resolved; a moving tag may advance to wherever it
-/// points today. Fully transactional — either every binding resolves or nothing
-/// is written. Use `ocx update` to force a re-resolve of every tag regardless
-/// of drift.
-///
-/// Migrates a legacy lock to the current per-platform format automatically
-/// on any write — no separate migration step is required.
-///
-/// Materializes packages by default after writing the lock (matching
-/// `ocx add`). Pass `--no-pull` to write the lock without downloading.
-///
-/// `--pull` is the affirmative form of the default (redundant but
-/// accepted). Both flags use POSIX last-wins semantics (`overrides_with`):
-/// `--no-pull --pull` resolves to pull; `--pull --no-pull` resolves to
-/// no-pull.
+/// A current lock is carried forward verbatim, never advancing a moving tag; a drifted one
+/// re-resolves every tag. Transactional: every binding resolves or nothing is written.
 #[derive(Parser, Clone)]
 pub struct Lock {
     /// Verify `ocx.lock` is current relative to `ocx.toml` and exit.
@@ -58,49 +41,18 @@ pub struct Lock {
 
 impl Lock {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // ── --check fast path ────────────────────────────────────────────
-        //
-        // `--check` is a no-op verification: read ocx.toml + ocx.lock,
-        // compare hashes, exit 0/65/78 without ever acquiring the project
-        // flock or touching the network. Routes through
-        // `load_project_with_lock` which already enforces the staleness
-        // gate via `StaleLock` (exit 65) and surfaces `LockMissing`
-        // (exit 78) for the "no lock at all" case.
+        // No flock, no network: `load_project_with_lock` already enforces 65 and 78.
         if self.check {
             return run_check(&context).await;
         }
 
-        // Acquire flock + load snapshot. `ocx lock` mutates the lock file
-        // only; the staging closure is identity, and `lock_only()`
-        // suppresses the manifest rewrite at commit time.
-        // Errors propagate to the `main.rs` boundary (logged + classified).
         let guard = load_project_for_mutate(&context).await?;
 
-        // Stage as a lock-only mutation — the candidate config is
-        // byte-identical to the snapshot. `commit` will skip the
-        // manifest write.
+        // Lock-only: the candidate config is byte-identical, so `commit` skips the manifest write.
         let staged = guard.stage(|_cfg| Ok(()))?.lock_only();
 
-        // Whole-file reconcile (spec §4.6) branched on predecessor freshness so
-        // a CLEAN lock is preserved verbatim — never silently bumped:
-        //
-        // - No predecessor → create the lock from scratch (`resolve_lock`).
-        // - Predecessor present AND clean (config hash == the lock's stored
-        //   `declaration_hash`) → carry every pin forward verbatim with NO live
-        //   resolve. `resolve_lock_touched` with an empty `touched` set resolves
-        //   nothing: V2 entries pass through byte-identical, V1 entries are
-        //   migrated by exact pinned-index transcription, and a gone V1 index
-        //   fails `LockUpgradeRequired` (78, "run `ocx update`"). A moved
-        //   upstream tag must NOT change the pin on a clean lock — that is the
-        //   lock-vs-update distinction.
-        // - Predecessor present AND dirty (config changed since the last lock)
-        //   → full whole-file re-resolve of every declared tag; advancing a
-        //   moved tag is the intended explicit whole-file reconcile behaviour.
-        //
-        // `save` preserves `generated_at` via `tools_content_equal`, so a clean
-        // reconcile is a byte-identical no-op. V1 → V2 migration falls out of
-        // the resolver writing V2 only.
         let new_lock = match guard.previous_lock().cloned() {
+            // Clean: carry every pin forward; advancing a moved tag here would silently do `ocx update`'s job.
             Some(prev) if prev.metadata.declaration_hash == staged.config().declaration_hash_cached() => {
                 resolve_lock_touched(
                     staged.config(), // candidate
@@ -112,6 +64,7 @@ impl Lock {
                 )
                 .await?
             }
+            // Dirty or no predecessor: re-resolve every declared tag.
             _ => {
                 resolve_lock(
                     staged.config(),
@@ -122,16 +75,11 @@ impl Lock {
                 .await?
             }
         };
+        // `save` keeps `generated_at` when nothing else changed, so a clean reconcile is byte-identical.
 
         let config_path = guard.config_path().to_path_buf();
-        // C-054 / D-V8 — commit, then re-render the toolchain home the new lock
-        // describes, through the one shared orchestration. RUL-59: `-g` scoped
-        // *resolution* above; the re-render is whole-home.
-        // `--no-pull` promises this invocation downloads nothing, and the
-        // render's metadata closure walk is a download. It therefore runs
-        // against the offline view (the shipped `--no-pull` idiom, as in
-        // `ocx env --no-pull`): a warm store still re-renders, a cold one
-        // degrades quietly and the deferred `ocx pull` renders instead.
+        // `--no-pull` promises no downloads and the render's closure walk is one, so render offline; a
+        // cold store degrades quietly and `ocx pull` renders later.
         let eager = self.pull.enabled(true);
         let render_manager = if eager {
             context.manager().clone()
@@ -154,20 +102,12 @@ impl Lock {
             .await?
             .commit;
 
-        // Consent write seam (C-024, A-29) — one of the commands allowed to
-        // stamp, opting in explicitly. AFTER the commit, so the stamp records
-        // the source set the user just asked for rather than the one it
-        // replaced. Best-effort; never fails the mutation.
+        // After the commit, so the stamp records the requested source set, not the one it replaced.
         record_activation_consent(&commit.config_path, &new_lock, None).await;
 
-        // Best-effort materialization AFTER the commit lands. A failure here
-        // does not roll back the lock — the declaration is committed; only
-        // the object-store population is deferred. Matches `add` semantics.
-        // `--no-pull` opts out: defers to `ocx pull` or the first direnv hit.
+        // After the commit: a failed download leaves the lock committed.
         materialize_lock(&context, &new_lock, eager, platform.clone()).await?;
 
-        // Non-fatal advisory note when `.gitattributes` lacks
-        // `ocx.lock merge=union`.
         let project_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
         if !gitattributes_has_merge_union(project_dir).await {
             context
@@ -188,23 +128,14 @@ impl Lock {
     }
 }
 
-/// CI-primitive verification path for `ocx lock --check`.
-///
-/// Reads `ocx.toml` and `ocx.lock` from disk and exits without touching
-/// the network or the lock file. Reuses the existing project-context
-/// prologue so the staleness gate (`StaleLock` → exit 65) and missing-
-/// lock gate (`LockMissing` → exit 78) are byte-identical to what
-/// `ocx exec` and `ocx pull` already enforce. Success returns exit 0.
+/// `ocx lock --check`: the staleness (65) and missing-lock (78) gates `ocx exec` and `ocx pull`
+/// enforce, with no network and no write.
 async fn run_check(context: &crate::app::Context) -> anyhow::Result<ExitCode> {
-    // All `ProjectContextError` variants classify at the `main.rs` boundary
-    // (NoProject→64, LockMissing→78, StaleLock→65); propagate and let the
-    // boundary log + map the exit code.
     load_project_with_lock(context).await?;
     Ok(ExitCode::SUCCESS)
 }
 
-/// Probe whether `{project_dir}/.gitattributes` contains the
-/// `ocx.lock merge=union` attribute line.
+/// Whether `{project_dir}/.gitattributes` carries `ocx.lock merge=union`.
 async fn gitattributes_has_merge_union(project_dir: &Path) -> bool {
     let path = project_dir.join(".gitattributes");
     let Ok(contents) = tokio::fs::read_to_string(&path).await else {
@@ -261,8 +192,8 @@ mod tests {
         );
     }
 
-    /// A second `--platform` occurrence is a usage error (D4 of
-    /// `adr_platform_model_unification.md`).
+    /// A second `--platform` occurrence is a usage error, per the
+    /// single-platform authoring decision in `adr_platform_model_unification.md`.
     #[test]
     fn rejects_repeated_platform_flag() {
         assert!(

@@ -1,120 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Retry and timeout policy for HTTP transports
-//! (`adr_index_sync_performance.md` D-010 / D-011).
-//!
-//! Three value objects and one driver, all transport-agnostic:
-//!
-//! - [`RetryPolicy`] — how many attempts, how long to back off, how far a
-//!   server-stated `Retry-After` may be trusted.
-//! - [`RetryBudget`] — how much *total* retry traffic a run may add. Shared
-//!   state, not a value object: the counters live behind an [`Arc`] so every
-//!   clone of a transport meters against one budget (D-010 rule 2).
-//! - [`TransportHardening`] — the three timeout bounds a client is built with.
-//!   Injectable so a fixture can assert the same semantics in milliseconds
-//!   instead of the shipped minutes (D-011).
-//! - [`run`] — the ladder itself, driving an attempt closure. It takes a
-//!   closure rather than a request so it can be exercised under
-//!   `tokio::time::pause` with no socket: a wall-clock assertion under a
-//!   paused clock cannot tell "slept 2 s" from "returned immediately", and a
-//!   real socket under a paused clock trips its own timeouts on auto-advance.
-//!
-//! # Why this is hand-rolled and not a crate
-//!
-//! `reqwest-middleware` + `reqwest-retry` implement most of this. The ADR's
-//! Golden Path metadata commits this work to **no new dependency**, and two
-//! behaviours are OCX's own anyway: the run-global retry *ratio* budget, and
-//! ACR's `Retry-After` counting down across polls (so the first value seen is
-//! never cached). Neither is a wire format, so this is Warn-tier, not Block.
+//! Retry and timeout policy for HTTP transports (`adr_index_sync_performance.md`).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-/// Statuses worth a second attempt (D-010, oras-go's default set plus GCS's
-/// documented one). Everything else — `401`, `403`, `404`, every other 4xx,
-/// and every `3xx` — is terminal.
+/// Statuses worth a second attempt; everything else is terminal.
 ///
-/// `404` is deliberately absent: on the index path a confirmed absence is
-/// load-bearing (it is what `OcxIndex::jurisdiction` settles an `Outside`
-/// verdict off), so re-asking cannot change the answer. `3xx` is absent
-/// because `redirect::Policy::none()` surfaces it as a non-success status and
-/// re-fetching an unfollowed redirect returns the same redirect (D-011c).
+/// Never `404` (a confirmed absence is load-bearing on the index path) or `3xx`
+/// (redirects are unfollowed, so a re-fetch returns the same redirect).
 pub fn is_retryable_status(status: u16) -> bool {
     matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
 }
 
-/// Whether a status may carry a `Retry-After` the ladder honours (RFC 9110
-/// §10.2.3 defines it for `429`, `503` and `3xx`; `3xx` is never retried here).
+/// Whether a status may carry a `Retry-After` the ladder honours.
 pub fn honours_retry_after(status: u16) -> bool {
     matches!(status, 429 | 503)
 }
 
-/// Whether a `reqwest` transport failure is worth another attempt (D-010).
+/// Whether a `reqwest` transport failure is worth another attempt: all but a
+/// builder error or a refused certificate, which answer the same every time.
 ///
-/// **Everything except a builder error and a refused certificate is.**
-///
-/// The narrow rule this replaces — `is_connect() || is_timeout()`, plus a walk
-/// of the source chain for a transient [`std::io::ErrorKind`] — is inert
-/// against the transport this path actually negotiates. `Cargo.toml` enables
-/// `reqwest`'s `http2` feature and nothing here calls `http1_only()`, so ALPN
-/// settles on h2 against a CDN-fronted index; and an h2 failure does not reach
-/// an `io::Error` at all. `hyper::Error::new_h2` routes only an *io-backed* h2
-/// failure to `new_io` (hyper 1.11 `src/error.rs`) — everything else becomes
-/// `Kind::Http2` carrying the `h2::Error`, and `impl error::Error for Error {}`
-/// (h2 0.4 `src/error.rs`) overrides no `source()`, so the chain terminates
-/// there with nothing for the walk to find. A `RST_STREAM` — which RFC 9113
-/// §8.7 names as the code a peer sends precisely to say "retry this elsewhere",
-/// and which is what a CDN emits when it sheds a stream — was therefore
-/// classified **terminal**, and one of them inside a 512-wide burst failed the
-/// whole run. `h2_wire_tests` is the guard, and it reds on exactly that rule.
-///
-/// A `GOAWAY` escaped the old rule only by accident: h2 fails an in-flight
-/// stream with a *synthesized* `BrokenPipe`, which the walk did catch. Nothing
-/// in the classification depended on that, and nothing does now.
-///
-/// # Why retrying this broadly is safe *here*
-///
-/// Not because retrying is generally safe — because of what this one caller
-/// is. The request is a bodyless idempotent `GET` (D-010c). Redirects are
-/// refused rather than followed (`redirect::Policy::none()`), so a `3xx` is a
-/// *status* — which [`is_retryable_status`] excludes — and never an error to
-/// classify. The size cap and the parse both happen outside the ladder, so no
-/// attempt can commit a partial result. Volume stays bounded by
-/// [`RetryPolicy::attempts`] and the run-global [`RetryBudget`], which is what
-/// makes "retry unless a second attempt provably cannot change the answer"
-/// affordable rather than an amplification risk.
-///
-/// A builder error is that one class: raised from the request the caller
-/// constructed, before a byte leaves the process. A certificate the verifier
-/// refused ([`is_tls_certificate_refusal`]) is the other: the peer answered,
-/// with a certificate, and the verdict on it is the same on every dial — so
-/// D-010's "unless a second attempt provably cannot change the answer" names
-/// it, and re-dialing only spends the budget and repeats the handshake.
+/// Narrowing to `is_connect() || is_timeout()` makes an h2 `RST_STREAM` terminal
+/// and fails a whole 512-wide sync (`h2_wire_tests`).
 pub fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
     !error.is_builder() && !is_tls_certificate_refusal(error)
 }
 
-/// Whether a failed request died in the TLS handshake on the verifier refusing
-/// the peer's certificate -- rustls's `InvalidCertificate`, whatever reason
-/// sits inside it: webpki's `UnknownIssuer` and `NotValidForName`, the
-/// platform verifier's `Other(..)` on macOS and Windows, an expired leaf.
+/// Whether a failed request died on the TLS verifier refusing the peer's certificate.
 ///
-/// Read off the `Display` rustls fixes for that variant, `"invalid peer
-/// certificate: {reason}"`, rather than downcast: `rustls` is not a direct
-/// dependency of this crate, so its error type is not nameable here. And
-/// read at every link rather than at a downcast `std::io::Error`, because the
-/// rustls error is not a link at all: tokio-rustls files it as the payload of
-/// an `io::Error` (`InvalidData`), reqwest's connector boxes that inside a
-/// second (`Other`), and `io::Error::source` answers with its payload's
-/// source -- `None` for rustls -- never the payload itself. What every one of
-/// those `io::Error`s does forward is `Display`, which is what the prefix
-/// test reads.
-///
-/// Shared by the two transports that classify a dial: the registry client
-/// (`native_transport::registry_error`, where it is exit 69 rather than 75)
-/// and the index client's retry ladder (above, where it is terminal).
+/// Matched on each link's `Display`: the rustls error is an `io::Error` payload
+/// `source()` never returns, so a downcast never matches.
 pub fn is_tls_certificate_refusal(error: &reqwest::Error) -> bool {
     let mut source = std::error::Error::source(error);
     while let Some(link) = source {
@@ -128,32 +46,21 @@ pub fn is_tls_certificate_refusal(error: &reqwest::Error) -> bool {
 
 /// Carries the extra-CA remedy on a certificate the verifier refused.
 ///
-/// The verdict alone (`invalid peer certificate: UnknownIssuer`) names the
-/// symptom; the cure is a root the operator has to hand ocx, and nothing in
-/// rustls's text says so. Wrapped *inside* the terminal classification each
-/// transport already makes -- `ClientError::Registry` (69) for the registry
-/// client, `Error::IndexHttpFailed` (69) for the index ladder -- so the exit
-/// code is untouched and only the chain gains a line: the
-/// `PlainHttpAllowanceHint` shape (`native_transport.rs`). Generic over the
-/// wrapped error because the two transports hold different types at the
-/// point of classification.
+/// Wrapped inside each transport's existing classification, so the exit code is unchanged.
 #[derive(Debug, thiserror::Error)]
 #[error(
     "the TLS certificate '{host}' presented is not trusted; to trust a private CA, set extra_ca_certs = \"<path>\" \
      (or extra_ca_certs_pem) in config.toml or export OCX_EXTRA_CA_CERTS=<path>"
 )]
 pub struct UntrustedCertificateHint<E> {
-    /// The host whose certificate was refused -- the dial's authority, never
-    /// the full URL (an index base may embed credentials, CWE-532).
+    /// The authority only, never the full URL: an index base may embed credentials (CWE-532).
     pub host: String,
-    /// The transport's own error, with the verdict in its chain.
     #[source]
     pub source: E,
 }
 
 impl<E> UntrustedCertificateHint<E> {
-    /// Wraps `source` for the dial of `url`; the host is the URL's, or the
-    /// whole redacted string when it has none (the hint still names a target).
+    /// Wraps `source` for the dial of `url`.
     pub fn for_url(url: Option<&reqwest::Url>, source: E) -> Self {
         let host = url
             .and_then(|url| url.host_str())
@@ -162,19 +69,8 @@ impl<E> UntrustedCertificateHint<E> {
     }
 }
 
-/// Parses a `Retry-After` header value into the interval to wait, relative to
-/// `now` (RFC 9110 §10.2.3 — **both** wire forms).
-///
-/// Returns `None` when the value is unparseable, which the caller reads as
-/// "the header was not usable" and falls back to the normal jittered backoff.
-/// A **past-dated** HTTP-date returns `Some(ZERO)` — never a negative or a
-/// wrapped duration — so a stale date retries immediately rather than
-/// underflowing into a multi-century sleep.
-///
-/// The date form is parsed as RFC 2822, which accepts the IMF-fixdate
-/// (`Sun, 06 Nov 1994 08:49:37 GMT`) RFC 9110 requires senders to use. The two
-/// obsolete forms (RFC 850, asctime) fall through to `None` and therefore to
-/// jittered backoff, which is a safe degradation rather than a wrong sleep.
+/// Parses a `Retry-After` value (either RFC 9110 form) into the wait from `now`;
+/// `None` when unusable, so the caller falls back to jittered backoff.
 pub fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Duration> {
     let value = value.trim();
     if value.is_empty() {
@@ -185,49 +81,31 @@ pub fn parse_retry_after(value: &str, now: std::time::SystemTime) -> Option<Dura
     }
     let target = chrono::DateTime::parse_from_rfc2822(value).ok()?;
     let target = std::time::UNIX_EPOCH.checked_add(Duration::from_secs(u64::try_from(target.timestamp()).ok()?))?;
-    // `saturating_duration_since` is what makes a past date zero rather than a
-    // wrapped `Duration` — this is attacker-influenced input.
+    // A past date is zero, never a wrapped `Duration`: this is attacker-influenced input.
     Some(target.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
 /// What the ladder should do before the next attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryDelay {
-    /// Sleep this long, then retry.
     After(Duration),
-    /// The server asked for longer than the policy will wait. Give up now and
-    /// surface the failure — do **not** sleep for the stated interval.
+    /// The server asked for longer than the clamp: fail now, without sleeping.
     StopRetrying,
 }
 
-/// How the ladder retries (D-010's table).
+/// How the ladder retries.
 #[derive(Debug, Clone, Copy)]
 pub struct RetryPolicy {
-    /// Total attempts, initial included. `3` ships (initial + 2 retries).
-    ///
-    /// `0` means **one** attempt, not none: [`run`] has to call the closure
-    /// before it has a `T` to return at all, so the cap is only ever consulted
-    /// after the first attempt has already run. Documented rather than
-    /// clamped — a clamp would spend a branch making a value that cannot mean
-    /// "never dispatch" merely *look* like it was rejected.
+    /// Total attempts, initial included; `0` still makes one.
     pub attempts: u32,
-    /// Backoff base; the ceiling for retry `n` is `base * 2^n`.
     pub base: Duration,
-    /// Upper bound on the backoff ceiling however many retries have run.
     pub cap: Duration,
-    /// Upper bound on a server-stated `Retry-After`. Above it the ladder stops
-    /// (see [`RetryDelay::StopRetrying`]).
-    ///
-    /// **A security control, not a tuning knob (CWE-400).** `Retry-After` is
-    /// attacker- or misconfiguration-controlled header input; `Retry-After:
-    /// 86400` would otherwise freeze an unattended CI sync for a day on one
-    /// header from one CDN edge.
+    /// A security control (CWE-400): unclamped, one `Retry-After: 86400` from a
+    /// CDN edge freezes an unattended CI sync for a day.
     pub retry_after_clamp: Duration,
 }
 
 impl Default for RetryPolicy {
-    /// oras-go's field-tested defaults (250 ms base, 3 s cap) at the Google SRE
-    /// Book's per-request attempt floor, with D-010's 30 s `Retry-After` clamp.
     fn default() -> Self {
         Self {
             attempts: 3,
@@ -239,7 +117,6 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// The full-jitter ceiling for retry `retry_index` (0-based):
     /// `min(cap, base * 2^retry_index)`.
     pub fn backoff_ceiling(&self, retry_index: u32) -> Duration {
         self.base
@@ -247,14 +124,10 @@ impl RetryPolicy {
             .min(self.cap)
     }
 
-    /// The delay before retry `retry_index`, honouring a parsed `Retry-After`
-    /// when the server sent a usable one.
+    /// The delay before retry `retry_index`: a usable `Retry-After`, else full jitter.
     ///
-    /// Without a header this is **full jitter** — `random(0, ceiling)` — which
-    /// the AWS Architecture Blog measured to do less total work than equal
-    /// jitter under contention. Lockstep backoff across a 512-wide fan-out
-    /// against one rate limiter reproduces the spike the ladder exists to
-    /// absorb, so the jitter is not optional.
+    /// The jitter is not optional: lockstep backoff across a 512-wide fan-out
+    /// reproduces the rate-limit spike the ladder exists to absorb.
     pub fn delay_for(&self, retry_index: u32, retry_after: Option<Duration>) -> RetryDelay {
         match retry_after {
             Some(stated) if stated > self.retry_after_clamp => RetryDelay::StopRetrying,
@@ -264,30 +137,10 @@ impl RetryPolicy {
     }
 }
 
-/// Uniform draw from `[0, ceiling)`.
+/// Uniform draw from `[0, ceiling)`, SplitMix64 over a global counter.
 ///
-/// SplitMix64 over a process-global counter, seeded once from the wall clock —
-/// which keeps the retry path free of a `rand` dependency, the point of the
-/// house pattern in `utility/fs.rs::jittered_backoff`, without inheriting its
-/// one weakness.
-///
-/// **The mix is load-bearing, and this is not hypothetical.** Scaling
-/// `SystemTime::now().subsec_nanos()` straight into the ceiling — the house
-/// pattern verbatim — makes a draw a *linear* function of the wall clock, so
-/// draws taken close together come out close together: 64 draws in a tight
-/// loop span about 25 microseconds of a 3-second ceiling instead of spanning
-/// the ceiling. That cluster is the lockstep the jitter exists to break, and a
-/// 512-wide fan-out retrying off one shared rate limiter is exactly the case
-/// that produces it. Nor is it theoretical: it made this module's own jitter
-/// test fail on the first run, because tokio's millisecond-granular timer
-/// rounded every one of 20 supposedly-jittered delays to the same value.
-/// `full_jitter_draws_are_spread_across_the_ceiling_not_clustered_by_the_clock`
-/// is the guard, and it reds on exactly that source.
-///
-/// The counter carries the smaller half: the finalizer avalanches its input, so
-/// it needs the input to *move*, and a clock that has not ticked between two
-/// calls would otherwise hand it the same one twice. The clock still seeds the
-/// sequence, so two processes starting together do not draw the same one.
+/// Never scale the clock directly: draws taken close together would cluster
+/// (`full_jitter_draws_are_spread_across_the_ceiling_not_clustered_by_the_clock`).
 fn full_jitter(ceiling: Duration) -> Duration {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     static SEED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -302,8 +155,7 @@ fn full_jitter(ceiling: Duration) -> Duration {
             .unwrap_or_default()
             .as_nanos() as u64
     });
-    // SplitMix64 (Steele, Lea & Flood 2014): one finalizer round over a
-    // golden-ratio-strided counter. Fixed cost, no state beyond the counter.
+    // SplitMix64 (Steele, Lea & Flood 2014).
     let strided = COUNTER
         .fetch_add(1, Ordering::Relaxed)
         .wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -312,42 +164,20 @@ fn full_jitter(ceiling: Duration) -> Duration {
     mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     mixed ^= mixed >> 31;
 
-    // Top 53 bits scaled into the ceiling: uniform over `[0, ceiling)`.
     let scaled = ceiling_nanos * u128::from(mixed >> 11) / (1u128 << 53);
     Duration::from_nanos(u64::try_from(scaled).unwrap_or(u64::MAX))
 }
 
-/// Retries admitted before the ratio applies at all.
-///
-/// Without it the ratio makes the very first request unretryable (`1/1 > 0.1`)
-/// and the ladder is deleted for small runs. Google's SRE client budget
-/// carries the same floor.
+/// Retries admitted before the ratio applies, or a small run's first request is unretryable (`1/1 > 0.1`).
 const RETRY_FLOOR: u64 = 10;
 
-/// Retry traffic admitted as a fraction of total traffic, as a reciprocal:
-/// `retries / total <= 1/10`.
+/// `retries / total <= 1 / RETRY_RATIO_DENOMINATOR`.
 const RETRY_RATIO_DENOMINATOR: u64 = 10;
 
-/// Run-global cap on retry traffic (D-010 rule 2).
+/// Run-global cap on retry traffic, as a ratio of total traffic.
 ///
-/// A ratio, not a count: a constant sized for 200 packages starves a
-/// 5,000-package sync and is far too loose for a 20-package one. The Google
-/// SRE Book records the amplification arithmetic this prevents (3 layers × 4
-/// attempts = 64×) — and for a single process fanning out 512-wide against one
-/// bottleneck the amplification is *within* one process.
-///
-/// # Why the counters are behind an `Arc`
-///
-/// `ReqwestIndexTransport` is `Clone` and `IndexTransport` requires
-/// `box_clone`; `index_common.rs` builds one index per package **inside** the
-/// fan-out, so it clones the transport per package. Counters held as plain
-/// fields would therefore be per-package — which is the uncapped per-request
-/// policy this budget exists to replace, and which every single-package test
-/// would pass regardless. `Relaxed` is deliberate: at this width exactness is
-/// not required, monotonicity is.
-///
-/// Scope is one transport, i.e. one source per process. A process-global
-/// counter would couple two sources' failures.
+/// Counters sit behind `Arc`: the transport is cloned per package, so plain
+/// fields would silently uncap the budget.
 #[derive(Debug, Clone, Default)]
 pub struct RetryBudget {
     total: Arc<AtomicU64>,
@@ -359,15 +189,12 @@ impl RetryBudget {
         Self::default()
     }
 
-    /// Counts one attempt — initial or retry — against the run's total.
     pub fn record_attempt(&self) {
         self.total.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Admits a retry while `retries / total <= 1/10`, or while the floor is
-    /// unspent. Returns `false` once the budget is exhausted, and the caller
-    /// must then fail **immediately** without sleeping: a budget that still
-    /// sleeps is the amplification the budget exists to prevent.
+    /// Admits a retry within the ratio or floor; on `false` the caller must fail
+    /// without sleeping, or the budget still amplifies load.
     pub fn try_admit_retry(&self) -> bool {
         let total = self.total.load(Ordering::Relaxed);
         self.retries
@@ -394,54 +221,31 @@ impl RetryBudget {
     }
 }
 
-/// The three timeout bounds an index HTTP client is built with (D-011).
-///
-/// All three apply **simultaneously** — `reqwest`'s `timeout`, `read_timeout`
-/// and `connect_timeout` are independent composable builder calls — which is
-/// curl's own recommended composition: a fast-fail connect, a stall detector in
-/// the middle, and a generous outer cap.
-///
-/// They are fields rather than constants only so a fixture can assert the same
-/// semantics at a few hundred milliseconds; the shipped values are the only
-/// ones production uses.
+/// The three timeout bounds an index HTTP client is built with, all applied at once.
 #[derive(Debug, Clone, Copy)]
 pub struct TransportHardening {
-    /// Bound on the connect phase. A dead or black-holing endpoint must not
-    /// stall a resolve indefinitely (CWE-400).
     pub connect_timeout: Duration,
-    /// Per-frame idle bound: a body that goes quiet for this long is dead, but
-    /// an honest slow body that keeps delivering frames is untouched however
-    /// long it runs. This is the slowloris control the old hard total deadline
-    /// used to provide, without punishing a throttled link.
+    /// Per-frame idle bound: the slowloris control that spares an honest slow body.
     pub idle_bound: Duration,
-    /// Per-attempt outer cap. The bound that a dribbling peer — one byte every
-    /// `idle_bound − ε`, never tripping the idle bound and never reaching the
-    /// byte cap — cannot outlast. Wraps **one attempt**, not the ladder.
+    /// Per-attempt cap a peer dribbling just under `idle_bound` cannot outlast.
     pub outer_cap: Duration,
 }
 
 /// One attempt's outcome, as the ladder sees it.
 pub enum Attempt<T> {
-    /// Terminal — success or a failure another attempt cannot change. Returned
-    /// to the caller as-is.
     Done(T),
-    /// Retryable. `retry_after` is the server's parsed hint (`None` when it
-    /// sent none or an unusable one); `terminal` is what the caller gets if no
-    /// further attempt is admitted.
-    Retry { retry_after: Option<Duration>, terminal: T },
+    /// `terminal` is returned if no further attempt is admitted.
+    Retry {
+        retry_after: Option<Duration>,
+        terminal: T,
+    },
 }
 
-/// Drives `attempt` under `policy` and `budget` until it is done, out of
+/// Drives `attempt` (given its 0-based index) until it is done, out of
 /// attempts, past the `Retry-After` clamp, or out of budget.
 ///
-/// `attempt` receives the 0-based attempt index, which is what lets the caller
-/// emit its own (redacted) retry diagnostic without this module knowing
-/// anything about URLs.
-///
-/// Deliberately **not** wrapped in a `tokio::time::timeout`: total retry
-/// volume is already bounded by the budget, and a wall-clock cap on the ladder
-/// would abort a run making honest progress across several slow-but-not-stalled
-/// attempts — the exact case D-011 exists to stop aborting.
+/// No outer `tokio::time::timeout`: it would abort honest slow progress the
+/// ladder exists to let finish.
 pub async fn run<T, F, Fut>(policy: &RetryPolicy, budget: &RetryBudget, mut attempt: F) -> T
 where
     F: FnMut(u32) -> Fut,
@@ -462,8 +266,6 @@ where
                         tokio::time::sleep(delay).await;
                         index += 1;
                     }
-                    // Out of budget: fail with the attempt's own terminal
-                    // value, without sleeping.
                     RetryDelay::After(_) => return terminal,
                 }
             }
@@ -935,17 +737,13 @@ mod tests {
 }
 
 /// [`is_retryable_transport_error`]'s h2 branch, against a real HTTP/2 peer.
-///
 /// The branch that matters in production and the one no fixture in this tree
 /// could reach: `RST_STREAM` and `GOAWAY` are h2 frames, and every other wire
 /// fixture here — and the acceptance-suite index server — speaks HTTP/1.x, so
-/// the h2 classification had never been exercised in either direction.
-///
-/// The peer speaks h2c under prior knowledge rather than h2-over-TLS. The
-/// classifier walks the error `reqwest`/`hyper`/`h2` build above the socket,
-/// and h2 builds that error identically whichever transport carries the
-/// frames — a TLS wrapper would add a certificate fixture and no
-/// discriminating power.
+/// the h2 classification had never been exercised in either direction. The
+/// peer speaks h2c under prior knowledge rather than h2-over-TLS: h2 builds
+/// its error identically whichever transport carries the frames, so a TLS
+/// wrapper would add a certificate fixture and no discriminating power.
 #[cfg(test)]
 mod h2_wire_tests {
     use super::*;

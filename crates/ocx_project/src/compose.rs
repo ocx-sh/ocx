@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Tool-set composition for `ocx exec`.
-//!
-//! Composes the set of tools to fetch and use as environment for `ocx exec`
-//! from a mix of `--group` selections (resolved via the digest-pinned
-//! `ocx.lock`) and explicit positional packages (resolved via the index,
-//! tag-style, like the rest of `ocx`).
-//!
-//! Pure composition — no I/O. Lock loading and staleness checks are done by
-//! the CLI layer; this module accepts the loaded data as input.
+//! Tool-set composition for `ocx exec`: `--group` selections from `ocx.lock`
+//! plus positional packages. Pure; the CLI loads the lock.
 
 use std::path::Path;
 
@@ -22,33 +15,17 @@ use ocx_package::metadata::env::entry::Entry;
 
 use super::error::{ProjectError, ProjectErrorKind};
 
-/// Materialize the project's declared `[env]` and the selected groups'
-/// `[group.<name>.env]` as resolved [`Entry`] values, in application order.
-///
-/// This is stages 4 and 5 of the composition order — appended to the entry
-/// vector after the package-composed env and the patch overlay, so a constant
-/// declared here replaces a package-declared one and a path entry lands ahead of
-/// package paths. Stage 6 (`ocx exec --env`) is the caller's to append after this.
-///
-/// `groups` is the already-expanded selection list (post `all` expansion, with
-/// the empty case promoted to the default group), in `-g` order. A repeated name
-/// keeps only its **last** occurrence so `-g ci -g docs -g ci` really does let
-/// `ci` win — which is what "later group wins" means. [`DEFAULT_GROUP`] is
-/// skipped: the default group's env is the top-level `[env]` already emitted as
-/// stage 4, and there is no `[group.default]` table to read.
-///
-/// Relative `type = "path"` values resolve against the directory holding
-/// `config_path`, never the current directory, so `ocx exec` from a subdirectory
-/// composes the same `PATH` as from the project root.
+/// The project `[env]`, then the selected groups' `[group.<name>.env]`, as
+/// resolved [`Entry`] values applied after package env, so a constant here wins.
+/// A repeated group keeps only its last occurrence; relative `path` values
+/// resolve against `config_path`'s directory.
 pub fn project_env_entries(config: &ProjectConfig, config_path: &Path, groups: &[String]) -> Vec<Entry> {
-    // A resolved `ocx.toml` path always has a parent; `.` keeps a hand-built
-    // relative path from panicking rather than inventing a fallback root.
+    // `.` only keeps a hand-built relative path from panicking.
     let project_root = config_path.parent().unwrap_or_else(|| Path::new("."));
 
     let mut entries = config.env.to_entries(project_root);
 
     for (index, name) in groups.iter().enumerate() {
-        // Later-wins dedup: skip every occurrence but the last.
         if name == DEFAULT_GROUP || groups[index + 1..].contains(name) {
             continue;
         }
@@ -70,11 +47,8 @@ pub enum Origin {
     Explicit,
 }
 
-/// One tool resolved by [`compose_tool_set`].
-///
-/// `binding` is the local name (TOML key from `ocx.toml` for group entries,
-/// inferred or explicit for positionals). `identifier` is the OCI identifier
-/// to pull (digest-pinned for group entries, tag-style for positionals).
+/// One tool resolved by [`compose_tool_set`]: digest-pinned for group
+/// entries, tag-style for positionals.
 #[derive(Debug, Clone)]
 pub struct ResolvedTool {
     pub binding: String,
@@ -82,30 +56,17 @@ pub struct ResolvedTool {
     pub origin: Origin,
 }
 
-/// The unresolved source backing a [`SelectedTool`].
-///
-/// Selection ([`select_tool_set`]) records *where* a binding came from without
-/// touching the host platform; [`resolve_selected_tools`] later maps each
-/// source to a concrete pull [`PackageRef`]. Splitting selection from
-/// resolution lets a caller narrow the set to a requested NAME subset *before*
-/// resolving host leaves, so an unrelated sibling that ships no leaf for the
-/// host never aborts a narrowly-named run.
+/// The unresolved source of a [`SelectedTool`]. Selection stays platform-free
+/// so a caller narrows to named tools first, or a sibling with no host leaf aborts the run.
 #[derive(Debug, Clone)]
 pub enum ToolSource {
-    /// A group entry from the lock. The host leaf is resolved later, only if
-    /// the entry survives name filtering.
+    /// A lock entry; its host leaf resolves only if it survives name filtering.
     Locked(LockedTool),
-    /// A positional `name=identifier` package — already a concrete tag-style
-    /// identifier, resolved verbatim.
+    /// A positional `name=identifier`, resolved verbatim.
     Explicit(PackageRef),
 }
 
 /// One tool selected by [`select_tool_set`], before host-leaf resolution.
-///
-/// `binding` is the local name; `origin` records provenance for diagnostics
-/// and logging; `source` carries the unresolved backing (a lock entry or an
-/// explicit identifier). [`resolve_selected_tools`] turns this into a
-/// [`ResolvedTool`].
 #[derive(Debug, Clone)]
 pub struct SelectedTool {
     pub binding: String,
@@ -113,30 +74,17 @@ pub struct SelectedTool {
     pub source: ToolSource,
 }
 
-/// One positional package parsed from the command line.
-///
-/// The `binding` is either explicit (`name=identifier` form) or inferred from
-/// the identifier's repository basename via [`PackageRef::name`].
+/// One positional package; `binding` is explicit (`name=`) or the repository basename.
 #[derive(Debug, Clone)]
 pub struct PositionalPackage {
     pub binding: String,
     pub identifier: PackageRef,
 }
 
-/// Parse a positional package argument of the form `[name=]identifier`.
-///
-/// When the `name=` prefix is present, that name is the explicit binding.
-/// Otherwise, the binding is inferred from the identifier's repository
-/// basename (`PackageRef::name`), e.g. `cmake:3.29` → binding `cmake`,
-/// `ghcr.io/acme/foo:1` → binding `foo`.
-///
-/// PackageRef parsing uses [`PackageRef::parse_with_default_registry`] so
-/// short forms like `cmake:3.28` resolve against the configured default
-/// registry, matching the rest of the `ocx` CLI.
+/// Parse `[name=]identifier`; without `name=` the binding is the repository
+/// basename (`ghcr.io/acme/foo:1` → `foo`). Short forms use `default_registry`.
 pub fn parse_positional(input: &str, default_registry: &str) -> Result<PositionalPackage, super::Error> {
-    // Detect a `name=identifier` prefix. The split is on the *first* `=` —
-    // identifier values don't contain `=` themselves (digests use `@`, tags
-    // use `:`), so this is unambiguous.
+    // The first `=` splits unambiguously: identifiers never contain `=`.
     let (explicit_binding, ident_str) = match input.split_once('=') {
         Some((name, rest)) if is_valid_binding(name) => (Some(name.to_string()), rest),
         _ => (None, input),
@@ -166,37 +114,9 @@ pub fn parse_positional(input: &str, default_registry: &str) -> Result<Positiona
     Ok(PositionalPackage { binding, identifier })
 }
 
-/// Expand the reserved scope keyword `all` to the union of the default group
-/// ([`DEFAULT_GROUP`]) and every named group declared in `config.groups`,
-/// preserving the position of `all` in the input. Non-`all` entries pass
-/// through unchanged. Pure: no I/O, no policy beyond the literal-string match.
-///
-/// Currently consumed by the `ocx exec` command. The helper is exposed at the
-/// lib layer so other project-tier CLIs (`pull`, `lock`, `update`) can adopt
-/// the same `-g all` expansion without duplicating the keyword logic, and so
-/// programmatic consumers can call it directly before invoking
-/// [`compose_tool_set`].
-///
-/// # Order
-///
-/// Each occurrence of `all` is replaced *in place* by
-/// `[DEFAULT_GROUP, *config.groups.keys()]` where named groups are in
-/// alphabetical order (since `BTreeMap::keys` is alphabetical).
-/// [`compose_tool_set`] then deduplicates the resulting list at the group
-/// iteration step.
-///
-/// # Empty input
-///
-/// `expand_all_keyword(&[], _)` returns `vec![]`. The caller (CLI Phase C.2)
-/// is responsible for promoting an empty post-expansion list to the default
-/// scope (`vec![DEFAULT_GROUP.into()]`); this helper does not inject default
-/// scope on empty input.
-///
-/// # Example
-///
-/// Input groups `[ci, all, release]` with config declaring groups `{ci, docs,
-/// release}` becomes `[ci, default, ci, docs, release, release]`; the
-/// `compose_tool_set` dedup step collapses repeats.
+/// Expand `all` in place to [`DEFAULT_GROUP`] then every named group,
+/// alphabetically; duplicates are left for [`compose_tool_set`]. Empty input
+/// stays empty: the caller defaults an empty list.
 pub fn expand_all_keyword(groups: &[String], config: &ProjectConfig) -> Vec<String> {
     if groups.is_empty() {
         return Vec::new();
@@ -206,8 +126,6 @@ pub fn expand_all_keyword(groups: &[String], config: &ProjectConfig) -> Vec<Stri
     let mut out = Vec::with_capacity(groups.len());
     for entry in groups {
         if entry == all_keyword {
-            // Expand `all` in place: DEFAULT_GROUP first, then every named group
-            // in alphabetical order (BTreeMap::keys is alphabetical).
             out.push(default_group.to_owned());
             for named in config.groups.keys() {
                 out.push(named.clone());
@@ -219,40 +137,10 @@ pub fn expand_all_keyword(groups: &[String], config: &ProjectConfig) -> Vec<Stri
     out
 }
 
-/// Select the final tool set from groups and positionals — *without* resolving
-/// host leaves.
-///
-/// Pure function — no I/O, no host-platform lookup. This is the **selection**
-/// half of [`compose_tool_set`]: it builds the binding set and applies
-/// positional overrides, but leaves every group entry as an unresolved
-/// [`ToolSource::Locked`]. A caller that needs only a subset (e.g.
-/// `ocx exec NAME`) can filter the result via [`filter_by_names`] and then
-/// resolve just the survivors via [`resolve_selected_tools`], so a sibling that
-/// ships no host leaf for the current platform never aborts the run.
-///
-/// Selection **detects** a duplicate binding across selected groups but does not
-/// report it — [`check_duplicate_selection`] does, over whatever set survives
-/// the caller's filter. Every caller must run that check before resolving;
-/// [`compose_tool_set`] does it immediately for the unfiltered case.
-///
-/// Pipeline:
-///
-/// 1. Build the initial set from `groups` × `lock.tools` (deduplicating group
-///    names, preserving first-seen order; within a group, lock entry order is
-///    preserved).
-/// 2. Duplicate-across-groups detection, performed at the **lock level**: the
-///    same binding in two selected groups with identical [`LockedTool`] content
-///    (via [`locked_tool_content_equal`]) collapses to the first-seen entry;
-///    differing content keeps **both** entries so the conflict survives into the
-///    final set. Because it compares resolutions — not resolved host leaves — an
-///    unnamed sibling with no host leaf is never resolved here and so cannot
-///    error at selection time.
-/// 3. Apply positional overrides: right-most wins; a matching binding replaces
-///    the entry in place (origin becomes [`Origin::Explicit`]) and drops any
-///    conflicting sibling kept by step 2, a non-matching one adds a fresh entry.
-///    Positionals also dedup among themselves with right-most-wins.
-///
-/// `config` is currently unused beyond signature parity.
+/// The selection half of [`compose_tool_set`]: group entries stay unresolved so
+/// a caller can filter by name before resolving host leaves.
+/// Detects but does not report a cross-group duplicate: every caller must run
+/// [`check_duplicate_selection`] over the surviving set. `config` is unused.
 pub fn select_tool_set(
     _config: &ProjectConfig,
     lock: Option<&ProjectLock>,
@@ -260,15 +148,9 @@ pub fn select_tool_set(
     positionals: &[PositionalPackage],
 ) -> Result<Vec<SelectedTool>, super::Error> {
     let mut selected: Vec<SelectedTool> = Vec::new();
-    // Parallel `binding -> selected[i]` index that mirrors `selected`. Replaces
-    // the previous O(G·T·R) `iter().find` chain inside the inner loop with an
-    // O(1) `HashMap` probe. Every push to `selected` must be paired with an
-    // insert; every override (positional `right-most wins`) keeps the same
-    // index so the map never goes stale.
+    // Every push to `selected` pairs with an insert here, or the map goes stale.
     let mut binding_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
-    // Step 1+2: build initial set from groups, in user-specified group order
-    // (deduplicated). Within a group, lock entry order is preserved.
     let mut seen_groups: Vec<&str> = Vec::with_capacity(groups.len());
     for raw in groups {
         if seen_groups.contains(&raw.as_str()) {
@@ -277,9 +159,7 @@ pub fn select_tool_set(
         seen_groups.push(raw.as_str());
 
         let Some(lock_ref) = lock else {
-            // No lock available but a group was selected. The CLI layer is
-            // responsible for surfacing `LockMissing` (exit 78) before
-            // calling compose; reaching here means a broken contract.
+            // The CLI reports `LockMissing` before calling; reaching here is a broken contract.
             return Err(super::Error::Project(ProjectError::new(
                 std::path::PathBuf::new(),
                 ProjectErrorKind::LockMissing,
@@ -290,13 +170,8 @@ pub fn select_tool_set(
             if entry.group != *raw {
                 continue;
             }
-            // Step 2: duplicate-across-groups detection at the lock level.
-            // Identical resolution content in another selected group collapses
-            // silently; differing content keeps BOTH entries so the conflict
-            // survives into the final set for `check_duplicate_selection` to
-            // report — after any caller-side NAME filter has had its say. No
-            // host-leaf resolution happens here, so an entry with no host leaf
-            // for the current platform never errors at selection time.
+            // Identical content in another selected group collapses; differing
+            // content keeps both for `check_duplicate_selection` after the NAME filter.
             let mut conflicting = false;
             if let Some(&idx) = binding_index.get(&entry.name) {
                 let existing = &selected[idx];
@@ -306,7 +181,6 @@ pub fn select_tool_set(
                         unreachable!("a Group-origin selection always carries a Locked source");
                     };
                     if locked_tool_content_equal(existing_tool, entry) {
-                        // Same content in another selected group — silently keep the first.
                         continue;
                     }
                     conflicting = true;
@@ -318,23 +192,16 @@ pub fn select_tool_set(
                 origin: Origin::Group(raw.clone()),
                 source: ToolSource::Locked(entry.clone()),
             });
-            // The index keeps pointing at the FIRST occurrence: a conflicting
-            // second entry must not shadow it, or a third selected group would
-            // compare against the wrong sibling and the reported group pair
-            // would drift off the first-seen one.
+            // The index stays on the first occurrence, or a third group compares
+            // against the wrong sibling.
             if !conflicting {
                 binding_index.insert(entry.name.clone(), idx);
             }
         }
     }
 
-    // Step 3: positional overrides (right-most wins, including among
-    // positionals themselves). An explicit override supersedes EVERY
-    // group-sourced entry for its binding — including a conflicting twin step 2
-    // kept — so a deliberate override resolves that conflict instead of leaving
-    // `check_duplicate_selection` to trip over a stale sibling. The first
-    // matching entry is rewritten in place, so the surviving order is the same
-    // one the group walk produced.
+    // Positionals override right-most-wins, replacing every group entry for the
+    // binding (a conflicting twin included) at the first match's position.
     for pos in positionals {
         let mut overridden = false;
         selected.retain_mut(|tool| {
@@ -361,23 +228,13 @@ pub fn select_tool_set(
     Ok(selected)
 }
 
-/// Report a binding that two selected groups resolve differently.
-///
-/// The complement to [`select_tool_set`], which *detects* the condition but
-/// keeps both entries rather than reporting it. Splitting the two lets a caller
-/// narrow the selection first — `ocx exec go-task` must not fail over a
-/// conflicting binding it never named — while an unfiltered caller gets the
-/// identical whole-scope error by running this immediately (see
-/// [`compose_tool_set`]).
-///
-/// Only group-sourced pairs can conflict: step 3 of `select_tool_set` collapses
-/// an explicitly overridden binding to a single entry, so an override resolves
-/// the conflict rather than tripping it.
+/// Report a binding two selected groups resolve differently. Run after any
+/// name filter, so `ocx exec go-task` never fails over a binding it did not name.
 ///
 /// # Errors
 ///
-/// Returns [`ProjectErrorKind::DuplicateToolAcrossSelectedGroups`] naming the
-/// binding and the first two groups that disagree about it.
+/// [`ProjectErrorKind::DuplicateToolAcrossSelectedGroups`] naming the binding
+/// and the first two disagreeing groups.
 pub fn check_duplicate_selection(selected: &[SelectedTool]) -> Result<(), super::Error> {
     let mut first_position_by_binding: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::with_capacity(selected.len());
@@ -389,8 +246,6 @@ pub fn check_duplicate_selection(selected: &[SelectedTool]) -> Result<(), super:
         if first == position {
             continue;
         }
-        // `group_a` is the first-seen group, matching the order the group walk
-        // visited them in.
         let (Origin::Group(group_a), Origin::Group(group_b)) = (&selected[first].origin, &tool.origin) else {
             continue;
         };
@@ -407,20 +262,12 @@ pub fn check_duplicate_selection(selected: &[SelectedTool]) -> Result<(), super:
     Ok(())
 }
 
-/// Resolve a previously [`select_tool_set`]-selected slice to concrete pull
-/// identifiers for `platform`.
-///
-/// Maps each [`SelectedTool`] to a [`ResolvedTool`]: a [`ToolSource::Locked`]
-/// group entry resolves its host leaf via [`host_leaf_identifier`]; a
-/// [`ToolSource::Explicit`] positional keeps its identifier verbatim. Because
-/// only the entries in `selected` are resolved, [`ProjectErrorKind::NoHostLeaf`]
-/// can surface solely for a tool actually in this slice — a caller that
-/// filtered the selection to a NAME subset never trips on an unrelated sibling.
+/// Resolve selected tools for `platform`: a locked entry to its host leaf, an
+/// explicit one verbatim.
 ///
 /// # Errors
 ///
-/// Returns [`ProjectErrorKind::NoHostLeaf`] when a `Locked` V2 entry ships no
-/// leaf for `platform` and no `"any"` fallback at the locked version.
+/// [`host_leaf_identifier`]'s, for a locked entry.
 pub fn resolve_selected_tools(
     selected: &[SelectedTool],
     platform: &Platform,
@@ -441,30 +288,9 @@ pub fn resolve_selected_tools(
         .collect()
 }
 
-/// Compose the final tool set from selected groups and positional packages.
-///
-/// Pure function — no I/O. Lock load + staleness checks happen at the CLI
-/// boundary; this function trusts the caller to have validated those.
-///
-/// Thin delegate over [`select_tool_set`] → [`check_duplicate_selection`] →
-/// [`resolve_selected_tools`]: selection builds the binding set and applies
-/// positional overrides, the check reports a binding two selected groups
-/// disagree about, then resolution maps every surviving entry to its
-/// host-platform pull [`PackageRef`]. The three concerns are split so a caller
-/// that needs only a subset can filter between selection and the check;
-/// `compose_tool_set` keeps the "resolve everything" contract by checking and
-/// resolving the entire selection.
-///
-/// Note the internal ordering: duplicate validation fully precedes host-leaf
-/// resolution and compares [`LockedTool`] content rather than resolved leaves.
-/// This is behaviour-preserving for real locks — a lock is generated from one
-/// resolved manifest, so the same repository implies an identical `platforms`
-/// map.
-///
-/// `current_platform` is the host platform: each lock entry resolves to its
-/// host-compatible leaf digest for that platform via
-/// [`crate::resolve::lookup_host_leaf`]. `config` is currently
-/// unused beyond signature parity.
+/// Compose the final tool set: select, check duplicates, resolve. `config` is
+/// unused. Duplicates compare [`LockedTool`] content, not resolved leaves; the
+/// two agree for real locks, where one manifest yields one `platforms` map.
 pub fn compose_tool_set(
     config: &ProjectConfig,
     lock: Option<&ProjectLock>,
@@ -477,30 +303,13 @@ pub fn compose_tool_set(
     resolve_selected_tools(&selected, current_platform)
 }
 
-/// Resolve a locked tool to its host-platform pull [`PackageRef`].
-///
-/// Looks up the host platform's compatible leaf via
-/// [`crate::resolve::lookup_host_leaf`] and reconstructs
-/// `repository.clone_with_digest(leaf)`. No compatible entry →
-/// [`ProjectErrorKind::NoHostLeaf`]; two or more entries tied at the maximum
-/// score → [`ProjectErrorKind::AmbiguousHostLeaf`] — the two conditions carry
-/// different remedies (re-resolve vs. disambiguate with `--platform`), so
-/// they are surfaced as distinct error kinds rather than both collapsing to
-/// "no leaf".
-///
-/// Single source of the host-leaf resolution shared by every lock reader —
-/// `compose_tool_set`, `ocx pull`, and lock materialization — so both
-/// conditions always carry the same typed error and message. The error is
-/// the outer [`super::Error`] enum so CLI callers can convert it with
-/// `.map_err(anyhow::Error::from)` and still have the `main.rs` boundary
-/// classify it via the enum's `ClassifyExitCode` impl, which the binary
-/// carries (`ocx::exit`).
+/// Resolve a locked tool to its host-platform pull [`PackageRef`] via
+/// [`crate::resolve::lookup_host_leaf`].
 ///
 /// # Errors
 ///
-/// Returns [`ProjectErrorKind::NoHostLeaf`] when the entry ships no leaf
-/// compatible with the host platform at the locked version, or
-/// [`ProjectErrorKind::AmbiguousHostLeaf`] when two or more leaves tie.
+/// [`ProjectErrorKind::NoHostLeaf`] when no leaf fits the host;
+/// [`ProjectErrorKind::AmbiguousHostLeaf`] when two tie. Kept distinct: the remedies differ.
 pub fn host_leaf_identifier(tool: &LockedTool, current_platform: &Platform) -> Result<PackageRef, super::Error> {
     match super::resolve::lookup_host_leaf(&tool.platforms, current_platform) {
         Selection::Found((leaf, _key)) => Ok(tool.repository.clone_with_digest(leaf.clone())),
@@ -522,12 +331,6 @@ pub fn host_leaf_identifier(tool: &LockedTool, current_platform: &Platform) -> R
     }
 }
 
-/// Validates that `name` is a plausible binding identifier — non-empty and
-/// composed of characters that won't ever appear inside an OCI identifier
-/// before the first `=`. Used by [`parse_positional`] to disambiguate
-/// `name=identifier` from a degenerate identifier that happens to contain
-/// `=`. OCI identifiers do not contain `=`, so any leading prefix matching
-/// `[A-Za-z0-9_.-]+=` is treated as the explicit-binding form.
 fn is_valid_binding(name: &str) -> bool {
     !name.is_empty()
         && name

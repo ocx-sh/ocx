@@ -19,41 +19,15 @@ pub struct Version {
 }
 
 impl Version {
-    /// Context-free execution path — called from `app.rs` before
-    /// `Context::try_init`.
+    /// Context-free path run before `Context::try_init`.
     ///
-    /// Delegates printer + format-default + quiet wiring to
-    /// [`ContextOptions::build_api`] — the same init seam
-    /// `Context::try_init` uses — so `--format`, `--color`, and `--quiet`
-    /// behave identically on the static-command bypass path.
-    ///
-    /// # Hermetic-subprocess invariant
-    ///
-    /// `ocx_package_manager::tasks::update_check::query_installed_version`
-    /// spawns this command with `env_clear()` to query a previously installed
-    /// binary's version during `ocx self update`. This method MUST therefore
-    /// NOT depend on `HOME`, `PATH`, or any `OCX_*` env var to produce the
-    /// JSON `version` payload — the subprocess child receives only the
-    /// `resolve_env`-composed entries. A regression that adds env reads
-    /// silently routes the self-update path to bootstrap mode (the JSON
-    /// parse fails or the subprocess errors), which is hard to debug. If
-    /// new behaviour requires config, route it through the parent process
-    /// and let the subprocess stay pure-version. See
-    /// `subsystem-package-manager.md` "OCX Configuration Forwarding".
-    ///
-    /// The build provenance fields populated by
-    /// [`VersionData::enriched`] are read from compile-time `option_env!`
-    /// constants (see `app::build_info`), not runtime `std::env` — they
-    /// stay correct under `env_clear()`.
+    /// `query_installed_version` spawns this with `env_clear()`: reading `HOME`, `PATH` or `OCX_*` on the
+    /// non-verbose path makes `ocx self update` silently fall back to bootstrap mode.
     pub async fn execute(&self, options: &ContextOptions, color_config: ColorModeConfig) -> anyhow::Result<ExitCode> {
         let data = VersionData::enriched(crate::app::version(), env!("CARGO_PKG_VERSION"));
         let api = options.build_api(color_config);
         if self.verbose {
-            // `ocx version` runs on the static bypass, so `Context::try_init`
-            // (which normally caches host capabilities) has not run. Populate
-            // the host-libc cache here so the verbose `host:` row can report
-            // the detected family. Only the verbose plain path needs it; the
-            // bare/JSON path stays pure for the self-update subprocess parser.
+            // The static bypass skipped `Context::try_init`'s host-libc caching; the verbose `host:` row needs it.
             ocx_oci::HostCapabilities::detect_and_cache(
                 ocx_config::home::default_ocx_root()
                     .map(|root| ocx_store::file_structure::StateStore::new(root.join("state")).host_capabilities_file())

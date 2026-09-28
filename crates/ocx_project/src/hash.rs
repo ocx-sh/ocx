@@ -7,53 +7,17 @@ use sha2::{Digest, Sha256};
 
 use super::ProjectConfig;
 
-/// Canonicalization contract version baked into every lock file's
-/// `metadata.declaration_hash_version`. Incrementing this is a breaking
-/// change to the hash input format and must be paired with a test
-/// update covering the new canonicalization.
-///
-/// Deliberately typed as `u8`, not a `serde_repr` enum: the field ships
-/// as a plain integer in the lock file's `[metadata]` block, and the
-/// version gate is enforced by an explicit comparison in
-/// `ProjectLock::from_str_with_path`. A `serde_repr` enum would force
-/// a variant-per-release churn in this crate for a check that's one
-/// `if` statement today.
+/// Hash canonicalization version, written to every lock; bump it with any
+/// change to the hash input.
 pub const DECLARATION_HASH_VERSION: u8 = 1;
 
-/// Prefix for SHA-256 digest strings emitted by [`declaration_hash`].
 const SHA256_PREFIX: &str = "sha256:";
 
-/// Compute the declaration hash for a [`ProjectConfig`].
-///
-/// Algorithm (v1):
-/// 1. Build a canonical JSON value of the form
-///    `{ "default": [[name, identifier], ...],
-///       "group.<name>": [[name, identifier], ...] }`
-///    where every inner pair list is sorted lexicographically by binding
-///    name, and `identifier` is the `Display` form of the parsed
-///    [`ocx_oci::PackageRef`] (`registry/repo:tag[@digest]`).
-/// 2. Serialize via RFC 8785 JCS (`serde_json_canonicalizer`).
-/// 3. SHA-256 the UTF-8 bytes.
-/// 4. Return `"sha256:<hex>"`.
-///
-/// The platform set is **not** part of the hash input. Effective
-/// platforms are sourced ambient from the project tier and may evolve
-/// independently of `ocx.toml`'s declared content.
-///
-/// Infallible: the JSON value built here only contains `String`, `Array`,
-/// and `Object` nodes — no floats, no non-UTF-8 bytes are possible from
-/// Rust `String` inputs. RFC 8785 JCS cannot fail on this subtree, and
-/// SHA-256 + hex encoding never fail. If JCS ever gains a failure mode
-/// reachable from string/array/object input (it cannot today), the
-/// `.expect` below will panic loudly rather than silently returning a
-/// bogus hash.
+/// `sha256:<hex>` of the RFC 8785 JCS form of
+/// `{"default": [[name, identifier], ...], "group.<name>": [...]}`, pairs sorted by name.
 pub fn declaration_hash(config: &ProjectConfig) -> String {
-    // 1. Build a canonical JSON object. Field order at insertion time is
-    //    irrelevant — RFC 8785 JCS re-sorts object keys lexicographically
-    //    during canonicalization.
     let mut map = serde_json::Map::new();
 
-    // "default" — the reserved top-level group (maps to `config.tools`).
     let mut default_pairs: Vec<(&String, String)> = config.tools.iter().map(|(n, id)| (n, id.to_string())).collect();
     default_pairs.sort();
     let default_json: Vec<serde_json::Value> = default_pairs
@@ -65,11 +29,8 @@ pub fn declaration_hash(config: &ProjectConfig) -> String {
         serde_json::Value::Array(default_json),
     );
 
-    // "group.<name>" — `config.groups` is a BTreeMap, so iteration is
-    // already sorted by group name. Only `.tools` participates: `[env]` does
-    // not change WHICH packages resolve, so it cannot stale `ocx.lock` and
-    // an env edit must not force a re-lock. Adding it here would be a
-    // breaking change requiring a DECLARATION_HASH_VERSION bump.
+    // Only `.tools` is hashed: an `[env]` edit must not stale `ocx.lock`, and
+    // hashing more needs a DECLARATION_HASH_VERSION bump.
     for (group_name, group) in &config.groups {
         let mut pairs: Vec<(&String, String)> = group.tools.iter().map(|(n, id)| (n, id.to_string())).collect();
         pairs.sort();
@@ -79,11 +40,9 @@ pub fn declaration_hash(config: &ProjectConfig) -> String {
 
     let value = serde_json::Value::Object(map);
 
-    // 2. Canonicalize via RFC 8785 JCS.
     let canonical = serde_json_canonicalizer::to_string(&value)
         .expect("JCS cannot fail on string/array/object JSON — no floats or invalid UTF-8 possible");
 
-    // 3. SHA-256 + hex-encode.
     let digest = Sha256::digest(canonical.as_bytes());
     format!("{SHA256_PREFIX}{}", hex::encode(digest))
 }

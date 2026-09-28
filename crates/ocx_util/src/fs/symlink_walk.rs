@@ -2,19 +2,13 @@
 // Copyright 2026 The OCX Authors
 
 //! Refuse a path whose ancestor chain contains any symlink.
-//!
-//! Used by destination-path validation to guard against symlink-traversal
-//! attacks where an adversary places a symlink along the path to redirect
-//! writes to attacker-controlled locations.
 
 use std::path::{Path, PathBuf};
 
 /// Failure mode of [`refuse_if_symlink_in_path`].
 #[derive(Debug)]
 pub enum SymlinkWalkError {
-    /// `ancestor` (an existing component of `path`) is a symlink.
     Ancestor { path: PathBuf, ancestor: PathBuf },
-    /// I/O failure while walking the ancestor chain.
     Io { path: PathBuf, source: std::io::Error },
 }
 
@@ -43,34 +37,13 @@ impl std::error::Error for SymlinkWalkError {
     }
 }
 
-/// Refuses when `path` itself or any existing ancestor below `boundary` is a
-/// symlink.
+/// Refuses when `path` itself or any existing ancestor below `boundary` is a symlink; missing ancestors pass.
 ///
-/// Walks ancestors from `path` upward (most specific first) and calls
-/// [`tokio::fs::symlink_metadata`] on each that exists. Missing ancestors
-/// are tolerated — only existing symlinks fail the check.
-///
-/// `boundary` marks a **trusted** root: the walk stops when it reaches that
-/// path, so `boundary` and everything above it are never checked. Pass
-/// `Some(dest_content)` when only the untrusted portion strictly *below* a
-/// package's content root should be validated — OCX's own store path (e.g. a
-/// `~/.ocx` that is itself a symlink onto a larger disk) is trusted and must not
-/// fail-close every prefix-using install. Pass `None` to walk the whole
-/// ancestor chain up to the filesystem root (for a fully untrusted path such as
-/// a user-supplied `--output` directory).
-///
-/// # Security note
-///
-/// TOCTOU residual: an ancestor swap between this check and the subsequent
-/// directory create can still redirect writes. Single-user use cases are
-/// unaffected; CI automation should validate the exact path passed in,
-/// not derive it from untrusted input.
+/// `boundary` and above are trusted and never checked (a symlinked `~/.ocx` must not fail every install); `None` walks to the root.
+/// An ancestor swapped after the check still redirects writes, so validate the exact path that is written.
 pub async fn refuse_if_symlink_in_path(path: &Path, boundary: Option<&Path>) -> Result<(), SymlinkWalkError> {
     let mut current: Option<&Path> = Some(path);
     while let Some(p) = current {
-        // Stop at the trusted boundary: `boundary` and its ancestors are OCX's
-        // own store path, which may legitimately be a symlink. Only the
-        // untrusted portion strictly below it is in scope.
         if boundary == Some(p) {
             break;
         }
@@ -97,15 +70,7 @@ pub async fn refuse_if_symlink_in_path(path: &Path, boundary: Option<&Path>) -> 
     Ok(())
 }
 
-/// Synchronous sibling of [`refuse_if_symlink_in_path`] for blocking contexts.
-///
-/// The archive extractor runs inside `spawn_blocking` and cannot `.await`, so it
-/// uses this variant to refuse — *before* it creates anything — any entry whose
-/// destination resolves through a symlink an earlier entry planted. Identical
-/// policy and error type to the async version; walks with
-/// [`std::fs::symlink_metadata`]. `boundary` scopes the walk to the untrusted
-/// portion strictly below a trusted root (pass `Some(canonical_root)` so a
-/// symlinked `$OCX_HOME` above the extraction root is not itself refused).
+/// Synchronous sibling of [`refuse_if_symlink_in_path`] for `spawn_blocking` callers such as the archive extractor.
 pub(crate) fn refuse_if_symlink_in_path_sync(path: &Path, boundary: Option<&Path>) -> Result<(), SymlinkWalkError> {
     let mut current: Option<&Path> = Some(path);
     while let Some(p) = current {

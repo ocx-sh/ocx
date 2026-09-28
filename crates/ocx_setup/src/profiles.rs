@@ -1,25 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Profile-target detection for `ocx self setup` (plan contract 5).
-//!
-//! [`detect_targets`] ports the POSIX multi-profile decision tree from
-//! `install.sh:744-784`: for any POSIX login shell it wires the login and
-//! interactive RC files for both bash and zsh, so activation fires regardless of
-//! how the terminal is launched. The login fence always lands in `~/.profile`
-//! (the generic file every sh-family shell reads — sh/dash/ksh and bash's
-//! fallback) and *additionally* in `~/.bash_profile` when that exists (bash's
-//! preferred login file). fish, nushell, and elvish own dedicated files instead
-//! of a fenced block.
-//!
-//! Detection reads no real environment: it operates over an injectable
-//! [`HomeEnv`] so the decision tree is unit-testable without touching the
-//! process environment.
-//!
-//! PowerShell `$PROFILE` cannot be hardcoded (OneDrive / GPO redirect the path),
-//! so [`detect_powershell_profile`] asks the host itself via a subprocess. The
-//! execution-policy probe [`execution_policy_is_restricted`] surfaces a
-//! non-fatal advisory when a `$PROFILE` fence would be inert.
+//! Profile-target detection for `ocx self setup`.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -56,9 +38,7 @@ pub struct ProfileTarget {
     pub kind: ProfileKind,
 }
 
-/// An injectable snapshot of the environment variables that drive profile
-/// detection, so [`detect_targets`] is unit-testable without reading the real
-/// process environment.
+/// An injectable snapshot of the environment variables that drive profile detection.
 #[derive(Debug, Clone)]
 pub struct HomeEnv {
     /// `$HOME` — the user's home directory.
@@ -90,12 +70,7 @@ impl HomeEnv {
             .unwrap_or_else(|| self.home.join(".local/share"))
     }
 
-    /// `$ZDOTDIR`, or `$HOME` when unset. Rejects unsafe values — non-absolute,
-    /// containing a `..` parent component, or the filesystem root — to prevent an
-    /// environment-driven path-traversal/clobber of the auto-detected zsh RC
-    /// files (CWE-22). Hardens `install.sh:776-781`, which only rejected `/`. An
-    /// unsafe `ZDOTDIR` falls back to `$HOME`; a user wanting an arbitrary
-    /// location passes `--profile` explicitly.
+    /// `$ZDOTDIR`, or `$HOME` when unset or unsafe.
     fn zsh_dir(&self) -> PathBuf {
         match &self.zdotdir {
             Some(dir) if Self::is_safe_zdotdir(dir) => dir.clone(),
@@ -110,9 +85,7 @@ impl HomeEnv {
         }
     }
 
-    /// A `$ZDOTDIR` is safe to write under only when it is absolute, is not the
-    /// filesystem root, and carries no `..` (parent-dir) component — so a
-    /// relative or escaping value cannot redirect the auto-detect write path.
+    /// A relative, root or `..`-bearing `$ZDOTDIR` would redirect the auto-detected zsh RC writes (CWE-22).
     fn is_safe_zdotdir(dir: &Path) -> bool {
         dir.is_absolute()
             && dir != Path::new("/")
@@ -130,21 +103,11 @@ impl HomeEnv {
     }
 }
 
-/// Resolve the profile files a `ocx self setup` run should target, in write
-/// order, from an injectable [`HomeEnv`].
+/// Resolve the profile files a `ocx self setup` run should target, in write order.
 ///
-/// fish, nushell, and elvish each own a dedicated activation file. Every other
-/// POSIX login shell wires the login and interactive RC files for both bash and
-/// zsh (`install.sh:744-784`): the shared `env.sh` detects the running shell, so
-/// a copy that fires in an unused shell is a harmless no-op. The login fence
-/// always targets `~/.profile` (read by sh/dash/ksh and bash's fallback) and
-/// additionally `~/.bash_profile` when present (bash's preferred login file), so
-/// non-bash POSIX login shells are never stranded on a skel that ships
-/// `~/.bash_profile`. PowerShell `$PROFILE` is intentionally absent here — it
-/// requires a subprocess probe ([`detect_powershell_profile`]).
+/// PowerShell `$PROFILE` is not included; see [`detect_powershell_profile`].
 pub fn detect_targets(home_env: &HomeEnv) -> Vec<ProfileTarget> {
     match home_env.shell_name().as_str() {
-        // Dedicated-file shells opt out of the shared bash+zsh wiring.
         "fish" => {
             let path = home_env.config_home().join("fish").join("conf.d").join("ocx.fish");
             return vec![ProfileTarget {
@@ -174,19 +137,10 @@ pub fn detect_targets(home_env: &HomeEnv) -> Vec<ProfileTarget> {
         _ => {}
     }
 
-    // Shared bash+zsh wiring for any POSIX login shell. Both source the same
-    // env.sh; the runtime shell detection inside it picks the completion backend.
     let mut targets = Vec::with_capacity(5);
 
-    // POSIX login: ALWAYS wire ~/.profile — the generic login file every
-    // sh-family shell reads (sh/dash/ksh, and bash too when no bash-specific
-    // login file exists). When ~/.bash_profile *also* exists, wire it IN
-    // ADDITION (not instead): bash reads ~/.bash_profile and then ignores
-    // ~/.profile, so there is no double activation for bash, while dash/ksh/sh
-    // still pick up ~/.profile. Writing the fence to ~/.bash_profile alone
-    // (because it happens to exist) would strand dash/ksh/sh login shells — which
-    // never read ~/.bash_profile — on any distro whose skel ships it (e.g.
-    // Fedora), leaving ocx off PATH for those shells.
+    // `.profile` stays wired even beside `.bash_profile`, or dash/ksh/sh login shells lose activation.
+    // `.bash_profile` shadows `.profile` for bash, so it is wired too when present.
     targets.push(ProfileTarget {
         path: home_env.home.join(".profile"),
         kind: ProfileKind::PosixFence,
@@ -197,13 +151,11 @@ pub fn detect_targets(home_env: &HomeEnv) -> Vec<ProfileTarget> {
             kind: ProfileKind::PosixFence,
         });
     }
-    // bash interactive (non-login).
     targets.push(ProfileTarget {
         path: home_env.home.join(".bashrc"),
         kind: ProfileKind::PosixFence,
     });
 
-    // zsh: login (.zprofile) + interactive (.zshrc), under $ZDOTDIR.
     let zsh_dir = home_env.zsh_dir();
     targets.push(ProfileTarget {
         path: zsh_dir.join(".zprofile"),
@@ -219,9 +171,7 @@ pub fn detect_targets(home_env: &HomeEnv) -> Vec<ProfileTarget> {
 
 /// Ask a PowerShell host for the current-user, all-hosts `$PROFILE` path.
 ///
-/// The path is never hardcoded: OneDrive and Group Policy redirect the profile
-/// directory, so only the host knows the real location. Spawns `pwsh` first,
-/// then falls back to `powershell`; returns `None` when neither host is present.
+/// Never hardcoded: OneDrive and Group Policy redirect the profile directory.
 pub async fn detect_powershell_profile() -> Option<PathBuf> {
     for host in ["pwsh", "powershell"] {
         if let Some(path) = query_powershell_profile(host).await {
@@ -233,9 +183,7 @@ pub async fn detect_powershell_profile() -> Option<PathBuf> {
 
 /// Run one PowerShell host and parse `$PROFILE.CurrentUserAllHosts` from stdout.
 ///
-/// Returns `None` on any failure (host absent, exec error, non-zero exit, empty
-/// output) so detection degrades to "no PowerShell profile" rather than failing
-/// setup.
+/// Returns `None` on any failure, so detection never fails setup.
 async fn query_powershell_profile(host: &str) -> Option<PathBuf> {
     let output = tokio::process::Command::new(host)
         .args([
@@ -265,11 +213,8 @@ async fn query_powershell_profile(host: &str) -> Option<PathBuf> {
 
 /// Whether the current-user PowerShell execution policy is `Restricted`.
 ///
-/// A `Restricted` policy makes a `$PROFILE` fence inert, so the orchestrator
-/// emits a non-fatal advisory to relax it. Returns `false` on non-Windows hosts,
-/// when no PowerShell host is present, or on any subprocess failure — the probe
-/// never fails setup, and it never auto-changes the policy (a user security
-/// decision).
+/// `false` when no host answers; the probe never fails setup and never changes
+/// the policy, which is the user's security decision.
 pub async fn execution_policy_is_restricted() -> bool {
     for host in ["pwsh", "powershell"] {
         if let Some(policy) = query_execution_policy(host).await {

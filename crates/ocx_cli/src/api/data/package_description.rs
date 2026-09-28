@@ -14,10 +14,6 @@ pub struct Inner {
 }
 
 /// Package description metadata (title, description, keywords).
-///
-/// Plain format: key-value lines for non-None fields, or "No description found" message.
-///
-/// JSON format: flat object with title/description/keywords, or `null` when absent.
 pub struct PackageDescription {
     inner: Option<Inner>,
     identifier: ocx_oci::PackageRef,
@@ -56,14 +52,7 @@ impl Printable for PackageDescription {
     }
 }
 
-/// One or more [`PackageDescription`] views keyed by the requested identifier.
-///
-/// Plain format: a `== <id> ==` header line per package followed by its
-/// description fields, in input order.
-///
-/// JSON format: object keyed by the raw request identifier
-/// (`{"<id>": {…}|null}`), preserving input order — the same keyed-object shape
-/// `which` uses, applied even for a single package.
+/// [`PackageDescription`] views keyed by the raw request identifier, in input order, even for one package.
 pub struct PackageDescriptions {
     entries: Vec<(String, PackageDescription)>,
 }
@@ -94,8 +83,7 @@ impl Printable for PackageDescriptions {
     }
 }
 
-// The `Serialize` impl above is transparent, so the published schema is the
-// inner type's. A package with no description serializes as `null`, not as `{}`.
+// Transparent `Serialize`: a package with no description is `null`, not `{}`.
 impl schemars::JsonSchema for PackageDescription {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "PackageDescription".into()
@@ -106,8 +94,7 @@ impl schemars::JsonSchema for PackageDescription {
     }
 }
 
-// The `Serialize` impl above writes a map keyed by the argument the caller passed, not the struct's
-// own fields, so the schema is hand-written to match it.
+// Hand-written: `Serialize` writes a map keyed by the request identifier, not the struct's fields.
 impl schemars::JsonSchema for PackageDescriptions {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "PackageDescriptions".into()

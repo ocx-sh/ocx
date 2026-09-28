@@ -1,26 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Per-traffic-host mirror configuration (`[mirrors."<host>"]`).
+//! Per-traffic-host mirror configuration (`[mirrors."<host>"]`); identifiers, digests and on-disk
+//! paths stay keyed to the upstream host.
 //!
-//! Home for all `[mirrors]` settings. Each entry maps a canonical upstream
-//! **traffic host** (e.g. `"ghcr.io"`, `"index.ocx.sh"`) to replacement
-//! endpoints — a corporate artifact-manager remote/proxy repository — so OCX
-//! routes read traffic to the mirror instead of the firewall-blocked origin.
-//! The canonical identifier, content-addressed digest, and every on-disk path
-//! stay keyed to the upstream host; only the transport reference is
-//! rewritten.
-//!
-//! Since `adr_index_indirection.md` F5b, a `[mirrors]` entry is a **union
-//! value**, not a fixed `{url}` table: a bare string rewrites both traffic
-//! roles for that host (the common single-role host), while a
-//! `{registry?, index?}` table splits per role — `registry` rewrites OCI
-//! distribution traffic (`/v2`), `index` rewrites index-tree traffic
-//! (`/config.json`, `/c`, `/p`). The two roles are path-disjoint, so the same
-//! host may co-serve both. The registry role feeds
-//! [`MirrorMap`](ocx_oci::MirrorMap) (the OCI client read path) ONLY; the
-//! index role feeds the index client's base-URL resolution ONLY — never the
-//! other way around.
+//! The roles are path-disjoint (`adr_index_indirection.md`): `registry` rewrites only `/v2`
+//! traffic, `index` only `/config.json`, `/c` and `/p`.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -28,40 +13,23 @@ use serde::Deserialize;
 
 use ocx_oci::client::mirror_map::ParsedMirror;
 
-/// Minimal shape shared by [`toml::Value`] and [`serde_json::Value`] so
-/// [`parse_mirror_value`] can branch on "string vs. table" **once**, then
-/// reuse the same branch logic for a TOML `[mirrors]` table entry and a
-/// forwarded `OCX_MIRRORS` JSON per-host value.
+/// Shape shared by [`toml::Value`] and [`serde_json::Value`], so [`parse_mirror_value`] parses a
+/// TOML entry and a forwarded `OCX_MIRRORS` value alike.
 ///
-/// Deliberately **not** a `#[serde(untagged)]` enum: an untagged derive
-/// reports only a generic "data did not match any variant" error on a
-/// malformed entry (the class of opaque error cargo#12574 moved away from) —
-/// this hand-rolled, value-first shape lets [`parse_mirror_value`] raise a
-/// named, field-specific [`MirrorConfigError`] instead.
+/// Not a `#[serde(untagged)]` enum, whose opaque "did not match any variant" would replace the
+/// named [`MirrorConfigError`].
 pub trait MirrorValueShape {
-    /// The string value if this is a bare-string entry (`"https://..."`,
-    /// which rewrites both traffic roles for the host).
+    /// The string value of a bare-string entry, which rewrites both roles.
     fn as_mirror_str(&self) -> Option<&str>;
 
-    /// A named field's string value if this is a table entry
-    /// (`{registry = "...", index = "..."}`).
-    ///
-    /// `Ok(None)` when the field is genuinely absent (that role was simply
-    /// not declared); `Err(type_name)` when the field key IS present but its
-    /// value is not a string — the two cases resolve to different
-    /// [`MirrorConfigError`] variants downstream (an absent role never
-    /// errors by itself; a present-but-wrong-typed role is always
-    /// [`MirrorConfigError::NonStringRoleValue`]), so a single collapsed
-    /// `Option` cannot carry the distinction [`parse_mirror_value`] needs.
+    /// A table field's string value: `Ok(None)` when absent, `Err(type_name)` when present but not
+    /// a string.
     fn mirror_field(&self, field: &str) -> Result<Option<&str>, &'static str>;
 
-    /// `true` when this value is a table (the `{registry?, index?}` shape),
-    /// `false` for a bare string or any other shape.
+    /// Whether this value is a table.
     fn is_mirror_table(&self) -> bool;
 
-    /// Short, human-readable type name for an unrecognized shape (e.g.
-    /// `"integer"`, `"boolean"`, `"array"`), used to build
-    /// [`MirrorConfigError::InvalidShape`] / [`MirrorConfigError::NonStringRoleValue`].
+    /// Short type name (e.g. `"integer"`) for error messages.
     fn mirror_type_name(&self) -> &'static str;
 }
 
@@ -113,9 +81,7 @@ impl MirrorValueShape for serde_json::Value {
     }
 }
 
-/// Short, human-readable type name for a [`serde_json::Value`] — the JSON
-/// analog of [`toml::Value::type_str`] (which the `toml` crate provides
-/// natively, `serde_json` does not).
+/// The JSON analog of [`toml::Value::type_str`].
 fn json_value_type_name(value: &serde_json::Value) -> &'static str {
     match value {
         serde_json::Value::Null => "null",
@@ -129,49 +95,29 @@ fn json_value_type_name(value: &serde_json::Value) -> &'static str {
 
 /// Normalized `[mirrors."<host>"]` entry: one independent optional endpoint
 /// per traffic role.
-///
-/// Re-exported from [`crate`] as `MirrorConfig`. Never derives
-/// [`serde::Deserialize`] directly — the string-or-table union value it is
-/// built from is parsed by [`parse_mirror_value`] (fed from
-/// [`deserialize_mirrors_table`] on the TOML side and
-/// [`crate::env::mirrors`] on the forwarded-env side), never by a derive on
-/// this struct.
 #[derive(Debug, Default, Clone, PartialEq, Eq, schemars::JsonSchema)]
 pub struct MirrorConfig {
     /// Endpoint for OCI distribution traffic (`/v2`) to this host, if a
     /// registry role was declared for it (a bare string, `{registry: ...}`,
-    /// or `{registry: ..., index: ...}`). Feeds
-    /// [`MirrorMap`](ocx_oci::MirrorMap) only.
+    /// or `{registry: ..., index: ...}`).
+    // Feeds `ocx_oci::MirrorMap` only.
     pub registry: Option<String>,
 
     /// Endpoint for index-tree traffic (`/config.json`, `/c`, `/p`) to this
-    /// host, if an index role was declared for it. Feeds the index client's
-    /// base-URL resolution only.
+    /// host, if an index role was declared for it.
+    // Feeds the index client's base-URL resolution only.
     pub index: Option<String>,
 
-    /// Runtime provenance marker: the `registry` role of this entry was
-    /// declared at the SYSTEM config scope (`/etc/ocx/config.toml`), so it is
-    /// NON-OVERRIDABLE by any lower tier. Independent of
-    /// [`Self::index_system_locked`] — a system entry may declare only one
-    /// role, leaving the other role open for a lower tier to set (F5b: the
-    /// two roles are independent fields on one entry).
-    ///
-    /// Never serialized — set by the loader via [`Self::lock_as_system`]
-    /// after parsing the system-scope file, not read from disk.
+    /// Set by the loader when a SYSTEM-scope entry declares `registry`; locks that role only.
     #[schemars(skip)]
     pub registry_system_locked: bool,
 
-    /// Runtime provenance marker: the `index` role of this entry was
-    /// declared at the SYSTEM config scope. See
-    /// [`Self::registry_system_locked`] for the per-role locking rationale.
+    /// As `registry_system_locked`, for the `index` role.
     #[schemars(skip)]
     pub index_system_locked: bool,
 }
 
-/// Error raised while parsing a mirror `url` into a [`ParsedMirror`]
-/// ([`parse_url`]), while parsing a raw `[mirrors."<host>"]` union value into
-/// a [`MirrorConfig`] ([`parse_mirror_value`]), or while resolving the
-/// per-host mirror map in [`resolve_mirror_map`].
+/// Error parsing a mirror `url` or `[mirrors]` value, or resolving the mirror map.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum MirrorConfigError {
@@ -185,9 +131,7 @@ pub enum MirrorConfigError {
         /// The offending `url` value.
         url: String,
     },
-    /// A `[mirrors."<upstream>"]` role's `url` could not be parsed. Carries
-    /// the upstream host key for context and the underlying parse error as
-    /// source.
+    /// A `[mirrors."<upstream>"]` role's `url` could not be parsed.
     #[error("invalid [mirrors.\"{upstream}\"] configuration")]
     InvalidEntry {
         /// The upstream host key whose mirror entry failed to parse.
@@ -196,10 +140,7 @@ pub enum MirrorConfigError {
         #[source]
         source: Box<MirrorConfigError>,
     },
-    /// A `[mirrors."<upstream>"]` entry declares neither a `registry` nor an
-    /// `index` endpoint (an empty table, or a merged entry every tier left
-    /// empty) — the union analog of a no-op mirror: silently allowing direct
-    /// egress to the upstream host for every role.
+    /// A `[mirrors."<upstream>"]` entry declares neither role, silently allowing direct egress.
     #[error(
         "mirrors.\"{upstream}\" declares neither a registry nor an index endpoint; a mirror entry \
          with no role would silently allow direct egress to the upstream host"
@@ -228,12 +169,7 @@ pub enum MirrorConfigError {
         /// Human-readable type name of the offending value (e.g. `"integer"`).
         found: String,
     },
-    /// A mirror endpoint uses plain HTTP but its host is in neither half of the
-    /// insecure-host union — `[registries."<host>"] insecure` and
-    /// `OCX_INSECURE_REGISTRIES`. Replace semantics forbid silently downgrading
-    /// to HTTP, so this fails loud at resolve time with an actionable hint
-    /// (CWE-319) rather than as an opaque TLS error mid-transport. Both
-    /// spellings are named because either one fixes it.
+    /// A mirror endpoint uses plain HTTP but its host is not allowed plain HTTP (CWE-319).
     #[error(
         "mirror for '{upstream}' uses http:// but mirror host '{mirror_host}' is not allowed plain HTTP; \
          set insecure = true under [registries.\"{mirror_host}\"] or add the host to OCX_INSECURE_REGISTRIES"
@@ -244,9 +180,8 @@ pub enum MirrorConfigError {
         /// The mirror host that would be contacted over plain HTTP.
         mirror_host: String,
     },
-    /// The forwarded `OCX_MIRRORS` env value was not valid JSON. A malformed
-    /// forwarded map is a hard error: silently degrading to an identity map
-    /// would route reads to the firewall-blocked origin instead of the mirror.
+    /// The forwarded `OCX_MIRRORS` value is not valid JSON; degrading to an identity map instead
+    /// would route reads to the blocked origin.
     #[error("malformed OCX_MIRRORS env value")]
     MalformedEnvJson {
         /// The underlying JSON parse failure.
@@ -256,17 +191,7 @@ pub enum MirrorConfigError {
 }
 
 impl MirrorConfig {
-    /// Mark this entry as system-locked — non-overridable by lower tiers for
-    /// whichever role(s) it declares.
-    ///
-    /// Called by the config loader on each entry of the system-scope file's
-    /// (`/etc/ocx/config.toml`) `[mirrors]` table, after parsing and before
-    /// folding higher tiers in. **Per-role**, unlike
-    /// [`RegistryConfig::lock_as_system`](crate::RegistryConfig::lock_as_system):
-    /// only the role(s) this entry actually sets (`registry.is_some()` /
-    /// `index.is_some()`) become non-overridable — a system entry that
-    /// declares only `registry` leaves `index` open for a lower tier to set
-    /// (F5b: the two roles are independent fields on one entry).
+    /// Lock whichever role(s) this entry declares; an undeclared role stays open to lower tiers.
     pub fn lock_as_system(&mut self) {
         if self.registry.is_some() {
             self.registry_system_locked = true;
@@ -276,20 +201,10 @@ impl MirrorConfig {
         }
     }
 
-    /// Merge `other` into `self`, field-by-field. `other`'s `Some` values
-    /// override `self`'s; `other`'s `None` values do not clobber `self`.
+    /// Merge `other` into `self`: each role's `Some` wins unless that role is locked.
     ///
-    /// Each role merges independently, honoring its own lock: `registry`
-    /// merges under [`Self::registry_system_locked`], `index` merges under
-    /// [`Self::index_system_locked`] — a system entry locking only one role
-    /// still lets a lower tier set the other (F5b).
-    /// Each role also ADOPTS its lock from `other` while still unlocked:
-    /// `Config::merge` reaches every `[mirrors."<host>"]` entry through
-    /// `map.entry(host).or_default().merge(..)`, so the system tier is never
-    /// `self` on the fold that first carries it into the accumulator. Without
-    /// adopting, the flag `apply_system_locks` set is dropped on that very
-    /// fold and a system-scope mirror lock — the egress-containment surface an
-    /// operator reaches for first — silently does nothing.
+    /// Each role adopts its lock from `other`, since `Config::merge` folds through `or_default()`;
+    /// without that, a system-scope mirror lock does nothing.
     pub fn merge(&mut self, other: MirrorConfig) {
         if !self.registry_system_locked {
             if other.registry.is_some() {
@@ -306,34 +221,19 @@ impl MirrorConfig {
     }
 }
 
-/// Parses a raw `[mirrors."<host>"]` union value (a bare string, or a
-/// `{registry?, index?}` table) into a normalized [`MirrorConfig`].
+/// Parses a raw `[mirrors."<host>"]` value (a bare string, or a `{registry?, index?}` table).
 ///
-/// The single shared branch backing both `[mirrors]` TOML-table entries
-/// ([`deserialize_mirrors_table`]) and forwarded `OCX_MIRRORS` JSON per-host
-/// entries ([`crate::env::mirrors`]) — fed [`toml::Value`] from the former and
-/// [`serde_json::Value`] from the latter, generic over [`MirrorValueShape`] so
-/// neither caller needs a second copy of the branch logic.
-///
-/// Returns `Ok(None)` for a table that declares no role this binary knows —
-/// an empty table, a typo'd key, or a role added by a later ocx. The entry
-/// contributes nothing and is skipped rather than raised: a `[mirrors]` entry
-/// written for a newer ocx must not fail the whole config it arrives in (see
-/// [`crate::Config`] — forward compatibility over typo detection). The
-/// no-op-mirror guard it used to provide survives one layer up, where
-/// [`resolve_mirror_map`] still rejects a role-less merged entry.
+/// `Ok(None)` for a table declaring no known role, so a newer ocx's entry cannot fail the whole
+/// config; [`resolve_mirror_map`] rejects a role-less merged entry.
 ///
 /// # Errors
 ///
-/// Returns [`MirrorConfigError::InvalidShape`] when `value` is neither a
-/// string nor a table, and [`MirrorConfigError::NonStringRoleValue`] when a
-/// table field is present but not a string — a wrong-typed value on a known
-/// key is a malformed entry, not a forward-compatibility question.
+/// [`MirrorConfigError::InvalidShape`] for neither string nor table,
+/// [`MirrorConfigError::NonStringRoleValue`] for a known role that is not a string.
 pub fn parse_mirror_value<V: MirrorValueShape>(
     upstream: &str,
     value: &V,
 ) -> Result<Option<MirrorConfig>, MirrorConfigError> {
-    // Bare string: both traffic roles rewrite to the same endpoint.
     if let Some(url) = value.as_mirror_str() {
         return Ok(Some(MirrorConfig {
             registry: Some(url.to_string()),
@@ -382,16 +282,8 @@ pub fn parse_mirror_value<V: MirrorValueShape>(
     Ok(Some(config))
 }
 
-/// Deserializes the `[mirrors]` TOML table into normalized [`MirrorConfig`]
-/// entries, keyed by upstream host.
-///
-/// Wired onto [`crate::Config::mirrors`] via `#[serde(deserialize_with
-/// = "mirror::deserialize_mirrors_table")]` instead of a plain derive: each
-/// per-host TOML value is read as a generic [`toml::Value`] first (this
-/// function has the map-key context [`parse_mirror_value`] itself lacks), so a
-/// malformed entry raises a **named** per-host error via
-/// [`MirrorConfigError::InvalidEntry`]-style wrapping instead of an opaque
-/// "data did not match any variant".
+/// Deserializes `[mirrors]` into [`MirrorConfig`] entries keyed by upstream host, through
+/// [`parse_mirror_value`] so a malformed entry raises a named per-host error.
 pub fn deserialize_mirrors_table<'de, D>(deserializer: D) -> Result<Option<HashMap<String, MirrorConfig>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -409,42 +301,26 @@ where
     Ok(Some(result))
 }
 
-/// Parses a mirror endpoint `url` into a [`ParsedMirror`].
+/// Parses a mirror endpoint `url` into a [`ParsedMirror`], keeping the path prefix verbatim.
 ///
-/// A free function (not a method — a [`MirrorConfig`] entry may declare two
-/// role URLs, so there is no single `self.url` to parse) so
-/// [`resolve_mirror_map`] can call it once per declared role.
-///
-/// Dedicated split: strip the scheme into `protocol`, take the first `/`
-/// boundary as the host/path-prefix split, keep the remainder verbatim as
-/// the path prefix, and trim one trailing `/`. Deliberately does **not**
-/// reuse `auth::registry_url::canonicalize_registry`, whose `/vN` strip and
-/// `docker.io` special-case would corrupt a repo-key prefix or a
-/// `docker.io` mirror host.
+/// Never `canonicalize_registry`, whose `/vN` strip and `docker.io` special case would corrupt a
+/// repo-key prefix or a `docker.io` mirror host.
 ///
 /// # Errors
 ///
-/// Returns [`MirrorConfigError::MissingUrl`] when `url` is empty, and
-/// [`MirrorConfigError::MissingHost`] when the `url` has no host segment.
+/// [`MirrorConfigError::MissingUrl`] for an empty `url`, [`MirrorConfigError::MissingHost`] for
+/// one with no host.
 pub fn parse_url(url: &str) -> Result<ParsedMirror, MirrorConfigError> {
     if url.is_empty() {
         return Err(MirrorConfigError::MissingUrl);
     }
 
-    // 1. Strip the scheme into `protocol`, normalized to ASCII-lowercase so a
-    //    mixed-case scheme (`HTTP://`) cannot bypass the plain-HTTP gate
-    //    downstream, which compares against lowercase `"http"` (CWE-319 — the
-    //    `url` crate lowercases the scheme on the wire, so an un-normalized
-    //    `"HTTP"` would gate as "not http" yet egress plaintext). Default to
-    //    https when no scheme is present (matches the registry-auth convention
-    //    without pulling in `canonicalize_registry`'s /vN and docker.io
-    //    special-cases).
+    // Lowercased, or `HTTP://` passes the plain-HTTP gate yet egresses plaintext (CWE-319).
     let (protocol, rest) = match url.split_once("://") {
         Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
         None => ("https".to_string(), url),
     };
 
-    // 2. First `/` boundary splits host from the verbatim path prefix.
     let (host, raw_prefix) = match rest.split_once('/') {
         Some((host, prefix)) => (host, prefix),
         None => (rest, ""),
@@ -454,7 +330,6 @@ pub fn parse_url(url: &str) -> Result<ParsedMirror, MirrorConfigError> {
         return Err(MirrorConfigError::MissingHost { url: url.to_string() });
     }
 
-    // 3. Trim exactly one trailing `/` from the prefix (verbatim otherwise).
     let path_prefix = raw_prefix.strip_suffix('/').unwrap_or(raw_prefix);
 
     Ok(ParsedMirror {
@@ -467,65 +342,29 @@ pub fn parse_url(url: &str) -> Result<ParsedMirror, MirrorConfigError> {
 /// Per-role, per-purpose output of [`resolve_mirror_map`].
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedMirrors {
-    /// Parsed registry-role (OCI distribution, `/v2`) mirror endpoints, keyed
-    /// by upstream traffic host — feeds
-    /// [`MirrorMap::new`](ocx_oci::MirrorMap::new) on the client side.
-    /// Never carries an index-only entry.
+    /// Registry-role (`/v2`) endpoints by upstream host, for [`MirrorMap::new`](ocx_oci::MirrorMap::new).
     pub registry: BTreeMap<String, ParsedMirror>,
-    /// Parsed index-role (index-tree traffic: `/config.json`, `/c`, `/p`)
-    /// mirror endpoints, keyed by upstream traffic host — feeds the index
-    /// client's base-URL resolution. Never carries a registry-only entry.
+    /// Index-role endpoints by upstream host, for the index client.
     pub index: BTreeMap<String, ParsedMirror>,
-    /// The merged (`[mirrors]` config union the inherited `OCX_MIRRORS`, env
-    /// wins per host) but not-yet-role-parsed entries, keyed by upstream
-    /// host — forwarded verbatim via
-    /// [`OcxConfigView::mirrors`](crate::env::OcxConfigView::mirrors) so a
-    /// child ocx re-parses and re-validates the same map instead of
-    /// inheriting pre-split [`ParsedMirror`] internals.
+    /// The merged, unparsed entries, forwarded via
+    /// [`OcxConfigView::mirrors`](crate::env::OcxConfigView::mirrors) so a child re-validates them.
     pub merged: BTreeMap<String, MirrorConfig>,
 }
 
-/// Resolves the per-host mirror map from `[mirrors]` config merged with the
-/// inherited `OCX_MIRRORS` env, then parses and validates every resolved
-/// entry, splitting the result by traffic role.
-///
-/// This is the single Config→mirror-map transform shared by the CLI
-/// (`Context::try_init`) and `ocx config test`'s preview of a candidate. It
-/// owns the one-way-door precedence rule and the plain-HTTP security gate so
-/// they cannot drift between layers:
-///
-/// - **Per-host merge** — `env_entries` (the inherited, already-normalized
-///   `OCX_MIRRORS`) win per-host key; a host present only in `[mirrors]`
-///   config survives. Order is stable (a [`BTreeMap`]), so forwarding to a
-///   child ocx is deterministic.
-/// - **Parse + validate** — each merged entry's declared role(s) are parsed
-///   via [`parse_url`]; a missing/empty role `url` is a hard error (F9: a
-///   no-op mirror silently egresses to the blocked upstream host); an entry
-///   with no role at all is [`MirrorConfigError::EmptyEntry`].
-/// - **Plain-HTTP gate (CWE-319)** — an `http://` mirror whose host is not in
-///   `insecure_hosts` is a hard error naming both ways to allow it, so the
-///   failure surfaces loud at resolve time rather than as an opaque TLS error
-///   mid-transport.
-/// - **Role-only filtering** — an index-only entry never appears in
-///   [`ResolvedMirrors::registry`], and a registry-only entry never appears in
-///   [`ResolvedMirrors::index`]: an index-only mirror must NOT rewrite OCI
-///   traffic, and vice versa.
+/// Resolves `[mirrors]` merged with the inherited `OCX_MIRRORS` (which wins per host), validated
+/// and split by role; shared by `Context::try_init` and `ocx config test` so neither can drift.
 ///
 /// # Errors
 ///
-/// Returns [`MirrorConfigError::InvalidEntry`] when a configured mirror role's
-/// `url` is missing/empty or has no host, [`MirrorConfigError::EmptyEntry`]
-/// when an entry declares neither role, and
-/// [`MirrorConfigError::PlainHttpMirrorNotAllowed`] when a mirror uses plain
-/// HTTP without its host in `insecure_hosts`.
+/// [`MirrorConfigError::InvalidEntry`] for a bad role `url`, [`MirrorConfigError::EmptyEntry`]
+/// for a role-less entry, [`MirrorConfigError::PlainHttpMirrorNotAllowed`] for an `http://`
+/// mirror outside `insecure_hosts`.
 pub fn resolve_mirror_map(
     config: &crate::Config,
     env_entries: Vec<(String, MirrorConfig)>,
     insecure_hosts: &[String],
 ) -> Result<ResolvedMirrors, MirrorConfigError> {
-    // Per-host merge: config first, then env entries win per host key
-    // (whole-value replace — an env entry is already a fully-merged
-    // `MirrorConfig`, not something to field-merge against).
+    // Env entries replace whole values: each is already a fully merged `MirrorConfig`.
     let mut merged: BTreeMap<String, MirrorConfig> = config
         .mirrors
         .iter()
@@ -558,9 +397,7 @@ pub fn resolve_mirror_map(
     })
 }
 
-/// Parses and validates a single declared role `url` for `upstream`: wraps a
-/// [`parse_url`] failure in [`MirrorConfigError::InvalidEntry`] naming the
-/// upstream host, then enforces the plain-HTTP gate (CWE-319).
+/// Parses one role `url` for `upstream` and enforces the plain-HTTP gate (CWE-319).
 fn resolve_mirror_role(
     upstream: &str,
     url: &str,
@@ -1453,9 +1290,9 @@ mod tests {
         );
     }
 
-    // ── C-020 regression guard: `parse_url` and `file://` ────────────────────
+    // ── regression guard: `parse_url` and `file://` ──────────────────────────
     //
-    // C-020 corrects an earlier design-spec draft that claimed `parse_url`
+    // An earlier design-spec draft claimed that `parse_url`
     // rejects every `file://` form and called for a scheme allowlist in this
     // shared parser. Neither claim holds: `parse_url` splits on the first
     // `://`, lower-cases the scheme, and rejects **only** an empty host — no
@@ -1467,18 +1304,17 @@ mod tests {
     // unchanged**. They are not, by themselves, proof that a `file://`
     // `[mirrors]` index-role override is safe to use — it is refused, just
     // one layer up: the closed-scheme post-override gate in
-    // `resolve_base_url` (`oci/index/ocx_index.rs`, C-018 check 2), owned by
-    // WP6. A reader who sees only `parse_url_file_scheme_with_host_parses_ok`
+    // `resolve_base_url`.
+    // A reader who sees only `parse_url_file_scheme_with_host_parses_ok`
     // below must not conclude `file://` is safe in `[mirrors]`; pair it
-    // mentally with WP6's gate test, per C-020's own instruction that "the
-    // pair is the contract; either alone misleads".
+    // mentally with that gate's test: the pair is the contract; either alone
+    // misleads.
 
     /// `parse_url("file://localhost/srv/x")` parses **today**, and that is
     /// intentional: a non-empty authority (`localhost`) gives `parse_url` a
     /// host to extract, so the generic split succeeds exactly as it would for
-    /// any other scheme. Refusing a `file://` index-role mirror is C-018
-    /// check 2's job (`resolve_base_url`'s post-override gate), not this
-    /// parser's — see C-020.
+    /// any other scheme. Refusing a `file://` index-role mirror is
+    /// `resolve_base_url`'s post-override gate's job, not this parser's.
     #[test]
     fn parse_url_file_scheme_with_host_parses_ok() {
         let parsed = parse_url("file://localhost/srv/x").expect("file:// with a non-empty authority must parse");
@@ -1678,8 +1514,7 @@ mod tests {
     /// `resolve_mirror_map`'s doc comment — "env_entries win per-host key"),
     /// so a host present in both sources takes the ENTIRE env entry, not a
     /// per-role splice. A field-wise cross-role merge instead of whole-value
-    /// replace is a deferred design question (recorded in
-    /// `plan_one_index.md`), not implemented here.
+    /// replace is a deferred design question, not implemented here.
     #[test]
     fn env_mirrors_replace_is_whole_value_not_field_wise_across_roles() {
         let mut mirrors = HashMap::new();

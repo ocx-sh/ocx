@@ -1,71 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The report vocabulary the two forge-writing commands share (DX-59).
-//!
-//! C-060 and C-061 contract the **same** value vocabularies for
-//! `credential_kind`, `push_credential_kind` and the capability-check rows
-//! across `ocx package claim` and `ocx package announce`, so one renderer is
-//! right and two would drift. A neutral module rather than one report importing
-//! the other: pointing the older, more general announce report at the newer
-//! claim report would make that inversion permanent.
-//!
-//! No `Printable` impl lives here, so this module owes no `report_roots!` row
-//! (DX-57) — it is projected *into* the two reports that do.
-//!
-//! # Why the two credential kinds are enums with an `ALL` array
-//!
-//! Both are **wire vocabularies**: their serialized spellings are rendered into
-//! a parsed report and are one-way once shipped. A bare `&'static str` mapper
-//! over an ad-hoc `match` cannot be checked for completeness — a
-//! `..._wire_spellings` test written against it counts only the arms the test
-//! itself enumerated, which is green in every state (`quality-core.md`
-//! § Unchecked Green). Pairing the spelling assertion against `ALL` makes a
-//! newly added arm red instead, which is how `CapabilityName` (`forge/api.rs`)
-//! and `ClaimStatus` (`claim/request.rs`) already hold theirs.
-//!
-//! Both derive `Serialize` and `JsonSchema` and are held **typed** on the
-//! report, so the published schema carries the closed set rather than an open
-//! `string`, and no report can spell a value the mapper cannot produce. There
-//! is deliberately no `Display` impl beside the derive: one wire vocabulary
-//! gets one renderer, and two would be free to drift.
+//! The report vocabulary `ocx package claim` and `ocx package announce` share: one renderer, or
+//! the two drift. No `Display` sits beside the `Serialize` derives here, for the same reason.
 
 use ocx_announce::forge::{CapabilityCheck, CapabilityName, CheckStatus, ForgeCredentials, WriteTransport};
 use serde::{Serialize, Serializer};
 
-/// Serialize a value by its [`std::fmt::Display`] spelling.
-///
-/// For the vocabularies C-060 closes that `ocx_lib` already owns —
-/// [`CapabilityName`] and [`CheckStatus`] here, [`ClaimStatus`], [`ForgeKind`],
-/// [`WriteTransport`] and [`OwnerIdentitySource`] on the claim report. None of
-/// them derives `Serialize`: their `Display` impl **is** the wire spelling.
-/// Holding the enum and rendering through this is what stops a report spelling a
-/// value the library cannot produce, without minting a second vocabulary at this
-/// layer.
-///
-/// Where each spelling is actually held — checked, not assumed, because this is
-/// the file a later change consults before touching one:
-///
-/// | Vocabulary | Held by |
-/// |---|---|
-/// | [`ClaimStatus`], [`OwnerIdentitySource`], [`CapabilityName`], [`CheckStatus`] | an `ALL`-paired spelling test at library scope |
-/// | [`WriteTransport`] | `write_transport_value_spellings`, paired against clap's `value_variants()` rather than an `ALL` |
-/// | [`ForgeKind`] | **no library-scope spelling test** — `forge/kind.rs` declares no `ALL`. Its `github`/`gitlab` spellings are held only by this crate's golden claim-report document. |
-///
-/// [`ClaimStatus`]: ocx_announce::claim::ClaimStatus
-/// [`ForgeKind`]: ocx_announce::forge::ForgeKind
-/// [`OwnerIdentitySource`]: ocx_announce::claim::OwnerIdentitySource
+/// Serializes a library-owned closed vocabulary by its `Display` spelling, which is its wire form.
+/// `ForgeKind` has no library spelling test: only the golden claim-report document holds `github`/`gitlab`.
 pub fn serialize_display<T: std::fmt::Display, S: Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.collect_str(value)
 }
 
-/// [`serialize_display`] for a key whose absence is `null`.
-///
-/// `serialize_with` replaces serde's handling of the **whole** field, `Option`
-/// included, so the plain helper above would render `Some(x)`'s `Display` for a
-/// present value and fail to compile for an absent one. A field that renders
-/// `null` when the run produced nothing is DX-40.3's rule, not an option this
-/// layer gets to take.
+/// [`serialize_display`] for an `Option` field, whose absence renders `null`.
 pub fn serialize_optional_display<T: std::fmt::Display, S: Serializer>(
     value: &Option<T>,
     serializer: S,
@@ -76,12 +24,11 @@ pub fn serialize_optional_display<T: std::fmt::Display, S: Serializer>(
     }
 }
 
-/// The API credential's wire kind (C-060).
+/// The API credential's kind.
 ///
-/// ocx **may not report a kind it cannot observe**: there is deliberately no
-/// `Pat`, no `DeployToken` and no `Oauth` arm, because nothing the forge tells
-/// ocx distinguishes those from one another. Adding one is what
-/// `credential_kind_wire_spellings` exists to red.
+/// ocx reports only a kind it can observe: a personal access token, a deploy
+/// token and an OAuth token all report as `token`.
+// No `Pat`/`DeployToken`/`Oauth` arm: ocx cannot observe the difference (`credential_kind_wire_spellings`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum CredentialKind {
@@ -94,21 +41,16 @@ pub enum CredentialKind {
 }
 
 impl CredentialKind {
-    /// Every kind, in declaration order.
-    ///
-    /// The single source of the vocabulary's size: the spelling test pairs its
-    /// expected list against this array, so a fourth arm reds rather than
-    /// passing unmentioned.
+    /// Every kind, in declaration order; the spelling test pairs against this array, so a new arm reds.
     pub const ALL: [Self; 3] = [Self::JobToken, Self::Token, Self::None];
 }
 
-/// The push credential's wire kind (C-060).
+/// The push credential's kind; `null` means the `api` transport pushed nothing.
 ///
-/// `null` is **not** a variant: it is `Option::None` at the call site, and it
-/// means "the `api` transport pushes nothing". [`Self::GitHelper`] is a
-/// different statement — a push happened and git's own credential helpers
-/// authenticated it — and collapsing the two is the defect
-/// `push_credential_kind_git_helper_is_distinct_from_null` exists to catch.
+/// `git-helper` is a different statement: a push happened and git's own
+/// credential helpers authenticated it.
+// `null` is `Option::None` at the call site, never `GitHelper`
+// (`push_credential_kind_git_helper_is_distinct_from_null`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum PushCredentialKind {
@@ -126,12 +68,6 @@ impl PushCredentialKind {
 }
 
 /// One row of the write preflight.
-///
-/// A report-side projection of [`CapabilityCheck`] rather than a re-export of
-/// it: the wire shape is this layer's contract, and the library type carries no
-/// `Serialize`. The two closed vocabularies are held as the library's own
-/// enums and rendered through [`serialize_display`], so a row cannot carry a
-/// name or a status the library has no variant for.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct CapabilityCheckEntry {
     /// The capability's wire name — `git-version`, `push-access`,
@@ -150,15 +86,7 @@ pub struct CapabilityCheckEntry {
 }
 
 impl CapabilityCheckEntry {
-    /// Project the preflight rows into their wire shape, in
-    /// `CapabilityName` declaration order.
-    ///
-    /// Takes the slice
-    /// [`PushAccess::checks`](ocx_announce::forge::PushAccess::checks) hands out, not
-    /// a `Vec`: `PushAccess` owns its rows and the privacy of that vector is
-    /// what makes "non-empty on every run" unrepresentable-otherwise (C-069).
-    /// **Every** row is projected, `Skipped` ones included — filtering the
-    /// inapplicable rows out is what S-011 exists to forbid.
+    /// Projects every preflight row, `Skipped` included, in `CapabilityName` declaration order.
     #[must_use]
     pub fn from_checks(checks: &[CapabilityCheck]) -> Vec<Self> {
         checks
@@ -172,14 +100,8 @@ impl CapabilityCheckEntry {
     }
 }
 
-/// The API credential's wire kind, read off the credential the **ladder**
-/// resolved.
-///
-/// Never off a direct `OCX_ANNOUNCE_TOKEN` read: that misses the job-token rung
-/// entirely, so an operator inside a GitLab job with an empty ocx variable would
-/// be reported as `none` for a run that authenticated perfectly well.
-/// [`ForgeCredentials::api_is_present`] (DX-52) is the only way to observe the
-/// terminal rung, and it is the same read C-063's exit-80 refusal branches on.
+/// The API credential's wire kind, read off the ladder's credential: a direct `OCX_ANNOUNCE_TOKEN`
+/// read misses the job-token rung and reports `none` for an authenticated run.
 #[must_use]
 pub fn credential_kind(credentials: &ForgeCredentials) -> CredentialKind {
     if !credentials.api_is_present() {
@@ -193,26 +115,17 @@ pub fn credential_kind(credentials: &ForgeCredentials) -> CredentialKind {
 }
 
 /// The push credential's wire kind, or `None` under the `api` transport.
-///
-/// The transport gate is load-bearing and is **not** derivable from the
-/// credential alone: [`ForgeCredentials::resolve`] populates the push half
-/// whenever an API credential exists, with no transport guard, so a mapper
-/// reading `push()` alone reports `"token"` for an ordinary REST claim that
-/// pushed nothing.
 #[must_use]
 pub fn push_credential_kind(credentials: &ForgeCredentials, transport: WriteTransport) -> Option<PushCredentialKind> {
     match transport {
-        // The gate R-23 exists for: `resolve` populates the push half whenever
-        // an API credential exists, so reading `push()` alone would report a
-        // push kind for a REST run that pushed nothing.
+        // `resolve` fills the push half whenever an API credential exists, so `push()` alone misreports REST.
         WriteTransport::Api => None,
         WriteTransport::Git => Some(if credentials.push_is_job_token() {
             PushCredentialKind::JobToken
         } else if credentials.push().is_some() {
             PushCredentialKind::Token
         } else {
-            // Nothing injected is NOT "no push": the push happened and git's
-            // own helpers authenticated it.
+            // Nothing injected is not "no push": git's own helpers authenticated it.
             PushCredentialKind::GitHelper
         }),
     }

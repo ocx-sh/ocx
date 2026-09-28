@@ -2,8 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 /// Log level for controlling the verbosity of logging output.
-///
-/// Implements `clap::ValueEnum` for use as a CLI flag (`--log-level`).
 #[derive(Clone, Copy, Debug)]
 pub enum LogLevel {
     /// Log everything, including very detailed information typically only useful for debugging

@@ -3,151 +3,57 @@
 
 //! The one recogniser for OCX interpolation tokens.
 //!
-//! OCX claims **every** `${…}` sequence in an env value or an entrypoint arg
-//! (`adr_interpolation_token_grammar.md` D3). There is no foreign-token
-//! concept and no pass-through path: a `${…}` either parses into one of four
-//! recognised bodies or the scan returns an error, and `$${` is the only way
-//! to emit a literal `${…}`.
+//! Every `${…}` parses into one of the four [`RECOGNISED_BODIES`] or the scan errors, and
+//! `$${` is the only literal `${` (`adr_interpolation_token_grammar.md`).
 //!
 //! ```text
 //! installPath   self.installPath   self.env.KEY   deps.NAME.installPath
 //! ```
-//!
-//! The walk is single-pass and left to right. At each position the **first**
-//! rule that matches wins, and the bytes it consumes are appended to the
-//! output and never re-examined:
-//!
-//! - **R1 — escape.** `$${` emits the two bytes `${` and advances by 3.
-//! - **R2 — token.** `${` with a `}` after it: the whole raw body is parsed
-//!   against the anchored body grammar *and* the closed set of four bodies.
-//!   Failing either is an error returned from the scan — never a
-//!   [`Segment::Literal`].
-//! - **R3 — literal.** The residue: emit one character, advance by its UTF-8
-//!   length. A `${` with no `}` before end of input lands here (Axis D).
-//!
-//! Why the three are ordered and bounded the way they are is recorded at each
-//! rule, in [`scan`]'s body.
-//!
-//! Single-pass is a correctness property, not a performance one: output bytes
-//! are never re-read, so bytes that came from the filesystem can never be
-//! re-interpreted as a publisher token. That is what makes the install-path
-//! `${` injection defence structurally unnecessary (D12, C-009).
-//!
-//! Byte indexing on `$`, `{`, `}`, `.` and `:` is safe on arbitrary UTF-8:
-//! every byte of a multi-byte sequence has the high bit set, so an ASCII byte
-//! can never occur inside one (C-035).
 
 use super::render::RenderModifier;
 use super::{TemplateError, UnknownTokenHint};
 use crate::metadata::dependency::DependencyName;
 
-/// One classified piece of a scanned template string.
-///
-/// Literal text is borrowed from the scanned input throughout — a fired escape
-/// yields `Literal` over the input's own `${` bytes, so ordinary text costs no
-/// allocation. Only a `${deps.NAME.installPath}` token allocates, for the
-/// owned [`DependencyName`] its `NAME` segment converts into.
+/// One classified piece of a scanned template string, borrowed from the input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Segment<'a> {
-    /// Bytes to emit verbatim: ordinary text, and the `${` a fired escape
-    /// produced.
+    /// Bytes to emit verbatim, including the `${` a fired escape produced.
     Literal {
-        /// The bytes themselves.
         text: &'a str,
         /// Where `text` starts in the scanned input.
-        ///
-        /// Carried rather than recoverable from the borrow: a fired escape
-        /// yields two bytes out of three, so the pieces' lengths do not sum to
-        /// the input's and no cursor can reconstruct this. A consumer that
-        /// needs to map a literal back onto what the publisher wrote — the libc
-        /// lint's `PATH` split, the one there is — would otherwise reach for
-        /// pointer arithmetic against the input's base address, which is an
-        /// invariant about *where every literal borrows from* that nothing
-        /// enforces and a scanner change could silently break.
+        // Carried because an escape drops a byte, so no cursor over the pieces can recover it.
         at: usize,
     },
     /// A recognised token, fully parsed.
     Token(Token<'a>),
 }
 
-/// A recognised `${…}` token.
-///
-/// A `${…}` that does not parse into one of the four bodies never reaches
-/// this type — it is an error returned from [`scan`].
+/// A recognised `${…}` token; an unrecognised one is an error from [`scan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token<'a> {
-    /// Which of the four recognised bodies this is.
     pub shape: TokenShape<'a>,
-    /// The optional `:native` / `:posix` suffix. `None` means the modifier
-    /// was omitted, which renders identically to `:native` (D5).
+    /// The optional `:native` / `:posix` suffix; `None` renders as `:native`.
     pub modifier: Option<RenderModifier>,
-    /// The raw `${…}` text exactly as the publisher wrote it, including the
-    /// delimiters and any modifier — so an error can name the token verbatim.
+    /// The raw `${…}` text as written, for error messages.
     pub source: &'a str,
 }
 
-/// The closed set of recognised token bodies.
-///
-/// `installPath` and `self.installPath` are the *same* referent (D4) and
-/// therefore the same variant: a gate that told them apart would make an
-/// alias observably not an alias.
-///
-/// Every variant is fully validated by the time it exists: a body that fails
-/// any of the constraints below is an error out of [`scan`], never a `Token`
-/// a later stage has to re-check.
+/// The closed set of recognised token bodies, each fully validated by [`scan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenShape<'a> {
-    /// `${installPath}` or its exact alias `${self.installPath}` — the
-    /// consuming package's `content/` directory.
+    /// `${installPath}` or its alias `${self.installPath}`: the package's `content/` directory.
     InstallPath,
-    /// `${self.env.KEY}` — the resolved value of this package's
-    /// earlier-declared var `KEY` (D6). Legal in env values only; the
-    /// capability gate refuses it elsewhere.
-    ///
-    /// `key` satisfies [`ocx_util::env::is_valid_env_key`], the same validator
-    /// the shell emitters and the CI flavors gate their keys through, so the
-    /// accepted character class cannot drift from what OCX will actually
-    /// emit. The body grammar alone is looser — it would admit `1ABC` and
-    /// `A-B`, neither of which is a settable env-var key — so a `KEY` the
-    /// validator rejects is a [`TemplateError::UnknownToken`], not a
-    /// recognised token that fails later.
+    /// `${self.env.KEY}`: the resolved value of this package's earlier-declared var `KEY`,
+    /// which passes [`ocx_util::env::is_valid_env_key`], the emitters' own validator.
     SelfEnv { key: &'a str },
-    /// `${deps.NAME.installPath}` — a declared direct dependency's `content/`
-    /// directory.
-    ///
-    /// `name` is the owned, validated [`DependencyName`] — not the raw text —
-    /// because the pattern the scanner matches `NAME` against is only half of
-    /// that type's contract: `DependencyName::try_from` also enforces
-    /// `SLUG_MAX_LEN`, so a 65-byte name passes a pattern check and fails the
-    /// conversion. Doing the conversion here means both consumers (the
-    /// substitution's `HashMap<DependencyName, _>` lookup and the publish
-    /// gate's declared-name check) get the key they need without a fallible
-    /// step of their own.
-    ///
-    /// There is no `field`: `installPath` is the only leaf, so a `Dep` token
-    /// with any other field could not exist. `${deps.cmake.version}` is a
-    /// [`TemplateError::UnknownField`] raised from the raw body during the
-    /// scan, which needs no `Token` to name it.
+    /// `${deps.NAME.installPath}`: a declared direct dependency's `content/` directory.
+    // A `DependencyName`, not raw text: the pattern alone admits a 65-byte name the type refuses.
     Dep { name: DependencyName },
 }
 
 impl TokenShape<'_> {
-    /// Whether a `:native` / `:posix` suffix is legal on this shape (D5).
-    ///
-    /// True exactly for the shapes whose value OCX *knows* is a path. The
-    /// modifier is a slash-direction flip over the whole resolved value, so on
-    /// a value that is not a path it is meaningless at best and corrupting at
-    /// worst — a `${self.env.KEY}` naming a regex, a compiler flag, or a `list`
-    /// var would have its legitimate backslashes rewritten on Windows.
-    ///
-    /// The narrow rule is the reversible one. This grammar is permanent on
-    /// published metadata: widening it later breaks nothing, while narrowing it
-    /// later would refuse documents already in registries.
-    ///
-    /// A `self.env` value composed *from* a path keeps the render axis — the
-    /// modifier goes on the token in the declaring var (`${installPath:posix}/sdk`)
-    /// and the reference inherits the rendered form. Only *re-rendering* an
-    /// already-rendered value is lost, which was never coherent.
+    /// Whether a `:native` / `:posix` suffix is legal: only on shapes OCX knows are paths.
+    // Keep it narrow: widening later breaks nothing, narrowing refuses published metadata.
     const fn takes_modifier(&self) -> bool {
         match self {
             Self::InstallPath | Self::Dep { .. } => true,
@@ -156,45 +62,26 @@ impl TokenShape<'_> {
     }
 }
 
-/// Classifies `input` into a sequence of literal and token segments.
-///
-/// Pure: no filesystem access, no capability gate, no substitution. The
-/// capability gate (`AllowedTokens`) and the substitution both run over the
-/// result, which is what makes gate-before-substitution a property of the
-/// pipeline's shape rather than of one call's position (D9).
+/// Classifies `input` into literal and token segments; pure, with no gate or substitution.
 ///
 /// # Errors
 ///
-/// [`TemplateError::UnknownToken`] for a `${…}` whose body fails the anchored
-/// grammar, falls outside the closed set, names a `deps.NAME` that is not a
-/// valid [`DependencyName`], or names a `self.env.KEY` that
-/// [`ocx_util::env::is_valid_env_key`] rejects;
-/// [`TemplateError::UnknownField`] for a recognised namespace with exactly one
-/// unknown leaf; [`TemplateError::UnknownModifier`] for a `:suffix` outside
-/// `{ native, posix }`.
+/// [`TemplateError::UnknownToken`] for a `${…}` outside the closed set or with an invalid
+/// `NAME` or `KEY`; [`TemplateError::UnknownField`] for a recognised namespace with one
+/// unknown leaf; [`TemplateError::UnknownModifier`] or
+/// [`TemplateError::ModifierNotApplicable`] for a bad `:suffix`.
 pub fn scan(input: &str) -> Result<Vec<Segment<'_>>, TemplateError> {
     let mut segments = Vec::new();
-    // Start of the literal run currently open. Literal bytes are accumulated
-    // lazily rather than pushed per character, so a token-free input costs one
-    // borrowed segment and no allocation.
     let mut literal_start = 0usize;
     let mut index = 0usize;
-    // R2's `find(CLOSE)` can only answer `Some` while a `}` remains ahead of the
-    // cursor, and `index` only grows — so one `rfind` up front collapses the
-    // "no terminator anywhere ahead" case from a full re-read per `$` to an O(1)
-    // test. Without it a run of `${` is quadratic, and R3 makes that run legal,
-    // publishable literal text: every `$` re-reads the whole remainder, finds
-    // nothing, and advances one byte.
+    // One `rfind` up front, or a run of unclosed `${` rescans the remainder per `$` (quadratic).
     let last_close = input.rfind(CLOSE);
 
     loop {
         let rest = &input[index..];
         let Some(character) = rest.chars().next() else { break };
 
-        // R1 — escape. Checked before R2, which is what makes `$${installPath}`
-        // unambiguous: the `${` one byte in is never reachable as a token start.
-        // The emitted delimiter borrows the input's own bytes and is output, so
-        // it is never rescanned.
+        // Escape before token, or the `${` inside `$${installPath}` would start a token.
         if rest.starts_with(ESCAPED_OPEN) {
             push_literal(&mut segments, input, literal_start, index);
             push_literal(&mut segments, input, index + 1, index + ESCAPED_OPEN.len());
@@ -203,10 +90,7 @@ pub fn scan(input: &str) -> Result<Vec<Segment<'_>>, TemplateError> {
             continue;
         }
 
-        // R2 — token. The terminator is the *first* `}` at or after the body's
-        // start, so there is no nesting. A `${` with no `}` before end of input
-        // is not a token at all and falls through to R3 one character at a time
-        // (Axis D), which is why the publish accept-set only ever grows.
+        // The first `}` terminates, so there is no nesting; an unclosed `${` stays literal.
         if rest.starts_with(OPEN)
             && last_close.is_some_and(|at| at >= index + OPEN.len())
             && let Some(offset) = rest[OPEN.len()..].find(CLOSE)
@@ -224,7 +108,6 @@ pub fn scan(input: &str) -> Result<Vec<Segment<'_>>, TemplateError> {
             continue;
         }
 
-        // R3 — literal residue. The character stays in the open run.
         index += character.len_utf8();
     }
 
@@ -232,29 +115,16 @@ pub fn scan(input: &str) -> Result<Vec<Segment<'_>>, TemplateError> {
     Ok(segments)
 }
 
-/// The escape, the token opener, and the terminator — the only byte sequences
-/// the walk branches on.
 const ESCAPED_OPEN: &str = "$${";
 const OPEN: &str = "${";
 const CLOSE: char = '}';
 
-/// The separator between a body and its verbatim `:suffix`.
 const MODIFIER_SEPARATOR: char = ':';
 
-/// The one leaf under every namespace, and the whole of the bare body.
 const INSTALL_PATH: &str = "installPath";
 
-/// The closed set of four recognised bodies, spelled the way a publisher writes
-/// them — `KEY` and `NAME` are the publisher's own placeholders.
-///
-/// The single source of truth for D13's diagnostics: the branch-3 message lists
-/// these verbatim, and the recognised-root set is each entry's root run (see
-/// `unknown_token_hint`), so there is no second root vocabulary to keep in step
-/// and no root freeze to maintain.
-///
-/// It is *not* the source of truth for acceptance — that is `parse_shape`'s
-/// match, which the two placeholders could not express. Adding a fifth body
-/// means editing both, and only the parse decides what resolves.
+/// The four recognised bodies as a publisher writes them, the source of every diagnostic.
+// Not the acceptance rule, which is `parse_shape`'s match: a fifth body means editing both.
 pub const RECOGNISED_BODIES: &[&str] = &[
     INSTALL_PATH,
     "self.installPath",
@@ -262,15 +132,11 @@ pub const RECOGNISED_BODIES: &[&str] = &[
     "deps.NAME.installPath",
 ];
 
-/// The closed render-modifier set, as one list: the parse and the message that
-/// enumerates the alternatives cannot drift apart.
+/// The closed render-modifier set, read by both the parse and its error message.
 const MODIFIERS: &[(&str, RenderModifier)] = &[("native", RenderModifier::Native), ("posix", RenderModifier::Posix)];
 
 /// Appends `input[at..end]` as a literal segment, skipping an empty run.
-///
-/// Takes the range rather than the slice so the recorded offset cannot disagree
-/// with the bytes it points at — the one invariant [`Segment::Literal`]'s `at`
-/// has to hold.
+// Takes the range, not the slice, so the recorded `at` cannot disagree with the text.
 fn push_literal<'a>(segments: &mut Vec<Segment<'a>>, input: &'a str, at: usize, end: usize) {
     if end > at {
         segments.push(Segment::Literal {
@@ -280,19 +146,8 @@ fn push_literal<'a>(segments: &mut Vec<Segment<'a>>, input: &'a str, at: usize, 
     }
 }
 
-/// Parses one `${…}` whose extent is already known: `source` is the whole
-/// token including delimiters, `body` is the raw text between them.
-///
-/// The `:suffix` is split off **verbatim** and judged only once the base has
-/// been recognised. That order is what makes `${self.installPath:POSIX}` an
-/// unknown *modifier* while `${localEnv:HOME}` stays an unknown *token* — the
-/// publisher is told which half of a recognised token is wrong, and is not told
-/// that a foreign token has a modifier problem.
-///
-/// Applicability is judged before the suffix is resolved against the modifier
-/// set, so `${self.env.KEY:POSIX}` reports that the *modifier does not belong
-/// there* rather than that `POSIX` is misspelled — the latter would invite the
-/// publisher to write `:posix`, which is refused too.
+/// Parses one `${…}`: `source` is the whole token, `body` the text between the delimiters.
+// Base, then applicability, then the suffix, so each error names the half that is wrong.
 fn parse_token<'a>(source: &'a str, body: &'a str) -> Result<Token<'a>, TemplateError> {
     let (base, suffix) = match body.find(MODIFIER_SEPARATOR) {
         Some(at) => (&body[..at], Some(&body[at + MODIFIER_SEPARATOR.len_utf8()..])),
@@ -313,10 +168,7 @@ fn parse_token<'a>(source: &'a str, body: &'a str) -> Result<Token<'a>, Template
     })
 }
 
-/// Matches a modifier-free body against the anchored grammar and then against
-/// the closed set of four bodies. Passing the grammar is necessary and not
-/// sufficient: `${installPath.foo}` and `${localEnv}` both derive cleanly and
-/// are still errors.
+/// Matches a modifier-free body against the grammar, then against the four bodies.
 fn parse_shape<'a>(source: &str, base: &'a str) -> Result<TokenShape<'a>, TemplateError> {
     let path: Vec<&str> = base.split('.').collect();
     if !path.iter().all(|segment| is_body_segment(segment)) {
@@ -324,21 +176,13 @@ fn parse_shape<'a>(source: &str, base: &'a str) -> Result<TokenShape<'a>, Templa
     }
 
     match path.as_slice() {
-        // `installPath` is the one root that is also a whole body, so it admits
-        // no dotted continuation; `self.installPath` is its exact alias (D4) and
-        // therefore the same shape.
         [INSTALL_PATH] | ["self", INSTALL_PATH] => Ok(TokenShape::InstallPath),
-        // A second filter on top of the grammar: `segment` admits a leading
-        // digit and `-`, neither of which is a settable env-var key, so a body
-        // the validator rejects is an unknown token rather than a recognised one
-        // that fails later (C-039).
+        // The grammar admits a leading digit and `-`, which no settable env key has.
         ["self", "env", key] if ocx_util::env::is_valid_env_key(key) => Ok(TokenShape::SelfEnv { key }),
         ["self", "env", _] => Err(unknown_token(source, base)),
         ["self", field] => Err(unknown_field("self", field, &[INSTALL_PATH, "env.KEY"])),
         ["deps", name, field] => match DependencyName::try_from(*name) {
-            // The name is validated before the leaf: an unusable name means OCX
-            // cannot locate the mistake in a namespace it recognises, which is
-            // what `UnknownField` reports.
+            // Name before leaf: `UnknownField` needs a namespace OCX can locate.
             Ok(dependency) if *field == INSTALL_PATH => Ok(TokenShape::Dep { name: dependency }),
             Ok(_) => Err(unknown_field(&format!("deps.{name}"), field, &[INSTALL_PATH])),
             Err(_) => Err(unknown_token(source, base)),
@@ -347,8 +191,7 @@ fn parse_shape<'a>(source: &str, base: &'a str) -> Result<TokenShape<'a>, Templa
     }
 }
 
-/// `segment = 1*( ALPHA / DIGIT / "_" / "-" )` — the anchored body grammar's
-/// one production, applied to the root and to every dotted segment alike.
+/// `segment = 1*( ALPHA / DIGIT / "_" / "-" )`, for the root and every dotted segment.
 fn is_body_segment(segment: &str) -> bool {
     !segment.is_empty()
         && segment
@@ -363,21 +206,12 @@ fn parse_modifier(suffix: &str) -> Result<RenderModifier, TemplateError> {
         .find(|(name, _)| *name == suffix)
         .map(|(_, modifier)| *modifier)
         .ok_or_else(|| TemplateError::UnknownModifier {
-            // Same echo class as `unknown_token`: the suffix is the rest of the
-            // body, so it carries the same bytes at the same lengths.
             modifier: for_message(suffix),
             supported: MODIFIERS.iter().map(|(name, _)| (*name).to_string()).collect(),
         })
 }
 
-/// The refusal for a modifier on a shape that does not take one
-/// ([`TokenShape::takes_modifier`]).
-///
-/// Both echoes are publisher-controlled and go through [`for_message`], the
-/// same escaping every other echo site uses. No list of applicable bodies is
-/// enumerated: `self.env.KEY` is the only shape this refuses, so "install-path
-/// tokens" names the complement exactly, and a second body vocabulary here
-/// could drift from [`RECOGNISED_BODIES`].
+/// The refusal for a modifier on a shape that does not take one.
 fn modifier_not_applicable(source: &str, suffix: &str) -> TemplateError {
     TemplateError::ModifierNotApplicable {
         token: for_message(source),
@@ -385,17 +219,8 @@ fn modifier_not_applicable(source: &str, suffix: &str) -> TemplateError {
     }
 }
 
-/// The catch-all refusal, naming the token verbatim.
-///
-/// `source` is the whole `${…}` as authored — what the message quotes — and
-/// `rejected` is the text the parse refused, from which the message branch is
-/// chosen. Both, rather than re-deriving one from the other at the render site:
-/// R2.2 is a scanner rule, and a second reading of the token elsewhere would be
-/// a second recogniser.
-///
-/// Every call site passes the *modifier-stripped* base, not the raw body. The
-/// two agree on the root run either way — `:` is outside the root's character
-/// class, so it ends the run exactly as the end of the base does.
+/// The catch-all refusal: `source` is quoted, `rejected` picks the message branch.
+// Both passed, or the render site would re-derive one from the other as a second recogniser.
 fn unknown_token(source: &str, rejected: &str) -> TemplateError {
     TemplateError::UnknownToken {
         token: for_message(source),
@@ -403,40 +228,15 @@ fn unknown_token(source: &str, rejected: &str) -> TemplateError {
     }
 }
 
-/// The byte ceiling on publisher text quoted back in a refusal message.
-///
-/// Comfortably above every token a real tool writes — the longest in the
-/// rejection corpus is `${containerWorkspaceFolder}` at 27 — so truncation is
-/// reachable only by input authored to reach it.
+/// The byte ceiling on publisher text quoted in a refusal, well above any real tool's token.
 const MAX_ECHOED_BYTES: usize = 120;
 
-/// Marks a quoted run the message cut short, so a truncated echo does not read
-/// as the whole of what the publisher wrote.
-///
-/// Public because the escape hint has to know: advice that spells out a
-/// truncated token would tell the publisher to write a literal that is not the
-/// one they wrote.
+/// Marks a quoted run the message cut short.
 pub const TRUNCATION_MARKER: &str = "…";
 
-/// Renders publisher-controlled text safe to put in a refusal message.
-///
-/// A token body admits every byte but `}`, so without this a newline or an ANSI
-/// escape sequence reaches stderr raw and a forged multi-line diagnostic is
-/// constructible (CWE-117/150), at whatever length the metadata field allows.
-/// The repo already holds this line — `RelativePath::parse` refuses control
-/// characters citing the same class.
-///
-/// Truncate first, escape second: escaping expands, so bounding its input is
-/// what bounds the message. `str::escape_debug` is the escaping — the same
-/// rendering `{:?}` uses, so an escaped run is unambiguous and stays readable
-/// for the ordinary token that needs no escaping at all.
-///
-/// Public because the token bodies this module rejects are not the only
-/// publisher-controlled text a refusal echoes: [`SelfEnvScope::lookup`] names
-/// declared env keys, which reach it straight off `metadata.json` with no
-/// grammar applied. One escaping helper, so the two sites cannot drift.
-///
-/// [`SelfEnvScope::lookup`]: super::SelfEnvScope::lookup
+/// Renders publisher text safe for a refusal message: truncated, then `{:?}`-escaped.
+// Unescaped, a newline or ANSI sequence forges a diagnostic (CWE-117/150); truncate first,
+// since escaping expands.
 pub fn for_message(text: &str) -> String {
     let mut end = MAX_ECHOED_BYTES.min(text.len());
     while !text.is_char_boundary(end) {
@@ -451,65 +251,34 @@ pub fn for_message(text: &str) -> String {
     }
 }
 
-/// Picks D13's message branch for a rejected body.
-///
-/// The branch is chosen from **R2.2's root run** — the maximal
-/// `[A-Za-z0-9_-]` prefix of the body, possibly empty — which is also how each
-/// recognised root is derived from [`RECOGNISED_BODIES`], so there is no second
-/// root vocabulary to drift from the closed set.
-///
-/// Ordered, and the order is the whole rule:
-///
-/// 1. **Root recognised** → [`UnknownTokenHint::SupportedBodies`]. Deciding
-///    this first is what keeps a typo in a *name* — `${deps.Python.installPath}`,
-///    where `deps` is recognised and `Python` fails the slug class — away from
-///    the suggester, which has nothing useful to say about a name.
-/// 2. **Near miss on a recognised root** → [`UnknownTokenHint::SuggestedRoot`].
-///    Within `max(recognised_root.len(), 3) / 3` edits, the length-scaled
-///    threshold `find_best_match_for_name` uses
-///    ([rustc_span/src/edit_distance.rs](https://github.com/rust-lang/rust/blob/master/compiler/rustc_span/src/edit_distance.rs)).
-///    Under a flat 1, `${instalPatch}` — two edits from `installPath` — falls to
-///    the escape branch and the publisher is advised to ship their own typo as
-///    literal text (C-033).
-/// 3. Otherwise → [`UnknownTokenHint::Escape`].
-///
-/// The distance is [`strsim::osa_distance`], **not** `strsim::levenshtein`:
-/// rustc's metric counts an adjacent transposition as one edit, and plain
-/// Levenshtein scores C-033's `slef` → `self` leg as 2 against a threshold of
-/// 1 — losing the very suggestion the contract requires.
+/// Picks the message branch from a rejected body's root run: recognised, near miss, or neither.
 fn unknown_token_hint(body: &str) -> UnknownTokenHint {
     let root = root_run(body);
 
+    // First, so a bad name under a recognised root (`${deps.Python…}`) never reaches the suggester.
     if recognised_roots().any(|recognised| recognised == root) {
         return UnknownTokenHint::SupportedBodies;
     }
 
     recognised_roots()
+        // `osa_distance`, not Levenshtein, which scores the transposition `slef` 2 and loses it.
         .map(|recognised| (strsim::osa_distance(root, recognised), recognised))
+        // rustc's length-scaled threshold; a flat 1 would advise escaping the typo `${instalPatch}`.
         .filter(|(distance, recognised)| *distance <= recognised.len().max(3) / 3)
-        // `min_by_key` keeps the first of an equal-distance pair, so the winner
-        // is a function of `RECOGNISED_BODIES`' order and not of iteration luck.
+        // `min_by_key` keeps the first tie, so the winner follows `RECOGNISED_BODIES`' order.
         .min_by_key(|(distance, _)| *distance)
         .map_or(UnknownTokenHint::Escape, |(_, recognised)| {
             UnknownTokenHint::SuggestedRoot(recognised.to_string())
         })
 }
 
-/// The recognised roots, derived from [`RECOGNISED_BODIES`] rather than listed
-/// again — `self` appears twice and is left duplicated, which no consumer above
-/// can observe.
+/// The recognised roots, derived from [`RECOGNISED_BODIES`] (`self` twice, harmlessly).
 fn recognised_roots() -> impl Iterator<Item = &'static str> {
     RECOGNISED_BODIES.iter().copied().map(root_run)
 }
 
-/// R2.2's root run: the maximal leading run of `segment`-class characters,
-/// possibly empty (`${}`, `${.foo}`).
-///
-/// The class is [`is_body_segment`]'s, spelled per byte because this needs the
-/// position where the run ends rather than a verdict on a whole segment. Byte
-/// indexing is safe on arbitrary UTF-8: every byte of a multi-byte sequence has
-/// the high bit set, so the first byte outside the class is never inside a
-/// character (C-035).
+/// The maximal leading run of [`is_body_segment`]-class bytes, possibly empty.
+// Byte slicing is safe: every byte of a multi-byte UTF-8 sequence falls outside the class.
 fn root_run(body: &str) -> &str {
     let end = body
         .bytes()
@@ -518,8 +287,7 @@ fn root_run(body: &str) -> &str {
     &body[..end]
 }
 
-/// The located refusal: a recognised namespace shape with exactly one unknown
-/// leaf. Everything else is [`unknown_token`].
+/// The refusal for a recognised namespace with exactly one unknown leaf.
 fn unknown_field(namespace: &str, field: &str, supported: &[&str]) -> TemplateError {
     TemplateError::UnknownField {
         namespace: namespace.to_string(),
@@ -528,17 +296,7 @@ fn unknown_field(namespace: &str, field: &str, supported: &[&str]) -> TemplateEr
     }
 }
 
-/// Rewrites `input` so [`scan`] reproduces it verbatim.
-///
-/// The publisher-facing inverse of the scanner's R1 rule, and the only
-/// supported way to put a literal `${` into a metadata string: every `${`
-/// becomes `$${`, and nothing else changes. `scan(&escape(s))` classifies to
-/// exactly the text of `s` for every `s`, including strings OCX would
-/// otherwise refuse (C-034).
-///
-/// Lives beside [`scan`] so the round-trip has one authored inverse. A caller
-/// — a test included — that spells the escaping itself is asserting the rule
-/// twice and can get it wrong twice.
+/// Rewrites `input` so [`scan`] reproduces it verbatim: every `${` becomes `$${`.
 #[must_use]
 pub fn escape(input: &str) -> String {
     input.replace(OPEN, ESCAPED_OPEN)

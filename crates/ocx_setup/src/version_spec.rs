@@ -3,31 +3,14 @@
 
 //! Version specification for `ocx self setup [VERSION]`.
 //!
-//! A [`VersionSpec`] is an identifier *suffix* — a tag, a digest, or both —
-//! applied to a base [`ocx_oci::PackageRef`] via [`VersionSpec::apply`]. The base
-//! identifier supplies the registry and repository; the spec supplies the
-//! version constraint.
-//!
-//! # Grammar
+//! A [`VersionSpec`] is an identifier suffix applied to a base
+//! [`ocx_oci::PackageRef`], which supplies the registry and repository.
 //!
 //! ```text
 //! VERSION = tag | digest | tag "@" digest
 //! tag     = <identifier tag chars, same charset as OCI tag>
 //! digest  = "sha256:" <64 hex chars> | "sha384:" <96 hex chars> | "sha512:" <128 hex chars>
 //! ```
-//!
-//! Examples: `1.2.3`, `sha256:<64hex>`, `1.2.3@sha256:<64hex>`.
-//!
-//! A digest-only spec is written bare (`sha256:<hex>`, no `@`): the OCI tag
-//! charset has no `:`, so the form is unambiguous, matching `LayerRef` and
-//! docker/oras conventions. `@` appears only as the `tag@digest` separator.
-//!
-//! # Application order (invariant)
-//!
-//! [`apply`](VersionSpec::apply) sets the tag first, then the digest. This is
-//! mandatory because [`ocx_oci::PackageRef::clone_with_tag`] drops any prior digest — if
-//! the digest were applied first it would be silently erased on the subsequent
-//! tag call.
 
 use std::fmt;
 use std::str::FromStr;
@@ -37,11 +20,6 @@ use ocx_oci::{self, Digest};
 
 /// An identifier suffix that pins an `ocx self setup` run to a specific
 /// version of `ocx.sh/ocx/cli`.
-///
-/// The three variants mirror the grammar exactly — an empty spec is
-/// unrepresentable by construction. With [`TagAndDigest`](Self::TagAndDigest),
-/// `setup` resolves the tag and cross-checks the resulting digest against the
-/// specified one (fail-closed immutability assertion per plan D9).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VersionSpec {
     /// Tag only (`1.2.3`) — resolved against the registry or local index.
@@ -50,23 +28,14 @@ pub enum VersionSpec {
     /// tag resolution.
     Digest(Digest),
     /// Tag plus digest — resolves the tag, then asserts the resolved digest
-    /// equals the specified one (plan D9, exit 65 on mismatch).
+    /// equals the specified one (exit 65 on mismatch).
     TagAndDigest { tag: String, digest: Digest },
 }
 
 impl VersionSpec {
-    /// Apply this spec to a base identifier, producing a new identifier that
-    /// carries the specified tag and/or digest.
-    ///
-    /// # Application order (mandatory)
-    ///
-    /// Tag is applied first via [`ocx_oci::PackageRef::clone_with_tag`] (which drops
-    /// any prior digest on the base), then the digest is applied via
-    /// [`ocx_oci::PackageRef::clone_with_digest`]. This order is required: reversing it
-    /// would silently drop the digest.
+    /// Apply this spec's tag and/or digest to a base identifier.
     pub fn apply(&self, base: ocx_oci::PackageRef) -> ocx_oci::PackageRef {
-        // ORDER INVARIANT: tag first (clone_with_tag drops any prior digest),
-        // then digest. Reversing would silently erase the digest.
+        // Tag first: `clone_with_tag` drops any digest, so the reverse order erases it.
         match self {
             Self::Tag(tag) => base.clone_with_tag(tag.as_str()),
             Self::Digest(digest) => base.clone_with_digest(digest.clone()),
@@ -75,9 +44,6 @@ impl VersionSpec {
     }
 
     /// Returns `true` when this spec carries an explicit digest component.
-    ///
-    /// Used by `ensure_self_installed` to decide whether to run the
-    /// `tag@digest` cross-check (plan D9).
     pub fn is_pinned_digest(&self) -> bool {
         matches!(self, Self::Digest(_) | Self::TagAndDigest { .. })
     }
@@ -102,19 +68,10 @@ impl VersionSpec {
 impl FromStr for VersionSpec {
     type Err = error::Error;
 
-    /// Parse a version spec string.
+    /// Parse a version spec string: `"1.2.3"` (tag), `"sha256:<64hex>"` (digest,
+    /// bare, no `@`) or `"1.2.3@sha256:<64hex>"` (both).
     ///
-    /// Accepted forms:
-    /// - `"1.2.3"` — tag only
-    /// - `"sha256:<64hex>"` — digest only (bare, no `@`)
-    /// - `"1.2.3@sha256:<64hex>"` — tag and digest
-    ///
-    /// Errors (map to exit 64 `UsageError` via clap `value_parser`):
-    /// - Empty string
-    /// - Double `@` (`"a@b@c"`)
-    /// - Trailing `@` (`"1.2.3@"`)
-    /// - Leading `@` (`"@sha256:..."`) — digest-only pins are written bare
-    /// - Malformed digest (short hex, uppercase hex, unknown algorithm)
+    /// Rejects the empty string, a second, leading or trailing `@`, and a malformed digest.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let invalid = |reason: &str| error::Error::InvalidVersionSpec {
             input: s.to_string(),
@@ -126,7 +83,6 @@ impl FromStr for VersionSpec {
         }
 
         match s.split_once('@') {
-            // `@` present: strictly the `tag@digest` form.
             Some((tag_part, digest_part)) => {
                 if digest_part.contains('@') {
                     return Err(invalid("version spec may contain at most one '@'"));
@@ -141,9 +97,7 @@ impl FromStr for VersionSpec {
                     digest: parse_digest(digest_part).map_err(|reason| invalid(&reason))?,
                 })
             }
-            // No `@`: a `:` means digest (the OCI tag charset has no `:`),
-            // otherwise tag. Fail-closed: `sha256:<bad-hex>` surfaces a digest
-            // error, never falls back to tag interpretation.
+            // A `:` means digest (tags cannot hold one); a bad digest never falls back to a tag.
             None => {
                 if s.contains(':') {
                     Ok(Self::Digest(parse_digest(s).map_err(|reason| invalid(&reason))?))
@@ -156,12 +110,8 @@ impl FromStr for VersionSpec {
 }
 
 /// Parses and validates a digest string (`sha256:<64hex>` style).
-///
-/// OCI digest hex must be lowercase. `Digest::try_from` tolerates uppercase
-/// hex (`is_ascii_hexdigit`), so reject it explicitly before constructing the
-/// digest — a digest pin is an immutability assertion and must not silently
-/// accept a case-variant of the canonical lowercase form.
 fn parse_digest(digest_str: &str) -> Result<Digest, String> {
+    // `Digest::try_from` accepts uppercase hex, which would let a pin name a case-variant digest.
     if digest_str.chars().any(|c| c.is_ascii_uppercase()) {
         return Err("invalid digest: hex must be lowercase (`sha256:<64hex>` style)".to_string());
     }
@@ -169,13 +119,7 @@ fn parse_digest(digest_str: &str) -> Result<Digest, String> {
         .map_err(|_| "invalid digest: expected `sha256:<64hex>`, `sha384:<96hex>`, or `sha512:<128hex>`".to_string())
 }
 
-/// Validates a tag against the OCI tag charset and normalizes `+` to `_`
-/// (mirroring [`ocx_oci::PackageRef`] tag handling).
-///
-/// OCI tags match `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`. A `+` in the input is
-/// normalized to `_` before validation, matching the identifier parser's
-/// `normalize_tag` behavior, so the same forms users already pass to
-/// identifiers are accepted here.
+/// Validates a tag against the OCI tag charset, normalizing `+` to `_` like [`ocx_oci::PackageRef`].
 fn validate_tag(tag: &str) -> Result<String, String> {
     let normalized = tag.replace('+', "_");
     if normalized.len() > 128 {
@@ -195,7 +139,6 @@ fn validate_tag(tag: &str) -> Result<String, String> {
 }
 
 impl fmt::Display for VersionSpec {
-    /// Renders the spec in its grammar form: `tag`, `digest`, or `tag@digest`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Tag(tag) => f.write_str(tag),

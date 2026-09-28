@@ -53,32 +53,19 @@ pub struct Login {
     registry: Option<String>,
 }
 
-// NOTE: `--format plain|json` is the project-wide global flag parsed at the `Cli`
-// root level (see `crates/ocx_cli/src/cli.rs`). Do NOT declare it on Login / Logout
-// structs — clap inherits it from root; `context.api().report(&result)` honors it.
-
 impl Login {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // 1. Resolve registry.
         let registry = self
             .registry
             .clone()
             .unwrap_or_else(|| context.default_registry().to_string());
 
-        // Announce target before any prompt — user must know which registry
-        // they're typing credentials for, especially when REGISTRY was
-        // omitted and the default kicked in. `UserInterface::status` honors
-        // --quiet and color settings; --format json still emits the human
-        // line on stderr (stdout stays clean for the structured LoginResult).
+        // Before any prompt: the user must see which registry the credentials go to, above all when
+        // the default applied.
         let ui = context.ui();
         ui.status("Logging in", &registry);
         ui.status_break();
 
-        // 2. Read credentials. Validation happens before any registry I/O.
-        //
-        // `ui.prompt_line` returns Err(Unsupported) when non-interactive,
-        // which we map to the same UsageError that the old TTY-check produced.
-        // `ui.prompt_secret` does the same for the password path.
         let username = match &self.username {
             Some(u) => u.clone(),
             None => ui.prompt_line("Username: ").map_err(|_| {
@@ -99,9 +86,7 @@ impl Login {
             }
             SecretString::from(buf)
         } else {
-            // Fail early with the actionable hint when stdin/stderr is not a
-            // TTY: an interactive password prompt can only error here, and the
-            // bare prompt error ("failed to read password") buries the fix.
+            // Without a TTY the prompt can only fail, and its bare error buries the fix.
             if !ui.is_interactive() {
                 return Err(
                     UsageError::new("non-interactive login requires --password-stdin (stdin is not a TTY)").into(),
@@ -119,38 +104,25 @@ impl Login {
             SecretString::from(pwd)
         };
 
-        // 3. Pre-flag warning for plaintext route. Emitting the warning early
-        // means it lands on stderr regardless of where the put eventually
-        // routes; the helper-route branch is silent.
+        // Warned before the put, so it lands whichever route the store takes.
         let needs_plaintext_warning = self.allow_insecure_store && !has_helper_configured(&registry).await;
         if needs_plaintext_warning {
             ui.warn("storing credentials as plaintext base64 in ~/.docker/config.json (no native helper)");
         }
 
-        // 4. Build credential + store + run login.
         let cred = Credential::basic(username.clone(), password_secret);
-        // Disable native-helper detection: the acceptance contract is that
-        // `ocx login` is deterministic — either a helper is configured in
-        // `~/.docker/config.json` (`credsStore` / `credHelpers[reg]`) or the
-        // user opts into plaintext via `--allow-insecure-store`. Auto-
-        // detection (oras-go `DetectDefaultNativeStore`) silently writes
-        // `credsStore` on first run, which surprises users on shared dev
-        // machines where `pass`/`secretservice` happen to be installed.
+        // No native-store detection: it silently writes `credsStore` on first run, a surprise on shared
+        // machines where `pass`/`secretservice` is installed.
         let store = DockerCredentialStore::new(StoreOptions {
             allow_plaintext_put: self.allow_insecure_store,
             detect_default_native_store: false,
         })?;
 
-        // Verify credentials against the registry before storing them (default).
-        // `--no-verify` swaps in the no-op Ping to store without a round-trip.
-        // Either way the security invariant ("Ping failure ⇒ no put") holds,
-        // proven by `MockPing` unit tests in `auth/login.rs`.
-        // The probe must reach the registry over the same scheme, trusting
-        // the same CA roots, as every other command would — so it takes the
-        // resolved plain-HTTP set and the merged extra-CA view (C-006) rather
-        // than deciding for itself.
+        // The resolved plain-HTTP set and extra-CA view, never its own: the probe must reach the registry
+        // the way every other command does.
         let verifying_ping =
             OciClientPing::new(context.insecure_hosts().to_vec(), context.extra_roots_merged().clone());
+        // A ping failure means no put, owned by the `MockPing` tests in `auth/login.rs`.
         let ping: &dyn RegistryPing = if self.verify.enabled() {
             &verifying_ping
         } else {
@@ -158,25 +130,16 @@ impl Login {
         };
         login(&registry, &cred, &store, ping).await?;
 
-        // 5. Blank line separates prompts from the success line for legibility,
-        // then structured report (registry name reported in its user-supplied
-        // form, not the canonicalized form, so users see the same string they
-        // typed).
+        // The registry is reported as typed, not canonicalized.
         ui.status_break();
         ui.success("Login succeeded");
-        // Plain mode: nothing on stdout (success already on stderr). JSON
-        // mode: structured payload on stdout — the machine interface.
         let result = LoginResult { registry, username };
         context.api().report(&result)?;
         Ok(ExitCode::SUCCESS)
     }
 }
 
-/// No-op `RegistryPing` used on the `--no-verify` path. Always returns `Ok(())`
-/// so `login()` proceeds straight to `store.put` without a registry round-trip.
-/// The default (`--verify`) path uses `OciClientPing` instead; the security
-/// invariant ("Ping failure → no store") is proven by `MockPing` tests in
-/// `auth/login.rs`.
+/// The `--no-verify` ping: always `Ok`, so `login()` stores without a round-trip.
 struct NoopPing;
 
 #[async_trait::async_trait]
@@ -186,13 +149,10 @@ impl RegistryPing for NoopPing {
     }
 }
 
-/// Probe whether a helper is configured for `registry` in the docker config
-/// file currently pointed at by `DockerCredentialStore::new`. Used only to
-/// gate the plaintext-warning message — never to alter routing logic itself.
+/// Whether the docker config names a helper for `registry`; gates the plaintext warning only,
+/// never routing.
 async fn has_helper_configured(registry: &str) -> bool {
-    // Cheap probe: load the config once via the same constructor path the
-    // store uses, then inspect helper-config keys. Failure to read = "no
-    // helper configured" so the warning fires (safe default).
+    // An unreadable config counts as no helper, so the warning fires.
     let store = match DockerCredentialStore::new(StoreOptions::default()) {
         Ok(s) => s,
         Err(_) => return false,

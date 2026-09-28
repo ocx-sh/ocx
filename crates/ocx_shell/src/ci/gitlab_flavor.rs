@@ -14,43 +14,20 @@ use ocx_package::metadata::env::modifier::ModifierKind;
 
 use super::{error, flavor::Flavor};
 
-/// GitLab CI/CD flavor.
+/// GitLab CI/CD: JSON lines `{"name","value"}` for the step-runner's `${{ export_file }}`.
 ///
-/// GitLab's step-runner persists later-step environment via an export file
-/// (`${{ export_file }}`) of JSON-lines, each `{"name": "...", "value": "..."}`.
-/// Unlike GitHub Actions there is **no path channel** and the scope is the
-/// *later* steps, so every path-type entry — including `PATH` itself — is
-/// flattened into a single computed value the same way GitHub treats its
-/// non-`PATH` path case: accumulate the package values, read the existing
-/// process value, prepend, join with [`PATH_SEPARATOR`](ocx_util::env::PATH_SEPARATOR),
-/// and emit one JSON-line. Constants emit one JSON-line each (last-writer-wins).
-///
-/// The destination defaults to stdout (redirect to `${{ export_file }}`); a
-/// caller may instead pass an explicit output path. All entries are buffered in
-/// memory and serialized on [`flush`](Flavor::flush), producing exactly one line
-/// per key.
+/// There is no path channel, so every path variable, `PATH` included, is flattened onto its existing value.
 pub(super) struct GitLabFlavor {
-    /// Destination sink — an append/create file or stdout.
     sink: Box<dyn Write + Send>,
-    /// Buffered path entries (any key, `PATH` included): key → values in
-    /// prepend order.
     buffered_paths: IndexMap<String, Vec<String>>,
-    /// Buffered list entries: key → (separator, [values in append order]).
-    /// The separator is captured from the first entry buffered for a key;
-    /// every later entry for the same key already carries the same one,
-    /// settled upstream by `reconcile_list_separators`.
+    /// Separator taken from the first entry; `reconcile_list_separators` already made all entries agree.
     buffered_lists: IndexMap<String, (String, Vec<String>)>,
-    /// Buffered constant entries: key → value (last-writer-wins).
     buffered_constants: IndexMap<String, String>,
-    /// Tracks constant-type assignments to warn on conflicts.
     constants: ConstantTracker,
 }
 
 impl GitLabFlavor {
-    /// Opens the destination sink.
-    ///
-    /// `Some(path)` opens the file for append/create; `None` writes the
-    /// JSON-lines to stdout (the caller redirects to `${{ export_file }}`).
+    /// Appends to `export_file`, or writes to stdout when `None`.
     pub fn new(export_file: Option<PathBuf>) -> Result<Self, crate::ci::error::Error> {
         let sink: Box<dyn Write + Send> = match export_file {
             Some(path) => {
@@ -66,10 +43,6 @@ impl GitLabFlavor {
         Ok(Self::new_with_writer(sink))
     }
 
-    /// Constructs a flavor around an injected sink.
-    ///
-    /// Used by tests to assert against an in-memory buffer without touching
-    /// stdout or the filesystem.
     fn new_with_writer(sink: Box<dyn Write + Send>) -> Self {
         Self {
             sink,
@@ -80,16 +53,11 @@ impl GitLabFlavor {
         }
     }
 
-    /// Returns `true` if there are any buffered entries to flush.
     fn has_buffered(&self) -> bool {
         !self.buffered_paths.is_empty() || !self.buffered_lists.is_empty() || !self.buffered_constants.is_empty()
     }
 
-    /// Computes the final key/value pairs and serializes them as JSON-lines.
     fn flush_inner(&mut self) -> Result<(), crate::ci::error::Error> {
-        // Compute path-prepend values first (reads the existing process env),
-        // then emit constants. Draining into a local list keeps the immutable
-        // env reads separate from the mutable borrow of the sink.
         let mut lines: Vec<(String, String)> = Vec::new();
         for (key, values) in self.buffered_paths.drain(..) {
             let full = super::prepend_existing(&key, &values);
@@ -119,16 +87,12 @@ impl Flavor for GitLabFlavor {
         kind: &ModifierKind,
         separator: Option<&str>,
     ) -> Result<(), crate::ci::error::Error> {
-        // Gate the key slot before buffering: a non-identifier charset (spaces,
-        // `=`, newlines) corrupts the JSON-lines `name` field. Values are
-        // serde-framed so they need no separate newline guard here.
+        // An invalid key corrupts the `name` field; values are serde-escaped and need no guard.
         if !ocx_util::env::is_valid_env_key(key) {
             warn!("skipping invalid env-var key {key:?} for CI export");
             return Ok(());
         }
         match kind {
-            // GitLab has no path channel, so PATH is flattened like any other
-            // path-type variable (accumulate, prepend to existing on flush).
             ModifierKind::Path => {
                 self.buffered_paths
                     .entry(key.to_string())
@@ -168,23 +132,18 @@ impl Drop for GitLabFlavor {
     }
 }
 
-/// Detects whether we're running inside GitLab CI/CD.
+/// Whether this process runs inside GitLab CI/CD.
 pub(super) fn detect() -> bool {
     ocx_util::env::var("GITLAB_CI").as_deref() == Some("true")
 }
 
-/// A single GitLab export entry, serialized as one JSON object per line.
 #[derive(Serialize)]
 struct ExportLine<'a> {
     name: &'a str,
     value: &'a str,
 }
 
-/// The single serializer for GitLab's JSON-lines export format.
-///
-/// Produces `{"name":"<key>","value":"<value>"}` followed by a newline. This is
-/// the one place the wire shape is pinned, so a step-runner format change is a
-/// one-line fix.
+/// Writes one `{"name":"<key>","value":"<value>"}` line.
 fn write_export_line(writer: &mut dyn Write, name: &str, value: &str) -> Result<(), error::Error> {
     let line = ExportLine { name, value };
     let mut encoded = serde_json::to_string(&line).map_err(|e| error::Error::Write(std::io::Error::other(e)))?;

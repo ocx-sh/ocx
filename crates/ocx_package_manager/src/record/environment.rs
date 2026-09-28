@@ -1,39 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Best-effort collection of the ambient blocks: host, OS, and process.
+//! Best-effort collection of the host, OS and process blocks.
 //!
-//! Every lookup here can fail on a hardened or unusual host, and none of them is
-//! worth failing a launch over. The contract is **omit, never guess**: a field
-//! that cannot be determined is absent from the record rather than filled with a
-//! placeholder a consumer would have to learn to distrust. An absent key means
-//! "not determinable here"; a present key is always true.
-//!
-//! Concretely: an unreadable hostname, an architecture outside the closed OCI
-//! set, or a missing passwd entry each drop exactly one key. Consumers already
-//! tolerate absent keys, so this costs them nothing. The contract also covers
-//! facts a platform cannot answer at all: Windows has no parent-pid call and no
-//! uid, so both keys are simply absent there.
-//!
-//! `process.pid` and `process.executable` are the exception — they are
-//! load-bearing, in hand from the caller, and cannot fail.
+//! Omit, never guess: a failed lookup drops exactly its own key and never fails the launch.
 
 use std::path::Path;
 
 use super::execution_record::{Host, Os, ParentProcess, Process, User};
 use ocx_oci::{Architecture, OperatingSystem};
 
-/// The testing seam that forces individual probes to fail.
-///
-/// Comma-separated **record key paths** — `host.name`, `os.type`,
-/// `process.arch`, `process.user.id`, `process.user.name`,
-/// `process.parent.pid`, `process.working_directory`. One variable rather than
-/// one per probe, so the seam's vocabulary is the wire format's own and a test
-/// names the key it expects to be missing.
+/// Testing seam: comma-separated record key paths (e.g. `process.user.id`) whose probes fail.
 #[cfg(any(test, feature = "__testing"))]
 const FAIL_PROBES_VAR: &str = "__OCX_TESTING_RECORDS_FAIL_PROBES";
 
-/// Collect the host block. Every field omits rather than guesses.
+/// Collect the host block.
 pub fn host() -> Host {
     Host {
         name: probe("host.name", sysinfo::System::host_name),
@@ -49,17 +30,12 @@ pub fn operating_system() -> Os {
 
 /// Collect the process block.
 ///
-/// `pid` is supplied rather than read here because the two platforms learn it at
-/// different moments: on Unix it is ocx's own pid, which the exec turns into the
-/// tool; on Windows it is the spawned child's, which does not exist until after
-/// the spawn.
+/// `pid` is passed in because on Windows it is the spawned child's, which exists only after the spawn.
 pub fn process(pid: u32, executable: &Path) -> Process {
     Process {
         pid,
         parent: probe("process.parent.pid", parent_pid).map(|pid| ParentProcess { pid }),
         user: user(),
-        // `Architecture::current` already returns `None` for anything outside the
-        // closed OCI vocabulary, which is precisely "undeterminable here".
         arch: probe("process.arch", Architecture::current),
         executable: executable.to_path_buf(),
         working_directory: probe("process.working_directory", || ocx_util::env::current_dir().ok()),
@@ -67,9 +43,6 @@ pub fn process(pid: u32, executable: &Path) -> Process {
 }
 
 /// The invoking user, or `None` when neither field is determinable.
-///
-/// The block is emitted whenever *either* field resolves, so a hardened host
-/// that answers the uid but sets no `$USER` still records who ran the tool.
 fn user() -> Option<User> {
     let user = User {
         id: probe("process.user.id", user_id),
@@ -78,10 +51,7 @@ fn user() -> Option<User> {
     (user.id.is_some() || user.name.is_some()).then_some(user)
 }
 
-/// Run one best-effort probe, unless a test has forced it to fail.
-///
-/// `key` is the probe's key path in the record, which is also the vocabulary of
-/// [`FAIL_PROBES_VAR`].
+/// Run one best-effort probe, where `key` is its record key path, unless a test forced it to fail.
 fn probe<T>(key: &str, lookup: impl FnOnce() -> Option<T>) -> Option<T> {
     if forced_to_fail(key) {
         return None;
@@ -89,37 +59,22 @@ fn probe<T>(key: &str, lookup: impl FnOnce() -> Option<T>) -> Option<T> {
     lookup()
 }
 
-/// The effective user id the kernel reports.
-///
-/// The trustworthy half of the user block: `geteuid` answers from the process's
-/// own credentials, so unlike [`user_name`] no environment variable can move it.
-/// It cannot fail — the call has no error path — but it stays behind the probe
-/// seam so a test can exercise the absent case the way Windows produces it.
+/// The effective user id; unlike [`user_name`], no environment variable can move it.
 #[cfg(unix)]
 fn user_id() -> Option<String> {
-    // SAFETY: `geteuid` reads the calling process's own credentials. It takes no
-    // arguments, touches no memory, and is documented as always succeeding.
+    // SAFETY: `geteuid` takes no arguments, touches no memory and always succeeds.
     Some(unsafe { libc::geteuid() }.to_string())
 }
 
-/// Windows identifies a user by SID rather than uid, and reading it means
-/// opening the process token and querying it — work this launch-path probe does
-/// not do. Absent means "not determinable here", which is exactly true.
+/// Omitted: a Windows SID needs a process-token query this launch-path probe does not make.
 #[cfg(not(unix))]
 fn user_id() -> Option<String> {
     None
 }
 
-/// The invoking user's account name.
+/// The invoking user's account name: caller-controlled via the environment, so audits key on [`user_id`].
 ///
-/// **Caller-controlled**: read from the environment, so a hostile invocation can
-/// name any user it likes. [`user_id`] is the field an audit keys on; this one
-/// exists because a name is what a human reading the record recognises.
-///
-/// Read from the environment rather than the passwd database: enumerating users
-/// costs a directory round-trip on an LDAP/SSSD-backed host, which is exactly the
-/// corporate host this feature exists for, and the field is best-effort either
-/// way. A scratch container sets neither, so both approaches omit the key there.
+/// Not read from passwd, which costs a directory round-trip per launch on LDAP/SSSD-backed hosts.
 fn user_name() -> Option<String> {
     #[cfg(windows)]
     {
@@ -131,20 +86,14 @@ fn user_name() -> Option<String> {
     }
 }
 
-/// The launching process id, so a call tree (`make` → `ocx exec` → tool)
-/// reconstructs from records alone.
+/// The launching process id.
 #[cfg(unix)]
 fn parent_pid() -> Option<u32> {
     Some(std::os::unix::process::parent_id())
 }
 
-/// Windows has no `getppid`, and the portable stand-ins all cost a process-table
-/// walk: `sysinfo`'s pid-scoped refresh still calls
-/// `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` and iterates every entry to
-/// find the one asked for, filtering afterwards. That is a blocking scan of the
-/// whole machine's process list on the launch path, to fill one best-effort
-/// field — so the key is omitted instead, which the module's contract reads as
-/// "not determinable here".
+/// Omitted: Windows has no `getppid`, and every stand-in (`sysinfo` included) scans the whole process
+/// table on the launch path.
 #[cfg(not(unix))]
 fn parent_pid() -> Option<u32> {
     None

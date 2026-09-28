@@ -1,47 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Default-on SSRF guard for remote-controlled registry hosts.
+//! Default-on SSRF guard for remote-controlled registry hosts: before OCX
+//! dereferences an index root's `repository` pointer, the host must not resolve
+//! to a private, loopback, link-local or metadata address.
 //!
-//! An index root's `repository` pointer (`oci://host/path`) arrives in
-//! remote-controlled data: a mirrored or compromised index can name any host it
-//! likes. Before OCX dereferences that pointer into a physical registry fetch,
-//! the host must not resolve to a private, loopback, link-local, or metadata
-//! address — the classic Server-Side Request Forgery target set (ocx#218). Public
-//! hosts never trip the guard, so the open-source path stays zero-config.
-//!
-//! The check binds to the **resolved IPs at connect time** — a hostname-string
-//! check alone loses to DNS rebinding. Two layers realise resolve -> validate ->
-//! pin:
-//!
-//! 1. [`resolve_and_validate`] is a pre-flight the read path calls **before** the
-//!    first physical registry request (ordering parity with the index bot). It
-//!    resolves the host, validates every address, and fails fast with no transport
-//!    call when any address is forbidden.
-//! 2. [`GuardedResolver`] is a [`reqwest::dns::Resolve`] hook injected into the
-//!    physical-fetch client. reqwest connects only to the addresses the resolver
-//!    returns, so the same validation runs again at connect time — closing the
-//!    resolve -> connect rebinding window.
-//!
-//! Both layers are **route-aware**. Under a configured HTTP proxy the process
-//! resolves and dials only the proxy — the destination is literal text in a
-//! `CONNECT` line — so [`guard_destination`] performs no DNS on that route and
-//! judges the destination textually instead, after normalising it exactly as
-//! reqwest will (`0x7f000001` is `127.0.0.1`). An IP literal is still refused
-//! here in every spelling `url` parses — including the IPv4-mapped,
-//! IPv4-compatible and NAT64-embedded IPv6 forms — and so is a loopback
-//! **name**, which says its own address (RFC 6761 §6.3). A host that merely
-//! *resolves* to an internal address is the proxy's egress policy to refuse.
-//! Symmetrically
-//! [`GuardedResolver`] admits the process's own proxy host with no range
-//! judgement, because a corporate proxy is operator config and RFC1918 by
-//! nature (ocx#323).
-//!
-//! `trusted_hosts` (configured per `[registries."<ns>"]`) is the explicit escape
-//! hatch: a listed host or CIDR skips validation, so a private corporate registry
-//! reaches its own private index without disabling the guard globally. Host
-//! *allowlisting* (which hosts may appear in roots at all) stays index-side
-//! governance — this module only enforces the SSRF floor.
+//! The connect pins the validated IPs, never the hostname, or DNS rebinding
+//! reopens the window between check and dial.
 
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -50,20 +15,10 @@ use std::sync::{Arc, LazyLock};
 use hyper_util::client::proxy::matcher::Matcher;
 use url::{Host, Url};
 
-/// Whether `host` carries a plain-HTTP allowance.
+/// Whether `host` carries a plain-HTTP allowance: byte-exact on `host[:port]`.
 ///
-/// The granting comparison, in one place. Byte-exact on `host[:port]`, matching
-/// `oci_client::ClientProtocol::HttpsExcept` — the fork makes the same test on
-/// the same set and cannot share this function across the crate boundary, so
-/// the two must not drift. Every ocx-side gate (mirror role, index base URL,
-/// `ocx login`'s probe) calls this rather than writing the `iter().any(..)` out
-/// again, so the invariant
-/// `ocx_config::insecure::insecure_hosts` documents
-/// has one place to be true.
-///
-/// The *set* is resolved by the config layer; the *comparison* is a transport
-/// decision and lives beside [`DialScheme::for_registry`], the one site that
-/// consumes it, so the OCI side of the plaintext gate names no config module.
+/// Must match `oci_client::ClientProtocol::HttpsExcept`, or the fork and ocx
+/// disagree on which hosts dial plain HTTP.
 #[must_use]
 pub fn allows_plain_http(hosts: &[String], host: &str) -> bool {
     hosts.iter().any(|allowed| allowed == host)
@@ -72,13 +27,9 @@ pub fn allows_plain_http(hosts: &[String], host: &str) -> bool {
 /// A physical host was refused, or could not be resolved, by the SSRF guard.
 #[derive(Debug, thiserror::Error)]
 pub enum SsrfError {
-    /// The host resolved to an address inside a forbidden range (loopback,
-    /// private, link-local, metadata, or unspecified) and was not listed in
-    /// `trusted_hosts`.
     #[error("host {host} resolves to a forbidden address {ip}; add it to trusted_hosts to allow")]
     ForbiddenTarget { host: String, ip: IpAddr },
 
-    /// DNS resolution of the host failed at the transport layer.
     #[error("failed to resolve host {host}")]
     Resolution {
         host: String,
@@ -87,18 +38,10 @@ pub enum SsrfError {
     },
 }
 
-/// True for addresses OCX refuses to reach from a remote-controlled host: IPv4
-/// loopback / RFC1918 private / link-local (169.254.0.0/16, including the
-/// 169.254.169.254 cloud-metadata endpoint) / unspecified / CGNAT-shared
-/// (100.64.0.0/10, e.g. Tailscale/overlay ranges) / broadcast / multicast /
-/// documentation (192.0.2/24, 198.51.100/24, 203.0.113/24) / benchmarking
-/// (198.18.0.0/15) / reserved (240.0.0.0/4), and the IPv6 equivalents —
-/// loopback (`::1`), ULA (`fc00::/7`), link-local (`fe80::/10`), unspecified
-/// (`::`), multicast (`ff00::/8`), documentation (`2001:db8::/32`). Every IPv6
-/// form that embeds an IPv4 target — mapped (`::ffff:a.b.c.d`), compatible
-/// (`::a.b.c.d`) and NAT64 (`64:ff9b::a.b.c.d`) — is unwrapped and judged by
-/// that embedded address, so no encoding can smuggle a forbidden target past
-/// the guard.
+/// True for addresses OCX refuses to reach from a remote-controlled host.
+///
+/// Every IPv6 form embedding an IPv4 target is judged by that address, or an
+/// encoding smuggles a forbidden target past the guard.
 pub fn is_forbidden_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_forbidden_v4(v4),
@@ -119,30 +62,23 @@ fn is_forbidden_v4(ip: Ipv4Addr) -> bool {
         || is_reserved(ip) // 240.0.0.0/4
 }
 
-/// `100.64.0.0/10` — carrier-grade NAT / shared address space (RFC 6598),
-/// also used by overlay networks such as Tailscale. `Ipv4Addr::is_shared` is
-/// unstable, so the `/10` prefix is hand-rolled: octets[1]'s top two bits
-/// must be `01` (i.e. `octets[1]` in `64..=127`).
+/// `100.64.0.0/10` (RFC 6598); hand-rolled while `Ipv4Addr::is_shared` is unstable.
 fn is_shared_cgnat(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
     octets[0] == 100 && (octets[1] & 0xc0) == 0x40
 }
 
-/// `198.18.0.0/15` — benchmarking address space (RFC 2544).
 fn is_benchmarking(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
     octets[0] == 198 && (octets[1] & 0xfe) == 18
 }
 
-/// `240.0.0.0/4` — reserved for future use (includes the limited-broadcast
-/// address, already covered by `is_broadcast`).
 fn is_reserved(ip: Ipv4Addr) -> bool {
     ip.octets()[0] >= 240
 }
 
 fn is_forbidden_v6(ip: Ipv6Addr) -> bool {
-    // An IPv4-mapped address embeds an IPv4 target — judge it as IPv4 so a
-    // `::ffff:127.0.0.1` cannot bypass the IPv4 range checks above.
+    // Judged as IPv4, or `::ffff:127.0.0.1` bypasses the IPv4 range checks.
     if let Some(v4) = ip.to_ipv4_mapped() {
         return is_forbidden_v4(v4);
     }
@@ -156,16 +92,10 @@ fn is_forbidden_v6(ip: Ipv6Addr) -> bool {
         || embeds_forbidden_v4(ip) // ::a.b.c.d, 64:ff9b::a.b.c.d
 }
 
-/// `::a.b.c.d` (IPv4-compatible, `::/96`) and `64:ff9b::a.b.c.d` (the NAT64
-/// well-known prefix, RFC 6052) carry an IPv4 target in their last two
-/// segments, so both reach a forbidden address without matching any predicate
-/// above.
+/// `::a.b.c.d` and NAT64 `64:ff9b::a.b.c.d` (RFC 6052) carry an IPv4 target.
 ///
-/// Deliberately judged **last**: `::1` and `::` are themselves inside `::/96`,
-/// and unwrapping before the loopback and unspecified checks would read `::1`
-/// as the allowed `0.0.0.1`. For the same reason this is a separate function
-/// rather than swapping `to_ipv4_mapped` for `to_ipv4`, which unwraps the
-/// compatible form at the top where precedence is wrong.
+/// Judged last, never via `to_ipv4` at the top: `::1` is inside `::/96`, and
+/// unwrapping it first reads it as the allowed `0.0.0.1`.
 fn embeds_forbidden_v4(ip: Ipv6Addr) -> bool {
     let [prefix @ .., high, low] = ip.segments();
     if prefix != [0, 0, 0, 0, 0, 0] && prefix != [0x64, 0xff9b, 0, 0, 0, 0] {
@@ -174,17 +104,13 @@ fn embeds_forbidden_v4(ip: Ipv6Addr) -> bool {
     is_forbidden_v4(Ipv4Addr::from((u32::from(high) << 16) | u32::from(low)))
 }
 
-/// `2001:db8::/32` — documentation address space (RFC 3849).
-/// `Ipv6Addr::is_documentation` is unstable, so the `/32` prefix is
-/// hand-rolled from the first two segments.
+/// `2001:db8::/32` (RFC 3849); hand-rolled while `Ipv6Addr::is_documentation` is unstable.
 fn is_documentation_v6(ip: Ipv6Addr) -> bool {
     let segments = ip.segments();
     segments[0] == 0x2001 && segments[1] == 0x0db8
 }
 
-/// Whether `host` is exempt from validation: an exact string match against a
-/// `trusted_hosts` entry, or — when `host` is an IP literal — membership in a
-/// trusted `CIDR` entry (e.g. `10.0.0.0/8` covers `10.1.2.3`).
+/// Whether `host` exactly matches a `trusted_hosts` entry, or is an IP literal inside a trusted CIDR.
 pub fn host_is_trusted(host: &str, trusted: &[String]) -> bool {
     let host_ip = host.parse::<IpAddr>().ok();
     trusted.iter().any(|entry| {
@@ -198,8 +124,6 @@ pub fn host_is_trusted(host: &str, trusted: &[String]) -> bool {
     })
 }
 
-/// Parses a `<addr>/<prefix>` CIDR entry. Returns `None` for a bare host, a bad
-/// address, or a non-numeric / out-of-range prefix.
 fn parse_cidr(entry: &str) -> Option<(IpAddr, u8)> {
     let (addr, prefix) = entry.split_once('/')?;
     let network = addr.parse::<IpAddr>().ok()?;
@@ -211,8 +135,6 @@ fn parse_cidr(entry: &str) -> Option<(IpAddr, u8)> {
     (prefix <= max).then_some((network, prefix))
 }
 
-/// Whether `ip` falls inside the `network/prefix` CIDR block. Mismatched address
-/// families never match. A `/0` prefix matches everything of the same family.
 fn cidr_contains(network: IpAddr, prefix: u8, ip: IpAddr) -> bool {
     match (network, ip) {
         (IpAddr::V4(network), IpAddr::V4(ip)) => {
@@ -227,28 +149,10 @@ fn cidr_contains(network: IpAddr, prefix: u8, ip: IpAddr) -> bool {
     }
 }
 
-/// Splits a physical registry authority into `(host, port)` for
-/// [`resolve_and_validate`], defaulting to `443` when no explicit port is
-/// present.
+/// Splits a registry authority into `(host, port)`, defaulting to `443`.
 ///
-/// Accepts the plain `host` and `host:port` forms the registry grammar admits
-/// (e.g. `ghcr.io`, `localhost:5000`). Only a trailing numeric `:port` is split
-/// off; anything else is treated as a bare host on the default port.
-///
-/// Lives beside [`resolve_and_validate`] because it is the parse half of the
-/// same guard: every caller that validates a remote-controlled authority splits
-/// it here first, so the two cannot drift apart (design register X3, shared
-/// module).
-///
-/// Known gap, deliberately unchanged: a bracketed IPv6 authority
-/// (`[::1]:5000`) yields the host `"[::1]"`, which `str::parse::<IpAddr>`
-/// rejects and no DNS name matches. Both routes still refuse it, by different
-/// means: a direct dial reaches [`resolve_and_validate`], whose lookup fails
-/// with [`SsrfError::Resolution`], and a proxied dial reaches
-/// [`guard_destination`], where `normalised_destination` reads the brackets
-/// as the URL syntax they are and refuses `::1` as
-/// [`SsrfError::ForbiddenTarget`]. Both fail **closed**. Any future bracket
-/// stripping must land here, once, so both call sites get it together.
+/// A bracketed IPv6 authority stays `"[::1]"`, which both guard routes refuse;
+/// any bracket stripping lands here, or the two routes judge different hosts.
 #[must_use]
 pub fn split_host_port(registry: &str) -> (&str, u16) {
     match registry.rsplit_once(':') {
@@ -260,15 +164,7 @@ pub fn split_host_port(registry: &str) -> (&str, u16) {
     }
 }
 
-/// Resolves `host` and returns its socket addresses, refusing any that fall in a
-/// forbidden range unless `host` is trusted (`trusted_hosts`).
-///
-/// This is the pre-flight the read path runs **before** the first physical
-/// registry request. A trusted host skips validation and returns its addresses
-/// verbatim; otherwise every resolved address must pass [`is_forbidden_ip`], and
-/// the first that does not aborts with [`SsrfError::ForbiddenTarget`] and no
-/// transport call. `port` is only used to drive resolution; the returned
-/// addresses carry it, but the caller's [`GuardedResolver`] pins the connection.
+/// Resolves `host`, refusing every forbidden address unless `host` is trusted.
 ///
 /// # Errors
 ///
@@ -299,31 +195,16 @@ pub async fn resolve_and_validate(host: &str, port: u16, trusted: &[String]) -> 
     Ok(addresses)
 }
 
-/// A [`reqwest::dns::Resolve`] hook that runs [`resolve_and_validate`] at connect
-/// time, so reqwest connects only to SSRF-validated addresses (resolve ->
-/// validate -> pin). Injected into the physical-fetch client via the vendored
-/// `oci_client` fork's `ClientConfig::dns_resolver` seam.
+/// A [`reqwest::dns::Resolve`] hook running [`resolve_and_validate`] at connect time.
 ///
-/// **One name is exempt: the process's own proxy** ([`ProxyRules::is_proxy_host`]).
-/// Under a hostname-configured proxy every request resolves the proxy through
-/// this hook, and a corporate proxy is RFC1918 by nature, so keeping the floor
-/// on it refuses every Sigstore and registry call (ocx#323). It is admitted
-/// with a plain lookup and no range judgement — the same trust tier as
-/// `trusted_hosts`, since both are operator configuration rather than
-/// remote-controlled data.
-///
-/// Residual, deliberate: whatever that proxy then reaches is bounded by the
-/// proxy's own egress policy, not by this guard — except for the destinations
-/// [`guard_destination`] already refused by name or literal before the dial.
-/// The exemption covers exactly one operator-named host; every other name
-/// still faces the full floor.
+/// Exempts only the process's own proxy host: a corporate proxy is RFC1918, so
+/// the floor would refuse every call; widening it past that one host reopens SSRF.
 pub struct GuardedResolver {
     trusted: Arc<Vec<String>>,
     rules: Arc<ProxyRules>,
 }
 
 impl GuardedResolver {
-    /// Builds a resolver that exempts the hosts / CIDRs in `trusted`.
     pub fn new(trusted: Arc<Vec<String>>, rules: Arc<ProxyRules>) -> Self {
         Self { trusted, rules }
     }
@@ -334,12 +215,9 @@ impl reqwest::dns::Resolve for GuardedResolver {
         let trusted = self.trusted.clone();
         let rules = self.rules.clone();
         Box::pin(async move {
-            // reqwest overrides the port from the request URL after resolution, so
-            // any placeholder here is discarded; only the validated IPs matter.
+            // Port 0: reqwest replaces it with the request URL's after resolution.
             let host = name.as_str();
             let addresses: Vec<SocketAddr> = if rules.is_proxy_host(host) {
-                // The process's own proxy: admitted with no range judgement,
-                // for the reason on `GuardedResolver`.
                 tokio::net::lookup_host((host, 0))
                     .await
                     .map_err(|source| SsrfError::Resolution {
@@ -356,11 +234,7 @@ impl reqwest::dns::Resolve for GuardedResolver {
     }
 }
 
-/// The scheme OCX will dial a registry over.
-///
-/// Distinct from `Route`: the dial scheme decides which proxy environment
-/// variable applies (`HTTP_PROXY` vs `HTTPS_PROXY`), not whether a proxy
-/// intercepts the dial at all.
+/// The scheme OCX will dial a registry over; it picks `HTTP_PROXY` vs `HTTPS_PROXY`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialScheme {
     Http,
@@ -368,10 +242,7 @@ pub enum DialScheme {
 }
 
 impl DialScheme {
-    /// `Http` iff [`allows_plain_http`] admits `registry` — the
-    /// `host[:port]` authority exactly as `OCX_INSECURE_REGISTRIES` spells
-    /// it; `Https` otherwise. The ONE site that decides the dial scheme —
-    /// every guard site calls this instead of re-deriving the predicate.
+    /// `Http` iff [`allows_plain_http`] admits `registry`.
     #[must_use]
     pub fn for_registry(insecure_hosts: &[String], registry: &str) -> Self {
         if allows_plain_http(insecure_hosts, registry) {
@@ -386,58 +257,34 @@ impl DialScheme {
 /// HTTP proxy, or reaches the destination directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
-    /// No proxy intercepts: the process itself resolves and dials the host.
     Direct,
-    /// A configured proxy dials the destination; the process resolves only
-    /// the proxy.
     Proxied,
 }
 
-/// The outcome of [`guard_destination`]: what the SSRF floor decided about a
-/// dial, and — on [`Route::Direct`] — the validated addresses to pin.
+/// The outcome of [`guard_destination`]; `Direct` carries the validated addresses to pin.
 #[derive(Debug)]
 pub enum DialRoute {
-    /// No proxy intercepts: the floor-checked addresses the process will
-    /// connect to.
     Direct(Vec<SocketAddr>),
-    /// A configured proxy dials the destination; the process resolves only
-    /// the proxy, so there is nothing here to pin.
     Proxied,
 }
 
-/// The system/env HTTP proxy matcher — the same env/system reader reqwest
-/// itself consults under its `system-proxy` feature — plus the (at most two)
-/// proxy authorities it can ever pick.
-///
-/// Built once per process via [`proxy_rules`]. [`Self::new`] is the test seam:
-/// an explicit `Matcher` (`Matcher::builder()...build()`) instead of reading
-/// the ambient environment.
+/// The system/env HTTP proxy matcher reqwest itself consults, plus the proxy hosts it can pick.
 pub struct ProxyRules {
     matcher: Matcher,
-    /// The host names (ascii-lowercase, no port, no userinfo) of the proxies
-    /// `matcher` can ever pick — at most one per scheme. Enumerated once in
-    /// [`Self::new`] by intercepting a synthetic probe destination per scheme.
+    /// Lowercase host names, at most one per scheme.
     proxy_hosts: BTreeSet<String>,
 }
 
-/// Synthetic destinations used only to ask `matcher` which proxy authority it
-/// would pick for each scheme. Never dialed, never resolved; the name is
-/// deliberately one no `NO_PROXY` rule would list.
+/// Never dialed: a name no `NO_PROXY` rule lists, to ask which proxy each scheme picks.
 const PROXY_PROBES: [&str; 2] = ["http://ocx-proxy-probe/", "https://ocx-proxy-probe/"];
 
 impl ProxyRules {
-    /// Builds the rules from the process environment / OS proxy settings.
     #[must_use]
     pub fn from_system() -> Self {
         Self::new(Matcher::from_system())
     }
 
-    /// Test seam: build from an explicit matcher instead of reading the
-    /// ambient environment.
-    ///
-    /// Enumerates the proxy-host set by intercepting `PROXY_PROBES`. A
-    /// matcher with `NO_PROXY=*` intercepts neither probe, so the set is empty
-    /// and no name is ever admitted as a proxy host.
+    /// Build from an explicit matcher instead of the ambient environment.
     #[must_use]
     pub fn new(matcher: Matcher) -> Self {
         let proxy_hosts = PROXY_PROBES
@@ -450,19 +297,14 @@ impl ProxyRules {
         Self { matcher, proxy_hosts }
     }
 
-    /// Whether `host:port` under `scheme` is dialed through a configured
-    /// proxy or directly.
-    ///
-    /// A host that cannot be spelled as a URL degrades to [`Route::Direct`],
-    /// which keeps the full SSRF floor on it — the guard's fail-closed
-    /// direction.
+    /// Whether `host:port` is dialed through a proxy; an unparseable host is
+    /// `Direct`, which keeps the full floor on it (fail closed).
     #[must_use]
     pub fn dial_route(&self, scheme: DialScheme, host: &str, port: u16) -> Route {
         normalised_destination(scheme, host, port).map_or(Route::Direct, |destination| self.route_for(&destination))
     }
 
-    /// [`Self::dial_route`] over an already-normalised destination, so the
-    /// matcher and [`guard_destination`]'s literal check judge the same host.
+    /// Takes the normalised destination, or the matcher and the literal check judge different hosts.
     fn route_for(&self, destination: &Url) -> Route {
         let Ok(destination) = destination.as_str().parse::<http::Uri>() else {
             return Route::Direct;
@@ -474,16 +316,13 @@ impl ProxyRules {
         }
     }
 
-    /// Whether `name` is one of this process's configured proxy hosts. DNS
-    /// names are case-insensitive, so the comparison folds case on both sides.
+    /// Whether `name` is one of this process's configured proxy hosts (case-insensitive).
     #[must_use]
     pub fn is_proxy_host(&self, name: &str) -> bool {
         self.proxy_hosts.iter().any(|proxy| proxy.eq_ignore_ascii_case(name))
     }
 }
 
-/// A test seam for the two shapes every guard-site test needs. Kept beside
-/// [`ProxyRules`] so `Matcher` stays confined to this module.
 #[cfg(any(test, feature = "__testing"))]
 impl ProxyRules {
     /// No proxy is configured: every dial takes [`Route::Direct`].
@@ -497,24 +336,13 @@ impl ProxyRules {
     }
 }
 
-/// The destination as **reqwest** will parse it, not as the root spelled it.
-///
-/// reqwest builds its request URL with `url::Url`, whose WHATWG host parser
-/// normalises every alternate IPv4 spelling — `0x7f000001`, `2130706433`,
-/// `127.1` and `0177.0.0.1` all become `127.0.0.1`, and a bare or bracketed
-/// IPv6 literal becomes the canonical bracketed form. Judging the raw string
-/// instead would let `oci://0x7f000001:5000/repo` past both the proxy match
-/// and `str::parse::<IpAddr>`, while the transport dialed loopback.
-///
-/// `None` for anything that is not a URL host at all; every caller reads that
-/// as [`Route::Direct`], which keeps the resolving floor on it.
+/// The destination as reqwest will parse it: judging the raw spelling lets
+/// `0x7f000001` past the checks while the transport dials loopback.
 fn normalised_destination(scheme: DialScheme, host: &str, port: u16) -> Option<Url> {
     let scheme = match scheme {
         DialScheme::Http => "http",
         DialScheme::Https => "https",
     };
-    // A URL spells an IPv6 literal bracketed (RFC 3986 §3.2.2); an authority
-    // that already carries its brackets is passed through untouched.
     let destination = if host.parse::<Ipv6Addr>().is_ok() {
         format!("{scheme}://[{host}]:{port}/")
     } else {
@@ -523,55 +351,27 @@ fn normalised_destination(scheme: DialScheme, host: &str, port: u16) -> Option<U
     Url::parse(&destination).ok()
 }
 
-/// Process-wide [`ProxyRules`], read once from the environment. The single
-/// proxy-env reader shared by [`ssrf`](self) and
-/// [`endpoint`](crate::endpoint).
+/// Process-wide [`ProxyRules`]: the one proxy-env reader, or the guard and the dial disagree on the route.
 #[must_use]
 pub fn proxy_rules() -> Arc<ProxyRules> {
     static RULES: LazyLock<Arc<ProxyRules>> = LazyLock::new(|| Arc::new(ProxyRules::from_system()));
     RULES.clone()
 }
 
-/// `localhost` and every `*.localhost` name are loopback BY DEFINITION
-/// (RFC 6761 §6.3) — a resolver may not answer them with anything else — so
-/// refusing them by name needs no DNS and cannot be wrong. One trailing dot
-/// (the FQDN root) is tolerated; `localhost.example` is an ordinary name and
-/// is not matched.
+/// `localhost` and `*.localhost` are loopback by definition (RFC 6761 §6.3).
 fn is_loopback_name(name: &str) -> bool {
     let name = name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase();
     name == "localhost" || name.ends_with(".localhost")
 }
 
-/// The SSRF floor, route-aware — the production replacement for
-/// [`resolve_and_validate`] once every guard site threads a [`ProxyRules`]
-/// through.
+/// The route-aware SSRF floor: [`resolve_and_validate`] on a direct route.
 ///
-/// On [`Route::Direct`] this is [`resolve_and_validate`] verbatim: resolve,
-/// validate, fail closed on both an unresolvable host and a forbidden address.
-///
-/// On [`Route::Proxied`] the proxy resolves and dials the destination, so the
-/// process performs **no DNS** — a lookup here would fail on a proxy-only-DNS
-/// network (ocx#407) and would judge addresses nothing ever connects to. A
-/// trusted host is admitted first; a forbidden IP **literal** is then refused
-/// textually, judged after `normalised_destination` has folded it into the
-/// address reqwest will actually dial.
-///
-/// A loopback **name** (`is_loopback_name`) is refused there too, reported as
-/// `127.0.0.1` because RFC 6761 §6.3 says that is what it names. An IP literal
-/// is refused on either route, in every spelling `url` parses — including the
-/// IPv4-mapped, IPv4-compatible and NAT64-embedded IPv6 forms.
-///
-/// Residual, deliberate and now narrower: a host whose **name** does not say it
-/// is loopback but which resolves to an internal address through the proxy
-/// (`intranet.corp`, a rebinding name) is still admitted. Only the proxy's own
-/// egress policy can refuse that one — from here the destination is literal
-/// text in a `CONNECT` line, and ocx has no address to judge.
+/// A proxied route does no DNS (it would judge the wrong address on a
+/// proxy-only-DNS network) and refuses only a forbidden literal or loopback name.
 ///
 /// # Errors
 ///
-/// [`SsrfError::ForbiddenTarget`] for a forbidden address (resolved on a direct
-/// route, textual on a proxied one — the `ip` field carries the normalised
-/// address, `host` the spelling the caller passed); [`SsrfError::Resolution`]
+/// [`SsrfError::ForbiddenTarget`] for a forbidden address; [`SsrfError::Resolution`]
 /// when a direct route's host cannot be resolved.
 pub async fn guard_destination(
     scheme: DialScheme,
@@ -593,14 +393,10 @@ pub async fn guard_destination(
             let literal = match destination.as_ref().and_then(Url::host) {
                 Some(Host::Ipv4(address)) => Some(IpAddr::V4(address)),
                 Some(Host::Ipv6(address)) => Some(IpAddr::V6(address)),
-                // A loopback NAME carries its address in the name, so it is
-                // judged without a lookup. Load-bearing when the proxy is on
-                // the caller's own machine (cntlm/mitmproxy on 127.0.0.1),
-                // where the residual below — "the proxy's egress policy
-                // refuses it" — is not a control at all: `CONNECT
-                // localhost:5999` would reach the caller's own loopback from
-                // remote-controlled index data.
+                // Without this, a proxy on the caller's own machine forwards
+                // `CONNECT localhost:5999` from index data to the caller's loopback.
                 Some(Host::Domain(name)) if is_loopback_name(name) => Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                // Residual: an internal name (`intranet.corp`) is admitted; only the proxy's egress can refuse it.
                 Some(Host::Domain(_)) | None => None,
             };
             if let Some(ip) = literal
@@ -616,54 +412,32 @@ pub async fn guard_destination(
     }
 }
 
-/// Everything the dial-site SSRF floor needs to judge a rewritten target,
-/// separated from the index that used to carry it.
-///
-/// The three fields are the ones [`guard_destination`] takes, resolved for one
-/// logical namespace: the plain-HTTP allowance set, that namespace's
-/// `trusted_hosts` escape hatch, and the process proxy routing. An index builds
-/// one per run; a signing pipeline is handed it and never learns there is an
-/// index behind it (ADR 1.9, D-026).
+/// What the dial-site SSRF floor needs to judge a rewritten target in one logical namespace.
 pub struct DialPolicy<'a> {
-    /// `[registries."<ns>"].insecure` — the hosts a plain-HTTP route is allowed
-    /// for, read by [`DialScheme::for_registry`].
     pub insecure_hosts: &'a [String],
-    /// The `trusted_hosts` escape hatch configured for the **logical**
-    /// registry, never the physical one. An operator who keyed the entry on the
-    /// host it rewrites to has not allowed anything (ocx#455).
+    /// Keyed on the **logical** registry, never the physical one (ocx-sh/ocx#455).
     pub trusted_hosts: &'a [String],
-    /// Process proxy routing, normally [`proxy_rules`].
     pub rules: &'a ProxyRules,
 }
 
 /// A rewritten physical target was refused at the dial site.
 ///
-/// The message is the one `crate::index::Error::Ssrf` carried, moved rather than
-/// copied: that variant is now `#[error(transparent)]` over this type, so there
-/// is exactly one place the wording and the `source()` hop live, and the
-/// `reason` string the sign, verify and attest pipelines fold into
-/// `ForbiddenRegistryTarget` is unchanged byte for byte
+/// The pipelines fold this wording into `ForbiddenRegistryTarget` verbatim
 /// (`physical_dial_refusal_renders_the_index_wording`).
 #[derive(Debug, thiserror::Error)]
 #[error(
     "the physical host of {namespace}/… was refused; list it (bare host, no port) under [registries.\"{namespace}\"].trusted_hosts"
 )]
 pub struct PhysicalDialRefused {
-    /// The logical registry the `trusted_hosts` entry is keyed on.
     pub namespace: String,
-    /// What the floor itself refused.
     #[source]
     pub source: SsrfError,
 }
 
-/// SSRF floor for a **rewritten** physical target, applied at the dial site —
-/// immediately before the first request that would reach it, and only when one
-/// is imminent.
+/// SSRF floor for a **rewritten** physical target, applied just before the first dial.
 ///
-/// The body of `Index::guard_physical_dial`, which now delegates here; its
-/// documentation carries the full rationale for why this half fails closed on a
-/// lookup failure while the resolve-time half tolerates one, and for the
-/// non-rewrite carve-out below.
+/// Fails closed on a lookup failure, unlike the resolve-time half: an answer
+/// appearing only between check and dial is the rebinding attack.
 ///
 /// # Errors
 ///
@@ -675,14 +449,11 @@ pub async fn guard_physical_dial(
     logical: &crate::PackageRef,
     physical: &crate::OciIdentifier,
 ) -> Result<(), PhysicalDialRefused> {
+    // Not a rewrite: guarding it would refuse every private registry.
     if physical.registry() == logical.registry() {
         return Ok(());
     }
     let (host, port) = split_host_port(physical.registry());
-    // `DialRoute::Proxied` is an admission: the proxy resolves and dials the
-    // destination, so there is no address here to pin and none to refuse
-    // beyond a forbidden literal, which `guard_destination` refuses on the
-    // text alone.
     guard_destination(
         DialScheme::for_registry(policy.insecure_hosts, physical.registry()),
         host,

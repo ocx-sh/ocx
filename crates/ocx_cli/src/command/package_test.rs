@@ -133,14 +133,11 @@ pub struct PackageTest {
 
     /// Command to execute inside the composed env, with arguments. Required
     /// unless `--script` is given (exactly one of the two forms must be supplied).
-    ///
-    /// `last = true` (mirroring `toolchain_exec.rs`'s `argv`) makes clap parse everything
-    /// before the mandatory `--` into `layers` and everything after into
-    /// `command`. Without it, `command` is an ordinary positional sitting
-    /// after the optional `layers` (index 1), which trips clap's debug-assert
-    /// "non-required positional with a lower index than a required positional" -
-    /// fatal in debug builds when the command tree is built (e.g. completion
-    /// generation). Requires clap >= 4.5.57 (see `toolchain_exec.rs` NOTE).
+    // `last = true`, as on `ocx exec`'s `argv`: clap parses everything before the
+    // mandatory `--` into `layers` and the rest into `command`. Without it, `command`
+    // sits after the optional `layers` (index 1) and trips clap's debug-assert
+    // "non-required positional with a lower index than a required positional", fatal
+    // in debug builds whenever the command tree is built (completions). Needs clap >= 4.5.57.
     #[clap(allow_hyphen_values = true, last = true, required_unless_present_any = ["script", "junit"], num_args = 1..)]
     command: Vec<String>,
 }
@@ -306,7 +303,7 @@ impl PackageTest {
                 &platform,
             )
             .await?;
-        // W-11: `entries` and `env_overrides` are disjoint `Vec`s holding
+        // `entries` and `env_overrides` are disjoint `Vec`s holding
         // independent copies of the `--env` overrides (mirrors exec.rs) —
         // reconcile them together so a package-established `list` separator
         // reaches the forwarded copy.
@@ -357,7 +354,7 @@ impl PackageTest {
                 &context.records(ocx_package_manager::record::RecordsOptions::default())?,
                 ExemptionReason::PackageTest,
             )?;
-            // Read the script source. `-` reads the SOURCE from stdin (R1);
+            // Read the script source. `-` reads the source from stdin;
             // any other value is a filesystem path. A missing path file →
             // Usage/64; a stdin stream that errors → Io/74 (distinct: reading
             // a supplied stream that fails is I/O, not bad usage).
@@ -375,12 +372,12 @@ impl PackageTest {
             let (source, label): (String, String) = if is_stdin {
                 let mut buf = String::new();
                 match tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut buf).await {
-                    // LDR-8: for `--script -`, a zero-byte stdin means the
-                    // source was never delivered (closed/broken pipe) — that
-                    // is an I/O failure (74), distinct from an explicitly
-                    // empty script *file* (U11: empty file → Passed). Rust's
-                    // `read_to_string` returns Ok(0) on EOF, so the broken-
-                    // stream case is detected here, not via `Err`.
+                    // For `--script -`, a zero-byte stdin means the source
+                    // was never delivered (closed/broken pipe) — that is an
+                    // I/O failure (74), distinct from an explicitly empty
+                    // script *file*, which passes. Rust's `read_to_string`
+                    // returns Ok(0) on EOF, so the broken-stream case is
+                    // detected here, not via `Err`.
                     Ok(0) => {
                         drop(td_guard);
                         let message = "no script source provided on stdin (--script -)";
@@ -584,7 +581,7 @@ async fn provision_scratch_dir(package_root: &std::path::Path) -> anyhow::Result
     // `block_in_place` engine call — blocking `std::fs` here would stall the
     // worker thread.
     tokio::fs::create_dir_all(&scratch).await.map_err(|e| {
-        // Scratch creation failure → IoError (74) per C2; surface as the lib
+        // Scratch creation failure maps to IoError (74); surface as the lib
         // file error so classify_error maps it (this is a pre-engine host
         // setup failure, not a script outcome).
         anyhow::Error::from(ocx_util::error::FileError::new(&scratch, e))
@@ -601,7 +598,7 @@ mod tests {
     /// waives the command positional because `--junit` conflicts with it), then
     /// `validate_junit` refuses it with a usage error naming both flags. The
     /// old `requires = "script"` produced an unsatisfiable "provide both
-    /// --script and <COMMAND>" instead (H6).
+    /// --script and <COMMAND>" instead.
     #[test]
     fn junit_without_script_is_a_usage_error_naming_both_flags() {
         let cmd = PackageTest::try_parse_from(["package-test", "-i", "example:1", "--junit", "out.xml"])

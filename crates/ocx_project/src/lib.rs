@@ -2,16 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 //! The project tier: `ocx.toml`/`ocx.lock`, consent, mutation, per-prompt
-//! activation sequencing, lazy loading.
-//!
-//! The `project/**` subtree flattens to the crate root rather than keeping a
-//! `project` module, so a caller writes `ocx_project::config` and not
-//! `ocx_project::project::config`. `ocx_oci` set that precedent; `ocx_shell`
-//! kept its subtree only because it holds two of them.
-//!
-//! `activate`, `ladder` and `lazy` join it as siblings: they are the
-//! sequencing and lazy-loading halves of the same tier, and the per-prompt
-//! path crosses all four.
+//! activation, lazy loading.
 
 pub mod activate;
 pub mod ladder;
@@ -54,26 +45,12 @@ pub use registry::ProjectRegistry;
 pub use resolve::{ResolveLockOptions, lookup_host_leaf, resolve_lock, resolve_lock_touched};
 pub use toolchain_home::resolve_toolchain_home;
 
-/// The crate's own `Result`, the project tier's half of the `ocx_lib::Result`
-/// the split dissolved (E1, DEC-27).
+/// The crate's own `Result`, keyed to the tier's own [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Reserved group name for the implicit default group (the top-level
-/// `[tools]` table in `ocx.toml`, the `"default"` group key in lock
-/// entries, and the JSON key in the declaration-hash canonical form).
-///
-/// Re-exported from the module-private [`internal::DEFAULT_GROUP`] so CLI
-/// callers (`exec`, `pull`, `lock`, `update`, `shell-hook`, `hook-env`, …)
-/// share a single source of truth instead of each defining a local
-/// `const DEFAULT_GROUP: &str = "default"`.
+/// Reserved name of the implicit default group (top-level `[tools]`).
 pub const DEFAULT_GROUP: &str = internal::DEFAULT_GROUP;
 
-/// Reserved CLI keyword that expands to the union of the default group and
-/// every named group declared in `ocx.toml` when passed to `-g`.
-///
-/// Re-exported from the module-private [`internal::ALL_GROUP`]. Project-tier
-/// commands (`run`, `pull`, `lock`, `update`) accept `-g all` and expand it
-/// at the CLI layer via [`compose::expand_all_keyword`] before calling
-/// [`compose_tool_set`]. `[group.all]` in `ocx.toml` is rejected at parse
-/// time; `--group all` in mutating commands is rejected at mutate time.
+/// Reserved `-g` keyword: the default group plus every named group. Never a
+/// declarable group; `[group.all]` and `--group all` are rejected.
 pub const ALL_GROUP: &str = internal::ALL_GROUP;

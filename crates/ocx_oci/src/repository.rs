@@ -6,9 +6,6 @@ use serde::{Deserialize, Serialize};
 use super::PackageRef;
 
 /// A parsed OCI repository reference: `registry/repository` without tag or digest.
-///
-/// Represents the concept of "which package" independent of any specific version.
-/// Use this instead of ad-hoc `(String, String)` tuples or `without_specifiers()`.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct Repository {
     registry: String,
@@ -16,7 +13,6 @@ pub struct Repository {
 }
 
 impl Repository {
-    /// Creates a new repository reference from explicit registry and repository strings.
     pub fn new(registry: impl Into<String>, repository: impl Into<String>) -> Self {
         Self {
             registry: registry.into(),

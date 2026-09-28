@@ -9,118 +9,39 @@ use serde::{Deserialize, Serialize};
 
 use ocx_util::prelude::StringExt as _;
 
-/// [`Result`](std::result::Result) over the one failure this store's file
-/// operations can raise. `From<FileError>` for the crate-wide error yields
-/// exactly `InternalFile(path, cause)`, one conversion later than it was.
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
-/// Filename of a project's shell-activation consent stamp.
 const CONSENT_STAMP_FILE: &str = "consent.json";
 
-/// Filename of a rendered toolchain tree's render stamp (C-003).
-///
-/// The same basename in both tiers, at two different roots: `state/` for the
-/// global tree, `state/projects/<key>/` for a project's — see
-/// [`StateStore::global_render_stamp_file`] for why the global one may not
-/// live under `projects/`.
 const RENDER_STAMP_FILE: &str = "render_stamp.json";
 
-/// The only [`RenderStamp`] schema version this binary understands.
-///
-/// A stamp at any other `v` reads as **absent**, never as an error: the
-/// caller's answer to an absent stamp is "re-render", which is always safe,
-/// whereas an error would fail a prompt over a file that is pure derived
-/// state. Same rule, same reason, as `consent`'s `STAMP_VERSION`.
+/// Any other `v` reads as absent, never an error, or a prompt fails over pure derived state.
 const RENDER_STAMP_VERSION: u8 = 1;
 
-// Why the key canonicalizes the project FILE and then takes its parent, rather
-// than canonicalizing the directory: `resolve_explicit_project_path` follows
-// symlinks by design and returns the UN-canonicalized path, so
-// `OCX_PROJECT=/w/fake/ocx.toml` symlinked to `/attacker/ocx.toml` would key —
-// and grant `paths` consent — under `/w/fake`. Canonicalizing the file makes
-// the identity `/attacker`, which is not granted. The two-call order is also
-// load-bearing on Windows: `tokio::fs::canonicalize` on the config file and
-// `dunce::canonicalize` on the directory do not produce the same string, and
-// the ledger's key is the second form. Reuse `register_project_dir_best_effort`
-// as the one shared helper; never add a second, directory-based derivation.
+// Project keys canonicalize the FILE, then take its parent, never the directory, or a symlinked `ocx.toml` is keyed at the link.
+// Reuse `register_project_dir_best_effort` (`dunce`, not `tokio::fs::canonicalize`); a second derivation re-opens that hole.
 
-/// One `bin/` entry's identity in a [`RenderStamp`] (C-003, D-V13).
+/// One `bin/` entry's identity in a [`RenderStamp`].
 ///
-/// **Per entry, never one folded digest.** C-061's prompt gate compares
-/// `(name, size, file id)` against the stamp and hashes only the entries that
-/// differ; a single rolled-up digest gives it nothing to compare and no way to
-/// recover an individual entry's hash, which degenerates the gate into the
-/// unconditional re-hash it exists to avoid.
-///
-/// **No field covers mtime**, here or in [`RenderStamp`] — a stated invariant,
-/// not an oversight. mtime is trivially forgeable and is preserved by an
-/// in-place overwrite, so it would report "unchanged" for exactly the edit the
-/// stamp is meant to notice.
-///
-/// # Residual: an in-place overwrite passes the stat gate (R-W4)
-///
-/// The gate's cheap half is `(name, size, file id)`, and an **in-place**
-/// overwrite — written without a rename, which preserves the inode on POSIX —
-/// changes none of the three when the replacement is the same size under the
-/// same name. Such an entry is never re-hashed, on the prompt path or on the
-/// emit path, so its `content_hash` is believed rather than checked. The tree
-/// this happens in is one the ADR itself calls attacker-writable, and the
-/// stamp exists for the committed-`bin/` attack in the first place, so the
-/// residual belongs on the type where a caller reasoning about the gate will
-/// meet it — not only in the plan that recorded it.
+/// Per entry, never one folded digest, or every prompt re-hashes every entry.
+/// No mtime: it survives an in-place overwrite, so it would call exactly the tampered edit unchanged.
+/// Residual: an in-place overwrite keeps `(size, file_id)`, so its `content_hash` is believed, not re-checked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BinEntryStamp {
-    /// The entry's size in bytes — half of the cheap stat comparison, and the
-    /// half a `read_dir` walk does not yield on Unix.
     pub size: u64,
 
-    /// The entry's filesystem identity: the inode on Unix, the file index on
-    /// Windows. `None` when the platform would not report one, or when the
-    /// entry could not be re-opened to ask — which makes the gate fall through
-    /// to the content hash rather than guess.
-    ///
-    /// Not speculative on Windows: C-003 already requires proving a
-    /// trampoline `.exe`'s hardlink identity against the `ShimBinStore` blob,
-    /// which *is* the file index.
-    ///
-    /// The one `Option` in the stamp tree, and deliberately so: serde resolves
-    /// a **missing** key here to `None` with no `#[serde(default)]` involved,
-    /// which lands on exactly the fall-through-to-the-content-hash behaviour
-    /// the absent case already has. Do not read [`RenderStamp`]'s serde
-    /// paragraph as covering this field — there, that same resolution is the
-    /// hazard [`RenderStampScope`] exists to remove; here it is the intent.
+    /// Inode on Unix, file index on Windows; `None` falls through to the content hash, as a missing key does.
     pub file_id: Option<u64>,
 
-    /// Hex digest of the entry's bytes
-    /// ([`ocx_oci::Algorithm::Sha256`](ocx_oci::Algorithm::Sha256)) — the
-    /// authority the stat pair is only an index into.
+    /// SHA-256 hex of the bytes: the authority the stat pair only indexes.
     pub content_hash: String,
 }
 
 impl BinEntryStamp {
-    /// One entry's stamp, taken from its `metadata` and an
-    /// already-computed `content_hash`.
+    /// The one derivation of `file_id`: producer and gate both call it, or they disagree on Windows.
     ///
-    /// **This is the one derivation of `file_id`, on purpose.** The stamp is
-    /// produced in one work package and compared in another, in different
-    /// files: if the two ends derived "file id" differently on Windows the
-    /// stat gate would silently mis-answer — every entry looking changed, or
-    /// none — which is exactly the class C-061 exists to prevent, arriving
-    /// through the seam *between* the two rather than inside either. Neither
-    /// side re-derives it; both call this.
-    ///
-    /// The `cfg` split is the inode on Unix and the NTFS file index on
-    /// Windows — see `file_id_of`, which owns both and documents why the
-    /// Windows arm goes through an open handle rather than through `metadata`.
-    ///
-    /// Takes **both** `path` and `metadata`, and each is load-bearing for one
-    /// platform: `size` and the Unix inode come from the `metadata` the caller
-    /// already took — re-stat'ing here would be wasted work and a TOCTOU
-    /// widening — while the Windows file index cannot be read out of a
-    /// `Metadata` on stable at all, so that arm opens `path`. `path` must
-    /// therefore be the path the `metadata` was taken from; handing it a
-    /// different one produces a stamp describing two files.
+    /// `path` must be the path `metadata` came from, or the stamp describes two files.
     #[must_use]
     pub fn from_metadata(path: &Path, metadata: &std::fs::Metadata, content_hash: String) -> Self {
         Self {
@@ -130,29 +51,9 @@ impl BinEntryStamp {
         }
     }
 
-    /// One entry's stamp read from the file itself — the stat pair from
-    /// `metadata`, the `content_hash` from the bytes on disk.
+    /// The one hashing derivation, called by render and gate alike; blocking.
     ///
-    /// **The one hashing derivation, called by both ends** (RUL-89): the render
-    /// that *writes* a `bin_fingerprint` and C-061's prompt gate that *checks
-    /// one*. The two live in different modules and different work packages, and
-    /// a hash spelled twice is the class of defect this tree has already met —
-    /// a contract documented at one site and violated at its sibling. Neither
-    /// side may spell `read_bounded` + SHA-256 itself.
-    ///
-    /// The read is bounded by `metadata.len()`, so an entry that grew between
-    /// the stat and the read answers `None` rather than being hashed at a size
-    /// nobody observed. `None` is also every other read failure — a vanished
-    /// entry, a permission refusal, something that is no longer a regular file.
-    /// Both ends already have one answer for that: the producer omits the
-    /// entry, the gate calls it a mismatch.
-    ///
-    /// Takes `&Metadata` beside the path for the reason
-    /// [`Self::from_metadata`] does: the caller has already stat'ed the entry
-    /// to decide it is a regular file, and re-stat'ing here would be wasted
-    /// work and a TOCTOU widening.
-    ///
-    /// Blocking: one read. Async callers wrap it in `spawn_blocking`.
+    /// `None` on any read failure, including an entry grown past `metadata.len()` since the stat.
     #[must_use]
     pub fn of_file(path: &Path, metadata: &std::fs::Metadata) -> Option<Self> {
         let bytes = ocx_util::fs::read_bounded(path, metadata.len())
@@ -163,57 +64,15 @@ impl BinEntryStamp {
     }
 }
 
-/// The Unix inode — the platform's own answer to "is this the same file".
-///
-/// `path` is unused: `stat(2)` already carried the inode, so the metadata the
-/// caller took is the whole answer. It is in the signature for the Windows arm
-/// below, which cannot read the identity out of a `Metadata` at all.
 #[cfg(unix)]
 fn file_id_of(_path: &Path, metadata: &std::fs::Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt as _;
     Some(metadata.ino())
 }
 
-/// The NTFS file index, read from an **open handle** rather than from
-/// `metadata` — the Windows answer to "is this the same file".
+/// Opens a handle because `MetadataExt::file_index()` is unstable (rust-lang/rust#63010).
 ///
-/// # Why not `MetadataExt::file_index()`
-///
-/// It is the obvious spelling and it does not compile on stable: it sits behind
-/// the unstable `windows_by_handle` feature (rust-lang/rust#63010), and the
-/// stabilization blocker is that the 64-bit index is not a complete identity on
-/// every Windows filesystem (ReFS has a 128-bit file id). `hardlink.rs`'s W3
-/// test already routes around it through `GetFileInformationByHandle`; this is
-/// the same datum by the same route, on the production path.
-///
-/// The handle route is also strictly better than the accessor would have been:
-/// the index a `read_dir`-produced `Metadata` does not carry is always present
-/// when the identity is read from a handle, so the caveat that a caller "must
-/// stat the path itself" is gone. The 64-bit index is compared only against
-/// another index taken the same way on the same volume — the identical
-/// assumption the Unix arm makes by comparing a bare `ino()` without a `dev()`.
-///
-/// # Why a real identity, and not `None`
-///
-/// `None` here would be sound — the content hash is the authority the file id
-/// only indexes into — but it would silently retire two Windows-only
-/// behaviours. C-061's per-prompt gate would SHA-256 every trampoline
-/// (a ~300 KiB `.exe` per tool) on every prompt instead of comparing a stat
-/// pair, and `windows_pair_unchanged` — whose *entire* subject is the `.exe`'s
-/// hardlink identity against the [`ShimBinStore`](super::ShimBinStore) blob —
-/// would take its fail-closed `None` branch forever, so every render would
-/// republish every Windows trampoline and `--dry-run` would report a delta that
-/// no render can ever clear. The mitigation would then never run on the only
-/// platform it exists for.
-///
-/// # Failure is `None`
-///
-/// An absent path, a refused open, an API failure: all `None`, which is the
-/// documented fall-through to the content hash. `FILE_FLAG_OPEN_REPARSE_POINT`
-/// keeps the open on the name the caller judged rather than following a link to
-/// its target — every caller decides `is_file()` on a `symlink_metadata` first,
-/// and this makes the handle honour that decision even if the name is swapped
-/// in between.
+/// Never stub this to `None`: every render would then republish every trampoline and `--dry-run` never clears.
 #[cfg(windows)]
 fn file_id_of(path: &Path, _metadata: &std::fs::Metadata) -> Option<u64> {
     use std::os::windows::fs::OpenOptionsExt as _;
@@ -224,19 +83,16 @@ fn file_id_of(path: &Path, _metadata: &std::fs::Metadata) -> Option<u64> {
         BY_HANDLE_FILE_INFORMATION, FILE_FLAG_OPEN_REPARSE_POINT, GetFileInformationByHandle,
     };
 
+    // Open the reparse point itself, or a swapped name hands back its target's identity.
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
         .inspect_err(|e| log::debug!("Could not open '{}' for its file index: {e}", path.display()))
         .ok()?;
-    // SAFETY: `BY_HANDLE_FILE_INFORMATION` is a plain-old-data struct of
-    // integers and `FILETIME`s, so an all-zero bit pattern is a valid — if
-    // meaningless — value. It is overwritten by the call below before anything
-    // reads it, and the call's failure arm returns without reading it at all.
+    // SAFETY: a plain-old-data struct, so all-zero is valid; it is read only after the call succeeds.
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    // SAFETY: `file` owns a live handle for the whole call, and `&mut info`
-    // points at writable, aligned storage of exactly the size the API writes.
+    // SAFETY: `file` keeps the handle live for the call, and `info` is writable storage of the written size.
     let queried = unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) };
     if queried == 0 {
         log::debug!(
@@ -249,127 +105,38 @@ fn file_id_of(path: &Path, _metadata: &std::fs::Metadata) -> Option<u64> {
     Some((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow))
 }
 
-/// No file identity is available, so the gate falls through to the content
-/// hash — the same behaviour as an absent `file_id`.
 #[cfg(not(any(unix, windows)))]
 fn file_id_of(_path: &Path, _metadata: &std::fs::Metadata) -> Option<u64> {
     None
 }
 
-/// What one render left on disk, written **last** so a crash mid-render leaves
-/// a tree that is detectably incomplete rather than one that looks finished
-/// (C-003, C-048).
+/// What one render left on disk; written last, so a crash mid-render leaves a detectably incomplete tree.
 ///
-/// Lives at [`StateStore::render_stamp_file`] for a project tree and at
-/// [`StateStore::global_render_stamp_file`] for the global one, written
-/// through [`write_bytes_atomic`](ocx_util::fs::write_bytes_atomic) and
-/// replaced, never edited in place — the same discipline as the consent stamp.
-///
-/// Serde matches `ConsentStamp`
-/// deliberately: `deny_unknown_fields` and **no `#[serde(default)]` on any
-/// field**. What that pair buys is narrower than it reads, and the gap is why
-/// [`RenderStampScope`] exists rather than an `Option<PathBuf>`:
-/// `deny_unknown_fields` governs *extra* keys only, and serde resolves a
-/// **missing** `Option<T>` to `None` on its own, with no `#[serde(default)]`
-/// involved. A tier spelled `Option<PathBuf>` whose key was dropped —
-/// truncation, a hand edit, a hostile rewrite — would therefore deserialize
-/// cleanly and present as the global tier, skipping the identity check D-V13
-/// added it for.
-///
-/// So no field of this struct is `Option`-shaped: dropping any one of them is
-/// a deserialize *error*, which [`StateStore::render_stamp`] reports as an
-/// absent stamp and answers by re-rendering.
-/// [`BinEntryStamp::file_id`] is the tree's one `Option`, and safe — see that
-/// field.
+/// No field may be `Option`-shaped: serde reads a dropped `Option` key as `None`, which here would silently mean the global tier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenderStamp {
-    /// Stamp schema version. A `v` this binary does not recognise makes the
-    /// stamp unusable, which is the same as absent.
-    ///
-    /// **Private, unlike every other field**, so [`Self::new`] is the only way
-    /// to build one: a public `v` leaves `RenderStamp { v: 1, .. }` spellable
-    /// as a struct literal, which is the second source of truth for a
-    /// persisted wire version the constructor exists to prevent. Serde is
-    /// unaffected — field privacy is not a serialization property — so the key
-    /// stays on the wire under its own name. Read it with [`Self::version`].
+    // Private so [`Self::new`] is the only writer: a spellable literal would be a second source of the wire version.
     v: u8,
 
-    /// The toolchain home this stamp describes — the lookup key half of the
-    /// pair.
     pub home: PathBuf,
 
-    /// Which tier the home was rendered for, carrying the canonical project
-    /// directory when it was a project one (D-V13).
-    ///
-    /// The identity half, beside `home`'s lookup key — the same split
-    /// `ConsentStamp` documents,
-    /// and load-bearing for the same reason. With `toolchain_dir` configured,
-    /// two projects colliding in the 64 bits of `name_for_path` share one home
-    /// *and* one stamp, so project B's `bin` mode would pass the gate over
-    /// trampolines that bake `--project '<A>'`. Without `toolchain_dir` the
-    /// `home` field alone catches that; the defect is `toolchain_dir`-specific
-    /// and this is its fix.
+    /// Identity beside `home`: under `toolchain_dir`, two projects colliding in `name_for_path` share one home and stamp.
     pub scope: RenderStampScope,
 
-    /// The exposed name set the render wrote into `bin/`.
-    ///
-    /// **Invariant: this is the on-disk entry set, so it must equal
-    /// [`Self::bin_fingerprint`]'s key set.** C-003 mandates both fields, and
-    /// the two encode the same fact — a stamp where they disagree is
-    /// representable but meaningless, and the failure it produces is silent:
-    /// wave 3's prompt gate could compare one set while the heal repairs the
-    /// other, so an entry present in exactly one of them is either checked and
-    /// never repaired or repaired and never checked. Producers build both from
-    /// one walk; [`Self::new`] takes them as one pair for that reason.
+    /// Always [`Self::bin_fingerprint`]'s key set, derived by [`Self::new`], or the gate and the heal diverge.
     pub names: BTreeSet<String>,
 
-    /// `bin/` entry name → its [`BinEntryStamp`]. See that type for why the
-    /// map is per-entry.
     pub bin_fingerprint: BTreeMap<String, BinEntryStamp>,
 
-    /// `"<group>/<entry>"` → the digest root the link points at,
-    /// **default group only**.
+    /// `"<group>/<entry>"` → link target, default group only: the key is not the on-disk path, so layout moves keep the format.
     ///
-    /// **The key is `<group>/<entry>`, not the on-disk path.** The links moved
-    /// under `links/` when depth 1 became a closed, tree-owned set (C-071), and
-    /// this key did **not** move with them: it is derived from the group name
-    /// and the entry name, never from where the render happens to put them, so
-    /// the next layout change does not rewrite a persisted format for nothing.
-    /// Nothing compares it against a path — see
-    /// `render_toolchain`'s
-    /// `the_stamped_link_fingerprint_key_is_group_slash_entry`, which is the
-    /// only thing standing between this format and a silent, unobservable
-    /// break — and which lives beside the producer, because a check over a
-    /// hand-built sample here would pin the sample and not the code.
-    ///
-    /// Scoped to exactly what `bin` mode's per-prompt heal can repair (C-062).
-    /// Widening it would make every non-default-group repoint mismatch the
-    /// stamp on every prompt while the prompt path — which does not heal those
-    /// groups — withheld the entry and printed the `ocx pull` hint forever.
-    /// Non-default groups are protected on the composing side instead (C-070).
+    /// Never widen past the default group: the prompt heals no other group, so their entries would mismatch forever.
     pub link_fingerprint: BTreeMap<String, String>,
 }
 
 impl RenderStamp {
-    /// A stamp at the schema version this binary writes.
-    ///
-    /// **The constructor exists so `v` is never a producer's decision.**
-    /// `RENDER_STAMP_VERSION` is module-private and the first producer lives
-    /// in another module, so without this a producer would hardcode `1` and
-    /// create a second source of truth for a *persisted wire version* — the
-    /// one number that must not drift, since the reader treats an
-    /// unrecognised `v` as an absent stamp and silently re-renders forever.
-    /// It also deletes "did you remember `v`?" from that producer's review.
-    ///
-    /// **`names` is derived here, not accepted**, and that is the whole
-    /// enforcement of [`Self::names`]'s invariant. Taking the two as a pair
-    /// still let a producer pass a set that disagreed with the map, and the
-    /// disagreement is silent by construction — wave 3's prompt gate would
-    /// compare one set while the heal repaired the other. Deriving makes the
-    /// meaningless state unconstructible through the one sanctioned
-    /// constructor rather than merely detectable after the fact; the field
-    /// stays on the wire because C-003 mandates it.
+    /// A stamp at the version this binary writes, with `names` derived from `bin_fingerprint`.
     #[must_use]
     pub fn new(
         home: PathBuf,
@@ -387,66 +154,31 @@ impl RenderStamp {
         }
     }
 
-    /// The stamp's schema version.
-    ///
-    /// The read half of `Self::v`'s privacy: the field is not `pub` so that
-    /// the constructor is the only writer, which leaves callers outside this
-    /// module needing a way to see it.
     #[must_use]
     pub fn version(&self) -> u8 {
         self.v
     }
 }
 
-/// Which tier a persisted [`RenderStamp`] describes (C-003, D-V13).
-///
-/// A **required, tagged** field of the stamp rather than an
-/// `Option<PathBuf>`: a dropped tag is a deserialize error instead of a silent
-/// fall-back to the global tier (see [`RenderStamp`]), and "a global stamp
-/// carrying a project directory" is unrepresentable in the persisted form the
-/// way [`RenderStampTarget`] makes it unrepresentable in the API.
+/// Which tier a persisted [`RenderStamp`] describes; tagged, never `Option<PathBuf>`, so a dropped key errors instead of meaning global.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RenderStampScope {
-    /// A project tree, rendered for this **canonical** project directory —
-    /// the file-first derivation, i.e. the same path
-    /// `ConsentStamp::project_dir`
-    /// records, not merely the key it hashes to.
+    /// The canonical project directory, as `ConsentStamp::project_dir` records it.
     Project(PathBuf),
-    /// The global tree at `$OCX_HOME/toolchain`, which has no project.
     Global,
 }
 
-/// Which tier's render stamp a [`StateStore`] call addresses (C-003).
-///
-/// One value rather than two method pairs, because the tier is a runtime
-/// choice its caller makes once and carries — and because it gives
-/// [`StateStore::render_stamp`] and [`StateStore::set_render_stamp`] a
-/// parameter in which "wrote the global stamp under a project key" cannot be
-/// spelled.
-///
-/// That is the whole of what it buys, and it is worth stating narrowly: the
-/// two path accessors, [`StateStore::render_stamp_file`] and
-/// [`StateStore::global_render_stamp_file`], are both public and ungated, so a
-/// caller that derives a path itself and writes it can still put either stamp
-/// anywhere. The enum constrains this API pair, not the store.
+/// Which tier's render stamp a [`StateStore`] call addresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderStampTarget<'a> {
-    /// A project tree, keyed by
-    /// [`ReferenceManager::name_for_path`](crate::reference_manager::ReferenceManager::name_for_path)
-    /// of its canonical directory — the same key the consent stamp uses.
+    /// Keyed like the consent stamp.
     Project(&'a str),
-    /// The global tree at `$OCX_HOME/toolchain`.
     Global,
 }
 
-/// Manages persistent runtime state files under `$OCX_HOME/state/`.
+/// Runtime state under `$OCX_HOME/state/`, one named accessor per subsystem so none keys into another's namespace.
 ///
-/// `StateStore` is the typed home for state files whose existence or mtime IS
-/// the data.  Unlike `cache/` (regenerable bulk), files here are persistent
-/// across sessions.
-///
-/// Layout:
 /// ```text
 /// {root}/
 ///   update-check/
@@ -465,176 +197,57 @@ impl StateStore {
         Self { root: root.into() }
     }
 
-    /// The root directory of the state store (e.g., `$OCX_HOME/state`).
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Returns the directory for update-check throttle state files.
-    ///
-    /// Path: `{root}/update-check/`
-    ///
-    /// Each file under this directory has the form `{slug}` where `slug` is
-    /// the strict (no-dot) slug of the identifier. The mtime of the file is
-    /// the only datum — content is always zero bytes.
     pub fn update_check_dir(&self) -> PathBuf {
         self.root.join("update-check")
     }
 
-    /// Returns the throttle state file path for the given identifier.
-    ///
-    /// Path: `{root}/update-check/{slug}` where `{slug}` is the strict
-    /// (no-dot) slug of `identifier.to_string()` — all non-alphanumeric
-    /// characters replaced with `_`. For `ocx.sh/ocx/cli` this produces
-    /// `ocx_sh_ocx_cli`.
-    ///
-    /// The file is zero-byte; its mtime is the only datum (time of last
-    /// registry probe). The parent directory is created lazily on first touch.
-    ///
-    /// # Atomic-touch portability
-    ///
-    /// The throttle write path ([`StateStore::touch`]) relies on
-    /// `std::fs::rename` to publish a new mtime atomically without races on
-    /// the destination. Platform semantics:
-    ///
-    /// - **Linux**: `rename(2)` follows symlinks at source, replaces the
-    ///   destination inode atomically without intermediate "absent" state.
-    /// - **macOS**: BSD `rename(2)` provides the same atomic-replace
-    ///   semantics as Linux.
-    /// - **Windows**: `std::fs::rename` shims to `MoveFileExW` with
-    ///   `MOVEFILE_REPLACE_EXISTING`, which gives equivalent atomic-replace
-    ///   semantics (modulo open-handle constraints on the destination).
-    ///
-    /// In all three cases the atomic-touch contract holds. See
-    /// <https://doc.rust-lang.org/std/fs/fn.rename.html> for the cross-platform
-    /// shim's documented invariants.
+    /// Zero-byte throttle file whose mtime is the last registry probe; write it only through [`Self::touch`].
     pub fn update_check_file(&self, identifier: &ocx_oci::PackageRef) -> PathBuf {
         let slug = identifier.to_string().to_slug();
         self.update_check_dir().join(slug)
     }
 
-    /// The managed-config tier's on-disk layout under this store's root.
-    ///
-    /// The five paths themselves are derived by
-    /// [`ManagedConfigPaths`](ocx_config::managed_config::ManagedConfigPaths),
-    /// which owns them because the config loader needs them before any store
-    /// exists. This accessor is the route for callers that do hold a store.
     pub fn managed_config(&self) -> ocx_config::managed_config::ManagedConfigPaths {
         ocx_config::managed_config::ManagedConfigPaths::new(&self.root)
     }
 
-    /// Returns the per-project state directory for `key`.
-    ///
-    /// Path: `{root}/projects/<key>/`
-    ///
-    /// `key` is [`ReferenceManager::name_for_path`](crate::reference_manager::ReferenceManager::name_for_path)
-    /// of the project's canonical directory — the first 16 hex of SHA-256, the
-    /// same key `refs/symlinks/` and the project ledger already use. The
-    /// canonical directory is
-    /// `dunce::canonicalize(canonicalize(<resolved project FILE>).parent())`:
-    /// canonicalize the **file**, take its parent, then `dunce`.
-    ///
-    /// Deletable at any time — nothing here is GC truth. Not to be confused
-    /// with `$OCX_HOME/projects/`, the symlink ledger whose lifetime is tied to
-    /// installs.
+    /// Deletable at any time, unlike the `$OCX_HOME/projects/` GC ledger that shares its key.
     pub fn project_state_dir(&self, key: &str) -> PathBuf {
         self.project_state_root().join(key)
     }
 
-    /// Returns the consent-stamp file for the project keyed by `key`.
-    ///
-    /// Path: `{root}/projects/<key>/consent.json`
-    ///
-    /// Read by `crate::project::consent::load`, written only by
-    /// `crate::project::consent::record`, and **replaced, never edited in
-    /// place** — so a future multi-writer surface here uses `lock_scoped` into
-    /// `$OCX_HOME/locks`, never a sidecar.
+    /// Replaced, never edited in place, so any lock for it goes through `lock_scoped`, never a sidecar.
     pub fn consent_stamp_file(&self, key: &str) -> PathBuf {
         self.project_state_dir(key).join(CONSENT_STAMP_FILE)
     }
 
-    /// Returns the sweep root for `ocx clean`'s consent-stamp pass.
-    ///
-    /// Path: `{root}/projects/`
-    ///
-    /// `ocx clean` removes `state/projects/<key>/` iff the stamp's own
-    /// `project_dir` no longer exists on disk — the one exception to
-    /// `state/` not being walked by `ocx clean`.
+    /// The one part of `state/` that `ocx clean` sweeps.
     pub fn project_state_root(&self) -> PathBuf {
         self.root.join("projects")
     }
 
-    /// Returns the render stamp for the **project** tree keyed by `key`
-    /// (C-003).
-    ///
-    /// Path: `{root}/projects/<key>/render_stamp.json` — beside the shipped
-    /// consent stamp, same key, same "deletable at any time" lifetime.
-    ///
-    /// Named per subsystem like every other accessor on this store; there is
-    /// deliberately no generic `state_file(subsystem, key)` API, so the layout
-    /// stays greppable and one subsystem cannot key into another's namespace.
-    ///
-    /// A path accessor, and ungated: reading and writing a stamp goes through
-    /// [`Self::render_stamp`] and [`Self::set_render_stamp`], whose
-    /// [`RenderStampTarget`] is what keeps a tier from being stamped at the
-    /// other tier's path. Reach for this one only when the *path* itself is
-    /// the answer — a diagnostic, a sweep, a test.
+    /// Ungated path accessor; read and write through [`Self::render_stamp`] / [`Self::set_render_stamp`].
     pub fn render_stamp_file(&self, key: &str) -> PathBuf {
         self.project_state_dir(key).join(RENDER_STAMP_FILE)
     }
 
-    /// Returns the render stamp for the **global** tree (C-003, D-V13).
-    ///
-    /// Path: `{root}/render_stamp.json` — directly under `$OCX_HOME/state/`,
-    /// **not** under `projects/<key>/`.
-    ///
-    /// # Why not beside the project stamps
-    ///
-    /// Two shipped mechanisms make the `projects/` path unusable for the
-    /// global tier, and both fail silently rather than loudly:
-    ///
-    /// - `consent::record_in` refuses to stamp
-    ///   `$OCX_HOME` at all (A-44), so `state/projects/<key-for-$OCX_HOME>/`
-    ///   is never created — a global stamp written there would be the first
-    ///   thing ever to create a directory the consent invariant asserts
-    ///   nothing writes.
-    /// - `ocx clean` classifies a `state/projects/<key>/` whose stamp records
-    ///   `$OCX_HOME` as `SweepReason::OcxHome` and removes the **whole**
-    ///   directory, so the stamp would be deleted on every clean and the
-    ///   global gate would re-render from scratch forever.
+    /// Never under `projects/<key>/`: `ocx clean` removes the `$OCX_HOME` key's directory, so every clean would delete it.
     pub fn global_render_stamp_file(&self) -> PathBuf {
         self.root.join(RENDER_STAMP_FILE)
     }
 
-    /// Read `target`'s render stamp, or `None` if there is not a usable one
-    /// (C-003).
-    ///
-    /// Returns `None` on **every** failure — absent, unreadable, corrupt JSON,
-    /// an unknown field, or a `v` this binary does not recognise — logged at
-    /// debug and never warned, exactly as
-    /// `consent::load` does: an unusable
-    /// stamp is an absent stamp, and the caller's answer is "re-render",
-    /// which is always safe.
-    ///
-    /// Absence is the ordinary state (every unrendered tree, every first
-    /// prompt), which is why even a genuine read failure stays at debug. The
-    /// debug line must name the cause it actually observed — a parse failure
-    /// says the stamp did not parse, never that the file is absent, or the one
-    /// diagnostic a user has for a corrupt stamp points them at the wrong
-    /// thing.
-    ///
-    /// Blocking: one synchronous read. Async callers wrap it in
-    /// `spawn_blocking` — `ocx pull`'s path reaches this.
+    /// `target`'s stamp, or `None` on every failure, which callers answer by re-rendering; blocking.
     #[must_use]
     pub fn render_stamp(&self, target: RenderStampTarget<'_>) -> Option<RenderStamp> {
         let path = self.render_stamp_path(target);
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(e) => {
-                // Absence is the ordinary state — every unrendered tree, every
-                // first prompt — so even a genuine read failure stays at debug:
-                // the outcome is identical and a WARN would fire on the common
-                // case.
+                // Debug, not WARN: absence is the ordinary first-prompt state.
                 log::debug!("No usable render stamp at '{}': {e}", path.display());
                 return None;
             }
@@ -642,9 +255,6 @@ impl StateStore {
         let stamp: RenderStamp = match serde_json::from_slice(&bytes) {
             Ok(stamp) => stamp,
             Err(e) => {
-                // Never "absent" here: a corrupt stamp is the one case a user
-                // has a diagnostic for, and naming the wrong cause points them
-                // at the wrong file.
                 log::debug!(
                     "Render stamp '{}' did not parse, treating as absent: {e}",
                     path.display()
@@ -663,34 +273,17 @@ impl StateStore {
         Some(stamp)
     }
 
-    /// Write `stamp` for `target`, replacing any existing one (C-003).
-    ///
-    /// Written **last** in a render (C-048) and replaced atomically via
-    /// [`write_bytes_atomic`](ocx_util::fs::write_bytes_atomic), never
-    /// edited in place.
-    ///
-    /// The parent directory must be created first: `write_bytes_atomic` stages
-    /// its temp file *in the target's parent* and explicitly does not create
-    /// it, so a `create_dir_all` on the parent precedes the write — the same
-    /// sequence, for the same reason, as
-    /// `consent`'s `record_at`.
-    ///
-    /// Blocking: a `create_dir_all` and an atomic write. Async callers wrap it
-    /// in `spawn_blocking` — `ocx pull`'s path reaches this.
+    /// Atomically replaces `target`'s stamp; blocking.
     ///
     /// # Errors
     ///
-    /// The serialization's failure, or the write's own I/O failure with the
-    /// stamp path attached.
+    /// Serialization or the write fails.
     pub fn set_render_stamp(&self, target: RenderStampTarget<'_>, stamp: &RenderStamp) -> Result<()> {
         let path = self.render_stamp_path(target);
         let bytes = serde_json::to_vec_pretty(stamp)
             .map_err(|e| ocx_util::error::FileError::new(&path, std::io::Error::other(e)))?;
 
-        // `write_bytes_atomic` stages its temp file in the target's parent and
-        // explicitly does not create it, so the tier's directory has to exist
-        // first — the same sequence, for the same reason, as `consent`'s
-        // `record_at`.
+        // `write_bytes_atomic` does not create the parent.
         let parent = path.parent().ok_or_else(|| {
             ocx_util::error::FileError::new(
                 &path,
@@ -701,12 +294,6 @@ impl StateStore {
         ocx_util::fs::write_bytes_atomic(&path, &bytes).map_err(|e| ocx_util::error::FileError::new(&path, e))
     }
 
-    /// The stamp file for `target` — the one place the tier tag becomes a path.
-    ///
-    /// Private so [`RenderStampTarget`]'s guarantee holds for this API pair:
-    /// resolving the tier in one function is what makes "wrote the global stamp
-    /// under a project key" unspellable through [`Self::render_stamp`] and
-    /// [`Self::set_render_stamp`].
     fn render_stamp_path(&self, target: RenderStampTarget<'_>) -> PathBuf {
         match target {
             RenderStampTarget::Project(key) => self.render_stamp_file(key),
@@ -714,24 +301,11 @@ impl StateStore {
         }
     }
 
-    /// Returns the host-capability record.
-    ///
-    /// Path: `{root}/host/capabilities.json`. Keyed by nothing: the record
-    /// describes the machine ocx is running on, of which there is one. Owned by
-    /// [`ocx_oci::host_capabilities::HostCapabilities`].
     pub fn host_capabilities_file(&self) -> PathBuf {
         self.root.join("host").join("capabilities.json")
     }
 
-    /// Returns `true` when the state file at `path` was last touched within
-    /// `interval`, meaning the next probe is not yet due.
-    ///
-    /// Returns `false` (probe is due) when the file is absent, unreadable, or
-    /// older than `interval`. An `interval` of `Duration::ZERO` always returns
-    /// `false` (bypass semantics).
-    ///
-    /// Synchronous (blocking) I/O — callers on an async runtime should wrap
-    /// in `tokio::task::spawn_blocking`.
+    /// Whether `path` was touched within `interval`; absent, unreadable or a zero `interval` mean not throttled. Blocking.
     pub fn is_throttled(path: &Path, interval: Duration) -> bool {
         if interval.is_zero() {
             return false;
@@ -743,22 +317,12 @@ impl StateStore {
             return false;
         };
         let Ok(elapsed) = mtime.elapsed() else {
-            // mtime in the future — treat as "file was just touched", i.e. throttled
             return true;
         };
         elapsed < interval
     }
 
-    /// Awaits `touch_atomic` on a blocking thread, logging at debug on
-    /// failure.
-    ///
-    /// Drives the sync write off the async executor, swallows the result at
-    /// debug, and awaits completion before returning so the throttle window
-    /// resets before the next invocation lands.
-    ///
-    /// `JoinError` (task panic) is silently dropped at debug level: the
-    /// throttle file failing to touch is non-fatal — the next invocation
-    /// re-probes, which is the correct behaviour after a panic anyway.
+    /// Atomically refreshes `path`'s mtime; a failure is non-fatal, since the next invocation just re-probes.
     pub async fn touch(path: PathBuf) {
         let _ = tokio::task::spawn_blocking(move || {
             if let Err(touch_err) = touch_atomic(&path) {
@@ -769,32 +333,7 @@ impl StateStore {
     }
 }
 
-/// Creates or updates the state file at `path` atomically.
-///
-/// Write a zero-byte temp file next to `path`, then `std::fs::rename` into
-/// place so other processes observe an atomic mtime update. Parent directory
-/// is created lazily on first touch.
-///
-/// # Portability
-///
-/// The atomic-replace contract here relies on platform-level `rename`
-/// semantics:
-///
-/// - **Linux**: `rename(2)` follows symlinks at the source path and replaces
-///   the destination inode atomically — no intermediate "absent" state.
-///   `renameat2(RENAME_NOFOLLOW)` is not used; we deliberately accept the
-///   source-symlink-follow semantics because the temp file is always a freshly
-///   created regular file under our control.
-/// - **macOS**: BSD `rename(2)` matches the Linux semantics relied on above.
-/// - **Windows**: `std::fs::rename` shims to `MoveFileExW` with
-///   `MOVEFILE_REPLACE_EXISTING`, which gives equivalent atomic-replace
-///   behaviour modulo open-handle constraints on the destination.
-///
-/// See <https://doc.rust-lang.org/std/fs/fn.rename.html> for the cross-platform
-/// shim contract. The throttle directory is OCX-private under `$OCX_HOME`, so
-/// attacker symlink races on the destination are out of scope; the doc-comment
-/// is here so future refactors don't accidentally depend on `renameat2`-only
-/// guarantees that the cross-platform shim doesn't provide.
+/// Publishes a zero-byte file at `path` by rename, so readers never see it absent.
 fn touch_atomic(path: &Path) -> std::io::Result<()> {
     use std::fs;
 
@@ -804,16 +343,9 @@ fn touch_atomic(path: &Path) -> std::io::Result<()> {
 
     fs::create_dir_all(parent)?;
 
-    // Build a unique temp filename using PID + a counter derived from the
-    // thread ID so concurrent tasks don't collide on the same suffix.
     let unique_suffix = {
         use std::sync::atomic::{AtomicU64, Ordering};
-        // PID gives cross-process uniqueness; a process-global monotonic
-        // counter gives within-process uniqueness. A wall-clock nanos suffix
-        // (the previous approach) collides when concurrent tasks land in the
-        // same clock bucket on coarse-resolution timers — observed flaky on
-        // macOS. The counter guarantees every call gets a distinct temp name,
-        // so concurrent writers never race on the same temp file.
+        // A counter, not wall-clock nanos: coarse macOS timers collided concurrent writers on one temp name.
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         format!("{}.{}", std::process::id(), n)

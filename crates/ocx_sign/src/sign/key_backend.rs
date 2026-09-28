@@ -2,20 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! [`KeyBackend`] — the narrow signing primitive behind key-mode signing.
-//!
-//! Deliberately shaped for a KMS rather than for files. A file-shaped trait
-//! (`private_key() -> SigningKey`, synchronous, infallible) is trivially
-//! satisfiable today and unimplementable by the first remote backend, so it
-//! would be rewritten the moment `awskms://` lands — worse than having no
-//! trait at all.
-//!
-//! Adding a backend is a new implementor plus one arm in
-//! [`Scheme::is_implemented`](ocx_trust::key_ref::Scheme::is_implemented). No
-//! contract in this file moves.
-//!
-//! `file://` and `env://` share [`PemKeyBackend`]: one cosign envelope, two
-//! places to find it, and the source travels as data so the reported
-//! `signatures[].key_backend` has a single producer.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -24,55 +10,32 @@ use sha2::{Digest as _, Sha256};
 use ocx_trust::key_ref::{KeyBackendKind, KeyEnvError, MAX_KEY_PEM_BYTES, Scheme, read_key_env};
 use ocx_util::fs::{BoundedReadError, read_bounded};
 
-/// The narrow signing primitive: turn a digest into a signature without ever
-/// exposing private key material.
+/// Turn a digest into a signature without ever exposing private key material.
 ///
-/// Shaped for a KMS, not for files — `async` because a KMS signs over the
-/// network, and [`sign_prehash`](Self::sign_prehash) rather than a
-/// `private_key()` accessor because a KMS cannot satisfy the latter.
-/// [`Signer`](super::signer::Signer) stays the pipeline-level abstraction
-/// returning a whole bundle; the key-mode `Signer` **delegates** to a
-/// `KeyBackend` (ISP — `Signer`'s signature is keyless-shaped, taking a token
-/// and a Fulcio URL, and widening it would tax every caller).
+/// KMS-shaped (`async`, no `private_key()` accessor), or the first remote backend cannot implement it.
 #[async_trait::async_trait]
 pub trait KeyBackend: Send + Sync {
-    /// Sign an already-hashed message.
-    ///
-    /// `digest` is the raw hash bytes, never hex and never base64. Returns the
-    /// DER-encoded signature.
+    /// Sign an already-hashed message: `digest` is raw hash bytes; returns a DER signature.
     ///
     /// # Errors
     ///
-    /// [`KeyBackendError::Io`] when the key material could not be read, and
-    /// [`KeyBackendError::MalformedKey`] when it is not a key this backend
-    /// accepts. [`KeyBackendError::Unavailable`] is reserved for the first
-    /// remote backend; no implemented one returns it.
+    /// [`KeyBackendError::Io`] when the key cannot be read, [`KeyBackendError::MalformedKey`] when it is rejected.
     async fn sign_prehash(&self, digest: &[u8]) -> Result<Vec<u8>, KeyBackendError>;
 
     /// The DER `SubjectPublicKeyInfo` of this backend's public key.
-    ///
-    /// The backend supplies it; the caller must not reconstruct it from a
-    /// private key it is not allowed to see.
     fn public_key_der(&self) -> &[u8];
 
-    /// Which backend this is, for `signatures[].key_backend`.
     fn kind(&self) -> KeyBackendKind;
 
-    /// The bundle's `verificationMaterial.publicKey.hint`.
-    ///
-    /// Defaulted deliberately: the derivation is **wire-visible and fixed**
-    /// (see [`public_key_hint`]), so no backend may compute it differently.
+    /// The bundle's `verificationMaterial.publicKey.hint`; never override, the derivation is wire-fixed.
     fn hint(&self) -> String {
         public_key_hint(self.public_key_der())
     }
 }
 
-/// The cosign-compatible key hint: **standard base64 (with padding) of the
-/// SHA-256 of the DER `SubjectPublicKeyInfo`**.
+/// The cosign-compatible key hint: standard base64 (padded) of SHA-256 of the DER SPKI.
 ///
-/// This is a wire format, not an implementation detail: it is published in
-/// every key-mode bundle and cosign matches on it. URL-safe alphabet or
-/// dropped padding produce a hint no cosign verifier recognises.
+/// A wire format cosign matches on: URL-safe or unpadded base64 yields a hint no verifier recognises.
 pub fn public_key_hint(spki_der: &[u8]) -> String {
     BASE64.encode(Sha256::digest(spki_der))
 }
@@ -80,20 +43,9 @@ pub fn public_key_hint(spki_der: &[u8]) -> String {
 /// Why a [`KeyBackend`] could not sign.
 #[derive(Debug, thiserror::Error)]
 pub enum KeyBackendError {
-    /// The backend could not be reached, or answered with a transient fault.
-    ///
-    /// **Reserved, not a current outcome.** `file` is the only backend OCX
-    /// implements and a local file is never unreachable, so nothing outside a
-    /// test double constructs this — it waits for the first remote backend the
-    /// way [`KeyBackendKind`]'s five KMS variants name backends no code drives
-    /// yet. The transport class (retry, exit 75) is what it classifies as when
-    /// one lands; until then no command can produce it and no exit-code table
-    /// should list it.
+    /// Transient backend failure (exit 75); reserved for the first remote backend, nothing constructs it yet.
     #[error("key backend unavailable: {reason}")]
-    Unavailable {
-        /// What the backend reported, for the operator to act on.
-        reason: String,
-    },
+    Unavailable { reason: String },
     /// The key material could not be read from its location (exit 74).
     #[error("cannot read key material")]
     Io(#[source] std::io::Error),
@@ -113,60 +65,27 @@ pub enum KeyBackendError {
 
 /// The environment variable holding the password for an encrypted private key.
 ///
-/// Spelled here rather than read from the configuration tier's `env::keys`
-/// table: `ocx_sign` sits below `ocx_config` in the crate map, and a signing
-/// primitive asking the config layer how to spell a variable name is the one
-/// edge that made the two inseparable. The two spellings cannot drift — the
-/// application layer, which may name both, pins them equal
-/// (`ocx::exit::ocx_sign::the_signing_key_password_variable_is_spelled_once`).
+/// Spelled here, not read from `ocx_config` (a crate above this one); `the_signing_key_password_variable_is_spelled_once`
+/// pins the two spellings equal.
 pub const OCX_KEY_PASSWORD: &str = "OCX_KEY_PASSWORD";
 
 /// The password guarding an encrypted private key, from [`OCX_KEY_PASSWORD`].
 ///
-/// Absent reads as the **empty** password, which is what cosign accepts when a
-/// key pair was generated by pressing enter twice — a real and supported shape,
-/// not a degenerate one, so an unset variable must not become a distinct error.
-///
-/// Never a flag: a password in `argv` is visible to every process on the host.
-/// Not zeroized either — the value is already in this process's environment
-/// block, so wiping a copy of it protects nothing.
+/// Unset reads as the empty password, a legal cosign key, never an error. Never a flag: `argv` is host-visible.
 #[must_use]
 pub fn key_password() -> String {
     std::env::var(OCX_KEY_PASSWORD).unwrap_or_default()
 }
 
-/// A key pair decrypted from a cosign PEM envelope — the only [`KeyBackend`]
-/// that exists today.
-///
-/// Accepts cosign's own `ENCRYPTED SIGSTORE PRIVATE KEY` envelope
-/// (scrypt-wrapped ECDSA P-256), decrypted by
-/// [`SigStoreKeyPair::from_encrypted_pem`]. **This repository owns no scrypt and
-/// no PEM envelope** — that is `sigstore`'s job, and hand-rolling either would
-/// be owning a cryptographic wire format for no gain
-/// (`quality-core.md` §"Don't Own Non-Domain Code").
-///
-/// **Named for the envelope, not for where it was found.** One PEM reaches this
-/// type from two schemes — `file://` and `env://` — and the decryption is
-/// identical for both, so the *source* is data on the value ([`Self::kind`])
-/// rather than two types. A second type would be two copies of the scrypt call
-/// site, and `signatures[].key_backend` would then have two producers.
-///
-/// **Key generation is deliberately absent.** `cosign generate-key-pair` defines
-/// the format and cosign ships in the OCX index, so generation would mean owning
-/// scrypt KDF parameter choice, password prompting and TTY handling for a
-/// one-time bootstrap act.
+/// A key pair decrypted by `sigstore` from a cosign `ENCRYPTED SIGSTORE PRIVATE KEY` PEM (P-256).
 pub struct PemKeyBackend {
     signing_key: p256::ecdsa::SigningKey,
     public_key_der: Vec<u8>,
-    /// Which `--key` scheme the envelope came from. Reported verbatim as
-    /// `signatures[].key_backend`, so it is a wire value and never a guess:
-    /// only a constructor that *knows* the source may set it.
+    /// Published as `signatures[].key_backend`, so only a constructor that knows the source sets it.
     kind: KeyBackendKind,
 }
 
-/// Written by hand, not derived: a derived `Debug` would reach into the signing
-/// key, and a private scalar must never be one `{:?}` away from a log line.
-/// Only the public half — which is published in every bundle anyway — is shown.
+/// By hand: a derived `Debug` would print the private scalar.
 impl std::fmt::Debug for PemKeyBackend {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -178,41 +97,25 @@ impl std::fmt::Debug for PemKeyBackend {
 }
 
 impl PemKeyBackend {
-    /// Read and decrypt the private key at `path`, taking the password from
-    /// `OCX_KEY_PASSWORD`.
-    ///
-    /// One of the two password-reading entry points, so every test drives
-    /// [`from_encrypted_pem`](Self::from_encrypted_pem) with an explicit
-    /// password and never mutates the process environment.
+    /// Read and decrypt the private key at `path`, taking the password from `OCX_KEY_PASSWORD`.
     ///
     /// # Errors
     ///
-    /// [`KeyBackendError::Io`] when the file cannot be read, and whatever
-    /// [`from_encrypted_pem`](Self::from_encrypted_pem) raises.
+    /// [`KeyBackendError::Io`] when the file cannot be read, and whatever [`from_encrypted_pem`](Self::from_encrypted_pem) raises.
     pub fn open(path: &std::path::Path) -> Result<Self, KeyBackendError> {
         let pem = read_key_pem(path)?;
         Self::from_encrypted_pem(&pem, key_password().as_bytes(), KeyBackendKind::File)
     }
 
-    /// Decrypt the private key held **in** the environment variable `name`
-    /// (`--key env://NAME`), taking the password from `OCX_KEY_PASSWORD`.
-    ///
-    /// The variable carries the PEM itself, never a path to one: this is the
-    /// spelling for a runner with no writable disk, where writing the key out
-    /// to sign with it is the thing being avoided. `OCX_KEY_PASSWORD` is
-    /// unrelated and both coexist — one names the envelope, the other opens it.
+    /// Decrypt the PEM held **in** the environment variable `name` (`--key env://NAME`), never a path.
     ///
     /// # Errors
     ///
-    /// [`KeyBackendError::Io`] when the variable is unset or empty (the code a
-    /// missing key file gets), [`KeyBackendError::MalformedKey`] when it
-    /// exceeds [`MAX_KEY_PEM_BYTES`], and whatever
-    /// [`from_encrypted_pem`](Self::from_encrypted_pem) raises.
+    /// [`KeyBackendError::Io`] when unset or empty, [`KeyBackendError::MalformedKey`] over [`MAX_KEY_PEM_BYTES`],
+    /// and whatever [`from_encrypted_pem`](Self::from_encrypted_pem) raises.
     pub fn open_env(name: &str) -> Result<Self, KeyBackendError> {
         let pem = read_key_env(name).map_err(|error| match error {
-            // Nothing to read is an I/O fault, the same class and exit code as
-            // a key file that is not there — one `--key`, one answer, whether
-            // the material was named by path or by variable.
+            // Same class and exit code as a missing key file.
             KeyEnvError::Unset { .. } => {
                 KeyBackendError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, error.to_string()))
             }
@@ -224,56 +127,30 @@ impl PemKeyBackend {
     }
 }
 
-/// Read a private-key PEM, bounded and refusing anything that is not a regular
-/// file.
+/// Read a private-key PEM, bounded, refusing anything but a regular file.
 ///
-/// Both guards live in [`read_bounded`] — one implementation, shared with
-/// `ocx_trust::read_key_file` (the *public* half) and with the CLI's
-/// `--tags-file` reader. What is not shared is the wording: this side says
-/// "cannot read key material", the policy side names the offending signer's
-/// scope, and folding those would regress one of them.
-///
-/// The guards are load-bearing on any operator-supplied path.
-/// `ocx package sign --key /dev/zero` read until memory ran out (CWE-400)
-/// while this was a bare `std::fs::read`. This initiative already fixed that
-/// same bug once inside `read_key_file`, where a stray early return sat above
-/// the guards and both guard tests asserted against dead code. The guards exist
-/// because that happened; a second reader skipping them is that bug returning
-/// by another door — which is why there is no second reader any more.
+/// Never a bare `std::fs::read`: `--key /dev/zero` reads until memory runs out (CWE-400).
 fn read_key_pem(path: &std::path::Path) -> Result<Vec<u8>, KeyBackendError> {
     read_bounded(path, MAX_KEY_PEM_BYTES).map_err(|error| match error {
         BoundedReadError::TooLarge { cap, .. } => KeyBackendError::MalformedKey {
             reason: format!("larger than {cap} bytes, which no private key is"),
         },
-        // The raw `io::Error` is carried through, not re-wrapped: its
-        // `ErrorKind` is what separates a missing key (exit 74) from an
-        // unreadable one downstream.
+        // Carried raw: its `ErrorKind` separates a missing key from an unreadable one downstream.
         BoundedReadError::Io { source, .. } => KeyBackendError::Io(source),
         not_regular => KeyBackendError::Io(std::io::Error::other(not_regular.to_string())),
     })
 }
 
 impl PemKeyBackend {
-    /// Decrypt a cosign `ENCRYPTED SIGSTORE PRIVATE KEY` PEM.
-    ///
-    /// An empty `password` is legal — see [`key_password`].
-    ///
-    /// `kind` is the scheme the PEM came from, and it is a parameter rather
-    /// than a default because it is published as `signatures[].key_backend`: a
-    /// caller that does not know the source has no business claiming one.
+    /// Decrypt a cosign `ENCRYPTED SIGSTORE PRIVATE KEY` PEM; an empty `password` is legal.
     ///
     /// # Errors
     ///
-    /// [`KeyBackendError::MalformedKey`] when the envelope does not decrypt
-    /// under this password, or when it yields anything but an ECDSA P-256 key.
+    /// [`KeyBackendError::MalformedKey`] when it does not decrypt, or is not ECDSA P-256.
     pub fn from_encrypted_pem(pem: &[u8], password: &[u8], kind: KeyBackendKind) -> Result<Self, KeyBackendError> {
         let pair =
             sigstore::crypto::signing_key::SigStoreKeyPair::from_encrypted_pem(pem, password).map_err(|error| {
-                // The frozen `MalformedKey` carries a `reason: String` and no
-                // `#[source]`, so the underlying error has nowhere structured to
-                // go. Log it rather than flatten it into the message: the two
-                // causes below are what an operator can act on, and sigstore's
-                // own Display for a failed decrypt names neither.
+                // Logged, not flattened: sigstore's Display names neither actionable cause.
                 log::debug!("encrypted key PEM rejected by sigstore: {error}");
                 KeyBackendError::MalformedKey {
                     reason: "not a cosign ENCRYPTED SIGSTORE PRIVATE KEY, or the password in OCX_KEY_PASSWORD is \
@@ -282,10 +159,7 @@ impl PemKeyBackend {
                 }
             })?;
 
-        // P-256 only. `SigStoreKeyPair` also models Ed25519 and RSA, but cosign
-        // generates P-256 and every OCX signature path is ECDSA P-256 — so an
-        // unexpected curve is refused by name here rather than failing later
-        // with a signature no verifier accepts.
+        // P-256 only: refuse another curve by name, or it fails later with a signature no verifier accepts.
         let private_key_der = pair.private_key_to_der().map_err(|error| {
             log::debug!("decrypted key could not be re-encoded as PKCS#8 DER: {error}");
             KeyBackendError::MalformedKey {
@@ -334,21 +208,12 @@ impl KeyBackend for PemKeyBackend {
 
 /// ECDSA P-256 over an already-hashed message, DER-encoded.
 ///
-/// Shared by [`PemKeyBackend`] and the test double so the two cannot produce
-/// differently-encoded signatures — the double exists to stand in for the file
-/// backend, which it stops doing the moment its output shape diverges.
-///
-/// Signing is a few microseconds of arithmetic on a 32-byte digest, so it stays
-/// inline rather than going through `spawn_blocking`; the `async` in the trait
-/// is there for a KMS that signs over the network.
+/// Shared with the test double, or the double stops standing in for the file backend.
 fn sign_prehash_p256(signing_key: &p256::ecdsa::SigningKey, digest: &[u8]) -> Result<Vec<u8>, KeyBackendError> {
     use p256::ecdsa::signature::hazmat::PrehashSigner as _;
 
     let signature: p256::ecdsa::Signature = signing_key.sign_prehash(digest).map_err(|error| {
         log::debug!("ECDSA P-256 refused a {}-byte prehash: {error}", digest.len());
-        // Unreachable from any in-tree caller — every one passes a 32-byte
-        // SHA-256 digest — and the frozen error set has no "bad argument" arm,
-        // so this lands on the one variant that means "input refused" (exit 65).
         KeyBackendError::MalformedKey {
             reason: format!(
                 "cannot sign a {}-byte prehash with ECDSA P-256; expected a 32-byte SHA-256 digest",
@@ -361,7 +226,7 @@ fn sign_prehash_p256(signing_key: &p256::ecdsa::SigningKey, digest: &[u8]) -> Re
 
 /// A deterministic in-memory [`KeyBackend`] over a fixed key.
 ///
-/// ARCH-07's second implementation: the trait is justified by a KMS-shaped
+/// The trait's second implementation: a trait is justified by a KMS-shaped
 /// contract plus **an exercised double**, and this is the double. It exists so
 /// the signing tests never read a key file, never touch `OCX_KEY_PASSWORD` and
 /// never depend on a fixture's decryption succeeding — a signing bug and a

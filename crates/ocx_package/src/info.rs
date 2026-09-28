@@ -7,14 +7,7 @@ use super::metadata::Metadata;
 use ocx_oci::client::error::ClientError;
 use ocx_oci::manifest_builder::ManifestBuilder;
 
-/// What a package **is** — its metadata, for one platform — independent of
-/// where it is published or stored.
-///
-/// It carries no identifier on purpose. A publish writes it to a physical
-/// [`OciIdentifier`](ocx_oci::OciIdentifier) the caller names; a local
-/// materialization stores it under a package
-/// [`PackageRef`](ocx_oci::PackageRef). One field could not be both without
-/// a conversion between the two, which is the thing ocx#504 made impossible.
+/// A package's metadata for one platform, independent of where it is published or stored.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Info {
@@ -23,15 +16,8 @@ pub struct Info {
 }
 
 impl Info {
-    /// The half of an OCX **package** image manifest that the package layer
-    /// owns: `artifactType = MEDIA_TYPE_PACKAGE_V1` plus the serialized
-    /// metadata config blob. Layers are appended by whoever resolved them —
-    /// the registry push path from its uploaded descriptors, the local
-    /// materialization path from the ones it staged.
-    ///
-    /// Both paths build from this one chain, so adding a manifest-level field
-    /// here reaches both and the drift class where one path gains a feature the
-    /// other lacks cannot open.
+    /// The package-owned half of an OCX package manifest (artifact type and
+    /// metadata config blob); callers append the layers.
     ///
     /// # Errors
     ///

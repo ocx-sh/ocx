@@ -21,18 +21,12 @@ pub struct ContextOptions {
     /// config).
     ///
     /// A directory resolves to the `ocx.toml` inside it, so `--project .` and
-    /// `--project /path/to/repo` both work. Naming a file instead accepts any
-    /// filename (matches Cargo `--manifest-path`); the CWD walk still looks for
-    /// the literal name `ocx.toml`.
-    ///
-    /// Can also be set via the `OCX_PROJECT` environment variable.
-    /// To disable project discovery entirely, set `OCX_NO_PROJECT=1`.
-    ///
-    /// Symlink policy: paths given via this flag (and `OCX_PROJECT`) are
-    /// trusted and followed through symlinks. Paths discovered by the CWD walk
-    /// reject symlinks and continue upward to avoid a writer with control
-    /// over an intermediate directory redirecting discovery to arbitrary
-    /// files.
+    /// `--project /path/to/repo` both work; a file may have any name (like Cargo
+    /// `--manifest-path`). Equivalent env var: `OCX_PROJECT`; `OCX_NO_PROJECT=1`
+    /// disables project discovery. Paths given here or via `OCX_PROJECT` are
+    /// trusted and followed through symlinks. The CWD walk looks for the literal
+    /// name `ocx.toml`, rejects symlinks and continues upward, so a writer with
+    /// control over an intermediate directory cannot redirect discovery.
     #[arg(long, value_name = "PATH")]
     pub project: Option<std::path::PathBuf>,
 
@@ -44,13 +38,7 @@ pub struct ContextOptions {
     /// `OCX_GLOBAL`. Equivalent env var: `OCX_GLOBAL`. The global
     /// toolchain never composes into project resolution; `ocx exec` and
     /// `ocx package exec` stay hermetic and never read it.
-    //
-    // `-g` is `--global` only here, at the root; after a subcommand `-g` is
-    // `--group` (`add.rs`, `update.rs`, `options/group_selection.rs`). The
-    // overload is deliberate and settled: position disambiguates, the same way
-    // `git -C <dir>` and `git commit -C <ref>` coexist. `--global` picks a tier
-    // and is typed once per command line; `--group` is typed interactively and
-    // keeps the short form. Do not "align" these.
+    // `-g` is `--group` after a subcommand (`options/group_selection.rs`); position disambiguates, do not unify.
     #[arg(short = 'g', long, conflicts_with = "project", default_value_t = ocx_util::env::flag(env::keys::OCX_GLOBAL, false))]
     pub global: bool,
 
@@ -78,19 +66,14 @@ pub struct ContextOptions {
 
     /// Freeze tag resolution to the local index; never fetch an unknown tag.
     ///
-    /// A tag already in the local index resolves from cache; a digest-pinned
-    /// reference (`repo@sha256:...`, or a tag pinned by `ocx.lock`) still
-    /// fetches its content. But an unpinned tag missing from the local index
-    /// errors instead of being fetched and recorded. Run
-    /// `ocx index update` without this flag to populate the index first, then
-    /// resolve under `--frozen` - an index update is itself discovery, so a
-    /// frozen one is refused (exit 81). Scoped to packages: patch companions
-    /// and managed configuration are unaffected and still resolve live.
-    /// Unlike `--offline`, frozen still reaches the network for
-    /// known/pinned content. Unlike Cargo's `--frozen`, the network is not
-    /// disabled; `--offline` alone (which also refuses unpinned tags) matches
-    /// Cargo's behavior. Conflicts with `--remote`. Equivalent env var:
-    /// `OCX_FROZEN`.
+    /// A tag in the local index resolves from cache and a digest-pinned
+    /// reference (`repo@sha256:...`, or a tag `ocx.lock` pins) still fetches its
+    /// content, but an unpinned tag missing from the index errors instead of
+    /// being fetched. Populate the index first with `ocx index update`, without
+    /// this flag (a frozen index update is refused, exit 81). Scoped to
+    /// packages: patch companions and managed configuration still resolve live.
+    /// Unlike `--offline` and Cargo's `--frozen`, the network stays reachable
+    /// for known content. Conflicts with `--remote`. Env var: `OCX_FROZEN`.
     #[arg(long, conflicts_with = "remote", default_value_t = ocx_util::env::flag(env::keys::OCX_FROZEN, false))]
     pub frozen: bool,
 
@@ -109,12 +92,12 @@ pub struct ContextOptions {
     ///
     /// `0` means "use all logical cores" (GNU Parallel convention). Omitting
     /// the flag falls back to the `OCX_JOBS` environment variable; when
-    /// neither is set, pulls run unbounded (legacy behavior). Negative values
+    /// neither is set, pulls run unbounded. Negative values
     /// are rejected at parse time.
     ///
     /// Caps only the outer dispatch - transitive dependency and layer
-    /// extraction stay unbounded so they cannot deadlock against an
-    /// ancestor's permit.
+    /// extraction stay unbounded.
+    // Capping the inner work too would deadlock it against an ancestor's permit.
     #[arg(long, value_name = "N")]
     pub jobs: Option<usize>,
 
@@ -135,26 +118,16 @@ pub struct ContextOptions {
     #[arg(short, long, value_enum)]
     pub log_level: Option<crate::tracing_init::LogLevel>,
 
-    // Parsed early in App::run() via ColorMode::from_args(); this field exists
-    // so clap recognizes --color and shows it in --help.
+    // Read early by `ColorMode::from_args` in `App::run`; declared so clap accepts `--color` and lists it.
     /// When to use ANSI colors in output.
     #[arg(long, value_enum, value_name = "WHEN", default_value_t = Default::default())]
     pub color: ColorMode,
 }
 
 impl ContextOptions {
-    /// Build the reporting [`Api`](api::Api) from parsed flags + resolved
-    /// color config.  Single source of truth for the printer +
-    /// format-default + quiet wiring, shared by
-    /// [`crate::app::Context::try_init`] and the Context-free
-    /// static-command bypass paths (`ocx version`).
-    ///
-    /// Layering: `ContextOptions` is the CLI-surface parser tier and may
-    /// reach down into `api`; the reverse is forbidden (api has no
-    /// knowledge of the parser).  Centralising this constructor avoids two
-    /// historical failure modes: the static-command path hardcoding
-    /// `Printer::new(false, false)` (lost `--color` honouring) and the
-    /// `format.unwrap_or(Plain)` default drifting between init sites.
+    /// Builds the reporting [`Api`](api::Api); the only construction, shared by
+    /// [`crate::app::Context::try_init`] and Context-free commands (`ocx version`).
+    // A second construction site would drop `--color` or drift the format default.
     pub fn build_api(&self, color_config: ColorModeConfig) -> api::Api {
         let printer = Printer::new(color_config.stdout, color_config.stderr);
         let data = DataInterface::new(printer);
@@ -162,9 +135,10 @@ impl ContextOptions {
     }
 
     /// Builds the resolution-affecting policy snapshot forwarded to child ocx
-    /// processes. `self_exe` is the absolute path of the running `ocx`
-    /// executable (captured by `Context::try_init` from `current_exe()`).
+    /// processes; `self_exe` is the running `ocx`'s absolute path.
     pub fn as_view(&self, self_exe: std::path::PathBuf) -> OcxConfigView {
+        // Fields no root flag carries start unset; `Context::try_init` or the spawning command fills
+        // the ones it forwards.
         OcxConfigView {
             self_exe,
             offline: self.offline,
@@ -173,54 +147,15 @@ impl ContextOptions {
             config: self.config.clone(),
             project: self.project.clone(),
             global: self.global,
-            // The consent tri-state is a per-command flag pair (`ocx exec`),
-            // not a root flag, so the parser tier starts as "did not refuse".
-            // Only a command that carries `--no-consent` sets this, on the view
-            // it forwards to its own child.
             no_consent: false,
             index: self.index.clone(),
-            // The resolved toolchain root is not derivable from
-            // `ContextOptions`: `toolchain_dir` is a `config.toml` key with no
-            // root flag, folded with `OCX_TOOLCHAIN_DIR` and subject to the
-            // containment refusals. `Context::try_init` resolves it and
-            // populates this field on the returned view; the parser tier starts
-            // empty (C-008).
             toolchain_dir: None,
-            // The resolved mirror map is not derivable from `ContextOptions`
-            // alone — it merges `[mirrors]` config with the inherited
-            // `OCX_MIRRORS` env. `Context::try_init` builds it and populates
-            // this field on the returned view; the parser tier starts empty.
             mirrors: Vec::new(),
-            // The resolved patch config is not derivable from `ContextOptions`
-            // alone — it merges the `[patches]` config tier with the inherited
-            // `OCX_PATCHES` env. `Context::try_init` builds it via
-            // `resolve_patch_config` and populates this field on the returned
-            // view; the parser tier starts empty.
             patches: None,
-            // The active patch snapshot path is resolved by `Context::try_init`
-            // from `OCX_PATCH_SNAPSHOT` (or a future `--patch-snapshot` flag)
-            // and populated on the returned view; the parser tier starts empty.
             patch_snapshot: None,
-            // The resolved `[records]` block is not derivable from
-            // `ContextOptions` alone — `--records-dir` / `--records-name` are
-            // per-command flags on `run` and `package exec`, not root flags, and
-            // the config and `OCX_RECORDS_*` tiers fold in above them.
-            // `Context::try_init` resolves the block and populates this field on
-            // the returned view; the parser tier starts empty.
             records: ocx_package_manager::record::RecordsOptions::default(),
-            // The effective managed-config source (flag > env > seed) is not
-            // derivable from `ContextOptions` alone; `Context::try_init` will
-            // populate this field once the managed-config tier is wired in
-            // (managed-config phase 4). The parser tier starts empty.
             managed_config_source: None,
-            // The auto-verify opt-out is a per-command flag (`--no-verify`), not
-            // a `ContextOptions` field. `Context::try_init` reads `OCX_NO_VERIFY`
-            // and populates this field on the returned view; the parser tier
-            // starts as the env-unset default.
             no_verify: false,
-            // `OCX_NO_CONFIG` is a pure env opt-in with no root flag, read at
-            // the loader seam. `Context::try_init` populates this field on the
-            // returned view; the parser tier starts as the env-unset default.
             no_config: false,
         }
     }

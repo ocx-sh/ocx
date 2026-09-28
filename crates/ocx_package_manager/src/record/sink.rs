@@ -3,30 +3,9 @@
 
 //! Publishing a record into the operator's sink directory.
 //!
-//! The sink is a **directory**, never a file, and never inside `$OCX_HOME`.
-//! Records are output the operator collects, not ocx runtime state, and
-//! `$OCX_HOME` is per-user while the audit trail is fleet-wide. A directory sink
-//! is also the only shape that is correct on every filesystem: no portable,
-//! spec-backed guarantee exists for concurrent append anywhere — POSIX promises
-//! non-interleaving only for pipes, NFS has no append opcode at all, and the
-//! Windows CRT's emulation does not inherit the native atomic-append guarantee.
-//!
-//! **Publication must not clobber.** A plain tempfile-then-rename publish is
-//! atomic but *replacing*: a record can appear atomically on top of another
-//! record, which is a worse failure than an interleaved append — it is silent
-//! and total. Two containers on one host sharing an NFS sink each have their own
-//! PID namespace, so both can be PID 1 in the same millisecond, and a template
-//! carrying only `{time}` collides across every host on a shared mount.
-//!
-//! So the publish is no-clobber and a collision retries under a freshly drawn
-//! random component. On the hardlink fallback path — which is exactly the NFS
-//! path — a lost reply can produce a spurious collision report even though the
-//! link landed, so the failure mode is a byte-identical duplicate, never a loss.
-//! Duplicates join on the same digest; loss would not be recoverable.
-//!
-//! One consequence worth stating for whoever writes the collector: a crash
-//! between link and unlink strands a temp file in the sink permanently. A
-//! collector must ignore `.tmp*`.
+//! Publication is no-clobber, or two containers that are both PID 1 in the same millisecond overwrite each other
+//! on a shared sink. A crash between link and unlink strands a `.tmp*` file, which a collector must ignore
+//! (`adr_exec_resolution_record.md` § "Rationale from code: launch").
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -39,42 +18,24 @@ use super::name_template::{NameContext, NameTemplate, random_component};
 use super::policy::RecordingPolicy;
 use ocx_util::fs::{PersistOutcome, persist_temp_file_noclobber};
 
-/// How many names one record may try before giving up.
-///
-/// Every retry past the first draws 32 fresh bits, so exhausting this means
-/// losing the same coin toss eight times running. The bound exists only so a
-/// sink that is somehow permanently occupied fails loudly instead of spinning.
+/// Names one record may try, so a permanently occupied sink fails loudly instead of spinning.
 const MAX_PUBLISH_ATTEMPTS: usize = 8;
 
-/// Write `record` into the policy's sink, returning the published path.
-///
-/// `Ok(None)` when recording is configured off — the common case, and not a
-/// failure.
-///
-/// Async because publication is blocking filesystem work on a path that is
-/// already inside an async task; the blocking half belongs on a blocking pool,
-/// not on the runtime's worker thread.
+/// Write `record` into the policy's sink, returning the published path, or `Ok(None)` when recording is off.
 ///
 /// # Errors
 ///
-/// Returns [`RecordsError`] when the record cannot be serialized or published.
-/// Whether the caller aborts on that is [`RecordingPolicy::required`]'s call,
-/// not this function's.
+/// Returns [`RecordsError`] when the record cannot be serialized or published; whether that aborts the launch is
+/// [`RecordingPolicy::required`]'s call.
 pub async fn emit(record: &ExecutionRecord, policy: &RecordingPolicy) -> Result<Option<PathBuf>, RecordsError> {
     let Some(dir) = policy.dir() else {
         return Ok(None);
     };
 
-    // Checked here, on every platform, and not only in the pre-spawn probe: that
-    // probe is Windows-only on the `exec` path — Unix writes the record before
-    // `execvp`, so the write is its own gate — which left the refusal inert on
-    // Linux and macOS, where a sink swapped for a symlink would silently
-    // relocate the whole audit trail.
+    // Also here, not only in the Windows-only pre-spawn probe, or on Unix a symlinked sink relocates the trail.
     refuse_substituted_sink(dir).await?;
 
     let json = record.to_json()?;
-    // Drawn from the record itself so the filename and the payload can never
-    // disagree about when it was written or which process ran the tool.
     let context = NameContext {
         recorded_at: record.recorded_at,
         pid: record.process.pid,
@@ -100,32 +61,20 @@ pub async fn emit(record: &ExecutionRecord, policy: &RecordingPolicy) -> Result<
     .map(Some)
 }
 
-/// Check that `dir` exists and is writable **before** the child starts.
-///
-/// This is what keeps the fail-closed posture honest on the platform where the
-/// record can only be written after the spawn: the probe refuses an unwritable
-/// sink while nothing has run yet, and it costs one create/unlink rather than
-/// reaching for platform-specific process APIs to learn a pid early.
+/// Check that `dir` exists and is writable before the child starts, for the platform that records after the spawn.
 ///
 /// # Errors
 ///
-/// - [`RecordsError::SinkSymlink`] — `dir` no longer resolves to the directory
-///   it was designated as, which would let whoever swapped it redirect an audit
-///   trail somewhere the operator never designated.
+/// - [`RecordsError::SinkSymlink`] — `dir` no longer resolves to the directory it was designated as.
 /// - [`RecordsError::Io`] — `dir` is absent, or not writable.
 pub async fn probe_writable(dir: &Path) -> Result<(), RecordsError> {
-    // The same refusal [`emit`] applies, run here too so the platform whose gate
-    // is *only* pre-spawn keeps both halves of it: on Windows the record is
-    // written after the child exists, and a substituted sink caught only at emit
-    // would mean the tool had already started.
+    // Also here: on Windows the record is written after the spawn, so catching this only at emit is too late.
     refuse_substituted_sink(dir).await?;
 
     let dir = dir.to_path_buf();
     let sink = dir.clone();
     tokio::task::spawn_blocking(move || {
-        // Create and immediately unlink: the one probe that answers "can this
-        // process put a file here" without trusting permission bits, which are
-        // advisory for root and meaningless on a read-only mount.
+        // Create and unlink: permission bits are advisory for root and meaningless on a read-only mount.
         NamedTempFile::new_in(&dir)
             .map(drop)
             .map_err(|source| RecordsError::Io { path: dir, source })
@@ -137,30 +86,10 @@ pub async fn probe_writable(dir: &Path) -> Result<(), RecordsError> {
     })?
 }
 
-/// Refuse a sink that is no longer the directory it was designated as.
+/// Refuse a sink that no longer resolves to the path [`super::policy::resolve_records`] pinned.
 ///
-/// [`super::policy::resolve_records`] resolves the operator's configured sink to
-/// its real location once and pins the result, so a pinned path re-resolves to
-/// itself for as long as nobody moves the directory. A disagreement here means a
-/// symlink has been inserted into the pinned path since designation — which would
-/// otherwise redirect an audit trail somewhere the operator never designated,
-/// with no error and no missing record at the source, so the collector simply
-/// sees an empty sink.
-///
-/// **What this does not catch**, because it compares a canonical *path* rather
-/// than holding the directory's identity: replacing the sink with a *different
-/// real directory* at the same path re-resolves to itself and is accepted; and a
-/// symlink inserted between this check and [`NamedTempFile::new_in`] is followed,
-/// because the file is created by path, not through a handle pinned here. Closing
-/// either needs an `openat`-style directory handle opened at designation and every
-/// write made relative to it. This is an integrity control against a script or a
-/// rotator redirecting the trail by accident, not a defence against an adversary
-/// racing it — consistent with the rest of `[records]`, where anyone able to plant
-/// that symlink can equally just not run `ocx`.
-///
-/// Deliberately *not* a symlink-in-ancestor refusal: every path picks up OS
-/// aliases (macOS reaches `/var/log` through `/var` → `/private/var`), so that
-/// guard refused ordinary hosts — permanently, under `required = true`.
+/// Compares canonical paths only, so a different directory at the same path or a later race still passes: an
+/// integrity control against accidents, not an adversary.
 ///
 /// # Errors
 ///
@@ -185,11 +114,7 @@ async fn refuse_substituted_sink(dir: &Path) -> Result<(), RecordsError> {
     }
 }
 
-/// Write `bytes` into `dir` under the first name `name_for` offers that is free.
-///
-/// Blocking. The retry is the whole point: a taken name never overwrites, it
-/// draws another. `name_for` receives the attempt index so it can vary a
-/// template that carries no randomness of its own.
+/// Blocking: write `bytes` into `dir` under the first free name `name_for(attempt)` offers, never overwriting.
 fn publish(dir: &Path, mut name_for: impl FnMut(usize) -> String, bytes: &[u8]) -> Result<PathBuf, RecordsError> {
     let io_error = |path: &Path, source: std::io::Error| RecordsError::Io {
         path: path.to_path_buf(),
@@ -198,14 +123,8 @@ fn publish(dir: &Path, mut name_for: impl FnMut(usize) -> String, bytes: &[u8]) 
 
     let mut tmp = NamedTempFile::new_in(dir).map_err(|e| io_error(dir, e))?;
     tmp.write_all(bytes).map_err(|e| io_error(dir, e))?;
-    // Deliberately no `sync_data`. What this path promises is the ADR's own
-    // guarantee — the whole record appears under its name atomically — and that
-    // comes from the no-clobber publish, not from a flush. An `fsync` would add
-    // only durability across host power loss, the one failure that also destroys
-    // the job the record describes; measured on ext4 it cost 71 ms median and
-    // 518 ms p99 against 43 µs / 290 µs without, on the critical path of every
-    // tool invocation in a build. Should a deployment ever need a record to
-    // outlive a power cut, `tmp.as_file().sync_data()` here is the whole change.
+    // No `sync_data`: no-clobber publish already makes the record atomic, and an fsync costs 71 ms median on
+    // ext4 per tool invocation for power-loss durability only.
 
     for attempt in 0..MAX_PUBLISH_ATTEMPTS {
         let target = resolve_in_sink(dir, &name_for(attempt))?;
@@ -230,20 +149,14 @@ fn publish(dir: &Path, mut name_for: impl FnMut(usize) -> String, bytes: &[u8]) 
     })
 }
 
-/// Place one rendered name inside the sink, refusing anything that is not a
-/// plain filename.
+/// Place one rendered name inside the sink, refusing anything that is not a plain filename.
 ///
-/// Every candidate name passes through here, which is what makes this the
-/// backstop to [`NameTemplate`]'s own `{host}` sanitizer: a separator or a `..`
-/// — from a template literal, from a hostname, or from some future placeholder
-/// drawn from the environment — would put the record outside the directory the
-/// operator designated. `Component::Normal` is checked against the name verbatim
-/// so nothing is silently normalized into looking well-formed.
+/// The backstop for every candidate, or a separator or `..` writes outside the sink; compared verbatim so nothing
+/// is normalized into looking well-formed.
 ///
 /// # Errors
 ///
-/// Returns [`RecordsError::NameNotAFilename`] when `name` is not exactly one
-/// normal path component.
+/// Returns [`RecordsError::NameNotAFilename`] when `name` is not exactly one normal path component.
 fn resolve_in_sink(dir: &Path, name: &str) -> Result<PathBuf, RecordsError> {
     let mut components = Path::new(name).components();
     match (components.next(), components.next()) {
@@ -254,12 +167,8 @@ fn resolve_in_sink(dir: &Path, name: &str) -> Result<PathBuf, RecordsError> {
     }
 }
 
-/// The filename for one publish attempt.
-///
-/// Attempt 0 is the operator's template verbatim. A retry must not re-offer the
-/// name that just collided, so a template carrying `{rand}` is simply re-rendered
-/// — it draws afresh every call — while one without gets a random component
-/// appended.
+/// The filename for one publish attempt; a retry re-renders `{rand}` or appends a random component, so it never
+/// re-offers the name that just collided.
 fn candidate_name(template: &NameTemplate, context: &NameContext, attempt: usize) -> String {
     let name = template.render(context);
     if attempt == 0 || template.has_random() {
@@ -269,9 +178,8 @@ fn candidate_name(template: &NameTemplate, context: &NameContext, attempt: usize
     }
 }
 
-/// Insert a random component before the extension — `run.json` →
-/// `run-3f7a1c08.json` — so a retried record still matches whatever glob the
-/// collector was configured with.
+/// Insert a random component before the extension (`run.json` → `run-3f7a1c08.json`), so a retried record still
+/// matches the collector's glob.
 fn with_random_component(name: &str) -> String {
     let component = random_component();
     match name.rsplit_once('.') {
@@ -328,7 +236,7 @@ mod tests {
         found
     }
 
-    /// The defect D11 names: a record must never land on top of another one.
+    /// The defect: a record must never land on top of another one.
     /// Cross-container pid reuse makes this reachable in production — two
     /// containers on one host each have their own pid namespace, so both can be
     /// pid 1 in the same millisecond on a shared sink. Forcing the name is the

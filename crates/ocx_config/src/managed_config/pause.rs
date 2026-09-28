@@ -3,37 +3,26 @@
 
 //! Pause state for the managed-config background tick.
 //!
-//! `ocx config update --pause <duration>` writes a content-bearing
-//! `pause.json` beside the snapshot; the background tick short-circuits while
-//! it is in force. Pause affects the **tick only** — the required gate and
-//! explicit `ocx config update` are never blocked by it. An expired or
-//! corrupt pause file reads as absent (benign-state rule) and is overwritten
-//! by the next `--pause` / cleared by the next explicit update.
+//! A pause holds the tick only, never the required gate or an explicit `ocx config update`.
 
 use crate::managed_config::ManagedConfigPaths;
 
-/// Hard ceiling for `--pause <duration>` (7 days). A pause is a temporary
-/// hold, not an opt-out — `refresh = "manual"` is the permanent form.
+/// Hard ceiling for `--pause <duration>` (7 days).
 pub const MAX_PAUSE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(7 * 86_400);
 
-/// On-disk pause state at [`ManagedConfigPaths::pause_file`]
-/// (`$OCX_HOME/state/managed-config/pause.json`).
+/// On-disk pause state at [`ManagedConfigPaths::pause_file`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ManagedConfigPause {
     /// ISO-8601 UTC instant until which the background tick is paused.
     pub paused_until: String,
-    /// The version spec pinned alongside the pause
-    /// (`ocx config update --pause <d> <VERSION>`), for `--check` reporting.
+    /// Version spec pinned with the pause, for `--check` reporting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_version: Option<String>,
 }
 
 impl ManagedConfigPause {
-    /// Builds a pause lasting `duration` from now.
-    ///
-    /// The domain layer owns the 7-day invariant: `duration` is clamped to
-    /// [`MAX_PAUSE_INTERVAL`] before the window is computed, so a caller that
-    /// bypasses the clap-side ceiling still cannot write an over-cap pause.
+    /// Builds a pause lasting `duration` from now, clamped to [`MAX_PAUSE_INTERVAL`] so a
+    /// caller bypassing the clap ceiling still cannot write an over-cap pause.
     pub fn for_duration(duration: std::time::Duration, pinned_version: Option<String>) -> Self {
         let capped = duration.min(MAX_PAUSE_INTERVAL);
         let paused_until =
@@ -71,11 +60,7 @@ pub async fn read_pause(paths: &ManagedConfigPaths) -> Option<ManagedConfigPause
         );
         return None;
     }
-    // A window beyond `now + MAX_PAUSE_INTERVAL` cannot have come from
-    // `for_duration` (which clamps): treat the file as tampered/corrupt and
-    // ignore it. Reject rather than clamp-and-keep — a rolling read-time clamp
-    // would let a far-future stamp perpetually re-satisfy the window and never
-    // expire.
+    // Reject, never clamp, an over-cap window: a read-time clamp lets a far-future stamp never expire.
     let ceiling = now + chrono::Duration::from_std(MAX_PAUSE_INTERVAL).unwrap_or_else(|_| chrono::Duration::days(7));
     if until > ceiling {
         log::debug!(
@@ -88,8 +73,7 @@ pub async fn read_pause(paths: &ManagedConfigPaths) -> Option<ManagedConfigPause
     Some(pause)
 }
 
-/// Writes `pause` atomically (temp+rename, `spawn_blocking`) to
-/// [`ManagedConfigPaths::pause_file`].
+/// Writes `pause` atomically to [`ManagedConfigPaths::pause_file`].
 ///
 /// # Errors
 ///

@@ -3,16 +3,6 @@
 
 /// Whether to record a shell-activation consent stamp for the project a
 /// command targets.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add the paired
-/// `--consent` / `--no-consent` flags. The two use POSIX last-wins semantics
-/// (`overrides_with`) — combining them is not an error (git `--[no-]verify`
-/// idiom). Carried by `ocx init`, `ocx pull` and `ocx exec`.
-///
-/// Resolve with [`Consent::explicit`] and hand the `Option<bool>` to the write
-/// seam, which fills a `None` in from
-/// [`OCX_NO_CONSENT`](ocx_config::env::keys::OCX_NO_CONSENT) and otherwise stamps.
-/// The ladder is flag, then env, then stamp.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Consent {
     /// Record a consent stamp (the default unless OCX_NO_CONSENT is set)
@@ -39,11 +29,8 @@ pub struct Consent {
 impl Consent {
     /// What the user typed, or `None` when they typed neither flag.
     ///
-    /// The tri-state is the whole point: "neither flag" and "`--consent`" are
-    /// different answers, and collapsing them to a `bool` at the command would
-    /// let [`OCX_NO_CONSENT`](ocx_config::env::keys::OCX_NO_CONSENT) — read further
-    /// down, at the write seam — outrank a flag the user typed. `None` travels
-    /// to that seam so the env speaks only where nothing else did.
+    /// Collapsing `None` to a `bool` lets [`OCX_NO_CONSENT`](ocx_config::env::keys::OCX_NO_CONSENT),
+    /// read at the write seam, outrank a typed flag.
     pub fn explicit(&self) -> Option<bool> {
         if self.consent {
             Some(true)

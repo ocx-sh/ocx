@@ -3,16 +3,12 @@
 
 //! Equivalence suite: a graph the push path built must read back clean.
 //!
-//! The oracle is the production push path itself. For a set of versions and
-//! platforms, every publication order is replayed against a stub registry
-//! through the same tag resolution and index merge a real push performs, and
-//! the resulting graph is then gathered and diffed. A finding means check and
-//! push disagree about the same algebra — either a real drift bug or a false
-//! positive, and both are defects.
-//!
-//! The suite carries its own falsifier: one scenario deliberately damages the
-//! replayed graph and asserts exactly one finding comes back, so a green run
-//! here is distinguishable from a run that checked nothing.
+//! The oracle is the production push path: every publication order of a set of
+//! versions and platforms is replayed against a stub registry through the same
+//! tag resolution and index merge a real push performs, then gathered and diffed.
+//! A finding means check and push disagree about the same algebra, a drift bug or
+//! a false positive. One scenario damages the replayed graph and asserts exactly
+//! one finding, so a green run is distinguishable from one that checked nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 

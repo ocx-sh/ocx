@@ -1,17 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The configured half of the operator-supplied extra CA roots
-//! (`OCX_EXTRA_CA_CERTS` / `extra_ca_certs`, ocx#448): where a bundle's bytes
-//! came from, the refusal that names that door, and the resolution ladder over
-//! the environment and the `config.toml` tiers.
-//!
-//! Everything here reads a tier, a path or the environment. The value type it
-//! produces, the byte cap it enforces and the process-wide Sigstore set live in
-//! [`tls`](ocx_util::tls), which knows nothing about configuration: the one
-//! validated choke point every root byte passes through is
-//! [`ExtraRoots::from_pem`], and [`parse_pem`] is that call plus the origin a
-//! refusal has to name.
+//! The configured half of the operator-supplied extra CA roots (`OCX_EXTRA_CA_CERTS` /
+//! `extra_ca_certs`): where a bundle came from, the refusal naming it, and the resolution ladder.
 
 use std::path::{Path, PathBuf};
 
@@ -21,12 +12,7 @@ use ocx_util::tls::{ExtraRoots, MAX_EXTRA_CA_CERTS_BYTES, PemBundleError};
 
 /// Where an [`ExtraRoots`] value's bytes came from.
 ///
-/// Carried for diagnostics only — every variant names a source, never holds
-/// the PEM bytes themselves, so nothing reachable from here can leak
-/// certificate (or, if an operator pastes the wrong secret, key) content into
-/// an error message or a log line (D-11). `Debug` delegates to `Display` for
-/// the same reason: a `{:?}` of a [`TlsError`] (or of anything carrying one)
-/// must not open a second door the redaction does not watch.
+/// No variant holds PEM bytes, or a pasted key could leak into an error message or log line.
 #[derive(Clone)]
 pub enum ExtraRootsSource {
     /// Inline PEM text in the `OCX_EXTRA_CA_CERTS` environment variable.
@@ -37,17 +23,15 @@ pub enum ExtraRootsSource {
     ConfigPath {
         /// The path as the config named it (anchored absolute by the loader).
         path: PathBuf,
-        /// The tier whose file set the key — the loader's own record
-        /// (DX-16), never a guess from the value — or `None` when the path was
-        /// read outside the loader's tiers: `ocx config push` reading the
-        /// payload it is about to publish.
+        /// The tier whose file set the key, or `None` when read outside the loader's tiers
+        /// (`ocx config push` reading its payload).
         tier: Option<ConfigTier>,
     },
-    /// Inline PEM text under `extra_ca_certs_pem` in a `config.toml` tier,
-    /// tagged with the tier that supplied it.
+    /// Inline PEM text under `extra_ca_certs_pem`, with the tier that supplied it.
     ConfigInline(ConfigTier),
 }
 
+// Delegates to `Display`, or a `{:?}` of a `TlsError` bypasses the path redaction.
 impl std::fmt::Debug for ExtraRootsSource {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, formatter)
@@ -55,20 +39,17 @@ impl std::fmt::Debug for ExtraRootsSource {
 }
 
 impl ExtraRootsSource {
-    /// Longest path echoed verbatim into a message; anything longer is a
-    /// value that is not a path (D-11).
+    /// Longest path echoed verbatim; anything longer is not a path and is never echoed.
     const MAX_ECHOED_PATH_BYTES: usize = 256;
 
-    /// Whether the bytes came from a file the operator named (`EnvPath`,
-    /// `ConfigPath`) rather than inline text — the split C-010's exit codes
-    /// turn on.
+    /// Whether the bytes came from a named file rather than inline text; a refusal's exit code
+    /// turns on it.
     pub fn is_file(&self) -> bool {
         matches!(self, Self::EnvPath(_) | Self::ConfigPath { .. })
     }
 
-    /// The byte count of a path that must not be echoed — over 256 bytes or
-    /// carrying a newline, the shape of PEM text landed in a path-typed
-    /// variable by mistake (D-11) — or `None` for a path safe to print.
+    /// The byte count of a path too long or newline-bearing to echo (PEM text in a path-typed
+    /// variable), or `None` for a path safe to print.
     fn redacted_len(path: &Path) -> Option<usize> {
         let bytes = path.as_os_str().as_encoded_bytes();
         (bytes.len() > Self::MAX_ECHOED_PATH_BYTES || bytes.contains(&b'\n')).then_some(bytes.len())
@@ -76,19 +57,7 @@ impl ExtraRootsSource {
 }
 
 impl std::fmt::Display for ExtraRootsSource {
-    /// Names the door the operator used, never the value that came through it.
-    ///
-    /// Every variant names its door — the variable or the config key — and a
-    /// config-sourced one names the tier's file too, so a refusal on a host
-    /// with three `config.toml`s says which one to open. The two path forms
-    /// render as `<door>=<path>`: `EnvPath` is the *same* variable as `Env`
-    /// read as a path rather than inline text (D-4), and `ConfigPath` is the
-    /// key `extra_ca_certs` — a bare path named neither.
-    ///
-    /// A path over 256 bytes or carrying a newline is not echoed at all — it
-    /// renders as `<door> (<N> bytes, not a readable path)`, so an operator
-    /// who exported PEM text (or the wrong secret) into the path-typed form
-    /// never sees it copied into a CI log (D-11, CWE-532).
+    /// Names the door the operator used, never the value that came through it (CWE-532).
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Env => write!(formatter, "OCX_EXTRA_CA_CERTS"),
@@ -111,62 +80,39 @@ impl std::fmt::Display for ExtraRootsSource {
     }
 }
 
-/// The PEM tag `TlsError::NotACertificate` echoes, bounded and `{:?}`-escaped:
-/// the `pem` crate takes the tag as everything between `-----BEGIN ` and the
-/// next `-----`, so a body line mistaken for a header would otherwise echo up
-/// to the whole bundle (D-11).
+/// The PEM tag `TlsError::NotACertificate` echoes, bounded and escaped, or a body line mistaken
+/// for a header echoes up to the whole bundle.
 fn truncated_tag(tag: &str) -> String {
     const MAX_TAG_BYTES: usize = 32;
     if tag.len() <= MAX_TAG_BYTES {
         return format!("{tag:?}");
     }
-    // ASCII marker: a rendered string is what a Windows PowerShell 5.1
-    // console shows, and U+2026 there is mojibake.
+    // ASCII marker: U+2026 renders as mojibake on a Windows PowerShell 5.1 console.
     let prefix = &tag[..tag.floor_char_boundary(MAX_TAG_BYTES)];
     format!("{prefix:?}...")
 }
 
-/// Failure parsing, validating, or reading operator-supplied extra CA root
-/// material (`OCX_EXTRA_CA_CERTS` / `extra_ca_certs`, ocx#448).
+/// Failure parsing, validating, or reading operator-supplied extra CA root material.
 ///
-/// Every variant carries only a source, a byte count, a block index, or a PEM
-/// tag — never the certificate (or mistakenly-pasted key) bytes themselves
-/// (D-11): a `Display` reachable from this type can land in CI logs. The tag
-/// is the one field that is operator text; its `Display` truncates it to 32
-/// bytes and escapes it, so even a bundle whose whole body was parsed as a
-/// tag echoes a bounded prefix.
-///
-/// This is the *only* rendered form of a refused bundle. The origin-free
-/// discriminant [`PemBundleError`] that [`ExtraRoots::from_pem`] raises is
-/// converted here, in `parse_pem`, and implements neither `Display` nor
-/// `std::error::Error` — so it cannot be printed, cannot be a `#[source]`, and
-/// has no way to reach an operator at all.
+/// Variants carry no certificate or key bytes, only a source, count, index or truncated tag:
+/// a reachable `Display` can land in CI logs.
 #[derive(Debug, thiserror::Error)]
 pub enum TlsError {
-    /// The combined PEM bundle exceeds [`MAX_EXTRA_CA_CERTS_BYTES`] — in
-    /// practice from inline text (an environment variable's value, or
-    /// `extra_ca_certs_pem`): a file over the cap is refused by
-    /// [`ocx_util::fs::read_bounded`] before its bytes reach
-    /// `parse_pem`, and surfaces as [`TlsError::Unreadable`].
+    /// The PEM bundle exceeds [`MAX_EXTRA_CA_CERTS_BYTES`]; inline text only, since an
+    /// over-cap file surfaces as [`TlsError::Unreadable`].
     #[error(
         "{origin} is {bytes} bytes, over the {}-byte limit for a CA bundle",
         MAX_EXTRA_CA_CERTS_BYTES
     )]
     TooLarge {
         /// Where the oversized text came from.
-        ///
-        /// Named `origin`, not `source`: thiserror treats a field literally
-        /// named `source` as the `#[source]` error (`Error::source()`), which
-        /// would require [`ExtraRootsSource`] to implement
-        /// `std::error::Error` — it is a plain diagnostic label, not an error.
         origin: ExtraRootsSource,
         /// Its length in bytes.
         bytes: usize,
     },
 
     /// A PEM block's tag is not `CERTIFICATE` — refused rather than silently
-    /// skipped, so a pasted private key is never dropped without a diagnostic
-    /// (D-10).
+    /// skipped, so a pasted private key is never dropped without a diagnostic.
     #[error("{origin} contains a PEM block tagged {}, not CERTIFICATE", truncated_tag(tag))]
     NotACertificate {
         /// Where the bundle came from.
@@ -182,11 +128,8 @@ pub enum TlsError {
         origin: ExtraRootsSource,
     },
 
-    /// A `CERTIFICATE` block failed to decode as X.509, the bundle's PEM
-    /// framing could not be decoded (bad base64, mismatched `BEGIN`/`END`
-    /// tags), or the platform TLS verifier's probe build rejected the set as
-    /// anchors — the acceptance test D-9's fallback arms must never be
-    /// reached from instead.
+    /// A block is not X.509, the PEM framing is undecodable, or the platform TLS verifier's
+    /// probe build rejected the set as anchors.
     #[error(
         "{origin}: certificate {}",
         index.map_or_else(
@@ -197,58 +140,36 @@ pub enum TlsError {
     Malformed {
         /// Where the bundle came from.
         origin: ExtraRootsSource,
-        /// The zero-based index of the PEM block that failed to parse
-        /// (one-based in the message), or `None` when the failure is not
-        /// attributable to one block: the PEM decoder refusing the bundle,
-        /// or the platform-verifier probe build rejecting the set.
+        /// Zero-based index of the failing block (one-based in the message), or `None` when no
+        /// single block is at fault.
         index: Option<usize>,
     },
 
-    /// A `-----BEGIN` line the decoder could not complete — a bundle cut off
-    /// mid-copy. Its own variant, not a [`TlsError::Malformed`] index: the
-    /// fix is to paste the rest, not to hunt an OS trust-store
-    /// incompatibility. Classifies with `Malformed` (65 file / 78 inline).
+    /// A `-----BEGIN` line with no end — a bundle cut off mid-copy.
     #[error("{origin}: certificate block {} is incomplete (no -----END line)", index + 1)]
     Truncated {
         /// Where the bundle came from.
         origin: ExtraRootsSource,
-        /// The zero-based index of the first block with no end line
-        /// (one-based in the message).
+        /// Zero-based index of the first block with no end line (one-based in the message).
         index: usize,
     },
 
-    /// A path-typed source could not be read as a bounded, regular file — see
-    /// [`ocx_util::fs::read_bounded`].
+    /// A path-typed source could not be read as a bounded, regular file.
     #[error("cannot read {origin}")]
     Unreadable {
-        /// The path-typed source that was refused — `EnvPath` or `ConfigPath`
-        /// already carry the path, so this variant holds no separate one.
+        /// The refused path-typed source.
         origin: ExtraRootsSource,
-        /// What the read raised, with the path stripped: `origin` names it
-        /// (and redacts it, D-11), and `{err:#}` at the CLI boundary renders
-        /// this whole chain, so a second copy here would echo a value the
-        /// origin refused to. See `read_path`.
+        /// What the read raised, path stripped, or the `{err:#}` chain echoes a path `origin` redacted.
         #[source]
         io: std::io::Error,
     },
 }
 
-/// C-005's environment arm, shared by `Context::try_init`'s resolution
-/// ladder and `ocx self setup`'s persistence phase: a non-empty
-/// `OCX_EXTRA_CA_CERTS` value containing `-----BEGIN` is the PEM text
-/// itself (D-4 — a path can never contain it); anything else is a path,
-/// read now through [`ocx_util::fs::read_bounded`] under
-/// [`MAX_EXTRA_CA_CERTS_BYTES`] (D-5, D-10). Returns the bytes as read —
-/// never re-encoded, so a caller persisting them stores the operator's
-/// bundle — with the [`ExtraRootsSource`] to validate them under. Bytes,
-/// not text: [`parse_pem`] is bytes-native, and the config-path arm
-/// hands it the same raw read, so one file resolves identically through
-/// either door (C-005); a caller that needs text decodes for itself.
+/// The environment arm of the extra-CA ladder: a non-empty value containing `-----BEGIN` is PEM
+/// text, anything else a path read through [`read_path`]. **Blocking** on the path arm.
 ///
-/// Validation is the caller's next step ([`parse_pem`]); an empty
-/// `value` is "unset" and never reaches here.
-///
-/// **Blocking** on the path arm (a file read).
+/// Returns the bytes as read, never re-encoded, so a caller persisting them stores the operator's
+/// bundle; validate them with [`parse_pem`].
 ///
 /// # Errors
 ///
@@ -262,23 +183,11 @@ pub fn from_env_value(value: &str) -> Result<(Vec<u8>, ExtraRootsSource), TlsErr
     read_path(&path, ExtraRootsSource::EnvPath(path.clone()))
 }
 
-/// C-005's path arm — the one bounded read behind every path-typed
-/// source: [`from_env_value`], the `extra_ca_certs` arm of
-/// `Context::try_init`'s ladder, and `ocx config push`'s inlining read.
-/// Reads `path` through [`ocx_util::fs::read_bounded`] under
-/// [`MAX_EXTRA_CA_CERTS_BYTES`] (D-10) and returns the bytes as read with
-/// the `origin` to validate them under ([`parse_pem`] is the
-/// caller's next step).
+/// The bounded read behind every path-typed source, under [`MAX_EXTRA_CA_CERTS_BYTES`];
+/// validate the bytes with [`parse_pem`]. **Blocking.**
 ///
-/// The refusal carries the path **once**, in `origin`: `read_bounded`'s
-/// own error names the path in its `Display`, unredacted, and the CLI
-/// prints the whole `source()` chain — so a PEM body pasted into a
-/// path-typed value would be echoed through the chain even though
-/// `origin` redacts it (D-11, CWE-532). The `std::io::Error` kept here is
-/// the OS error itself, or an `InvalidInput` naming only the rule
-/// (`not a regular file`, `over the <N>-byte cap`).
-///
-/// **Blocking.**
+/// The refusal names the path only in `origin`: `read_bounded`'s error names it unredacted, so
+/// keeping that would leak a PEM body in a path-typed value through the source chain (CWE-532).
 ///
 /// # Errors
 ///
@@ -293,29 +202,16 @@ pub fn read_path(path: &Path, origin: ExtraRootsSource) -> Result<(Vec<u8>, Extr
     Ok((bytes, origin))
 }
 
-/// [`ExtraRoots::from_pem`] — the one validated choke point every
-/// extra-CA-roots byte passes through (C-004, D-9) — with the `origin` a
-/// refusal has to name attached.
+/// [`ExtraRoots::from_pem`], the one validated choke point for every extra-CA byte, with the
+/// `origin` a refusal names attached.
 ///
-/// The parse itself, its check order and its platform probe build live on
-/// [`ExtraRoots`]; what this adds is the door. The mapping below is
-/// one-to-one and total, so every discriminant [`ExtraRoots::from_pem`]
-/// can raise has exactly one rendered form and no bundle is ever refused
-/// without one.
-///
-/// **Blocking**, for [`ExtraRoots::from_pem`]'s reasons: the probe build loads
-/// the platform trust store. Call from a blocking context; from async, wrap the
-/// read and the parse together in `spawn_blocking`.
+/// **Blocking**: the probe build loads the platform trust store; from async, `spawn_blocking`
+/// the read and the parse together.
 ///
 /// # Errors
 ///
-/// [`TlsError::TooLarge`] over [`MAX_EXTRA_CA_CERTS_BYTES`],
-/// [`TlsError::Truncated`] for a `-----BEGIN` with no matching end (a
-/// bundle cut off mid-copy, naming that block's index),
-/// [`TlsError::NotACertificate`] for a non-`CERTIFICATE` PEM block,
-/// [`TlsError::Empty`] for zero blocks, [`TlsError::Malformed`] for a
-/// bundle the PEM decoder refuses, a block that fails to parse as X.509,
-/// or a set the platform TLS verifier's probe build rejects.
+/// [`TlsError::TooLarge`], [`TlsError::Truncated`], [`TlsError::NotACertificate`],
+/// [`TlsError::Empty`] or [`TlsError::Malformed`], one per refusal kind.
 pub fn parse_pem(pem: &[u8], origin: &ExtraRootsSource) -> Result<ExtraRoots, TlsError> {
     ExtraRoots::from_pem(pem).map_err(|refused| {
         let origin = origin.clone();
@@ -329,50 +225,20 @@ pub fn parse_pem(pem: &[u8], origin: &ExtraRootsSource) -> Result<ExtraRoots, Tl
     })
 }
 
-/// C-005: the extra-CA-roots resolution ladder for one view (`merged` or
-/// `local` — the caller decides which `config` and which `env` value to pass;
-/// `sigstore` is a fold over the two, [`sigstore_extra_roots`], not a third
-/// walk of this ladder).
-///
-/// Ladder: `env` set and non-empty → `from_env_value` (a value
-/// containing `-----BEGIN` is inline PEM text, `ExtraRootsSource::Env`, D-4;
-/// else a path, `ExtraRootsSource::EnvPath`, read via
-/// `read_path`) — unless `config.extra_ca_certs_system_locked`
-/// (ocx#469), which ignores `env` with a warning; `env` unset or `""` →
-/// `config.extra_ca_certs_pem` inline (`ExtraRootsSource::ConfigInline`), else
-/// `config.extra_ca_certs` as a path (`ExtraRootsSource::ConfigPath`, the same
-/// `read_path`); neither set → the empty [`ExtraRoots`]. Every
-/// non-empty candidate passes through `parse_pem` (C-004), the
-/// single validated choke point (D-9).
-///
-/// `tier` is the loader's own record of which tier set the config key
-/// (`LoadedConfig::extra_ca_certs_tier`, DX-16) — the origin a refusal names
-/// is the file that set the value, never a guess from the value. A `Config`
-/// carrying `extra_ca_certs_pem` with no recorded tier cannot come out of the
-/// loader; a hand-built one is attributed to `$OCX_HOME/config.toml`.
-///
-/// **Blocking** (DX-11): a path read plus `parse_pem`'s probe
-/// build both do blocking I/O. The CLI's `Context::try_init` is `async fn`,
-/// so it runs this inside `tokio::task::spawn_blocking`, mapping a
-/// `JoinError` to an I/O-class failure — never `NotFound` — matching
-/// `oci/verify/trust_resolve.rs`'s precedent.
+/// The extra-CA-roots resolution ladder for one view: a non-empty `env` (unless the config pair
+/// is system-locked), then `extra_ca_certs_pem`, then `extra_ca_certs` as a path, else empty.
+/// `tier` is the loader's record of the key's tier. **Blocking.**
 ///
 /// # Errors
 ///
-/// [`TlsError::Unreadable`] when a path-typed value cannot be read as a
-/// bounded regular file, else any [`TlsError`] `parse_pem`
-/// raises, propagated verbatim — a `TlsError` from any view aborts
-/// `Context::try_init` (D-9).
+/// [`TlsError::Unreadable`] for an unreadable path, else any [`TlsError`] `parse_pem` raises.
 pub fn resolve_extra_roots(
     config: &Config,
     env: Option<&str>,
     tier: Option<ConfigTier>,
 ) -> Result<ExtraRoots, TlsError> {
     let env = env.filter(|value| !value.is_empty());
-    // ocx#469: a system-locked pair outranks the environment too — the one
-    // rung the loader's lock cannot reach, since the env is not a tier it
-    // folds. Same voice as the loader's per-tier warning; never the value
-    // (D-11).
+    // A system-locked pair outranks the env too, the one rung the loader's lock cannot reach.
     let env = if config.extra_ca_certs_system_locked && env.is_some() {
         log::warn!(
             "ignoring OCX_EXTRA_CA_CERTS: extra_ca_certs / extra_ca_certs_pem are locked by {}; edit the system tier \
@@ -390,9 +256,6 @@ pub fn resolve_extra_roots(
         }
         None => match (config.extra_ca_certs_pem.as_deref(), config.extra_ca_certs.as_deref()) {
             (Some(pem), _) => {
-                // The loader records a tier for every key it folds in
-                // (`load_and_merge_recording`, `fold_managed_tier`); a
-                // `None` here is a hand-built `Config`, never a loaded one.
                 debug_assert!(
                     tier.is_some(),
                     "a loaded Config carrying extra_ca_certs_pem has a recorded tier"
@@ -415,21 +278,8 @@ pub fn resolve_extra_roots(
     }
 }
 
-/// D-7: the Sigstore trust-services view, folded from the two resolved views.
-///
-/// `merged` when the resolved `[managed] source` carries a digest pin
-/// (`managed_source_pinned` — the caller passes `.digest().is_some()`, or
-/// `false` when no managed tier resolved), **or** when the managed payload's
-/// key did not win the fold — `extra_ca_tier` is the loader's record of which
-/// tier set the surviving key (DX-16), so anything but `Managed` means the
-/// merged and local views resolved the same material; else `local`.
-///
-/// Pure so the fold is unit-testable (`extra_ca_sigstore_view_follows_managed_pin`);
-/// the CLI's `Context::try_init` calls it once and installs the result via
-/// [`install_sigstore_roots`](ocx_util::tls::install_sigstore_roots) before any
-/// client is built. Takes a `bool` rather than `Option<&ocx_oci::PackageRef>` —
-/// this module has no other reason to know that type, and the caller already
-/// has the pin question answered.
+/// The Sigstore trust-services view: `merged` when the managed source is digest-pinned or the
+/// managed payload did not win the extra-CA key, else `local`.
 #[must_use]
 pub fn sigstore_extra_roots(
     merged: &ExtraRoots,
@@ -459,9 +309,9 @@ mod tests {
         parse_pem(pem, &ENV)
     }
 
-    // ── C-004: the parse matrix ──────────────────────────────────────────────
+    // ── the parse matrix ─────────────────────────────────────────────────────
 
-    /// C-004 / edge case "bundle with 2+ certificates → all appended".
+    /// Edge case "bundle with 2+ certificates → all appended".
     #[test]
     fn extra_ca_parse_pem_accepts_a_two_certificate_bundle_in_order() {
         let (_, first) = mint_root("CN=ocx-test-ca-1");
@@ -480,7 +330,7 @@ mod tests {
         assert_eq!(roots.der()[1].as_ref(), second.as_slice(), "second block, second root");
     }
 
-    /// C-004 / edge case "CRLF PEM, leading `subject=` labels before
+    /// Edge case "CRLF PEM, leading `subject=` labels before
     /// `-----BEGIN` (Fedora/RHEL bundles) → accepted".
     #[test]
     fn extra_ca_parse_pem_accepts_crlf_and_a_leading_subject_label_line() {
@@ -498,7 +348,7 @@ mod tests {
         assert_eq!(roots.der()[0].as_ref(), root.as_slice());
     }
 
-    /// C-004 / D-10: a non-`CERTIFICATE` tag refuses — a pasted private key is
+    /// A non-`CERTIFICATE` tag refuses — a pasted private key is
     /// never silently skipped the way `reqwest::from_pem_bundle` would.
     #[test]
     fn extra_ca_parse_pem_refuses_a_private_key_block_alone() {
@@ -511,7 +361,7 @@ mod tests {
         }
     }
 
-    /// C-004 / D-10: the same refusal when a valid certificate sits beside the
+    /// The same refusal when a valid certificate sits beside the
     /// key — a bundle is all-or-nothing, never "the certificates that parsed".
     #[test]
     fn extra_ca_parse_pem_refuses_a_private_key_block_beside_a_certificate() {
@@ -524,7 +374,7 @@ mod tests {
         }
     }
 
-    /// C-004 / D-10: OpenSSL's `-trustout` output is tagged
+    /// OpenSSL's `-trustout` output is tagged
     /// `TRUSTED CERTIFICATE` — a certificate with trust attributes appended,
     /// which no TLS stack takes as an anchor. Refused by its tag like any
     /// other non-`CERTIFICATE` block, so the operator is told what to convert
@@ -541,7 +391,7 @@ mod tests {
         }
     }
 
-    /// C-005 env arm: a UTF-8 BOM ahead of `-----BEGIN` (a bundle saved by a
+    /// Env arm: a UTF-8 BOM ahead of `-----BEGIN` (a bundle saved by a
     /// Windows editor) is leading text to the decoder, so the bundle parses —
     /// and to the same root as without it, so a persisted copy stays
     /// idempotent on the next run.
@@ -559,7 +409,7 @@ mod tests {
         );
     }
 
-    /// C-004: zero blocks → `Empty`, for both the literal empty value and a
+    /// Zero blocks → `Empty`, for both the literal empty value and a
     /// whitespace-only one (an env var set to a blank line).
     #[test]
     fn extra_ca_parse_pem_refuses_empty_and_whitespace_only_input() {
@@ -570,7 +420,7 @@ mod tests {
         );
     }
 
-    /// C-004 (L2): a bundle cut off after `-----BEGIN` — the `pem` decoder
+    /// A bundle cut off after `-----BEGIN` — the `pem` decoder
     /// yields no block for it — is `Truncated` at block 0, not `Empty`: the
     /// operator supplied a certificate, just not all of it — and not
     /// `Malformed` either, whose wording sends them hunting an OS trust-store
@@ -594,7 +444,7 @@ mod tests {
         assert!(matches!(parse(b"subject=CN=ocx\n"), Err(TlsError::Empty { .. })));
     }
 
-    /// C-004: a complete certificate followed by a truncated one is refused
+    /// A complete certificate followed by a truncated one is refused
     /// naming the truncated block — `pem::parse_many` stops silently at the
     /// first block it cannot complete, so without the `-----BEGIN` count a
     /// bundle cut off mid-copy after cert 1 of 2 would trust one root and
@@ -625,7 +475,7 @@ mod tests {
         assert_eq!(parse(whole.as_bytes()).expect("two complete blocks parse").len(), 2);
     }
 
-    /// C-004: the truncation count uses the decoder's own needle. A leading
+    /// The truncation count uses the decoder's own needle. A leading
     /// comment carrying a bare `-----BEGIN` (`# delimited by
     /// -----BEGIN/-----END`) is not a block the decoder would have parsed, so
     /// a complete bundle behind it is accepted, not refused as `Truncated`.
@@ -643,7 +493,7 @@ mod tests {
         }
     }
 
-    /// C-004 / D-10: the size check runs first and is exact — one byte over
+    /// The size check runs first and is exact — one byte over
     /// `MAX_EXTRA_CA_CERTS_BYTES` is `TooLarge` carrying the byte count; a
     /// bundle of exactly the cap still parses.
     #[test]
@@ -669,7 +519,7 @@ mod tests {
         }
     }
 
-    /// C-004: a `CERTIFICATE` block whose body is not an X.509 certificate is
+    /// A `CERTIFICATE` block whose body is not an X.509 certificate is
     /// `Malformed` naming the zero-based block — both for arbitrary bytes and
     /// for valid DER that is not a certificate.
     #[test]
@@ -712,10 +562,10 @@ mod tests {
         }
     }
 
-    /// C-004 / S-007: a block that parses as X.509 but that the platform
+    /// A block that parses as X.509 but that the platform
     /// verifier refuses as an anchor — a pre-v3 certificate — is `Malformed`
     /// from the probe build, so no client is ever built with fewer roots than
-    /// configured (D-9). Linux-only by design: only webpki refuses it;
+    /// configured. Linux-only by design: only webpki refuses it;
     /// CryptoAPI and Security.framework accept any certificate version.
     ///
     /// The design record names a v1 root; rustls-webpki 0.103's
@@ -744,9 +594,9 @@ mod tests {
         }
     }
 
-    // ── C-043: every arm's rendered text, against a literal ─────────────────
+    // ── every arm's rendered text, against a literal ────────────────────────
 
-    /// C-043: the operator-facing wording of every `TlsError` arm, pinned to
+    /// The operator-facing wording of every `TlsError` arm, pinned to
     /// the literal string rather than to a shape.
     ///
     /// These are the sentences an operator reads when trust material is
@@ -827,7 +677,7 @@ mod tests {
         );
     }
 
-    // ── D-11: nothing reachable from an error echoes certificate bytes ──────
+    // ── nothing reachable from an error echoes certificate bytes ────────────
 
     /// A PEM body the way an operator's mistake would land it: the whole text
     /// in a path-typed variable. Returns the text and a slice of its base64
@@ -874,7 +724,7 @@ mod tests {
         ]
     }
 
-    /// D-11: every `TlsError` variant, over every source shape including the
+    /// Every `TlsError` variant, over every source shape including the
     /// pathological "PEM text landed in the path variable" one, renders no
     /// `-----BEGIN` and no base64 body — a `Display` reachable from here lands
     /// in CI logs (CWE-532). Asserted over the whole `source()` chain, the
@@ -907,7 +757,7 @@ mod tests {
         }
     }
 
-    /// D-11 through the real reader: `Unreadable` built by [`read_path`]
+    /// No PEM echo through the real reader: `Unreadable` built by [`read_path`]
     /// on the pathological value (PEM text as the path — over 256 bytes and
     /// newline-bearing) carries the path once, redacted, and its `#[source]`
     /// chain never names it. `read_bounded`'s own error renders the path
@@ -995,7 +845,7 @@ mod tests {
         }
     }
 
-    /// D-11 / DX-9: an `EnvPath` over 256 bytes or carrying a newline renders
+    /// An `EnvPath` over 256 bytes or carrying a newline renders
     /// as `OCX_EXTRA_CA_CERTS (<N> bytes, not a readable path)`; at exactly
     /// 256 bytes and newline-free it is still a path and prints verbatim.
     #[test]
@@ -1027,7 +877,7 @@ mod tests {
         );
     }
 
-    /// D-11: the same redaction for a `config.toml` path — the rendering names
+    /// The same redaction for a `config.toml` path — the rendering names
     /// the key, the tier and a byte count, never the value; an ordinary path
     /// prints as `extra_ca_certs=<path> (<tier>)`, so a refusal from any of a
     /// host's three `config.toml`s says which door and which file — the bare
@@ -1085,7 +935,7 @@ mod tests {
         );
     }
 
-    /// D-11 / DX-9: `NotACertificate` echoes the offending tag truncated — a
+    /// `NotACertificate` echoes the offending tag truncated — a
     /// 300-byte "tag" (the shape of a body line mistaken for a header) renders
     /// to a bounded, `{:?}`-escaped stub, never the whole thing.
     #[test]
@@ -1152,7 +1002,7 @@ mod tests {
         }
     }
 
-    /// C-005's env arm: `-----BEGIN` anywhere is the text itself under the
+    /// The env arm: `-----BEGIN` anywhere is the text itself under the
     /// `Env` origin; anything else is a path read as-is under `EnvPath`;
     /// a non-regular file is `Unreadable` under that same `EnvPath`.
     #[test]
@@ -1211,7 +1061,7 @@ mod tests {
         }
     }
 
-    // ── C-005 / D-7: the resolution ladder and the Sigstore fold ────────────
+    // ── the resolution ladder and the Sigstore fold ─────────────────────────
 
     /// A real self-signed CA (the test stack's Fulcio root, `basicConstraints
     /// CA:TRUE`) — the parser runs a real X.509 parse and a probe build, so
@@ -1242,7 +1092,7 @@ mod tests {
         path
     }
 
-    /// C-005: an env value carrying `-----BEGIN` is inline PEM text — parsed
+    /// An env value carrying `-----BEGIN` is inline PEM text — parsed
     /// as the `Env` origin, never read as a path.
     #[test]
     fn extra_ca_resolve_env_inline_text_is_the_env_origin() {
@@ -1259,7 +1109,7 @@ mod tests {
         }
     }
 
-    /// C-005: an env value without `-----BEGIN` is a path, read through the
+    /// An env value without `-----BEGIN` is a path, read through the
     /// bounded read as the `EnvPath` origin.
     #[test]
     fn extra_ca_resolve_env_path_is_read_as_the_env_path_origin() {
@@ -1279,7 +1129,7 @@ mod tests {
         }
     }
 
-    /// C-005 / S-007 / D-10: a path to a non-regular file is `Unreadable`
+    /// A path to a non-regular file is `Unreadable`
     /// (the bounded read refuses it), never a hang and never an empty set.
     #[cfg(unix)]
     #[test]
@@ -1293,7 +1143,7 @@ mod tests {
         }
     }
 
-    /// C-005 / S-005: env set → config never consulted. The config holds a
+    /// Env set → config never consulted. The config holds a
     /// value every arm would refuse; the env value wins and resolves.
     #[test]
     fn extra_ca_resolve_env_wins_over_config() {
@@ -1306,7 +1156,7 @@ mod tests {
         assert_eq!(roots.len(), 1, "the env value alone must be what resolved");
     }
 
-    /// ocx#469: a system-locked pair ignores the env value — the config's
+    /// A system-locked pair ignores the env value — the config's
     /// root is the one that resolves, and the env value (one every arm
     /// refuses) is never parsed. Red state: drop the lock guard and the env
     /// value wins as in `extra_ca_resolve_env_wins_over_config`.
@@ -1321,7 +1171,7 @@ mod tests {
         assert_eq!(roots.len(), 1, "the system root alone");
     }
 
-    /// C-005 / S-005: `""` is unset — falls through to config.
+    /// `""` is unset — falls through to config.
     #[test]
     fn extra_ca_resolve_empty_env_falls_through_to_config() {
         let roots = resolve_extra_roots(&config_with_pem(EXTRA_CA_PEM), Some(""), Some(ConfigTier::Home))
@@ -1335,7 +1185,7 @@ mod tests {
         );
     }
 
-    /// C-005: `extra_ca_certs_pem` is the `ConfigInline` origin.
+    /// `extra_ca_certs_pem` is the `ConfigInline` origin.
     #[test]
     fn extra_ca_resolve_config_pem_is_the_config_inline_origin() {
         let roots = resolve_extra_roots(&config_with_pem(EXTRA_CA_PEM), None, Some(ConfigTier::Home))
@@ -1361,7 +1211,7 @@ mod tests {
         }
     }
 
-    /// C-005: `extra_ca_certs` (already anchored absolute by the loader) is
+    /// `extra_ca_certs` (already anchored absolute by the loader) is
     /// read as the `ConfigPath` origin.
     #[test]
     fn extra_ca_resolve_config_path_is_the_config_path_origin() {
@@ -1386,14 +1236,14 @@ mod tests {
         }
     }
 
-    /// C-005: neither env nor config → the empty set, and nothing is read.
+    /// Neither env nor config → the empty set, and nothing is read.
     #[test]
     fn extra_ca_resolve_neither_is_empty() {
         let roots = resolve_extra_roots(&Config::default(), None, Some(ConfigTier::Home)).expect("nothing configured");
         assert!(roots.is_empty());
     }
 
-    /// D-7: [`sigstore_extra_roots`] folds to the `merged` view when
+    /// [`sigstore_extra_roots`] folds to the `merged` view when
     /// the managed source is digest-pinned or its key did not win the fold
     /// (the loader's tier record is anything but `Managed`), else `local`.
     #[test]

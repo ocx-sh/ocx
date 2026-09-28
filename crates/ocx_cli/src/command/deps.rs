@@ -29,9 +29,7 @@ use crate::{api, conventions, options};
 #[derive(Parser)]
 pub struct Deps {
     /// Expose the package's full dep set, including private (self-only)
-    /// edges. Affects `--flat` (the resolved evaluation order is filtered
-    /// through `tc_entry.visibility.has_private()` instead of
-    /// `has_interface()`). See `ocx exec --help` for the full surface
+    /// edges. Affects `--flat`. See `ocx exec --help` for the full surface
     /// semantics.
     ///
     /// Generated launchers embed `--self` automatically; avoid passing it
@@ -69,43 +67,16 @@ impl Deps {
         let fs = manager.file_structure();
 
         if self.flat {
-            // Walk each info's pre-built TC and emit entries that belong to
-            // the requested surface:
-            //
-            //   --self off (default): interface surface — emit entries where
-            //     `dep.visibility.has_interface()` is true (PUBLIC + INTERFACE
-            //     edges). This mirrors what `ocx exec` and `ocx env` see.
-            //
-            //   --self on: private surface — emit entries where
-            //     `dep.visibility.has_private()` is true (PUBLIC + PRIVATE
-            //     edges). This is the full self-runtime view used by generated
-            //     launchers.
-            //
-            // Before listing, scan the surface-projected union TC for version
-            // conflicts on the same `registry/repo` so users see a
-            // `conflicting` warning when multiple roots pull incompatible
-            // versions of the same package that actually contribute to the
-            // active surface (see test_deps_flat_conflicting_digests_reports_error).
-            // Sealed-edge TC entries that cannot collide at runtime are excluded.
-            //
-            // `deps` is a diagnostic listing, so the conflict is non-fatal here:
-            // `env`/`exec`/`run` hard-error on the same collision (see
-            // composer::check_repo_digest_conflicts), but the dependency tree
-            // must stay inspectable precisely so the user can see why. Both
-            // paths share the composer's detection helper under the same
-            // surface gate.
+            // Warn only, unlike `exec`/`env`'s hard error: the tree must stay inspectable to show why.
             let info_arcs: Vec<Arc<InstallInfo>> = infos.iter().cloned().map(Arc::new).collect();
             composer::warn_repo_digest_conflicts(&info_arcs, self.self_view);
 
-            // Dedup key: strip the advisory tag so two identifiers for the
-            // same registry/repo/digest (one tagged, one bare) collapse to one
-            // entry. Using only `digest()` would incorrectly merge two
-            // distinct registry/repo packages that share a manifest digest.
+            // Tag-stripped key, not the digest alone: two repositories sharing a digest must stay apart.
             let mut seen = HashSet::new();
             let mut entries = Vec::new();
             for info in &infos {
                 for dep in &info.resolved().dependencies {
-                    // Surface gate: skip entries not visible on the requested surface.
+                    // `--self`: the private surface (launcher runtime view); else what `exec`/`env` see.
                     let visible = if self.self_view {
                         dep.visibility.has_private()
                     } else {
@@ -131,7 +102,6 @@ impl Deps {
             }
             context.api().report(&api::data::deps::FlatDependencies::new(entries))?;
         } else if let Some(ref why_pkg) = self.why {
-            // Why view: find all paths from roots to target via resolve.json.
             let why_id = why_pkg.with_domain(context.default_registry())?;
             let mut all_paths = Vec::new();
 
@@ -155,7 +125,6 @@ impl Deps {
                 .api()
                 .report(&api::data::deps::DependenciesTrace::new(all_paths))?;
         } else {
-            // Tree view (default): walk metadata deps, resolve via resolve.json.
             let mut seen = HashSet::new();
             let max_depth = self.depth.unwrap_or(usize::MAX);
             let mut tree_roots = Vec::with_capacity(infos.len());
@@ -186,8 +155,6 @@ fn build_tree_node<'a>(
         let children = if is_repeated || current_depth >= max_depth {
             Vec::new()
         } else {
-            // Resolve declared deps to content paths via resolve.json (not deps/ symlinks).
-            // The resolved transitive closure maps (registry, repo) → platform-specific identifier.
             let resolved_map = resolved_dep_map(info.resolved());
             let mut children = Vec::new();
             for dep in info.metadata().dependencies() {
@@ -219,7 +186,6 @@ fn find_paths_to<'a>(
     all_paths: &'a mut Vec<Vec<ocx_oci::PackageRef>>,
 ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
     Box::pin(async move {
-        // Resolve declared deps via resolve.json (not deps/ symlinks).
         let resolved_map = resolved_dep_map(info.resolved());
 
         for dep in info.metadata().dependencies() {
@@ -241,12 +207,8 @@ fn find_paths_to<'a>(
 
 // ── Shared resolution helpers ────────────────────────────────────────
 
-/// Builds a lookup from `(registry, repo)` to the platform-resolved
-/// [`ocx_oci::PinnedPackageRef`] using the pre-computed resolve.json data.
-///
-/// This replaces the previous `read_deps_symlinks` approach — resolve.json
-/// is the canonical source written at pull time, and digest-pinned metadata
-/// cannot form cycles by construction.
+/// `(registry, repo)` → platform-resolved [`ocx_oci::PinnedPackageRef`], from resolve.json.
+/// Digest-pinned metadata cannot form cycles, so the walks over it need no cycle check.
 fn resolved_dep_map(resolved: &ResolvedPackage) -> HashMap<ocx_oci::Repository, &ocx_oci::PinnedPackageRef> {
     resolved
         .dependencies
@@ -255,31 +217,26 @@ fn resolved_dep_map(resolved: &ResolvedPackage) -> HashMap<ocx_oci::Repository, 
         .collect()
 }
 
-/// Resolves a declared dependency to an [`InstallInfo`] using the parent's
-/// resolve.json map (not deps/ symlinks).
+/// Resolves a declared dependency to an [`InstallInfo`] using the parent's resolve.json map.
 async fn resolve_dep_via_metadata(
     fs: &FileStructure,
     id: &ocx_oci::PinnedPackageRef,
     resolved_map: &HashMap<ocx_oci::Repository, &ocx_oci::PinnedPackageRef>,
 ) -> Option<InstallInfo> {
-    // Primary: direct digest lookup (single-platform manifests where
-    // the declared digest matches the stored content digest).
+    // A single-platform manifest: the declared digest is the content digest.
     let content = fs.packages.content(id);
     if ocx_util::fs::path_exists_lossy(&content).await {
         return load_install_info(id.clone(), content).await;
     }
 
-    // Fallback: the declared digest is an Image Index digest — look up the
-    // platform-resolved identifier from the parent's resolve.json.
+    // An image index digest: take the platform-resolved identifier.
     let repo_key = ocx_oci::Repository::from(&**id);
     let resolved_id = resolved_map.get(&repo_key)?;
     let content = fs.packages.content(resolved_id);
     load_install_info((*resolved_id).clone(), content).await
 }
 
-/// Whether validation refused the metadata for declaring an env modifier type
-/// this ocx does not know — the one failure here that means "too old", not
-/// "broken".
+/// Whether validation refused an env modifier type this ocx does not know: "too old", not "broken".
 fn is_unknown_env_modifier(error: &ocx_package::error::Error) -> bool {
     matches!(error, ocx_package::error::Error::UnknownEnvModifier { .. })
 }
@@ -289,12 +246,7 @@ async fn load_install_info(identifier: ocx_oci::PinnedPackageRef, content: std::
         Metadata::read_json(content.with_file_name("metadata.json")),
         ResolvedPackage::read_json(content.with_file_name("resolve.json")),
     );
-    // Enforce the ValidMetadata typestate: metadata this binary cannot
-    // structurally read is skipped rather than fed to downstream graph
-    // traversal, but the failure is surfaced as a warning so the user knows
-    // a corrupted install exists. An env token that fails to *resolve* does
-    // not land here (D14) — this command never resolves env values, so an
-    // otherwise-intact install still shows in the tree.
+    // Unparseable metadata is skipped with a warning, never traversed.
     let raw_metadata = match metadata {
         Ok(m) => m,
         Err(err) => {
@@ -309,9 +261,7 @@ async fn load_install_info(identifier: ocx_oci::PinnedPackageRef, content: std::
     let metadata = match ValidMetadata::try_from(raw_metadata) {
         Ok(m) => m.into(),
         Err(err) => {
-            // A package declaring a modifier type this ocx does not know is a
-            // newer package, not a damaged one — sending its publisher to
-            // reinstall would be advice for a fault that is not there.
+            // A newer package, not a damaged one: "reinstall" would be advice for a fault that is not there.
             if is_unknown_env_modifier(&err) {
                 tracing::warn!(
                     package = %identifier,
@@ -382,7 +332,7 @@ mod tests {
     }
 
     /// `ocx package deps` shows a tree it cannot resolve, and skips an install
-    /// it cannot read (D14).
+    /// it cannot read.
     ///
     /// Inverted: an env token naming an undeclared dep used to make the whole
     /// install vanish from the tree with a "corrupted install" warning. Showing

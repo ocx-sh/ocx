@@ -2,16 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 /// Whether the shell that invoked `ocx self activate` is an interactive one.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add the paired
-/// `--interactive` / `--no-interactive` flags. `--interactive` declares the
-/// session interactive, `--no-interactive` declares it not. The two are POSIX
-/// last-wins, so passing both is not an error. With neither flag the caller's
-/// own terminal probe decides — see [`Interactive::resolve`].
-///
-/// Both flags are hidden: they are machine surface, emitted by the
-/// `$OCX_HOME/env.*` shims from the interactivity test their own shell language
-/// provides, not something to type.
+// Hidden: emitted by the `$OCX_HOME/env.*` shims from their shell's own interactivity test.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Interactive {
     /// Declare this shell session interactive, instead of probing for a terminal.
@@ -24,30 +15,10 @@ pub struct Interactive {
 }
 
 impl Interactive {
-    /// Resolve whether this session is interactive, most specific first:
+    /// Whether this session is interactive: the flags, else `probed`.
     ///
-    /// 1. `--no-interactive` → false
-    /// 2. `--interactive` → true
-    /// 3. `probed` — the caller's own terminal probe
-    ///
-    /// This is the **input to** the `auto` rung of the `[shell] hook` and
-    /// `[shell] completions` ladders ([`super::hook::resolve_ladder`] rung 5),
-    /// never a rung of its own. A shim must pass this pair and not `--hook`:
-    /// rung 2 outranks `OCX_NO_HOOK` and `[shell] hook`, so a shim spelling its
-    /// answer as `--hook` would revoke both opt-outs for every shell it starts.
-    //
-    // The shell knows the answer and the binary cannot ask for it. Every shipped
-    // shim runs `self activate` inside a command substitution with stderr
-    // redirected, and stdin is no better: `ssh -t host 'bash -lc …'` allocates a
-    // pty for a shell that reads the login profile and exits without ever
-    // rendering a prompt, while Emacs `M-x shell` drives a genuinely interactive
-    // session over pipes on all three descriptors. `$-`, `status is-interactive`
-    // and `[Console]::IsInputRedirected` answer both correctly.
-    //
-    // `probed` stays as the fallback rather than a required argument so a shim
-    // written by an older `ocx self setup` — which sends no flag until the user
-    // re-runs setup or `self update` refreshes it — resolves exactly as it does
-    // today.
+    /// Feeds only the `auto` rung of [`super::hook::resolve_ladder`]; a shim must send this pair, never
+    /// `--hook`, which outranks `OCX_NO_HOOK` and `[shell] hook` and so revokes both opt-outs.
     pub fn resolve(&self, probed: bool) -> bool {
         if self.no_interactive {
             false
@@ -58,26 +29,8 @@ impl Interactive {
         }
     }
 
-    /// [`Self::resolve`] with this process's own best-effort terminal probe
-    /// supplying the fallback.
-    ///
-    /// Used **only** when the caller sent neither flag — a command typed at a
-    /// prompt, or a shim an older `ocx self setup` wrote. A shell that states
-    /// its own answer is always believed instead, because no descriptor answers
-    /// this correctly from inside the process: every shipped shim runs the
-    /// binary in a command substitution with stderr redirected to `/dev/null`,
-    /// so a stderr-only probe answered `false` for **every** real shell and no
-    /// shell ever registered the per-prompt hook through the install path.
-    ///
-    /// Both descriptors are therefore ORed, deliberately biased towards `true`:
-    /// this path only runs where no shim spoke, and there a terminal on either
-    /// descriptor is the best evidence available.
-    //
-    // A *signal*, never the decision. The ladder above it (`--no-hook`,
-    // `--hook`, `OCX_NO_HOOK`, `[shell] hook` — and the completion twins) still
-    // wins, which is why a shim must state interactivity through the
-    // `--[no-]interactive` pair and never paper over it with `--hook` or
-    // `--completion`: those rungs outrank the env and config opt-outs.
+    /// [`Self::resolve`] with this process's own terminal probe as the fallback.
+    // ORs stdin and stderr: every shim redirects stderr, so a stderr-only probe answers `false` for every shell.
     pub fn resolve_probed(&self) -> bool {
         use std::io::IsTerminal as _;
 

@@ -132,7 +132,6 @@ MIN_FILES_READ = 200
 #: the acceptance suite's census already runs on: diff names, never totals.)
 BASELINE_DEAD = frozenset({
     "crates/ocx_cli/src/app/conventions.rs",
-    "crates/ocx_cli/src/cli.rs",
     "crates/ocx_cli/src/command/package_info.rs",
     "crates/ocx_cli/src/command/run.rs",
     "crates/ocx_lib/src/cli/exit_code.rs",

@@ -1,46 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The macOS session-PATH writer: a `RunAtLoad` LaunchAgent.
+//! The macOS session-PATH writer: a `RunAtLoad` LaunchAgent whose `ProgramArguments` are
+//! `/bin/sh -c <merge script>`, not `launchctl setenv PATH <literal>`.
 //!
-//! The agent's `ProgramArguments` are `/bin/sh -c <merge script>`, **not**
-//! `launchctl setenv PATH <literal>`. launchd runs no shell of its own, so a
-//! plist argument reaches `execve` verbatim and a `$PATH` inside it is four
-//! literal characters. Baking a composed literal at `ocx self setup` time
-//! would freeze whatever PATH existed *that day* and replay it at every
-//! subsequent login, silently reverting anything another tool changed in
-//! between. The `/bin/sh -c` form makes the value a function of the
-//! **then-current** session instead: the script reads
-//! `launchctl getenv PATH` at load, removes any prior occurrence of the two
-//! directories, and re-inserts them in front.
-//!
-//! **Each directory appears exactly once in the script, single-quoted, and
-//! every later use is a `"$var"` expansion.** That binding is the whole safety
-//! argument: inside `'…'` nothing expands, and `"$b"` expands the variable
-//! without re-scanning its value, so a `$`, a backtick or a `\` in `$OCX_HOME`
-//! is inert at both sites. Interpolating a directory directly into the final
-//! double-quoted word would re-open the injection in a second place, because a
-//! double-quoted word *does* expand `$` and backtick.
-//!
-//! # The plist is a template, not a serializer
-//!
-//! Per D-V2/C-041 the plist is a **constant template with two validated
-//! interpolations and no escaper**, and the refusal set widens accordingly to
-//! `&`, `<`, `>` and every XML-1.0-forbidden control character.
-//! `quality-core.md` rates hand-emitting an external wire format Block-tier —
-//! and it is right to, which is why nothing here *emits* XML: the document has
-//! zero dynamic structure, and the only variability is two text runs whose
-//! character set is refused down to one that needs no escaping. Stated
-//! honestly: unlike the sibling writers, which refuse the *unrepresentable*,
-//! this refuses the *representable*. It is a deliberate narrowing, and
-//! launchd's failure mode is what justifies it — a malformed plist is a
-//! **silent** non-load, so a refusal naming the directory is the only
-//! diagnosable outcome available.
-//!
-//! Two limits are stated rather than worked around: `launchctl setenv` reaches
-//! processes started afterwards, never a GUI application already running; and
-//! another tool that calls `launchctl setenv PATH` later in the same session
-//! simply wins by running last.
+//! A literal baked at setup would revert every later PATH change at each login, so the script reads
+//! `launchctl getenv PATH` at load and re-inserts the directories in front
+//! (`adr_toolchain_activation.md` § Session PATH, per platform).
 
 use std::path::{Path, PathBuf};
 
@@ -55,34 +21,11 @@ pub const AGENT_LABEL: &str = "sh.ocx.path";
 /// The plist this writer owns, relative to the user's home directory.
 pub const PLIST_RELATIVE_PATH: &str = "Library/LaunchAgents/sh.ocx.path.plist";
 
-/// The mode the plist must carry.
-///
-/// launchd refuses a LaunchAgent with "dubious permissions" and its failure
-/// mode is a **silent non-load**, so this is load-bearing rather than hygiene
-/// and needs its own test rather than a code review. Group- and
-/// world-*writable* is what launchd objects to; 0644 is the mode it accepts.
+/// The mode the plist must carry: launchd silently never loads a group- or world-writable agent.
 pub const PLIST_MODE: u32 = 0o644;
 
-/// Characters the plist and its embedded script cannot carry, checked in this
-/// order (the first match is the one the refusal names).
-///
-/// - `'` — the script single-quotes each directory, and a single-quoted shell
-///   word has no escape for a `'` inside it.
-/// - `"` — refused with `'` so the two quoting characters have one answer
-///   between them.
-/// - `&`, `<`, `>` — XML markup. Under D-V2 they are refused rather than
-///   escaped, because escaping them would mean owning an XML emitter.
-/// - `\n`, `\r` — a newline ends the script line; `\r` is additionally
-///   rewritten to `\n` by XML 1.0 line-end normalisation (§2.11), so a
-///   directory containing one would be *silently renamed* by any conforming
-///   parser rather than merely refused.
-/// - `:` — the PATH delimiter. A segment containing one is two segments to
-///   every reader.
-/// - `\0` — forbidden by XML 1.0 and unrepresentable in a `sh` argument.
-///
-/// Every character XML 1.0 forbids outright is refused too — see
-/// [`xml_forbids`], which covers the control bytes this table does not name
-/// individually.
+/// Characters the plist and its script cannot carry, in the order the refusal names them;
+/// [`xml_forbids`] covers the control bytes this table does not name.
 pub const REFUSED: &[(char, &str)] = &[
     ('\'', "and a single-quoted shell word has no escape for it"),
     ('"', "which the plist's quoting cannot carry"),
@@ -103,19 +46,8 @@ pub fn plist_path(home: &HomeEnv) -> PathBuf {
     home.home.join(PLIST_RELATIVE_PATH)
 }
 
-/// Whether XML 1.0 forbids `character` in document content.
-///
-/// The `Char` production, verbatim: `#x9 | #xA | #xD | [#x20-#xD7FF] |
-/// [#xE000-#xFFFD] | [#x10000-#x10FFFF]`. Everything outside it is forbidden —
-/// which is every C0 control except tab, newline and carriage return, plus
-/// U+FFFE and U+FFFF.
-///
-/// Two boundaries are worth stating because they are the ones that get guessed
-/// wrong. **U+007F is allowed**: XML 1.0 permits the whole `#x20-#xD7FF` range,
-/// so DEL and the C1 controls are legal here (XML *1.1* is the one that
-/// restricts them, and a plist is XML 1.0). And the D800–DFFF surrogate gap
-/// needs no arm at all: a Rust `char` can never hold one, so a branch for it
-/// would be unreachable rather than defensive.
+/// Whether XML 1.0's `Char` production excludes `character`.
+// DEL and U+0080-U+009F stay allowed: only XML 1.1 restricts them, and a plist is XML 1.0.
 pub fn xml_forbids(character: char) -> bool {
     !matches!(
         character,
@@ -143,10 +75,7 @@ pub fn encode(directory: &Path) -> Result<&str, SessionPathError> {
     if let Some((character, reason)) = REFUSED.iter().find(|(character, _)| spelled.contains(*character)) {
         return Err(refusal(*character, reason));
     }
-    // The table names the characters a *reader* would guess at; this catches
-    // every remaining one XML 1.0 has no representation for, so a control byte
-    // nobody thought to list is refused rather than written into a document
-    // launchd then declines to load without saying why.
+    // Any unlisted forbidden byte is refused here, or launchd silently declines the document.
     match spelled.chars().find(|character| xml_forbids(*character)) {
         Some(character) => Err(refusal(character, "which XML 1.0 forbids outright")),
         None => Ok(spelled),
@@ -168,40 +97,11 @@ pub fn encode(directory: &Path) -> Result<&str, SessionPathError> {
 /// launchctl setenv PATH "$d0:$d1${out:+:$out}"
 /// ```
 ///
-/// The remove-then-prepend is what makes a second load a no-op instead of an
-/// accumulating prefix, and everything the pipeline does not match is copied
-/// through unchanged — so a tool that appended to the GUI PATH after the agent
-/// was installed keeps its entry across the next login.
-///
-/// # The `__OCX_TESTING_LAUNCHCTL` seam
-///
-/// The first two lines are a **testability seam, and nothing else**: the
-/// default is the absolute `/bin/launchctl` the agent runs under, so on a real
-/// login the script behaves exactly as if the path were written inline. It
-/// exists because ADR item 6 — that the composed PATH is a function of the
-/// *then-current* session value rather than a setup-time snapshot — is only
-/// provable by running this script, and the only other way to run it off macOS
-/// is to rewrite a literal in the generated text, which tests the rewriting
-/// rather than the script. launchd sets no `__OCX_TESTING_LAUNCHCTL` in an agent's
-/// environment, so the default is what loads.
-///
-/// The `__OCX_TESTING_` prefix is this repository's convention for a seam that
-/// is not product surface (D-V27), and it matters more here than it usually
-/// does: this is an **environment-controlled program path in a script launchd
-/// runs at every login**, so a plausible-looking name like `LAUNCHCTL` is one
-/// `launchctl setenv` away from redirecting the binary the login agent
-/// executes. The prefix makes the variable read as non-product to anyone
-/// auditing the plist, and makes it something nobody sets by accident.
-///
-/// The indirection through a function keeps the two invocations spelled
-/// `launchctl getenv PATH` and `launchctl setenv PATH` — the vocabulary the
-/// contract and the manual-removal recipe both use, and what a user reading
-/// the plist expects to find.
+/// Remove-then-prepend keeps a second load a no-op and copies every other segment through.
 ///
 /// # Errors
 ///
-/// [`SessionPathError`] from [`encode`], for the first directory that cannot
-/// be encoded.
+/// [`SessionPathError`] from [`encode`], for the first directory that cannot be encoded.
 pub fn merge_script(directories: &[PathBuf]) -> Result<String, SessionPathError> {
     let mut assignments = String::new();
     let mut filters = String::new();
@@ -209,17 +109,9 @@ pub fn merge_script(directories: &[PathBuf]) -> Result<String, SessionPathError>
 
     for (index, directory) in directories.iter().enumerate() {
         let spelled = encode(directory)?;
-        // Single-quoted, exactly once. Every later use is `"$dN"`, which
-        // expands the variable without re-scanning its value — so a `$`, a
-        // backtick or a `\` in `$OCX_HOME` is inert at both sites.
+        // Quoted once; every later use is `"$dN"`, since interpolating the directory reopens shell injection.
         assignments.push_str(&format!("d{index}='{spelled}'\n"));
-        // `-e` before the operand: without it a directory beginning with `-`
-        // is parsed by `grep` as an option rather than a pattern, so the
-        // dedup filters the wrong segment (or, for `-f…`, reads a file) and
-        // the remove-then-prepend accumulates a duplicate at every login.
-        // `encodable_str` already refuses a relative directory, which covers
-        // this case today — this keeps the emitted script correct on its own
-        // terms rather than by a guard three modules away.
+        // `-e`, or a directory starting with `-` is a `grep` option and duplicates accumulate per login.
         filters.push_str(&format!(" | grep -vxF -e \"$d{index}\""));
         if index > 0 {
             prefix.push(':');
@@ -227,15 +119,15 @@ pub fn merge_script(directories: &[PathBuf]) -> Result<String, SessionPathError>
         prefix.push_str(&format!("$d{index}"));
     }
 
-    // With no directories there is no prefix to prepend, and emitting the
-    // `"<prefix>${out:+:$out}"` form anyway would set PATH to a value with a
-    // leading `:` — the working directory, to every reader.
+    // An empty prefix in the `${out:+:$out}` form leaves a leading `:`, read as the working directory.
     let composed = if prefix.is_empty() {
         "\"$out\"".to_owned()
     } else {
         format!("\"{prefix}${{out:+:$out}}\"")
     };
 
+    // A test seam: a plausible name like `LAUNCHCTL` would be one `launchctl setenv` from redirecting
+    // the binary this login agent runs, so it keeps the `__OCX_TESTING_` prefix.
     Ok(format!(
         "__OCX_TESTING_LAUNCHCTL=${{__OCX_TESTING_LAUNCHCTL:-{LAUNCHCTL_BINARY}}}\n\
          launchctl() {{ \"$__OCX_TESTING_LAUNCHCTL\" \"$@\"; }}\n\
@@ -250,15 +142,11 @@ pub fn merge_script(directories: &[PathBuf]) -> Result<String, SessionPathError>
 /// The `launchctl` the agent runs, and the default of the script's seam.
 pub const LAUNCHCTL_BINARY: &str = "/bin/launchctl";
 
-/// What the merge script composes onto when `launchctl getenv PATH` is unset.
-///
-/// Without it a fresh login would get a PATH holding OCX's two directories and
-/// nothing else — no `sh`, no `ls` — for every GUI application launched
-/// afterwards.
+/// Composed onto when `launchctl getenv PATH` is unset, or GUI apps get a PATH without `sh` or `ls`.
 pub const SYSTEM_DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
-/// The whole plist: a constant template with exactly two interpolations —
-/// [`AGENT_LABEL`] and the [`merge_script`] output — and no escaper (D-V2).
+/// The whole plist: a constant template interpolating [`AGENT_LABEL`] and [`merge_script`], with no
+/// escaper, since [`encode`] refuses everything that would need one.
 ///
 /// # Errors
 ///
@@ -286,36 +174,13 @@ pub fn render_plist(directories: &[PathBuf]) -> Result<String, SessionPathError>
     ))
 }
 
-/// Publish `contents` to `path` and leave it at [`PLIST_MODE`].
-///
-/// **The mode is the whole reason this function exists.** Every shipped setup
-/// writer publishes through [`ocx_util::fs::write_bytes_atomic`], which
-/// creates its temp file `0o600` — a private-file contract its own doc states
-/// explicitly and which is right for every other file `ocx self setup` writes.
-/// A LaunchAgent at 0600 is what launchd calls "dubious permissions", and it
-/// refuses to load it **silently**: no error, no log the user will find, just a
-/// PATH that never changes. So the atomic publish is kept — a plain
-/// `std::fs::write` would follow a symlink at the target and truncate it — and
-/// the mode is set on the **temp file, before the rename**.
-///
-/// Ordering, not style: a `set_permissions` *after* the publish leaves the
-/// plist briefly live at its final path at 0600, and `set_permissions`
-/// follows symlinks — so a same-uid process replacing the file in that window
-/// gets an arbitrary file chmod'd 0644. Same uid throughout, so no privilege
-/// boundary is crossed, but the window has no reason to exist: `tempfile`
-/// takes the mode at creation, and after that the rename publishes a file
-/// that was never at the wrong mode.
-///
-/// `cfg(unix)` rather than `cfg(target_os = "macos")`: nothing here is
-/// macOS-specific, and gating it to macOS would make the one rule whose failure
-/// mode is silence observable only on the platform where it is hardest to test.
-/// On Linux this runs, and its test reds there.
+/// Publish `contents` to `path` atomically at [`PLIST_MODE`].
 ///
 /// # Errors
 ///
-/// Any I/O failure from the publish or the mode change. The caller maps it to
-/// [`SessionPathOutcome::Failed`]; it never becomes a
-/// [`SessionPathError`].
+/// Any I/O failure; the caller maps it to [`SessionPathOutcome::Failed`].
+// Not `write_bytes_atomic`: its 0600 temp file is an agent launchd silently refuses.
+// The mode is set before the rename: a chmod after it follows a symlink a same-uid process swapped in.
 #[cfg(unix)]
 pub fn publish_plist(path: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write as _;
@@ -325,23 +190,14 @@ pub fn publish_plist(path: &Path, contents: &str) -> std::io::Result<()> {
         .parent()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "plist path has no parent"))?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    // `File::set_permissions` on the open handle, not `Builder::permissions`:
-    // the builder passes the mode to `open(2)`, where the umask clips it, so a
-    // user at `umask 077` would publish a 0600 plist launchd silently refuses
-    // — and `plist_is_current` would then agree with it forever. An `fchmod`
-    // on the fd is neither umask-masked nor symlink-following.
+    // `fchmod` on the fd, not `Builder::permissions`: `open(2)`'s mode is umask-clipped to 0600 at `umask 077`.
     tmp.as_file()
         .set_permissions(std::fs::Permissions::from_mode(PLIST_MODE))?;
     tmp.write_all(contents.as_bytes())?;
     ocx_util::fs::persist_temp_file(tmp, path)
 }
 
-/// Run `launchctl` with `arguments` and hand back its whole result.
-///
-/// The one place this module starts a process. Its callers decide what a
-/// non-zero exit means, because that differs per subcommand: a failed
-/// `setenv` is a genuine failure, while a `bootout` of an agent that was never
-/// loaded is the ordinary state after a manual removal.
+/// Run `launchctl` with `arguments`; callers judge a non-zero exit, which differs per subcommand.
 #[cfg(target_os = "macos")]
 fn launchctl<I, S>(arguments: I) -> std::io::Result<std::process::Output>
 where
@@ -353,17 +209,9 @@ where
 
 /// The current session-wide `PATH`, as `launchctl getenv PATH` reports it.
 ///
-/// `Ok(None)` when there is nothing to compose against — the variable is
-/// unset, or `launchctl` itself declined the read. The two are deliberately
-/// **not** distinguished: `getenv` of an unset variable is not a documented
-/// exit status, so treating a non-zero exit as an error would make the
-/// ordinary fresh-login state a failure on some OS versions. The only caller
-/// subtracts from what comes back, and an empty answer means it subtracts
-/// nothing — never that it clears anything.
-///
-/// An `OsString` rather than a `String`: a PATH that is not valid UTF-8 is
-/// still a PATH, and `to_string_lossy` here would substitute U+FFFD into
-/// somebody else's segment and then write the corrupted value back.
+/// `Ok(None)` when unset or the read was declined: `getenv` of an unset variable has no documented
+/// exit status, so treating non-zero as an error fails a fresh login.
+// `OsString`: `to_string_lossy` would write U+FFFD back into another tool's segment.
 #[cfg(target_os = "macos")]
 fn launchctl_getenv_path() -> std::io::Result<Option<std::ffi::OsString>> {
     use std::os::unix::ffi::OsStringExt as _;
@@ -380,12 +228,7 @@ fn launchctl_getenv_path() -> std::io::Result<Option<std::ffi::OsString>> {
 }
 
 /// Set the session-wide `PATH` to `value`.
-///
-/// **`launchctl unsetenv PATH` is forbidden** and has no wrapper here on
-/// purpose: it deletes the entire session-wide value rather than ocx's
-/// contribution to it, stripping every other tool's segment from every GUI
-/// application launched afterwards. A deregistration whose remainder is empty
-/// writes nothing at all rather than reaching for it.
+// No `unsetenv` wrapper exists on purpose: it strips every tool's segment from every later GUI app.
 #[cfg(target_os = "macos")]
 fn launchctl_setenv_path(value: &std::ffi::OsStr) -> std::io::Result<()> {
     let output = launchctl([std::ffi::OsStr::new("setenv"), std::ffi::OsStr::new("PATH"), value])?;
@@ -398,57 +241,33 @@ fn launchctl_setenv_path(value: &std::ffi::OsStr) -> std::io::Result<()> {
     )))
 }
 
-/// Boot the agent out of the current GUI domain.
-///
-/// `launchctl bootout gui/<uid>/sh.ocx.path` — a **service** target, not the
-/// bare domain target `gui/<uid>`. The plan's C-040 text spells the latter;
-/// that spelling boots out the user's entire GUI domain, which ends their
-/// login session. The service target is what removes this one agent, and it is
-/// what this writer uses.
-///
-/// `bootout` rather than the deprecated `launchctl unload`. An agent that is
-/// not loaded is not an error — bootout of an absent service is the ordinary
-/// state after a manual removal — so this reports the exit status rather than
-/// judging it, and every caller ignores it deliberately.
+/// Boot the agent out of the current GUI domain, reporting the exit status unjudged.
+// A service target: the bare domain `gui/<uid>` would end the user's whole login session.
 #[cfg(target_os = "macos")]
 fn boot_agent_out(uid: u32) -> std::io::Result<std::process::Output> {
     launchctl(["bootout".to_owned(), format!("gui/{uid}/{AGENT_LABEL}")])
 }
 
-/// The uid naming the GUI domain this process can address.
-///
-/// `launchctl`'s `gui/<uid>` is the caller's own login session, so the answer
-/// comes from the process's own credentials rather than from `$HOME` or
-/// `$USER` — the same reason `record::environment::user_id` reaches for
-/// `geteuid` instead of an environment variable.
+/// The uid of the GUI domain this process can address, from its credentials, never `$HOME`/`$USER`.
 #[cfg(target_os = "macos")]
 fn gui_domain_uid() -> u32 {
-    // SAFETY: `getuid` reads the calling process's own credentials. It takes no
-    // arguments, touches no memory, and is documented as always succeeding.
+    // SAFETY: `getuid` takes no arguments, touches no memory and always succeeds.
     unsafe { libc::getuid() }
 }
 
-/// Write the LaunchAgent plist at [`PLIST_MODE`], creating `LaunchAgents/`
-/// when absent.
-///
-/// Ensure-present rather than write-once: rewritten when the rendered bytes
-/// differ, left untouched when they already match
-/// ([`SessionPathOutcome::Unchanged`]).
-///
-/// The publish itself is [`publish_plist`], which owns the 0644 rule.
+/// Write the LaunchAgent plist and load it; left untouched when already current.
 ///
 /// # Errors
 ///
-/// [`SessionPathError`] from [`render_plist`]. An I/O or `launchctl` failure
-/// is [`SessionPathOutcome::Failed`], never an error.
+/// [`SessionPathError`] from [`render_plist`]; an I/O or `launchctl` failure is
+/// [`SessionPathOutcome::Failed`].
 #[cfg(target_os = "macos")]
 pub(crate) fn register(
     home: &HomeEnv,
     directories: &[PathBuf],
     dry_run: bool,
 ) -> Result<(PathBuf, SessionPathOutcome), SessionPathError> {
-    // The one `?` on this path, and it runs before a byte is read or written:
-    // from here down every failure is an outcome (C-036).
+    // The only `?`, before any I/O: every later failure must be an outcome, never an error.
     let contents = render_plist(directories)?;
     let path = plist_path(home);
 
@@ -461,8 +280,6 @@ pub(crate) fn register(
     let outcome = match write_and_load(&path, &contents) {
         Ok(()) => SessionPathOutcome::Written,
         Err(error) => {
-            // Reported, not swallowed: the user-facing half is the caller's
-            // warning, and this is the cause behind it.
             tracing::debug!(path = ?path, %error, "LaunchAgent publish failed");
             SessionPathOutcome::Failed
         }
@@ -470,13 +287,8 @@ pub(crate) fn register(
     Ok((path, outcome))
 }
 
-/// Whether the plist on disk is already what this run would publish — **bytes
-/// and mode both**.
-///
-/// The mode belongs in the comparison because launchd's objection to a
-/// non-0644 agent is a silent non-load: a plist whose content is right and
-/// whose mode is wrong is a broken installation that a content-only check
-/// would report as `Unchanged` forever.
+/// Whether the plist on disk already has this run's bytes and mode.
+// Mode counts: a wrong-mode plist silently never loads, and bytes alone call it `Unchanged` forever.
 #[cfg(target_os = "macos")]
 fn plist_is_current(path: &Path, contents: &str) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
@@ -487,10 +299,7 @@ fn plist_is_current(path: &Path, contents: &str) -> bool {
 
 /// Publish the plist and load it into the current GUI domain.
 ///
-/// The load is what makes `ocx self setup` take effect in this login session
-/// rather than only at the next one. It is a boot-out-then-bootstrap pair
-/// because `bootstrap` refuses a service that is already loaded, and the
-/// boot-out of an agent that was never loaded is not a failure (E-M15).
+/// Booted out first, since `bootstrap` refuses an already-loaded service.
 #[cfg(target_os = "macos")]
 fn write_and_load(path: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -499,42 +308,30 @@ fn write_and_load(path: &Path, contents: &str) -> std::io::Result<()> {
     publish_plist(path, contents)?;
 
     let uid = gui_domain_uid();
-    // Deliberately ignored: an agent that is not loaded is the ordinary state
-    // on a first run, and `bootout` reports that as a non-zero exit.
+    // Ignored: `bootout` of a not-loaded agent, the first-run state, exits non-zero.
     let _ = boot_agent_out(uid);
 
     let domain = std::ffi::OsString::from(format!("gui/{uid}"));
     let loaded = launchctl([std::ffi::OsStr::new("bootstrap"), &domain, path.as_os_str()])?;
     if !loaded.status.success() {
-        // Not a failure of the publish: `RunAtLoad` still composes the PATH at
-        // the next login, so the store is correct either way. Recorded because
-        // it is the difference between "takes effect now" and "takes effect
-        // after you log in again".
+        // Not a failure: `RunAtLoad` still composes the PATH at the next login.
         tracing::debug!(status = %loaded.status, "launchctl bootstrap of the LaunchAgent did not load it now");
     }
     Ok(())
 }
 
-/// Boot the agent out, delete the plist, then subtract the two directories
-/// from the live session value.
-///
-/// Order matters: the agent is booted out first so it cannot re-add the
-/// directories between the delete and the `setenv`. The `setenv` writes the
-/// remainder — never `unsetenv` — and is skipped entirely when
-/// `launchctl getenv PATH` comes back empty.
+/// Boot the agent out, delete the plist, then subtract the directories from the live session value.
 ///
 /// # Errors
 ///
-/// [`SessionPathError`] from [`encode`] — the directories are still validated,
-/// so a value that could never have been written is diagnosed as such rather
-/// than reported as a successful removal.
+/// [`SessionPathError`] from [`encode`], so a never-writable value is diagnosed, not reported removed.
 #[cfg(target_os = "macos")]
 pub(crate) fn deregister(
     home: &HomeEnv,
     directories: &[PathBuf],
     dry_run: bool,
 ) -> Result<(PathBuf, SessionPathOutcome), SessionPathError> {
-    // The one `?` on this path, and it runs before the store is touched.
+    // The only `?`, before the store is touched.
     let mut encoded = Vec::with_capacity(directories.len());
     for directory in directories {
         encoded.push(encode(directory)?);
@@ -542,10 +339,7 @@ pub(crate) fn deregister(
     let path = plist_path(home);
 
     if dry_run {
-        // Both pieces of evidence the real run acts on, so the prediction
-        // cannot disagree with it: the plist, and the live session value. The
-        // plist is judged by what it *carries*, never by its mere presence —
-        // see [`remove_agent`], whose real run is gated the same way.
+        // The same two pieces of evidence the real run acts on, so the prediction cannot disagree.
         let present = plist_carries_any(&path, &encoded) || session_carries_any(&encoded);
         let outcome = if present {
             SessionPathOutcome::Removed
@@ -566,35 +360,17 @@ pub(crate) fn deregister(
     Ok((path, outcome))
 }
 
-/// Boot the agent out, delete its plist, and subtract `directories` from the
-/// live session value. `Ok(false)` when none of the three had anything to do.
-///
-/// The subtraction goes through [`ocx_util::path::remove_segment`], the
-/// shipped inverse of the move-to-front the merge script performs, so the
-/// segments this removes are exactly the ones registration added. What it does
-/// **not** reach for is `launchctl` with a whole-variable verb: the remainder
-/// is written back, and an empty read writes nothing at all.
-///
-/// **Only the plist can fail this function.** The store is the plist — the
-/// live `launchctl` value is this session's copy of what the agent composed,
-/// and it is gone at the next login either way. So a `launchctl` fault after
-/// the plist has been deleted is a debug line, not an error: returning one
-/// would report [`SessionPathOutcome::Failed`] for a store that *was* removed,
-/// and the advisory behind that outcome tells the user to re-run
-/// `ocx self setup` — a **registration** — as the remedy for a deregistration.
+/// Boot the agent out (booted first, or it re-adds the directories before the `setenv`), delete its
+/// plist, and subtract `directories` from the live session value; `Ok(false)` when nothing changed.
+// Only the plist can fail this: a live-value fault would report `Failed` for a removed store and
+// advise re-running setup, a registration, to remedy a removal.
 #[cfg(target_os = "macos")]
 fn remove_agent(path: &Path, directories: &[&str]) -> std::io::Result<bool> {
-    // Gated on what the plist carries, not on whether one exists. `ocx self
-    // setup` calls the deregistration on every run with C-084's retired
-    // `<root>/bin` and then registers the current directories: booting the
-    // agent out and deleting a plist that names only the *current* ones would
-    // reload the agent on every re-run and report `written` where C-036
-    // promises `unchanged`.
+    // Gated on content, not presence: setup deregisters every run, so a presence gate would reload the
+    // agent each time and report `written` where `unchanged` is promised.
     let changed = if plist_carries_any(path, directories) {
         let uid = gui_domain_uid();
-        // Deliberately ignored: an agent that is not loaded is the ordinary
-        // state after a manual removal, and `bootout` reports that as a
-        // non-zero exit.
+        // Ignored: `bootout` of a not-loaded agent, the state after a manual removal, exits non-zero.
         let _ = boot_agent_out(uid);
         match std::fs::remove_file(path) {
             Ok(()) => true,
@@ -633,28 +409,15 @@ fn subtract_from_session(directories: &[&str]) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Whether the plist at `path` carries any of `directories`.
-///
-/// An unreadable or absent plist carries nothing, which is the honest answer
-/// for a store this writer cannot name a segment in — [`register`] republishes
-/// it wholesale on the same run either way.
+/// Whether the plist at `path` carries any of `directories`; an unreadable one carries nothing.
 #[cfg(target_os = "macos")]
 fn plist_carries_any(path: &Path, directories: &[&str]) -> bool {
     std::fs::read_to_string(path).is_ok_and(|contents| carries_any(&contents, directories))
 }
 
 /// Whether a rendered plist's text carries any of `directories`.
-///
-/// Matched on the whole `dN='<dir>'` assignment [`merge_script`] writes, never
-/// as a bare substring of the plist: the document also carries the *script*
-/// that reads those directories, so `contains` answers yes for any text that
-/// appears in it — a directory one of the assignments merely begins with
-/// (`<root>/toolchain/active`) included. The delimiters are exact because
-/// [`encode`] refuses both `'` and a newline in a directory, so the assignment
-/// line cannot be forged from a directory's own text.
-///
-/// Pure and host independent, like [`merge_script`] itself, so the rule it
-/// encodes has a reachable red state on every CI leg rather than only on macOS.
+// The whole `='<dir>'\n` assignment, never a bare substring, which also matches a directory an
+// assignment merely begins with; unforgeable because `encode` refuses `'` and newline.
 pub fn carries_any(contents: &str, directories: &[&str]) -> bool {
     directories
         .iter()
@@ -662,10 +425,6 @@ pub fn carries_any(contents: &str, directories: &[&str]) -> bool {
 }
 
 /// Whether the live session value still carries any of `directories`.
-///
-/// The half of the removal a `--dry-run` can observe without writing, so the
-/// dry run predicts from the same two pieces of evidence the real run acts on
-/// — the plist and the session value — rather than from the plist alone.
 #[cfg(target_os = "macos")]
 fn session_carries_any(directories: &[&str]) -> bool {
     let Ok(Some(current)) = launchctl_getenv_path() else {

@@ -20,15 +20,7 @@ use crate::options::signature_format::SignatureFormatOpt;
 use crate::{conventions, options};
 
 #[derive(Parser)]
-// The three signing modifiers are inert without something to sign, and a flag
-// that does nothing is the failure mode this spec rejects everywhere else. The
-// refusal is clap's, not hand-written: `ArgGroup::requires` pointing at a
-// second group renders "the following required arguments were not provided:
-// <--sign|--sbom>", which names both flags that would make the modifier mean
-// something. A hand-written check would have to reproduce that message, and it
-// would need "was this flag given" accessors on three option groups that are
-// shared with `sign`, `attest` and `verify` and deliberately expose only
-// resolvers.
+// `requires` refuses a signing modifier without `--sign`/`--sbom`, which would otherwise be a silent no-op.
 #[clap(group(clap::ArgGroup::new("signing_target").args(["sign", "sbom"]).multiple(true)))]
 #[clap(group(
     clap::ArgGroup::new("signing_modifier")
@@ -42,21 +34,19 @@ pub struct PackagePush {
     cascade: bool,
 
     /// Let the pushed tag's variant also own the un-prefixed version track
-    ///
-    /// A package whose every build is a named variant (`full-1.2.3`,
-    /// `slim-1.2.3`) publishes no bare `1.2.3`, so `ocx package install <ref>`
-    /// with no variant resolves nothing. Pushing a named variant with this flag
-    /// additionally tags the same manifest under the version with the prefix
-    /// stripped - one upload, two tag sets.
-    ///
-    /// With `--cascade` the bare track cascades too (`1.2.3`, `1.2`, `1`,
-    /// `latest`), blocked by newer bare versions exactly as any other track is;
-    /// without it only the bare version is written. Only the index of each
-    /// alias tag is written - no blob and no manifest is uploaded twice.
-    ///
-    /// The pushed tag must carry a variant; `--default` on a tag with no
-    /// variant is a usage error. In a pipeline that pushes every variant, pass
-    /// this flag only on the build whose variant should own the bare track.
+    #[arg(long_help = "\
+        Let the pushed tag's variant also own the un-prefixed version track\n\n\
+        A package whose every build is a named variant (`full-1.2.3`, `slim-1.2.3`) publishes no \
+        bare `1.2.3`, so `ocx package install <ref>` with no variant resolves nothing. Pushing a \
+        named variant with this flag additionally tags the same manifest under the version with the \
+        prefix stripped - one upload, two tag sets.\n\n\
+        With `--cascade` the bare track cascades too (`1.2.3`, `1.2`, `1`, `latest`), blocked by \
+        newer bare versions exactly as any other track is; without it only the bare version is \
+        written. Only the index of each alias tag is written - no blob and no manifest is uploaded \
+        twice.\n\n\
+        The pushed tag must carry a variant; `--default` on a tag with no variant is a usage error. \
+        In a pipeline that pushes every variant, pass this flag only on the build whose variant \
+        should own the bare track.")]
     #[clap(long = "default")]
     default: bool,
 
@@ -68,18 +58,16 @@ pub struct PackagePush {
     keep_tag: options::KeepTag,
 
     /// Append a UTC build-metadata segment to the published tag.
-    ///
-    /// `datetime` appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`,
-    /// `none` is a no-op. Passing the flag without a value defaults to
-    /// `datetime`. Must use `=` when supplying an explicit value
-    /// (`--build-timestamp=date`); bare `--build-timestamp` with no `=`
-    /// uses the `datetime` default. The version core in `--identifier`
-    /// must already be `X.Y.Z` (optionally with variant prefix or
-    /// pre-release); pushing against a tag that already carries build
-    /// metadata is rejected.
-    ///
-    /// Use this in continuous-deploy pipelines to publish rolling versions
-    /// like `dev.ocx.sh/ocx:0.3.0-dev_<YYYYMMDDhhmmss>`.
+    #[arg(long_help = "\
+        Append a UTC build-metadata segment to the published tag.\n\n\
+        `datetime` appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`, `none` is a no-op. \
+        Passing the flag without a value defaults to `datetime`. Must use `=` when supplying an \
+        explicit value (`--build-timestamp=date`); bare `--build-timestamp` with no `=` uses the \
+        `datetime` default. The version core in `--identifier` must already be `X.Y.Z` (optionally \
+        with variant prefix or pre-release); pushing against a tag that already carries build \
+        metadata is rejected.\n\n\
+        Use this in continuous-deploy pipelines to publish rolling versions like \
+        `dev.ocx.sh/ocx:0.3.0-dev_<YYYYMMDDhhmmss>`.")]
     #[clap(
         long = "build-timestamp",
         value_enum,
@@ -102,43 +90,35 @@ pub struct PackagePush {
     metadata: Option<std::path::PathBuf>,
 
     /// Record an OCI annotation on the published image index. Repeatable.
-    ///
-    /// Written verbatim onto the index of every tag this push writes,
-    /// including cascade tags. A repeated key keeps the last value. Omitting
-    /// the flag writes no annotations and leaves any the registry already
-    /// holds untouched.
-    ///
-    /// Set `org.opencontainers.image.source` to the HTTPS URL of the source
-    /// repository: on GHCR this is what links the package to its repository
-    /// and lets it inherit that repository's permissions. Registries derive
-    /// nothing from the repository path, so state it explicitly - for example
-    /// in GitHub Actions:
-    ///
-    ///   --annotation org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY
+    #[arg(long_help = "\
+        Record an OCI annotation on the published image index. Repeatable.\n\n\
+        Written verbatim onto the index of every tag this push writes, including cascade tags. A \
+        repeated key keeps the last value. Omitting the flag writes no annotations and leaves any \
+        the registry already holds untouched.\n\n\
+        Set `org.opencontainers.image.source` to the HTTPS URL of the source repository: on GHCR \
+        this is what links the package to its repository and lets it inherit that repository's \
+        permissions. Registries derive nothing from the repository path, so state it explicitly - \
+        for example in GitHub Actions:\n\n\
+        --annotation org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY")]
     #[clap(long = "annotation", value_name = "KEY=VALUE", value_parser = parse_annotation)]
     annotation: Vec<(String, String)>,
 
     /// Stamp OCI annotations from the CI environment
-    ///
-    /// Records `org.opencontainers.image.source`, `.revision`, `.created` and
-    /// `.version` on every index this push writes, cascade tags included.
-    /// `--ci-annotations=github` reads `$GITHUB_SERVER_URL`,
-    /// `$GITHUB_REPOSITORY` and `$GITHUB_SHA`; `--ci-annotations=gitlab` reads
-    /// `$CI_PROJECT_URL`, `$CI_COMMIT_SHA` and `$CI_PIPELINE_CREATED_AT`.
-    /// `$SOURCE_DATE_EPOCH`, when set, decides `.created` on either.
-    ///
-    /// Bare `--ci-annotations` autodetects the provider from the environment;
-    /// a usage error (exit 64) when none is detected. Must be supplied with
-    /// `=` (`--ci-annotations=gitlab`).
-    ///
-    /// `.version` is the value a pipeline cannot assemble for itself: with
-    /// `--identifier` omitted the tag comes from the build receipt, and this
-    /// push is what resolves it. The variant prefix is stripped, so pushing
-    /// `full-1.2.3` annotates `1.2.3`; a tag that is not a version annotates
-    /// no version.
-    ///
-    /// A variable that is unset or blank writes no annotation rather than an
-    /// empty one, and an explicit `--annotation` on the same key wins.
+    #[arg(long_help = "\
+        Stamp OCI annotations from the CI environment\n\n\
+        Records `org.opencontainers.image.source`, `.revision`, `.created` and `.version` on every \
+        index this push writes, cascade tags included. `--ci-annotations=github` reads \
+        `$GITHUB_SERVER_URL`, `$GITHUB_REPOSITORY` and `$GITHUB_SHA`; `--ci-annotations=gitlab` \
+        reads `$CI_PROJECT_URL`, `$CI_COMMIT_SHA` and `$CI_PIPELINE_CREATED_AT`. \
+        `$SOURCE_DATE_EPOCH`, when set, decides `.created` on either.\n\n\
+        Bare `--ci-annotations` autodetects the provider from the environment; a usage error (exit \
+        64) when none is detected. Must be supplied with `=` (`--ci-annotations=gitlab`).\n\n\
+        `.version` is the value a pipeline cannot assemble for itself: with `--identifier` omitted \
+        the tag comes from the build receipt, and this push is what resolves it. The variant prefix \
+        is stripped, so pushing `full-1.2.3` annotates `1.2.3`; a tag that is not a version \
+        annotates no version.\n\n\
+        A variable that is unset or blank writes no annotation rather than an empty one, and an \
+        explicit `--annotation` on the same key wins.")]
     #[clap(
         long = "ci-annotations",
         value_enum,
@@ -159,31 +139,27 @@ pub struct PackagePush {
     tags_file: Option<std::path::PathBuf>,
 
     /// After the push, attest this CycloneDX SBOM against the pushed manifest.
-    ///
-    /// Sugar for `ocx package attest --type cyclonedx` on the digest this push
-    /// just wrote. The file is read before the push, so a bad path costs no
-    /// upload; the OIDC token comes from OCX_IDENTITY_TOKEN or from ambient
-    /// CI detection, as `ocx package attest` resolves it.
-    ///
-    /// A push that lands followed by an attestation that fails is not rolled
-    /// back: a pushed manifest is immutable and OCI offers no un-push. The
-    /// push report is still emitted, with the attestation outcome recorded,
-    /// and the attestation failure decides the exit code.
+    #[arg(long_help = "\
+        After the push, attest this CycloneDX SBOM against the pushed manifest.\n\n\
+        Sugar for `ocx package attest --type cyclonedx` on the digest this push just wrote. The \
+        file is read before the push, so a bad path costs no upload; the OIDC token comes from \
+        OCX_IDENTITY_TOKEN or from ambient CI detection, as `ocx package attest` resolves it.\n\n\
+        A push that lands followed by an attestation that fails is not rolled back: a pushed \
+        manifest is immutable and OCI offers no un-push. The push report is still emitted, with the \
+        attestation outcome recorded, and the attestation failure decides the exit code.")]
     #[clap(long = "sbom", value_name = "PATH")]
     sbom: Option<std::path::PathBuf>,
 
     /// Sign each platform manifest this push writes, inline.
-    ///
-    /// Opt-in: a push without it signs nothing. The signature covers the
-    /// platform manifest, whose digest is final the moment it is pushed --
-    /// never the image index, whose digest is rewritten every time another
-    /// platform merges into it. Sign the index afterwards with
-    /// `ocx package sign --tags-file`, using the file `--tags-file` wrote.
-    ///
-    /// Keyless by default; `--key` selects a key pair. A push that lands and
-    /// then fails to sign is not rolled back: the push report is still
-    /// emitted, with the per-platform signing outcome recorded, and the
-    /// failure decides the exit code.
+    #[arg(long_help = "\
+        Sign each platform manifest this push writes, inline.\n\n\
+        Opt-in: a push without it signs nothing. The signature covers the platform manifest, whose \
+        digest is final the moment it is pushed -- never the image index, whose digest is rewritten \
+        every time another platform merges into it. Sign the index afterwards with `ocx package \
+        sign --tags-file`, using the file `--tags-file` wrote.\n\n\
+        Keyless by default; `--key` selects a key pair. A push that lands and then fails to sign is \
+        not rolled back: the push report is still emitted, with the per-platform signing outcome \
+        recorded, and the failure decides the exit code.")]
     #[clap(long = "sign")]
     sign: bool,
 
@@ -192,8 +168,7 @@ pub struct PackagePush {
     /// Defaults to [trust.sigstore].fulcio_url, else public Fulcio.
     ///
     /// Keyless-only: an error alongside `--key`, never silently ignored. A
-    /// flag that does nothing is the failure mode this command refuses
-    /// everywhere. A usage error without `--sign` or `--sbom`.
+    /// usage error without `--sign` or `--sbom`.
     #[clap(long = "fulcio-url", value_name = "URL", conflicts_with = "key")]
     fulcio_url: Option<String>,
 
@@ -244,57 +219,37 @@ pub struct PackagePush {
     identifier: Option<options::Identifier>,
 
     /// Layers to push, in order (base layer first, top layer last).
-    ///
-    /// Each layer is either:
-    ///   - a path to a pre-built archive file (`.tar.gz`, `.tar.xz`,
-    ///     `.tar.zst`), or
-    ///   - a digest reference to a layer already present in the target
-    ///     registry, written as `sha256:<hex>.<ext>` where `<ext>` declares
-    ///     the original archive format - one of `tar.gz`, `tgz`, `tar.xz`,
-    ///     `txz`, `tar.zst`, `tzst`, `tar.zstd`. The OCI distribution spec
-    ///     does not expose a layer's media type via blob HEAD, so the suffix
-    ///     is required: OCX refuses to guess.
-    ///
-    /// Either form may carry an optional layout tail
-    /// `:strip=N,prefix=P,from=REPO` that controls how the layer is placed
-    /// when the package is installed and where it uploads from:
-    ///   - `strip=N` drops the leading N path components (like
-    ///     `tar --strip-components=N`).
-    ///   - `prefix=P` relocates the layer under the relative subdirectory `P`
-    ///     (must stay inside the package; `..`, absolute, and Windows-style
-    ///     paths are rejected).
-    ///   - `from=REPO` attempts a cross-repository blob mount from `REPO`
-    ///     (same registry) before falling back to a normal upload. Use this
-    ///     to reuse a layer already pushed to another repository without
-    ///     re-uploading its bytes.
-    ///
-    /// All three keys are optional and comma-separated; omit the tail for
-    /// the default (no strip, package root, no mount attempt).
-    ///
-    /// Digest references enable layer reuse: a base layer pushed once can be
-    /// referenced by digest from many packages without re-uploading. Zero
-    /// layers is valid (produces a config-only OCI artifact) when
-    /// `--metadata` is supplied.
-    ///
-    /// Examples:
-    ///   ocx package push repo:2.0.0 ./libs.tar.gz:strip=1,prefix=share
-    ///   ocx package push repo:2.0.0 sha256:<hex>.tar.xz ./new.tar.zst
-    ///   ocx package push app:1.0.0 ./layer.tar.gz:from=base-images/layer
+    #[arg(long_help = "\
+        Layers to push, in order (base layer first, top layer last).\n\n\
+        Each layer is either: - a path to a pre-built archive file (`.tar.gz`, `.tar.xz`, \
+        `.tar.zst`), or - a digest reference to a layer already present in the target registry, \
+        written as `sha256:<hex>.<ext>` where `<ext>` declares the original archive format - one of \
+        `tar.gz`, `tgz`, `tar.xz`, `txz`, `tar.zst`, `tzst`, `tar.zstd`. The OCI distribution spec \
+        does not expose a layer's media type via blob HEAD, so the suffix is required: OCX refuses \
+        to guess.\n\n\
+        Either form may carry an optional layout tail `:strip=N,prefix=P,from=REPO` that controls \
+        how the layer is placed when the package is installed and where it uploads from: - \
+        `strip=N` drops the leading N path components (like `tar --strip-components=N`). - \
+        `prefix=P` relocates the layer under the relative subdirectory `P` (must stay inside the \
+        package; `..`, absolute, and Windows-style paths are rejected). - `from=REPO` attempts a \
+        cross-repository blob mount from `REPO` (same registry) before falling back to a normal \
+        upload. Use this to reuse a layer already pushed to another repository without re-uploading \
+        its bytes.\n\n\
+        All three keys are optional and comma-separated; omit the tail for the default (no strip, \
+        package root, no mount attempt).\n\n\
+        Digest references enable layer reuse: a base layer pushed once can be referenced by digest \
+        from many packages without re-uploading. Zero layers is valid (produces a config-only OCI \
+        artifact) when `--metadata` is supplied.\n\n\
+        Examples: ocx package push repo:2.0.0 ./libs.tar.gz:strip=1,prefix=share ocx package push \
+        repo:2.0.0 sha256:<hex>.tar.xz ./new.tar.zst ocx package push app:1.0.0 \
+        ./layer.tar.gz:from=base-images/layer")]
     layers: Vec<LayerRef>,
 }
 
 impl PackagePush {
-    /// Refuses `--ci-annotations gitlab` — the space form, which
-    /// `require_equals` reads as a bare `--ci-annotations` plus a layer named
-    /// `gitlab`.
-    ///
-    /// A method rather than an inline call so a test can drive it on a
-    /// clap-parsed `PackagePush`: the absorption is the parser's doing, and a
-    /// test that hand-built the fields would prove nothing about it.
+    /// Refuses `--ci-annotations gitlab`, which `require_equals` reads as a bare flag plus a layer
+    /// named `gitlab`.
     fn refuse_spaced_ci_annotations(&self) -> Result<(), crate::error::UsageError> {
-        // `Some(None)` is the bare flag: the `Option<Option<_>>` grammar keeps
-        // bare and `--ci-annotations=gitlab` apart, so only the former can
-        // have lost a value to `layers`.
         conventions::refuse_spaced_enum_value::<ocx_shell::ci::CiFlavor>(
             "--ci-annotations",
             matches!(self.ci_annotations, Some(None)),
@@ -302,30 +257,11 @@ impl PackagePush {
         )
     }
 
-    /// Refuses `--build-timestamp none` — the space form, which
-    /// `require_equals` reads as a bare `--build-timestamp` plus a layer named
-    /// `none`.
-    ///
-    /// The worst of the three guarded flags, because `default_missing_value`
-    /// turns the absorbed value into its **opposite**: the bare flag resolves
-    /// to `Datetime`, so an operator who asked for *no* build metadata gets a
-    /// `_YYYYMMDDhhmmss` suffix published. If no file named `none` exists the
-    /// push then fails on a phantom layer — loud, but blaming a layer for an
-    /// argument mistake. If one *does* exist (a directory named `date`, a stray
-    /// `none`), the push succeeds: an extra bogus layer, and `pkg:1.0+…`
-    /// published where `pkg:1.0` was asked for. A wrong published artifact,
-    /// against `--ci-annotations`' worst case of a missing annotation.
-    ///
-    /// A method rather than an inline call so a test can drive it on a
-    /// clap-parsed `PackagePush`: the absorption is the parser's doing, and a
-    /// test that hand-built the fields would prove nothing about it.
+    /// Refuses `--build-timestamp none`, which `require_equals` reads as a bare flag (`Datetime`)
+    /// plus a layer named `none`, silently publishing a timestamp.
     fn refuse_spaced_build_timestamp(&self) -> Result<(), crate::error::UsageError> {
-        // `default_missing_value = "datetime"` erases the bare/`=` distinction
-        // for `Datetime` alone — every other variant proves the value attached
-        // and so cannot have been lost. Coupled to that clap attribute by
-        // construction; `a_bare_build_timestamp_still_resolves_to_datetime`
-        // fails if the default is ever repointed, which would leave this
-        // precondition silently narrower than the grammar.
+        // Sound only while `default_missing_value` is `datetime`
+        // (`a_bare_build_timestamp_still_resolves_to_datetime`).
         let could_be_bare = matches!(self.build_timestamp, Some(BuildTimestampFormat::Datetime));
         conventions::refuse_spaced_enum_value::<BuildTimestampFormat>(
             "--build-timestamp",
@@ -335,32 +271,19 @@ impl PackagePush {
     }
 
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Before the autodetect below, not after: a value written with a space
-        // never reached the flag at all, and saying so beats both what
-        // autodetect guesses inside CI (the value silently ignored) and the
-        // error it raises outside (which blames the environment instead).
+        // Before the autodetect, or a spaced value is silently ignored in CI and blamed on the
+        // environment outside it.
         self.refuse_spaced_ci_annotations()?;
-        // Beside it, and for the same reason: before any auth, upload or
-        // receipt read, because the value never reached the flag and no amount
-        // of registry work can change that answer.
         self.refuse_spaced_build_timestamp()?;
-        // First, because it depends on nothing: a bare `--ci-annotations`
-        // outside a detectable CI is a usage error, and a usage error must
-        // cost no upload.
         let ci_annotations = conventions::resolve_ci_annotations_arg(self.ci_annotations)?;
 
-        // Read the build receipt only for what the command line left open: a
-        // fully explicit push must not be able to fail on a file it never
-        // needed. Resolved before `Publisher::new` and auth, so a push missing
-        // both a flag and a recorded value fails on its own arguments without
-        // a network round-trip first.
+        // Read only for what the command line left open: a fully explicit push must not fail on a file it never needed.
         let explicit_identifier = self
             .identifier
             .as_ref()
             .map(|identifier| identifier.with_domain(context.default_registry()))
             .transpose()?;
-        // A tagless -i is not a complete answer: the receipt may still supply
-        // the version, so it counts as a gap for the lazy read below.
+        // A tagless `-i` still leaves the version to the receipt.
         let identifier_answers = explicit_identifier
             .as_ref()
             .is_some_and(|identifier| identifier.tag().is_some() || identifier.digest().is_some());
@@ -370,16 +293,9 @@ impl PackagePush {
             crate::build_receipt::read_beside_bundle(&self.layers).await?
         };
         let identifier = crate::build_receipt::resolve_target_identifier(explicit_identifier, receipt.as_ref())?;
-        // The published index entry's platform label must not decouple from
-        // what the dependency pins were resolved against, which is why the
-        // receipt is the fallback rather than the host platform.
+        // Falls back to the receipt, never the host, or the index label decouples from what the pins resolved against.
         let platform = crate::build_receipt::resolve_target_platform(self.platform.clone(), receipt.as_ref())?;
 
-        // `--default` makes the pushed tag's own variant own the un-prefixed
-        // track. A tag that carries no variant has no default to declare, so it
-        // is a usage error (exit 64) rather than a silent no-op — and it is
-        // resolved here, before auth or any upload, so the refusal costs no
-        // network round-trip.
         if self.default && Version::parse(identifier.tag_or_latest()).is_none_or(|version| version.variant().is_none())
         {
             return Err(crate::error::UsageError::new(format!(
@@ -389,16 +305,7 @@ impl PackagePush {
             .into());
         }
 
-        // `--sbom` work that must happen BEFORE the push, because a push is
-        // not undoable. The offline refusal is first so it beats the generic
-        // `OfflineMode` (81) `remote_client()` would raise: an offline attest
-        // is a deliberate policy refusal (77) whichever verb reached it, and a
-        // script branching on 77 must not see a different code here than it
-        // sees from `ocx package attest`.
-        //
-        // WATCH: 77-before-81 is S-018's contract, pinned end to end in WP10a.
-        // Moving this block below `Publisher::new` silently returns 81 instead
-        // — no unit test here reaches `remote_client()`, so nothing local reds.
+        // Before `Publisher::new`, or offline exits 81 instead of 77 (no unit test reaches `remote_client()`).
         if self.sign {
             package_sign_common::refuse_when_offline(
                 &context,
@@ -418,11 +325,8 @@ impl PackagePush {
             }
         };
 
-        // Resolved before the push for the same reason the predicate is read
-        // before it: a malformed `--key`, a keyless `--no-rekor-upload`, or a
-        // forbidden `[trust.sigstore]` URL must cost no upload. Gated on a
-        // signing request, because an ordinary push must not start failing on
-        // a config key it never reads.
+        // Before the push, so a bad `--key`, keyless `--no-rekor-upload` or forbidden URL costs no upload.
+        // Gated on a signing request, or an ordinary push fails on a `[trust.sigstore]` key it never reads.
         let signing = match self.sign || self.sbom.is_some() {
             false => None,
             true => Some(self.resolve_signing(&context, &identifier).await?),
@@ -437,20 +341,14 @@ impl PackagePush {
         );
         let metadata = conventions::read_published_metadata(&metadata_path).await?;
 
-        // The publish gate, not the structural check: push is the last moment a
-        // publisher can be told about an unrecognised token before it becomes a
-        // published artifact nobody can edit (D14).
+        // The publish gate, not the structural check: past this, an unrecognised token is published immutably.
         let valid = ocx_package::metadata::validate_for_publish(metadata)?;
 
-        // A push writes where the identifier names: a write is never routed
-        // through an index, only a read of a package name is (ocx#504).
+        // `passthrough`, never index-routed: a write goes where the identifier names.
         let target = ocx_oci::OciIdentifier::passthrough(&identifier);
         let publisher = Publisher::new(context.remote_client()?.clone());
         publisher.ensure_auth(&target).await?;
 
-        // Gate: every dependency pin must name an existing platform MANIFEST
-        // digest — push makes no resolution decisions (run `ocx package
-        // create` for that).
         {
             let _spin = context.progress().spinner("Verifying dependency pins");
             publisher::verify_dependency_pins(publisher.client(), context.default_index(), &valid, &platform).await?;
@@ -467,10 +365,7 @@ impl PackagePush {
             None => BTreeMap::new(),
             Some(flavor) => ocx_shell::ci::annotations::for_flavor(
                 flavor,
-                // The tag this push resolved, whatever answered for it. A
-                // pipeline that omits `--identifier` learns the tag only from
-                // the report, which is after the index is written -- so the
-                // version annotation is the one it cannot stamp itself.
+                // Stamped here: a pipeline without `--identifier` learns the tag only after the index is written.
                 identifier.tag().and_then(Version::parse).as_ref(),
             ),
         };
@@ -509,37 +404,16 @@ impl PackagePush {
                 .await?
         };
 
-        // The primary version tag plus the rolling cascade tags, and the bare
-        // track `--default` aliased onto them. The `__ocx.keep.*` tags
-        // are deliberately left out: announce drops them downstream, so
-        // recording one in a file named "announce" would state something that
-        // never gets announced.
+        // No `__ocx.keep.*` tags: announce drops them, so the file would name tags never announced.
         let mut pushed_tags = vec![identifier.tag_or_latest().to_string()];
         pushed_tags.extend(outcome.cascade_tags.iter().cloned());
         pushed_tags.extend(outcome.aliases_written.iter().cloned());
 
-        // Emit the structured push report BEFORE the tags-file append. The
-        // push itself already succeeded and is not undoable, so an I/O failure
-        // writing the scratch file must not swallow the report — the caller
-        // still has to learn what landed in the registry. Plain output is a
-        // one-row table (identifier, digest, cascade + keep tags, layer
-        // counts); `--format json`
-        // serializes the report consumed by `ocx-mirror pipeline push`, and
-        // adds the per-platform manifest digests, which are JSON-only because
-        // the plain table is already at its five-column budget.
-        // Read before the outcome is consumed: `platform_digests` is the
-        // signing input, and it names the platform manifests -- never the
-        // index, whose digest the next platform merge rewrites.
+        // Platform manifests, never the index, whose digest a later platform merge rewrites.
         let platform_digests = outcome.platform_digests.clone();
         let mut report = crate::api::data::push::PushReport::from_outcome(identifier.to_string(), outcome)
             .with_annotations(annotations);
-
-        // Post-push work is never rolled back -- a pushed manifest is
-        // immutable and OCI offers no un-push -- so every failure below is a
-        // row in the report and a line on stderr, and the process exit code is
-        // `sweep_exit_code` over all of them: one fault class scripts through,
-        // a mix collapses to the generic failure. Same collapse the `--tags`
-        // sweep uses, and the same vocabulary in the rows.
+        // Post-push failures are never rolled back: each becomes a report row plus a log line.
         let mut failures: Vec<ocx_exit::ExitCode> = Vec::new();
 
         if let Some(options) = &signing
@@ -553,10 +427,7 @@ impl PackagePush {
             for (platform, outcome) in signed {
                 rows.push(match outcome {
                     Ok(signed) => {
-                        // Read before the result is consumed, exactly as
-                        // `sign` does: a `--signature-format both` platform
-                        // that lost one leg is a failure that still carries
-                        // the leg that landed.
+                        // A `both` platform that lost one leg fails but still reports the leg that landed.
                         let result = signed.result;
                         let leg = result
                             .first_failure()
@@ -591,10 +462,7 @@ impl PackagePush {
             report = report.with_signatures(rows);
         }
 
-        // The push already landed. Whatever the attestation does, the report is
-        // owed to the caller — so the outcome is folded into the report rather
-        // than replacing it with an error envelope, and the error is returned
-        // only after the report is on stdout.
+        // Folded into the report, never raised: the push already landed and its report is owed.
         if let Some(predicate) = sbom_predicate {
             let options = signing.expect("--sbom resolves the signing options above");
             match Self::attest_sbom(&context, &identifier, &platform, options, predicate).await {
@@ -608,8 +476,7 @@ impl PackagePush {
         }
         context.api().report(&report)?;
 
-        // The append still decides the exit code: the caller asked for the file,
-        // so a failure is a failure — it just no longer costs them the report.
+        // After the report, so a tags-file failure never swallows a push that already landed.
         if let Some(path) = &self.tags_file
             && let Err(error) = append_to_tags_file(path, &pushed_tags).await
         {
@@ -620,36 +487,16 @@ impl PackagePush {
             return Err(error);
         }
 
-        // The push succeeded, so a post-push failure is the worst outcome in
-        // the run and owns the exit code. It is returned rather than raised:
-        // the push report already claimed stdout, so an error envelope would
-        // be suppressed anyway, and only a code can express the sweep's
-        // "a mixed set collapses to Failure" rule. Each failure was logged
-        // above, which is the line `main` would have printed for a raised one.
+        // Returned, not raised: stdout already holds the report, so an error envelope would be suppressed.
         Ok(ExitCode::from(package_sign_common::sweep_exit_code(&failures)))
     }
 
-    /// Resolve the one option set both `--sign` and `--sbom` sign under.
-    ///
-    /// [`SignOptions`] is the carrier rather than a second struct: it already
-    /// holds every field [`AttestOptions`] needs beyond the predicate, and
-    /// minting a parallel type would give the Rekor-upload asymmetry a second
-    /// place to drift.
-    ///
-    /// `--fulcio-url` and `--rekor-url` let both URLs enter the shared ladder
-    /// as an explicit flag, ahead of `[trust.sigstore]` and the builtin
-    /// default, behind the same SSRF guard `sign` uses. `no_tty` is `false`
-    /// and the token overrides are absent, matching what `push --sbom`
-    /// already did.
+    /// Resolves the one option set both `--sign` and `--sbom` sign under.
     ///
     /// # Errors
     ///
-    /// A forbidden endpoint URL, a malformed `--key` reference (exit 64) or a
-    /// recognised-but-unimplemented key backend (exit 85), and the keyless
-    /// `--no-rekor-upload` refusal (exit 64). Each carries the identifier,
-    /// because each is returned as a `SignError` rather than a bare kind.
-    ///
-    /// [`AttestOptions`]: ocx_package_manager::AttestOptions
+    /// A forbidden endpoint URL, a malformed `--key` (exit 64), an unimplemented key backend
+    /// (exit 85) or a keyless `--no-rekor-upload` (exit 64), each a `SignError` carrying the identifier.
     async fn resolve_signing(
         &self,
         context: &crate::app::Context,
@@ -661,10 +508,7 @@ impl PackagePush {
             self.fulcio_url.as_deref(),
             self.rekor_url.as_deref(),
         )?;
-        // Both refusals are wrapped in `SignError` before they reach `anyhow`:
-        // `classify_error` downcasts the outer error, so a bare
-        // `SignErrorKind` exits 1 with an empty `context` instead of 85/64
-        // with the identifier. `sign` and `attest` wrap at the same two calls.
+        // Wrapped in `SignError`, or `classify_error` misses the bare kind and exits 1 with no identifier.
         let key = self.key.reference().map_err(|kind| {
             ocx_sign::sign::SignError::new(identifier.clone(), ocx_sign::sign::SignErrorKind::from(kind))
         })?;
@@ -675,9 +519,6 @@ impl PackagePush {
             .rekor_upload
             .enabled(self.key.is_key_mode(), configured_rekor_upload)
             .map_err(|kind| ocx_sign::sign::SignError::new(identifier.clone(), kind))?;
-        // The OIDC token comes from OCX_IDENTITY_TOKEN or ambient CI detection
-        // exactly as `ocx package attest` resolves it; `push` carries no
-        // `--identity-token-*` flags, so both overrides enter as absent.
         let identity_token = package_sign_common::resolve_override_token(None, false, identifier).await?;
         Ok(ocx_package_manager::SignOptions {
             fulcio_url,
@@ -691,23 +532,12 @@ impl PackagePush {
         })
     }
 
-    /// Attest `predicate` as a CycloneDX SBOM against the manifest this push
-    /// wrote for `platform`.
-    ///
-    /// The subject digest is resolved by the attest pipeline from the
-    /// identifier and platform, never derived from a keep tag —
-    /// `--no-keep-tag` may have suppressed those.
-    ///
-    /// `options` is the same [`SignOptions`](ocx_package_manager::SignOptions)
-    /// the inline platform signing ran under, so `--signature-format`, `--key`
-    /// and `--rekor-upload` mean one thing per invocation. `push --sbom` used
-    /// to hard-code keyless with a mandatory Rekor upload because push carried
-    /// none of those flags; it carries them now.
+    /// Attests `predicate` as a CycloneDX SBOM against the manifest this push wrote for `platform`,
+    /// resolved through `identifier`, never a keep tag (`--no-keep-tag` may have suppressed it).
     ///
     /// # Errors
     ///
-    /// Any attest-pipeline failure, already re-rooted so the JSON envelope
-    /// keeps its `context.identifier`.
+    /// Any attest-pipeline failure, re-rooted so the JSON envelope keeps `context.identifier`.
     async fn attest_sbom(
         context: &crate::app::Context,
         identifier: &ocx_oci::PackageRef,
@@ -740,11 +570,7 @@ impl PackagePush {
             .await
             .map_err(package_sign_common::attest_error_into_anyhow)?
             .result;
-        // Both addresses are reported, and neither is required: under
-        // `--signature-format simplesigning` the pipeline writes the
-        // `sha256-<hex>.att` sidecar and no referrer, which is a published
-        // attestation and not a failure. `SignatureFormat` has no variant that
-        // writes nothing, so at least one of the two is `Some`.
+        // Neither is required: `simplesigning` writes only the `.att` sidecar, still a published attestation.
         Ok(crate::api::data::push::AttestationOutcome::Succeeded {
             referrer_digest: result.referrer.map(|leg| leg.manifest_digest.to_string()),
             sidecar_digest: result.sidecar.map(|leg| leg.manifest_digest.to_string()),
@@ -754,12 +580,7 @@ impl PackagePush {
     }
 }
 
-/// Splits a `KEY=VALUE` annotation argument at the first `=`.
-///
-/// The value may contain `=` (URLs with query strings do) and may be empty;
-/// the key may not be empty. Beyond that OCX does not police annotation keys —
-/// the OCI spec only *recommends* reverse-domain notation, and a registry is
-/// free to define its own.
+/// Splits a `KEY=VALUE` annotation argument at the first `=`; only the key must be non-empty.
 pub(crate) fn parse_annotation(argument: &str) -> anyhow::Result<(String, String)> {
     let (key, value) = argument
         .split_once('=')
@@ -770,14 +591,8 @@ pub(crate) fn parse_annotation(argument: &str) -> anyhow::Result<(String, String
     Ok((key.to_string(), value.to_string()))
 }
 
-/// Lays the explicit `--annotation` pairs over the generated `--ci-annotations`
-/// set.
-///
-/// Order is the contract: `extend` is last-value-wins, so generated first
-/// means an explicit pair overrides its generated namesake, and the explicit
-/// pairs keep today's last-wins among themselves (the POSIX convention for a
-/// repeated flag). Reversing the two arguments silently demotes every
-/// `--annotation` a user typed to a value the environment can overwrite.
+/// Lays the explicit `--annotation` pairs over the generated `--ci-annotations` set, last value
+/// winning; reversed, the environment would overwrite what a user typed.
 fn merge_annotations(generated: BTreeMap<String, String>, explicit: &[(String, String)]) -> BTreeMap<String, String> {
     let mut merged = generated;
     merged.extend(explicit.iter().cloned());
@@ -785,11 +600,9 @@ fn merge_annotations(generated: BTreeMap<String, String>, explicit: &[(String, S
 }
 
 /// Appends `tags` onto the tags-file at `path` (created if absent),
-/// deduping against whatever is already there (design register C2).
+/// deduping against whatever is already there.
 async fn append_to_tags_file(path: &std::path::Path, tags: &[String]) -> anyhow::Result<()> {
-    // The shared bounded reader, not a bare `fs::read`: this path is
-    // operator-typed, so `--tags-file /dev/zero` read until memory ran out.
-    // Absence is still not a failure — the file is created below.
+    // Bounded, not a bare `fs::read`, or `--tags-file /dev/zero` reads until memory runs out.
     let existing = crate::options::tags::read_tags_file_if_present(path).await?;
     let merged = conventions::merge_tags_file(&existing, tags);
     tokio::fs::write(path, merged)
@@ -989,7 +802,7 @@ mod signing_flag_tests {
 
     /// Every modifier flag, spelled as argv.
     ///
-    /// OCX-C-5 added the two endpoint flags, and they join this list rather
+    /// The two endpoint flags join this list rather
     /// than getting a test of their own: both group rules below iterate it, so
     /// a member added here is covered by the refusal case *and* the
     /// both-targets case at once — which is exactly the pair a flag admitted
@@ -1089,9 +902,9 @@ mod signing_flag_tests {
         );
     }
 
-    // ── OCX-C-5: the two endpoint flags ────────────────────────────────
+    // ── the two endpoint flags ──────────────────────────────────────────
 
-    /// **OCX-C-5.** `--fulcio-url` is keyless-only and conflicts with `--key`;
+    /// `--fulcio-url` is keyless-only and conflicts with `--key`;
     /// `--rekor-url` is allowed in key mode alongside `--rekor-upload`.
     ///
     /// The asymmetry is the contract, so both halves are asserted here: a
@@ -1124,7 +937,7 @@ mod signing_flag_tests {
         .expect("a key-mode signature may name the transparency log it is recorded in");
     }
 
-    /// **OCX-C-5.** The endpoint pair `push` resolves prefers its own flags
+    /// The endpoint pair `push` resolves prefers its own flags
     /// over `[trust.sigstore]`.
     ///
     /// Both tiers are populated and they disagree, so a resolver reading the
@@ -1135,7 +948,7 @@ mod signing_flag_tests {
     ///
     /// `[trust.sigstore]` is what makes a self-hosted stack a fleet-wide
     /// setting; the flags are what let one publish run out-vote it, which is
-    /// the whole reason ocx-mirror needs them (D1).
+    /// the whole reason ocx-mirror needs them.
     #[test]
     fn the_resolved_endpoint_pair_prefers_pushs_flags_over_trust_sigstore() {
         let configured = ocx_trust::SigstoreTrust {

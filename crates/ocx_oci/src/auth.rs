@@ -85,10 +85,9 @@ impl Default for Auth {
     }
 }
 
-/// Retrieves Docker credentials for the specified registry using the native Docker credential helper.
+/// Retrieves Docker credentials for the registry via the native credential helper.
 ///
-/// Canonicalizes the registry argument through `auth::registry_url::canonicalize_registry`
-/// so the same key form is used for read (here) and write (`auth::store::DockerCredentialStore`).
+/// Canonicalizes like `DockerCredentialStore` does on write, or a stored login is never found.
 fn get_docker_auth(registry: impl AsRef<str>) -> Result<Option<crate::native::Auth>> {
     use docker_credential::CredentialRetrievalError as DockerError;
     use docker_credential::DockerCredential;

@@ -3,27 +3,11 @@
 
 use ocx_package::metadata::env::modifier::ModifierKind;
 
-// Conflict tracking at this layer is value-only. The `entry::Entry` stream
-// passed to `write_entry` is already resolved and carries no package
-// attribution, so both flavors call `ConstantTracker::track("", key, value)`
-// with an empty package label. A conflict warning therefore identifies the
-// key and the two values, not which packages set them — package attribution
-// would have to be threaded down from the composer, which the CI export
-// surface does not currently do.
-
-/// Trait that each CI flavor must implement to export environment variables
-/// into its runtime files.
+/// Exports environment entries into one CI system's runtime files.
 pub(super) trait Flavor {
-    /// Writes a single environment variable entry to the CI system's runtime files.
+    /// Writes one entry; `Path` and `List` values may be buffered until [`flush`](Flavor::flush).
     ///
-    /// For path-type and list-type variables, implementations may buffer values
-    /// internally and defer writing until [`flush`](Flavor::flush) is called.
-    ///
-    /// `separator` carries a `List` entry's fold separator; ignored for `Path`
-    /// and `Constant`. By the time an entry reaches this call,
-    /// [`reconcile_list_separators`](ocx_package::metadata::env::apply::reconcile_list_separators) has
-    /// already settled it across every contributor to `key`, so `None` here
-    /// legitimately means the default `" "`, not "not yet decided".
+    /// `separator` is a `List` entry's already-reconciled separator; `None` means the default `" "`.
     fn write_entry(
         &mut self,
         key: &str,
@@ -32,6 +16,6 @@ pub(super) trait Flavor {
         separator: Option<&str>,
     ) -> Result<(), crate::ci::error::Error>;
 
-    /// Flushes any buffered state to the CI system's runtime files.
+    /// Writes any buffered `Path`/`List` values.
     fn flush(&mut self) -> Result<(), crate::ci::error::Error>;
 }

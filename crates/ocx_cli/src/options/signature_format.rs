@@ -5,17 +5,7 @@ use crate::error::UsageError;
 use ocx_sign::sign::SignatureFormat;
 
 /// Which cosign wire shape a command writes, or which shape a verify accepts.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add `--signature-format`.
-/// The value grammar is the same on both sides of the read/write split, but the
-/// two sides admit different subsets: writing accepts `both`, pinning does not,
-/// because "either of two signatures satisfied me" is not a statement a
-/// verification result can carry. That asymmetry lives in the two resolvers
-/// below rather than in a second enum or a stringly-typed value parser, so
-/// there is exactly one vocabulary. Resolve with [`SignatureFormatOpt::write_format`]
-/// or [`SignatureFormatOpt::pin`] and never read the field directly.
-///
-/// Arg id: `signature_format`.
+// Read only through `write_format`/`pin`: a direct read lets `both` reach a verify, which must pin one shape.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct SignatureFormatOpt {
     /// Signature wire format: bundle (default), simplesigning, or both.
@@ -34,14 +24,10 @@ impl SignatureFormatOpt {
         self.signature_format.unwrap_or_default()
     }
 
-    /// The shape to accept when reading.
-    ///
-    /// `Ok(None)` means the caller was given no pin and should prefer a bundle,
-    /// falling back to a simplesigning sidecar.
+    /// The shape to accept when reading; `Ok(None)` means no pin: prefer a bundle, fall back to simplesigning.
     ///
     /// # Errors
-    /// [`SignatureFormatPinError`] when `both` is named. `both` selects what to
-    /// write; a verify pins a single shape.
+    /// [`SignatureFormatPinError`] when `both` is named.
     pub fn pin(&self) -> Result<Option<SignatureFormat>, SignatureFormatPinError> {
         match self.signature_format {
             Some(SignatureFormat::Both) => Err(SignatureFormatPinError),
@@ -56,12 +42,7 @@ impl SignatureFormatOpt {
 pub struct SignatureFormatPinError;
 
 impl From<SignatureFormatPinError> for UsageError {
-    /// The refusal is a bad invocation, so it must reach exit 64.
-    ///
-    /// `UsageError` is the type `classify_error` downcasts for that code; a
-    /// bare [`SignatureFormatPinError`] propagated through `anyhow` would
-    /// classify as a generic failure instead. A call site therefore spells the
-    /// refusal `opt.pin().map_err(UsageError::from)?`.
+    /// Call sites spell `opt.pin().map_err(UsageError::from)?`; a bare error classifies as generic, not exit 64.
     fn from(error: SignatureFormatPinError) -> Self {
         Self::new(error.to_string())
     }

@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Async read wrapper that computes a running digest over all bytes read,
-//! dispatching over the algorithm declared by the OCI descriptor (sha256 /
-//! sha384 / sha512).
+//! Async read wrapper computing a running digest in the OCI descriptor's algorithm.
 
 use std::io;
 use std::pin::Pin;
@@ -13,12 +11,7 @@ use sha2::Digest as _;
 use tokio::io::AsyncRead;
 use tokio::io::ReadBuf;
 
-/// Tracks the running state for one of the three supported OCI hash algorithms.
-///
-/// Each variant wraps the corresponding `sha2` hasher type.  The enum exists
-/// so [`HashingAsyncReader`] can be generic over the algorithm without requiring
-/// a type parameter at every call site — the algorithm is chosen at runtime from
-/// the layer descriptor.
+/// Running hasher for one of the OCI digest algorithms, chosen at runtime.
 enum DigestState {
     Sha256(sha2::Sha256),
     Sha384(sha2::Sha384),
@@ -51,45 +44,10 @@ impl DigestState {
     }
 }
 
-/// An [`AsyncRead`] wrapper that computes a running digest over all bytes
-/// successfully read, using the algorithm declared by the OCI layer descriptor.
+/// An [`AsyncRead`] wrapper digesting every byte it successfully delivers.
 ///
-/// The digester is updated only on successful reads (i.e. bytes that
-/// `poll_read` placed into the caller-supplied buffer). I/O errors do not
-/// update the digest; a partial read that returns an error means the erroneous
-/// bytes are not included.
-///
-/// Call [`finalize`](Self::finalize) after the stream ends to obtain the
-/// digest and the total byte count. The returned digest is in the same
-/// algorithm variant that was passed to [`new`](Self::new).
-///
-/// # Algorithm dispatch
-///
-/// Pass the [`crate::Algorithm`] extracted from the layer descriptor's digest.
-/// The internal `DigestState` enum dispatches over `sha2::Sha256`,
-/// `sha2::Sha384`, and `sha2::Sha512` — the same set supported by
-/// [`crate::Algorithm::hash_file`]. All three OCI-spec digest algorithms are
-/// verified correctly; hardcoding SHA-256 would be a CWE-345 regression for
-/// sha384 and sha512 descriptors.
-///
-/// # Ordering note (`pull_layer` governs)
-///
-/// A running digest is only a whole-blob digest if the whole blob is read.
-/// `pull_layer` therefore **drains** the compressed stream to EOF after tar
-/// extraction — tar stops at the end-of-archive marker and leaves the codec
-/// trailer unread — and only then calls `finalize()`, even when extraction
-/// failed (e.g. invalid gzip header).
-///
-/// It then discriminates in this order:
-///
-/// 1. `bytes_read` short of the manifest-declared size → `ShortBlobRead`. The
-///    blob never arrived in full, so its digest was never in question; checking
-///    the hash first would mask every incomplete delivery as a registry fault.
-/// 2. Digest mismatch → `DigestMismatch`, ahead of any extraction error. Wrong
-///    bytes from a misbehaving registry cause extraction to fail with a format
-///    error; reporting the mismatch first correctly attributes the failure to
-///    the registry (CWE-345), not to a local archive problem.
-/// 3. Extraction error.
+/// Call [`finalize`](Self::finalize) only once the stream is drained, codec trailer included, or a sound blob
+/// reads as `DigestMismatch`.
 ///
 /// # Example
 ///
@@ -107,11 +65,7 @@ pub(crate) struct HashingAsyncReader<R> {
 }
 
 impl<R: AsyncRead + Unpin> HashingAsyncReader<R> {
-    /// Wraps `inner` with a hashing layer using `algorithm`.
-    ///
-    /// `algorithm` must match the algorithm of the OCI descriptor's digest so
-    /// that [`finalize`](Self::finalize) returns a digest in the same variant
-    /// as the expected digest for comparison.
+    /// Wraps `inner`; `algorithm` must be the descriptor digest's, or the result never equals it.
     pub fn new(inner: R, algorithm: crate::Algorithm) -> Self {
         Self {
             inner,
@@ -120,13 +74,7 @@ impl<R: AsyncRead + Unpin> HashingAsyncReader<R> {
         }
     }
 
-    /// Finalises the digest computation and returns `(digest, bytes_read)`.
-    ///
-    /// The returned [`crate::Digest`] is in the same algorithm variant passed
-    /// to [`new`](Self::new). `bytes_read` equals the total number of bytes
-    /// successfully delivered to callers through this reader.
-    ///
-    /// Consumes `self`; after this point no further reads are possible.
+    /// Returns `(digest, bytes_read)` over everything delivered so far.
     #[must_use]
     pub fn finalize(self) -> (crate::Digest, u64) {
         (self.state.finalize(), self.bytes_read)
@@ -141,11 +89,6 @@ impl<R: AsyncRead + Unpin> AsyncRead for HashingAsyncReader<R> {
             let filled_after = buf.filled().len();
             let n = filled_after - filled_before;
             if n > 0 {
-                // Only update the digest for bytes actually placed into the
-                // buffer on a successful read. I/O errors do not update the
-                // digest; partially-filled reads that subsequently error leave
-                // the digest covering only the bytes that were successfully
-                // delivered.
                 self.state.update(&buf.filled()[filled_before..filled_after]);
                 self.bytes_read += n as u64;
             }

@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The exposed-name algebra — one function, four consumers (plan contract
-//! C-021, `plan_toolchain_activation.md`).
-//!
-//! [`exposed_names`] replaces `prepare_lazy`'s former `interface_shim_names`,
-//! which discarded which package claimed which name. `ocx env`, `ocx inspect
-//! --closure`, [`super::prepare_lazy`], and the rendered `bin/` (WP-7) all
-//! need the *same* answer to "what names does this closure expose, and who
-//! owns each one" — one algebra, computed once, never a directory scan
-//! (C-023).
+//! The exposed-name algebra: which names a closure exposes and who owns each, one answer for `ocx env`,
+//! `ocx inspect --closure`, [`super::prepare_lazy`] and the rendered `bin/`, never a directory scan.
+//! See `adr_toolchain_activation.md` § Name set.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,94 +14,43 @@ use ocx_package::metadata::{Binaries, BinaryName, Entrypoints};
 use super::common::ClosureNode;
 use super::inspect;
 
-/// The admission surface [`exposed_names`] gates on: the **interface**
-/// surface, never the private one (C-023 — a shim or a rendered launcher is a
-/// consumer-facing artifact, never the package's own private view). Named
-/// rather than a bare `false` at its three call sites, matching the constant
-/// the base `interface_shim_names` carried before this module replaced it.
+/// The interface surface: a shim or rendered launcher is consumer-facing, never the private view.
 const INTERFACE_SURFACE: bool = false;
 
-/// How [`exposed_names`] treats a node that claims neither `binaries` nor
-/// entry points (C-022).
-///
-/// A *deferred* `prepare_lazy` call has nothing else to fall back on — an
-/// unenumerable node means no shim tree can be generated, full stop — while a
-/// render already knows the tree is a projection of whatever metadata is
-/// declared: a node contributing nothing is ordinary, not a refusal.
+/// How [`exposed_names`] treats a node that claims neither `binaries` nor entry points.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NotEnumerablePolicy {
     /// Refuse the whole call — [`PackageErrorKind::ShimNamesNotEnumerable`].
     Refuse,
     /// Skip the node; it contributes no names.
-    ///
-    /// No production caller constructs this yet — the render path (WP-7,
-    /// `render_toolchain.rs`) is the one that passes `Skip`; `prepare_lazy`
-    /// always passes `Refuse`. The `expect` below is scoped to non-test
-    /// builds only: this crate's own tests already construct `Skip`, which
-    /// would make an unscoped `expect` unfulfilled (and therefore itself a
-    /// hard error) under `--all-targets`.
     Skip,
 }
 
-/// Who claims one exposed name, and what else claimed it (C-021, C-024).
-///
-/// Collisions never refuse, warn, or rise above debug level — the last tool
-/// walked wins, matching composed-PATH order, and [`Self::shadowed`] is the
-/// `ocx inspect` collision row's source, not a refusal payload.
+/// Who claims one exposed name, and what else claimed it; the last tool walked wins, matching composed-PATH order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NameOwner {
     /// The tool whose claim won.
     pub tool: ocx_oci::PinnedPackageRef,
-    /// Whether `tool` is the closure's own root, as opposed to an
-    /// interface-admitted dependency.
+    /// Whether `tool` is the closure's root rather than an interface-admitted dependency.
     pub is_root: bool,
-    /// Every other tool that also claimed this name and lost, oldest walked
-    /// first.
+    /// Every other tool that also claimed this name and lost, oldest walked first.
     pub shadowed: Vec<ocx_oci::PinnedPackageRef>,
-    /// The position of the winning claim in the merged multi-root node slice
-    /// [`exposed_names`] walked (RUL-12), zero-based.
+    /// Zero-based position of the winning claim in the walked node slice.
     ///
-    /// A [`BTreeMap`]'s only total order is its key order, which is not walk
-    /// order — and ASCII lowercase sorts above uppercase, so a fold keyed on
-    /// the map's own iteration order would always pick an all-lowercase
-    /// spelling, making the tool that owns `bin/make` differ from the one
-    /// that wins on the composed `PATH`. `walk_index` (RUL-32) is what lets
-    /// [`fold_case_insensitive`] recover "last walked" as a real total order
-    /// after the map has already discarded the slice's own order.
+    /// [`fold_case_insensitive`] resolves on it because map key order always picks the lowercase spelling,
+    /// so `bin/make` would belong to a different tool than the composed `PATH` winner.
     pub walk_index: usize,
 }
 
-/// The exposed-name set: `binaries` ∪ `entrypoints` of the default group's
-/// roots and every interface-admitted dependency (C-021, C-023).
-///
-/// The closure is pre-filtered by
-/// [`inspect::admitted_on_surface`](super::inspect::admitted_on_surface)
-/// (interface surface — a shim or a rendered launcher is a **consumer**-facing
-/// artifact, never the package's own private view), then unioned through
-/// [`composer::carrier_crosses`](crate::composer::carrier_crosses).
-/// Never a directory scan: a node with no `binaries` claim and no entry points
-/// contributes no names, per `policy` (C-022).
-///
-/// A collision between two nodes' claims never refuses or warns (C-024): the
-/// last node walked wins, matching composed-PATH order, and the losing
-/// claim(s) are recorded on the winning [`NameOwner::shadowed`] for `ocx
-/// inspect` to report.
-///
-/// **The returned map is unfolded.** `Make` and `make` are two distinct keys
-/// here, even on a case-insensitive filesystem — this function never reads
-/// host filesystem case sensitivity. C-025's case-fold collapse is a separate
-/// pure step, [`fold_case_insensitive`], that the renderer calls on this
-/// map's output; keeping the two apart is what lets the fold be unit-tested
-/// deterministically on both hosts, with no `cfg!` inside either function.
+/// The exposed-name set: `binaries` ∪ entry points of the roots and every interface-admitted dependency,
+/// admitted through [`inspect::admitted_on_surface`](super::inspect::admitted_on_surface) and
+/// [`composer::carrier_crosses`](crate::composer::carrier_crosses). The map is unfolded (`Make`/`make`
+/// stay distinct); case-folding is [`fold_case_insensitive`]'s step.
 ///
 /// # Errors
 ///
-/// - [`PackageErrorKind::ShimNamesNotEnumerable`] — a node claims neither
-///   `binaries` nor entry points and `policy` is
-///   [`NotEnumerablePolicy::Refuse`] (C-022).
-/// - [`PackageErrorKind::ShimNameInvalid`] — a declared entry point name does
-///   not survive conversion to a [`BinaryName`] (every Windows-reserved device
-///   name is one).
+/// - [`PackageErrorKind::ShimNamesNotEnumerable`] — a node claims neither `binaries` nor entry points under `Refuse`.
+/// - [`PackageErrorKind::ShimNameInvalid`] — an entry point name is not a valid [`BinaryName`].
 pub(crate) fn exposed_names(
     nodes: &[ClosureNode],
     policy: NotEnumerablePolicy,
@@ -115,16 +58,11 @@ pub(crate) fn exposed_names(
     let mut exposed: BTreeMap<BinaryName, NameOwner> = BTreeMap::new();
 
     for (walk_index, node) in nodes.iter().enumerate() {
-        // C-023: the pre-filter is the shared interface-surface admission —
-        // never a re-implementation, and never the private surface (E-14).
         if !inspect::admitted_on_surface(node, INTERFACE_SURFACE) {
             continue;
         }
 
-        // `Some(empty)` is enumerable (E-03) — the publisher asserted zero
-        // interface executables — and contributes no name, which is still a
-        // complete tree. Only `None` *and* no entry points leaves nothing to
-        // enumerate.
+        // `Some(empty)` is enumerable (zero executables asserted); only `None` with no entry points is not.
         if node.binaries.is_none() && node.entrypoints.is_empty() {
             match policy {
                 NotEnumerablePolicy::Refuse => {
@@ -136,9 +74,7 @@ pub(crate) fn exposed_names(
             }
         }
 
-        // A name claimed on both axes by this node is one claim, not two
-        // (E-08) — collected into a set before recording so a node can never
-        // shadow itself across its own two axes (RUL-11).
+        // A set, or a name claimed on both axes makes the node shadow itself.
         let mut claimed: BTreeSet<BinaryName> = BTreeSet::new();
 
         if let Some(binaries) = &node.binaries
@@ -151,10 +87,8 @@ pub(crate) fn exposed_names(
             && composer::carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, node.is_root, INTERFACE_SURFACE)
         {
             for entrypoint in &node.entrypoints {
-                // Not total: every Windows-reserved device name is a valid
-                // slug and none is a valid `BinaryName` (E-09). Refusing
-                // beats skipping under every policy — a quietly incomplete
-                // name set is the failure C-022 exists to prevent.
+                // Refused under every policy: Windows device names are valid slugs but no `BinaryName`,
+                // and skipping would quietly shrink the name set.
                 claimed.insert(BinaryName::try_from(entrypoint.as_str()).map_err(PackageErrorKind::ShimNameInvalid)?);
             }
         }
@@ -167,29 +101,7 @@ pub(crate) fn exposed_names(
     Ok(exposed)
 }
 
-/// Records one node's claim on `name`, resolving a collision by last-walked
-/// wins (C-024, RUL-11, RUL-12).
-///
-/// `node` claiming a name it already owns (its own second axis is filtered
-/// before this is called; a shared dependency reached twice through a merged
-/// multi-root slice, E-34, is not) is not a collision: the identifier is
-/// updated in place — `walk_index` and `is_root` travel with the freshest
-/// sighting — and nothing is pushed onto `shadowed`, or the node would shadow
-/// itself.
-///
-/// Otherwise the incoming node wins (it is walked later): every prior
-/// owner's own identifier, plus whatever it had already accumulated in its
-/// own `shadowed`, moves onto the new owner's `shadowed`, oldest first — with
-/// `node.identifier` itself dropped from that inherited list first. Without
-/// that filter, a name claimed by an **interleaved** repeat of the same
-/// identifier (`[A, B, A]`, all claiming one name — reachable the moment
-/// RUL-12's merged multi-root slice exists, WP-7) would make `A` shadow
-/// itself: `B` shadows `A` at the middle step, and `A` winning again at the
-/// end would otherwise carry that `A` entry straight back onto its own
-/// winning `shadowed`.
-///
-/// A collision is never a refusal, a warning, or silence (C-024) — it emits
-/// exactly one debug line naming the name, the winner and the loser.
+/// Records one node's claim on `name`; a collision is last-walked-wins with one debug line.
 fn record_claim(
     exposed: &mut BTreeMap<BinaryName, NameOwner>,
     name: BinaryName,
@@ -201,6 +113,7 @@ fn record_claim(
         .entry(name)
         .and_modify(|owner| {
             if owner.tool == node.identifier {
+                // A dependency shared by two roots is walked twice; update in place, or it shadows itself.
                 owner.is_root = node.is_root;
                 owner.walk_index = walk_index;
                 return;
@@ -210,6 +123,7 @@ fn record_claim(
                 node.identifier,
                 owner.tool
             );
+            // Drop `node.identifier` first, or an interleaved repeat (`[A, B, A]`) makes the final `A` shadow itself.
             let mut shadowed = std::mem::take(&mut owner.shadowed);
             shadowed.retain(|id| *id != node.identifier);
             shadowed.push(owner.tool.clone());
@@ -228,33 +142,9 @@ fn record_claim(
         });
 }
 
-/// Collapses [`exposed_names`]'s unfolded map onto the case-folded key
-/// (C-025), for the renderer only — `exposed_names` itself never does this
-/// (see its doc).
-///
-/// The fold key is **ASCII** case (C-015's own charset rule folds the same
-/// way), never Unicode `to_lowercase`: a Unicode fold would collapse
-/// characters ASCII case-insensitivity does not (e.g. Turkish dotted/dotless
-/// İ/i), which is not what a case-insensitive *filesystem* does.
-///
-/// Same collision rule as [`exposed_names`], one level up: the winner on a
-/// shared folded key is the entry with the greatest recorded
-/// [`NameOwner::walk_index`] among the colliding entries — **never** the
-/// greatest key (RUL-32; a `BTreeMap`'s only total order is key order, and
-/// ASCII lowercase sorts above uppercase, which would make an all-lowercase
-/// spelling always win). Every losing owner's identifier — plus its own prior
-/// [`NameOwner::shadowed`] — is appended to the winner's `shadowed`,
-/// oldest-first (RUL-11), **excluding any entry equal to the winner's own
-/// tool** — reachable when one node claims both case twins on its own two
-/// axes (`binaries = ["Make"]`, `entrypoints = ["make"]`), which would
-/// otherwise make the winner shadow itself. Pure: no I/O, no
-/// `cfg!(target_os)` — the host question ("is this filesystem
-/// case-insensitive") is answered by the caller, not here, which is what
-/// makes this fold unit-testable deterministically on every host.
+/// Collapses [`exposed_names`]'s map onto ASCII-folded keys for the renderer; never Unicode `to_lowercase`,
+/// which merges characters (Turkish İ/i) a case-insensitive filesystem does not.
 pub(crate) fn fold_case_insensitive(names: BTreeMap<BinaryName, NameOwner>) -> BTreeMap<BinaryName, NameOwner> {
-    // Group by the ASCII-folded key first — a `BTreeMap`'s only total order
-    // is its key order, which the module doc above and RUL-32 both name as
-    // the wrong order to resolve a collision on.
     let mut groups: BTreeMap<String, Vec<(BinaryName, NameOwner)>> = BTreeMap::new();
     for (key, owner) in names {
         groups
@@ -271,30 +161,11 @@ pub(crate) fn fold_case_insensitive(names: BTreeMap<BinaryName, NameOwner>) -> B
             continue;
         }
 
-        // RUL-32: the winner is the entry with the greatest `walk_index`,
-        // never the greatest key. On a genuine TIE — reachable only when one
-        // node claims both case twins on its own two axes, so both entries
-        // carry the same `walk_index` — the key is an explicit, stated
-        // tie-break rather than an accidental fallthrough to however this
-        // group's vec happened to be built. Which spelling *should* survive
-        // in that one-node case is an open question (D-1, deferred to the
-        // owner); this only makes the fallback deterministic and documented
-        // instead of silent.
+        // The greatest `walk_index` wins, never the greatest key.
         group.sort_by_key(|(key, owner)| (owner.walk_index, key.clone()));
         let (winning_key, mut winner) = group.pop().expect("a colliding group has at least two entries");
 
-        // Every loser, oldest walked first (RUL-11): its own identifier plus
-        // whatever it had already accumulated in its own `shadowed` moves
-        // onto the winner's — EXCEPT an entry equal to the winner's own tool.
-        // That is reachable whenever one node claims both case twins (its two
-        // keys collapse to one folded group with the *same* owner): without
-        // this guard the winner would shadow itself, either directly (the
-        // other entry is literally the same owner) or through an inherited
-        // `shadowed` list from a raw collision `exposed_names` already
-        // resolved in the winner's favour under a different unfolded key. The
-        // winner's own prior `shadowed` is appended last — the relative order
-        // between an inherited entry and its owning loser's own identifier is
-        // not otherwise fixed.
+        // Skip the winner's own tool (one node claiming both case twins), or the winner shadows itself.
         let mut shadowed = Vec::new();
         for (_, loser) in group {
             if loser.tool == winner.tool {
@@ -310,9 +181,7 @@ pub(crate) fn fold_case_insensitive(names: BTreeMap<BinaryName, NameOwner>) -> B
         );
         winner.shadowed = shadowed;
 
-        // RUL-19: the surviving key is the winner's OWN spelling
-        // (`winning_key`), never the folded one — the fold stops a second
-        // write, it never renames a tool.
+        // The winner's own spelling, never the folded one: the fold stops a second write, it never renames a tool.
         folded.insert(winning_key, winner);
     }
 
@@ -330,10 +199,9 @@ mod tests {
     // ── Fixtures ────────────────────────────────────────────────────────────
     //
     // Moved here from `prepare_lazy.rs`'s test module together with the nine
-    // `exposed_names_*` tests below (S-11): validation item 16 and the plan's
-    // *Contract coverage* row both name `tasks/toolchain_names.rs` as the home
-    // of the C-021/C-022/C-023 unit cases, and the `fold_case_insensitive`
-    // cases need the same node/owner fixtures.
+    // `exposed_names_*` tests below: this file is the home for the
+    // `exposed_names` unit cases, and the `fold_case_insensitive` cases need
+    // the same node/owner fixtures.
 
     /// An arbitrary valid SHA-256 hex, built from a one-byte seed so each
     /// fixture node can carry a digest distinguishable from its neighbours'.
@@ -386,8 +254,8 @@ mod tests {
     }
 
     /// A **dependency** node (`is_root = false`) carrying an explicit
-    /// effective visibility — the field `admitted_on_surface` gates on
-    /// (C-023). A root has none, which is why [`node`] leaves it `None`.
+    /// effective visibility — the field the admission surface gates on. A
+    /// root has none, which is why [`node`] leaves it `None`.
     fn dependency(
         identifier: ocx_oci::PinnedPackageRef,
         claimed: Option<&[&str]>,
@@ -431,7 +299,7 @@ mod tests {
     const ASSERTED_EMPTY: &[&str] = &[];
 
     /// Builds a [`fold_case_insensitive`] input map from `entries`, assigning
-    /// each owner's `walk_index` (RUL-32) from its position in `entries` —
+    /// each owner's `walk_index` from its position in `entries` —
     /// the vec's own order stands in for "walked order" in every fold
     /// fixture, so listing an owner earlier in `entries` means it was walked
     /// earlier, regardless of where its key then sorts in the `BTreeMap`.
@@ -446,9 +314,9 @@ mod tests {
             .collect()
     }
 
-    // ── C-021 / C-023: the claim axes ───────────────────────────────────────
+    // ── The claim axes ──────────────────────────────────────────────────────
 
-    /// C-021/C-023 (E-06): the name set is `binaries ∪ entrypoints`.
+    /// The name set is `binaries ∪ entrypoints`.
     #[test]
     fn exposed_names_unions_binaries_and_entrypoint_names() {
         let nodes = vec![node(pinned("ns/cmake", "a"), Some(&["cmake"]), &["ctest"], true)];
@@ -458,9 +326,9 @@ mod tests {
         assert_eq!(owned_names(&set), vec!["cmake", "ctest"]);
     }
 
-    /// C-021 (E-06, single axis): a `binaries` claim alone yields exactly
-    /// those names — the union's other operand contributes nothing rather
-    /// than, say, defaulting to the entry point set.
+    /// A `binaries` claim alone yields exactly those names — the union's
+    /// other operand contributes nothing rather than, say, defaulting to the
+    /// entry point set.
     #[test]
     fn exposed_names_admits_a_node_claiming_only_binaries() {
         let nodes = vec![node(pinned("ns/cmake", "a"), Some(&["cmake", "cpack"]), &[], true)];
@@ -470,9 +338,8 @@ mod tests {
         assert_eq!(owned_names(&set), vec!["cmake", "cpack"]);
     }
 
-    /// C-021 (E-08, key half): "a name claimed on both axes yields exactly one
-    /// launcher" — the set is flat, so `bin/` never holds two entries for one
-    /// name.
+    /// A name claimed on both axes yields exactly one launcher — the set is
+    /// flat, so `bin/` never holds two entries for one name.
     #[test]
     fn exposed_names_yields_one_name_when_both_axes_claim_it() {
         let nodes = vec![node(pinned("ns/cmake", "a"), Some(&["cmake"]), &["cmake"], true)];
@@ -486,10 +353,10 @@ mod tests {
         );
     }
 
-    /// RUL-11 (E-08, `shadowed` half): a node's two axes are one claimant, so
-    /// the name it claims on both must NOT record the node as its own
-    /// shadowed rival. Discriminates a fold that pushes every observed claim
-    /// onto `shadowed` before checking whether the winner is the same tool.
+    /// A node's two axes are one claimant, so the name it claims on both must
+    /// NOT record the node as its own shadowed rival. Discriminates a fold
+    /// that pushes every observed claim onto `shadowed` before checking
+    /// whether the winner is the same tool.
     #[test]
     fn exposed_names_never_shadows_a_node_with_its_own_second_axis() {
         let claiming = pinned("ns/cmake", "a");
@@ -506,9 +373,9 @@ mod tests {
         );
     }
 
-    // ── C-022: the two `NotEnumerablePolicy` arms ───────────────────────────
+    // ── The two `NotEnumerablePolicy` arms ───────────────────────────────────
 
-    /// C-022 (E-01): a node claiming neither `binaries` nor entry points makes
+    /// A node claiming neither `binaries` nor entry points makes
     /// the name set non-enumerable under `Refuse` — `prepare_lazy`'s policy —
     /// and the error names *that node*, which may be a dependency, not the
     /// tool the user asked for.
@@ -531,7 +398,7 @@ mod tests {
         }
     }
 
-    /// C-022 (E-02): the identical closure under `Skip` — a render's policy —
+    /// The identical closure under `Skip` — a render's policy —
     /// contributes no name for the silent node instead of refusing the whole
     /// call.
     #[test]
@@ -546,7 +413,7 @@ mod tests {
         assert_eq!(owned_names(&set), vec!["cmake"]);
     }
 
-    /// C-022 (E-05): the silent node is the **root**, not a dependency. Same
+    /// The silent node is the **root**, not a dependency. Same
     /// variant, and `package` names the root — an implementation that only
     /// examined dependencies (the arm the sibling test exercises) would return
     /// `Ok` here.
@@ -574,7 +441,7 @@ mod tests {
         }
     }
 
-    /// C-022 (E-03): `binaries = Some([])` is the publisher **asserting zero
+    /// `binaries = Some([])` is the publisher **asserting zero
     /// executables**, which is enumerable. It contributes no name and is never
     /// a refusal, under either policy — the distinction `Option::is_none`
     /// carries and `Binaries::is_empty` does not.
@@ -594,7 +461,7 @@ mod tests {
         }
     }
 
-    /// C-022 / C-044 (E-04): every node silent, under `Skip` → an empty map
+    /// Every node silent, under `Skip` → an empty map
     /// and no error. The render still writes a complete (empty) `bin/`, so
     /// "nothing to expose" must be a value, never a refusal.
     #[test]
@@ -609,7 +476,7 @@ mod tests {
         assert!(set.is_empty(), "expected no names, got {:?}", owned_names(&set));
     }
 
-    /// C-022 / F-8 (E-07): the refusal fires only when a node has **no**
+    /// The refusal fires only when a node has **no**
     /// `binaries` **and** no entry points. A node declaring entry points and no
     /// `binaries` claim is perfectly enumerable — keying the refusal on
     /// `Surface::binaries_complete` would over-refuse it.
@@ -623,7 +490,7 @@ mod tests {
         assert_eq!(owned_names(&set), vec!["cmake"]);
     }
 
-    /// C-021 F-5 (E-09, `Refuse` arm): every Windows-reserved device name is a
+    /// `Refuse` arm: every Windows-reserved device name is a
     /// valid slug — hence a valid `EntrypointName` — and none is a valid
     /// `BinaryName`.
     #[test]
@@ -643,7 +510,7 @@ mod tests {
         );
     }
 
-    /// C-021 F-5 (E-09, `Skip` arm — the discriminating one). The refusal is
+    /// `Skip` arm — the discriminating one. The refusal is
     /// "regardless of `policy`": `Skip` skips a node that claims *nothing*, not
     /// a node whose claim cannot be rendered. Folding the two into one
     /// "tolerant" arm would publish a quietly incomplete `bin/`.
@@ -660,9 +527,9 @@ mod tests {
         );
     }
 
-    // ── C-023: the admission surface ────────────────────────────────────────
+    // ── The admission surface ────────────────────────────────────────────────
 
-    /// C-023 (E-10): the set is the *closure's* interface surface, so an
+    /// The set is the *closure's* interface surface, so an
     /// interface-admitted dependency's claims are in it too — not just the
     /// root's.
     #[test]
@@ -682,7 +549,7 @@ mod tests {
         assert_eq!(owned_names(&set), vec!["cmake", "zlib-flate"]);
     }
 
-    /// C-021/C-023 (E-12, E-13, E-20): `is_root` discriminates the two
+    /// `is_root` discriminates the two
     /// claimants. The root carries no `effective_visibility` at all and is
     /// admitted at depth 0 unconditionally; the dependency is admitted only
     /// through its edge. Both axes cross for both — `binaries` under
@@ -720,7 +587,7 @@ mod tests {
         }
     }
 
-    /// C-023 (E-11, first half): a dependency the interface surface does not
+    /// A dependency the interface surface does not
     /// admit contributes nothing, even though its `binaries` claim is
     /// perfectly valid. `SEALED` propagates on neither axis.
     #[test]
@@ -739,8 +606,8 @@ mod tests {
         );
     }
 
-    /// C-022 + C-023 (E-11, second half — and it fixes the order of two
-    /// operations). `exposed_names` now owns the admission filter that used to
+    /// This fixes the order of two
+    /// operations: `exposed_names` now owns the admission filter that used to
     /// live at its caller, so *filter then enumerate* versus *enumerate then
     /// filter* is this function's own choice. A sealed dependency claiming
     /// nothing must be dropped silently: refusing the whole tool because an
@@ -759,7 +626,7 @@ mod tests {
         assert_eq!(owned_names(&set), vec!["cmake"]);
     }
 
-    /// C-023 (E-14): the pre-filter surface is `admitted_on_surface(node,
+    /// The pre-filter surface is `admitted_on_surface(node,
     /// /* self_view = */ false)`, never `true`. A `PRIVATE` dependency is
     /// admitted on the *private* surface and refused on the interface one, so
     /// this row is exactly what reds an implementation that passed
@@ -781,9 +648,9 @@ mod tests {
         );
     }
 
-    // ── C-024 / RUL-11 / RUL-12: collisions ─────────────────────────────────
+    // ── Collisions ────────────────────────────────────────────────────────────
 
-    /// C-024 + RUL-11 (E-15): two tools, one name — the **later**-walked wins,
+    /// Two tools, one name — the **later**-walked wins,
     /// matching composed-PATH order, and the earlier is recorded rather than
     /// discarded. Never an `Err`.
     #[test]
@@ -803,7 +670,7 @@ mod tests {
         assert_eq!(owner.shadowed, vec![first], "the loser is recorded, not dropped");
     }
 
-    /// RUL-11 verbatim (E-16): three claimants — `tool` is the last, and
+    /// Three claimants — `tool` is the last, and
     /// `shadowed` carries the other two **oldest walked first**. Reds a
     /// `Vec::push`-onto-the-front or a `BTreeSet`-shaped accumulator.
     #[test]
@@ -825,8 +692,8 @@ mod tests {
         assert_eq!(owner.shadowed, vec![first, second], "oldest walked first (RUL-11)");
     }
 
-    /// C-024 + RUL-12 (E-17): "last walked" is the **slice** order, and RUL-12
-    /// fixes that slice as the one merged multi-root node list. Reversing the
+    /// "Last walked" is the **slice** order, fixed as the one merged
+    /// multi-root node list. Reversing the
     /// input reverses the winner; without this row the phrase is untested
     /// vocabulary that a `BTreeMap`-key tie-break would also satisfy.
     #[test]
@@ -849,7 +716,7 @@ mod tests {
         );
     }
 
-    /// C-024 + C-021 (E-19): the closure is walked deps-before-dependents with
+    /// The closure is walked deps-before-dependents with
     /// the root last, so a root that claims a dependency's name wins it —
     /// `shadowed` carries the dependency and `is_root` follows the **winner**,
     /// not the name.
@@ -870,7 +737,7 @@ mod tests {
         assert_eq!(owner.shadowed, vec![dep]);
     }
 
-    /// RUL-11 + RUL-12 (E-34): the same pinned identifier twice in the slice —
+    /// The same pinned identifier twice in the slice —
     /// reachable the moment two merged roots share a dependency. The node must
     /// not shadow itself, so `shadowed` gains no self-entry.
     #[test]
@@ -893,7 +760,7 @@ mod tests {
         );
     }
 
-    /// RUL-11 + RUL-12 (F-3): the same pinned identifier claiming a name
+    /// The same pinned identifier claiming a name
     /// **twice with a different claimant interleaved** (`[A, B, A]`) —
     /// reachable the moment two merged roots share a dependency AND a third
     /// node also claims the name in between. `A`'s second win must not
@@ -924,13 +791,13 @@ mod tests {
         assert_eq!(owner.shadowed, vec![other], "only the interleaved claimant is shadowed");
     }
 
-    // ── S-012 / C-024: no denylist, no reserved name ────────────────────────
+    // ── No denylist, no reserved name ────────────────────────────────────────
 
-    /// C-024 / S-012 (E-21): a claimed `ocx` renders like any other name.
+    /// A claimed `ocx` renders like any other name.
     ///
     /// Inverted from `interface_shim_names_refuses_the_literal_ocx_name`,
-    /// which this replaces: that test asserted exactly the refusal D-4
-    /// deletes. The assertion that carries the inversion is the **admission** —
+    /// which this replaces: that test asserted exactly the refusal this
+    /// module deletes. The assertion that carries the inversion is the **admission** —
     /// `is_ok()` alone would be satisfied by an implementation that quietly
     /// dropped `ocx` from the map, which is the same refusal one register down.
     #[test]
@@ -949,9 +816,9 @@ mod tests {
         );
     }
 
-    /// C-025 / RUL-10 / S-012 (E-22): `Ocx` is admitted **and is a distinct
+    /// `Ocx` is admitted **and is a distinct
     /// key from `ocx`** in the map `exposed_names` returns. The unfolded map is
-    /// the contract (D-V18); only `fold_case_insensitive` collapses the two.
+    /// the contract; only `fold_case_insensitive` collapses the two.
     #[test]
     fn exposed_names_keeps_ocx_and_its_case_twin_as_two_unfolded_keys() {
         let lower = pinned("ns/lower", "b");
@@ -969,7 +836,7 @@ mod tests {
         assert_eq!(owner_at(&set, "ocx").tool, lower);
     }
 
-    /// ADR D-4 / S-012 (E-23): there is **no denylist**. The privilege-boundary
+    /// There is **no denylist**. The privilege-boundary
     /// names are the ones a denylist would reach for first; each is admitted
     /// like any other claim. This row reds the day one is reintroduced.
     #[test]
@@ -990,7 +857,7 @@ mod tests {
         }
     }
 
-    /// C-024 (E-24): the comparison target the deleted refusal used was the
+    /// The comparison target the deleted refusal used was the
     /// literal `ocx`, never `current_exe()`'s stem — this test binary is not
     /// named `ocx`, and its own name is admitted exactly like any other claim.
     #[test]
@@ -1013,7 +880,7 @@ mod tests {
 
     // ── Degenerate inputs ───────────────────────────────────────────────────
 
-    /// C-021/C-022 (E-32): an empty node slice is `Ok(empty)` under **both**
+    /// An empty node slice is `Ok(empty)` under **both**
     /// policies — `Refuse` refuses a node that claims nothing, and there is no
     /// node.
     #[test]
@@ -1025,7 +892,7 @@ mod tests {
         }
     }
 
-    /// C-022 (E-33): the one-node boundary — a single root claiming nothing.
+    /// The one-node boundary — a single root claiming nothing.
     /// `Skip` yields the empty map, `Refuse` names that one node.
     #[test]
     fn exposed_names_handles_a_single_node_claiming_nothing_under_both_policies() {
@@ -1043,9 +910,9 @@ mod tests {
         }
     }
 
-    // ── C-025 / RUL-10 / RUL-19 / RUL-32: the case fold ─────────────────────
+    // ── The case fold ────────────────────────────────────────────────────────
     //
-    // The fold's total order is `NameOwner::walk_index` (RUL-32), not the
+    // The fold's total order is `NameOwner::walk_index`, not the
     // `BTreeMap`'s own key order — a fold keyed on key order would always
     // pick an all-lowercase spelling, since ASCII lowercase sorts above
     // uppercase. "Last walked wins" therefore reads here as "the greatest
@@ -1053,8 +920,8 @@ mod tests {
     // below is deterministic on every host by construction: no `cfg!`, no
     // filesystem probe, no `current_exe`.
 
-    /// C-025 / RUL-10 (E-26): three spellings of one name collapse to one key,
-    /// and the losers land on the winner's `shadowed` oldest-first (RUL-11).
+    /// Three spellings of one name collapse to one key,
+    /// and the losers land on the winner's `shadowed` oldest-first.
     #[test]
     fn fold_case_insensitive_collapses_three_spellings_onto_one_key() {
         let upper = pinned("ns/upper", "b");
@@ -1074,7 +941,7 @@ mod tests {
         assert_eq!(owner.shadowed, vec![upper, mixed], "oldest colliding key first");
     }
 
-    /// RUL-19 (E-27, the binding half): **the winner keeps its ORIGINAL
+    /// **The winner keeps its ORIGINAL
     /// spelling.** With no all-lowercase spelling among the claims, the
     /// surviving key must be the winner's own bytes — `Make`, never the folded
     /// `make`. This is the row that reds an implementation that re-keys the map
@@ -1100,15 +967,15 @@ mod tests {
         assert_eq!(owner_at(&folded, "Make").shadowed, vec![upper]);
     }
 
-    /// RUL-32 (E-28, updated from the round-1 key-order draft to the binding
-    /// walk-order rule): the folded winner is whichever colliding entry has
+    /// Updated from an earlier key-order draft to the binding
+    /// walk-order rule: the folded winner is whichever colliding entry has
     /// the greatest `walk_index`, **never** whichever key sorts last in the
     /// `BTreeMap`. Here the winner (`Make`, walked second) sorts BEFORE its
     /// rival (`make`, walked first) in key order, so an implementation that
     /// picked the greatest *key* would answer `make`/`lower` — this row reds
-    /// that implementation. This is the sole test RUL-32 names as an
-    /// exception to "do not edit a test": the original assertion pinned the
-    /// key-order rule the round-2 ruling replaced.
+    /// that implementation. This test's assertion was rewritten once, when
+    /// the key-order rule it originally pinned was replaced by the
+    /// walk-order rule above.
     #[test]
     fn fold_case_insensitive_winner_is_the_greatest_walk_index_not_the_greatest_key() {
         let lower = pinned("ns/lower", "b");
@@ -1129,13 +996,13 @@ mod tests {
         assert_eq!(owner.shadowed, vec![lower]);
     }
 
-    /// RUL-10 (E-29): the empty map folds to the empty map, no panic.
+    /// The empty map folds to the empty map, no panic.
     #[test]
     fn fold_case_insensitive_returns_an_empty_map_unchanged() {
         assert!(fold_case_insensitive(BTreeMap::new()).is_empty());
     }
 
-    /// C-025 (E-26, the non-colliding boundary): a map with no case twins is
+    /// The non-colliding boundary: a map with no case twins is
     /// returned entry-for-entry, spellings and owners intact. Reds a fold that
     /// lowercases unconditionally.
     #[test]
@@ -1152,7 +1019,7 @@ mod tests {
         assert_eq!(folded, map, "nothing collides, so nothing changes");
     }
 
-    /// RUL-11 through the fold: a loser's own `shadowed` list is not lost when
+    /// Through the fold: a loser's own `shadowed` list is not lost when
     /// its key is collapsed — every identifier that lost the name survives on
     /// the winner exactly once, and the winner never shadows itself.
     ///
@@ -1210,14 +1077,14 @@ mod tests {
         assert_eq!(owner.shadowed.len(), 3, "no entry invented, none lost");
     }
 
-    /// C-025 (F-2): the self-shadow fixture — **one node claims both case
+    /// The self-shadow fixture — **one node claims both case
     /// twins**, so both unfolded entries carry the identical `tool` AND the
     /// identical `walk_index` (a single node is processed at one position in
     /// `exposed_names`'s walk). Without the `loser.tool == winner.tool` guard,
     /// the fold would push the node onto its own `shadowed` the moment the
     /// group's other entry is popped as a "loser" — it never is a loser, it
     /// is the same claimant. The genuine walk_index TIE this fixture
-    /// produces also exercises the documented key tie-break (RUL-32): with
+    /// produces also exercises the documented key tie-break: with
     /// both walk_index equal, `"make"` sorts after `"Make"` (ASCII lowercase
     /// sorts above uppercase), so `"make"` survives.
     #[test]
@@ -1262,7 +1129,7 @@ mod tests {
         );
     }
 
-    /// C-025 (round-2 review WARN): the **inherited**-`shadowed` filter — the
+    /// The **inherited**-`shadowed` filter — the
     /// `.filter(|id| *id != winner.tool)` on a LOSER's own prior `shadowed`,
     /// distinct from the self-claim guard above. Reachable the moment a name's
     /// unfolded collision history already names the eventual fold winner: `C`
@@ -1316,7 +1183,7 @@ mod tests {
         );
     }
 
-    /// C-024 (F-7): the collision branch [`record_claim`] takes emits exactly
+    /// The collision branch [`record_claim`] takes emits exactly
     /// one debug line naming the collision — the module doc's own claim
     /// ("never a refusal, a warning, or silence") is otherwise unobserved by
     /// any behavioural test, since a debug log has no return-value effect. A
@@ -1355,7 +1222,7 @@ mod tests {
         );
     }
 
-    /// C-015 / C-025 (E-31): the fold key is ASCII case **by construction of
+    /// The fold key is ASCII case **by construction of
     /// the key type**, not by a rule the fold has to remember. `BinaryName`
     /// admits only `is_ascii_graphic` bytes, so the Unicode/ASCII divergence a
     /// `to_lowercase()` would introduce (Turkish dotted `İ` folding onto `i`)
@@ -1373,9 +1240,9 @@ mod tests {
         }
     }
 
-    /// RUL-10 (E-30): the module is **pure with respect to the host** — no
-    /// `cfg!` macro anywhere in its code. That is the entire reason D-V18 moved
-    /// the case-sensitivity question to the renderer's call site: a
+    /// The module is **pure with respect to the host** — no
+    /// `cfg!` macro anywhere in its code. That is the entire reason the
+    /// case-sensitivity question moved to the renderer's call site: a
     /// `cfg!(target_os = "windows")` branch inside either function is green on
     /// whichever host runs it and never observed on the other, which is
     /// `quality-core.md`'s unreachable-red class.

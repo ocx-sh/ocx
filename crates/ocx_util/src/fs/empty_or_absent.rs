@@ -2,21 +2,14 @@
 // Copyright 2026 The OCX Authors
 
 //! Validate that a path is absent or an empty directory.
-//!
-//! Used by destination-path preconditions: `ocx package test --output DIR`
-//! requires `DIR` to be absent (it will be created) or empty (it will be
-//! reused).
 
 use std::path::{Path, PathBuf};
 
 /// Failure modes of [`ensure_empty_or_absent`].
 #[derive(Debug)]
 pub enum EmptyOrAbsentError {
-    /// `path` exists and is not a directory.
     NotADirectory { path: PathBuf },
-    /// `path` exists, is a directory, and contains entries.
     NonEmpty { path: PathBuf },
-    /// I/O failure during the existence/metadata/listing probe.
     Io { path: PathBuf, source: std::io::Error },
 }
 
@@ -48,9 +41,6 @@ impl std::error::Error for EmptyOrAbsentError {
 }
 
 /// Verify that `path` is either absent or an empty directory.
-///
-/// Returns `Ok(())` on success. Errors with structured variants distinguish
-/// "exists as file", "non-empty directory", and "I/O failure".
 pub async fn ensure_empty_or_absent(path: &Path) -> Result<(), EmptyOrAbsentError> {
     let exists = tokio::fs::try_exists(path).await.map_err(|e| EmptyOrAbsentError::Io {
         path: path.to_path_buf(),

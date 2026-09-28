@@ -34,14 +34,9 @@ pub use version::version;
 
 pub mod build_info;
 
-/// A CLI-local command failure carrying its own exit code.
+/// A CLI-local command failure carrying its own exit code, for validations that exit other than 64.
 ///
-/// Mirrors `crate::error::UsageError` (message + fixed classification) but
-/// lets the caller pick the code, for command-boundary validations that map
-/// to exits other than 64 (e.g. `NotFound`, `ConfigError`, `DataError`) and
-/// whose originating type is not a library error. Commands return this
-/// instead of `eprintln!` + `Ok(ExitCode::…)` so the message flows through
-/// the single [`finish`] boundary.
+/// Return this, not `eprintln!` + `Ok(ExitCode::…)`, so the message flows through [`finish`].
 #[derive(Debug)]
 pub struct CommandError {
     message: String,
@@ -74,11 +69,7 @@ impl crate::exit::ClassifyExitCode for CommandError {
 #[derive(Parser)]
 #[command(name = "ocx", about, long_about = None)]
 #[command(about = "A simple package manager for pre-built binaries.", long_about = None)]
-// Disable clap's auto-generated `help` subcommand so `ocx help <name>` falls
-// through to the External variant and is rewritten to `ocx-<name> --help` by
-// `plugin_dispatch::rewrite_help_invocation`. Without this, clap intercepts
-// `help <X>` before External fires, producing a confusing "unrecognized
-// subcommand" error instead of dispatching to the plugin.
+// Off so `ocx help <name>` reaches `External` as `ocx-<name> --help`; clap's own would reject it first.
 #[command(disable_help_subcommand = true)]
 pub struct Cli {
     #[command(flatten)]
@@ -90,8 +81,7 @@ pub struct Cli {
 
 pub struct App {}
 
-// The crate has a library target, so `App::new` is public API and clippy asks
-// for the conventional `Default` beside it.
+// Clippy's `new_without_default`: `App::new` is public API of the library target.
 impl Default for App {
     fn default() -> Self {
         Self::new()
@@ -119,62 +109,29 @@ impl App {
         color_config: ocx_console::ColorModeConfig,
     ) -> anyhow::Result<ExitCode> {
         let styles = ocx_console::clap_styles(color_config.stdout);
-        // Route every clap failure (value-validation, missing args, unknown
-        // flags) through `clap_parse::parse` so backend tools see typed exit
-        // codes (`EX_USAGE` = 64) instead of clap's default `2`. Help, version
-        // and `DisplayHelpOnMissingArgumentOrSubcommand` paths still print
-        // and exit `0` via clap's renderer inside the helper.
+        // Through `parse`, so a clap failure exits 64 (`EX_USAGE`) rather than clap's 2.
         let matches = match parse(Cli::command().color(color_mode.into()).styles(styles.clone()), &argv) {
             Ok(matches) => matches,
             Err(code) => return Ok(code),
         };
         let cli = Cli::from_arg_matches(&matches)?;
-        // Before the static bypass below: under the seam, a verb that is not
-        // admitted must not run at all, static or not.
+        // Before the static bypass, or a non-admitted static verb still runs under the seam.
         #[cfg(any(test, feature = "__testing"))]
         if seam::active() {
             seam::admit(cli.command.as_ref())?;
         }
 
-        // Static commands dispatch without constructing a Context so they
-        // survive a malformed ambient config (`~/.ocx/config.toml`).
-        // `Version::execute`, `ShellCompletion::execute`, `SelfActivate::execute`,
-        // and bare `ocx` (None) are Context-free — the entire `Context::try_init`
-        // path (which calls `ConfigLoader::load` and aborts on bad TOML /
-        // oversized files) is unnecessary for them.
-        //
-        // `Self_(SelfActivate)` is in this list because `self activate` runs on
-        // every shell startup (sourced from `$OCX_HOME/env.sh`).  The full
-        // `Context::try_init` cost — ConfigLoader file walk, OCI client,
-        // OciIndex, PackageManager construction — is paid unnecessarily on
-        // every new shell session.  `SelfActivate::execute` only needs a
-        // `FileStructure` (to resolve the absolute symlink bin path), which it
-        // constructs cheaply via `FileStructure::new()` directly.
-        //
-        // `Info` is deliberately NOT in this list: it reads
-        // `context.default_registry()` from the loaded config and is expected
-        // to surface more config-derived fields in the future. When ambient
-        // config is broken, falling back to `ocx version` is the documented
-        // diagnostic path. The regression guard lives at
-        // `test/tests/test_config.py::test_info_still_requires_valid_config_when_ambient_broken`.
-        // Consuming match so the External arm can take argv by value (no clone).
-        // The fallthrough arm binds `command` by value; the separate
-        // `should_check_for_update` call below re-borrows from the re-bound name.
+        // Static commands bypass `Context::try_init`, which aborts on bad ambient config.
         match cli.command {
             Some(command::Command::Version(ref v)) => return v.execute(&cli.context, color_config).await,
             Some(command::Command::Shell(command::shell::Shell::Completion(ref c))) => {
                 return c.execute(&cli.context).await;
             }
             Some(command::Command::Self_(command::self_group::SelfGroup::Activate(ref a))) => {
+                // Runs on every shell startup, so it skips `Context::try_init`'s cost.
                 let result = a.execute(&cli.context, color_config).await;
-                // The `finish` boundary reports through `tracing::error!`,
-                // and the subscriber it needs is installed by `Context::try_init`,
-                // which this path skips — so a refused activation exited 64 in
-                // silence (#434). Installed only once the path has failed: the
-                // stream itself stays diagnostic-free (A-21), and a shell start
-                // still pays nothing for a subscriber it never writes through.
-                // `.ok()`: `--reconcile` reaches `Context::try_init` itself and
-                // already holds the global.
+                // `finish` logs via `tracing`, whose subscriber `try_init` installs; without it the error vanishes.
+                // `.ok()`: `--reconcile` already installed the global subscriber via `Context::try_init`.
                 if result.is_err() {
                     crate::tracing_init::LogSettings::default()
                         .with_console_level(cli.context.log_level)
@@ -214,32 +171,21 @@ impl App {
             unreachable!("None handled in static-command bypass above");
         };
 
-        // Capture format + canonical command name so JSON mode can render an
-        // error envelope on stdout before `main.rs` returns the exit code.
-        // Error branch only: success envelopes are owned by each command's
-        // `api().report(...)` call, which already honors `--format json`.
         let format = cli.context.format.mode();
         let command_name = canonical_command_name(command);
-        // Report-then-fail commands (e.g. `package push --tags-file` with an
-        // unwritable path) already printed their stdout document; appending the
-        // envelope would leave two concatenated JSON documents on stdout. The
-        // envelope is the stdout document only for failures that reported nothing.
+        // No envelope after a report, or stdout carries two JSON documents.
         let reported = context.api().reported_handle();
         match command.execute(context).await {
             Ok(code) => Ok(code),
             Err(err) if format == FormatMode::Json && !reported.load(std::sync::atomic::Ordering::Relaxed) => {
                 match render_error_envelope(command_name, &err) {
-                    // Through the printer, not `println!`, so the one stdout
-                    // path every report takes carries the envelope too.
+                    // Through the printer, the one stdout path every report takes.
                     Ok(rendered) => ocx_console::Printer::new(false, false)
                         .cout()
                         .plain(rendered)
                         .end_line(),
                     Err(render_err) => {
-                        // Envelope rendering is infallible-by-design, but if serde
-                        // ever fails we surface both causes rather than swallowing
-                        // either one — the operator gets the underlying failure AND
-                        // a diagnostic about the broken envelope path.
+                        // Log this and still return `err`, so neither cause is swallowed.
                         log::error!("error envelope render failed: {render_err:#}");
                     }
                 }
@@ -250,11 +196,9 @@ impl App {
     }
 }
 
-/// Map a parsed `Command` to the canonical space-separated string consumers
-/// match on (e.g., `"package sign"`, `"package verify"`, `"index update"`).
+/// Canonical space-separated command name in the JSON error envelope.
 ///
-/// Frozen per ADR C-S1-1, "JSON error envelope" section (the `command` field is
-/// part of the frozen v1 envelope shape). Any change to an existing mapping is a v1 → v2 schema bump.
+/// Frozen v1 (`adr_oci_referrers_signing_v1.md`): changing an existing mapping is a v2 schema bump.
 fn canonical_command_name(command: &command::Command) -> &'static str {
     use command::Command;
     use command::config::ConfigGroup as ConfigCmd;
@@ -310,8 +254,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
                 DescriptionCmd::Push(_) => "package description push",
                 DescriptionCmd::Pull(_) => "package description pull",
             },
-            // Old spellings keep their released strings — see the note on
-            // `Command::DeprecatedRun` above.
+            // Deprecated spellings keep their released strings, like `DeprecatedRun` below.
             PackageCmd::DeprecatedDescribe(_) => "package describe",
             PackageCmd::DeprecatedInfo(_) => "package info",
             PackageCmd::Deps(_) => "package deps",
@@ -341,10 +284,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
         Command::Pull(_) => "pull",
         Command::Remove(_) => "remove",
         Command::Exec(_) => "exec",
-        // The deprecated spelling keeps reporting `"run"`, so no mapping a
-        // released binary already emitted changes meaning and the frozen v1
-        // envelope needs no version bump — `"exec"` is purely additive until
-        // 0.7 deletes this arm along with the rest of `command::deprecated`.
+        // Keeps its released `"run"`, so the frozen v1 envelope needs no bump.
         Command::DeprecatedRun(_) => "run",
         Command::Shell(sub) => match sub {
             ShellCmd::Allow(_) => "shell allow",
@@ -362,37 +302,11 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
     }
 }
 
-/// Skip the update check for commands that only print static info, plus the
-/// `ocx config` group — fleet tooling whose members carry their own network
-/// contract (`config test` promises no network and no state writes at all),
-/// matching [`should_check_managed_config_refresh`]'s exclusion.
+/// Skips the network update check for static, `self`, `config` and `shell` commands, and for
+/// the trampoline and per-prompt hot paths (`exec`, `run`, `env`, `direnv`).
 ///
-/// `shell state` is skipped alongside `shell completion`: it is a diagnostic
-/// (C-050), and a diagnostic that fails — or merely stalls — because the thing
-/// it is diagnosing is broken is useless. The `Shell` variants are listed one
-/// by one rather than wildcarded so a new subcommand is not skipped by
-/// default; `should_check_for_update_skips_all_shell_variants_canary` makes
-/// that decision a compile error.
-///
-/// **The machine-driven surfaces are skipped for the same reason `self
-/// activate` is**, and they were the omission this list was carrying. The
-/// probe is a live tag listing through the index chain plus an `ocx --format
-/// json version` subprocess spawn — measured at 264.5 ms when it fires against
-/// 63.8 ms throttled — and it lands on whichever invocation happens to be the
-/// first in a 24-hour window. That is fine on a command a human typed and
-/// wrong on one a machine issues:
-///
-/// - `Exec` (and its deprecated `run` spelling) is what every rendered
-///   `<home>/toolchain/active/bin/<name>` trampoline `exec`s — the user typed `cmake`,
-///   not `ocx`, and a quarter-second stall on the first build of the day is
-///   attributed to the binary, not to ocx.
-/// - `Env` and `Direnv` compose an environment for a shell to evaluate:
-///   `.envrc`'s `eval "$(ocx direnv export)"` re-runs on every directory change
-///   and on every `ocx.toml` / `ocx.lock` touch.
-///
-/// Every command a user reaches for deliberately — `install`, `pull`, `add`,
-/// `lock`, `update`, `status`, the `package` group — still carries the check,
-/// so the notification still happens; it just no longer rides a hot path.
+/// `Shell` variants are listed, not wildcarded, so a new one is checked by default
+/// (`should_check_for_update_skips_all_shell_variants_canary`).
 fn should_check_for_update(command: &Option<command::Command>) -> bool {
     !matches!(
         command,
@@ -415,18 +329,10 @@ fn should_check_for_update(command: &Option<command::Command>) -> bool {
     )
 }
 
-/// Skip the managed-config background-refresh probe for commands that only
-/// print static info, plus the `ocx config` group itself — an explicit
-/// `config update` already performs the full (non-throttled) refresh, and
-/// `config push` is the operator-side publish command that never consults
-/// the local tier.
+/// Skips the managed-config refresh probe for static, `self`, `shell` and `config` commands.
 ///
-/// `shell state` is skipped here too, which also exempts it from
-/// [`should_enforce_managed_config_required`] below. That exemption is
-/// load-bearing: with `[managed] required = true` and no
-/// matching snapshot — the ordinary broken state a confused user is told to
-/// diagnose — the gate would exit 78 before the command ran, against C-051's
-/// "0 in every reportable state, 74 the only non-zero path".
+/// Also the required-snapshot exemption: without `shell state` here, `required = true` with no
+/// snapshot exits 78 before the diagnostic that reports it.
 fn should_check_managed_config_refresh(command: &Option<command::Command>) -> bool {
     !matches!(
         command,
@@ -445,26 +351,17 @@ fn should_check_managed_config_refresh(command: &Option<command::Command>) -> bo
     )
 }
 
-/// Gates `Context::try_init`'s `[managed]` required-snapshot enforcement
-/// (ADR Decision E, criterion 6: `required = true` + no matching snapshot →
-/// exit 78 for ordinary commands).
+/// Gates `[managed] required = true` enforcement: exit 78 with no matching snapshot.
 ///
-/// Exempts the same command set as [`should_check_managed_config_refresh`]:
-/// `ocx config update` is the ONLY command that can create the missing
-/// snapshot in the first place (the CI-ephemeral recipe is
-/// `OCX_MANAGED_CONFIG=... && ocx config update && ocx <cmd>` — the update
-/// step itself must be reachable with no snapshot yet), and the `self`/
-/// static commands never consult the managed-config tier.
+/// Exempts the refresh set, which must keep `ocx config update`, the only command that creates the missing snapshot.
 fn should_enforce_managed_config_required(command: &Option<command::Command>) -> bool {
     should_check_managed_config_refresh(command)
 }
 
-/// Names the three commands that can adopt a brand-new managed-config source
-/// with no seed present (`ocx config setup`, `ocx config update`, `ocx self
-/// setup --managed-config <ref>`): only they get the managed-fetch client
-/// built when no source resolves yet. Deliberately narrower than the
-/// required-gate exemption above — `ocx self activate` runs on every shell
-/// startup and must not pay the client-build cost for an unconfigured tier.
+/// The commands that build the managed-fetch client before any source resolves.
+///
+/// Narrower than the required-gate exemption: `self activate` runs on every shell startup and
+/// must not pay that build.
 fn is_managed_config_onboarding_command(command: &Option<command::Command>) -> bool {
     matches!(
         command,
@@ -490,9 +387,7 @@ fn parse(cmd: clap::Command, argv: &[std::ffi::OsString]) -> Result<clap::ArgMat
     crate::clap_parse::parse(cmd, argv).map_err(Into::into)
 }
 
-/// Whether this invocation runs inside the in-process seam ([`seam::run`]),
-/// which replaces every process-global the production path installs or
-/// probes. Always `false` in a build without the testing gate.
+/// Whether this runs inside the in-process seam; always `false` without the testing gate.
 fn in_seam() -> bool {
     #[cfg(any(test, feature = "__testing"))]
     let active = seam::active();

@@ -20,14 +20,13 @@ pub struct LoginResult {
 
 impl Printable for LoginResult {
     fn print_plain(&self, _printer: &ocx_console::DataInterface) {
-        // Intentionally empty: success is reported on stderr. Only the JSON
-        // path writes to stdout (the data interface).
+        // Empty: success is reported on stderr.
     }
 }
 
 /// Successful `ocx logout` result.
 ///
-/// Plain format: nothing on stdout (see [`LoginResult`]).
+/// Plain format: nothing on stdout; success is reported on stderr.
 ///
 /// JSON format: `{"registry": "..."}` on stdout.
 #[derive(Serialize, schemars::JsonSchema)]

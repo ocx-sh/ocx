@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Versioned, content-hashed RC-block state machine (Decision 3D).
+//! Versioned, content-hashed RC-block state machine.
 //!
-//! OCX writes a conda-style fenced block to user shell profiles:
+//! The fenced block written to user shell profiles:
 //!
 //! ```text
 //! # >>> ocx v1 a1b2c3d4 >>>
@@ -13,27 +13,9 @@
 //! # <<< ocx <<<
 //! ```
 //!
-//! The opener carries a format version (`v1`) and an 8-hex content hash of the
-//! block body. A three-hash state machine drives idempotent re-application,
-//! format-upgrade rewrites, and dirty-edit detection:
-//!
-//! - **canonical** — hash of the body *this* binary would write (compile-time derivable).
-//! - **marker** — the hash parsed from the on-disk opener line.
-//! - **actual** — hash recomputed from the on-disk block body.
-//!
-//! | canonical | marker | actual | state | action |
-//! |---|---|---|---|---|
-//! | — | absent | — | `Fresh` | append fresh block |
-//! | = | = | = | `Current` | no-op |
-//! | = | absent | = | `Current` | no-op (hashless opener treated as v0-clean) |
-//! | ≠ | = (or different `v\d+`) | = | `FormatUpgraded` | rewrite to canonical v1 |
-//! | ≠ | absent | ≠ canonical | `FormatUpgraded` | silent overwrite — no marker means user edits undetectable |
-//! | any | present | ≠ marker | `Dirty` | skip unless `--force` |
-//!
-//! Line scanning is manual (O(n), CRLF-tolerant, collapses duplicates); the
-//! opener `regex` is used only to parse the version + hash off a single line.
-//! See `.claude/artifacts/adr_self_setup.md` and the research artifact (Gap 1/2)
-//! for the prior art this ports from.
+//! The opener carries a format version and an 8-hex hash of the body; comparing it
+//! with the on-disk and canonical body gives a [`BlockState`]
+//! (`.claude/artifacts/adr_self_setup.md`).
 
 use std::sync::OnceLock;
 
@@ -45,21 +27,13 @@ use crate::error::Error;
 /// The version this binary writes into the opener (`# >>> ocx v1 … >>>`).
 const CURRENT_VERSION: u32 = 1;
 
-/// Fence label used by the original `ocx self setup` shell-activation block.
-/// Passed as the `label` argument by every existing caller so output stays
-/// byte-identical; a second caller (e.g. managed config) passes its own
-/// label (e.g. `"ocx managed"`) to get a distinctly fenced block.
+/// Fence label of the shell-activation block.
 pub const OCX_LABEL: &str = "ocx";
 
-/// Fence label used by `ocx self setup --managed-config` (the second caller of
-/// this fence machine) so its `[managed]` seed block is distinctly fenced from
-/// the shell-activation block above.
+/// Fence label of the `--managed-config` `[managed]` seed block.
 pub const MANAGED_LABEL: &str = "ocx managed";
 
-/// Closer line for the legacy (pre-v1) `# BEGIN ocx` / `# END ocx` migration
-/// path — [`strip_block`] and [`has_legacy_artifacts`] are ocx-specific (no
-/// second caller has a legacy footprint to migrate from), so they stay
-/// hardcoded to the original label rather than taking a `label` parameter.
+/// Closer of the [`OCX_LABEL`] fence, for [`strip_block`], which only that label needs.
 const CLOSER: &str = "# <<< ocx <<<";
 
 /// A managed block as it appears on disk, with the spans needed to splice it.
@@ -98,9 +72,7 @@ pub struct RcBlock {
 }
 
 impl RcBlock {
-    /// Build the full fenced block text (LF-terminated, opener + body + closer)
-    /// for the given fence `label` (e.g. [`OCX_LABEL`] or a second caller's own
-    /// label).
+    /// Build the full LF-terminated fenced block for `label`.
     fn render(&self, label: &str) -> String {
         format!(
             "# >>> {label} v{CURRENT_VERSION} {hash} >>>\n{body}\n{closer}\n",
@@ -116,18 +88,12 @@ fn closer_text(label: &str) -> String {
     format!("# <<< {label} <<<")
 }
 
-/// Version-agnostic opener for `label`: matches any `# >>> {label} v<N>
-/// [<hash8>] >>>` line so a future v2 fence (or a malformed-hash opener) is
-/// recognized and collapsed.
-///
-/// Rebuilt per call rather than cached — only a handful of distinct labels
-/// exist (one per caller) and this runs at most a few times per CLI
-/// invocation, so a `OnceLock`-per-label cache would be premature.
+/// Version-agnostic opener for `label`, so a future v2 fence or a hashless opener is
+/// still recognized and collapsed.
 // ponytail: rebuilt per call; cache-by-label if this becomes a hot path.
 fn opener_regex(label: &str) -> Regex {
     let escaped_label = regex::escape(label);
-    // Tolerate leading whitespace and an optional hash group. `label` is
-    // always a compile-time-constant caller label, so this never fails.
+    // `label` is escaped, so the pattern is valid for any label.
     Regex::new(&format!(
         r"^\s*# >>> {escaped_label} v(\d+)(?: ([0-9a-f]{{8}}))? >>>\s*$"
     ))
@@ -154,25 +120,18 @@ fn dominant_is_crlf(content: &str) -> bool {
     if crlf == 0 {
         return false;
     }
-    // Count bare LF (LF not preceded by CR) to compare against CRLF runs.
-    // Strict `>`: a file with *more* CRLF than bare LF is CRLF-dominant. An
-    // equal-count mixed file defaults to LF (the else branch in
-    // `apply_line_ending`), matching the spec's "more `\r\n` than bare `\n`".
+    // Strict `>`: an equal-count mixed file defaults to LF.
     let total_lf = content.matches('\n').count();
     let bare_lf = total_lf.saturating_sub(crlf);
     crlf > bare_lf
 }
 
-/// Find the (first) versioned fence carrying `label` in `content`.
-///
-/// Matching is performed on a CRLF-normalized copy; the returned `body` is
-/// normalized to `\n`. Returns `None` when no opener line parses.
+/// Find the first versioned fence carrying `label`; the returned `body` is LF-normalized.
 pub fn find_block(content: &str, label: &str) -> Option<ParsedBlock> {
     find_all_blocks(content, label).into_iter().next()
 }
 
-/// Find every versioned fence carrying `label` (used to collapse duplicates /
-/// forward versions).
+/// Find every versioned fence carrying `label`.
 fn find_all_blocks(content: &str, label: &str) -> Vec<ParsedBlock> {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let lines: Vec<&str> = normalized.lines().collect();
@@ -193,8 +152,7 @@ fn find_all_blocks(content: &str, label: &str) -> Vec<ParsedBlock> {
             .unwrap_or(CURRENT_VERSION);
         let marker = captures.get(2).map(|m| m.as_str().to_string());
 
-        // Scan forward for the closer. A missing closer (truncated/edited file)
-        // means the opener is not a real block — skip past it.
+        // An opener without a closer is not a block.
         let mut closer_line = None;
         let mut scan = opener_line + 1;
         while scan < lines.len() {
@@ -231,27 +189,19 @@ pub fn classify(content: &str, body: &str, label: &str) -> BlockState {
     let canonical = canonical_hash(body);
 
     match &block.marker {
-        // A marker that disagrees with the on-disk body = user edited it.
         Some(marker) if *marker != actual => BlockState::Dirty,
-        // Marker matches body (ocx-authored). Current iff same version and the
-        // body already equals what this binary would write.
         Some(_) | None if block.version == CURRENT_VERSION && actual == canonical => BlockState::Current,
-        // ocx-authored but version or content differs → safe rewrite.
+        // A hashless opener has no marker, so a user edit under it is overwritten silently.
         _ => BlockState::FormatUpgraded,
     }
 }
 
-/// Apply the state machine. Returns the new file content, or `None` when no
-/// change is needed (`Current`, or `Dirty` without `force`).
-///
-/// CRLF handling: matching runs on a normalized copy, but the rewritten file
-/// preserves the original dominant line ending (Decision item 9b). All
-/// ocx-versioned fences are collapsed to a single v1 block (item 9a).
+/// Apply the state machine: the new content, or `None` when no change is needed
+/// (`Current`, or `Dirty` without `force`). Keeps the dominant line ending.
 ///
 /// # Errors
 ///
-/// Currently infallible, but returns [`Error`] so future write-side validation
-/// can surface without changing the signature.
+/// Currently infallible.
 pub fn apply(content: &str, body: &str, force: bool, label: &str) -> Result<Option<String>, Error> {
     let state = classify(content, body, label);
     let blocks = find_all_blocks(content, label);
@@ -260,7 +210,6 @@ pub fn apply(content: &str, body: &str, force: bool, label: &str) -> Result<Opti
         BlockState::Current => Ok(None),
         BlockState::Dirty if !force => Ok(None),
         BlockState::Fresh => Ok(Some(append_block(content, body, label))),
-        // FormatUpgraded, or Dirty + force: collapse every fence to one v1 block.
         _ => Ok(Some(rewrite_blocks(content, body, &blocks, label))),
     }
 }
@@ -271,8 +220,6 @@ fn append_block(content: &str, body: &str, label: &str) -> String {
     let block = RcBlock { body: body.to_string() }.render(label);
 
     let mut normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-    // Separate the appended block with one blank line, matching install.sh's
-    // leading `\n` before the fence. A brand-new empty file gets no leading gap.
     if normalized.is_empty() {
         normalized = block;
     } else {
@@ -294,7 +241,6 @@ fn rewrite_blocks(content: &str, body: &str, blocks: &[ParsedBlock], label: &str
     let trailing_newline = normalized.ends_with('\n');
 
     let block_text = RcBlock { body: body.to_string() }.render(label);
-    // `render()` always ends in `\n`; split into lines for re-interleaving.
     let block_lines: Vec<&str> = block_text.trim_end_matches('\n').lines().collect();
 
     let first_opener = blocks.first().map(|block| block.opener_line);
@@ -305,7 +251,6 @@ fn rewrite_blocks(content: &str, body: &str, blocks: &[ParsedBlock], label: &str
             if Some(index) == first_opener {
                 output.extend(block_lines.iter().map(|line| (*line).to_string()));
             }
-            // Skip the entire fence span (opener..=closer) for every block.
             index = block.closer_line + 1;
             continue;
         }
@@ -332,9 +277,6 @@ fn apply_line_ending(normalized: &str, crlf: bool) -> String {
 /// Remove the ocx footprint from `content`: the v1 (and any `v\d+`) fence, the
 /// legacy `# BEGIN ocx` / `# END ocx` block, `ocx shell init` dot-source lines,
 /// and the extensionless `$OCX_HOME/env` references.
-///
-/// Ports the awk state machine at `install.sh:691-711` plus the legacy
-/// block-strip at `install.sh:902` to a single Rust line-scan pass.
 pub fn strip_block(content: &str) -> String {
     let crlf = dominant_is_crlf(content);
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
@@ -344,11 +286,9 @@ pub fn strip_block(content: &str) -> String {
 
     let mut output: Vec<&str> = Vec::with_capacity(lines.len());
     let mut index = 0;
-    // States for the legacy `# OCX` extensionless-env guard (install.sh:683).
     while index < lines.len() {
         let line = lines[index];
 
-        // v1 / forward-version fence: drop opener..=closer.
         if regex.is_match(line) {
             let mut scan = index + 1;
             let mut closer = None;
@@ -365,7 +305,6 @@ pub fn strip_block(content: &str) -> String {
             }
         }
 
-        // Legacy `# BEGIN ocx` / `# END ocx` block: drop BEGIN..=END.
         if line.trim() == "# BEGIN ocx" {
             let mut scan = index + 1;
             let mut end = None;
@@ -382,8 +321,6 @@ pub fn strip_block(content: &str) -> String {
             }
         }
 
-        // Bare legacy dot-source lines: `. ".../.ocx/init.<shell>"` and
-        // extensionless `. ".../.ocx/env"` (install.sh:707-708).
         if is_legacy_init_line(line) || is_legacy_env_line(line) {
             index += 1;
             continue;
@@ -400,14 +337,7 @@ pub fn strip_block(content: &str) -> String {
     apply_line_ending(&joined, crlf)
 }
 
-/// Removes the fence carrying `label` (if present) from `content`, leaving
-/// everything else untouched. Returns `content` unchanged (byte-identical)
-/// when no fence carrying `label` is found.
-///
-/// Unlike [`strip_block`] (hardcoded to [`OCX_LABEL`]'s legacy footprint),
-/// this targets an arbitrary label's v1 (or forward-version) fence only.
-/// Used by a second caller's clear/unadopt path (`ocx self setup
-/// --managed-config ""`).
+/// Removes every fence carrying `label`; `content` stays byte-identical when none exists.
 pub fn remove_block(content: &str, label: &str) -> String {
     let blocks = find_all_blocks(content, label);
     if blocks.is_empty() {
@@ -437,17 +367,9 @@ pub fn remove_block(content: &str, label: &str) -> String {
     apply_line_ending(&joined, crlf)
 }
 
-/// Whether `content` carries any pre-v1 (legacy) ocx footprint that
-/// [`strip_block`] would remove: a `# BEGIN ocx` / `# END ocx` block, a legacy
-/// `ocx shell init` dot-source line, or an extensionless `$OCX_HOME/env`
-/// reference.
+/// Whether `content` carries a pre-v1 ocx footprint [`strip_block`] would remove.
 ///
-/// The orchestrator uses this to choose [`crate::ProfileOutcome::Migrated`]
-/// over `Completed`: a profile with a legacy footprint is stripped and rewritten
-/// to the v1 fence (a migration), whereas a profile with only a v1 fence (or
-/// none) takes the ordinary state-machine [`apply`] path. The v1-versioned fence
-/// is intentionally NOT a legacy artifact — collapsing it is a format upgrade,
-/// not a migration.
+/// A v1 fence is not legacy: collapsing it is a format upgrade, not a migration.
 pub fn has_legacy_artifacts(content: &str) -> bool {
     let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
     let lines: Vec<&str> = normalized.lines().collect();
@@ -455,7 +377,6 @@ pub fn has_legacy_artifacts(content: &str) -> bool {
     let mut index = 0;
     while index < lines.len() {
         let line = lines[index];
-        // A `# BEGIN ocx` … `# END ocx` block is the canonical legacy marker.
         if line.trim() == "# BEGIN ocx" {
             return true;
         }

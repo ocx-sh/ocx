@@ -3,13 +3,8 @@
 
 //! Structured JSON error envelope for `--format json` error output.
 //!
-//! Per ADR §C-S1-1, the envelope shape is frozen and treated as a stable
-//! public contract; the version integer moves only when the shape does (see
-//! [`ENVELOPE_SCHEMA_VERSION`]). Root-level keys are strictly
-//! `schema_version`, `command`, `exit_code`, and `error` (error path) or
-//! `schema_version`, `command`, `exit_code`, `data` (success path).
-//!
-//! Shape:
+//! The shape is a frozen public contract (`adr_oci_referrers_signing_v1.md`
+//! § JSON error envelope):
 //!
 //! ```json
 //! {
@@ -28,35 +23,18 @@
 //!   }
 //! }
 //! ```
-//!
-//! The `remediation` key is **reserved** in the shape but not currently
-//! emitted: [`render_error_envelope`] always leaves it `None`, so it is omitted
-//! from real output. Consumers must treat it as optional.
 
 use crate::exit::ClassifyErrorKind;
 use ocx_exit::{ErrorCategory, ExitCode};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-/// Schema version for the JSON envelope. Bump on any breaking change.
+/// Schema version for the JSON envelope; bump only on a shape change (rename, remove, re-nest).
 ///
-/// Freeze per C-S1-1: additive fields (new keys) do not bump; shape changes
-/// (rename, remove, re-nest) do. The [`ErrorCategory`] vocabulary is
-/// additive: new variants appear without a bump, and renaming a variant
-/// bumps only when a *released* binary ever emitted the old spelling —
-/// otherwise no consumer can observe the rename, while the version flip
-/// itself would break scripts pinning the number.
-///
-/// `rekor_unavailable` -> `transparency_log_unavailable` (exit 83
-/// unchanged) is exactly that case: the old slug never shipped in a
-/// release, so version 1 is still the contract.
+/// New keys, new [`ErrorCategory`] variants and renames of a slug no release emitted do not bump.
 pub const ENVELOPE_SCHEMA_VERSION: u32 = 1;
 
-/// Error-branch JSON envelope.
-///
-/// Top-level shape per the ADR C-S1-1 frozen contract: `schema_version`,
-/// `command`, `exit_code`, `error`. `success` is NOT present — consumers
-/// branch on whether the `error` or `data` key is present.
+/// Error-branch JSON envelope; there is no `success` key, consumers branch on `error` vs `data`.
 #[derive(Debug, Serialize)]
 pub struct ErrorEnvelope<'a> {
     /// Envelope schema version. Always [`ENVELOPE_SCHEMA_VERSION`].
@@ -74,28 +52,19 @@ pub struct ErrorEnvelope<'a> {
 pub struct EnvelopeError<'a> {
     /// Coarse human-readable category. Frozen set — see [`ErrorCategory`].
     pub kind: ErrorCategory,
-    /// Fine-grained snake_case variant name for programmatic matching
-    /// (e.g., `"oidc_token_rejected"`). Optional.
+    /// Fine-grained snake_case variant name (e.g., `"oidc_token_rejected"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<&'a str>,
     /// Full user-facing message (the outermost `Display` of the error chain).
     pub message: String,
-    /// Reserved remediation hint — part of the frozen shape but not
-    /// currently emitted (`render_error_envelope` always leaves it `None`, so
-    /// `skip_serializing_if` omits it). Consumers must treat it as optional.
+    /// Reserved in the frozen shape but never emitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remediation: Option<String>,
-    /// Structured context — identifier, digests, URLs. Values are
-    /// `serde_json::Value` so null and numeric fields serialize faithfully
-    /// (the ADR example shows `"bundle_digest": null`).
-    ///
-    /// Stable key ordering via `BTreeMap` — tests compare byte-for-byte
-    /// without sorting. Always emitted (may be an empty object).
+    /// Structured context (identifier, digests, URLs); always emitted, possibly empty.
     pub context: BTreeMap<&'static str, serde_json::Value>,
 }
 
-/// Success-branch JSON envelope. Mirrors [`ErrorEnvelope`] at the top level
-/// (`schema_version`, `command`, `exit_code`) with `data` replacing `error`.
+/// Success-branch JSON envelope: [`ErrorEnvelope`]'s top level with `data` replacing `error`.
 #[derive(Debug, Serialize)]
 pub struct SuccessEnvelope<'a, T: Serialize> {
     pub schema_version: u32,
@@ -115,14 +84,7 @@ impl<'a, T: Serialize> SuccessEnvelope<'a, T> {
         }
     }
 
-    /// Wrap `data` in an envelope reporting `exit_code`.
-    ///
-    /// For the one shape a plain success envelope cannot describe: a command
-    /// that produced a report **and** is about to exit non-zero, because part
-    /// of its work landed and part did not (`ocx package sign
-    /// --signature-format both`). The report is that run's only stdout
-    /// document, so hard-coding 0 here would put a `"exit_code":0` in front of
-    /// a consumer whose `$?` says 75.
+    /// Wrap `data` in an envelope reporting `exit_code`, for a report whose run then exits non-zero.
     pub fn with_exit_code(command: &'a str, data: &'a T, exit_code: ExitCode) -> Self {
         Self {
             schema_version: ENVELOPE_SCHEMA_VERSION,
@@ -133,30 +95,14 @@ impl<'a, T: Serialize> SuccessEnvelope<'a, T> {
     }
 }
 
-/// Render an `anyhow::Error` as a JSON error envelope (emitted on stdout by
-/// `app.rs` when `--format json` is active and the failing command printed no
-/// report of its own — a report-then-fail command keeps its report as the one
-/// stdout document, and the failure detail stays on stderr).
+/// Render an `anyhow::Error` as the JSON error envelope printed under `--format json`.
 ///
-/// Classifies the exit code via [`crate::exit::classify_error`] — the same
-/// authority `main.rs` returns from, so the envelope's `exit_code` can never
-/// disagree with the process's. The library classifier alone cannot downcast
-/// a CLI-local [`crate::app::CommandError`], so using it here rendered every
-/// such refusal as `1`/`internal` while the process exited 64 or 65 (CLI-04).
-/// The result maps to an [`ErrorCategory`]; identifier context is collected
-/// from the chain, and the whole is serialized as a byte-stable JSON envelope
-/// matching the frozen contract (see [`ENVELOPE_SCHEMA_VERSION`]).
-///
-/// The `message` field is `{err:#}` (the full chain), matching the
-/// plain-format `tracing::error!` line. Because the `tracing` line goes to
-/// stderr and the envelope goes to stdout, consumers can parse stdout via
-/// `json.loads()` without stripping logs.
+/// Classified by [`crate::exit::classify_error`], not the library pass,
+/// or a CLI-local `CommandError` reports `1` while the process exits 64.
 ///
 /// # Errors
 ///
-/// Returns an error only if `serde_json::to_string` fails. In practice, the
-/// envelope shape is `Serialize`-infallible, so this is defensive — we
-/// propagate rather than panicking to keep the error path robust.
+/// Only if `serde_json::to_string` fails.
 pub fn render_error_envelope(command: &str, err: &anyhow::Error) -> anyhow::Result<String> {
     let err_ref: &(dyn std::error::Error + 'static) = err.as_ref();
     let exit_code = crate::exit::classify_error(err_ref);
@@ -179,14 +125,7 @@ pub fn render_error_envelope(command: &str, err: &anyhow::Error) -> anyhow::Resu
     Ok(serde_json::to_string(&envelope)?)
 }
 
-/// Walk the error chain via `std::iter::successors` and collect structured
-/// context (identifier, etc.) for the envelope's `context` map.
-///
-/// Pulls the identifier from `SignError` / `VerifyError`, and both endpoints
-/// from `CopyError` — a copy is the one operation whose failure is about a pair
-/// of repositories, so a single `identifier` key could not say which end
-/// refused. Additional subsystems attach their own context as they gain
-/// envelope-relevant metadata.
+/// Collect the envelope's `context` map from the first sign, verify or copy error in the chain.
 fn collect_context(err: &(dyn std::error::Error + 'static)) -> BTreeMap<&'static str, serde_json::Value> {
     use ocx_package::publisher::CopyError;
     use ocx_sign::sign::SignError;
@@ -220,15 +159,7 @@ fn collect_context(err: &(dyn std::error::Error + 'static)) -> BTreeMap<&'static
     context
 }
 
-/// Walk the error chain and pull the fine-grained `detail` discriminant from
-/// the first leaf "kind" enum encountered.
-///
-/// Per C-S1-1, `envelope.error.detail` carries the snake_case variant name
-/// (e.g. `"offline_sign_refused"`) so consumers can dispatch programmatically
-/// without parsing stderr. The lookup walks `source()` to find the inner
-/// [`SignErrorKind`] / [`VerifyErrorKind`] carried by the typed three-layer
-/// errors. Returning `None` (no match) leaves `detail` absent in the JSON
-/// envelope via `skip_serializing_if`.
+/// Pull `detail` from the first leaf "kind" enum in the chain; `None` leaves it absent.
 fn collect_detail(err: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
     use ocx_announce::claim::ClaimError;
     use ocx_package::publisher::CopyErrorKind;
@@ -252,22 +183,13 @@ fn collect_detail(err: &(dyn std::error::Error + 'static)) -> Option<&'static st
     None
 }
 
-/// Render the success-path JSON envelope, serializing `data` under the
-/// `data` top-level key.
-///
-/// Success envelopes hard-code `exit_code = 0` — any command that wants to
-/// exit with a non-zero "success-ish" code (e.g. "nothing to do" for an idle
-/// operation) should return that code directly through
-/// [`ExitCode`](ocx_exit::ExitCode) rather
-/// than layering a success envelope on top.
+/// Render the success-path JSON envelope with `exit_code` 0.
 pub fn render_success_envelope<T: Serialize>(command: &str, data: &T) -> anyhow::Result<String> {
     let envelope = SuccessEnvelope::new(command, data);
     Ok(serde_json::to_string(&envelope)?)
 }
 
-/// Render the same envelope, reporting `exit_code` instead of assuming 0.
-///
-/// See [`SuccessEnvelope::with_exit_code`] for the one case that needs it.
+/// Render the success envelope reporting `exit_code` instead of 0.
 ///
 /// # Errors
 ///

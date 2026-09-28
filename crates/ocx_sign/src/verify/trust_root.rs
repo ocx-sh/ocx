@@ -1,31 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Sigstore trust material.
-//!
-//! [`TrustRoot`] holds the three kinds of key material a keyless verification
-//! needs: the Fulcio CA certificate(s) that anchor the signing certificate's
-//! chain, the certificate-transparency (CTFE) log keys that check the SCT
-//! embedded in that certificate, and the Rekor log key that checks the Signed
-//! Entry Timestamp.
-//!
-//! **Nothing here parses ASN.1, X.509 or the `TrustedRoot` wire format by
-//! hand.** Every parse is `sigstore`'s own: `SigstoreTrustRoot` for the
-//! protobuf-JSON document, `x509_cert` for a DER certificate body. The type
-//! implements [`sigstore::trust::TrustRoot`], so it plugs straight into
-//! `sigstore::bundle::verify::Verifier`, which owns chain building, validity
-//! windows and SCT verification.
-//!
-//! Construction paths:
-//!
-//! - [`TrustRoot::load_trusted_root_json`] — a Sigstore `TrustedRoot` JSON
-//!   document: Fulcio CAs, CTFE keys and the pinned Rekor key. The
-//!   `--sigstore-trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT` / `[trust.sigstore]`
-//!   air-gapped seam. No network.
-//! - [`TrustRoot::from_material`] — rebuild from the trust-root cache.
-//! - [`TrustRoot::load_embedded`] — the public-good Sigstore root, fetched and
-//!   verified over TUF by `sigstore`'s `tough`-backed client, dialing through
-//!   the shared Sigstore HTTP client (`ocx_oci::endpoint::sigstore_http_client`).
+//! Sigstore trust material (Fulcio CAs, CTFE log keys, Rekor log keys), implementing
+//! [`sigstore::trust::TrustRoot`] for `sigstore`'s `Verifier`.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -40,22 +17,12 @@ use url::Url;
 use super::error::{TrustRootLoadReason, VerifyErrorKind};
 use ocx_oci::endpoint::{resolve_sigstore_url, sigstore_http_client};
 
-/// The public-good Sigstore TUF repository `sigstore` fetches the trust root
-/// from.
-///
-/// `sigstore` hardcodes this base in its `constants` module and does not
-/// export it; the literal is repeated here because the shared Sigstore client
-/// dials only a host the SSRF guard has cleared, and clearing needs the URL
-/// before the fetch. A drift between the two is caught by
-/// `the_tuf_fetch_dials_through_the_injected_client`, which records every name
-/// the fetch resolves and compares it to this host.
+/// The public-good Sigstore TUF repository.
+// Must equal `sigstore`'s unexported constant, or the SSRF guard clears a host the fetch never dials
+// (`the_tuf_fetch_dials_through_the_injected_client`).
 const SIGSTORE_TUF_URL: &str = "https://tuf-repo-cdn.sigstore.dev";
 
 /// Reject a certificate body that is not a parseable X.509 certificate.
-///
-/// The parse is `x509_cert`'s, not ours: a structural byte check cannot tell a
-/// DER `SEQUENCE` from a certificate, and a trust anchor that fails to parse
-/// here would fail deep inside chain building with a far worse message.
 fn parse_certificate(der: &[u8]) -> Result<(), String> {
     use x509_cert::der::Decode;
     x509_cert::Certificate::from_der(der)
@@ -63,36 +30,10 @@ fn parse_certificate(der: &[u8]) -> Result<(), String> {
         .map_err(|e| format!("invalid X.509 certificate in trust root: {e}"))
 }
 
-/// Whole-operation deadline for the public-good TUF trust-root fetch.
-///
-/// The fetch dials through the shared Sigstore client, so each request already
-/// carries that client's connect, request and read timeouts (`ocx_oci::endpoint`).
-/// Those are per-request bounds, and the fetch is a chain of several small
-/// sequential requests (TUF metadata, then the `trusted_root.json` target),
-/// not one -- `sigstore` wraps the client in its own `tough` transport and
-/// issues the requests itself, so no per-request number can be expressed here.
-/// This budget bounds the whole chain instead: without it an endpoint that
-/// answers each request just inside its per-request budget can stretch
-/// `ocx package verify` -- and through the auto-verify hook every covered
-/// install -- across the entire walk.
-///
-/// It is set to twice the per-request budget the sibling trust services use
-/// for a single Fulcio or Rekor call (30s, in `ocx_oci::endpoint`) -- generous
-/// enough that a slow link walking the chain is not cut off mid-fetch, short
-/// enough that the whole walk fails in a minute rather than one request at a
-/// time.
+/// Whole-operation deadline for the TUF fetch; per-request timeouts cannot bound its chain of sequential requests.
 const TUF_FETCH_DEADLINE: Duration = Duration::from_secs(60);
 
-/// Bound `fetch` by `deadline`, reporting expiry as
-/// [`TrustRootLoadReason::TufFetchTimeout`].
-///
-/// Separate from [`TrustRoot::load_embedded`] so the deadline is observable
-/// without a network and without spending it: the client seam could pin the
-/// repository host to a local listener that never answers, but that proves the
-/// budget only by waiting it out. The deadline is a parameter for the same
-/// reason: it is what lets a test drive an already-elapsed budget against a
-/// never-ready future, which is decided purely by poll order and so cannot
-/// flake under load.
+/// Bound `fetch` by `deadline`, reporting expiry as [`TrustRootLoadReason::TufFetchTimeout`].
 async fn with_deadline<T>(
     deadline: Duration,
     fetch: impl Future<Output = Result<T, VerifyErrorKind>>,
@@ -103,79 +44,39 @@ async fn with_deadline<T>(
     }
 }
 
-/// Report a failure anywhere in the TUF chain -- the guard's verdict on the
-/// repository host, or the fetch itself -- as
-/// [`TrustRootLoadReason::AssetReadFailed`].
+/// Report a failure anywhere in the TUF chain, SSRF guard included, as [`TrustRootLoadReason::AssetReadFailed`].
 fn tuf_fetch_failed(error: impl std::fmt::Display) -> VerifyErrorKind {
     VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::AssetReadFailed {
         source: Box::new(std::io::Error::other(format!("TUF trust-root fetch failed: {error}"))),
     })
 }
 
-/// Sigstore trust material: Fulcio CAs, CTFE log keys, Rekor log keys.
-///
-/// Keys are held as DER `SubjectPublicKeyInfo` bytes, mapped by the log's
-/// hex-encoded `logId` — the same shape `sigstore::trust::ManualTrustRoot`
-/// uses, because the [`SigstoreTrustRootTrait`] impl below hands them straight
-/// to `sigstore`'s `Verifier`.
+/// Sigstore trust material: Fulcio CAs, CTFE log keys, Rekor log keys (DER SPKI keyed by `logId` hex).
 #[derive(Debug, Clone, Default)]
 pub struct TrustRoot {
-    /// DER-encoded Fulcio CA certificates — the chain's trust anchors.
-    ///
-    /// An empty `Vec` is valid at construction and means "no trust anchors":
-    /// every chain then fails to build, which is the correct fail-closed shape.
+    /// DER-encoded Fulcio CA certificates; empty means every chain fails to build.
     der_certs: Vec<Vec<u8>>,
 
-    /// CTFE (certificate-transparency) log keys, `logId` hex → DER SPKI.
-    ///
-    /// Empty when the material came from a bare Fulcio PEM. `sigstore`'s
-    /// verifier requires the SCT in the signing certificate to verify against
-    /// one of these, so an empty map means SCT verification cannot succeed.
+    /// CTFE log keys; empty means SCT verification cannot succeed.
     ctfe_keys: BTreeMap<String, Vec<u8>>,
 
-    /// Rekor log keys, `logId` hex → DER SPKI.
-    ///
-    /// Present for a `TrustedRoot` JSON, a TUF fetch, or a cache load; absent
-    /// for a bare Fulcio PEM, in which case the pipeline TOFU-fetches the key
-    /// from the Rekor endpoint (online only).
+    /// Rekor log keys; when empty, the pipeline TOFU-fetches one online.
     rekor_keys: BTreeMap<String, Vec<u8>>,
 }
 
 impl TrustRoot {
-    /// Load the public-good Sigstore trust root over TUF.
-    ///
-    /// Delegates entirely to `sigstore`'s `tough`-backed client: it ships the
-    /// TUF root of trust, enforces metadata expiry, and verifies the target
-    /// hash of `trusted_root.json` before returning it. `cache_dir` is where
-    /// the fetched targets are checked out so the next run can reuse them.
-    ///
-    /// The HTTP requests go through the shared Sigstore client
-    /// ([`sigstore_http_client`]), the same one Fulcio and Rekor calls use: so
-    /// the operator's extra CA roots, proxy configuration and the per-request
-    /// timeouts apply to the TUF fetch too, and a corporate TLS-terminating
-    /// proxy that every other Sigstore call already passes no longer fails
-    /// this one on a cold cache (ocx#470). That client dials only a host the
-    /// SSRF guard has cleared, so the repository host is resolved and pinned
-    /// through [`resolve_sigstore_url`] first -- with no `trusted_hosts`
-    /// admission, since the public-good CDN has no business resolving into a
-    /// private range. An operator whose DNS does that has the air-gapped
-    /// `--sigstore-trusted-root` seam.
+    /// Load the public-good Sigstore trust root over TUF, caching targets in `cache_dir`.
     ///
     /// # Errors
-    /// [`VerifyErrorKind::TrustRootLoad`] with [`TrustRootLoadReason::AssetReadFailed`]
-    /// when the repository host is refused or does not resolve, or when the
-    /// TUF client cannot produce a trusted root; or with
-    /// [`TrustRootLoadReason::TufFetchTimeout`] when the chain does not
-    /// complete within the whole-operation TUF deadline.
+    /// [`VerifyErrorKind::TrustRootLoad`] with [`TrustRootLoadReason::AssetReadFailed`] when the repository host
+    /// is refused or unresolvable or TUF yields no trusted root, or [`TrustRootLoadReason::TufFetchTimeout`].
     pub async fn load_embedded(cache_dir: &Path) -> Result<Self, VerifyErrorKind> {
-        // Best-effort: a missing cache dir is not a reason to fail the fetch,
-        // sigstore falls back to its embedded resources and the network.
+        // Best-effort: sigstore falls back to its embedded resources and the network.
         let _ = tokio::fs::create_dir_all(cache_dir).await;
-        // The local mkdir above stays outside the deadline: it is already
-        // best-effort, and the budget is for the network chain -- which
-        // starts with the guard's own lookup of the repository host.
         with_deadline(TUF_FETCH_DEADLINE, async {
             let tuf = Url::parse(SIGSTORE_TUF_URL).map_err(tuf_fetch_failed)?;
+            // No `trusted_hosts`: the public CDN never resolves privately, so admitting any would only lower the SSRF
+            // floor.
             resolve_sigstore_url(&tuf, &[]).await.map_err(tuf_fetch_failed)?;
             Self::fetch_with(cache_dir, sigstore_http_client().clone()).await
         })
@@ -183,10 +84,6 @@ impl TrustRoot {
     }
 
     /// The TUF fetch with the HTTP client injected.
-    ///
-    /// Split from [`TrustRoot::load_embedded`] so a test can hand in a client
-    /// whose resolver records what the fetch dials, proving the seam is used
-    /// without a network; production passes the shared Sigstore client.
     async fn fetch_with(cache_dir: &Path, client: reqwest::Client) -> Result<Self, VerifyErrorKind> {
         let root = SigstoreTrustRoot::new_with_client(Some(cache_dir), client)
             .await
@@ -196,9 +93,6 @@ impl TrustRoot {
 
     /// Copy the material out of anything implementing sigstore's `TrustRoot`.
     fn harvest<R: SigstoreTrustRootTrait>(root: &R) -> Result<Self, VerifyErrorKind> {
-        // As with the log keys below, `sigstore` reports "the document named
-        // none" as an `Err`, so collapse it into the empty case and let the
-        // `is_empty` check name the condition.
         let der_certs: Vec<Vec<u8>> = root
             .fulcio_certs()
             .unwrap_or_default()
@@ -211,15 +105,7 @@ impl TrustRoot {
         let owned = |map: BTreeMap<String, &[u8]>| -> BTreeMap<String, Vec<u8>> {
             map.into_iter().map(|(k, v)| (k, v.to_vec())).collect()
         };
-        // Log keys are optional material, and `sigstore` reports an EMPTY map as
-        // an error rather than an empty map -- so an `Err` here is "the document
-        // named no logs", not "a key failed to decode" (decoding already
-        // happened in the codec). Treating it as fatal would reject the
-        // Fulcio-plus-Rekor-only trusted root a self-hosted operator ships, and
-        // the bare-CA PEM path pins neither. Whether the harvested material is
-        // sufficient is the pipeline's call: no CTFE key means SCT verification
-        // fails, no Rekor key means the SET key is fetched (online) or the
-        // offline resolve refuses.
+        // `sigstore`'s `Err` here means an empty map; failing on it would reject a self-hosted root with no CTFE key.
         Ok(Self {
             der_certs,
             ctfe_keys: root.ctfe_keys().map(owned).unwrap_or_default(),
@@ -227,10 +113,7 @@ impl TrustRoot {
         })
     }
 
-    /// Rebuild trust material from the trust-root cache.
-    ///
-    /// No validation beyond what the cache round-tripped: the material was
-    /// already accepted by a successful online verify.
+    /// Rebuild trust material from the trust-root cache, without further validation.
     pub fn from_material(
         der_certs: Vec<Vec<u8>>,
         ctfe_keys: BTreeMap<String, Vec<u8>>,
@@ -243,18 +126,7 @@ impl TrustRoot {
         }
     }
 
-    /// Parse a Sigstore [`TrustedRoot`][trusted-root] JSON document.
-    ///
-    /// The parse is `sigstore`'s own protobuf-JSON codec, so the accepted shape
-    /// is exactly what `cosign trusted-root create` emits and what the
-    /// public-good TUF repository serves. Certificate-authority and log-key
-    /// validity windows are applied by that codec, not re-derived here.
-    ///
-    /// This is the `--sigstore-trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT` /
-    /// `[trust.sigstore]` air-gapped seam: it
-    /// performs no TUF fetch and no metadata-expiry check, because the operator
-    /// supplied the document out of band. [`TrustRoot::load_embedded`] is the
-    /// path that does verify TUF metadata.
+    /// Parse a Sigstore [`TrustedRoot`][trusted-root] JSON document; no TUF metadata-expiry check applies.
     ///
     /// # Errors
     /// [`VerifyErrorKind::TrustRootLoad`] when the document does not parse or
@@ -268,9 +140,7 @@ impl TrustRoot {
             })
         })?;
         let harvested = Self::harvest(&root)?;
-        // sigstore's codec accepts a CA whose `certChain` is absent, which
-        // harvests to zero anchors; `harvest` already rejects that. Re-check the
-        // certificate bodies, because a `rawBytes` field is opaque to the codec.
+        // The codec treats `rawBytes` as opaque, so an unparseable anchor would otherwise fail deep in chain building.
         for der in &harvested.der_certs {
             parse_certificate(der)
                 .map_err(|detail| VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::PemParseFailed { detail }))?;
@@ -278,13 +148,7 @@ impl TrustRoot {
         Ok(harvested)
     }
 
-    /// Pin a Rekor public key fetched at runtime (the TOFU path) onto this
-    /// trust root.
-    ///
-    /// Used when the operator supplied a bare Fulcio CA PEM: the key is fetched
-    /// once from the Rekor endpoint and pinned here so the rest of the batch
-    /// reuses it. The log id is unknown on that path, so the key is filed under
-    /// the empty id and reached through the first-key fallback.
+    /// Pin a Rekor public key fetched at runtime (TOFU), filed under the empty log id.
     ///
     /// # Errors
     /// [`VerifyErrorKind::TrustRootLoad`] when `pem` is not a PEM public key.
@@ -313,17 +177,10 @@ impl TrustRoot {
         &self.rekor_keys
     }
 
-    /// The pinned Rekor public key as PEM, if this trust root carries one.
+    /// The Rekor key whose `logId` sorts first, as PEM.
     ///
-    /// `Some` means the verify pipeline pins this key for SET verification with
-    /// no network; `None` means it TOFU-fetches the key from the Rekor endpoint.
-    ///
-    /// Log-id-**un**aware: `rekor_keys` is keyed by `logId` hex, so this returns
-    /// whichever id sorts first, not a key chosen for any particular bundle. Use
-    /// it only where the caller has no log id to select on; a caller that does
-    /// have one belongs on [`TrustRoot::rekor_public_key_pem_for`], or a bundle
-    /// from the second log of a rotated trust root verifies against the first
-    /// log's key and reports a valid signature as corrupt data.
+    /// Only for callers without a log id; with one use [`TrustRoot::rekor_public_key_pem_for`],
+    /// or a rotated root's second log verifies against the first log's key and reports corrupt data.
     pub fn rekor_public_key_pem(&self) -> Option<String> {
         self.rekor_keys
             .values()
@@ -331,12 +188,10 @@ impl TrustRoot {
             .map(|der| pem::encode(&pem::Pem::new("PUBLIC KEY", der.clone())))
     }
 
-    /// The pinned Rekor key for a specific log, as PEM — the log-id-aware
-    /// selector, and the one a SET check with a bundle in hand wants.
+    /// The pinned Rekor key for `log_id_hex`, as PEM.
     ///
-    /// Falls back to [`TrustRoot::rekor_public_key_pem`] when the bundle's log
-    /// id is not one this trust root knows — a single-log deployment writes no
-    /// meaningful id, and refusing there would break every private stack.
+    /// Falls back to [`TrustRoot::rekor_public_key_pem`] for an unknown id; refusing would break single-log
+    /// private stacks, which write no meaningful id.
     pub fn rekor_public_key_pem_for(&self, log_id_hex: &str) -> Option<String> {
         self.rekor_keys
             .get(log_id_hex)

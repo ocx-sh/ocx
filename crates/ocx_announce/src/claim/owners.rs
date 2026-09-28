@@ -1,44 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The owner ladder (C-048, C-049).
+//! The owner ladder.
 //!
-//! Two questions in order. **Which logins**: `--owner` if given at all, else the
-//! CI environment, else the token identity, else
-//! [`ClaimError::NoActingIdentity`](super::ClaimError::NoActingIdentity). **Who
-//! confirms**: the users API when it is reachable, the operator's `LOGIN:ID`
-//! when it is not, the CI environment when the list came from there.
-//!
-//! Five rulings the contract text never made, all load-bearing:
-//!
-//! - A **non-numeric** CI id makes the pair unusable and **falls through** to the
-//!   next rung. Never `unwrap_or(0)`: a zero id in a governance field that
-//!   indexbot's auto-merge matches on is the worst available outcome.
-//! - The **login lookup runs first and is case-insensitive**; the id comparison
-//!   follows. So `AliCe:8` against a server answering `alice`/`7` is an id
-//!   mismatch (64), never an unknown login (79) — 79 is reserved for a login the
-//!   forge genuinely does not know.
-//! - A login repeated **verbatim** is refused at 64 over the *supplied*
-//!   spellings, on **both** paths, before either of them can be confirmed. Two
-//!   spellings differing only in case are not verbatim repeats: a confirmed
-//!   list collapses them by resolved id (first occurrence wins, the server's
-//!   spelling is kept), an unconfirmed one refuses them for want of an id to
-//!   collapse by.
-//! - A bot is refused on **every** list, explicit or detected — strong form (the
-//!   forge's own `bot` field) on a confirmed list, weak form
-//!   ([`login_has_bot_shape`]) on an unconfirmed one.
-//! - A login carrying any character outside `[A-Za-z0-9._-]` is refused before it
-//!   reaches the request body ([`login_charset_is_valid`]) — over the *supplied*
-//!   spelling **and** over the server's canonical one, which replaces it. The
-//!   author field, which no refusal path guards, drops an invalid login to
-//!   `None` instead.
-//!
-//! Both CI pairs are read through [`ocx_util::env::var`], whose test seam falls
-//! through to `std::env` for any key with **no override** — and GitHub Actions
-//! exports `GITHUB_ACTOR` and `GITHUB_ACTOR_ID` on every runner, including the
-//! one this repository's gate gets run on. A ladder test that overrides only the
-//! two variables it exercises therefore measures the CI environment rather than
-//! the code.
+//! Which logins: `--owner` if given at all, else the CI environment, else the token identity, else
+//! [`ClaimError::NoActingIdentity`](super::ClaimError::NoActingIdentity). Who confirms: the users API
+//! when reachable, else the operator's `LOGIN:ID`, or the CI environment when the list came from there.
 
 use super::error::ClaimError;
 use super::request::{OwnerIdentitySource, OwnerSpec};
@@ -53,17 +20,13 @@ pub const GITHUB_ACTOR: &str = "GITHUB_ACTOR";
 /// GitHub Actions' numeric actor id variable.
 pub const GITHUB_ACTOR_ID: &str = "GITHUB_ACTOR_ID";
 
-/// Every CI variable the ladder reads.
-///
-/// A test isolating the ladder overrides **all four**, never only the pair it
-/// exercises — see the module doc.
+/// Every CI variable the ladder reads; a ladder test must override all four, or on a GitHub runner the
+/// [`ocx_util::env::var`] seam falls through and the test measures the environment, not the code.
 pub const CI_IDENTITY_VARS: [&str; 4] = [GITLAB_USER_LOGIN, GITLAB_USER_ID, GITHUB_ACTOR, GITHUB_ACTOR_ID];
 
 /// One confirmed owner, as it is written into the root and the report.
 ///
-/// `login`/`id` only (ADR decision W-B). The four-key form
-/// (`login`,`id`,`github`,`github_id`) carried by the vendored golden roots is
-/// *indexbot's* output, not ocx's.
+/// `login`/`id` only; the four-key form in the vendored golden roots is indexbot's output, not ocx's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedOwner {
     /// The forge's canonical login spelling.
@@ -72,69 +35,33 @@ pub struct ResolvedOwner {
     pub id: u64,
 }
 
-/// The owner list, the provenance label that produced it, and who authored the
-/// run.
+/// The owner list, the provenance label that produced it, and who authored the run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnerResolution {
     /// The resolved owners, in first-occurrence order.
     pub owners: Vec<ResolvedOwner>,
     /// Which rung answered, rendered once per run.
     pub source: OwnerIdentitySource,
-    /// The authoring identity (C-060): the token identity, else the
-    /// CI-environment identity, else `None`.
-    ///
-    /// Carried out of [`resolve_owners`] rather than resolved by a second public
-    /// entry point so that a run asks the users API for its own identity **at
-    /// most once**: the token rung of [`seed_logins`] already made that call,
-    /// and its answer is exactly what this field wants. A standalone
-    /// `resolve_author` would ask twice on that path.
+    /// The authoring identity: the token identity, else the CI-environment identity, else `None`.
     pub author: Option<ResolvedOwner>,
-    /// Which rung produced [`Self::author`] (C-060) — the sibling of
-    /// [`Self::source`], over the authoring identity instead of the owner list.
-    ///
-    /// [`OwnerIdentitySource::Resolved`] when the credential's own account
-    /// answered, [`OwnerIdentitySource::CiEnvironment`] when the CI pair did.
-    /// The two rungs are **not** equally trustworthy and the login alone cannot
-    /// say which one answered: the first is the forge's assertion about the
-    /// credential, the second an ordinary environment read an earlier pipeline
-    /// step can set to anything. `Asserted` is unreachable here — no operator
-    /// word is ever taken for the author.
-    ///
-    /// `None` exactly when [`Self::author`] is `None`: both are projected from
-    /// one `Option` by a single `unzip`, so no code path can set one without
-    /// the other.
+    /// Which rung produced [`Self::author`]: [`OwnerIdentitySource::Resolved`] for the credential's own
+    /// account, [`OwnerIdentitySource::CiEnvironment`] for the CI pair, which any earlier pipeline step
+    /// can set; never `Asserted`. `None` exactly when [`Self::author`] is.
     pub author_identity_source: Option<OwnerIdentitySource>,
 }
 
-/// Run the ladder (C-048, C-049).
-///
-/// `explicit` is the `--owner` list; empty means "not given".
+/// Run the ladder; an empty `explicit` (the `--owner` list) means "not given".
 ///
 /// # Errors
 ///
-/// [`ClaimError::NoActingIdentity`] at the terminal rung,
-/// [`ClaimError::OwnerUnknown`] for a login the forge does not know,
-/// [`ClaimError::OwnerIdMismatch`] for a supplied id that disagrees,
-/// [`ClaimError::BotIdentity`] for a bot on any list,
-/// [`ClaimError::DuplicateOwner`] for a login repeated verbatim on the supplied
-/// list,
-/// [`ClaimError::InvalidOwnerLogin`] for a login outside `[A-Za-z0-9._-]`,
-/// whether the operator supplied that spelling or the forge answered with it, or
-/// [`ClaimError::Forge`] when the users API is unreachable and a bare `LOGIN`
-/// cannot be turned into a pair.
+/// [`ClaimError::NoActingIdentity`] at the terminal rung; [`ClaimError::OwnerUnknown`],
+/// [`ClaimError::OwnerIdMismatch`], [`ClaimError::BotIdentity`] or [`ClaimError::DuplicateOwner`] for a
+/// refused owner; [`ClaimError::InvalidOwnerLogin`] for a supplied or forge-answered login outside
+/// `[A-Za-z0-9._-]`; [`ClaimError::Forge`] when the users API is unreachable and a bare `LOGIN` has no id.
 pub async fn resolve_owners(forge: &dyn Forge, explicit: &[OwnerSpec]) -> Result<OwnerResolution, ClaimError> {
     let (seeds, rung) = seed_logins(forge, explicit).await?;
 
-    // All three refusals run over the *supplied* spellings, before any of them
-    // can reach a request body, and the bot shape runs first: `--owner
-    // dependabot[bot]` violates the charset too, and "this is a bot account" is
-    // the diagnosis an operator can act on.
-    //
-    // The duplicate belongs here rather than on the unconfirmed arm alone
-    // (DX-79): refused only there, `--owner alice --owner alice` exits 0
-    // recording one owner while the users API answers and 64 while it does not
-    // — one argv, two outcomes, decided by an external service's availability,
-    // over a list a human merges under G-04.
+    // Bot shape before charset: `dependabot[bot]` fails both, and "bot account" is the actionable diagnosis.
     for (position, spec) in seeds.iter().enumerate() {
         let login = spec_login(spec);
         if login_has_bot_shape(login) {
@@ -147,10 +74,10 @@ pub async fn resolve_owners(forge: &dyn Forge, explicit: &[OwnerSpec]) -> Result
                 login: login.to_string(),
             });
         }
-        // Verbatim repeats only. Case is deliberately not folded here: on a
-        // confirmed list the server decides which spellings are one account,
-        // and pre-empting it would refuse `--owner AliCe --owner alice:7`,
-        // which C-048 resolves rather than rejects.
+        // Refused here, not only unconfirmed, or `--owner alice --owner alice` exits 0 or 64 by
+        // users-API reachability.
+        // Never fold case: the server decides which spellings are one account, and folding refuses
+        // `--owner AliCe --owner alice:7`.
         if seeds[..position].iter().any(|earlier| spec_login(earlier) == login) {
             return Err(ClaimError::DuplicateOwner {
                 login: login.to_string(),
@@ -158,21 +85,13 @@ pub async fn resolve_owners(forge: &dyn Forge, explicit: &[OwnerSpec]) -> Result
         }
     }
 
-    // C-060's `author`, resolved after the refusals so a rejected list costs no
-    // identity call. The token rung's single seed IS `authenticated_identity`'s
-    // answer, so that path reuses it instead of asking a second time.
-    //
-    // The identity and the word for where it came from are projected from ONE
-    // `Option` by a single `unzip`, so "both or neither" is a consequence of
-    // the shape rather than of two assignments staying in step.
+    // After the refusals, so a rejected list costs no identity call; the token rung's seed is reused.
     let (author, author_identity_source) = match (rung, seeds.as_slice()) {
         (Rung::Token, [OwnerSpec::Resolved { login, id }]) => Some((
             ResolvedOwner {
                 login: login.clone(),
                 id: *id,
             },
-            // The reused seed IS `authenticated_identity`'s answer, so it
-            // carries the rung that answer belongs to.
             OwnerIdentitySource::Resolved,
         )),
         _ => resolve_author(forge).await,
@@ -190,51 +109,24 @@ pub async fn resolve_owners(forge: &dyn Forge, explicit: &[OwnerSpec]) -> Result
         None => Ok(OwnerResolution {
             owners: take_operator_word(&seeds)?,
             source: match rung {
-                // The token identity is itself a server answer, so a list that
-                // came from it is confirmed even when a later lookup is not.
+                // Unconfirmed is `asserted` even from the token rung; only a CI-sourced list keeps its own word.
                 Rung::Explicit | Rung::Token => OwnerIdentitySource::Asserted,
                 Rung::Ci => OwnerIdentitySource::CiEnvironment,
             },
             author,
-            // Deliberately NOT folded into the owner list's `source` above: an
-            // unreachable users API says nothing about which rung the author
-            // came from, and `asserted` is not a word the author ladder can
-            // produce.
+            // Kept apart from `source`: an unreachable users API says nothing about the author's rung.
             author_identity_source,
         }),
     }
 }
 
-/// Who authored the run (C-060): the token identity, else the CI-environment
-/// identity, else `None` — each paired with the word for the rung that answered.
+/// Who authored the run: the token identity, else the CI-environment identity, else `None`, each with
+/// its rung's word. `--owner` is never consulted, and a failed identity call falls through at debug.
 ///
-/// This order is the **reverse** of [`seed_logins`]', deliberately and not as an
-/// oversight: authorship is the credential's, ownership is the explicit list,
-/// and the two never substitute. So `--owner` is not consulted here at all, and
-/// the token identity outranks the CI pair rather than falling in behind it.
-///
-/// An `Err` from the identity call is **not** fatal. The field's contract is
-/// "when known", so an unreachable or unauthorised users API falls through to
-/// the CI pair and then to `None`, logged at debug with the reason. That
-/// leniency is scoped to this function: [`seed_logins`]' own call keeps
-/// propagating, because a run with no resolvable owner list has nothing to
-/// write and must fail.
-///
-/// [`login_charset_is_valid`] is applied to **whichever rung answered**, and a
-/// login outside `[A-Za-z0-9._-]` yields `None` rather than an error: the field
-/// is published output, and the C-067 charset is what every other published
-/// login is held to. An invalid one does **not** fall through to the next rung
-/// — an unusable identity is not "known", and reporting the CI actor as the
-/// author of a run a differently-named credential made would be worse than
-/// reporting nothing. Reachable through the second rung, which is an ordinary
-/// environment read an earlier pipeline step can set to anything; neither
-/// forge's own logins can produce one.
-///
-/// Not a public entry point — see [`OwnerResolution::author`] for why the answer
-/// travels with the ladder's own result.
+/// A login outside `[A-Za-z0-9._-]` yields `None`, never the next rung, or the CI actor is published as
+/// author of a run a differently named credential made.
 async fn resolve_author(forge: &dyn Forge) -> Option<(ResolvedOwner, OwnerIdentitySource)> {
     let token = match forge.authenticated_identity().await {
-        // The server's canonical spelling, never the operator's.
         Ok(Some(identity)) => Some(ResolvedOwner {
             login: identity.login,
             id: identity.id,
@@ -246,14 +138,9 @@ async fn resolve_author(forge: &dyn Forge) -> Option<(ResolvedOwner, OwnerIdenti
             None
         }
     };
-    // Each rung carries its own word out, so the answer and its provenance are
-    // decided at the same place — a caller re-deriving "which rung was that?"
-    // from the login is exactly what C-060's report cannot do.
     token
         .map(|owner| (owner, OwnerIdentitySource::Resolved))
-        // The same both-halves-required pair the ladder reads, through the same
-        // helper: two readers of `GITLAB_USER_*`/`GITHUB_ACTOR*` could disagree
-        // about a non-numeric id, and one of them would be wrong.
+        // The ladder's own reader, or two readers could disagree about a non-numeric id.
         .or_else(|| ci_identity().map(|(login, id)| (ResolvedOwner { login, id }, OwnerIdentitySource::CiEnvironment)))
         .filter(|(owner, _)| login_charset_is_valid(&owner.login))
 }
@@ -276,11 +163,8 @@ fn spec_login(spec: &OwnerSpec) -> &str {
     }
 }
 
-/// Step one of the ladder: **which logins** (C-048).
-///
-/// `--owner` if given at all — the detected identity is never appended, or the
-/// invoker is silently written into a governance field they did not name
-/// themselves in.
+/// Step one of the ladder: which logins. The detected identity is never appended to `--owner`, or the
+/// invoker is silently written into a governance field they did not name themselves in.
 async fn seed_logins(forge: &dyn Forge, explicit: &[OwnerSpec]) -> Result<(Vec<OwnerSpec>, Rung), ClaimError> {
     if !explicit.is_empty() {
         return Ok((explicit.to_vec(), Rung::Explicit));
@@ -290,8 +174,7 @@ async fn seed_logins(forge: &dyn Forge, explicit: &[OwnerSpec]) -> Result<(Vec<O
     }
     match forge.authenticated_identity().await {
         Ok(Some(identity)) => {
-            // C-049's strong form at the point the identity is detected: the
-            // forge's own assertion, never a login heuristic.
+            // Strong bot check: the forge's own assertion, never a login heuristic.
             if identity.bot {
                 return Err(ClaimError::BotIdentity { login: identity.login });
             }
@@ -303,20 +186,15 @@ async fn seed_logins(forge: &dyn Forge, explicit: &[OwnerSpec]) -> Result<(Vec<O
                 Rung::Token,
             ))
         }
-        // A credential with no account (`Ok(None)`) and one that may not ask
-        // (`UsersApiUnavailable`) both mean "this rung has no answer". The
-        // remedy is `--owner`, not the `LOGIN:ID` form, so the terminal rung
-        // fires rather than the unreachable-API error being re-raised.
+        // Both mean "no answer", whose remedy is `--owner`, not the `LOGIN:ID` a re-raise would suggest.
         Ok(None) | Err(ForgeError::UsersApiUnavailable) => Err(ClaimError::NoActingIdentity),
         Err(other) => Err(ClaimError::Forge(other)),
     }
 }
 
-/// The CI-provided identity, GitLab before GitHub, **both halves required**.
+/// The CI-provided identity, GitLab before GitHub, both halves required.
 ///
-/// A non-numeric id makes the pair unusable and falls through to the next rung:
-/// never `unwrap_or(0)`, because a zero id in a field indexbot's auto-merge
-/// matches on is the worst available outcome.
+/// A non-numeric id falls through, never `unwrap_or(0)`: indexbot's auto-merge matches on that id.
 fn ci_identity() -> Option<(String, u64)> {
     for (login_key, id_key) in [(GITLAB_USER_LOGIN, GITLAB_USER_ID), (GITHUB_ACTOR, GITHUB_ACTOR_ID)] {
         let (Some(login), Some(id)) = (ocx_util::env::var(login_key), ocx_util::env::var(id_key)) else {
@@ -333,37 +211,26 @@ fn ci_identity() -> Option<(String, u64)> {
     None
 }
 
-/// Step two of the ladder when the users API answers: **the server confirms**
-/// (C-048).
+/// Step two when the users API answers: the server confirms.
 ///
-/// `Ok(None)` means the users API is unreachable — the caller then falls back to
-/// the operator's own word.
+/// `Ok(None)` means the users API is unreachable; the caller falls back to the operator's own word.
 async fn confirm_with_forge(forge: &dyn Forge, seeds: &[OwnerSpec]) -> Result<Option<Vec<ResolvedOwner>>, ClaimError> {
     let mut owners: Vec<ResolvedOwner> = Vec::new();
     for spec in seeds {
         let login = spec_login(spec);
         match forge.resolve_user(login).await {
             Ok(Some(identity)) => {
-                // C-049's strong form on a confirmed list. It catches what no
-                // login shape can — a service account with an ordinary login.
+                // Catches a service account with an ordinary login, which no login shape can.
                 if identity.bot {
                     return Err(ClaimError::BotIdentity { login: identity.login });
                 }
-                // C-067 over the spelling that actually ships. The guard in
-                // `resolve_owners` runs over the *supplied* login, and the
-                // server's canonical spelling **replaces** it a few lines below
-                // — so without this the earlier refusal only ever guarded a
-                // value that was thrown away, and a forge answer carrying `[`,
-                // `@` or a control byte would reach both the committed root and
-                // the request body a human merges under G-04. Self-hosted and
-                // proxied instances are the reaching case; neither forge's own
-                // logins can produce one.
+                // The server's spelling replaces the checked one, so a self-hosted or proxied forge could
+                // otherwise ship `[`, `@` or a control byte into the root and the request body.
                 if !login_charset_is_valid(&identity.login) {
                     return Err(ClaimError::InvalidOwnerLogin { login: identity.login });
                 }
-                // The login lookup already ran, and it is case-insensitive, so
-                // a disagreeing id is a mismatch (64) and never an unknown
-                // login (79).
+                // The lookup is case-insensitive, so `AliCe:8` against `alice`/`7` is a mismatch (64),
+                // never unknown (79).
                 if let OwnerSpec::Resolved { id, .. } = spec
                     && *id != identity.id
                 {
@@ -373,18 +240,8 @@ async fn confirm_with_forge(forge: &dyn Forge, seeds: &[OwnerSpec]) -> Result<Op
                         actual: identity.id,
                     });
                 }
-                // Confirmed lists dedup by *resolved id*: the server is what
-                // makes two spellings one account. First occurrence wins, and
-                // the server's canonical spelling is what is kept.
-                //
-                // Residual, recorded rather than guarded (DX-79): this is the
-                // one place two supplied spellings still collapse into one
-                // recorded owner — `--owner alice --owner AliCe` passes the
-                // verbatim-repeat refusal above and lands here as a single
-                // entry, while the same pair on an unconfirmed list is refused
-                // by `take_operator_word`. That is C-048's canonical-login
-                // override doing exactly what it is specified to do, so no
-                // second guard is added for it.
+                // Dedup by resolved id, first occurrence wins. Deliberately unguarded: `--owner alice
+                // --owner AliCe` collapses here, while `take_operator_word` refuses the same pair.
                 if !owners.iter().any(|owner| owner.id == identity.id) {
                     owners.push(ResolvedOwner {
                         login: identity.login,
@@ -404,22 +261,17 @@ async fn confirm_with_forge(forge: &dyn Forge, seeds: &[OwnerSpec]) -> Result<Op
     Ok(Some(owners))
 }
 
-/// Step two when the users API is unreachable: **the operator's word**, and only
-/// where they wrote a pair (C-048).
+/// Step two when the users API is unreachable: the operator's word, and only where they wrote a pair.
 ///
-/// A bare `LOGIN` cannot become an id here, so the unreachable-API error is
-/// re-raised — its message names the `LOGIN:ID` form, which is the fix.
+/// A bare `LOGIN` re-raises the unreachable-API error, whose message names the `LOGIN:ID` fix.
 fn take_operator_word(seeds: &[OwnerSpec]) -> Result<Vec<ResolvedOwner>, ClaimError> {
     let mut owners: Vec<ResolvedOwner> = Vec::new();
     for spec in seeds {
         match spec {
             OwnerSpec::Login(_) => return Err(ClaimError::Forge(ForgeError::UsersApiUnavailable)),
             OwnerSpec::Resolved { login, id } => {
-                // Reached only by spellings that differ in case: a verbatim
-                // repeat is already refused over the supplied list. There is no
-                // resolved id to collapse them by here, and two entries for one
-                // account in a field that gates auto-merge is worse than a
-                // refusal the operator can act on.
+                // Only case-differing spellings reach here; with no id to collapse them, two entries in
+                // a field that gates auto-merge would be worse than a refusal.
                 if owners.iter().any(|owner| owner.login.eq_ignore_ascii_case(login)) {
                     return Err(ClaimError::DuplicateOwner { login: login.clone() });
                 }
@@ -433,29 +285,16 @@ fn take_operator_word(seeds: &[OwnerSpec]) -> Result<Vec<ResolvedOwner>, ClaimEr
     Ok(owners)
 }
 
-/// The **weak** bot detector: the documented bot login shapes (C-049).
+/// The weak bot detector: the bot login shapes `<login>[bot]`, `project_<n>_bot*` and `group_<n>_bot*`.
 ///
-/// `<login>[bot]`, `project_<n>_bot*`, `group_<n>_bot*`. Consulted on **every**
-/// list, explicit or detected, and **before** [`login_charset_is_valid`]: the
-/// canonical bot spelling `<login>[bot]` violates the charset too, and "this is
-/// a bot account" is the diagnosis an operator can act on. It is the *only*
-/// detector on an unconfirmed list, where no forge `bot` field is available;
-/// a confirmed list additionally carries the forge's own assertion, which is
-/// what catches a bot whose login has no documented shape.
-///
-/// Its hole is real and deliberately not papered over as coverage: a GitLab
-/// service account with an operator-chosen login is **not** caught by any login
-/// shape, and the G-04 reviewer is the control for it. A substring predicate
-/// (`login.contains("bot")`) would refuse `robotics`, `bot-alice` and
-/// `project_manager`, which is why the negative rows exist.
+/// The only detector on an unconfirmed list; a GitLab service account with a chosen login matches no
+/// shape, and the human reviewer is that control. A substring test would refuse `robotics`.
 #[must_use]
 pub fn login_has_bot_shape(login: &str) -> bool {
     login.ends_with("[bot]") || numbered_bot_shape(login, "project_") || numbered_bot_shape(login, "group_")
 }
 
 /// `<prefix><digits>_bot…` — GitLab's project and group bot login shapes.
-///
-/// At least one digit is required, so `project_manager` is an ordinary login.
 fn numbered_bot_shape(login: &str, prefix: &str) -> bool {
     let Some(rest) = login.strip_prefix(prefix) else {
         return false;
@@ -464,12 +303,10 @@ fn numbered_bot_shape(login: &str, prefix: &str) -> bool {
     digits > 0 && rest[digits..].starts_with("_bot")
 }
 
-/// Whether `login` is safe to interpolate into a request body (C-067).
+/// Whether `login` is safe to interpolate into a request body: `[A-Za-z0-9._-]` only.
 ///
-/// `[A-Za-z0-9._-]` only. Both forges' logins sit inside that set; the refusal
-/// exists because the login is the only operator free-text channel into an
-/// artifact a human merges under G-04, and the push-option allowlist does not
-/// stop it — `[`, `]`, `(`, `)` and `@` are all printable ASCII.
+/// The login is the only operator free-text channel into an artifact a human merges, and the
+/// push-option allowlist lets `[`, `]`, `(`, `)` and `@` through.
 #[must_use]
 pub fn login_charset_is_valid(login: &str) -> bool {
     !login.is_empty()

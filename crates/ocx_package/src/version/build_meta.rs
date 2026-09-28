@@ -3,9 +3,7 @@
 
 //! UTC build-timestamp helpers shared by the mirror tool and `ocx package push`.
 //!
-//! See the underscore-build-separator ADR for the wire-format rationale: build
-//! metadata is parsed from `+` or `_`, but always rendered with `_` because OCI
-//! tag references forbid `+`.
+//! Build metadata parses from `+` or `_` but renders with `_`, because OCI tags forbid `+`.
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -34,7 +32,7 @@ pub enum BuildTimestampFormat {
     Datetime,
     /// `YYYYMMDD` — UTC date only.
     Date,
-    /// No suffix; `build_timestamp` returns `None`.
+    /// No suffix.
     None,
 }
 

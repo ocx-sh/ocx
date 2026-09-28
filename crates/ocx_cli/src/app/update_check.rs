@@ -10,14 +10,7 @@ use super::Context;
 
 /// Checks the remote registry for a newer OCX version and prints a notice to stderr.
 ///
-/// Always queries the **remote** index, regardless of the user's `--remote`/default index
-/// selection. Never fails the command — all errors are swallowed and logged at debug level.
-///
-/// Suppressed when:
-/// - `OCX_NO_UPDATE_CHECK` is truthy
-/// - `CI` is truthy (see [`ocx_util::env::is_ci`])
-/// - `OCX_OFFLINE` is truthy (or `--offline` flag)
-/// - stderr is not a terminal
+/// Never fails the command: errors are logged at debug level.
 pub async fn check_for_update(ctx: &Context) {
     if ocx_util::env::flag("OCX_NO_UPDATE_CHECK", false) {
         log::debug!("Update check skipped: OCX_NO_UPDATE_CHECK is set");
@@ -36,10 +29,7 @@ pub async fn check_for_update(ctx: &Context) {
         return;
     }
 
-    // Parse OCX_UPDATE_CHECK_INTERVAL:
-    //   unset → None (lib defaults to 24h)
-    //   "0"   → Some(ZERO) (always check)
-    //   N     → Some(Duration::from_secs(N))
+    // `None` (unset or malformed) takes the lib's 24h default.
     let throttle: Option<Duration> = match ocx_util::env::var("OCX_UPDATE_CHECK_INTERVAL") {
         None => None,
         Some(s) => match s.trim().parse::<u64>() {
@@ -52,17 +42,12 @@ pub async fn check_for_update(ctx: &Context) {
         },
     };
 
-    // The background auto-check exists to surface fresh *upstream* releases, so
-    // it forces a live probe regardless of the ambient ChainMode (a default-mode
-    // local read would only echo a stale local index). Explicit `ocx self
-    // update` passes the same `TagProbe::Remote`: both list live through the
-    // configured index chain's remote view, never a bare registry tags API.
+    // A live probe regardless of ChainMode: a local read would only echo a stale local index.
     match ctx.manager().self_check_update(throttle, TagProbe::Remote).await {
         Ok(UpdateCheckResult::AlreadyUpToDate) => {
             log::debug!("Already up to date.");
         }
         Ok(UpdateCheckResult::Skipped(reason)) => {
-            // Display impl provides the human-readable skip reason.
             log::debug!("Update check skipped: {reason}");
         }
         Ok(UpdateCheckResult::UpdateAvailable(identifier)) => {

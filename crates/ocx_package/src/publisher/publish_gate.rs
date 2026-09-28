@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Pre-push dependency-pin gate for `ocx package push`.
-//!
-//! Push makes no resolution decisions (`adr_dependency_manifest_pinning.md`):
-//! it reads the already-pinned published metadata and verifies each pin
-//! against the registry the index routes it to — the logical name itself for
-//! a registry-backed dependency, the physical location an index names for an
-//! index-served one (ocx#504). A dependency with no digest cannot reach here —
-//! the published metadata type has no digest-less form, so an unresolved
-//! dependency fails at parse.
+//! Pre-push dependency-pin gate for `ocx package push`, which makes no resolution decisions:
+//! it verifies each already-pinned digest where the index routes it
+//! (`adr_dependency_manifest_pinning.md`).
 
 use futures::stream::{self, StreamExt, TryStreamExt};
 
@@ -18,63 +12,24 @@ use ocx_oci::Client;
 use ocx_oci::client::ReadAddressing;
 use ocx_oci::{self, Platform, client::error::ClientError};
 
-/// Maximum number of dependency-pin registry verifications to run
-/// concurrently in a single [`verify_dependency_pins`] call.
-///
-/// Each verification is a small, latency-bound manifest GET (metadata, not a
-/// bulk transfer) — the same shape as `TagManager::refresh`'s per-tag digest
-/// fetch, which uses the same bounded-`buffer_unordered` idiom. Dependency
-/// count is itself capped at
-/// [`Dependencies::MAX_DEPENDENCIES`](crate::metadata::dependency::Dependencies::MAX_DEPENDENCIES)
-/// (256), so this only needs to bound simultaneous in-flight requests per
-/// push, not overall fan-out; 16 keeps a polite per-registry burst while
-/// still parallelizing the common case of a handful of cross-registry deps.
+/// Maximum concurrent pin verifications in one [`verify_dependency_pins`] call; the total is
+/// bounded by `Dependencies::MAX_DEPENDENCIES`.
 const DEPENDENCY_PIN_VERIFY_CONCURRENCY: usize = 16;
 
-/// Verify every dependency pin of the published `metadata` for the single
-/// target `platform`.
-///
-/// Three checks:
-///
-/// 1. for an `any`-targeted bundle, every pin is a *genuine* `any` offer in
-///    the dependency's own image index ([`verify_any_pin_provenance`]) — a
-///    leaf manifest carries no platform descriptor, so nothing about the pin
-///    itself says whether the dependency runs everywhere or only on one
-///    platform, and a sidecar cannot be taken at its word for it;
-/// 2. every pin resolves in its registry to an image **manifest** — an image
-///    INDEX digest is rejected because a tag's index is rewritten (and its
-///    old digest garbage-collected) on every platform push, so such a pin is
-///    guaranteed to break;
-/// 3. that resolution succeeds at all — verified via
-///    [`Client::pull_manifest`], which also authenticates per registry, so
-///    cross-registry dependencies are covered.
-///
-/// All three run concurrently per dependency (bounded by
-/// [`DEPENDENCY_PIN_VERIFY_CONCURRENCY`]); the first failure short-circuits
-/// the rest. Check 1 is skipped entirely for a concrete-target bundle — no
-/// extra network beyond the fetch checks 2 and 3 already make.
-///
-/// Every read dials where `index` routes the pin
-/// ([`Index::route_for_dial`](ocx_index::Index::route_for_dial)), never the
-/// logical name as written: an index-served namespace such as `ocx.sh` is not
-/// a registry. Every error still names the logical pin.
+/// Verifies every dependency pin of `metadata` for `platform`, concurrently; the first failure
+/// wins. Each pin must name an image manifest, never an index (garbage-collected on the next
+/// index rewrite), and under an `any` target be offered as `any`.
 ///
 /// # Errors
 ///
-/// See [`PublishGateError`]. Registry auth failures pass through so they
-/// classify to their own exit code.
+/// See [`PublishGateError`]; registry auth failures pass through to their own exit code.
 pub async fn verify_dependency_pins(
     client: &Client,
     index: &ocx_index::Index,
     metadata: &Metadata,
     platform: &Platform,
 ) -> Result<(), PublishGateError> {
-    // `Dependencies` enforces a unique (registry, repository) per entry, so
-    // distinct dependencies can never carry the same pin — no dedup pass is
-    // needed before verifying. The un-digested identifier is derived
-    // alongside each pin so an `any`-target provenance check
-    // (`verify_any_pin_provenance`) can re-fetch the dependency's own
-    // manifest by its advisory tag.
+    // `Dependencies` keeps (registry, repository) unique, so no dedup pass is needed.
     let pins: Vec<(ocx_oci::PackageRef, ocx_oci::PinnedPackageRef)> = metadata
         .dependencies()
         .iter()
@@ -83,7 +38,6 @@ pub async fn verify_dependency_pins(
 
     let is_any_target = platform.is_any();
 
-    // Independent reads: verify concurrently, bounded, first error wins.
     stream::iter(pins)
         .map(|(dependency_identifier, pin)| {
             let client = client.clone();
@@ -99,8 +53,7 @@ pub async fn verify_dependency_pins(
                 if is_any_target {
                     verify_any_pin_provenance(&client, index, &dependency_identifier, &routed, &pin).await?;
                 }
-                // `route_for_dial` carries the digest; re-stamping the pin's own
-                // version makes that local rather than a promise from another crate.
+                // Re-stamped locally rather than trusting `route_for_dial` to carry the digest.
                 let routed_pin = routed.at_pin_of(&pin);
                 log::debug!("verifying dependency pin '{pin}' at '{routed_pin}'");
                 match client.pull_manifest(&routed_pin).await {
@@ -123,34 +76,8 @@ pub async fn verify_dependency_pins(
         .await
 }
 
-/// D5 fail-closed provenance check for an `any`-targeted bundle
-/// (`adr_platform_model_unification.md` D5): a dependency pin is a
-/// sidecar-authored claim, not registry evidence. Because a leaf manifest
-/// carries no platform descriptor, a hand-edited sidecar could pin a
-/// platform-specific leaf in a bundle published as universal, and nothing in
-/// the metadata itself could detect the forgery.
-///
-/// This re-derives the fact from the dependency's own image index — the
-/// dispatch its advisory tag names — and requires an entry whose declared
-/// platform is `any` **and** whose digest equals `pin`'s. For an index-served
-/// dependency that dispatch is the index's committed answer
-/// ([`Index::resolve_version`](ocx_index::Index::resolve_version)), never the
-/// physical tag, which may have moved since; the index serves the dispatch
-/// itself, digest-verified against its root, so nothing about it is read from
-/// the registry. A registry-backed dependency is read by tag at `routed`. A flat (non-index) manifest is `any`-offered by construction —
-/// the same convention
-/// [`Index::fetch_candidates`](ocx_oci::Index::fetch_candidates) uses for
-/// `Manifest::Image` — so it passes only when its own digest equals `pin`'s
-/// (there is no other leaf it could be).
-///
-/// A dependency pinned without an advisory tag is fetched at `latest`
-/// ([`PackageRef::tag_or_latest`](ocx_oci::PackageRef::tag_or_latest)), so
-/// it passes exactly when the registry currently advertises the pinned digest
-/// as `any` under `latest` — a moving tag deciding a fixed pin. Otherwise it
-/// is [`AnyPinNotAdvertisedAsAny`](PublishGateError::AnyPinNotAdvertisedAsAny)
-/// when `latest` resolves but does not carry the digest as `any`, and
-/// [`AnyPinProvenanceUnavailable`](PublishGateError::AnyPinProvenanceUnavailable)
-/// when there is no `latest` to fetch at all.
+/// Fail-closed provenance check for an `any` target (`adr_platform_model_unification.md`
+/// § Decision D5): the dependency's own index must offer `pin`'s digest as `any`.
 async fn verify_any_pin_provenance(
     client: &Client,
     index: &ocx_index::Index,
@@ -158,6 +85,8 @@ async fn verify_any_pin_provenance(
     routed: &ocx_oci::OciIdentifier,
     pin: &ocx_oci::PinnedPackageRef,
 ) -> Result<(), PublishGateError> {
+    // A leaf carries no platform, so only the dependency's own index can refute a hand-edited pin.
+    // Without an advisory tag it reads `latest`, so a moving tag decides a fixed pin.
     let unavailable = |source| PublishGateError::AnyPinProvenanceUnavailable {
         identifier: Box::new(dependency_identifier.clone()),
         source,
@@ -169,17 +98,14 @@ async fn verify_any_pin_provenance(
             identifier: Box::new(pin.clone()),
             source,
         })? {
+        // The index's root-verified dispatch, never the physical tag, which may have moved.
         ocx_index::ResolvedVersion::Indexed { digest, manifest } => (digest, *manifest),
         ocx_index::ResolvedVersion::Absent => {
             return Err(unavailable(ClientError::ManifestNotFound(
                 dependency_identifier.to_string(),
             )));
         }
-        // Canonical, never a mirror: this read gates a publish, and Invariant #5
-        // says a read that decides a write names the same host the write lands on.
-        // A mirror advertising a platform-specific leaf as `any` — stale, or
-        // hostile — would otherwise admit exactly the forged provenance claim this
-        // function exists to refuse, and the mirror never has to fail to do it.
+        // Canonical, never a mirror, which could advertise a platform leaf as `any` (Invariant #5).
         ocx_index::ResolvedVersion::Registry => client
             .fetch_manifest_addressed(&routed.without_digest(), ReadAddressing::Canonical)
             .await
@@ -187,6 +113,7 @@ async fn verify_any_pin_provenance(
     };
 
     let advertised_as_any = match manifest {
+        // Flat manifests are `any` by construction, as `Index::fetch_candidates` treats them.
         ocx_oci::Manifest::Image(_) => digest == pin.digest(),
         ocx_oci::Manifest::ImageIndex(index) => index.manifests.into_iter().any(|entry| {
             ocx_oci::Digest::try_from(entry.digest.as_str()).is_ok_and(|entry_digest| entry_digest == pin.digest())
@@ -212,10 +139,7 @@ pub enum PublishGateError {
         "dependency '{identifier}' pins an image INDEX digest; a tag's index is rewritten on every platform push and its old digest is garbage-collected, so this pin will break — re-run `ocx package create` to pin platform manifest digests"
     )]
     DependencyPinnedToIndex { identifier: Box<ocx_oci::PinnedPackageRef> },
-    /// D5 provenance check: a dependency of an `any`-targeted bundle is not
-    /// advertised as `any` in the dependency's own image index — the pin is a
-    /// publisher claim, not registry evidence, so it cannot forge a
-    /// platform-specific dependency into a universal one.
+    /// A dependency of an `any` bundle whose own index does not offer the pinned digest as `any`.
     #[error(
         "dependency '{identifier}' pins digest '{digest}' for the `any` platform, but the dependency's own image index does not advertise that digest as `any`; re-run `ocx package create --platform any` to re-resolve it"
     )]
@@ -223,10 +147,7 @@ pub enum PublishGateError {
         identifier: Box<ocx_oci::PackageRef>,
         digest: String,
     },
-    /// The D5 `any`-pin provenance check ([`AnyPinNotAdvertisedAsAny`](Self::AnyPinNotAdvertisedAsAny))
-    /// could not fetch the dependency's own image index (missing tag,
-    /// network, auth, ...). Fails closed: an unverifiable provenance claim
-    /// is treated as untrusted, never silently accepted.
+    /// The `any` provenance check could not fetch the dependency's index; fails closed.
     #[error("failed to verify `any` pin provenance for dependency '{identifier}'")]
     AnyPinProvenanceUnavailable {
         identifier: Box<ocx_oci::PackageRef>,
@@ -243,9 +164,7 @@ pub enum PublishGateError {
         #[source]
         source: ClientError,
     },
-    /// The index could not say which registry serves the dependency, or the
-    /// dial-site SSRF floor refused the one it named. Names the logical pin;
-    /// the cause carries the rest.
+    /// The index could not route the dependency, or the SSRF floor refused the route.
     #[error("failed to route dependency '{identifier}' through the index")]
     Routing {
         identifier: Box<ocx_oci::PinnedPackageRef>,

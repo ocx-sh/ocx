@@ -1,26 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The one locked read-modify-write for a `config.toml` (ocx#468).
+//! The one locked read-modify-write for a `config.toml`.
 //!
-//! Every writer of `$OCX_HOME/config.toml` — the surgical `[shell]` toggles
-//! (`setup::shell_config::set`) and the `OCX_EXTRA_CA_CERTS`
-//! persistence in `ocx self setup` phase 0.5 through [`edit`], the fenced
-//! `[managed]` seed through [`edit_text`] — goes through this module, so two
-//! concurrent `ocx` invocations serialize on one cross-process lock instead of
-//! each reading the file, rendering its own edit and publishing over the
-//! other's. The file is replaced by atomic rename, so its inode rotates on
-//! every write and a lock on the data file would strand on the old inode:
-//! per the arch-principles Locking Policy the lock is a [`lock_scoped`]
-//! entry under `$OCX_HOME/locks`, keyed by the parent directory's identity
-//! and the file name, never a sidecar beside the file.
-//!
-//! One home, three closures: the caller supplies the edit as a closure over
-//! the parsed [`DocumentMut`] (or, for the fence, over the text); this module
-//! owns the bounded read, the parse, the render, the unchanged check, the
-//! size ceiling, the dry-run gate and the atomic write. A dry run is a
-//! read-only walk of the same steps: it neither creates the directory nor
-//! takes the lock, so `--dry-run` on a fresh machine leaves `$OCX_HOME` absent.
+//! Every `config.toml` writer goes through here, or concurrent `ocx` runs publish over each other's edit.
+//! The lock is a [`lock_scoped`] entry, never a lock on the file: atomic rename rotates the inode.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -33,25 +17,19 @@ use ocx_util::fs::{BoundedReadError, lock_scoped, read_bounded, write_bytes_atom
 /// The `scope` every `config.toml` edit lock is taken under.
 const LOCK_SCOPE: &str = "config-edit";
 
-/// How long an edit waits behind another editor before giving up. An edit
-/// is a few file operations, so a holder that outlives this is stuck.
+/// How long an edit waits behind another editor before giving up.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Test-only seam: hold the lock for this many milliseconds between the read
-/// and the write, so an acceptance test can make two `ocx` invocations
-/// overlap on purpose. Gated per the `__OCX_*` seam convention in
-/// `subsystem-tests.md` — absent from release builds.
+/// Test seam: hold the lock this many milliseconds between read and write.
 #[cfg(any(test, feature = "__testing"))]
 const HOLD_OVERRIDE: &str = "__OCX_TESTING_CONFIG_EDIT_HOLD_MS";
 
 /// What an [`edit`] did to the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditOutcome {
-    /// The closure left the document as it was: nothing was written, and an
-    /// absent file stays absent.
+    /// The closure left the document as it was; nothing was written.
     Unchanged,
-    /// The document changed and was written — or, under `dry_run`, would
-    /// have been.
+    /// The document changed and was written (or, under `dry_run`, would have been).
     Written,
 }
 
@@ -67,9 +45,7 @@ pub enum EditError {
         #[source]
         source: std::io::Error,
     },
-    /// Another `ocx` held the edit lock for longer than the timeout. The same
-    /// wording as `ocx.toml`'s `crate::project::ProjectErrorKind::Locked`,
-    /// and the same code (75): a rerun may well succeed.
+    /// Another `ocx` held the edit lock past the timeout.
     #[error("{} is locked by another process", path.display())]
     Locked {
         /// The `config.toml` the edit waited for — never the hashed lock file.
@@ -84,8 +60,7 @@ pub enum EditError {
         #[source]
         source: toml_edit::TomlError,
     },
-    /// The file parses but has a shape the closure cannot edit (a key that
-    /// should be a table and is not); it is left exactly as it was.
+    /// The file parses but has a shape the closure cannot edit; it is left as it was.
     #[error("{}: {reason}", path.display())]
     Malformed {
         /// The file that was refused.
@@ -93,9 +68,7 @@ pub enum EditError {
         /// The closure's one-line reason.
         reason: &'static str,
     },
-    /// The document is, or would render, over the loader's own size ceiling
-    /// (`MAX_CONFIG_SIZE`) — refused before any write, so a file the loader
-    /// would refuse is never produced.
+    /// The document is, or would render, over `MAX_CONFIG_SIZE`; refused before any write.
     #[error(
         "editing {} would leave it at {bytes} bytes, over the {MAX_CONFIG_SIZE}-byte config limit",
         path.display()
@@ -110,20 +83,7 @@ pub enum EditError {
 
 /// Apply `apply` to `config_path` under the machine-global edit lock.
 ///
-/// Creates the parent directory, takes the [`lock_scoped`] entry for
-/// `(parent, "config-edit", file name)` under `locks_root`, then on the
-/// blocking pool: reads the file bounded by `MAX_CONFIG_SIZE` (absent →
-/// empty document), parses it, runs `apply`, renders. A render equal to the
-/// original is [`EditOutcome::Unchanged`] and writes nothing — an absent
-/// file is not created. A render over the ceiling is
-/// [`EditError::TooLarge`]. Under `dry_run` the directory is not created and
-/// the lock is not taken (there is no write to serialize); a changed render
-/// is reported [`EditOutcome::Written`] without touching the file. Otherwise
-/// it is published by atomic rename, and the lock is held until the closure
-/// has returned and the write has landed.
-///
-/// `apply` returns `Err(reason)` for a document whose shape it cannot edit;
-/// that surfaces as [`EditError::Malformed`] and the file is left alone.
+/// An absent file edits as empty; `dry_run` reports a change but creates, locks and writes nothing.
 ///
 /// # Errors
 ///
@@ -146,11 +106,7 @@ where
     .await
 }
 
-/// [`edit`] for a writer that works on the file's text, not its TOML: the
-/// `[managed]` fence is a comment-delimited region `setup::rc_block`
-/// addresses by line, which `toml_edit` cannot see. Same lock, bounded read,
-/// unchanged gate, size ceiling, dry-run gate and atomic write; `apply` gets
-/// the text as read (absent → `""`) and returns the text to publish.
+/// [`edit`] over the file's raw text (absent → `""`), for the comment-delimited `[managed]` fence.
 ///
 /// # Errors
 ///
@@ -173,13 +129,7 @@ where
     .await
 }
 
-/// The shared body of [`edit`] and [`edit_text`]: lock (unless `dry_run`),
-/// then [`edit_blocking`] on the pool with `apply` as the text → text step.
-///
-/// `timeout` is [`LOCK_TIMEOUT`] for both public entries — it is a parameter
-/// only so the test that proves a held lock surfaces as [`EditError::Locked`]
-/// can wait out a short one instead of paying the shipped five seconds. The
-/// shipped value is pinned in that same test.
+/// The shared body of [`edit`] and [`edit_text`]; `timeout` is a parameter only for tests.
 async fn edit_with<F>(
     locks_root: &Path,
     config_path: &Path,
@@ -195,8 +145,7 @@ where
         source,
     };
 
-    // A dry run writes nothing, so there is nothing to serialize: no
-    // directory (an absent `$OCX_HOME` stays absent) and no lock file.
+    // No directory or lock under `dry_run`, so an absent `$OCX_HOME` stays absent.
     let _guard = if dry_run {
         None
     } else {
@@ -208,7 +157,6 @@ where
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        // The guarded directory must exist before it can be identified.
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|source| io(parent, source))?;
@@ -222,19 +170,10 @@ where
     tokio::task::spawn_blocking(move || edit_blocking(&path, dry_run, apply))
         .await
         .map_err(|join| io(config_path, std::io::Error::other(join.to_string())))?
-    // `_guard` drops here: after the closure returned and the write landed.
+    // `_guard` must outlive the write, or a second editor reads the pre-edit file.
 }
 
-/// What a failed [`lock_scoped`] means for the edit of `config_path`: a
-/// timeout is [`EditError::Locked`] on the config file (75), anything else
-/// is the lock file's own I/O failure (74).
-///
-/// Takes [`lock_scoped`]'s own [`FileError`](ocx_util::error::FileError) rather
-/// than the crate-wide `Error` it used to be widened into. The widening was
-/// `From<FileError>`, whose only output is `Error::InternalFile(path, cause)`,
-/// so the two arms this match kept are the same two it always took and the
-/// third — the `other` wildcard — was unreachable: `lock_scoped` returns one
-/// concrete type, never an enum. Same codes, 75 and 74, from the same inputs.
+/// A lock timeout is [`EditError::Locked`] on the config file (75); anything else is I/O (74).
 fn lock_error(config_path: &Path, error: ocx_util::error::FileError) -> EditError {
     if error.cause.kind() == std::io::ErrorKind::TimedOut {
         return EditError::Locked {
@@ -247,7 +186,6 @@ fn lock_error(config_path: &Path, error: ocx_util::error::FileError) -> EditErro
     }
 }
 
-/// Blocking body of [`edit_with`]: read → `apply` → gate → write.
 fn edit_blocking<F>(path: &Path, dry_run: bool, apply: F) -> Result<EditOutcome, EditError>
 where
     F: FnOnce(&Path, &str) -> Result<String, EditError>,
@@ -257,16 +195,12 @@ where
         source,
     };
 
-    // Bounded like the loader's own read: a file already over the ceiling
-    // (reachable under `OCX_NO_CONFIG=1`, which skips the loader) is refused
-    // as the same over-size document, not pulled whole into memory first.
+    // Bounded: `OCX_NO_CONFIG=1` skips the loader, so an oversize file can reach here.
     let original = match read_bounded(path, MAX_CONFIG_SIZE) {
         Ok(bytes) => {
             String::from_utf8(bytes).map_err(|error| io(std::io::Error::new(std::io::ErrorKind::InvalidData, error)))?
         }
-        // A missing file is the create case, not a failure. Every other read
-        // error is real and must not be papered over with an empty document —
-        // that would silently replace a file we could not read.
+        // Only NotFound reads as empty; any other error as empty would overwrite an unreadable file.
         Err(BoundedReadError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(BoundedReadError::TooLarge { .. }) => {
             let bytes = std::fs::metadata(path).map_or(0, |metadata| metadata.len()) as usize;
@@ -338,7 +272,7 @@ completions = true
         Ok(())
     }
 
-    /// ocx#468 — **the load-bearing assertion**: an edit of a file whose lock
+    /// **The load-bearing assertion**: an edit of a file whose lock
     /// another editor holds waits for that editor, and lands once it is gone.
     ///
     /// **Red-state**: change `LOCK_SCOPE` (or the discriminator) in [`edit`]

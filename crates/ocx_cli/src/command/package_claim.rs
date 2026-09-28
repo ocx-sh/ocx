@@ -2,19 +2,6 @@
 // Copyright 2026 The OCX Authors
 
 //! `ocx package claim` — claim a package in the index.
-//!
-//! # Where each refusal lives
-//!
-//! C-058 spreads seven rules over two sites, and the site is part of the
-//! contract. clap owns the ones it can express — `--out` ⟂ `--fork` (declared
-//! on [`options::ForgeWriteOptions`] itself, so both write commands inherit one
-//! rule) and each `--upstream-*` optional's `requires` on its anchor.
-//! [`options::ForgeWriteOptions::validate`] owns the value-conditional ones,
-//! because clap's `blacklist` holds arg ids and never predicates.
-//!
-//! [`PackageClaim::execute`]'s order is contracted too: every pure refusal
-//! precedes anything that spawns or dials, so a malformed command line costs no
-//! network call and no operator round trip through a token they did not need.
 
 use std::process::ExitCode;
 
@@ -25,25 +12,20 @@ use crate::api::data::claim::ClaimReport;
 use crate::options;
 
 /// Claim a package in the index so its tags can be announced.
-///
-/// Renders the package's index entry and opens a pull or merge request
-/// against the index repository, or writes the entry to a local directory with
-/// `--out`. Claiming an already-claimed package adds your owners to the entry
-/// and leaves everything else as committed; run it again with nothing new to
-/// say and it reports `unchanged` and opens no request.
-///
-/// The entry carries the package description the registry serves at
-/// `__ocx.desc`, refreshed on every claim. Publish one with
-/// `ocx package description push`.
-///
-/// Owners default to the CI environment's user variables, else to the identity
-/// behind the credential. Name them explicitly with `--owner`, which replaces
-/// the detected list rather than adding to it.
-///
-/// Opening a request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job
-/// token under `--transport git` inside a GitLab job. Writing to `--out` works
-/// without one.
 #[derive(Parser)]
+#[command(long_about = "\
+    Claim a package in the index so its tags can be announced.\n\n\
+    Renders the package's index entry and opens a pull or merge request against the index \
+    repository, or writes the entry to a local directory with `--out`. Claiming an already-claimed \
+    package adds your owners to the entry and leaves everything else as committed; run it again \
+    with nothing new to say and it reports `unchanged` and opens no request.\n\n\
+    The entry carries the package description the registry serves at `__ocx.desc`, refreshed on \
+    every claim. Publish one with `ocx package description push`.\n\n\
+    Owners default to the CI environment's user variables, else to the identity behind the \
+    credential. Name them explicitly with `--owner`, which replaces the detected list rather than \
+    adding to it.\n\n\
+    Opening a request needs a forge credential: `OCX_ANNOUNCE_TOKEN`, or the job token under \
+    `--transport git` inside a GitLab job. Writing to `--out` works without one.")]
 pub struct PackageClaim {
     /// Where the request is written, and how it gets there.
     #[command(flatten)]
@@ -54,14 +36,7 @@ pub struct PackageClaim {
     ///
     /// This is the pointer every later `ocx package announce` resolves tags
     /// against, so it names the registry repository, not the index.
-    //
-    // Deliberately a bare `String` with no `value_parser`: the pointer is parsed
-    // by the existing `ocx_oci::OciIdentifier::parse_repository_pointer`, which
-    // `claim::root` already calls and which names the refused value back
-    // (`ClaimError::MalformedRepository`, exit 64). A clap `value_parser` would
-    // move that refusal to `ValueValidation` -- 64 as well, so the exit code
-    // cannot tell them apart -- and leave the library guard with no production
-    // caller (R-13).
+    // A bare `String`, not a `value_parser`, or the exit-64 refusal loses the library's message naming the value.
     #[clap(long = "repository", value_name = "REPOSITORY", required = true)]
     repository: String,
 
@@ -91,10 +66,7 @@ pub struct PackageClaim {
     /// like. The value is written verbatim into the index entry, which a
     /// catalog may render as a link, so neither a scheme ocx cannot vouch for
     /// nor a secret ever reaches it.
-    //
-    // Anchored independently of its sibling below (exit 64): one `requires` on
-    // one flag would leave the other unanchored and still satisfy a singular
-    // test name.
+    // Each `--upstream-*` optional needs its own `requires`; one does not anchor the other.
     #[clap(long = "upstream-repository-url", value_name = "URL", requires = "upstream_org")]
     upstream_repository_url: Option<String>,
 
@@ -104,8 +76,6 @@ pub struct PackageClaim {
     /// The text reaches the index entry only. It is never interpolated into
     /// the pull or merge request, so it fires no mentions and renders no
     /// markdown in a repository humans review.
-    //
-    // Anchored independently, as above.
     #[clap(long = "upstream-disclaimer", value_name = "TEXT", requires = "upstream_org")]
     upstream_disclaimer: Option<String>,
 
@@ -118,28 +88,10 @@ pub struct PackageClaim {
 }
 
 impl PackageClaim {
-    /// The `--owner` values, parsed into the library's own vocabulary.
+    /// The `--owner` values, each parsed by `parse_owner_spec`.
     ///
-    /// **A design gap this seam records rather than hides.** No contract in the
-    /// plan names the CLI-side `--owner` parser: `OwnerSpec` has no `FromStr`
-    /// anywhere in the workspace, and every malformed wire form is unruled. The
-    /// ruling proposed here, and the one the tests pin, is: split on the
-    /// **first** `:`; the head must be non-empty and the tail must parse as
-    /// `u64`; a failure is a usage error (exit 64). `alice:7:8` therefore fails
-    /// on `7:8` — deterministic, and no forge login can contain `:`. Splitting
-    /// on the last `:` instead would silently read `alice:7:8` as login
-    /// `alice:7`, and `:7` names nobody at all.
-    ///
-    /// Two things this must **not** do, because both would make a library
-    /// governance rule unreachable:
-    ///
-    /// - filter an empty login. `--owner ""` reaches
-    ///   `claim::owners::resolve_owners` as `OwnerSpec::Login("")`, which
-    ///   refuses it — treating it as absence would silently write whoever the CI
-    ///   environment names into a governance field.
-    /// - deduplicate. `resolve_owners` owns that rule and raises
-    ///   `ClaimError::DuplicateOwner`; a CLI that dedups first makes it dead
-    ///   code.
+    /// Never filter an empty login, or `--owner ""` admits whoever CI names instead of reaching
+    /// `resolve_owners`' refusal; never deduplicate, or its `DuplicateOwner` refusal is dead code.
     ///
     /// # Errors
     ///
@@ -148,28 +100,15 @@ impl PackageClaim {
         self.owner.iter().map(|value| parse_owner_spec(value)).collect()
     }
 
-    /// Every refusal decidable from argv alone, in contract order, and the
-    /// forge kind the run resolved.
+    /// Every refusal decidable from argv alone, plus the forge kind the run resolved.
     ///
-    /// One function rather than four statements in [`Self::execute`] so that
-    /// "this is the whole set of zero-I/O refusals" is a property a test can
-    /// hold: everything here must outrank C-063's exit-80 credential refusal,
-    /// which is decidable only after the environment is read. A malformed
-    /// `--repository` that reached the credential check first would report 80,
-    /// sending an operator to provision a forge token for a typo.
-    ///
-    /// `--repository` is parsed **and the value discarded**: the library
-    /// re-parses it inside `claim::claim`, so `claim::root`'s
-    /// `malformed_repository_*` tests keep their production caller and R-13's
-    /// objection does not apply.
+    /// Runs before the credential refusal (exit 80), or a malformed `--repository` sends the operator
+    /// for a token they never needed. The parsed `--repository` is dropped; `claim::claim` re-parses it.
     ///
     /// # Errors
     ///
     /// Every refusal here classifies to exit 64.
     fn argv_faults(&self) -> anyhow::Result<ocx_announce::forge::ForgeKind> {
-        // `validate` carries C-058's value-conditional exclusions, the `git`
-        // transport's GitHub refusal and the fork/index host agreement, and it
-        // is the single producer of the resolved kind the report renders.
         let kind = self.forge.validate()?;
         self.owner_specs()?;
         claim::parse_repository(&self.repository)?;
@@ -178,22 +117,9 @@ impl PackageClaim {
     }
 }
 
-/// Refuse an `--upstream-repository-url` that may not be published.
+/// Refuses an `--upstream-repository-url` that may not be published (exit 64).
 ///
-/// The value is the one argv channel that reaches the index root without any
-/// grammar of its own — the logical name and the physical repository are both
-/// constrained by the identifier grammar, and the login by
-/// `claim::owners::login_charset_is_valid`. The rule itself lives in the library
-/// beside the field it protects
-/// ([`ocx_announce::claim::upstream_repository_url_is_publishable`], which states why
-/// each half exists); this function owns only the flag name and the exit code.
-///
-/// **The message names the flag and the rule, never the value.** The refusal's
-/// most likely input is a forwarded `CI_REPOSITORY_URL`, whose userinfo is a
-/// live job token — echoing it back would move the secret from the index root
-/// into the CI job log (CWE-532), which is the same disclosure one sink over.
-/// That is why this refusal reads differently from `parse_owner_spec`'s, which
-/// does name its value: a `--owner` login carries no secret.
+/// The message never echoes the value, or a forwarded `CI_REPOSITORY_URL` leaks its job token into the CI log.
 fn validate_upstream_repository_url(value: Option<&str>) -> anyhow::Result<()> {
     match value {
         Some(url) if !claim::upstream_repository_url_is_publishable(url) => Err(crate::error::UsageError::new(
@@ -204,14 +130,7 @@ fn validate_upstream_repository_url(value: Option<&str>) -> anyhow::Result<()> {
     }
 }
 
-/// One `--owner` value, by the split-on-first-colon rule
-/// [`PackageClaim::owner_specs`] records.
-///
-/// The `LOGIN:ID` form additionally requires a **non-empty login**: `:7` names
-/// nobody, so it is not a wire form. That is not the empty-login filter the
-/// method's doc forbids — `--owner ""` carries no colon, so it reaches the
-/// library as `OwnerSpec::Login("")` and is refused there, where the governance
-/// rule is documented.
+/// One `--owner` value, split on the first `:`; a `LOGIN:ID` needs a non-empty login and a `u64` id.
 fn parse_owner_spec(value: &str) -> anyhow::Result<ocx_announce::claim::OwnerSpec> {
     let Some((login, id)) = value.split_once(':') else {
         return Ok(ocx_announce::claim::OwnerSpec::Login(value.to_string()));
@@ -224,8 +143,7 @@ fn parse_owner_spec(value: &str) -> anyhow::Result<ocx_announce::claim::OwnerSpe
     if login.is_empty() {
         return Err(refuse().into());
     }
-    // `u64`, never `i64`: `alice:-1` is not an account id, and the last-colon
-    // split would silently read `alice:7:8` as login `alice:7`.
+    // `u64`, never `i64`: `alice:-1` is no account id, and `alice:7:8` must fail here, not read as login `alice:7`.
     let id: u64 = id.parse().map_err(|_| refuse())?;
     Ok(ocx_announce::claim::OwnerSpec::Resolved {
         login: login.to_string(),
@@ -235,55 +153,27 @@ fn parse_owner_spec(value: &str) -> anyhow::Result<ocx_announce::claim::OwnerSpe
 
 impl PackageClaim {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // 1. Argv faults first, before any credential check, so a malformed
-        //    command line reports what is wrong with it (64) rather than a
-        //    missing token the operator would set only to hit the real error
-        //    next run. All of them live in `argv_faults`, so the set is one
-        //    function rather than a call sequence a later edit can reorder
-        //    piecemeal.
         let kind = self.argv_faults()?;
         let owners = self.owner_specs()?;
         let package = self.package.with_domain(context.default_registry())?;
 
-        // C-065: the `git --version` gate runs beside `validate_transport` and
-        // BEFORE the forge is constructed, so a missing or too-old git exits 69
-        // with zero *forge* calls. Zero *network* calls is a stronger claim this
-        // ordering does not make (DX-62): the ambient self-update check runs
-        // upstream of every command, and what keeps it from dialling is
-        // `app/update_check.rs`'s "stderr is not a terminal" short-circuit, not
-        // anything claim does. Its result travels into the constructor as a
-        // `GitBinary` -- one producer, one assembler. Conditional on the
-        // transport: `ForgeKind::client` raises the same 69 for an unresolved
-        // binary, so an unconditional probe would only show up as an ordinary
-        // `api` claim failing on a host that never needed git.
+        // Before the forge is built, so a missing or too-old git exits 69 with zero forge calls.
+        // Only for the git transport, or an `api` claim fails on a host that never needed git.
         let git = if self.forge.needs_git() {
             Some(ocx_announce::forge::probe_git_binary().await?)
         } else {
             None
         };
 
-        // 2. The whole C-063 ladder lives in `resolve`, never here, and the
-        //    resolved pair travels down as one value. The selected transport is
-        //    what opens the job-token rung, so it is passed rather than assumed.
         let credentials = ocx_announce::forge::ForgeCredentials::resolve(self.forge.transport);
         self.forge.require_credential(&credentials)?;
 
-        // C-064: before the write, and only in the one state that surprises.
-        // Claim reaches that state through the same `resolve` announce does, so
-        // it renders the same sentence on the same stream from the same place —
-        // see `options::ForgeWriteOptions::warn_push_identity`.
         self.forge.warn_push_identity(context.ui(), &credentials);
 
-        // The SSRF escape hatch is sourced exclusively from the selected
-        // `[registries."<ns>"]` entry for the package's namespace — through the
-        // same `Context` accessor announce reads, because the description
-        // observation is the same pipeline step (design register X2). There is
-        // no CLI flag to widen it.
+        // The SSRF escape hatch comes only from the namespace's `[registries."<ns>"]` entry; no CLI flag widens it.
         let trusted_hosts = context.trusted_hosts_for(package.registry());
 
-        // The OCI client the `__ocx.desc` observation runs on — the invocation's
-        // shared, SSRF-pinned publisher recipe, the same call `ocx package
-        // announce` makes. Built here, before `package` moves into the request.
+        // The SSRF-pinned publisher `ocx package announce` also observes `__ocx.desc` through.
         let publisher = context.guarded_publisher(package.registry());
 
         let request = ClaimRequest {
@@ -294,15 +184,12 @@ impl PackageClaim {
             target: self.target(),
             index_repo: self.forge.index_repo.clone(),
             trusted_hosts,
-            // The same allowance `Context::client_builder` passes as
-            // `plain_http_registries`, so the pre-flight decides the dial
-            // scheme — and hence which proxy variable applies (ocx#407) —
-            // from what the client will actually dial.
+            // What `Context::client_builder` passes as `plain_http_registries`, or the pre-flight picks a
+            // different dial scheme, and proxy variable, than the client dials.
             insecure_hosts: context.insecure_hosts().to_vec(),
         };
 
-        // The merged extra-CA view (C-007): a forge dial trusts what every
-        // other client of this invocation trusts.
+        // Merged extra CAs, so a forge dial trusts what every other client of this invocation trusts.
         let forge = kind.client(
             self.forge.transport,
             credentials.clone(),
@@ -323,13 +210,7 @@ impl PackageClaim {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// The write target the flag pair selects.
-    ///
-    /// `--out` and `--fork` are mutually exclusive on the shared flatten (clap
-    /// `conflicts_with`), and neither given means the claim branch is pushed to
-    /// `--index-repo` itself. A method rather than an inline `match` so the
-    /// mapping — which decides *which repository gets written to* — is
-    /// assertable without a forge.
+    /// The write target `--out` / `--fork` select; neither means a branch on `--index-repo` itself.
     fn target(&self) -> ClaimTarget {
         match (&self.forge.out, &self.forge.fork) {
             (Some(directory), _) => ClaimTarget::Out(directory.clone()),
@@ -338,10 +219,7 @@ impl PackageClaim {
         }
     }
 
-    /// The `upstream` object, present exactly when its anchor was given.
-    ///
-    /// The two optionals cannot appear without `--upstream-org` (clap
-    /// `requires`), so the anchor alone decides whether the object exists.
+    /// The `upstream` object, present exactly when `--upstream-org` was given.
     fn upstream(&self) -> Option<Upstream> {
         self.upstream_org.as_ref().map(|org| Upstream {
             org: org.clone(),
@@ -378,8 +256,9 @@ mod tests {
         PackageClaim::try_parse_from(argv)
     }
 
-    /// Where a refusal is expected to come from. C-058 spreads seven rules over
-    /// two sites, and the *site* is part of the contract: a rule moved from clap
+    /// Where a refusal is expected to come from. The mutual-exclusion contract
+    /// spreads seven rules over two sites, and the *site* is part of the
+    /// contract: a rule moved from clap
     /// into a runtime check still exits 64, but stops being reported before the
     /// command starts doing anything.
     #[derive(Debug, Clone, Copy)]
@@ -396,7 +275,7 @@ mod tests {
         Validate,
     }
 
-    /// C-058: all seven mutual exclusions, each with its site, its exit code and
+    /// All seven mutual exclusions, each with its site, its exit code and
     /// what its message must name.
     ///
     /// A table rather than one assertion, because the inventory row's single
@@ -497,7 +376,7 @@ mod tests {
         }
     }
 
-    /// C-058 / R-10: the six mode cells, so the `git` refusals are proved
+    /// The six transport-mode cells, so the `git` refusals are proved
     /// **conditional on the transport** rather than on the flag.
     ///
     /// Without the three accepting `api` cells, an implementation that refuses
@@ -532,7 +411,7 @@ mod tests {
         }
     }
 
-    /// C-058 / R-08: one instance spelled two ways is one instance.
+    /// One instance spelled two ways is one instance.
     ///
     /// The positive half of the fork/index host rule, and the only half that
     /// catches the trap the announce command documents: comparing
@@ -554,7 +433,7 @@ mod tests {
         }
     }
 
-    /// C-057: `--repository` is required.
+    /// `--repository` is required.
     ///
     /// Red at the stub: the field is an `Option` with no `required`, so the
     /// invocation parses.
@@ -571,8 +450,7 @@ mod tests {
         );
     }
 
-    /// C-057 / S-012: each `--upstream-*` optional independently `requires` the
-    /// anchor.
+    /// Each `--upstream-*` optional independently `requires` the anchor.
     ///
     /// Three rows, not one: a single `requires` on a single flag satisfies the
     /// inventory's singular name while the sibling flag stays unanchored.
@@ -599,7 +477,7 @@ mod tests {
         }
     }
 
-    /// S-012: `--upstream-org` alone parses, and carries only the org.
+    /// `--upstream-org` alone parses, and carries only the org.
     ///
     /// The positive half of the rule above. Every named row is a refusal, so a
     /// `requires` written in the wrong direction — the anchor requiring its
@@ -616,7 +494,7 @@ mod tests {
         assert_eq!(args.upstream_disclaimer, None);
     }
 
-    /// C-057: `--format` is the root flag, never a subcommand flag.
+    /// `--format` is the root flag, never a subcommand flag.
     ///
     /// Walks the built `Command` rather than reading `--help` by hand, the same
     /// way `package_announce.rs::no_trusted_host_flag_is_registered` walks it.
@@ -632,7 +510,7 @@ mod tests {
         );
     }
 
-    /// C-057: the rendered usage line carries `[OPTIONS]` before `<PACKAGE>`.
+    /// The rendered usage line carries `[OPTIONS]` before `<PACKAGE>`.
     ///
     /// Read off `render_usage`, which is what an operator sees, rather than off
     /// the struct's field order.
@@ -644,10 +522,10 @@ mod tests {
     /// **not** red this, against clap 4.6. Two reachable reds remain, neither of
     /// them the ordering: removing every optional argument from the command
     /// panics the `[OPTIONS]` `.expect`, and renaming the `<PACKAGE>`
-    /// `value_name` panics the second one — DX-63(a)'s recorded discriminating
+    /// `value_name` panics the second one — the recorded discriminating
     /// mutation.
     ///
-    /// C-057's sentence describes the rendered grammar, not a parse rule: clap
+    /// This sentence describes the rendered grammar, not a parse rule: clap
     /// interleaves positionals and flags freely, so
     /// `ocx package claim acme/widget --repository X` parses today. What this
     /// assertion is worth keeping for is the cheap net it does hold — the
@@ -661,7 +539,7 @@ mod tests {
         assert!(options < positional, "flags precede the positional; got usage: {usage}");
     }
 
-    /// C-057: `--repository` reaches the library **unparsed**.
+    /// `--repository` reaches the library **unparsed**.
     ///
     /// The physical pointer is parsed by the existing
     /// `ocx_oci::OciIdentifier::parse_repository_pointer`, which `claim::root` already
@@ -681,7 +559,7 @@ mod tests {
         );
     }
 
-    /// C-057: both `--owner` wire forms, and every malformed one.
+    /// Both `--owner` wire forms, and every malformed one.
     ///
     /// The ruling this pins is recorded on
     /// [`PackageClaim::owner_specs`](super::PackageClaim::owner_specs) — no
@@ -741,7 +619,7 @@ mod tests {
         }
     }
 
-    /// C-048: `--owner ""` reaches the library as an empty login, unfiltered.
+    /// `--owner ""` reaches the library as an empty login, unfiltered.
     ///
     /// `claim::owners` refuses it there, and its own test says why: treating an
     /// empty login as absence silently writes whoever the CI environment names
@@ -761,7 +639,7 @@ mod tests {
         );
     }
 
-    /// S-006: `--owner` order is preserved and repeats pass through unmerged.
+    /// `--owner` order is preserved and repeats pass through unmerged.
     ///
     /// `resolve_owners` owns the duplicate rule (`ClaimError::DuplicateOwner`);
     /// a CLI that deduplicates first makes that path unreachable.
@@ -782,11 +660,11 @@ mod tests {
         );
     }
 
-    /// S-010: the flag pair selects the write target, and each cell maps to its
+    /// The flag pair selects the write target, and each cell maps to its
     /// own `ClaimTarget`.
     ///
     /// [`super::PackageClaim::target`] decides **which repository gets written
-    /// to**, and no other WP-14 test observes it: a `target()` returning
+    /// to**, and no other test observes it: a `target()` returning
     /// `Direct` under `--out` compiles and passes every other assertion here,
     /// turning a local render into a pull request against the real index.
     ///
@@ -818,10 +696,10 @@ mod tests {
         );
     }
 
-    /// S-012: `--upstream-org` alone builds the object, carrying only the org.
+    /// `--upstream-org` alone builds the object, carrying only the org.
     ///
     /// The sibling `upstream_org_alone_parses` asserts the three **struct
-    /// fields**; S-012's contracted outcome is the constructed object, and an
+    /// fields**; the contracted outcome here is the constructed object, and an
     /// `upstream()` returning `None` unless a sibling flag is present satisfies
     /// that test while violating the contract.
     ///
@@ -844,12 +722,12 @@ mod tests {
         assert_eq!(parse(&[]).expect("parses").upstream(), None, "no anchor, no object");
     }
 
-    /// S-037 / C-063: a malformed `--repository` is exit 64 **even with no
-    /// credential resolved**.
+    /// A malformed `--repository` is exit 64 **even with no credential
+    /// resolved**.
     ///
     /// The defect this pins is an ordering one, and it is a wrong published exit
-    /// code rather than a nit: `--repository` is deliberately unparsed by clap
-    /// (R-13), so if its refusal runs after `require_credential` then
+    /// code rather than a nit: `--repository` is deliberately unparsed by clap,
+    /// so if its refusal runs after `require_credential` then
     /// `ocx package claim --repository "not a pointer" acme/widget` with no
     /// token exits **80**. A script branching on 80 refreshes credentials for a
     /// typo, and an operator provisions a forge PAT they never needed — the
@@ -869,8 +747,8 @@ mod tests {
     /// reintroduces exit 80 for a typo and reds nothing here, and no red is
     /// reachable at unit scope: `execute` takes a `crate::app::Context`, which is
     /// built only by `Context::try_init` against a real home, config tier and
-    /// registry client. The controls for the *ordering* are WP-16's acceptance
-    /// row — a malformed `--repository` with no credential, which is the only
+    /// registry client. The controls for the *ordering* are the acceptance
+    /// suite's row — a malformed `--repository` with no credential, which is the only
     /// scope that observes an exit code — plus review of this file.
     #[test]
     fn a_malformed_repository_is_an_argv_fault_before_any_credential_is_needed() {
@@ -895,7 +773,7 @@ mod tests {
     ///
     /// The value is written verbatim into the **committed** index root, which a
     /// catalog may render as a link — so a `javascript:` or `data:` value would
-    /// need a G-04 reviewer to be the only control, and a
+    /// need a human reviewer to be the only control, and a
     /// `https://gitlab-ci-token:<token>@host/p.git` (GitLab's own
     /// `CI_REPOSITORY_URL`) would commit a live job token into a public
     /// governance artifact. The rule itself is asserted at library scope in

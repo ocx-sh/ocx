@@ -1,42 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Canonical wire-format serializer for every ocx-index document OCX writes.
+//! Canonical wire-format serializer for every ocx-index document OCX writes
+//! (`adr_servable_index_snapshot.md` § Decision F).
 //!
-//! **Byte authority: `ocx-sh/index`** — `bot/CONTRACTS.md` §14 ("Root
-//! serializer — client-facing byte-exact spec") for the root, and `render.py`
-//! for the other two. This module is the Rust port of that repo's
-//! `validate_entry.py::serialize_package_root`; its output must match the
-//! Python reference byte-for-byte.
-//!
-//! That match is **proven for the root only**: the `index_wire_conformance`
-//! integration test drives the vendored golden vectors under
-//! `crates/ocx_index/tests/fixtures/index_wire/root/` (plus the CPython escape
-//! truth table under `.../cpython/`) through [`serialize_root`]. Cross-language
-//! parity fixtures for the catalog and the config are **pending in WP7
-//! (C-025)**. Until they land, those two serializers are pinned only by the
-//! hand-written expectations in this module's tests — literals read off
-//! `render.py` by a human, not bytes any Python run emitted.
-//!
-//! Three documents are serialized by OCX, all through the one formatter below
-//! (`adr_servable_index_snapshot.md` decision F / C-025):
-//!
-//! - the human-diffable `p/<ns>/<pkg>.json` root ([`serialize_root`]),
-//! - the `c/index.json` catalog ([`serialize_catalog`]), and
-//! - `config.json` ([`serialize_config`]).
-//!
-//! What a tag points *at* is not among them: it is a registry's own OCI image
-//! index, stored byte-for-byte as it was served — the index writes no object
-//! shapes of its own (`adr_oci_index_only_dispatch.md` D1).
-//!
-//! The form is Python `json.dumps(data, indent=2, sort_keys=False,
-//! ensure_ascii=True)` plus a single trailing `\n`. Everything structural about
-//! that — 2-space indent, `": "` between key and value, inline `{}` / `[]`,
-//! insertion order, number spelling — is [`serde_json::ser::PrettyFormatter`],
-//! delegated to wholesale. OCX owns exactly one rule the JSON ecosystem does not
-//! implement: `ensure_ascii`, escaping every scalar outside printable ASCII
-//! (serde-rs/json#907 declined it). That one rule is [`PythonJson`]'s two escape
-//! methods; nothing else here is hand-rolled.
+//! Byte authority is `ocx-sh/index` (`ocx-sh/index:bot/CONTRACTS.md` §14): output must match Python
+//! `json.dumps(indent=2, sort_keys=False, ensure_ascii=True)` plus one `\n`. OCX owns only `ensure_ascii`
+//! (serde-rs/json#907 declined it), in [`PythonJson`]'s escapes.
 
 use std::io;
 
@@ -47,73 +17,23 @@ use super::wire::{CatalogDocument, IndexFormatConfig};
 
 /// Byte-exact package-root serialization (CONTRACTS §14).
 ///
-/// The input is an **order-preserving** [`serde_json::Value`] — parse the committed
-/// root with `serde_json` compiled with `preserve_order` (enabled crate-wide in
-/// `Cargo.toml`) so object fields stay in on-disk order. Announce mutates only the
-/// `tags` field; every human-governed field (`name`, `owners`, `desc`, `upstream`,
-/// …) rides through the `Value` verbatim, so nothing this writer does not touch can
-/// drift.
-///
-/// Output: 2-space indent, insertion-order fields, `\uXXXX` for every non-ASCII
-/// scalar, a single trailing `\n`. Empty `{}` / `[]` emit inline.
+/// `root` must be parsed with `preserve_order`, or unmodelled human-governed fields reorder on write.
 pub fn serialize_root(root: &serde_json::Value) -> Vec<u8> {
     python_json(root)
 }
 
-/// Byte-exact `c/index.json` serialization (`render.py:309`).
-///
-/// Output: `json.dumps(indent=2, sort_keys=False, ensure_ascii=True)` form plus
-/// a single trailing `\n` — the same [`PythonJson`] emitter [`serialize_root`]
-/// uses, not a second one.
-///
-/// This will replace `serde_json::to_vec_pretty` at the one catalog writer,
-/// `CatalogTransaction::commit` (`index_store.rs:1029`), when WP5 switches it
-/// over; `to_vec_pretty`'s output diverges from the Python renderer by the
-/// trailing newline — one byte, but a full-file diff on every render of a tree
-/// the two implementations share. `ensure_ascii` is
-/// vacuous here (`PACKAGE_ID_RE` in `validate_entry.py:70-72` restricts catalog
-/// keys to `[a-z0-9]` plus separators, so a non-ASCII key is unreachable
-/// upstream); it comes free with the shared formatter and still matters for
-/// roots (C-025).
-///
-/// [`CatalogDocument`]'s field order — `format_version` then `packages` — is
-/// the emitted order: `sort_keys=False` on both sides.
+/// Byte-exact `c/index.json` serialization (`render.py`'s catalog renderer).
 pub fn serialize_catalog(catalog: &CatalogDocument) -> Vec<u8> {
     python_json(catalog)
 }
 
-/// Byte-exact `config.json` serialization (`render.py:334-338`).
-///
-/// Output: `json.dumps(indent=2, sort_keys=False, ensure_ascii=True)` form plus
-/// a single trailing `\n`, through the same [`PythonJson`] emitter as the other
-/// two documents. `config.json` has no string field at all, so `ensure_ascii`
-/// is vacuous here.
-///
-/// The two producers agree on **form** and differ on **content**. Form: the
-/// two-space indent, `": "`, `","`, `sort_keys=False` declaration order, and
-/// the one trailing newline are the same on both sides. Content: `render.py`
-/// emits `name_segments` from a module constant (`NAME_SEGMENTS = 2`,
-/// `core/render.py:46`) **unconditionally**, so the reference never renders
-/// `{"format_version": 1}` — while that is exactly what OCX writes, because
-/// `name_segments` is an operator declaration OCX cannot derive from a tree and
-/// omitting it is honest where guessing `2` would not be. That omission is
-/// [`IndexFormatConfig::name_segments`]'s `skip_serializing_if`; [`IndexFormatConfig`]
-/// carries no OCX-only field either way.
-///
-/// No churn follows from the difference: C-023 writes this config only when the
-/// file is **absent**, and `regenerate` never writes one at all, so the two
-/// producers never write the same file.
+/// Byte-exact `config.json` serialization (`render.py`'s config renderer), except
+/// that OCX omits the `name_segments` it cannot derive.
 pub fn serialize_config(config: &IndexFormatConfig) -> Vec<u8> {
     python_json(config)
 }
 
 /// The one emitter behind all three public serializers.
-///
-/// Generic over `T: Serialize` rather than taking [`serde_json::Value`]: the
-/// catalog and config are modelled types, and routing them through a `Value`
-/// would re-sort or re-shape what the wire pins. Roots stay a `Value` because
-/// they carry human-governed fields OCX does not model and must ride through
-/// verbatim.
 fn python_json<T: Serialize>(document: &T) -> Vec<u8> {
     let mut out = Vec::new();
     let mut serializer = serde_json::Serializer::with_formatter(&mut out, PythonJson::new());
@@ -140,9 +60,7 @@ impl PythonJson<'_> {
 
 /// Forward a [`Formatter`] layout method to the wrapped [`PrettyFormatter`].
 ///
-/// Covers every method `PrettyFormatter` overrides in serde_json 1.0.150, plus
-/// `end_object_key` (a no-op default today) so a future override is inherited
-/// rather than silently dropped.
+/// List every method `PrettyFormatter` overrides, or a missing one silently falls back to compact layout.
 macro_rules! delegate_layout {
     ($($name:ident($($arg:ident: $ty:ty),*)),* $(,)?) => {$(
         fn $name<W: ?Sized + io::Write>(&mut self, writer: &mut W $(, $arg: $ty)*) -> io::Result<()> {
@@ -165,15 +83,9 @@ impl Formatter for PythonJson<'_> {
         end_object_value(),
     );
 
-    /// Escape every scalar from `0x7F` up — Python's `json.encoder` keeps only
-    /// `[\x20-\x7e]` raw, so **DEL is escaped**, not printable. Astral scalars
-    /// become UTF-16 surrogate pairs, as `ensure_ascii` has no other spelling.
-    ///
-    /// Only unescaped runs reach here: serde_json splits the string on its own
-    /// escape table (`"`, `\`, and every C0 control), which is a strict subset of
-    /// Python's, so the remainder is exactly the range this method must decide.
+    /// Escape every scalar from `0x7F` (DEL) up, as Python keeps only `[\x20-\x7e]` raw;
+    /// astral scalars become UTF-16 surrogate pairs.
     fn write_string_fragment<W: ?Sized + io::Write>(&mut self, writer: &mut W, fragment: &str) -> io::Result<()> {
-        // Copy raw runs wholesale; only the escaped scalars interrupt the memcpy.
         let mut run_start = 0;
         for (offset, character) in fragment.char_indices() {
             let code = character as u32;
@@ -196,21 +108,18 @@ impl Formatter for PythonJson<'_> {
     }
 
     /// Python's escape spellings for the scalars serde_json hands off pre-classified.
-    ///
-    /// `Solidus` is deliberately raw: serde_json reserves the `\/` escape, Python
-    /// never emits it. serde_json's own escape table never produces this variant
-    /// today — the arm is the guard against that changing under us.
     fn write_char_escape<W: ?Sized + io::Write>(&mut self, writer: &mut W, escape: CharEscape) -> io::Result<()> {
         match escape {
             CharEscape::Quote => writer.write_all(b"\\\""),
             CharEscape::ReverseSolidus => writer.write_all(b"\\\\"),
+            // Raw: Python never emits `\/`.
             CharEscape::Solidus => writer.write_all(b"/"),
             CharEscape::Backspace => writer.write_all(b"\\b"),
             CharEscape::FormFeed => writer.write_all(b"\\f"),
             CharEscape::LineFeed => writer.write_all(b"\\n"),
             CharEscape::CarriageReturn => writer.write_all(b"\\r"),
             CharEscape::Tab => writer.write_all(b"\\t"),
-            // Lowercase, zero-padded — Python's `\u00XX` for the remaining C0 controls.
+            // Lowercase, zero-padded, as Python spells it.
             CharEscape::AsciiControl(byte) => write!(writer, "\\u{byte:04x}"),
         }
     }

@@ -3,31 +3,9 @@
 
 //! Interpolation-token resolution for metadata string fields.
 //!
-//! OCX claims every `${…}` sequence. Four bodies are recognised —
-//! `${installPath}`, its exact alias `${self.installPath}`, `${self.env.KEY}`
-//! and `${deps.NAME.installPath}` — each optionally carrying a `:native` or
-//! `:posix` render modifier. Anything else is a hard error; `$${` is the only
-//! way to emit a literal `${…}`. Recognition lives in one place,
-//! [`scanner::scan`]; this module gates the classified tokens against the
-//! active [`AllowedTokens`] set, substitutes them, and renders the result.
-//!
-//! Consumed by `env::resolver::EnvResolver`, the entrypoint arg resolver, and
-//! the publish gate in `validation`.
-//!
-//! One concern per file. This one is the resolver: it drives the other five
-//! and owns nothing they own.
-//!
-//! | File | Concern |
-//! |---|---|
-//! | `scanner.rs` | Recognition — what a `${…}` **is** |
-//! | `gate.rs` | Capability — which token classes a surface may carry |
-//! | `scope.rs` | The `${self.env.KEY}` lookup scope |
-//! | `error.rs` | The refusal taxonomy and how each refusal reads |
-//! | `render.rs` | Path-separator rendering |
-//!
-//! `gate`, `scope` and `error` are private modules whose public items are
-//! re-exported here, so the crate sees one path per item — `template::Usage`,
-//! not `template::gate::Usage`.
+//! Four bodies are recognised (`${installPath}`, alias `${self.installPath}`,
+//! `${self.env.KEY}`, `${deps.NAME.installPath}`), each with an optional `:native` /
+//! `:posix` modifier; any other `${…}` is an error, and `$${` is the only literal `${`.
 
 mod error;
 mod gate;
@@ -49,48 +27,16 @@ use super::env::entry::Entry;
 use crate::metadata::dependency::DependencyName;
 use ocx_util::fs::path::RelativePath;
 
-/// The byte ceiling on one resolved template value.
-///
-/// `${self.env.KEY}` substitutes the referenced var's already-**resolved**
-/// value, so a var that names the previous one twice doubles per var while the
-/// authored metadata stays flat: 41 vars — under 4 KiB serialized, and accepted
-/// by `validate_for_publish`, which never resolves — expand to 32 MiB at
-/// compose time. That runs on every `ocx env` / `ocx exec` / `ocx package exec` /
-/// launcher re-entry, and is reachable through a **transitive dependency's**
-/// metadata, so the victim never named the document that did it
-/// (CWE-400/409/776).
-///
-/// A per-value cap is what closes it: the chain manifests as one var exceeding
-/// the cap, so resolution stops at the first offender instead of after the
-/// document. A count cap on `Env.variables` would additionally refuse documents
-/// already published, and buys nothing here (256 vars still permit 2²⁵⁵).
-///
-/// An **interface number**: a value it refuses is a value that stops resolving,
-/// so the owner may move it. Nothing derives from it.
+/// The byte ceiling on one resolved template value; lowering it refuses values that resolve today.
+// Chained `${self.env.KEY}` doubles per var: 41 vars under 4 KiB, which the publish gate
+// never resolves, reach 32 MiB at compose time through any transitive dependency (CWE-400).
 pub const MAX_RESOLVED_VALUE_BYTES: usize = 64 * 1024;
 
-/// Classifies a `Path`-modifier env var's raw value template as an
-/// install-path-rooted `PATH` directory, extracting the relative directory
-/// under the install root.
+/// Returns `rel` for a raw `${installPath}/<rel>` template with no modifier, else `None`,
+/// including for a scan error or an escaping `rel`.
 ///
-/// Returns `Some(rel)` only when the scan of `value` is exactly one
-/// modifier-free [`scanner::TokenShape::InstallPath`] token followed by one
-/// `/…` literal — so both
-/// `${installPath}/bin` and `${self.installPath}/bin` classify to `bin`
-/// (D4/D10). Any other shape returns `None`: a bare `${installPath}`, a
-/// combined-path var, a literal path, or a modifier-bearing token
-/// (`${self.installPath:posix}/bin`) — best-effort scan-scope exclusion, not
-/// an error. A scan **error** returns `None` for the same reason, and under
-/// D14 that is a reachable case rather than a defensive one: this runs on read
-/// paths, which no longer refuse an unrecognised token. `rel` is parsed through
-/// [`RelativePath::parse`] so a malformed or escaping `<rel>` is excluded the
-/// same way.
-///
-/// Consumed by `crate::bin_scan::scan_interface_binaries` (create-time
-/// executable auto-scan) to identify which declared `Path` vars are scan
-/// targets. Does not itself check `modifier`/`visibility` — those live on
-/// the `Var` struct, not the raw value string, and are the caller's
-/// responsibility. See `adr_declared_binaries_metadata.md` §2 steps 1-2.
+/// It never checks the var's `modifier` or `visibility`; the caller must
+/// (`adr_declared_binaries_metadata.md` §2).
 #[must_use]
 pub fn classify_install_path_rooted_dir(value: &str) -> Option<RelativePath> {
     let segments = scanner::scan(value).ok()?;
@@ -103,22 +49,7 @@ pub fn classify_install_path_rooted_dir(value: &str) -> Option<RelativePath> {
     RelativePath::parse(rest.strip_prefix('/')?).ok()
 }
 
-/// Resolves recognised interpolation tokens in template strings.
-///
-/// Build once with [`TemplateResolver::new`], call [`TemplateResolver::resolve`] for each
-/// template string. Callers that iterate over many variables (e.g. `Exporter`) benefit from
-/// building the resolver once and reusing it.
-///
-/// [`TemplateResolver::resolve`] substitutes real install paths and verifies each dep's
-/// `install_path.exists()` on disk. [`TemplateResolver::resolve_without_existence_checks`]
-/// is the same substitution with every filesystem assertion suppressed, for callers that
-/// must resolve a value they are not going to emit (D8).
-///
-/// Use [`TemplateResolver::usage`] to restrict which token classes are allowed (e.g.,
-/// `Usage::EntryPointArgs` forbids `${deps.*}` and `${self.env.*}` tokens), and
-/// [`TemplateResolver::with_self_env`] to supply the scope `${self.env.KEY}` resolves
-/// against. The resolver stays **pure** (D5): every input is a parameter, and nothing
-/// here reads the process environment.
+/// Resolves interpolation tokens in template strings; pure, since every input is a parameter.
 pub struct TemplateResolver<'a> {
     install_path: &'a Path,
     dep_contexts: &'a HashMap<DependencyName, DependencyContext>,
@@ -132,24 +63,13 @@ impl<'a> TemplateResolver<'a> {
         Self {
             install_path,
             dep_contexts,
-            // Default: Environment caps — every recognised token permitted.
-            // Preserves today's behavior for every existing caller that does not call .usage().
             allowed: Usage::Environment.into(),
             host: Host::current(),
-            // Empty by default: a caller that supplies no env context has no
-            // earlier-declared var for `${self.env.KEY}` to name, which is the
-            // undefined case rather than a special one.
             self_env: &scope::EMPTY_SELF_ENV,
         }
     }
 
-    /// Sets the interpolation usage, restricting which token classes are permitted.
-    ///
-    /// Pass a [`Usage`] variant or an [`AllowedTokens`] value directly. The default
-    /// is [`Usage::Environment`] (all tokens permitted), matching the existing behavior
-    /// for env-value interpolation callers.
-    ///
-    /// # Example
+    /// Restricts the permitted token classes; the default, [`Usage::Environment`], permits all.
     ///
     /// ```ignore
     /// let resolver = TemplateResolver::new(path, &deps).usage(Usage::EntryPointArgs);
@@ -160,30 +80,16 @@ impl<'a> TemplateResolver<'a> {
         self
     }
 
-    /// Supplies the scope `${self.env.KEY}` resolves against: the entries this
-    /// package's env vars **declared strictly earlier** already resolved to, in
-    /// declaration order (D6.1).
-    ///
-    /// A parameter rather than an ambient read, because D5 requires the resolver
-    /// to stay pure — and a growing scope cannot be a long-lived borrow: the
-    /// composer pushes into its private accumulator between vars, so the scope
-    /// is handed in per resolve call.
-    ///
-    /// Omitting it leaves the scope empty, which is what every caller outside
-    /// env-value resolution wants: entrypoint args carry no self-env scope, and
-    /// `Usage::EntryPointArgs` refuses the token outright.
+    /// Supplies the scope `${self.env.KEY}` resolves against: the resolved entries of this
+    /// package's vars declared strictly earlier. Empty when omitted.
     #[must_use]
     pub fn with_self_env(mut self, self_env: &'a SelfEnvScope<Entry>) -> Self {
         self.self_env = self_env;
         self
     }
 
-    /// Pins the host a `:posix` modifier renders for, so both legs of the
-    /// modifier contracts run on any CI host.
-    ///
-    /// Test-only seam per `arch-principles.md`: it covers [`render`]'s host
-    /// argument alone and must never divert `dunce::simplified`, which stays a
-    /// real `cfg(windows)` call.
+    /// Pins the host a `:posix` modifier renders for, so both legs run on any CI host.
+    // Covers `render`'s host argument only; `dunce::simplified` must stay a real `cfg(windows)` call.
     #[cfg(any(test, feature = "__testing"))]
     #[must_use]
     pub fn with_host(mut self, host: Host) -> Self {
@@ -195,21 +101,14 @@ impl<'a> TemplateResolver<'a> {
     ///
     /// # Errors
     ///
-    /// Returns [`TemplateError`] if `template` carries a `${…}` OCX does not
-    /// recognise, a token the active [`AllowedTokens`] set forbids, a
-    /// `${deps.*}` token naming an unknown dependency or field, or a
-    /// dependency that is not installed on disk.
+    /// [`TemplateError`] for an unrecognised or disallowed token, an unknown dependency or
+    /// field, or a dependency not installed on disk.
     pub fn resolve(&self, template: &str) -> Result<String, TemplateError> {
         self.resolve_inner(template, /* check_exists = */ true)
     }
 
-    /// Resolves every recognised token in `template` **without** asserting that
-    /// a referenced dependency exists on disk.
-    ///
-    /// The composer's split (D8) is *value resolution always; every filesystem
-    /// assertion on emit only*, so a var that never crosses the active surface
-    /// resolves through here: a declared-but-uninstalled dep must not turn a
-    /// working install into exit 79 on a value nobody emits.
+    /// [`Self::resolve`] without asserting dependencies exist on disk, for a value nobody
+    /// emits: an uninstalled dependency must not fail such a value with exit 79.
     ///
     /// # Errors
     ///
@@ -219,19 +118,7 @@ impl<'a> TemplateResolver<'a> {
         self.resolve_inner(template, /* check_exists = */ false)
     }
 
-    /// Scan, then gate, then substitute, then render — in that order.
-    ///
-    /// The gate runs over the whole scan, not per segment, so a disallowed
-    /// token anywhere in `template` is refused before any `dep_contexts` lookup
-    /// happens — and it is the same [`first_disallowed_token`] the publish gate
-    /// calls. Substituted bytes go straight to the output buffer and are never
-    /// re-examined, which is what makes an install path containing `${…}` inert
-    /// (C-009).
-    ///
-    /// The output buffer is measured against [`MAX_RESOLVED_VALUE_BYTES`] after
-    /// every segment. Here rather than at any of the six commands that resolve:
-    /// one budget on the one place bytes are produced closes every sink, where
-    /// per-command guards would be six guards for one root cause.
+    // Substituted bytes are never re-scanned, or an install path containing `${…}` would resolve.
     fn resolve_inner(&self, template: &str, check_exists: bool) -> Result<String, TemplateError> {
         let segments = scanner::scan(template)?;
         if let Some(token) = first_disallowed_token(&segments, self.allowed) {
@@ -260,9 +147,7 @@ impl<'a> TemplateResolver<'a> {
                 }
             }
 
-            // After every segment, not once at the end: the growth this bounds
-            // arrives one substitution at a time, so a value already over the
-            // budget must not be given another token's worth to double.
+            // Per segment, not at the end, or an over-budget value gets another token to double.
             if resolved.len() > MAX_RESOLVED_VALUE_BYTES {
                 return Err(TemplateError::ResolvedValueTooLarge {
                     limit: MAX_RESOLVED_VALUE_BYTES,
@@ -273,27 +158,12 @@ impl<'a> TemplateResolver<'a> {
     }
 }
 
-/// Produces one already-gated token's resolved value — before rendering, which
-/// the caller applies.
-///
-/// A free function rather than a method so the inputs it needs are its
-/// signature: it sees the install path and the dep contexts, and nothing else
-/// of the resolver. It takes no [`AllowedTokens`]: `resolve_inner` gates the
-/// whole scan through [`first_disallowed_token`] before the first substitution,
-/// so a token reaching here is already permitted.
-///
-/// `self_env` is the package's own earlier-declared, already-resolved entries
-/// — the scope `${self.env.KEY}` names (D6.1). What it substitutes is the
-/// referenced var's **resolved value, never its template** (C-029):
-/// `${self.env.A}` where `A = "${installPath}/bin"` yields the expanded path, so
-/// a token can never be re-read out of a substituted value and the single-pass
-/// guarantee (C-009) holds through self-reference too.
+/// One already-gated token's value, before rendering; `${self.env.A}` yields A's resolved
+/// value, never its template, so no token is re-read from a substitution.
 ///
 /// # Errors
 ///
-/// [`TemplateError::UndefinedSelfEnvRef`] / [`TemplateError::AmbiguousSelfEnvRef`]
-/// from the `${self.env.*}` lookup, plus the dependency-resolution errors the
-/// `Dep` arm raises.
+/// The `${self.env.*}` lookup and dependency-resolution errors.
 fn substitute(
     token: &Token<'_>,
     install_path: &Path,
@@ -312,10 +182,7 @@ fn substitute(
                 })?;
 
             let content_directory = context.install_path();
-            // Sync `.exists()` is intentional: this is the synchronous
-            // resolution API both `EnvResolver` and the entrypoint resolver
-            // call, and the probe is a single `stat(2)` against a path the
-            // caller is about to open.
+            // Sync `.exists()` is intentional: a synchronous API, and a single `stat(2)`.
             if check_exists && !content_directory.exists() {
                 return Err(TemplateError::DependencyNotInstalled {
                     ref_name: name.clone(),
@@ -329,12 +196,8 @@ fn substitute(
     }
 }
 
-/// The resolved value of the var `key` names, among the ones this package
-/// declared **strictly earlier**.
-///
-/// `scope` is that prefix, in declaration order — so acyclicity is structural
-/// rather than checked (D6.3): a forward reference and a self reference are both
-/// simply absent from it, and there is no back-edge to detect.
+/// The resolved value of `key` among the vars declared strictly earlier; forward and self
+/// references are absent from `scope`, so no cycle can form.
 ///
 /// # Errors
 ///
@@ -343,20 +206,14 @@ fn lookup_self_env(scope: &SelfEnvScope<Entry>, key: &str) -> Result<String, Tem
     scope.lookup(key).map(|entry| entry.value.clone())
 }
 
-/// Renders a resolved `content/` directory as the bytes a token substitutes to.
-///
-/// `dunce::simplified` strips a Windows `\\?\` verbatim prefix and is a no-op
-/// on every other path, so this is the identity off Windows. It runs here,
-/// below the render modifier, because rendering composes **after** it: no
-/// modifier may emit a verbatim prefix (C-016), and a `${installPath}/bin`
-/// template joined onto a verbatim path would otherwise produce a
-/// mixed-separator string Windows reads as one literal filename.
+/// Renders a resolved `content/` directory as the string a token substitutes to.
+// Strips a Windows `\\?\` prefix before rendering, or `${installPath}/bin` on a verbatim
+// path becomes a mixed-separator string Windows reads as one literal filename.
 fn content_directory_string(path: &Path) -> String {
     dunce::simplified(path).to_string_lossy().into_owned()
 }
 
-/// The dependency names an unresolved `${deps.*}` reference could have named,
-/// sorted so the message is reproducible rather than hash-order noise.
+/// The declared dependency names, sorted so the error message is reproducible.
 fn declared_names(dep_contexts: &HashMap<DependencyName, DependencyContext>) -> Vec<DependencyName> {
     let mut declared: Vec<DependencyName> = dep_contexts.keys().cloned().collect();
     declared.sort_by(|left, right| left.as_str().cmp(right.as_str()));

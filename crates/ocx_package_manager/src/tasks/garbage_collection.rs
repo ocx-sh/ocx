@@ -15,12 +15,7 @@ use reachability_graph::ReachabilityGraph;
 
 use super::resolve::SitePatchRoots;
 
-/// Garbage collector for the object store.
-///
-/// Built from the current filesystem state, provides both full GC
-/// ([`unreachable_objects`]) and scoped purge ([`orphaned_by_seeds`]).
-/// Query methods return sets without side effects; [`delete_objects`]
-/// performs the actual filesystem mutations.
+/// Garbage collector for the object store; only [`delete_objects`] mutates the filesystem.
 pub struct GarbageCollector {
     graph: ReachabilityGraph,
 }
@@ -28,17 +23,7 @@ pub struct GarbageCollector {
 impl GarbageCollector {
     /// Builds a [`GarbageCollector`] from the current filesystem state.
     ///
-    /// `project_roots` supplies additional GC roots derived from registered
-    /// projects' `ocx.lock` files (Unit 6). Pass `&[]` to omit project-registry
-    /// roots (used when `--force` is specified or when the registry is unavailable).
-    ///
-    /// `patch_roots` supplies additional GC roots derived from the site-patch
-    /// tier (companion packages + descriptor blobs). Pass `&SitePatchRoots::default()`
-    /// when patch roots are irrelevant (e.g. purge, uninstall). Patch roots are
-    /// always included in `clean` even under `--force` so required companions
-    /// survive GC (invariant C7).
-    ///
-    /// See [`adr_clean_project_backlinks.md`] for the multi-root design.
+    /// `patch_roots` stay seeded in `clean` even under `--force`, or required companions are collected.
     pub async fn build(
         file_structure: &FileStructure,
         project_roots: &[ProjectRootDigests],
@@ -47,24 +32,9 @@ impl GarbageCollector {
         let graph = ReachabilityGraph::build(file_structure, project_roots).await?;
         let mut collector = Self { graph };
 
-        // Seed patch_roots as additional BFS roots alongside project-registry
-        // roots so companion packages and descriptor blobs survive GC even
-        // when they have no live install symlinks (invariant C7).
-        //
-        // Companion packages: seed the package-store directory for each pinned
-        // companion identifier as a root.  The BFS then follows refs/layers/
-        // and refs/blobs/ edges from those directories, retaining their layers
-        // and blobs too.
         for companion_pinned in &patch_roots.companions {
             let raw_path = file_structure.packages.path(companion_pinned);
-            // Canonicalize BEFORE the guard: `all_entries` is keyed by canonical
-            // paths (`ReachabilityGraph::build` canonicalizes every entry), so a
-            // raw-path `contains_key` probe misses whenever `$OCX_HOME` itself
-            // sits behind a symlink (macOS `/tmp` -> `/private/tmp`, an NFS or
-            // bind-mounted home) — which would drop a present companion's root
-            // and over-collect it. Canonicalize, then guard + insert on the
-            // canonical path. An absent companion fails to canonicalize, falls
-            // back to the raw path, misses the guard, and is correctly skipped.
+            // `all_entries` keys are canonical; a raw path misses under a symlinked `$OCX_HOME` and over-collects.
             let canonical_path = dunce::canonicalize(&raw_path).unwrap_or_else(|error| {
                 log::debug!("cannot canonicalize companion path {}: {error}", raw_path.display());
                 raw_path
@@ -74,22 +44,10 @@ impl GarbageCollector {
             }
         }
 
-        // Descriptor blobs: seed the blob-store directory for each descriptor
-        // digest.  The manifest blob and its layer blobs are separate entries;
-        // each must be seeded individually (the reachability graph has no
-        // "descriptor blob → layer blob" edges — those would require parsing
-        // every candidate blob on every GC, which is expensive).
-        //
-        // SitePatchRoots.descriptors carries (registry, digest) pairs so we
-        // can call BlobStore::path(registry, digest) directly — no linear
-        // shard-suffix scan needed, and multi-registry correctness is preserved.
-        // A blob absent from disk is not in `all_entries` and needs no GC root.
+        // Seeded individually: the graph has no descriptor-blob -> layer-blob edge.
         for (registry, descriptor_digest) in &patch_roots.descriptors {
             let raw_path = file_structure.blobs.path(registry, descriptor_digest);
-            // Canonicalize before guard + insert, identical to the companion
-            // loop above: `all_entries` keys are canonical, so a raw-path probe
-            // would miss a present descriptor blob under a symlinked `$OCX_HOME`
-            // and over-collect it.
+            // Canonical, as in the companion loop above.
             let canonical_path = dunce::canonicalize(&raw_path).unwrap_or_else(|error| {
                 log::debug!(
                     "cannot canonicalize descriptor blob path {}: {error}",
@@ -105,35 +63,17 @@ impl GarbageCollector {
         Ok(collector)
     }
 
-    /// Returns the attribution map: package-store path → `Vec<ocx.lock paths>`.
-    ///
-    /// Non-empty only when `project_roots` was non-empty at build time. Used by
-    /// `PackageManager::clean` to populate `CleanedObject::held_by` in dry-run
-    /// output.
+    /// Returns the attribution map: package-store path → `ocx.lock` paths holding it.
     pub fn roots_attribution(&self) -> &std::collections::HashMap<PathBuf, Vec<PathBuf>> {
         &self.graph.roots_attribution
     }
 
-    /// Returns every entry reachable from this collector's roots.
-    ///
-    /// Canonical paths, the same keys `orphaned_by_seeds` compares against.
-    /// The complement of [`unreachable_objects`] over the walked entry set --
-    /// exposed separately because `purge_unrooted` needs the membership test
-    /// on seeds it supplies, not the collectable set.
-    ///
-    /// `pub(crate)`, unlike its siblings: the only consumer is `tasks::purge`,
-    /// and a bare `pub` on a type no other crate can name is what
-    /// `unreachable_pub` is ratcheted against.
+    /// Returns every entry reachable from this collector's roots, as canonical paths.
     pub(crate) fn reachable(&self) -> HashSet<PathBuf> {
         self.graph.reachable()
     }
 
-    /// Returns all entries not reachable from any root.
-    ///
-    /// Blobs are first-class GC participants: any blob reachable from an
-    /// installed package's `refs/blobs/` survives, and any orphan blob is
-    /// collected. Follow-up #50 tracks policy-based retention for users who
-    /// want stricter retention semantics in shared `$OCX_HOME` scenarios.
+    /// Returns all entries, blobs included, not reachable from any root.
     pub fn unreachable_objects(&self) -> HashSet<PathBuf> {
         let reachable = self.graph.reachable();
         self.graph
@@ -144,14 +84,7 @@ impl GarbageCollector {
             .collect()
     }
 
-    /// Returns entries newly orphaned by removing the given seeds.
-    ///
-    /// Computes what becomes unreachable when the seeds are no longer roots:
-    ///   reachable_with_seeds    = bfs(roots ∪ seeds)
-    ///   reachable_without_seeds = bfs(roots - seeds)
-    ///   orphaned = reachable_with_seeds - reachable_without_seeds
-    ///
-    /// Correct regardless of whether seeds are currently roots in the graph.
+    /// Returns entries newly orphaned by removing the given seeds, whether or not they are roots now.
     pub fn orphaned_by_seeds(&self, seeds: &[PathBuf]) -> HashSet<PathBuf> {
         let seed_set: HashSet<PathBuf> = seeds.iter().cloned().collect();
 
@@ -175,17 +108,9 @@ impl GarbageCollector {
         self.delete_objects(&targets, false).await
     }
 
-    /// Deletes the given CAS entry directories from disk.
+    /// Deletes the given CAS entry directories; an already-absent entry is not a failure.
     ///
-    /// For packages: unlinks dependency, layer, and blob forward-refs via
-    /// [`ReferenceManager`], then removes the directory. For layers and blobs:
-    /// removes the directory directly (they have no outgoing refs).
-    ///
-    /// Handles `NotFound` errors from `remove_dir_all` gracefully — a
-    /// concurrent deletion or external cleanup is not treated as failure.
-    ///
-    /// **Note:** No guard against concurrent installs. Do not run `clean`
-    /// while other OCX operations are in progress.
+    /// No guard against concurrent installs: an object another operation just linked can be deleted.
     pub async fn delete_objects(&self, targets: &HashSet<PathBuf>, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
         if targets.is_empty() {
             return Ok(Vec::new());
@@ -291,7 +216,7 @@ mod tests {
         assert_eq!(collector.unreachable_objects(), set(&["L2"]));
     }
 
-    /// Test 44 (plan_resolution_chain_refs.md §44): an unreachable blob
+    /// `adr_three_tier_cas_storage.md` § Single-Pass GC: an unreachable blob
     /// (not reachable via any package's refs/blobs/) IS collected by clean.
     #[test]
     fn unreachable_blob_is_collected() {
@@ -303,7 +228,7 @@ mod tests {
         );
     }
 
-    /// Test 45 (plan_resolution_chain_refs.md §45): a blob that IS reachable
+    /// `adr_three_tier_cas_storage.md` § Single-Pass GC: a blob that IS reachable
     /// via a root package's refs/blobs/ edge survives GC.
     ///
     /// This is the converse of test 44: the GC must distinguish reachable
@@ -351,7 +276,7 @@ mod tests {
         );
     }
 
-    /// Test 46 (plan_resolution_chain_refs.md §46): purge cascades through
+    /// `adr_three_tier_cas_storage.md` § Single-Pass GC: purge cascades through
     /// all intermediate chain blobs — both the top-level index blob and the
     /// platform manifest blob are purged when their parent package is purged.
     ///

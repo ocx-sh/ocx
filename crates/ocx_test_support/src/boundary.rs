@@ -1,55 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The boundary-test harness (ADR phase 0.1, plan C-006).
+//! The boundary-test harness: assert over source that one module tree never reaches another.
 //!
-//! A boundary test asserts over source that one module tree never reaches
-//! another. Such a guard fails in ways a behavioural test cannot: a needle
-//! that quietly stops matching reads as green, and a denylist can match its
-//! own comment. So every entry point here bakes in the five properties a
-//! boundary test needs instead of leaving them to each caller:
-//!
-//! 1. no scanned file reaches a forbidden module — via `use crate::x…`
-//!    (nested groups expanded), a `crate::x::` path anywhere in an item,
-//!    expression, type, attribute or macro invocation, a `super::` chain
-//!    resolved against the file's module path *and* every `mod` it sits
-//!    inside — including the ones written in macro tokens, which `syn` never
-//!    parses into items (`module_stack_per_token` names the shapes it
-//!    covers, each with a committed fixture) — or a lib-root re-export
-//!    (`use crate::Config` resolved through `lib.rs`'s `pub use`, a glob
-//!    through the module file it names — one that names no file is a loud
-//!    failure, never a shorter table) — or, for a guard whose scope has grown
-//!    onto an already-extracted crate, an `ocx_*::` path, the only spelling a
-//!    reach into an extracted subject has (DEC-30 item 1, B5-7);
-//! 2. the walk over the subtrees found more than one file, so it did not
-//!    scan nothing — a one-file crate is walked beside the rest, never
-//!    skipped for being alone — and no single subtree came back empty,
-//!    which the union's count alone absorbs;
-//! 3. the scanner still finds a forbidden reach in `witness` — **one per
-//!    entry**, whether the guard is a token-needle list or a forbidden-module
-//!    list — so 1 is not vacuous, for any of them. The one carve-out is
-//!    [`assert_no_imports_derived`], whose forbidden set the caller read off
-//!    the compiler's own `mod` items, where a needle that names nothing is
-//!    not expressible in the first place;
-//! 4. comments and the contents of string, raw-string and char literals are
-//!    never scanned — of any file *and* of the witness, so a witness whose
-//!    only offending line is commented out is refused (C-007);
-//! 5. every scanned file parses as Rust, and every `use` slice the walk finds
-//!    in macro tokens re-lexes as a `use` statement; one that does not is a
-//!    loud failure naming the file, the line and the text, never a shorter
-//!    walk — the two shapes that are not misses (`use<'a>` precise capturing,
-//!    the hygienic `$crate` root) are carved out at the refusal, each with
-//!    its reason.
-//!
-//! Source is read through `syn` (`syn::parse_file` + `syn::visit::Visit`)
-//! and `proc_macro2`'s lexer rather than a tokenizer of our own: a Rust
-//! parser is not this product's domain (quality-core "Don't Own Non-Domain
-//! Code"), and the hand-rolled one this replaced once lost 94 % of a file
-//! to a raw-string desync and reported green. `syn` leaves macro arguments
-//! and attribute lists as token streams; those are walked token by token so
-//! a `crate::x` or `module_path!()` inside `format!(…)` is still found, and
-//! a `use` statement written there is re-lexed and expanded rather than left
-//! to a path scan that stops at its group's brace.
+//! Every entry point holds five properties, so a guard cannot pass silently:
+//! 1. no scanned file reaches a forbidden module (`use`, `crate::`, `super::`, `self::`, `ocx_*::`
+//!    paths anywhere, macro tokens and lib-root re-exports included);
+//! 2. the walk found more than one file and no subtree came back empty;
+//! 3. `witness` yields a reach for every required entry, so 1 is not vacuous;
+//! 4. comments and literal contents are never scanned;
+//! 5. every file parses and every `use` slice in macro tokens re-lexes, else it panics.
 
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -62,18 +22,13 @@ use syn::visit::Visit;
 
 /// A path rendered with `/` separators on every platform.
 ///
-/// Every message this harness panics with names a fixture path, and
-/// `tests/boundary.rs` matches those messages with
-/// `#[should_panic(expected = "macro_arguments/a.rs:7: ...")]`. `Path::display`
-/// emits `\` on Windows, so the expectation misses there and thirty-five
-/// red-proof tests fail for the separator rather than for what they assert.
-/// Rendering one way keeps the diagnostic — and the expectation — platform-flat.
+/// `tests/boundary.rs` matches panic paths with `#[should_panic(expected = "macro_arguments/a.rs:7: ...")]`,
+/// which `Path::display`'s `\` fails on Windows.
 pub fn slashed(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// One forbidden reach: the file, the 1-based line and the `crate::`-relative
-/// path (or needle) that was reached.
+/// One forbidden reach: the file, the 1-based line and the path (or needle) reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reach {
     pub file: PathBuf,
@@ -87,29 +42,19 @@ impl std::fmt::Display for Reach {
     }
 }
 
-/// One source file, parsed once: its syntax tree for the structural walks
-/// and its flat token list for needle and macro-argument scans.
+/// One source file parsed once: its syntax tree and its flat token list.
+///
+/// Read through `syn`, never a hand-rolled lexer: one lost 94 % of a file to a raw-string desync and read green.
 pub struct Source {
     pub file: syn::File,
-    /// Filled on the first [`Source::tokens`] call, never by `parse`. Only the
-    /// needle scans and the `thiserror` sweep read tokens; every structural
-    /// walk reads `file` alone, and re-emitting the tree as a token stream
-    /// costs about as much again as parsing it did.
+    /// Filled on the first [`Source::tokens`] call, never by `parse`: emitting it costs as much again as parsing.
     tokens: OnceCell<Vec<Token>>,
 }
 
 impl Source {
-    /// Read and parse `path`. Panics naming the file and position on any
-    /// failure — a file the scanner cannot read is red, not skipped
-    /// (property 5).
+    /// Read and parse `path`, panicking with file and position on any failure (property 5).
     ///
-    /// Deliberately **not** memoised. A guard that re-asks for the same file
-    /// caches what it needs itself, over the small set it re-enters; a cache
-    /// here would have to retain every file of a 19 MB corpus for the whole
-    /// test, and the allocator pressure of holding six hundred syntax trees
-    /// cost the single-pass guards more than the re-parse it saved them
-    /// (`no_classification_in_libraries` went 0.92 s to 1.82 s when this was
-    /// global).
+    /// Not memoised: holding the 19 MB corpus's trees took `no_classification_in_libraries` from 0.92 s to 1.82 s.
     pub fn parse(path: &Path) -> Self {
         let text = std::fs::read_to_string(path)
             .unwrap_or_else(|error| panic!("boundary harness: read {}: {error}", slashed(path)));
@@ -128,28 +73,21 @@ impl Source {
         }
     }
 
-    /// The flat token list, built on first use.
-    ///
-    /// Re-emitted from the tree rather than lexed a second time: `syn`
-    /// carries the original spans, so a line number is the same either
-    /// way, and the file is read once.
+    /// The flat token list, re-emitted from the tree (original spans intact) on first use.
     pub fn tokens(&self) -> &[Token] {
         self.tokens.get_or_init(|| flatten(self.file.to_token_stream()))
     }
 }
 
-/// One lexed token, comments gone and literal contents dropped: an
-/// identifier or keyword, a single punctuation character, or a group
-/// delimiter. Literals are not emitted — their contents are what property 4
-/// keeps out of every scan.
+/// One token, with comments and literals dropped (property 4): an identifier or keyword, a single
+/// punctuation character, or a group delimiter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub text: String,
     pub at: LineColumn,
 }
 
-/// Flatten a token stream depth-first, emitting each group's delimiters as
-/// tokens around its contents.
+/// Flatten a token stream depth-first, emitting each group's delimiters as tokens around its contents.
 pub fn flatten(stream: TokenStream) -> Vec<Token> {
     fn walk(stream: TokenStream, out: &mut Vec<Token>) {
         for tree in stream {
@@ -192,28 +130,13 @@ pub fn flatten(stream: TokenStream) -> Vec<Token> {
     out
 }
 
-/// Assert that no `.rs` file under any of `subtrees` reaches any module in
-/// `forbidden`.
+/// Assert that no `.rs` file under `subtrees` reaches any module in `forbidden`; panics naming file and line.
 ///
-/// `forbidden` entries are `crate::`-relative module paths (`"project"`,
-/// `"cli::classify"`) **or** `ocx_*`-rooted crate paths (`"ocx_package"`,
-/// `"ocx_setup::session_path"`); a reach matches when its leading segments equal an
-/// entry. The second spelling is what a guard scoped onto an extracted `src/`
-/// needs: inside `crates/ocx_util/src`, a reach at a forbidden tier can only be
-/// written `ocx_package::…`, which has no `crate::` form at all. `witness` is a
-/// file that reaches **every** forbidden module — the committed negative
-/// fixture of C-007. Panics on every violated property listed in the module
-/// doc, naming the file and line.
-///
-/// One witness reach per entry, not one across the list: a needle that names
-/// no module — a typo, or a module renamed out from under it — forbids nothing
-/// and hides behind its neighbours' hits, and its share of the scan is then
-/// vacuous. Where the forbidden set is machine-derived rather than written by
-/// hand, use [`assert_no_imports_derived`].
+/// Entries are `crate::`-relative module paths (`"cli::classify"`) or `ocx_*` crate paths (`"ocx_package"`),
+/// matched on leading segments. `witness` is a committed fixture reaching **every** entry, so an entry naming no
+/// module reds instead of hiding behind its neighbours. For a derived set use [`assert_no_imports_derived`].
 pub fn assert_no_imports(subtrees: &[PathBuf], forbidden: &[&str], witness: &Path) {
-    // `Reach::path` is the resolved path in the spelling `record` reports it
-    // under — `crate::…` for a module entry, the crate path verbatim for an
-    // `ocx_*` one — and the required atoms have to match that to witness it.
+    // Atoms in the spelling `record` reports (`crate::…`, or `ocx_*` verbatim), or no witness hit matches them.
     let rooted: Vec<String> = forbidden
         .iter()
         .map(|entry| {
@@ -228,24 +151,14 @@ pub fn assert_no_imports(subtrees: &[PathBuf], forbidden: &[&str], witness: &Pat
     scan_imports(subtrees, forbidden, witness, &required);
 }
 
-/// [`assert_no_imports`] for a forbidden set the caller **derived** — read off
-/// the crate's own `mod` items rather than typed out — where one witness reach
-/// across the list is all the harness can ask for.
+/// [`assert_no_imports`] for a set derived from the crate's own `mod` items, needing one witness reach overall.
 ///
-/// A derived set cannot carry a needle that names nothing: every entry is a
-/// module the compiler resolved, so the defect per-entry witnessing exists to
-/// catch is not expressible. Demanding a witness per entry would instead demand
-/// a fixture that reaches every module of the crate and reds the moment one is
-/// added — which is the opposite of what deriving the set buys, namely that a
-/// new module joins the guard by itself.
+/// A per-entry witness would red on every new module, which a derived set exists to admit by itself.
 pub fn assert_no_imports_derived(subtrees: &[PathBuf], forbidden: &[&str], witness: &Path) {
     scan_imports(subtrees, forbidden, witness, &[]);
 }
 
 fn scan_imports(subtrees: &[PathBuf], forbidden: &[&str], witness: &Path, required: &[&str]) {
-    // One re-export table per crate root among the subtrees; a file resolves
-    // against the root it sits under, the witness (outside every crate)
-    // against none.
     let reexports: BTreeMap<PathBuf, BTreeMap<String, String>> = subtrees
         .iter()
         .filter_map(|subtree| crate_src_root(subtree))
@@ -269,17 +182,8 @@ fn scan_imports(subtrees: &[PathBuf], forbidden: &[&str], witness: &Path, requir
     );
 }
 
-/// The forbidden reaches one file carries, without the five properties around
-/// them — the static half of DEC-33.
-///
-/// [`assert_scan`] already demands that a guard's witness carry a hit for every
-/// atom, but only for a guard that *runs*: a `#[ignore]`d one, or one nobody
-/// calls, takes its needle list out of every check at once. This is the same
-/// scan, answerable about a fixture from outside the guard that owns it.
-///
-/// `file` is read as a witness is — outside any crate root, so no re-export
-/// table and no module path, which is exactly how [`assert_no_imports`] scans
-/// the witness it is handed.
+/// The forbidden reaches one file carries, read as a witness is and without the five properties, so a
+/// fixture can be checked from outside the guard that owns it.
 pub fn reaches_in(file: &Path, forbidden: &[&str]) -> Vec<Reach> {
     let source = Source::parse(file);
     let root = crate_src_root(file);
@@ -293,27 +197,17 @@ pub fn needles_in(file: &Path, needles: &[&str]) -> Vec<Reach> {
     needle_hits(source.tokens(), file, needles)
 }
 
-/// Assert that no `.rs` file under any of `subtrees` contains any of
-/// `needles` as a token sequence — the same five properties as
-/// [`assert_no_imports`] for guards whose forbidden shape is not a module
-/// path (`module_path!`, `type_name::<`). A needle is Rust tokens: comments
-/// and literal contents can never match it.
+/// Assert that no `.rs` file under `subtrees` contains any of `needles` as a token sequence, holding the
+/// same five properties for a forbidden shape that is not a module path (`module_path!`, `type_name::<`).
 pub fn assert_no_needles(subtrees: &[PathBuf], needles: &[&str], witness: &Path) {
     let scan = |file: &Path, source: &Source| needle_hits(source.tokens(), file, needles);
     assert_scan(subtrees, witness, &format!("one of {needles:?}"), needles, &scan);
 }
 
-/// The engine behind [`assert_no_imports`] and [`assert_no_needles`], and the
-/// entry point for a guard whose forbidden shape is neither a module path nor a
-/// token needle: `scan` answers "what does this one file violate", and the five
-/// module-doc properties are held around it here rather than by the caller.
+/// The engine behind [`assert_no_imports`] and [`assert_no_needles`]: `scan` answers what one file
+/// violates and the five properties are held around it.
 ///
-/// `required` are the atoms the witness must each produce a hit for. An atom is
-/// witnessed by a hit whose `Reach::path` equals it, or extends it at a `::`
-/// boundary — so a token needle matches its own hit text, and a forbidden module
-/// matches the resolved path that reached into it. Empty means "at least one hit
-/// anywhere", which is what [`assert_no_imports_derived`] asks for and what a
-/// caller assembling its own `scan` may choose.
+/// Each `required` atom needs a witness hit whose path equals it or extends it at `::`; empty means one hit anywhere.
 pub fn assert_scan(
     subtrees: &[PathBuf],
     witness: &Path,
@@ -322,12 +216,7 @@ pub fn assert_scan(
     scan: &(dyn Fn(&Path, &Source) -> Vec<Reach> + Sync),
 ) {
     let files = walked_corpus(subtrees);
-    // Property 5 rides in `Source::parse`: a file that does not parse panics
-    // there, before any scan could report a shorter walk as clean.
-    //
-    // The result is one entry per walked file, so the count is checked before
-    // it is flattened: a parallel walk that lost a chunk would otherwise be
-    // indistinguishable from a corpus with no violation in it.
+    // Counted before flattening, or a parallel walk that lost a chunk reads as a clean corpus.
     let per_file = map_sources(&files, scan);
     assert_eq!(
         per_file.len(),
@@ -347,17 +236,8 @@ pub fn assert_scan(
     );
 }
 
-/// [`assert_scan`] for a caller that has **already** walked and scanned these
-/// same subtrees, and must not pay for a second pass over them.
-///
-/// Every property [`assert_scan`] holds is held here, and two of them are
-/// checked rather than trusted. The subtrees are re-walked (a directory walk,
-/// no parsing) and `scanned` must name exactly that walk, so a caller that read
-/// a narrower set than this guard's scope reds naming the difference — property
-/// 2, now stated about the caller's own reading. Property 5 was established by
-/// the caller's parse of those very files, which is the set this re-walk just
-/// confirmed. Properties 3 and 4 run here exactly as always: the witness goes
-/// through `scan`, the caller's own scan function, on this side of the call.
+/// [`assert_scan`] for a caller that already scanned these subtrees: `scanned` must equal a re-walk of them,
+/// so a narrower read reds (property 2).
 pub fn assert_scan_of(
     subtrees: &[PathBuf],
     scanned: &[PathBuf],
@@ -386,7 +266,6 @@ pub fn assert_scan_of(
 
 /// The walk behind both entry points, with property 2 on it.
 fn walked_corpus(subtrees: &[PathBuf]) -> Vec<PathBuf> {
-    // Property 2: a scope glob that stopped matching must red, not pass.
     let walked: Vec<(&Path, Vec<PathBuf>)> = subtrees
         .iter()
         .map(|subtree| (subtree.as_path(), rust_sources(subtree)))
@@ -400,10 +279,7 @@ fn walked_corpus(subtrees: &[PathBuf]) -> Vec<PathBuf> {
         files.len(),
         subtrees.len()
     );
-    // And per subtree: the corpus stays far above the one-file floor while
-    // all but one of its members empty out, so a dropped subtree has to be
-    // named rather than absorbed by the union (`rust_sources` answers a
-    // missing or unreadable directory with an empty walk).
+    // Per subtree too: `rust_sources` answers a missing directory with an empty walk the union would absorb.
     let empty: Vec<&Path> = walked
         .iter()
         .filter(|(_, found)| found.is_empty())
@@ -437,10 +313,7 @@ fn conclude_scan(
         slashed(witness),
         subtrees.len()
     );
-    // Property 3 continued: EVERY atom of `required` must be one the scanner
-    // still recognises. "At least one hit" lets the list erode — a needle
-    // that quietly stopped matching (a lexer change, a typo) hides behind
-    // its neighbours' hits, and its whole scan is then vacuous.
+    // Every atom, not one hit overall: a needle that stopped matching hides behind its neighbours' hits.
     let witnessed = |atom: &str| {
         witness_hits
             .iter()
@@ -468,29 +341,11 @@ fn conclude_scan(
     );
 }
 
-/// Parse every file of `files` and apply `scan` to it, across the machine's
-/// cores, answering in `files` order.
+/// Parse and scan every one of `files` across the machine's cores, one answer per file in input order.
 ///
-/// **Reads exactly `files`, and every one of them.** Threading decides only
-/// *when* a file is parsed, never *whether* — every path handed in is parsed
-/// and scanned, a scan that panics (an unreadable or unparseable file,
-/// property 5) is re-raised here with its original message rather than
-/// swallowed, and the answer is one entry per input file in input order, so a
-/// caller can check the count it got against the walk it handed in. A walk
-/// that came back short is the one failure this cannot be allowed to hide.
-///
-/// A `Source` never leaves the thread that parsed it — `proc_macro2` spans are
-/// thread-local state — so only `T` crosses, and each thread reads its share
-/// of the corpus start to finish by itself.
-///
-/// The thread count is capped well under the core count because the caller is
-/// itself one of `nextest`'s parallel test processes. It is capped at all
-/// because the workspace is ~19 MB of Rust that `syn` parses in ~0.9 s on one
-/// core, which is the whole reason a guard reading all of it cannot fit in a
-/// second.
+/// A scan's panic (property 5) is re-raised with its original message.
 pub fn map_sources<T: Send>(files: &[PathBuf], scan: &(dyn Fn(&Path, &Source) -> T + Sync)) -> Vec<T> {
-    /// Enough to put a full-corpus walk under a second, few enough that
-    /// thirty-odd concurrent test processes do not each claim the machine.
+    /// A full-corpus walk under a second, without ~30 concurrent `nextest` processes each claiming the machine.
     const MAX_THREADS: usize = 8;
 
     let run = |chunk: &[PathBuf]| -> Vec<T> { chunk.iter().map(|file| scan(file, &Source::parse(file))).collect() };
@@ -501,6 +356,7 @@ pub fn map_sources<T: Send>(files: &[PathBuf], scan: &(dyn Fn(&Path, &Source) ->
         return run(files);
     }
     let per_thread = files.len().div_ceil(threads);
+    // A `Source` never leaves its thread (`proc_macro2` spans are thread-local), so only `T` crosses.
     std::thread::scope(|scope| {
         let handles: Vec<_> = files
             .chunks(per_thread)
@@ -510,17 +366,14 @@ pub fn map_sources<T: Send>(files: &[PathBuf], scan: &(dyn Fn(&Path, &Source) ->
             .into_iter()
             .flat_map(|handle| match handle.join() {
                 Ok(found) => found,
-                // The guard's own refusal, raised on a worker: re-raised
-                // verbatim, so the message a `#[should_panic(expected = …)]`
-                // test matches is the one it always was.
+                // Re-raised verbatim, or `#[should_panic(expected = …)]` tests stop matching.
                 Err(panic) => std::panic::resume_unwind(panic),
             })
             .collect()
     })
 }
 
-/// Every `*.rs` file under `subtree`, recursively, sorted. A file path is
-/// returned as a single-element walk.
+/// Every `*.rs` file under `subtree`, recursively, sorted; a file path is a single-element walk.
 pub fn rust_sources(subtree: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -547,8 +400,7 @@ pub fn rust_sources(subtree: &Path) -> Vec<PathBuf> {
 // Attributes and `use` trees
 // ---------------------------------------------------------------------------
 
-/// Whether `attrs` carries exactly `#[cfg(test)]` — the one gate a guard that
-/// judges production code strips.
+/// Whether `attrs` carries exactly `#[cfg(test)]`.
 pub fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| match &attr.meta {
         syn::Meta::List(list) if list.path.is_ident("cfg") => {
@@ -559,15 +411,11 @@ pub fn is_cfg_test(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
-/// Expand a `use` tree into `(path segments, alias)` pairs — `crate::a::{b,
-/// c::{d as e}, *}` → `[crate,a,b]`, `[crate,a,c,d]` (alias `e`),
-/// `[crate,a,*]`. A glob keeps its `*` as the last segment.
+/// Expand a `use` tree into `(path segments, alias)` pairs: `crate::a::{b, c::{d as e}, *}` →
+/// `[crate,a,b]`, `[crate,a,c,d]` (alias `e`), `[crate,a,*]`.
 ///
-/// `self` is dropped where it names the module already in the prefix — `use
-/// a::{self, b}` is `a` — and **kept where it leads**, because `use
-/// self::project::lock` roots the path at the current module and dropping it
-/// left `[project, lock]`, a relative path `reaches` could not tell from an
-/// extern crate's and therefore ignored (B5R-8).
+/// A non-leading `self` is dropped (`use a::{self, b}` is `a`); a leading one is kept, or `use self::x`
+/// reads as an extern crate path that `reaches` ignores.
 pub fn expand_use_tree(tree: &syn::UseTree) -> Vec<(Vec<String>, Option<String>)> {
     fn expand(prefix: &[String], tree: &syn::UseTree, out: &mut Vec<(Vec<String>, Option<String>)>) {
         let mut push = |ident: &syn::Ident, alias: Option<String>| {
@@ -608,9 +456,7 @@ pub fn expand_use_tree(tree: &syn::UseTree) -> Vec<(Vec<String>, Option<String>)
 // Reach detection
 // ---------------------------------------------------------------------------
 
-/// The `src/` directory of the crate `subtree` belongs to: the nearest
-/// ancestor (inclusive) holding a `lib.rs` or `main.rs`. `None` for a loose
-/// fixture tree, which then has no module path and no re-export table.
+/// The nearest ancestor (inclusive) of `subtree` holding a `lib.rs` or `main.rs`; `None` for a loose fixture tree.
 fn crate_src_root(subtree: &Path) -> Option<PathBuf> {
     let mut dir = if subtree.is_file() { subtree.parent()? } else { subtree };
     loop {
@@ -621,15 +467,11 @@ fn crate_src_root(subtree: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Lib-root re-exports: item name → `crate::`-relative module path, read from
-/// `lib.rs`'s `use <module>::…` statements whose first segment is a module
-/// declared in that file (a private `use` at the root is reachable from every
-/// descendant, so it counts). A glob (`pub use media_type::*;`) is resolved
-/// by reading that module's file for its `pub` items.
+/// Lib-root re-exports, item name → `crate::`-relative path, from every `lib.rs` `use` (private ones too) whose
+/// first segment is a module declared there; a glob is resolved from that module's `pub` items.
 fn reexport_table(src_root: &Path) -> BTreeMap<String, String> {
     let mut table = BTreeMap::new();
-    // A `main.rs`-only crate has no root to re-export from; a `lib.rs` that
-    // exists but does not parse is red, never an empty table.
+    // A `lib.rs` that exists but does not parse is red, never an empty table.
     let lib = src_root.join("lib.rs");
     if !lib.is_file() {
         return table;
@@ -683,8 +525,7 @@ fn reexport_table(src_root: &Path) -> BTreeMap<String, String> {
     table
 }
 
-/// Names of the top-level `pub` (any visibility but inherited) functions,
-/// types, traits, constants and statics of a module.
+/// Names of a module's top-level non-private functions, types, traits, constants and statics.
 fn pub_item_names(file: &syn::File) -> Vec<String> {
     file.items
         .iter()
@@ -728,11 +569,7 @@ fn resolve_super(effective: &[String], segs: &[String]) -> Vec<String> {
     base.iter().cloned().chain(segs[ups..].iter().cloned()).collect()
 }
 
-/// A path segment with its raw-identifier prefix stripped: `r#project` and
-/// `project` name the same module, so a forbidden entry written plainly has to
-/// match both — otherwise `use crate::r#project::api;` is a reach nothing
-/// reports. (A *root* is never raw: `r#crate`, `r#self`, `r#super` and
-/// `r#Self` are the four spellings Rust does not allow.)
+/// A segment without its `r#` prefix, or `use crate::r#project::api;` escapes a plain `project` entry.
 fn plain_segment(segment: &str) -> String {
     segment.strip_prefix("r#").unwrap_or(segment).to_owned()
 }
@@ -744,30 +581,12 @@ fn is_forbidden(segs: &[String], forbidden: &[&str]) -> bool {
     })
 }
 
-/// The inline `mod` chain each token sits inside, one entry per token of
-/// `tokens`.
+/// The inline `mod` chain each token sits inside, one entry per token of `tokens`.
 ///
-/// `syn` parses no macro body, so a `mod x { … }` written inside one never
-/// becomes an `ItemMod` and never reaches the visitor that tracks them: the
-/// module stack a `super::` chain resolves against would be short by however
-/// many modules the macro opens, and the chain then pops past the crate root
-/// into a path that names nothing forbidden — a silent miss, not a false
-/// positive.
-///
-/// Covered, each pinned by a fixture under `boundary_fixtures/`: a literal
-/// `mod x {`, a substituted `mod $x {`, a macro written inside another macro,
-/// an attribute (`#[cfg(…)]`, `#[path = "…"]`) between the macro's brace and
-/// the `mod`, a `use super::` inside the module, and a module handed to a
-/// macro as an *argument* rather than written in its body. Out of scope:
-/// `#[path = "…"] mod x;` pointing the module at another file — which file
-/// backs a module is [`file_module_path`]'s business, it is read off the
-/// file's own location, and the attribute misleads it inside a macro and
-/// outside one alike.
+/// `syn` parses no macro body, so without this a `mod x { … }` inside a macro leaves `super::` resolving
+/// past the crate root, a silent miss; each covered shape has a fixture under `boundary_fixtures/`.
 fn module_stack_per_token(tokens: &[Token]) -> Vec<Vec<String>> {
-    /// The module a `{` at `index` opens, if it opens one. A name written
-    /// `$x` is a macro substitution: the name is not knowable before
-    /// expansion but the *depth* is, so it is kept verbatim as `$x` — an
-    /// opaque segment, since a forbidden entry is always a bare identifier.
+    /// The module a `{` at `index` opens, if any; a `$x` name is kept verbatim as an opaque segment.
     fn opened_at(tokens: &[Token], index: usize) -> Option<String> {
         let name = |at: usize| {
             tokens
@@ -785,8 +604,7 @@ fn module_stack_per_token(tokens: &[Token]) -> Vec<Vec<String>> {
     }
 
     let mut out = Vec::with_capacity(tokens.len());
-    // (brace depth the module opened at, its name) — a `}` pops only the
-    // module whose own depth it closes.
+    // (depth opened at, name): a `}` pops only the module whose own depth it closes.
     let mut open: Vec<(usize, String)> = Vec::new();
     let mut depth = 0usize;
     for (index, token) in tokens.iter().enumerate() {
@@ -810,36 +628,17 @@ fn module_stack_per_token(tokens: &[Token]) -> Vec<Vec<String>> {
     out
 }
 
-/// Every `crate::`-, `super::`- or `ocx_*::`-rooted path in a flat token list,
-/// as `(segments, token index)` — the shape a macro argument or attribute list
-/// leaves unparsed. The index, not the line, so the caller can read both the
-/// line and the module chain the token sits inside. A root preceded by a `::`
-/// separator is the tail of another path; a single `:` before it is a field or
-/// type ascription (`Foo { field: crate::x }`, `|a: crate::x::T|`) and the
-/// root counts.
-///
-/// `ocx_*` is here for the same reason it is in `record`: a reach into an
-/// extracted crate has no `crate::` spelling, so leaving it out of the
-/// macro-token arm would cover the defect in parsed items and miss it in
-/// `format!`/`stringify!`/attribute arguments — the asymmetry that makes one
-/// arm of a guard quietly do less than the other.
+/// Every `crate::`-, `super::`-, `self::`- or `ocx_*::`-rooted path in a flat token list, as `(segments,
+/// token index)`; a root after a single `:` (`Foo { field: crate::x }`) counts.
 fn rooted_paths_in_tokens(tokens: &[Token]) -> Vec<(Vec<String>, usize)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < tokens.len() {
         let root = &tokens[i].text;
-        // A `::` before the root ends the question only when something a path
-        // can continue from precedes it: `foo::ocx_util` is a segment of
-        // someone else's path, but `::ocx_util::x` is the absolute form and is
-        // a reach. Treating the pair alone as disqualifying let every
-        // `::ocx_*::` written inside macro tokens through both arms of
-        // `reaches` (B5R-7) — a shape new with the B5 fix, since `::crate::`
-        // is not valid Rust and `ocx_*` is the only root a leading `::` takes.
+        // A `::` disqualifies the root only after something a path continues from: `::ocx_util::x` is a reach.
         let after_separator =
             i > 2 && tokens[i - 1].text == ":" && tokens[i - 2].text == ":" && continues_a_path(&tokens[i - 3].text);
-        // `self` is a root like `crate` and `super` (B5R-8). `self.field` and
-        // `Self::…` are different tokens, and the `::`-and-identifier loop
-        // below is what decides a path anyway, so no receiver can match.
+        // `self.field` and `Self::…` are different tokens, so no receiver matches the `self` root.
         let rooted =
             (root == "crate" || root == "super" || root == "self" || root.starts_with("ocx_")) && !after_separator;
         if !rooted {
@@ -851,9 +650,7 @@ fn rooted_paths_in_tokens(tokens: &[Token]) -> Vec<(Vec<String>, usize)> {
         while j + 2 < tokens.len()
             && tokens[j].text == ":"
             && tokens[j + 1].text == ":"
-            // `#` so a raw identifier (`crate::r#project::api`) is one segment
-            // rather than the end of the path — truncating there drops every
-            // segment after it, forbidden ones included.
+            // `#` keeps `r#project` one segment, or the path truncates before its forbidden segments.
             && tokens[j + 2].text.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '#')
         {
             segs.push(tokens[j + 2].text.clone());
@@ -865,43 +662,22 @@ fn rooted_paths_in_tokens(tokens: &[Token]) -> Vec<(Vec<String>, usize)> {
     out
 }
 
-/// Whether a `::` following `text` continues a path — an identifier, a raw
-/// identifier, or the `>` closing a turbofish. A delimiter, an operator or the
-/// start of the stream leaves the `::` path-leading instead.
+/// Whether a `::` following `text` continues a path: an identifier, a raw identifier, or a turbofish `>`.
 fn continues_a_path(text: &str) -> bool {
     text == ">" || text.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '#')
 }
 
-/// Every `use` statement in a flat token list, expanded, as `(segments, token
-/// index)` — the shape a macro body leaves unparsed.
+/// Every `use` statement in a flat token list, re-lexed and expanded by [`expand_use_tree`], as `(segments,
+/// token index)`: `rooted_paths_in_tokens` stops at a brace and would drop grouped names.
 ///
-/// `rooted_paths_in_tokens` reads a path segment by segment and stops at the
-/// brace of a group, so a `use crate::{project::lock, shell::export}` written
-/// inside a macro invocation yields the bare root `crate` and every name in
-/// the group drops out. The tokens are re-lexed as an `ItemUse` and expanded
-/// by [`expand_use_tree`] — the same expansion a `use` item outside a macro
-/// gets, rather than a second one to drift from it.
-///
-/// A slice beginning `use` that does not re-lex is a **loud failure**, the
-/// same way [`Source::parse`] refuses a file it cannot read (property 5): the
-/// silent `continue` this replaced dropped `$crate::{a, b}` — the spelling the
-/// crate split forces on every macro that becomes cross-module — with no trace,
-/// and the token path scan misses the group independently, so both arms read
-/// clean. Panicking converts the whole class, including shapes nobody has
-/// enumerated yet. Two shapes are not misses and are handled before the panic,
-/// each commented where it is skipped: `use<'a>` precise capturing, and the
-/// hygienic `$crate` root, normalised to `crate`.
+/// A slice beginning `use` that does not re-lex panics (property 5); skipping it hides the reach.
 fn use_trees_in_tokens(file: &Path, tokens: &[Token]) -> Vec<(Vec<String>, usize)> {
     let mut out = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
         if token.text != "use" {
             continue;
         }
-        // Not a miss: `impl Iterator<…> + use<'_>` is edition-2024 precise
-        // capturing, not a statement. A `use` statement can never be followed
-        // by `<`, so the one token decides it. (5 in `crates/**` today, none
-        // yet inside macro tokens — this keeps the first one that lands there
-        // from reading as a dropped `use`.)
+        // `use<'_>` is precise capturing; a `use` statement is never followed by `<`.
         if tokens.get(index + 1).is_some_and(|next| next.text == "<") {
             continue;
         }
@@ -909,16 +685,11 @@ fn use_trees_in_tokens(file: &Path, tokens: &[Token]) -> Vec<(Vec<String>, usize
             Some(end) => &tokens[index..=index + end],
             None => &tokens[index..],
         };
-        // `flatten` splits every punctuation character into its own token, so
-        // the texts are re-joined tight — `: :` has to read back as the path
-        // separator `::`. Only two adjacent word tokens need the space that
-        // keeps `use crate` from lexing as one identifier.
+        // Rejoined tight so `: :` reads back as `::`; only adjacent words need a space.
         let mut text = String::new();
         let mut prev_word = false;
         for (at, part) in slice.iter().enumerate() {
-            // Not a miss: `$crate` is the hygienic spelling of `crate`, and
-            // dropping the `$` is what makes the statement re-lex at all. This
-            // is the fix — without it `$crate::{a, b}` reaches neither arm.
+            // Dropping the `$` of hygienic `$crate` is what lets `$crate::{a, b}` re-lex at all.
             if part.text == "$" && slice.get(at + 1).is_some_and(|next| next.text == "crate") {
                 continue;
             }
@@ -965,26 +736,13 @@ fn reaches(
         out: Vec<Reach>,
     }
     impl Reacher<'_> {
-        /// `nested` is the `mod` chain opened inside macro tokens around this
-        /// path — empty for anything `syn` parsed into items, where
-        /// `visit_item_mod` already tracked the nesting in `inline`.
+        /// `nested` is the `mod` chain opened inside macro tokens around this path; empty for parsed items.
         fn record(&mut self, path: &[String], line: usize, nested: &[String]) {
-            // `ocx_*` is the split's crate namespace. Once a subject is
-            // extracted, the only way to reach it from another crate is
-            // `ocx_<crate>::…` — and a scan that understands `crate::` and
-            // `super::` alone returns here without looking, so a guard whose
-            // scope has grown onto an extracted `src/` (DEC-30 item 1) walks
-            // the new address while being blind to the one defect shape that
-            // address admits (B5-7). Matched and reported under the
-            // crate-rooted spelling, never folded back onto a module path:
-            // crate and module names are not in bijection (`file_structure`
-            // is `ocx_store`, `oci::index` is `ocx_index`), so a derived
-            // mapping would cover half the needles and say nothing about the
-            // other half. A guard that wants the cross-crate half lists
-            // `ocx_<crate>` as its own forbidden entry, and property 3 makes
-            // its fixture witness it.
+            // A reach into an extracted crate has no `crate::` spelling, only `ocx_*::`.
             if path.first().is_some_and(|root| root.starts_with("ocx_")) {
                 let segs: Vec<String> = path.iter().map(|seg| plain_segment(seg)).collect();
+                // Never folded onto a module path: crate and module names are not in bijection
+                // (`file_structure` is `ocx_store`), so a guard lists `ocx_<crate>` as its own entry.
                 if is_forbidden(&segs, self.forbidden) {
                     self.out.push(Reach {
                         file: self.file.to_path_buf(),
@@ -996,10 +754,7 @@ fn reaches(
             }
             let segs: Vec<String> = match path.first().map(String::as_str) {
                 Some("crate") => path[1..].to_vec(),
-                // `self::x` is the current module's `x` — `super` with no ups.
-                // It resolved to nothing at all until B5R-8, in a scanner
-                // carrying explicit fixtures for `crate::`, `super::`, raw
-                // identifiers, `$crate` and macro-nested `mod`.
+                // `self::x` is the current module's `x`.
                 Some("self") => {
                     let effective: Vec<String> = self
                         .file_mod
@@ -1022,9 +777,6 @@ fn reaches(
                 }
                 _ => return,
             };
-            // Raw spellings are the same module as the plain ones; normalising
-            // here puts the re-export lookup, the forbidden test and the
-            // reported path all on the canonical form at once.
             let segs: Vec<String> = segs.iter().map(|seg| plain_segment(seg)).collect();
             if segs.is_empty() {
                 return;
@@ -1058,9 +810,7 @@ fn reaches(
             let Some((_, items)) = &module.content else {
                 return syn::visit::visit_item_mod(self, module);
             };
-            // The attributes and visibility sit outside the module they
-            // decorate: resolved against the enclosing module, before the
-            // name is pushed.
+            // Attributes and visibility resolve against the enclosing module, so before the push.
             for attr in &module.attrs {
                 self.visit_attribute(attr);
             }
@@ -1072,8 +822,7 @@ fn reaches(
             self.inline.pop();
         }
         fn visit_vis_restricted(&mut self, restricted: &'ast syn::VisRestricted) {
-            // `pub(crate)` / `pub(super)` scope an item; only `pub(in
-            // crate::x)` names a module.
+            // Only `pub(in crate::x)` names a module.
             if restricted.in_token.is_some() {
                 self.visit_path(&restricted.path);
             }
@@ -1113,9 +862,8 @@ fn reaches(
     reacher.out
 }
 
-/// Every occurrence of one of `needles` as a contiguous token sequence in
-/// `tokens`, as reaches whose `path` is the needle. A needle that is not a
-/// balanced token sequence (`foo(`) is refused.
+/// Every occurrence of a needle as a contiguous token sequence, as reaches whose `path` is the needle; a
+/// needle that is not a balanced token sequence (`foo(`) is refused.
 fn needle_hits(tokens: &[Token], file: &Path, needles: &[&str]) -> Vec<Reach> {
     let mut out = Vec::new();
     for needle in needles {

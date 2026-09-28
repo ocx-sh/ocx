@@ -9,26 +9,14 @@ use serde::Serialize;
 use crate::api::Printable;
 use crate::api::data::path_kind::PathKind;
 
-/// A single resolved package → package-root entry.
-///
-/// `path` is the package root directory (parent of `content/` and
-/// `entrypoints/`). Consumers traverse into `<path>/content/` for the
-/// installed files or `<path>/entrypoints/` for generated launchers.
+/// A resolved package and its package root, the parent of `content/` and `entrypoints/`.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PathEntry {
     pub package: String,
     pub path: PathBuf,
 }
 
-/// Ordered list of resolved package roots, one per requested package.
-///
-/// Plain format: two-column table (Package | Path).
-///
-/// JSON format: object keyed by the input package identifier, preserving
-/// request order.
-///
-/// Reports `ocx package pull` only. `ocx package which` reports
-/// [`LocatedPaths`] instead — see that type for why the two did not merge.
+/// Resolved package roots for `ocx package pull`, keyed by input identifier in request order.
 pub struct Paths {
     pub entries: Vec<PathEntry>,
 }
@@ -64,45 +52,25 @@ impl Printable for Paths {
     }
 }
 
+// `PathKind` is shared with `ocx pull`'s report; never re-spell it here.
 /// One located package: the directory `ocx package which` reports for it, and
-/// which kind of directory that is (contract C-016).
+/// which kind of directory that is.
 ///
 /// A tool composed lazily has no package directory until its first invocation
 /// materializes one, so the answer to "where is this on disk" is its generated
-/// shim tree. [`PathKind`] is the discriminator that lets a consumer tell the
-/// two apart — minted once for the whole feature and shared with `ocx pull`'s
-/// report, never re-spelled here.
+/// shim tree. `kind` tells the two apart.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct LocatedPath {
-    /// The requested identifier, verbatim. Serialized as the map **key**, never
-    /// as a field: it would be byte-identical to the key it sits under, and a
-    /// duplicated value is a second place for it to go stale. Kept on the struct
-    /// for the plain table's `Package` column, matching `WarmedPath`.
+    /// The requested identifier: serialized only as the map key, kept for the plain `Package` column.
     #[serde(skip)]
     pub package: String,
     pub path: PathBuf,
     pub kind: PathKind,
 }
 
-/// Ordered list of located packages, one per requested identifier.
+/// Located packages for `ocx package which`, keyed by requested identifier in request order.
 ///
-/// Plain format: three-column table (Package | Kind | Path) — three of the five
-/// columns `subsystem-cli-api.md` allows.
-///
-/// JSON format: object keyed by the requested identifier, preserving request
-/// order; each value is `{"path": "...", "kind": "package"|"shim"}`.
-///
-/// **The wire break C-016 sanctions** (PLAN-NC-1, resolved): the map stays a
-/// map — every other multi-package report in this CLI is a keyed object — and
-/// only the *value* grows from a bare path string into an object, so a consumer
-/// edit is `.["cmake:3.28"]` → `.["cmake:3.28"].path` rather than a rewritten
-/// `select()` scan.
-///
-/// Deliberately not a widened [`Paths`], which still reports `ocx package pull`:
-/// every row that command produces is a materialized package root, so a `kind`
-/// column there would carry one constant value in every row (the plain-mode
-/// column budget forbids exactly that) and its JSON would take a wire break
-/// C-016 does not sanction.
+/// Not a widened [`Paths`]: every `pull` row is a materialized root, so `kind` there would be constant.
 pub struct LocatedPaths {
     pub entries: Vec<LocatedPath>,
 }
@@ -139,8 +107,7 @@ impl Printable for LocatedPaths {
     }
 }
 
-// The `Serialize` impl above writes a map keyed by package name, not the struct's
-// own fields, so the schema is hand-written to match it.
+// Hand-written: `Serialize` writes a map keyed by package, not the struct's fields.
 impl schemars::JsonSchema for Paths {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "Paths".into()
@@ -154,8 +121,7 @@ impl schemars::JsonSchema for Paths {
     }
 }
 
-// The `Serialize` impl above writes a map keyed by package name, not the struct's
-// own fields, so the schema is hand-written to match it.
+// Hand-written: `Serialize` writes a map keyed by package, not the struct's fields.
 impl schemars::JsonSchema for LocatedPaths {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "LocatedPaths".into()

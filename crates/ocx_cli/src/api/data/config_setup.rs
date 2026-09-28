@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::api::Printable;
 use crate::api::data::self_setup::ManagedConfigEntry;
 
-/// CLI wrapper around [`ManagedConfigSetupOutcome`] for `ocx config setup`.
+/// Report of `ocx config setup`: the outcome of adopting the managed config.
 ///
 /// Plain format: a key/value table with a `Managed config` summary row.
 ///

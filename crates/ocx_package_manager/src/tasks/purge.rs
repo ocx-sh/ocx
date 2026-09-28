@@ -8,51 +8,36 @@ use super::clean::{CollectedRoots, collect_project_roots};
 use super::garbage_collection::GarbageCollector;
 use super::resolve::{PatchRootScope, SitePatchRoots};
 
-/// Whether the reachability answer a [`PurgeUnrooted`] run acted on is one it
-/// could trust.
-///
-/// The two states produce the same `retained` list for opposite reasons, and a
-/// caller that reports them the same way tells the operator something false.
+/// Whether a [`PurgeUnrooted`] run could trust its root set; callers must report the
+/// two apart, as `retained` means opposite things under each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootSet {
-    /// Every root was readable. A retained seed is one something genuinely
-    /// holds.
+    /// Every root was readable; a retained seed is genuinely held.
     Determinate,
-    /// A live project's lock could not be read, so the set of roots is unknown.
-    /// Nothing was tested and nothing was removed -- a retained seed here says
-    /// only that the run declined to guess.
+    /// A live project's lock was unreadable, so nothing was tested or removed.
     Indeterminate,
 }
 
 /// What a [`PackageManager::purge_unrooted`] run did.
 pub struct PurgeUnrooted {
-    /// Object directories actually deleted, in deletion order. Includes the
-    /// layers and blobs the seeds orphaned, not only the seeds themselves.
+    /// Object directories deleted, in order, including layers and blobs the seeds orphaned.
     pub removed: Vec<PathBuf>,
-    /// Seeds left on disk. Under [`RootSet::Determinate`] something still holds
-    /// each one -- an install symlink, a project or global lock pin, a
-    /// site-patch companion. Under [`RootSet::Indeterminate`] it is every seed
-    /// that was passed in, held or not.
+    /// Seeds left on disk: each held by some root under [`RootSet::Determinate`], every seed
+    /// under [`RootSet::Indeterminate`].
     pub retained: Vec<ocx_oci::PinnedPackageRef>,
-    /// Which of those two the `retained` list means.
     pub root_set: RootSet,
 }
 
 impl PackageManager {
-    /// Purge a single object and its orphaned transitive dependencies.
-    ///
-    /// Returns the list of actually deleted object directories (may be empty
-    /// if the object is still reachable from another root).
+    /// Purges one object and its orphaned transitive dependencies, returning the deleted
+    /// directories (empty if the object is still reachable).
     pub async fn purge(&self, identifier: &ocx_oci::PinnedPackageRef) -> crate::Result<Vec<PathBuf>> {
         let obj_dir = self.file_structure().packages.path(identifier);
         let gc = GarbageCollector::build(self.file_structure(), &[], &SitePatchRoots::default()).await?;
         gc.purge(&[obj_dir]).await
     }
 
-    /// Batch purge: single graph build for all identifiers, single deletion pass.
-    ///
-    /// More efficient than calling [`purge`] in a loop because the
-    /// reachability graph is built once.
+    /// Batch [`purge`](Self::purge) with one reachability-graph build.
     pub async fn purge_all(&self, identifiers: &[ocx_oci::PinnedPackageRef]) -> crate::Result<Vec<PathBuf>> {
         let obj_dirs: Vec<PathBuf> = identifiers
             .iter()
@@ -62,23 +47,10 @@ impl PackageManager {
         gc.purge(&obj_dirs).await
     }
 
-    /// Collect the given packages, but only the ones nothing else holds.
+    /// Collects the given packages that nothing else holds, by `clean`'s reachability roots.
     ///
-    /// Backs `ocx package exec --rm`, which materializes through
-    /// `Materialization::Install` and writes **no** install symlink, so the
-    /// packages it pulled have no GC root at all and `ocx clean` would collect
-    /// them on its next run anyway. This collects them now instead of later --
-    /// and only them: the reachability graph is built with the same roots
-    /// `clean` uses, so a package an install symlink, a project or global
-    /// `ocx.lock`, or a site patch still holds is reported as `retained` and
-    /// left alone. There is no "did this invocation pull it" branch;
-    /// reachability is the whole decision.
-    ///
-    /// An indeterminate root set (`CollectedRoots::RetainAll` -- a live
-    /// project whose lock was transiently unreadable) retains every seed and
-    /// removes nothing, the same fail-closed direction `PackageManager::clean`
-    /// takes. Over-retention is recoverable; a deleted package a lock pins is
-    /// not.
+    /// An unreadable lock retains every seed, fail-closed like `clean`: over-retention
+    /// recovers, a deleted lock-pinned package does not.
     pub async fn purge_unrooted(&self, identifiers: &[ocx_oci::PinnedPackageRef]) -> crate::Result<PurgeUnrooted> {
         let ocx_home = self.file_structure().root().to_path_buf();
         let project_roots = match collect_project_roots(&ocx_home, self.file_structure()).await? {
@@ -92,9 +64,8 @@ impl PackageManager {
             }
         };
 
-        // Retention, not observation -- the same reason `clean` passes
-        // `RecordedAndSnapshot`: an active freeze's companion pins are roots
-        // even after an `ocx patch sync` advanced the live record past them.
+        // `RecordedAndSnapshot`, as in `clean`, or a freeze's companion pins are purged once
+        // `ocx patch sync` advances the record.
         let host_platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         let patch_roots = self
             .resolve_site_patch_roots(&host_platform, PatchRootScope::RecordedAndSnapshot)
@@ -106,13 +77,8 @@ impl PackageManager {
         let mut retained: Vec<ocx_oci::PinnedPackageRef> = Vec::new();
         for identifier in identifiers {
             let raw_path = self.file_structure().packages.path(identifier);
-            // Canonicalize BEFORE the membership test: the graph is keyed by
-            // canonical paths, so a raw-path probe misses whenever `$OCX_HOME`
-            // itself sits behind a symlink (macOS `/tmp` -> `/private/tmp`, a
-            // bind-mounted home) and would delete a package that IS reachable.
-            // A seed absent from disk fails to canonicalize, falls back to the
-            // raw path, and is filtered out by `orphaned_by_seeds` -- which
-            // only yields paths present in the walked entry set.
+            // The graph is keyed by canonical paths; a raw path under a symlinked `$OCX_HOME` would
+            // delete a reachable package.
             let canonical_path = dunce::canonicalize(&raw_path).unwrap_or_else(|error| {
                 log::debug!("cannot canonicalize package path {}: {error}", raw_path.display());
                 raw_path
@@ -222,7 +188,7 @@ repository = "localhost:5000/cmake"
             .expect("linking the fixture candidate must succeed");
     }
 
-    /// C-014: a package an install symlink holds is reported as retained and
+    /// A package an install symlink holds is reported as retained and
     /// left on disk. This is the property that separates `--rm` from
     /// `purge_all`, which would have deleted it and left the symlink dangling.
     #[tokio::test(flavor = "multi_thread")]
@@ -262,7 +228,7 @@ repository = "localhost:5000/cmake"
         );
     }
 
-    /// C-014: a package a lock pins is reported as retained and left on disk.
+    /// A package a lock pins is reported as retained and left on disk.
     /// The implicit `$OCX_HOME/ocx.lock` root is the global toolchain tier, and
     /// it reaches the graph only because the collector is built with
     /// `collect_project_roots` — which is what the mutation proof for this test
@@ -306,7 +272,7 @@ repository = "localhost:5000/cmake"
         );
     }
 
-    /// C-014: the package `ocx package exec` pulled and nothing else holds is
+    /// The package `ocx package exec` pulled and nothing else holds is
     /// the one this deletes. Without this arm the feature does nothing.
     #[tokio::test(flavor = "multi_thread")]
     async fn purge_unrooted_deletes_an_unrooted_seed() {

@@ -1,33 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx package sbom` — list, extract or summarize the verified SBOM
-//! attestations a published package carries.
+//! `ocx package sbom` — list, extract or summarize the SBOM attestations a published package carries, using
+//! the same identity resolution and trust-root ladder as `ocx package verify`.
 //!
-//! The attestation twin of `ocx package verify`: same identity resolution, same
-//! trust-root ladder, same pipeline — different arity.
-//!
-//! Two verification modes, resolved per invocation. **Demand**
-//! is what an operator who has said who may sign gets: full crypto, and an
-//! unsigned attachment is refused rather than listed. **Permissive** is what
-//! everyone else gets: no cryptography runs at all, and every document — raw
-//! attachment or bundle payload — is listed `verified: false`.
-//!
-//! Permissive is not a hole in SEC-32: every row it emits is labelled
-//! unverified in both output formats, carries no signer identity, and the
-//! effective mode is reported in the summary, so nothing registry-controlled is
-//! ever presented as fact. What it replaces is worse — until this existed, a
-//! consumer with no Sigstore setup could not read a published SBOM at all.
-//!
-//! Three output shapes, mutually exclusive by construction (clap
-//! `conflicts_with`): the default listing, `--output PATH` writing one
-//! predicate verbatim, and `--summary` parsing each CycloneDX document.
-//!
-//! `--output -` refuses a TTY. The predicate is authored by whoever holds an
-//! identity the policy admits, so "verified" does not mean "safe to print":
-//! written verbatim to a terminal, a component description carrying an OSC 52
-//! sequence sets the operator's clipboard (CWE-150). The bytes must stay exact
-//! for the round-trip contract, so the terminal is declined instead.
+//! Permissive mode (no cryptography) stays safe only while every row is `verified: false` in both formats, carries no
+//! signer identity, and the summary reports the effective mode.
 
 use std::collections::BTreeSet;
 use std::io::IsTerminal as _;
@@ -156,25 +134,15 @@ pub struct PackageSbom {
     identifier: options::Identifier,
 }
 
-/// `reason_kind` for a verified attestation `--summary` could not parse.
-///
-/// Deliberately outside the `VerifyErrorKind::kind_detail` set every other
-/// refusal slug comes from: the bundle verified and the signature held, and
-/// only the reading of the payload failed. A script that treats a refused
-/// signature and an unreadable SBOM as the same event is drawing the wrong
-/// conclusion about the publisher.
+/// `reason_kind` for an attestation `--summary` could not parse; outside `VerifyErrorKind::kind_detail`,
+/// since the signature held and only the payload failed.
 const SUMMARY_FAILED: &str = "sbom_summary_failed";
 
-/// Where `--output` sends the verified predicate bytes.
-///
-/// A parsed destination rather than a bare `Option<PathBuf>`, so the TTY
-/// refusal is a decision over a value and can be tested without a terminal
-/// (ARCH-12).
+/// Where `--output` sends the predicate bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum OutputDestination {
     /// `-` — the process's own stdout.
     Stdout,
-    /// A filesystem path.
     File(PathBuf),
 }
 
@@ -182,27 +150,17 @@ impl PackageSbom {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifier = self.identifier.with_domain(context.default_registry())?;
 
-        // D9's format pin, resolved and refused at the invocation boundary:
-        // `--signature-format both` names two shapes, and a verification result
-        // cannot say "either of these satisfied me", so it is a usage error (64)
-        // rather than a silent pick — before any network request rather than
-        // after one. The resolved pin then decides *discovery*: the shape it
-        // does not name is never looked for.
+        // `both` cannot pin one verification result, so it is a usage error before any request.
         let signature_format = self.signature_format.pin().map_err(crate::error::UsageError::from)?;
 
-        // Parsed before any request, so `--key awskms://alias/release` names its
-        // unimplemented backend (exit 85) instead of being read as a filename
-        // and reported as a missing file.
+        // Parsed up front, or `--key awskms://...` is reported as a missing file instead of exit 85.
         let key = self
             .key
             .reference()
             .map_err(|error| VerifyError::new(identifier.clone(), VerifyErrorKind::from(error)))?;
 
-        // SSRF hardening (CWE-918): validate the user-supplied endpoint at the
-        // boundary before it becomes an HTTP client target. Precedence, guard
-        // and refusal kind are the shared ladder's — the same one `verify`
-        // walks, which is the point: the two commands key the same trust-root
-        // cache and must not disagree about which Rekor they mean.
+        // SSRF-checked (CWE-918) through `verify`'s ladder, or the two disagree on the Rekor keying their
+        // shared trust-root cache.
         let rekor_url = package_sign_common::resolve_rekor_endpoint(
             context.config_trust_sigstore(),
             &identifier,
@@ -210,8 +168,6 @@ impl PackageSbom {
         )?;
 
         let destination = destination(self.output.as_deref());
-        // Refuse before the network round-trip, not after: an operator whose
-        // invocation cannot succeed should learn it in milliseconds.
         if let Some(destination) = &destination {
             refuse_tty_output(destination, std::io::stdout().is_terminal())?;
         }
@@ -220,17 +176,7 @@ impl PackageSbom {
         let offline = context.is_offline();
         let (verification, policies) = self.mode(&context, &identifier, key.as_ref()).await?;
 
-        // Neither is resolved under `Permissive`, and that is the gap fix, not
-        // an optimization: `resolve_policies` refuses an invocation with no
-        // identity source (exit 64), so calling it unconditionally locked every
-        // consumer without a trust policy out of reading SBOMs entirely. The
-        // trust root goes with it — a TUF fetch to serve a run that verifies
-        // nothing is latency spent on material nothing will read.
-        //
-        // `TrustRoot::default()` carries no anchors and no CT-log key, so it
-        // fails closed on contact: if this value ever reached the signed pass
-        // through a later refactor, that pass refuses with `NoCtLogKey` rather
-        // than verifying against nothing.
+        // `TrustRoot::default()` has no anchors, so leaked into a signed pass it fails closed (`NoCtLogKey`).
         let trust_root = match verification {
             VerificationMode::Permissive => TrustRoot::default(),
             VerificationMode::Demand => {
@@ -258,10 +204,8 @@ impl PackageSbom {
             verification,
             signature_format,
         };
-        // The unwrap is load-bearing, not ceremony: `PackageError` omits
-        // `#[source]` on its `kind`, so without re-rooting the chain on the
-        // bare `VerifyError` every sbom failure classifies to 1 instead of its
-        // own code. Pinned by `each_verify_kind_keeps_its_own_exit_code`.
+        // Re-rooted on the bare `VerifyError` (`PackageError` has no `#[source]`), or every failure exits 1
+        // (`each_verify_kind_keeps_its_own_exit_code_through_the_wrapper`).
         let report = context
             .manager()
             .sbom_one(&identifier, self.platform.as_ref(), options)
@@ -272,8 +216,7 @@ impl PackageSbom {
             Some(destination) => {
                 let selected = single_document(&identifier, &report.attestations, &report.unverified, report.refused)?;
                 if let Selected::Unverified(sbom) = &selected {
-                    // One line, on stderr, so `--output -` piped to a file is
-                    // still byte-exact. Registry-sourced, so sanitized (CWE-150).
+                    // stderr keeps `--output -` byte-exact; the digest is registry-sourced, so sanitized (CWE-150).
                     log::warn!(
                         "SBOM is unverified: no signature over referrer {} was checked, \
                          so nothing vouches for what it says",
@@ -296,31 +239,8 @@ impl PackageSbom {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// Resolve the verification mode, and the policies it will verify against.
-    ///
-    /// Three inputs, one answer:
-    ///
-    /// - `--no-verify` → permissive, and **nothing is resolved**. This is the
-    ///   gap fix: [`package_sign_common::resolve_policies`] refuses an
-    ///   invocation with no identity source (exit 64), so calling it here
-    ///   regardless of mode is what locked every consumer without a trust
-    ///   policy out of reading SBOMs at all.
-    /// - `--verify` → demand, through the strict resolution, so demanding
-    ///   verification with nothing to verify against is still the usage error
-    ///   it has always been.
-    /// - `--key` → demand against that one public key, short-circuiting every
-    ///   keyless matcher. Combined with `--no-verify` it is a usage error, for
-    ///   the reason the certificate flags already are.
-    /// - neither → the invocation decides. Identity flags, or a
-    ///   `[trust.policy]` covering the target, mean verification was asked
-    ///   for. Neither means there is nothing to verify against, and refusing
-    ///   would answer a question nobody asked.
-    ///
-    /// The empty policy set therefore has two readings, and the flag is what
-    /// picks between them: under `--verify` it is "you named nothing to verify
-    /// against" (64), and by default it is "no policy governs this package".
-    /// One resolution, two readings — see
-    /// [`package_sign_common::resolve_policies_lenient`].
+    /// Resolves the verification mode and the policies to verify against; `--no-verify` resolves
+    /// nothing, or every consumer without a trust policy is refused (exit 64).
     async fn mode(
         &self,
         context: &crate::app::Context,
@@ -329,11 +249,6 @@ impl PackageSbom {
     ) -> anyhow::Result<(VerificationMode, Vec<CompiledPolicy>)> {
         let requested = self.verification.requested();
         if requested == Some(VerificationMode::Permissive) {
-            // The refusal `--no-verify` already carries for the certificate
-            // flags, extended to `--key` from here rather than from the frozen
-            // option group. Naming a key while asking for no cryptography is
-            // the same contradiction, and the alternative is worse than a
-            // usage error: the key would be accepted and silently never used.
             if key.is_some() {
                 return Err(crate::error::UsageError::new(
                     "--no-verify cannot be combined with --key: it names a key nothing would check",
@@ -357,15 +272,8 @@ impl PackageSbom {
         }
     }
 
-    /// Project a scan into the report DTO, summarizing under `--summary`.
-    ///
-    /// One unsummarizable document refuses that entry, not the listing
-    /// (PKG-22). `--summary` augments a listing that works without it, so a
-    /// single SPDX document among four CycloneDX ones must not cost the
-    /// operator the other three — and a scan is over N independent items, where
-    /// a bare `?` in the loop is the shape that reports 1 of N as 0 of N.
-    /// The refusal lands in the vocabulary the report already carries, beside
-    /// the candidates the verify pipeline itself refused.
+    /// Projects a scan into the report DTO, summarizing under `--summary`; an unsummarizable document
+    /// refuses its own entry, never the listing.
     fn listing(
         &self,
         verification: VerificationMode,
@@ -411,9 +319,7 @@ impl PackageSbom {
             });
         }
 
-        // The unsigned half, through the same summarizer and the same refusal
-        // channel: `--summary` reads a document, and whether anyone signed it
-        // says nothing about whether it parses.
+        // Always `verified: false` with no signer fields: the permissive-mode safety invariant.
         for candidate in unverified {
             let is_shadowed = shadowed.contains(&candidate.referrer_digest);
             let referrer_digest = candidate.referrer_digest.to_string();
@@ -443,12 +349,8 @@ impl PackageSbom {
         SbomListingReport::new(verification, entries, refusals)
     }
 
-    /// The `--summary` cell for one document, or the refusal that replaces its
-    /// whole listing row.
-    ///
-    /// `Ok(None)` is the no-`--summary` case, not a failure: the listing works
-    /// without the flag, and only a document the flag could not read costs its
-    /// entry (PKG-22).
+    /// The `--summary` cell for one document (`Ok(None)` without the flag), or the refusal that
+    /// replaces its row.
     fn summary_for(
         &self,
         predicate_type: &str,
@@ -468,33 +370,20 @@ impl PackageSbom {
     }
 }
 
-/// The mode decision itself, over values: what the flags asked for, and
-/// whether any identity source resolved. `None` is the usage error.
-///
-/// Split from [`PackageSbom::mode`] because that one reads a project file and
-/// a config tier to answer the second question, and the decision over the
-/// answer needs neither (ARCH-12). Every row of the matrix is then a test
-/// that constructs nothing.
+/// The mode decision over what the flags asked for and whether any identity source resolved;
+/// `None` is the usage error.
 fn resolve_mode(requested: Option<VerificationMode>, policies_empty: bool) -> Option<VerificationMode> {
     match (requested, policies_empty) {
-        // `--no-verify` never reaches here; the caller short-circuits it
-        // before resolving anything, which is the point of the flag.
         (Some(VerificationMode::Permissive), _) => Some(VerificationMode::Permissive),
-        // Verification demanded with nothing to verify against.
         (Some(VerificationMode::Demand), true) => None,
         (Some(VerificationMode::Demand), false) => Some(VerificationMode::Demand),
-        // No flag: the invocation decides. An identity source means somebody
-        // asked for verification; its absence means nobody did, and refusing
-        // would answer a question nobody put.
+        // No flag: an identity source means verification was asked for.
         (None, true) => Some(VerificationMode::Permissive),
         (None, false) => Some(VerificationMode::Demand),
     }
 }
 
 /// The parsed `--output` destination, if the flag was given.
-///
-/// A free function rather than a method: it reads one field and nothing else,
-/// so it needs no receiver (ARCH-02) and its test needs no clap struct.
 fn destination(output: Option<&Path>) -> Option<OutputDestination> {
     output.map(|path| {
         if path == Path::new("-") {
@@ -505,11 +394,8 @@ fn destination(output: Option<&Path>) -> Option<OutputDestination> {
     })
 }
 
-/// Refuse writing raw predicate bytes to a terminal.
-///
-/// `UsageError` (64), not a data error: the bytes are fine, the destination is
-/// the problem, and the remedy is a different invocation — the same reasoning
-/// that puts `ProvenanceVersionUnsupported` at 64.
+/// Refuses writing raw predicate bytes to a terminal (exit 64): they are publisher-authored and
+/// unsanitized, so an OSC 52 sequence could set the clipboard (CWE-150).
 fn refuse_tty_output(destination: &OutputDestination, stdout_is_terminal: bool) -> Result<(), CommandError> {
     if matches!(destination, OutputDestination::Stdout) && stdout_is_terminal {
         return Err(CommandError::new(
@@ -521,11 +407,8 @@ fn refuse_tty_output(destination: &OutputDestination, stdout_is_terminal: bool) 
     Ok(())
 }
 
-/// Which document `--output` resolved to, and what backs it.
-///
-/// A two-variant enum rather than a `(&[u8], bool)` pair so the warning cannot
-/// be forgotten at a call site that already has the bytes: reading the document
-/// out of an unverified match is a `match` the compiler makes visible.
+/// Which document `--output` resolved to; an enum, not a `(&[u8], bool)`, so the unverified
+/// warning cannot be skipped silently.
 #[derive(Debug)]
 enum Selected<'a> {
     /// A document with a verified signature over it.
@@ -546,37 +429,8 @@ impl Selected<'_> {
 
 /// The one document `--output` may write, or a refusal naming the rest.
 ///
-/// **A truncated scan is refused before anything is picked.** `--output` needs
-/// exactly one candidate, and truncation is the state in which "exactly one"
-/// cannot be established: a second SBOM the budget never reached is
-/// indistinguishable from no second SBOM, so the ambiguity check below fails
-/// open and the command writes one document silently, exit 0. A demanded scan
-/// already fails closed on this inside the library (`finish_scan`); a
-/// permissive one deliberately does not, because a *listing* survives
-/// truncation and reports it as `partial_failure`. That is right for a listing
-/// and wrong for a pick, and this is where the asymmetry is repaired. The check
-/// lives here rather than at the call site so a pick cannot be made without it.
-///
-/// Zero of either kind never reaches here — the library ends that scan as
-/// `AttestationNotFound` (79). More than one is `MultipleAttestations` (65)
-/// naming every referrer digest, because picking one would let the registry's
-/// listing order decide which document a consumer reads.
-///
-/// **A verified document wins outright**, and the unverified set is not even
-/// looked at. That precedence is defensive rather than reachable: the two
-/// lists are mode-exclusive by construction — a demanded scan refuses unsigned
-/// attachments instead of listing them, and a permissive one verifies nothing
-/// — so exactly one of them is ever non-empty. Kept as the fail-safe ordering
-/// anyway, because if that ever stops holding, the answer that must not depend
-/// on listing order is which trust class `--output` writes. Ambiguity is
-/// judged **within** a trust class and never across it.
-///
-/// The refusal carries **every** distinct predicate type in the colliding set,
-/// not the first one: a package can carry a CycloneDX SBOM and an SPDX one, and
-/// a message naming only whichever the registry listed first states something
-/// untrue about the other candidate and hides the `--type` value that would
-/// actually resolve the ambiguity. `BTreeSet` both dedupes and sorts, so the
-/// message is stable across listing order (DATA-DET-01).
+/// A truncated scan refuses even a lone candidate: a second SBOM past the budget is indistinguishable
+/// from none (`adr_sbom_attestations.md` § "Rationale from code: ocx_cli").
 fn single_document<'a>(
     identifier: &ocx_oci::PackageRef,
     attestations: &'a [AttestationMatch],
@@ -605,10 +459,8 @@ fn single_document<'a>(
     }
     match unverified {
         [only] => Ok(Selected::Unverified(only)),
-        // Unreachable: a scan with nothing of either kind ends as
-        // `AttestationNotFound` inside the library. Returned rather than
-        // asserted — a panic here would be the CLI crashing on a library
-        // contract change instead of reporting one.
+        // Unreachable (the library ends an empty scan as `AttestationNotFound`); returned, not asserted,
+        // so a library contract change reports instead of panicking.
         [] => Err(VerifyError::new(identifier.clone(), VerifyErrorKind::AttestationNotFound).into()),
         many => Ok(Err(ambiguous(
             identifier,
@@ -621,15 +473,8 @@ fn single_document<'a>(
 
 /// The truncation refusal among a scan's refused candidates, if it carries one.
 ///
-/// The three kinds are the whole of what [`ScanBudget`] can stop on — a
-/// candidate cap, a byte budget, a listing cap — and they are the only refusals
-/// that say something about the candidates that were *not* examined. Every
-/// other refusal is about one candidate that was.
-///
-/// Matched exhaustively rather than by a catch-all: a new budget stop must
-/// either be added here or be a deliberate decision not to refuse a pick.
-///
-/// [`ScanBudget`]: ocx_lib::oci::verify
+/// Lists every kind the scan budget stops on; a new budget stop missing here lets a truncated scan
+/// pick a document.
 fn truncation_refusal(refused: Vec<RefusedCandidate>) -> Option<VerifyErrorKind> {
     refused.into_iter().map(|candidate| candidate.reason).find(|reason| {
         matches!(
@@ -658,16 +503,8 @@ fn ambiguous(identifier: &ocx_oci::PackageRef, candidates: Vec<(String, String)>
     .into()
 }
 
-/// Summarize one verified predicate, or return the refusal prose.
-///
-/// The reader parses CycloneDX 1.5-1.7 only, so anything else is an explicit
-/// refusal naming the offending type — never a silently empty summary
-/// (`adr_sbom_attestations.md` D-e). The refusal is a `String` and not a
-/// classified error because it does not end the process: [`Self::listing`]
-/// records it as a [`RefusedEntry`] and carries on, so there is no exit code
-/// for it to carry. A `CommandError` here would pin a `DataError` (65) that
-/// nothing can ever exit with, and tell every reader the opposite of what
-/// `--summary` does.
+/// Summarizes one CycloneDX 1.5-1.7 predicate, or returns refusal prose naming the type, never an
+/// empty summary (`adr_sbom_attestations.md` D-e).
 fn summarize(predicate_type: &str, document: &[u8]) -> Result<SbomSummaryOut, String> {
     sbom::cyclonedx::summarize_cyclonedx(document)
         .map(SbomSummaryOut::from)
@@ -676,7 +513,7 @@ fn summarize(predicate_type: &str, document: &[u8]) -> Result<SbomSummaryOut, St
         })
 }
 
-/// Write the verified predicate bytes verbatim.
+/// Writes the predicate bytes verbatim; sanitizing would break the byte-exact round-trip.
 async fn write_predicate(destination: &OutputDestination, bytes: &[u8]) -> anyhow::Result<()> {
     match destination {
         OutputDestination::Stdout => write_stream(&mut tokio::io::stdout(), bytes).await?,
@@ -687,12 +524,7 @@ async fn write_predicate(destination: &OutputDestination, bytes: &[u8]) -> anyho
     Ok(())
 }
 
-/// Writes the slice and nothing else.
-///
-/// No trailing newline, no framing, no re-encoding: D-e pins `--output -` as
-/// byte-exact, and a pipe is the whole reason that destination exists, so
-/// `shasum` on the stream must equal `shasum` on the file. Generic over the
-/// sink so the byte-exactness is assertable without capturing process stdout.
+/// Writes the slice and nothing else, so `shasum` on `--output -` equals `shasum` on the file.
 async fn write_stream<W: tokio::io::AsyncWrite + Unpin>(sink: &mut W, bytes: &[u8]) -> anyhow::Result<()> {
     sink.write_all(bytes).await?;
     sink.flush().await?;
@@ -784,7 +616,7 @@ mod tests {
     /// unconditionally.
     #[test]
     fn each_refusal_carries_its_own_frozen_slug() {
-        // PKG-25: `reason_kind` is what a script branches on, so it has to
+        // `reason_kind` is what a script branches on, so it has to
         // track the variant rather than be a constant. Two different kinds
         // through the same projection is what rules a constant out — one row
         // would pass whatever the field were wired to.
@@ -898,7 +730,7 @@ mod tests {
     /// A truncated scan refuses to pick, even when it happens to hold exactly
     /// one document.
     ///
-    /// This is the whole of W1: the one candidate here is real, and picking it
+    /// The one candidate here is real, and picking it
     /// would look correct. What makes it wrong is that the budget stopped
     /// before the listing was exhausted, so "exactly one" was never
     /// established — a second SBOM behind the cap is indistinguishable from no
@@ -1106,7 +938,7 @@ mod tests {
     }
 
     /// The refusal channel is shared too: an unsigned document `--summary`
-    /// cannot read costs its own entry and not the listing (PKG-22).
+    /// cannot read costs its own entry and not the listing.
     #[test]
     fn an_unsummarizable_unsigned_document_refuses_only_its_own_entry() {
         let listing = command(&["--summary"]).listing(
@@ -1156,7 +988,7 @@ mod tests {
         assert_eq!(summary.component_count, 1);
     }
 
-    /// S-019: a non-CycloneDX or out-of-range predicate is an explicit refusal
+    /// A non-CycloneDX or out-of-range predicate is an explicit refusal
     /// naming the type and the remedy, never a silently empty summary.
     #[test]
     fn a_non_cyclonedx_predicate_is_refused_naming_the_type_and_the_remedy() {
@@ -1245,7 +1077,7 @@ mod tests {
     const CYCLONEDX: &str = r#"{"bomFormat":"CycloneDX","specVersion":"1.6","components":[{"name":"zlib"}]}"#;
     const SPDX: &str = r#"{"spdxVersion":"SPDX-2.3"}"#;
 
-    /// S-007: two real matches, so the refusal is asserted on the path a user
+    /// Two real matches, so the refusal is asserted on the path a user
     /// reaches. The empty slice this once drove is structurally unreachable —
     /// the library ends a zero-match scan as `AttestationNotFound` — and it
     /// also could not carry a predicate type or a second digest, which are the
@@ -1281,7 +1113,7 @@ mod tests {
         );
     }
 
-    /// UF-2: a mixed-type match set. The message must name **both** types and
+    /// A mixed-type match set. The message must name **both** types and
     /// point at `--type`; naming only the first — which is what
     /// `many.first()` produced — tells the operator the SPDX candidate is a
     /// CycloneDX one, and withholds the one value that resolves the ambiguity.
@@ -1357,8 +1189,8 @@ mod tests {
 
     // ── listing under `--summary` ───────────────────────────────────────────
 
-    /// UF-3: one document `--summary` cannot read refuses that entry, never
-    /// the listing (PKG-22).
+    /// One document `--summary` cannot read refuses that entry, never
+    /// the listing.
     ///
     /// The library already refuses per candidate — `AttestationScan`'s own doc
     /// says failing closed would "hand a single malformed referrer the power
@@ -1458,7 +1290,7 @@ mod tests {
         );
     }
 
-    /// **C-011.** The library's shadow set reaches the entry it names, on both
+    /// The library's shadow set reaches the entry it names, on both
     /// trust classes, and marks nothing else.
     ///
     /// The set is keyed on the referrer manifest digest, which is where a

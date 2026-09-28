@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "AuthoringMetadata",
-  "description": "OCX package metadata in authoring (sidecar) form.\n\nThe published [`Metadata`] with one relaxation: dependency digests are\noptional. See the module docs.",
+  "description": "OCX package metadata in authoring (sidecar) form.\n\nThe published metadata with one relaxation: a dependency identifier may\nomit its digest, meaning \"resolve at `ocx package create` time\".",
   "oneOf": [
     {
       "type": "object",
@@ -32,7 +32,7 @@
       }
     },
     "Var": {
-      "description": "An environment variable declaration.\n\nEach variable has a key (the variable name), a [modifier](Modifier) that\ndetermines how the value is resolved, and a visibility that controls which\nexec surfaces load the entry. The modifier's type and fields are flattened\ninto this object in JSON.\n\n`visibility` defaults to [`Visibility::PRIVATE`] per ADR\n`adr_visibility_two_axis_and_exec_modes.md` Tension 1 (A): publishers must\nopt in explicitly to expose entries on the consumer axis. `\"sealed\"` is\nrejected at parse time — a `Var` invisible on every surface is dead config\n(ADR Tension 4).",
+      "description": "An environment variable declaration.\n\nEach variable has a key (the variable name), a modifier that determines\nhow the value is resolved, and a visibility that controls which exec\nsurfaces load the entry. The modifier's type and fields are flattened into\nthis object in JSON.\n\n`visibility` defaults to `private`: publishers must opt in explicitly to\nexpose entries on the consumer axis. `\"sealed\"` is rejected at parse time —\na variable invisible on every surface is dead config.",
       "type": "object",
       "properties": {
         "key": {
@@ -40,7 +40,7 @@
           "type": "string"
         },
         "visibility": {
-          "description": "Visibility on the entry axis — controls which exec surface (interface vs private)\nsees this entry; see the package manager's composer. Defaults to\n`private` — publishers explicitly mark contract entries as `public` or\n`interface` to expose them to consumers. `\"sealed\"` is rejected at parse\ntime (ADR Tension 4).",
+          "description": "Visibility on the entry axis — controls which exec surface (interface vs private)\nsees this entry. Defaults to `private` — publishers explicitly mark\ncontract entries as `public` or `interface` to expose them to consumers.\n`\"sealed\"` is rejected at parse time.",
           "type": "string",
           "enum": [
             "private",
@@ -130,11 +130,11 @@
       ]
     },
     "List": {
-      "description": "A list-type environment variable.\n\nList variables are appended to any existing value of the environment\nvariable, with every earlier occurrence of the same contribution removed\nfirst, so re-applying moves the contribution to the back rather than\nduplicating it. The consumer resolving duplicates last-wins is what the\ndirection serves. Interpolation tokens in `value` are replaced at\nresolution time.\n\nThe contribution is opaque: ocx never splits it into elements, so a value\ncarrying the separator is still one contribution.",
+      "description": "A list-type environment variable.\n\nList variables are appended to any existing value of the environment\nvariable, with every earlier occurrence of the same contribution removed\nfirst, so re-applying moves the contribution to the back rather than\nduplicating it. Interpolation tokens in `value` are replaced at\nresolution time.\n\nThe contribution is opaque: ocx never splits it into elements, so a value\ncarrying the separator is still one contribution.",
       "type": "object",
       "properties": {
         "separator": {
-          "description": "The string joining this contribution to the variable's existing value —\na single space for `JDK_JAVA_OPTIONS`, a comma for `GODEBUG`.\n\nRequired in package metadata, and refused there by `ValidMetadata`\nrather than by serde, so the message names the variable instead of a\nfield offset. Typed as optional because `ocx.toml` and `ocx exec --env`\nmay omit it.\n\nDeliberately no `skip_serializing_if`, unlike the tree's other optional\nwire fields: schemars drops a skipped field from `required`, and the\npublished schema is the write contract where \"a list needs a separator\"\nhas to be enforceable. The only value that would be written as `null` is\none `ValidMetadata` refuses to publish.",
+          "description": "The string joining this contribution to the variable's existing value —\na single space for `JDK_JAVA_OPTIONS`, a comma for `GODEBUG`.\n\nRequired in package metadata; `ocx.toml` and `ocx exec --env` may omit it.",
           "type": "string"
         },
         "value": {
@@ -154,7 +154,7 @@
       }
     },
     "AuthoringDependency": {
-      "description": "A dependency in authoring (sidecar) form.\n\nUnlike the published [`Dependency`], the identifier's digest is optional:\na tag-only identifier declares \"resolve me at `ocx package create` time\".\n`create` resolves it against the selected index for its `--platform` and\nattaches the winning platform manifest's digest to the identifier itself,\nso the projection to the published form\n([`AuthoringDependency::to_published`]) is a straight pass-through.",
+      "description": "A dependency in authoring (sidecar) form.\n\nUnlike the published dependency, the identifier's digest is optional:\na tag-only identifier declares \"resolve me at `ocx package create` time\".\n`create` resolves it against the selected index for its `--platform` and\nattaches the winning platform manifest's digest to the identifier itself.",
       "type": "object",
       "properties": {
         "identifier": {
@@ -213,7 +213,7 @@
       }
     },
     "Entrypoint": {
-      "description": "A single named entrypoint for a package.\n\nThe map key in [`Entrypoints`] supplies the *invocable name* — the\nfilename of the generated launcher. This struct holds the per-entry\nvalue.\n\nThe launcher generated for each entry re-enters via\n`ocx launcher exec '<package-root>' -- <name> [args...]`, preserving\nclean-env execution semantics. `ocx launcher exec` resolves the\n*dispatch command* against the composed `PATH` from the package's `env`\nblock: [`Entrypoint::command`] when set, otherwise the invocable name\nitself (the common case where they coincide).",
+      "description": "A single named entrypoint for a package.\n\nThe map key in `entrypoints` supplies the *invocable name* — the filename\nof the generated launcher; this object holds the per-entry value. The\nlauncher re-enters via `ocx launcher exec '<package-root>' -- <name> [args...]`,\npreserving clean-env execution semantics, and resolves the *dispatch\ncommand* against the composed `PATH` from the package's `env` block:\n`command` when set, otherwise the invocable name itself.",
       "type": "object",
       "properties": {
         "command": {
@@ -228,7 +228,7 @@
           ]
         },
         "args": {
-          "description": "Fixed leading arguments the generated launcher prepends before the user's\nown arguments. Each element may carry `${installPath}` — or its alias\n`${self.installPath}` — optionally suffixed `:native` or `:posix`; `${deps.*}`\nand `${self.env.*}` are NOT permitted here, and every other `${...}` is rejected\n(write `$${` for a literal `${`). Absent/empty serializes to nothing\n(wire-compatible with the pre-`args` shape).",
+          "description": "Fixed leading arguments the generated launcher prepends before the user's\nown arguments. Each element may carry `${installPath}` — or its alias\n`${self.installPath}` — optionally suffixed `:native` or `:posix`; `${deps.*}`\nand `${self.env.*}` are NOT permitted here, and every other `${...}` is rejected\n(write `$${` for a literal `${`). Absent/empty serializes to nothing.",
           "type": "array",
           "items": {
             "type": "string"
@@ -251,12 +251,12 @@
       "uniqueItems": true
     },
     "Integrations": {
-      "description": "A package's declared `integrations` map: namespace key → opaque payload.\n\nKeys iterate in lexicographic order ([`BTreeMap`]), so every derived\nordering — composed rows, cap-violation reporting, closure namespace lists\n— is deterministic across runs and platforms.\n\nAbsent on the wire and empty are the **same** state (deliberately not\n`binaries`' `Option` tri-state): nothing distinguishes \"declares none\" from\n\"did not say\".",
+      "description": "A package's declared `integrations` map: namespace key → opaque payload.\n\nAbsent on the wire and empty are the **same** state: nothing distinguishes\n\"declares none\" from \"did not say\".",
       "type": "object",
       "additionalProperties": true
     },
     "AuthoringBundle": {
-      "description": "Bundle package metadata in authoring form.\n\nSame shape as the published [`Bundle`], with authoring-form (digest-optional)\ndependencies.",
+      "description": "Bundle package metadata in authoring form.\n\nSame shape as the published bundle, with authoring-form (digest-optional)\ndependencies.",
       "type": "object",
       "properties": {
         "version": {
@@ -286,7 +286,7 @@
           "$ref": "#/$defs/Entrypoints"
         },
         "binaries": {
-          "description": "The interface-binaries claim, hand-authored or baked in by `ocx\npackage create`'s auto-scan step. Mirrors [`Bundle::binaries`] — see\n`adr_declared_binaries_metadata.md` §1, §2.1.",
+          "description": "The interface-binaries claim, hand-authored or baked in by `ocx\npackage create`'s auto-scan step. Same shape as the published `binaries`.",
           "anyOf": [
             {
               "$ref": "#/$defs/Binaries"
@@ -297,7 +297,7 @@
           ]
         },
         "integrations": {
-          "description": "Vendor-namespaced configuration blocks. Mirrors\n[`Bundle::integrations`] exactly — [`AuthoringMetadata::to_published`]\ncopies it through unchanged, so there is no authoring-form delta here.",
+          "description": "Vendor-namespaced configuration blocks, published unchanged.",
           "$ref": "#/$defs/Integrations"
         }
       },

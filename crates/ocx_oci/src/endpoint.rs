@@ -1,24 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! SSRF-hardened URL validation for Sigstore endpoints.
+//! SSRF-hardened URL validation for Sigstore endpoints: HTTPS only, plus `http` on loopback for local stacks.
 //!
-//! User-supplied `--fulcio-url` / `--rekor-url` flags become HTTP client
-//! targets; unrestricted input would enable SSRF (CWE-918). Slice 1 policy
-//! is HTTPS-only in production, with an explicit loopback carve-out so
-//! integration tests -- and an operator running Sigstore on the same host --
-//! can point at a local stack (`http://127.0.0.1:PORT/...`).
-//!
-//! Lives at `crate::endpoint` (a peer of `crate::sign` and `crate::verify`, per ADR
-//! `adr_oci_referrers_signing_v1.md` Amendment 2) so both pipelines share one
-//! validator without verify depending on sign. Any future library consumer
-//! (mirror tool, SDK, Bazel rule) routes through the same guard before it
-//! reaches an HTTP client. The function returns a [`UrlRejection`] on failure,
-//! which each caller wraps into their own `InvalidEndpointUrl` variant to
-//! attach the originating flag name. The exit verdict itself originates here
-//! and is carried on the rejection: a rejected URL is a usage error (64), an
-//! endpoint that does not resolve is unavailable (69), and the sign and verify
-//! wraps read that answer rather than each minting one.
+//! Shared by sign and verify (`adr_oci_referrers_signing_v1.md` Amendment 2): rejected is 64, unresolvable 69.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -27,72 +12,34 @@ use std::time::Duration;
 
 use url::Host;
 
-/// Re-exported so a caller can name what [`validate_sigstore_url`] returns
-/// without taking a direct `url` dependency of its own.
-///
-/// `ocx_cli` deliberately does not depend on `url`: a validated endpoint is a
-/// `let` binding threaded from here to the options struct, never a named type
-/// in a CLI signature. That works right up to the first CLI helper that
-/// *returns* one, which is what this re-export is for.
+/// Re-exported so callers can name what [`validate_sigstore_url`] returns without depending on `url`.
 pub use url::Url;
 
 /// Default public Rekor transparency-log endpoint.
-///
-/// Shared by `ocx package sign` / `ocx package verify` (as the `--rekor-url`
-/// clap default) and the policy-gated auto-verify hook, so the one public-Rekor
-/// literal lives in a single place. Overridable per-invocation via `--rekor-url`.
 pub const DEFAULT_REKOR_URL: &str = "https://rekor.sigstore.dev";
 
-/// Connect timeout for Sigstore trust-services HTTP calls (Fulcio, Rekor,
-/// ambient OIDC token exchange).
+/// Connect timeout for Sigstore trust-services HTTP calls.
 const SIGSTORE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Overall request timeout for Sigstore trust-services HTTP calls.
 const SIGSTORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Idle bound on a Sigstore trust-service response, mapped to
-/// [`reqwest::ClientBuilder::read_timeout`].
-///
-/// `SIGSTORE_REQUEST_TIMEOUT` is armed once at dispatch and bounds the whole
-/// call; it says nothing about a connection that goes quiet. reqwest resets
-/// this one per response-body frame, so a peer that stops answering fails in
-/// seconds instead of waiting out the full request budget. Fulcio, Rekor and an
-/// OIDC token endpoint each answer in a frame or two, so fifteen seconds of
-/// silence means the peer is gone -- and it stays comfortably under the 30 s
-/// ceiling, so this never truncates an honest call the request timeout allows.
+/// Idle bound between Sigstore response frames, so a silent peer fails in seconds rather than after
+/// `SIGSTORE_REQUEST_TIMEOUT`.
 const SIGSTORE_READ_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Idle connections reqwest keeps per Sigstore host.
-///
-/// The default is `usize::MAX`. A sign or verify run talks to at most Fulcio,
-/// Rekor and one OIDC endpoint, one request at a time each, so two spare
-/// sockets per host is already slack -- and this client is process-wide and
-/// long-lived, which is exactly where an unbounded idle pool accumulates.
+/// Idle connections kept per Sigstore host; reqwest's unbounded default accumulates in a process-wide client.
 const SIGSTORE_MAX_IDLE_PER_HOST: usize = 2;
 
-/// The one builder every Sigstore client is configured from.
-///
-/// Extracted so the timeout wiring has a seam a test can build against with a
-/// short `read_timeout`: nothing on `reqwest::Client` exposes its configured
-/// timeouts, so proving the bound exists means exercising it, and exercising
-/// the shipped 15 s value is not a unit test.
-///
-/// `extra_roots` chains operator-supplied CA roots (ocx#448, C-007) on top of
-/// the bundled set -- a pure function over its arguments, so a test can pass
-/// an explicit value without touching the process-wide
-/// [`ocx_util::tls::install_sigstore_roots`] `OnceLock`.
+/// The one builder every Sigstore client is configured from; its arguments let a test build one without the
+/// process-wide client.
 fn sigstore_client_builder(
     read_timeout: Duration,
     rules: Arc<crate::ssrf::ProxyRules>,
     extra_roots: &ocx_util::tls::ExtraRoots,
 ) -> reqwest::ClientBuilder {
-    // Bundled roots, exactly as `forge::github` and `crate::index::ocx_index`
-    // do it: reqwest's rustls path falls back to the OS trust store and
-    // panics where that store is empty (minimal container, CI runner with
-    // no ca-certificates). Without this, `ocx install` keeps working -- the
-    // `oci_client` transport seeds its own roots in the fork -- while
-    // `ocx package verify` panics on the same host, and auto-verify carries
-    // that panic into every covered install.
+    // Bundled roots: reqwest's rustls path panics on a host with an empty OS trust store, and auto-verify
+    // would carry that panic into installs.
     extra_roots
         .seed(ocx_util::tls::seed_embedded_roots(reqwest::Client::builder()))
         .connect_timeout(SIGSTORE_CONNECT_TIMEOUT)
@@ -103,38 +50,20 @@ fn sigstore_client_builder(
         .dns_resolver(Arc::new(PinnedResolver { rules }))
 }
 
-/// Shared HTTP client for Sigstore trust-services calls.
+/// Shared, process-wide HTTP client for Sigstore trust-services calls.
 ///
-/// `reqwest::Client::new()` carries no default timeout, so a stalled Fulcio or
-/// Rekor endpoint hangs verify forever — and via the policy-gated auto-verify
-/// hook, hangs every covered install, turning the fail-closed gate into
-/// fail-hung. A single process-wide client with bounded connect, request and
-/// per-frame read timeouts closes that, and its internal connection pool -- cap
-/// on idle sockets included, since the default is `usize::MAX` -- is reused
-/// across the sign and verify call sites instead of rebuilt per request.
-///
-/// Lives at `crate::endpoint` (a peer of `crate::sign`/`crate::verify`) so both
-/// pipelines share one HTTP seam without verify depending on sign.
+/// Every timeout bounded, or a stalled Fulcio or Rekor hangs verify and, through auto-verify, every covered install.
 pub fn sigstore_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         let roots = ocx_util::tls::sigstore_roots();
         match sigstore_client_builder(SIGSTORE_READ_TIMEOUT, crate::ssrf::proxy_rules(), roots).build() {
             Ok(client) => client,
-            // Only a TLS-backend init failure reaches here, and it fails every
-            // HTTPS request that follows anyway. Retry the same fully-bounded
-            // builder rather than a hand-rolled subset, so no path can hand
-            // out a client missing the timeouts, the redirect refusal or the
-            // pinned resolver. The bare-client terminal is unreachable in
-            // practice: the retry fails identically, and `Client::new()`
-            // panics under the same TLS-init failure. Operator roots cannot
-            // make it reachable either: `ExtraRoots::from_pem` probe-builds a
-            // client from the same set and refuses the set when that fails
-            // (C-004), so no `ExtraRoots` exists that this build rejects, and
-            // the terminal never hands out a client trusting fewer roots than
-            // configured (D-9).
+            // Retry the same fully-bounded builder rather than degrade to a hand-rolled subset.
             Err(_) => sigstore_client_builder(SIGSTORE_READ_TIMEOUT, crate::ssrf::proxy_rules(), roots)
                 .build()
+                // Unreachable: `Client::new()` panics under the same TLS-init failure, so no unbounded client
+                // is returned.
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
     })
@@ -142,19 +71,8 @@ pub fn sigstore_http_client() -> &'static reqwest::Client {
 
 /// Refuse every HTTP redirect on the Sigstore client.
 ///
-/// [`resolve_sigstore_url`] validates the endpoint the caller asked for. It
-/// cannot validate where a *response* points: reqwest's default policy follows
-/// up to ten redirects, so a `307` from a hostile — or merely compromised —
-/// Fulcio would re-issue the certificate POST, OIDC token in the body, at
-/// whatever host the `Location` names, including `169.254.169.254` and any
-/// private service (CWE-918, and a credential replay on top). The Rekor upload
-/// and the ambient-token exchange have the same second-dial shape.
-///
-/// Refusing outright rather than re-validating per hop is the smaller
-/// mechanism, and it costs nothing real: neither the public Sigstore
-/// deployment nor a self-hosted Fulcio/Rekor redirects its API endpoints. An
-/// operator who fronts one with a redirecting proxy points `--fulcio-url` /
-/// `--rekor-url` at the final host instead, and the error says so.
+/// The SSRF guard checks the endpoint, not a `Location`: a hostile Fulcio's `307` would re-POST the OIDC token
+/// to any host, metadata endpoints included (CWE-918).
 fn refuse_redirects() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
         attempt.error(
@@ -164,23 +82,14 @@ fn refuse_redirects() -> reqwest::redirect::Policy {
     })
 }
 
-/// Ceiling on a Sigstore trust-service response body.
-///
-/// Fulcio returns a certificate chain, Rekor a log entry, an ambient provider a
-/// JWT — all kilobytes. Nothing in those protocols bounds the length, and
-/// `reqwest` imposes no limit of its own, so a compromised or hostile endpoint
-/// (a self-hosted stack, or a `--fulcio-url` an attacker chose) answers a
-/// two-kilobyte request with as many gigabytes as the process will hold.
-/// One megabyte is three orders of magnitude above every honest response.
+/// Ceiling on a Sigstore trust-service response body; neither the protocols nor `reqwest` bound one, and honest
+/// answers are kilobytes.
 pub const MAX_SIGSTORE_RESPONSE_BYTES: u64 = 1024 * 1024;
 
 /// Read a Sigstore trust-service response body, refusing one above the cap.
 ///
-/// Returns `None` for a transport failure and for an over-cap body alike: no
-/// caller distinguishes them, and every one already has a single error variant
-/// for "this endpoint did not answer usefully". The declared `Content-Length`
-/// short-circuits the honest case; the running total is what bounds a body that
-/// declares nothing, or lies.
+/// `None` for a transport failure and an over-cap body alike; the running total bounds a body whose
+/// `Content-Length` is absent or lies.
 pub async fn read_body_capped(response: reqwest::Response) -> Option<Vec<u8>> {
     use futures::StreamExt as _;
 
@@ -189,8 +98,7 @@ pub async fn read_body_capped(response: reqwest::Response) -> Option<Vec<u8>> {
     {
         return None;
     }
-    // Sized from the hint only after the cap has already refused an over-declared
-    // body, so a hostile Content-Length cannot drive the allocation.
+    // Sized only after the cap refused an over-declared body, so a hostile Content-Length cannot drive the allocation.
     let hint = response.content_length().unwrap_or(0).min(MAX_SIGSTORE_RESPONSE_BYTES);
     let mut body = Vec::with_capacity(hint as usize);
     let mut stream = response.bytes_stream();
@@ -204,71 +112,30 @@ pub async fn read_body_capped(response: reqwest::Response) -> Option<Vec<u8>> {
     Some(body)
 }
 
-/// Addresses the SSRF guard approved, keyed by the hostname it approved them for.
-///
-/// Written by [`resolve_sigstore_url`], read by [`PinnedResolver`]. Process-wide
-/// because [`sigstore_http_client`] is: one client, one pin table, and the guard
-/// runs before any dial on every path that reaches it.
+/// Addresses the SSRF guard approved, keyed by hostname: written by [`resolve_sigstore_url`], read by
+/// [`PinnedResolver`].
 static SIGSTORE_PINS: OnceLock<Mutex<HashMap<String, Vec<SocketAddr>>>> = OnceLock::new();
 
 fn sigstore_pins() -> &'static Mutex<HashMap<String, Vec<SocketAddr>>> {
     SIGSTORE_PINS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Record the addresses the guard approved for `host`.
-///
-/// Last writer wins: two endpoints on one host agree by construction (the guard
-/// re-resolved and re-validated), and a genuine DNS change between two guarded
-/// endpoints is a fresh verdict, not a stale one to preserve.
+/// Record the addresses the guard approved for `host`; last writer wins, as each write is a fresh verdict.
 fn pin_sigstore_host(host: &str, addresses: Vec<SocketAddr>) {
     if addresses.is_empty() {
         return;
     }
-    // poison-policy: recover. The map holds addresses a validator already
-    // approved; a panic elsewhere cannot make an approved address unapproved,
-    // and refusing to record it would fail every subsequent dial closed for a
-    // reason unrelated to the endpoint.
+    // Poison recovered: a panic elsewhere cannot unapprove an address, and refusing would fail every later dial.
     let mut pins = sigstore_pins().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     pins.insert(host.to_ascii_lowercase(), addresses);
 }
 
-/// DNS resolver for [`sigstore_http_client`] that replays the SSRF guard's verdict.
+/// Resolver for [`sigstore_http_client`] replaying the SSRF guard's pins, so reqwest never re-resolves a judged
+/// name into a private range (CWE-918, DNS rebinding).
 ///
-/// [`resolve_sigstore_url`] resolves and validates the endpoint; without this,
-/// reqwest then resolves the same name *again* for itself when it connects, and
-/// a name answering a public address to the guard and a private one to reqwest
-/// walks straight past the floor (CWE-918, DNS rebinding). That window matters
-/// most on the Fulcio POST, which carries the OIDC bearer token in its body.
-///
-/// The hook returns the pinned addresses and never resolves anything, so it is
-/// not a second validator that could disagree with the first — it is the same
-/// verdict, applied at the dial. That is also why the earlier objection here
-/// (that a process-wide resolver cannot tell an opted-in loopback endpoint from
-/// a rebind) does not apply: the loopback decision is made once, by the guard,
-/// on the URL string the operator typed, and this hook only replays it.
-///
-/// **Fails closed on an unpinned host.** Every dial site on this client is
-/// preceded by a guard call, so an unpinned name means either a new call site
-/// that skipped the guard or a redirect/rebind — both refusals, not fallbacks.
-///
-/// One name is admitted without a pin: this process's own HTTP proxy. Under a
-/// proxy the connector dials the proxy, and the Sigstore endpoint travels as
-/// literal text in the `CONNECT` line, so the name this hook is asked for is
-/// the proxy — a host no guard was ever given, and refusing it fails every
-/// Fulcio, Rekor and OIDC call on such a network (ocx#323). Admitting it is a
-/// stated design property, not a hole: the proxy is operator configuration,
-/// the same trust tier as `trusted_hosts`, and RFC1918 by nature, so a range
-/// judgement on it would refuse every corporate deployment. Every other
-/// unpinned name is still refused.
-///
-/// Residual, deliberate: this hook is handed a name with no route context —
-/// reqwest asks it what to dial, not why — so "is this the proxy?" is
-/// approximated by membership of the configured proxy-host set, which is
-/// scheme-agnostic. A host that is both the proxy and a Sigstore endpoint
-/// therefore relies on the pin being consulted first, below.
+/// Fails closed on an unpinned host, except this process's own proxy, whose name is operator config.
 struct PinnedResolver {
-    /// This process's proxy configuration, consulted only to recognise the
-    /// proxy's own hostname.
+    /// Consulted only to recognise the proxy's own hostname.
     rules: Arc<crate::ssrf::ProxyRules>,
 }
 
@@ -283,20 +150,11 @@ impl reqwest::dns::Resolve for PinnedResolver {
             .cloned();
         let rules = Arc::clone(&self.rules);
         Box::pin(async move {
-            // Pin first, proxy admission only on a miss. One host can be both
-            // the configured proxy and a guard-cleared endpoint -- the proxy
-            // set is scheme-agnostic, so an `HTTP_PROXY`-only proxy still
-            // matches an `https` endpoint the guard routed direct and pinned.
-            // Admitting that name as a proxy would throw away the guard's own
-            // verdict and re-resolve it unjudged, which is the rebinding
-            // window this type exists to close. A proxied route pins nothing,
-            // so the ocx#323 admission below still fires whenever it matters.
+            // Pin first: a host that is both proxy and cleared endpoint would otherwise be re-resolved unjudged.
             match pinned {
                 Some(addresses) => Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs),
                 None if rules.is_proxy_host(&host) => {
-                    // Plain lookup, no range judgement: see the type doc
-                    // above. Port 0 because reqwest overrides it from the
-                    // request URL after resolution, as `GuardedResolver` does.
+                    // Port 0: reqwest overrides it from the request URL after resolution.
                     let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
                     Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
                 }
@@ -314,10 +172,7 @@ impl reqwest::dns::Resolve for PinnedResolver {
 
 /// Whether the URL names loopback in the string itself.
 ///
-/// Shared by [`validate_sigstore_url`] (which admits `http` only here) and
-/// [`resolve_sigstore_url`] (which treats it as the operator's explicit opt-in
-/// to a local stack). One function, so the two checks cannot drift into
-/// admitting a URL at the boundary that the dial guard then refuses.
+/// One function for both checks, or the boundary admits a URL the dial guard then refuses.
 fn is_loopback_host(url: &Url) -> bool {
     match url.host() {
         Some(Host::Domain(h)) => h == "localhost",
@@ -327,72 +182,29 @@ fn is_loopback_host(url: &Url) -> bool {
     }
 }
 
-/// Re-check a validated Sigstore endpoint against where it actually resolves.
+/// Re-checks a validated endpoint against where it resolves, pinning the approved addresses for
+/// `PinnedResolver`.
 ///
-/// [`validate_sigstore_url`] is a *string*-level check: it reads the scheme and
-/// the literal host. That admits `https://169.254.169.254/` and any DNS name
-/// that resolves into a private or link-local range, so on its own it does not
-/// close CWE-918 — a hostile `ocx.toml` or managed-config tier setting
-/// `rekor-url` to the cloud metadata endpoint would be dialed, and the response
-/// surfaces in an error message. This is the same floor
-/// `ocx_lib::oci::index::Index::guard_physical_dial` (still in `ocx_lib`)
-/// applies to a rewritten registry target, against the same
-/// [`resolve_and_validate`](crate::ssrf::resolve_and_validate) predicate
-/// and the same `trusted_hosts` escape hatch, so an operator running Sigstore
-/// on a private address configures it exactly once and identically.
-///
-/// The loopback carve-out is opt-in by construction: an `http://localhost:5555`
-/// endpoint resolves into a forbidden range, so it is admitted only because the
-/// *string* already said loopback — which is the operator typing it. A name
-/// that merely resolves to loopback gets no such pass, which is what closes DNS
-/// rebinding onto a local stack.
-///
-/// The verdict is then *pinned*: the approved addresses are recorded for the
-/// host and `PinnedResolver` replays them when [`sigstore_http_client`]
-/// connects, so the HTTP client never resolves the name a second time. That
-/// closes the resolve-then-connect rebinding window this guard would otherwise
-/// leave open -- unlike the registry guard, where the pull runs on a shared
-/// client with no resolver hook.
-///
-/// All of the above describes a *direct* route. Where the process's proxy
-/// configuration intercepts the endpoint, the proxy resolves and dials it and
-/// this process never does, so
-/// [`guard_destination`](crate::ssrf::guard_destination) performs no
-/// lookup, refuses a forbidden IP literal textually, and approves no addresses
-/// -- nothing is pinned, and `PinnedResolver` is asked for the proxy's name
-/// rather than the endpoint's.
+/// String-level [`validate_sigstore_url`] admits a name resolving into `169.254.169.254` or a private range
+/// (CWE-918). Loopback is opt-in by the string only, never by resolution. Proxied, only a forbidden IP literal
+/// or loopback name is refused and nothing is pinned.
 ///
 /// # Errors
 ///
-/// [`SsrfError::ForbiddenTarget`](crate::ssrf::SsrfError::ForbiddenTarget)
-/// when the endpoint resolves into a forbidden range with no `trusted_hosts`
-/// entry (or, on a proxied route, is a forbidden IP literal), and
-/// [`SsrfError::Resolution`](crate::ssrf::SsrfError::Resolution) when a
-/// directly-routed endpoint does not resolve at all -- failing closed either
-/// way.
+/// [`SsrfError::ForbiddenTarget`](crate::ssrf::SsrfError::ForbiddenTarget) for a forbidden target with no
+/// `trusted_hosts` entry, [`SsrfError::Resolution`](crate::ssrf::SsrfError::Resolution) when a directly-routed
+/// endpoint does not resolve.
 pub async fn resolve_sigstore_url(url: &Url, trusted: &[String]) -> Result<(), crate::ssrf::SsrfError> {
     resolve_sigstore_url_with_rules(url, trusted, &crate::ssrf::proxy_rules()).await
 }
 
-/// [`resolve_sigstore_url`] with the proxy rules injected instead of read from
-/// the process environment.
-///
-/// The seam exists because the route decides the whole verdict: on a proxied
-/// route the process never resolves the endpoint, so there is nothing to look
-/// up and nothing to pin. Proving that needs rules a test can choose, and the
-/// alternative -- mutating `HTTPS_PROXY` around the call -- is `unsafe` in
-/// edition 2024 and racy under a shared-process test runner.
-///
-/// Private, so the public shape stays a two-argument call for the sign, verify
-/// and auto-verify callers outside this module.
+/// [`resolve_sigstore_url`] with injected proxy rules, since a test cannot safely mutate `HTTPS_PROXY`.
 async fn resolve_sigstore_url_with_rules(
     url: &Url,
     trusted: &[String],
     rules: &crate::ssrf::ProxyRules,
 ) -> Result<(), crate::ssrf::SsrfError> {
-    // `host_str()` re-brackets an IPv6 literal (`[::1]`), and a bracketed host
-    // is neither a parseable address nor a resolvable name -- it would fail
-    // closed on every IPv6 endpoint. Take the already-parsed host instead.
+    // The parsed host, not `host_str()`, whose bracketed IPv6 would fail closed on every IPv6 endpoint.
     let host = match url.host() {
         Some(Host::Domain(domain)) => domain.to_string(),
         Some(Host::Ipv4(addr)) => addr.to_string(),
@@ -407,12 +219,7 @@ async fn resolve_sigstore_url_with_rules(
     } else {
         trusted
     };
-    // The scheme decides which proxy the destination would be routed through
-    // (`HTTPS_PROXY` vs `HTTP_PROXY`), so it is read from the URL rather than
-    // assumed. `validate_sigstore_url` admits only `https` and a loopback
-    // `http`, so no third scheme reaches here; treating one as `Https` anyway
-    // is the fail-closed direction, since an http-only proxy then leaves the
-    // full direct-route floor in place.
+    // The scheme picks the proxy; any unexpected scheme treated as `Https` still keeps the direct-route floor.
     let scheme = if url.scheme() == "http" {
         crate::ssrf::DialScheme::Http
     } else {
@@ -420,9 +227,8 @@ async fn resolve_sigstore_url_with_rules(
     };
     match crate::ssrf::guard_destination(scheme, &host, port, trusted, rules).await? {
         crate::ssrf::DialRoute::Direct(approved) => pin_sigstore_host(&host, approved),
-        // Nothing to pin: on a proxied route the process resolves only the
-        // proxy, so the guard approved no addresses for this host. Recording
-        // one here would hand [`PinnedResolver`] a verdict no guard made.
+        // Proxied: the guard approved no addresses, and pinning one would hand `PinnedResolver` a verdict no
+        // guard made.
         crate::ssrf::DialRoute::Proxied => {}
     }
     Ok(())
@@ -430,37 +236,19 @@ async fn resolve_sigstore_url_with_rules(
 
 /// Reason why a user-supplied Sigstore endpoint URL was rejected.
 ///
-/// Returned by [`validate_sigstore_url`] on failure. Callers wrap this into
-/// their own `InvalidEndpointUrl` error variant (`SignErrorKind` or
-/// `VerifyErrorKind`) with the originating flag name attached.
-///
-/// The `reason` string is safe to surface in CLI stderr and JSON envelopes:
-/// it is constructed entirely from the structural classification of the URL
-/// (empty string, bad scheme, etc.) and never echoes credential-bearing raw
-/// input (CWE-209 mitigation). The parse-failure branch deliberately omits
-/// the raw input — an unparseable URL may still contain `user:pass@`
-/// substrings whose userinfo cannot be reliably stripped before parsing —
-/// and every branch that echoes a parsed URL routes it through
-/// `scrub_for_echo` first, which clears userinfo, query and fragment.
+/// `reason` never carries raw input (CWE-209): a parse failure omits it, and a parsed URL is echoed only through
+/// `scrub_for_echo`.
 #[derive(Debug, thiserror::Error)]
 #[error("{reason}")]
 pub struct UrlRejection {
     /// Short description of why the URL was rejected.
     pub reason: String,
-    /// The exit code a bare rejection (one that reached the exit boundary
-    /// without a sign- or verify-side wrap) classifies to.
-    /// [`ExitCode::UsageError`](ocx_exit::ExitCode::UsageError) for every
-    /// string-level rejection; [`Self`]'s `From<SsrfError>` impl raises it to
-    /// [`Unavailable`](ocx_exit::ExitCode::Unavailable) for an endpoint that
-    /// does not resolve.
+    /// The exit code a bare rejection classifies to: 64, or 69 for an endpoint that does not resolve.
     exit: ocx_exit::ExitCode,
 }
 
 impl UrlRejection {
     /// The exit code a bare rejection classifies to.
-    ///
-    /// The field stays private - only this module may set it - but the ladder
-    /// that reads it lives in the binary, so the verdict needs an accessor.
     #[must_use]
     pub fn exit(&self) -> ocx_exit::ExitCode {
         self.exit
@@ -468,27 +256,12 @@ impl UrlRejection {
 }
 
 impl From<crate::ssrf::SsrfError> for UrlRejection {
-    /// Carry an SSRF verdict through the existing `InvalidEndpointUrl` channel.
-    ///
-    /// A refused endpoint is a refused endpoint whichever layer caught it, and
-    /// routing it here keeps the CLI contract fixed: same error variant, same
-    /// `error.detail` flag attribution, and — for every verdict but an
-    /// unresolvable host — the same exit code. `SsrfError`'s own
-    /// `Display` names the host and the address it resolved to -- both from the
-    /// caller's own URL, so there is nothing to redact.
+    /// Carries an SSRF verdict through the `InvalidEndpointUrl` channel, keeping the CLI's variant and exit contract.
     fn from(error: crate::ssrf::SsrfError) -> Self {
-        // Deliberately not `error.classify()`. That is the *registry* guard's
-        // table, where a forbidden target is a configuration error (78); on
-        // the Sigstore side a rejected endpoint URL is documented as 64, and
-        // that is the contract both `SignErrorKind::InvalidEndpointUrl` and
-        // its verify twin report. Only the resolution failure moves, to the
-        // 69 the registry guard now gives the identical condition.
+        // Not `error.classify()`, the registry guard's table (forbidden = 78): a rejected Sigstore endpoint is 64.
         let exit = match error {
             crate::ssrf::SsrfError::Resolution { .. } => ocx_exit::ExitCode::Unavailable,
-            // Spelled out rather than wildcarded: `SsrfError` is
-            // `#[non_exhaustive]` only to other crates, so within this one an
-            // added variant lands here as a compile error instead of a silent
-            // 64.
+            // No wildcard, so a new variant is a compile error rather than a silent 64.
             crate::ssrf::SsrfError::ForbiddenTarget { .. } => ocx_exit::ExitCode::UsageError,
         };
         Self {
@@ -499,13 +272,7 @@ impl From<crate::ssrf::SsrfError> for UrlRejection {
 }
 
 impl UrlRejection {
-    /// Builds a bare rejection classifying to
-    /// [`ExitCode::UsageError`](ocx_exit::ExitCode::UsageError).
-    ///
-    /// `pub` (rather than `crate::endpoint`-private) so a caller outside this
-    /// module can construct a rejection without going through a struct
-    /// literal — the private `exit` field means that literal no longer
-    /// compiles outside this module.
+    /// Builds a bare rejection classifying to [`ExitCode::UsageError`](ocx_exit::ExitCode::UsageError).
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
@@ -513,28 +280,17 @@ impl UrlRejection {
         }
     }
 
-    /// The exit code this rejection classifies to, independent of whether a
-    /// sign- or verify-side wrap ever asks
-    /// `ClassifyExitCode::classify`, which the binary carries (`ocx::exit`).
+    /// The exit code this rejection classifies to.
     #[must_use]
     pub fn exit_code(&self) -> ocx_exit::ExitCode {
         self.exit
     }
 }
 
-/// Strip every part of an operator-supplied URL that can carry a secret,
-/// before it is echoed back inside a rejection message.
-///
-/// Userinfo is the CWE-209 case the credentials branch already handled. Query
-/// and fragment are the same hazard one component over: a `[trust.sigstore]`
-/// entry is operator config, and `http://fulcio.corp/?token=hush` puts a
-/// bearer token in a string that a rejection prints to stderr and into the
-/// JSON error envelope (ERR-17). Scheme, host, port and path survive, so the
-/// operator can still tell which entry was refused.
+/// Strip userinfo, query and fragment from a URL before a rejection echoes it: each can carry a secret.
 fn scrub_for_echo(url: &Url) -> Url {
     let mut scrubbed = url.clone();
-    // Both setters fail only on a cannot-be-a-base URL, which cannot reach a
-    // rejection that wants to name a host; nothing is lost by ignoring them.
+    // The setters fail only on a cannot-be-a-base URL, which names no host to echo.
     let _ = scrubbed.set_username("");
     let _ = scrubbed.set_password(None);
     scrubbed.set_query(None);
@@ -544,34 +300,14 @@ fn scrub_for_echo(url: &Url) -> Url {
 
 /// Validate a user-supplied Sigstore endpoint URL.
 ///
-/// Accepts:
-/// - Any `https://` URL (production Fulcio/Rekor endpoints).
-/// - `http://` on loopback hosts (`127.0.0.0/8`, `::1`, `localhost`) for
-///   integration-test fixtures.
-///
-/// Rejects:
-/// - `http://` on non-loopback hosts (SSRF risk, CWE-918).
-/// - Any scheme other than `http` or `https` (`file://`, `ftp://`, etc.).
-/// - URLs embedding credentials (`https://user:pass@host/`) — Sigstore
-///   endpoints never require userinfo; presence indicates URL confusion
-///   or credential-stuffing attempts.
-/// - Empty or unparseable strings.
-///
-/// Scheme comparison is case-insensitive by virtue of `url::Url::parse`
-/// normalizing the scheme to lowercase during parsing, so `HTTPS://...`
-/// is accepted identically to `https://...`.
+/// Accepts `https://`, and `http://` only on loopback hosts; rejects embedded credentials, other schemes and
+/// unparseable input.
 ///
 /// # Errors
 ///
-/// Returns a [`UrlRejection`] describing the violation. Callers wrap it into
-/// their own `InvalidEndpointUrl` variant, citing the flag name so the error
-/// envelope's `error.detail` is programmatically dispatchable.
+/// A [`UrlRejection`] describing the violation, which callers wrap with the originating flag name.
 pub fn validate_sigstore_url(raw: &str, _flag_name: &str) -> Result<Url, UrlRejection> {
-    // Do not echo `raw` in the parse-failure message: an unparseable input may
-    // still contain a `user:password@host` substring (the parser rejects the
-    // URL for unrelated reasons — bad port, invalid host, etc.), and embedding
-    // it here would leak the credential into stderr or the JSON envelope
-    // before the post-parse userinfo scrubber below can run (CWE-209).
+    // Never echo `raw`: an unparseable input can still hold `user:password@` (CWE-209).
     let url = Url::parse(raw).map_err(|e| UrlRejection::new(format!("malformed URL: {e}")))?;
     if !url.username().is_empty() || url.password().is_some() {
         return Err(UrlRejection::new(format!(
@@ -628,7 +364,7 @@ mod tests {
         text
     }
 
-    /// C-007 / S-002 (unit tier): the Sigstore builder is the pure seam — a
+    /// The Sigstore builder is the pure seam — a
     /// set handed to `sigstore_client_builder` is what the built client trusts.
     /// One in-process TLS server presenting a leaf signed by a minted root, dialed
     /// by IP so the pinned resolver (names only) stays out of the picture; the
@@ -671,7 +407,7 @@ mod tests {
         assert_untrusted_root(&chain);
     }
 
-    /// C-007 (review r1): the SHIPPED client — `sigstore_http_client()`, the
+    /// The SHIPPED client — `sigstore_http_client()`, the
     /// one every Fulcio/Rekor/TUF call site uses — consumes the roots
     /// `install_sigstore_roots` installed, not only the pure builder the seam
     /// test above feeds. Dialed by IP so the pinned resolver stays out of it.
@@ -1288,7 +1024,7 @@ mod tests {
     // ── The proxy route: the process dials the proxy, not the endpoint ─────
 
     /// An operator whose only egress is an HTTP proxy named by *hostname* can
-    /// sign and verify (ocx-sh/ocx#323).
+    /// sign and verify.
     ///
     /// Under a proxy the connector resolves and dials the proxy; the Sigstore
     /// endpoint is literal text in the absolute-form request line, so the guard

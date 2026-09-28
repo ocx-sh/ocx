@@ -3,22 +3,7 @@
 
 //! [`KeySigner`] — the key-pair half of signing, delegated to a [`KeyBackend`].
 //!
-//! Keyless stays the default and the differentiator (spec D10); this is the
-//! model an air-gapped or policy-bound org uses, and the one a cosign user who
-//! signed with `--key` needs OCX to verify.
-//!
-//! **This signer delegates rather than extends.** `KeyBackend` is the narrow
-//! signing primitive — `async`, fallible with a transport-class error, never
-//! exposing private key material, so a KMS fits it as well as a file does.
-//! `Signer` is the pipeline-level abstraction that returns a whole bundle.
-//! Folding key mode into `Signer` directly would have widened a keyless-shaped
-//! interface (`token`, `fulcio_url`) for every caller (ISP).
-//!
-//! **It also bypasses `sigstore::bundle::sign`.** That API's `to_bundle()`
-//! hardcodes `Content::X509CertificateChain`, and there is no
-//! `Content::PublicKey` arm anywhere in the high-level crate — the protobuf
-//! type models it, the API does not. So the verification material is
-//! hand-assembled through [`SigningMaterial::PublicKey`](super::bundle).
+//! Bypasses `sigstore::bundle::sign`, whose `to_bundle()` has no `Content::PublicKey` arm.
 
 use std::sync::Arc;
 
@@ -37,16 +22,9 @@ use crate::attest::{DSSE_PAYLOAD_TYPE, MAX_STATEMENT_PAYLOAD_BYTES};
 /// Signs with a key pair held by a [`KeyBackend`], with no Fulcio and no OIDC.
 pub struct KeySigner {
     backend: Arc<dyn KeyBackend>,
-    /// Where to upload, when uploading. `None` is the default under a key —
-    /// `--rekor-upload` or `[trust.sigstore] rekor_upload = true` opts in.
+    /// Where to upload, when uploading; `None` by default under a key, unlike cosign.
     ///
-    /// Off by default despite cosign defaulting on, and deliberately: `rekor_url`
-    /// defaults to the **public** Rekor, so an on-by-default key path would
-    /// publish the digest and signer identity of a private corporate artifact to
-    /// a world-readable append-only log on first run. That is irreversible; the
-    /// opposite error — a signature with no transparency record — is fixed by
-    /// re-signing. In key mode the log is not load-bearing for verification
-    /// either, so its absence costs auditability, not verifiability.
+    /// Default-on would publish a private artifact's digest and signer to the public Rekor, irreversibly.
     rekor_url: Option<Url>,
 }
 
@@ -71,16 +49,10 @@ impl Signer for KeySigner {
             "the pipeline must not spend an OIDC token on a signer that declares it needs none",
         );
 
-        // `sha256(payload)`, not the PAE — cosign signs a simplesigning claim as
-        // an opaque blob, and its Rekor entry is a `hashedrekord` over the same
-        // digest.
+        // `sha256(payload)`, not the PAE: cosign's `hashedrekord` entry is over the same digest.
         let payload_digest = sha256(payload);
         let signature = self.backend.sign_prehash(&payload_digest).await?;
 
-        // No certificate and no chain: that is the key-mode shape, and the
-        // reader must not treat their absence as malformed (spec D5). Matches
-        // `test/tests/fixtures/golden/simplesigning_key_manifest.json`, whose
-        // one layer carries the signature annotation alone.
         let entry = match &self.rekor_url {
             Some(url) => Some(
                 RekorClient::new(url.clone())
@@ -128,10 +100,7 @@ impl Signer for KeySigner {
             "the pipeline must not spend an OIDC token on a signer that declares it needs none",
         );
 
-        // Same ceiling, same reason, and before any network contact: a Rekor
-        // entry is permanent, so an over-cap statement that reached the log
-        // would be published forever and then refused by this tool's own
-        // verifier.
+        // Capped before any network: an over-cap Rekor entry is permanent yet refused by our own verifier.
         if statement_bytes.len() > MAX_STATEMENT_PAYLOAD_BYTES {
             return Err(SignErrorKind::PredicateTooLarge {
                 limit: MAX_STATEMENT_PAYLOAD_BYTES as u64,
@@ -139,11 +108,7 @@ impl Signer for KeySigner {
             });
         }
 
-        // What is signed is `sha256(PAE(payload_type, statement_bytes))` — the
-        // identical rule the keyless path follows. The PAE is what binds the
-        // payload to its declared type; dropping it would make a signature over
-        // a CycloneDX SBOM equally valid over the same bytes claimed as SLSA
-        // provenance.
+        // Sign the PAE, never the bare bytes, or one signature holds for the same bytes under another payload type.
         let signature = self
             .backend
             .sign_prehash(&sha256(&pae(DSSE_PAYLOAD_TYPE, statement_bytes)))
@@ -155,16 +120,7 @@ impl Signer for KeySigner {
             payload_type: DSSE_PAYLOAD_TYPE.to_string(),
             signatures: vec![DsseSignature {
                 sig: signature,
-                // Empty, in key mode as in keyless: cosign omits the member in
-                // **both** — `key_bundle.json` and `keyless_bundle.json`, its
-                // own output, each carry a lone `sig` — and its DSSE verifier
-                // matches candidate signatures on keyid. A hint here therefore
-                // filters every ocx key-mode signature out before any
-                // cryptography runs ("accepted signatures do not match
-                // threshold, Found: 0, Expected 1"), for an intact signature as
-                // much as a corrupted one. The key is identified where cosign
-                // identifies it: `verificationMaterial.publicKey.hint`, set
-                // from this same `hint` below.
+                // Empty: `cosign verify` drops every signature whose `keyid` it cannot match, before any crypto runs.
                 keyid: String::new(),
             }],
         })?;
@@ -193,18 +149,12 @@ impl Signer for KeySigner {
     }
 }
 
-/// SHA-256 of `bytes`.
 fn sha256(bytes: &[u8]) -> Vec<u8> {
     use sha2::Digest as _;
     sha2::Sha256::digest(bytes).to_vec()
 }
 
-/// PEM-encode an SPKI DER public key, which is the form Rekor's `verifier`
-/// field takes.
-///
-/// Rekor accepts either a certificate or a bare public key there; under a key
-/// there is no certificate, so the public half is what identifies the signer to
-/// the log.
+/// PEM-encode an SPKI DER public key, the form Rekor's `verifier` field takes.
 fn pem_public_key(spki_der: &[u8]) -> Result<String, SignErrorKind> {
     use base64::Engine as _;
     let body = base64::engine::general_purpose::STANDARD.encode(spki_der);

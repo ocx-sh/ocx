@@ -1,17 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `attest_one` — package-manager task that attaches one in-toto attestation
-//! to a single target manifest.
-//!
-//! Mirrors [`sign_one`](super::sign) exactly: the client and index come from
-//! the [`PackageManager`] facade, the pipeline's [`AttestResult`] becomes an
-//! [`AttestReport`], and any failure is wrapped in a [`PackageError`] tagged
-//! with the target identifier.
-//!
-//! Per [`subsystem-package-manager.md`](../../../../../.claude/rules/subsystem-package-manager.md)
-//! and Spec A10 — tasks live in `package_manager/tasks/`; the aggregator is
-//! `package_manager/tasks.rs` (not `tasks/mod.rs`).
+//! Attach in-toto attestations to target manifests, mirroring [`sign_one`](super::sign).
 
 use url::Url;
 use zeroize::Zeroizing;
@@ -24,15 +14,8 @@ use ocx_sign::sign::{DispatchingTokenProvider, SignError, SignErrorKind};
 
 use super::super::PackageManager;
 
-/// Options forwarded from the CLI to [`PackageManager::attest_one`].
-///
-/// Mirrors [`SignOptions`](super::sign::SignOptions), plus the two fields
-/// attesting adds and the `offline` policy flag signing keeps at its own CLI
-/// boundary.
-///
-/// `Clone` for the same reason [`SignOptions`](super::sign::SignOptions) is: a
-/// `--tags` / `--tags-file` sweep attests N references from one parsed option
-/// set.
+/// Options forwarded from the CLI to [`PackageManager::attest_one`]: [`SignOptions`](super::sign::SignOptions)
+/// plus the predicate and the `offline` policy flag.
 #[derive(Clone)]
 pub struct AttestOptions {
     /// Fulcio CA endpoint (validated by the CLI). Default: `https://fulcio.sigstore.dev`.
@@ -41,18 +24,15 @@ pub struct AttestOptions {
     pub rekor_url: Url,
     /// OIDC override token (file / stdin / env, resolved by the CLI layer).
     pub identity_token: Option<Zeroizing<String>>,
-    /// The requested `--type`; its resolved URI is what gets written (D-c).
+    /// The requested `--type`; its resolved URI is what gets written.
     pub predicate_type: PredicateType,
-    /// RAW FILE BYTES, not a parsed `Value`. Validated by a parse whose result
-    /// is discarded, then spliced verbatim (D-b). A `Value` here would
-    /// normalize whitespace and number spelling before anything downstream
-    /// could preserve them.
+    /// Raw file bytes, spliced verbatim; a parsed `Value` would normalize whitespace and number spelling.
     pub predicate: Vec<u8>,
     /// Bypass the referrers-capability cache for this invocation.
     pub no_cache: bool,
     /// When true, suppress the browser OAuth fallback (CI / headless).
     pub no_tty: bool,
-    /// Mirrors the S1-E policy: the refusal runs before token resolution.
+    /// Offline-refusal policy, checked before token resolution.
     pub offline: bool,
     /// Selects key mode. `None` is keyless — see [`SignOptions::key`](super::sign::SignOptions::key).
     pub key: Option<ocx_trust::key_ref::KeyRef>,
@@ -72,17 +52,13 @@ pub struct AttestReport {
 }
 
 impl PackageManager {
-    /// Attach an in-toto attestation to what `package` resolves to, publishing
-    /// a DSSE-enveloped Sigstore bundle v0.3 referrer manifest.
-    ///
-    /// `platform` narrows exactly as it does for
-    /// [`sign_one`](Self::sign_one): `None` attests the resolved object,
-    /// `Some` narrows into an index to that child.
+    /// Attach an in-toto attestation to what `package` resolves to, publishing a DSSE-enveloped Sigstore bundle
+    /// v0.3 referrer manifest; `Some(platform)` narrows into an index as [`sign_one`](Self::sign_one) does.
     ///
     /// # Errors
     ///
-    /// [`PackageError`] tagged with `package` on any failure — exit-code
-    /// classification routes via [`ocx_sign::sign::SignErrorKind`].
+    /// [`PackageError`] tagged with `package` on any failure; the exit code comes from
+    /// [`ocx_sign::sign::SignErrorKind`].
     pub async fn attest_one(
         &self,
         package: &ocx_oci::PackageRef,
@@ -90,11 +66,7 @@ impl PackageManager {
         opts: AttestOptions,
         resolved: Option<&(ocx_oci::Digest, ocx_oci::Manifest)>,
     ) -> Result<AttestReport, PackageError> {
-        // The S1-E refusal has to answer here as well as in the pipeline:
-        // `require_client` below reports `OfflineMode` (81) for an offline
-        // manager, which would shadow the 77 policy code a script branches on
-        // to tell a deliberate refusal from an outage. The pipeline keeps its
-        // own check for every other caller; this one keeps 81 from winning.
+        // Refused here too, or `require_client`'s `OfflineMode` (81) shadows the 77 policy code scripts branch on.
         if opts.offline {
             return Err(map_attest_error(
                 package.clone(),
@@ -102,15 +74,9 @@ impl PackageManager {
             ));
         }
 
-        // The CLI hands over raw file bytes on purpose (D-b): parsing to a
-        // `Value` here would normalize whitespace and number spelling before
-        // anything downstream could preserve them. `RawValue` validates the
-        // bytes as JSON and keeps the original slice, which is what gets
-        // signed.
+        // `RawValue`, not `Value`: validates without normalizing, so the signed bytes are the file's own.
         let predicate: Box<serde_json::value::RawValue> = serde_json::from_slice(&opts.predicate).map_err(|_| {
-            // The parse error itself is discarded: it quotes the offending
-            // bytes, which came from a file the user named and would reach
-            // the terminal unsanitized.
+            // Parse error discarded: it quotes user-file bytes that would reach the terminal unsanitized.
             map_attest_error(
                 package.clone(),
                 SignError::new(package.clone(), SignErrorKind::PredicateNotJson),
@@ -125,17 +91,8 @@ impl PackageManager {
             .map_err(|kind| map_attest_error(package.clone(), SignError::new(package.clone(), kind)))?;
         let trusted_hosts = self.index().trusted_hosts_for(package.registry()).to_vec();
         let token_provider = DispatchingTokenProvider::new(opts.identity_token, opts.no_tty, trusted_hosts);
-        // Polarity: sign iff a signing identity is *visible*. An override token
-        // or a detected ambient CI identity means signed, and a failure to
-        // redeem it stays a hard error — a downgrade there would publish an
-        // identity-less artifact from a job configured for OIDC, and the
-        // referrer would look attached either way. Only the total absence of
-        // signing material reaches the unsigned attach, which is where both
-        // verbs used to dead-end at exit 77.
-        //
-        // Key mode short-circuits it: `--key` IS the signing material, so an
-        // attach that named a key must never degrade to an unsigned one because
-        // no OIDC identity happened to be around.
+        // Sign iff signing material is visible; `--key` counts, or naming a key degrades to unsigned without OIDC.
+        // A failed redemption stays a hard error, or an OIDC job publishes an unsigned, attached-looking referrer.
         let mode = match opts.key.is_some() || token_provider.has_signing_material() {
             true => AttestMode::Signed,
             false => AttestMode::Unsigned,
@@ -167,17 +124,8 @@ impl PackageManager {
 }
 
 impl PackageManager {
-    /// Attach the attestation to the index each of `tags` resolves to, in the
-    /// repository `package` names.
-    ///
-    /// The index sweep [`sign_tags`](Self::sign_tags) performs, for the attest
-    /// verb: same skip rule (a tag resolving to a bare manifest is left alone),
-    /// same survive-and-continue rule, same never-`Err` contract, and the same
-    /// one-run-per-distinct-subject-digest rule: an attestation is a referrer
-    /// of the subject digest too, so a cascade release's aliases collapse to
-    /// one run here exactly as they do for `sign`. One predicate is attached to
-    /// every swept index — the predicate is the caller's file, read once before
-    /// the sweep starts.
+    /// Attach the attestation to the index each of `tags` resolves to, under [`sign_tags`](Self::sign_tags)'s
+    /// sweep rules: bare-manifest tags skipped, failures survived, never `Err`, one run per subject digest.
     pub async fn attest_tags(
         &self,
         package: &ocx_oci::PackageRef,
@@ -187,8 +135,7 @@ impl PackageManager {
         use super::sign::{SweptOutcome, SweptTag};
         use std::collections::HashMap;
 
-        // Subject digest -> the tag whose run attested it, exactly as in
-        // `sign_tags`: see [`SweptOutcome::CoveredBy`].
+        // Subject digest -> the tag whose run attested it.
         let mut attested: HashMap<ocx_oci::Digest, String> = HashMap::new();
         let mut swept = Vec::with_capacity(tags.len());
         for tag in tags {
@@ -199,11 +146,6 @@ impl PackageManager {
                     log::warn!("Skipping '{identifier}': it resolves to a single manifest, which push already signed.");
                     SweptOutcome::SkippedBareManifest
                 }
-                // The resolution travels on, exactly as it does in
-                // `sign_tags`: this loop already asked the index chain what the
-                // tag names, and the pipeline would ask again (#373).
-                //
-                // `.cloned()` ends the borrow before the `None` arm inserts.
                 Ok(Some(resolved)) => match attested.get(&resolved.0).cloned() {
                     Some(first) => {
                         log::warn!(
@@ -230,8 +172,7 @@ impl PackageManager {
     }
 }
 
-/// Wrap a [`SignError`] in a [`PackageError`] tagged with `identifier`,
-/// preserving the attest exit code through `PackageErrorKind::Internal`.
+/// Wrap a [`SignError`] in a [`PackageError`] tagged with `identifier`, keeping the attest exit code.
 fn map_attest_error(identifier: ocx_oci::PackageRef, err: SignError) -> PackageError {
     PackageError::new(
         identifier,
@@ -291,7 +232,7 @@ mod tests {
         sign
     }
 
-    /// S-002 at the task layer. `require_client` answers `OfflineMode` (81) for
+    /// At the task layer, `require_client` answers `OfflineMode` (81) for
     /// an offline manager, so a task that reached for the client first would
     /// report a passive network failure where the contract says 77 policy
     /// refusal — and `ocx package push --sbom`, which never passes through
@@ -324,7 +265,7 @@ mod tests {
         assert_eq!(&error.identifier, &package, "the refusal is tagged with the target");
     }
 
-    /// S-005 read half: the CLI hands over raw bytes, and the task layer is
+    /// The CLI hands over raw bytes, and the task layer is
     /// where they become the `RawValue` the pipeline splices. Non-JSON bytes
     /// are a malformed *file* (65), not a bad invocation.
     #[tokio::test]
@@ -347,7 +288,7 @@ mod tests {
         }
     }
 
-    /// **S-011 / C-041.** The attest sweep resolves each tag once too.
+    /// The attest sweep resolves each tag once too.
     ///
     /// The issue names only `sign_tags`, but `attest_tags` imports the same
     /// `resolve_swept_index` and the same `resolve_platform_target`, so it

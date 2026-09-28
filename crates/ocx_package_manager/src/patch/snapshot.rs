@@ -1,39 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Patch-tier snapshot — opt-in determinism for the site-patch tier.
-//!
-//! A [`PatchSnapshot`] is written by `ocx patch freeze` and read at
-//! compose-time to prefer pinned digests over live tag lookups.  It is the
-//! patch-tier equivalent of `ocx.lock` for the project toolchain tier.
-//!
-//! ## File location
-//!
-//! The snapshot lives at [`PATCH_SNAPSHOT_FILE`] (`patches.snapshot.json`)
-//! as a sibling of `ocx.lock` in the project root (or `$OCX_HOME` under
-//! `--global`).  The path is derived the same way as the lock file: by
-//! joining the resolved project directory with [`PATCH_SNAPSHOT_FILE`].
-//!
-//! ## Key scheme
-//!
-//! - **`companions` map** — key = `registry/repository:tag`, built by
-//!   [`companion_key`] and read back by [`companion_key_identifier`], value =
-//!   the pinned digest. The tag is load-bearing: a descriptor may name one
-//!   repository at two tags, and the overlay composes each as its own
-//!   companion, so a repository-only key would let a freeze drop one of them.
-//!   Both halves of the scheme go through that one pair of functions, and
-//!   `companion_key_round_trips` pins them as inverses.
-//! - **`descriptors` map** — key = the descriptor SOURCE's canonical
-//!   `registry/repository` (the global root and each package-specific source,
-//!   from
-//!   [`SitePatchRoots::descriptor_pins`](crate::tasks::resolve::SitePatchRoots::descriptor_pins)),
-//!   value = the descriptor's manifest digest at freeze time.  This map drives
-//!   descriptor SELECTION at compose time (C8 whole-tier determinism): under an
-//!   active snapshot the overlay loads each descriptor by its pinned manifest
-//!   digest from the CAS instead of re-reading the live tag store, so a
-//!   post-freeze `ocx patch sync` that publishes a new descriptor cannot change
-//!   which companions a frozen build composes.  A source absent from this map
-//!   did not exist at freeze time and is not composed by a frozen build.
+//! Patch-tier snapshot — the site-patch tier's equivalent of `ocx.lock`, written
+//! by `ocx patch freeze` and preferred by compose over live tag lookups.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -47,11 +16,6 @@ use crate::SitePatchRoots;
 pub const PATCH_SNAPSHOT_FILE: &str = "patches.snapshot.json";
 
 /// On-disk version tag for the patch snapshot format.
-///
-/// `serde_repr` rejects unknown integer values on deserialise automatically.
-/// Only the current generation is representable — a snapshot is a derived
-/// file that `ocx patch freeze` rewrites in seconds, so an older one is
-/// refused with that remedy rather than parsed by a second code path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum SnapshotVersion {
@@ -66,12 +30,8 @@ impl SnapshotVersion {
 }
 
 /// The [`PatchSnapshot::companions`] key for a companion identifier:
-/// `registry/repository:tag`.
-///
-/// The tag is resolved through `tag_or_latest()` so the key matches the patch
-/// tier's own record, which is keyed by the same value inside
-/// `state/patch-companions/<registry>/<repository>.json`. Write and read both
-/// go through here; [`companion_key_identifier`] is the inverse.
+/// `registry/repository:tag`; write and read both go through here.
+// `tag_or_latest()`, or the key misses the patch-companion record keyed by the same value.
 pub fn companion_key(companion_id: &ocx_oci::PackageRef) -> String {
     format!(
         "{}/{}:{}",
@@ -83,10 +43,7 @@ pub fn companion_key(companion_id: &ocx_oci::PackageRef) -> String {
 
 /// Inverse of [`companion_key`]: the tagged identifier a key names, or `None`
 /// when the key is not in that grammar.
-///
-/// The split is unambiguous in both directions. A registry is a bare host
-/// authority, so it ends at the first `/` even when it carries a port; a
-/// repository cannot contain `:`, so the tag begins at the last one.
+// A registry (even with a port) ends at the first `/`; a repository has no `:`, so the tag starts at the last.
 pub fn companion_key_identifier(key: &str) -> Option<ocx_oci::PackageRef> {
     let (registry, rest) = key.split_once('/')?;
     let (repository, tag) = rest.rsplit_once(':')?;
@@ -94,65 +51,29 @@ pub fn companion_key_identifier(key: &str) -> Option<ocx_oci::PackageRef> {
 }
 
 /// Frozen view of the active site-patch tier for reproducible builds.
-///
-/// Written by `ocx patch freeze`, read at compose-time so the overlay
-/// prefers the pinned digests over live tag lookups. Serialised as JSON
-/// (pretty-printed, deterministic `BTreeMap` key order).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatchSnapshot {
     /// Format version. Unknown versions are rejected on deserialise.
     pub version: SnapshotVersion,
-    /// Companion packages pinned by the snapshot.
-    ///
-    /// Key: `registry/repository:tag`, from [`companion_key`].
-    /// Value: pinned digest at freeze time.
-    ///
-    /// Keyed by tag, not by repository: one repository named at two tags is
-    /// two companions in the overlay, each composing its own package.
+    /// Companion packages pinned by the snapshot: [`companion_key`] → digest at freeze time.
+    // Keyed by tag, not repository: one repository at two tags is two companions, and a
+    // repository-only key makes a freeze drop one.
     pub companions: BTreeMap<String, ocx_oci::Digest>,
-    /// Patch descriptor sources pinned by the snapshot (drives descriptor
-    /// SELECTION at compose time — C8).
-    ///
-    /// Key: the descriptor source's canonical `registry/repository` (the global
-    /// root and each package-specific source, from
-    /// [`SitePatchRoots::descriptor_pins`](crate::tasks::resolve::SitePatchRoots::descriptor_pins)).
-    /// Value: the descriptor's manifest digest at freeze time.
-    ///
-    /// Under an active snapshot the overlay loads each descriptor by its pinned
-    /// manifest digest from the CAS rather than the live tag store, so a
-    /// post-freeze `ocx patch sync` cannot change which companions a frozen
-    /// build composes.  A source absent here is not composed by a frozen build.
+    /// Descriptor sources pinned by the snapshot: canonical `registry/repository`
+    /// → manifest digest at freeze time. Compose loads each by digest, so a
+    /// post-freeze `ocx patch sync` cannot change a frozen build; an absent source
+    /// is not composed.
     pub descriptors: BTreeMap<String, ocx_oci::Digest>,
 }
 
 impl PatchSnapshot {
-    /// Build a snapshot from live [`SitePatchRoots`].
-    ///
-    /// Companion key = [`companion_key`] of the pinned identifier
-    /// (`registry/repository:tag`). Descriptor key = the source key stored in
-    /// the `(source_key, digest)` tuple.
-    ///
-    /// `BTreeMap` insertion is ordered so repeated calls with the same roots
-    /// yield byte-identical output.
+    /// Build a snapshot from live [`SitePatchRoots`]; equal roots yield byte-identical output.
     pub fn from_roots(roots: &SitePatchRoots) -> Self {
-        // Build the companions map through the shared key helper, so the read
-        // side (`companion_pin`) cannot drift from what a freeze writes.
-        // BTreeMap insertion guarantees deterministic key order.
         let mut companions = BTreeMap::new();
         for pinned in &roots.companions {
             companions.insert(companion_key(pinned.as_identifier()), pinned.digest());
         }
 
-        // Build the descriptors map: key = the descriptor SOURCE's canonical
-        // "registry/repository" (the global root + each package-specific source),
-        // value = the manifest digest pinned at freeze time. This drives
-        // descriptor SELECTION at compose time under an active snapshot (C8): the
-        // overlay loads the frozen descriptor by this digest instead of the live
-        // tag store, so a post-freeze `ocx patch sync` that advances a descriptor
-        // cannot change which companions a frozen build composes. `BTreeMap`
-        // insertion guarantees deterministic key order. (Built from
-        // `roots.descriptor_pins`, which `resolve_site_patch_roots` already
-        // dedups by source key.)
         let mut descriptors = BTreeMap::new();
         for (source_key, digest) in &roots.descriptor_pins {
             descriptors.insert(source_key.clone(), digest.clone());
@@ -165,14 +86,12 @@ impl PatchSnapshot {
         }
     }
 
-    /// Write this snapshot to the given path as pretty-printed JSON.
-    ///
-    /// The parent directory is created automatically if absent.
+    /// Write this snapshot to the given path as pretty-printed JSON, creating
+    /// the parent directory if absent.
     ///
     /// # Errors
     ///
-    /// Returns an error if the path cannot be created or the JSON cannot be
-    /// serialised.
+    /// The path cannot be created or the JSON cannot be serialised.
     pub async fn write(&self, path: &Path) -> crate::Result<()> {
         use ocx_util::prelude::SerdeExt;
         self.write_json(path).await.map_err(Into::into)
@@ -181,31 +100,21 @@ impl PatchSnapshot {
     /// Read a snapshot from the given path, with the digest of the bytes it was
     /// parsed from.
     ///
-    /// Returns `Ok(None)` when the file is absent so callers can fall back to
-    /// live lookups without treating a missing snapshot as an error.
-    ///
-    /// The digest rides along rather than being a second call the caller makes,
-    /// because it is the identity of *this* parse: an execution record naming a
-    /// snapshot digest that a later read produced would describe a file the
-    /// invocation never composed against.
+    /// Returns `Ok(None)` when the file is absent. The digest is of *this* parse's
+    /// bytes, or an execution record could name a file the invocation never composed against.
     ///
     /// # Errors
     ///
-    /// Returns an error if the file exists but cannot be parsed, or if it
-    /// carries a `version` other than [`SnapshotVersion::CURRENT`] — a
-    /// snapshot is derived state, so the remedy is to rewrite it with
-    /// `ocx patch freeze` rather than to keep a reader for the older shape.
+    /// The file exists but cannot be parsed, or carries a `version` other than
+    /// [`SnapshotVersion::CURRENT`].
     pub async fn read(path: &Path) -> crate::Result<Option<(Self, ocx_oci::Digest)>> {
         let bytes = match tokio::fs::read(path).await {
             Ok(bytes) => bytes,
-            // Absent file is not an error — fall back to live lookups.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(crate::error::file_error(path, error)),
         };
 
-        // Peek at `version` before the struct parse. `serde_repr` would reject
-        // an older generation as an opaque "unknown variant" with no remedy in
-        // it; a snapshot is cheap to rebuild, so the error says how.
+        // Peek at `version` first, or `serde_repr` rejects an older file as an opaque error with no remedy.
         let raw: serde_json::Value = serde_json::from_slice(&bytes)?;
         if let Some(found) = raw.get("version").and_then(serde_json::Value::as_u64)
             && found != SnapshotVersion::CURRENT as u64
@@ -223,16 +132,7 @@ impl PatchSnapshot {
     }
 }
 
-// ── Phase 5B specification tests — PatchSnapshot + SnapshotVersion ──────────
-//
-// Traceability:
-//   Test 1 — PatchSnapshot round-trips JSON deterministically (BTreeMap key order);
-//             SnapshotVersion rejects an unknown version on deserialise.
-//   Test 2 — PatchSnapshot::from_roots maps companions → digests and
-//             descriptors → digests correctly from a SitePatchRoots.
-//
-// These tests MUST compile and FAIL against the unimplemented!() stub in
-// PatchSnapshot::from_roots (the read/write paths are already implemented).
+// ── PatchSnapshot + SnapshotVersion tests ───────────────────────────────────
 
 #[cfg(test)]
 mod spec_tests {
@@ -401,7 +301,7 @@ mod spec_tests {
         );
 
         // Descriptor key: the source's canonical "registry/repository" (drives
-        // frozen descriptor selection at compose time — C8).
+        // frozen descriptor selection at compose time).
         let expected_descriptor_key = "patches.example.com/acme/cli";
         assert!(
             snapshot.descriptors.contains_key(expected_descriptor_key),

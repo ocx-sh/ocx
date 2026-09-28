@@ -18,9 +18,7 @@ impl TarBackend {
     pub fn new(writer: Box<dyn Write + Send>) -> Self {
         let mut builder = tar::Builder::new(writer);
         builder.follow_symlinks(false);
-        // Deterministic headers: zero uid/gid/mtime/uname/gname. Without this, every
-        // archive embeds the build user's uid and the current mtime, breaking byte-for-byte
-        // reproducibility and producing files owned by a stale uid after extraction.
+        // Deterministic headers, or every archive embeds the build user's uid and mtime and stops reproducing.
         builder.mode(tar::HeaderMode::Deterministic);
         Self {
             inner: Arc::new(Mutex::new(builder)),
@@ -132,12 +130,7 @@ fn add_dir_recursive(
     Ok(())
 }
 
-/// Extract a tar archive from `reader` to `output`, applying `strip_components`,
-/// and return the reader after extraction alongside the result.
-///
-/// Enables callers that wrapped the reader in a digest-accumulating or
-/// progress-tracking adapter to recover their state after the tar extractor
-/// has consumed the stream. The reader may be partially consumed on error.
+/// Extract a tar from `reader` into `output`, returning the reader (partially consumed on error) for its adapter state.
 pub(super) fn extract_returning_reader<R: std::io::Read>(
     reader: R,
     output: &std::path::Path,
@@ -148,55 +141,33 @@ pub(super) fn extract_returning_reader<R: std::io::Read>(
 
     let result = extract_from_archive(&mut archive, output, strip_components);
 
-    // Recover the reader from the archive regardless of whether extraction
-    // succeeded or failed. This allows callers to finalize digest state.
     let reader = archive.into_inner();
     (result, reader)
 }
 
-/// Internal extraction loop shared by `extract` and `extract_returning_reader`.
 fn extract_from_archive<R: std::io::Read>(
     archive: &mut tar::Archive<R>,
     output: &std::path::Path,
     strip_components: usize,
 ) -> Result<()> {
     let mut count = 0u64;
-    // The extraction root must exist before entries land and before the
-    // canonical-root resolution below; a top-level file entry would otherwise
-    // create it only lazily via `create_dir_all(parent)`.
+    // Before canonicalizing: a top-level file entry would create the root only lazily.
     std::fs::create_dir_all(output).map_err(|e| Error::Io {
         path: output.to_path_buf(),
         source: e,
     })?;
-    // Resolve the root once (following any symlink in the root's own ancestry)
-    // so every per-entry containment check compares against a real path.
+    // Resolved once, following the root's own ancestry, so containment checks compare real paths.
     let canonical_root = dunce::canonicalize(output).map_err(|e| Error::Io {
         path: output.to_path_buf(),
         source: e,
     })?;
-    // Remember only the most recent parent passed to `create_dir_all`. Tar
-    // archives list entries depth-first, so the same parent recurs across many
-    // consecutive entries; without this guard every file re-issues a
-    // `create_dir_all` (an N+1 syscall pattern). A single-slot guard collapses
-    // that run of duplicates with O(1) memory — unlike a whole-archive
-    // `HashSet`, whose size would be attacker-controlled by directory fan-out
-    // (memory-amplification surface). `create_dir_all` is idempotent, so an
-    // interleaved-parent layout merely re-issues a harmless syscall, never a
-    // wrong result.
+    // One-slot parent cache: tar lists depth-first, and a whole-archive set would grow with attacker fan-out.
     let mut last_parent: Option<PathBuf> = None;
     for entry in archive.entries().map_err(Error::Tar)? {
         let mut entry = entry.map_err(Error::Tar)?;
         let path = entry.path().map_err(Error::Tar)?.to_path_buf();
 
-        // Refuse GNU sparse entries (CWE-400). tar-rs materializes a sparse hole
-        // with `seek`+`set_len`, consuming NO bytes from the tar stream, so the
-        // decompressed-stream cap (`reader.take(cap + 1)`) never trips and a
-        // single stored byte can claim an arbitrary apparent size on disk. OCX's
-        // own bundler emits only regular entries (`append_file`/`append_dir_all`)
-        // and OCI image layers do not use the GNU sparse extension, so refusing
-        // outright closes the bypass without rejecting anything ocx produces or
-        // pulls. (`is_gnu_sparse` is the `b'S'` typeflag — the only shape tar-rs
-        // routes through its hole-materializing path.)
+        // GNU sparse holes consume no stream bytes, so one stored byte could claim any size past the cap (CWE-400).
         if entry.header().entry_type().is_gnu_sparse() {
             return Err(Error::GnuSparseUnsupported(path));
         }
@@ -206,36 +177,20 @@ fn extract_from_archive<R: std::io::Read>(
             continue;
         }
 
-        // Join under the root, folding `.`/`..` lexically and rejecting an entry
-        // that escapes it (absolute, Windows-prefixed, or `..`-escaping). This
-        // keeps the raw `..` out of the write path — `output.join(&stripped)`
-        // would have preserved it for `entry.unpack` to resolve physically.
+        // Lexical join, never `output.join`, which would hand a raw `..` to `unpack` to resolve physically.
         let out = crate::fs::path::join_under_root(&canonical_root, &stripped)
             .map_err(|_| Error::EntryEscape(path.clone()))?;
 
-        // A `.` / `a/..` entry normalizes to the root itself — the
-        // self-referential `./` entry a `tar -C dir .` archive lists first. It
-        // names no new content and its parent is the root's parent (legitimately
-        // outside the root), so skip it rather than treating it as an escape.
+        // A `./` entry (`tar -C dir .`) is the root itself: skip it, its parent is legitimately outside.
         if out == canonical_root {
             continue;
         }
 
-        // Physical containment BEFORE creating anything (CWE-22): refuse if any
-        // existing ancestor of `out` below the root is a symlink. An earlier
-        // entry can plant a symlink — in this entry's parent chain, or one its
-        // own target reaches through — that redirects a later `create_dir_all` /
-        // `unpack` outside the root; the mkdir must be refused *before* it
-        // happens, not after (a check that ran post-`create_dir_all` has already
-        // let the directory escape through the planted link). `Some(canonical_root)`
-        // trusts the root's own ancestry (a symlinked `$OCX_HOME`) and scopes the
-        // walk to the untrusted portion strictly below it. Every component created
-        // below is then a fresh directory — which cannot be a symlink — so `out`
-        // stays physically contained and is safe to act on by its own path.
+        // Before creating anything (CWE-22): a planted symlink ancestor redirects `create_dir_all`/`unpack` outside.
+        // `Some(canonical_root)` trusts the root's own ancestry, such as a symlinked `$OCX_HOME`.
         crate::fs::refuse_if_symlink_in_path_sync(&out, Some(&canonical_root)).map_err(|e| match e {
             crate::fs::SymlinkWalkError::Ancestor { .. } => Error::EntryEscape(path.clone()),
-            // A component we could not even stat is an I/O fault (74), not a
-            // containment verdict (65).
+            // An unstat-able component is an I/O fault (74), not a containment verdict (65).
             crate::fs::SymlinkWalkError::Io { path, source } => Error::Io { path, source },
         })?;
 
@@ -246,6 +201,7 @@ fn extract_from_archive<R: std::io::Read>(
             last_parent = Some(parent.to_path_buf());
         }
 
+        // Every component created below is a fresh directory, so `out` is safe to act on by path.
         let dst = out;
 
         if entry.header().entry_type() == tar::EntryType::Symlink {
@@ -266,45 +222,19 @@ fn extract_from_archive<R: std::io::Read>(
                 source: e,
             })?;
         } else {
-            // Capture the archived mode before `unpack` so the cap can be applied
-            // afterwards. `set_preserve_permissions(true)` makes `unpack` write
-            // the raw 0o7777 mode, so setuid/setgid/sticky and group/other write
-            // would otherwise survive into the extracted tree.
+            // Captured before `unpack`, which writes the raw 0o7777 including setuid and group/other write.
             #[cfg(unix)]
             let archived_mode = entry.header().mode().ok();
-            // QW2 deferred: wrapping the regular-file write in a BufWriter is not
-            // achievable cleanly with tar 0.4.46. `Entry::unpack`/`unpack_in`
-            // always open their own unbuffered `File`, and the only public way to
-            // apply the header's permission/ownership/mtime bits (set_perms_ownerships
-            // is crate-private) and to honour sparse-file padding is to let `unpack`
-            // own the write. A manual BufWriter copy would drop the executable bit
-            // asserted by test_executable_bit_preserved_through_round_trip, so the
-            // buffering quick win is left for an upstream tar API that exposes
-            // "unpack into a provided writer".
-            //
-            // `unpack` writes to `dst` — the lexical join, whose every existing
-            // ancestor the guard above proved is not a symlink — and never follows
-            // a symlink at the final component: for a regular file it removes any
-            // pre-existing file first, and refuses a directory. The mode cap below
-            // is therefore safe against a planted final-component symlink.
+            // `unpack` never follows a final-component symlink and no ancestor is one, so the cap cannot be steered.
+            // No `BufWriter`: only `unpack` applies the header's perms and keeps the exec bit.
             let unpacked = entry.unpack(&dst).map_err(Error::Tar)?;
+            // Strip setuid/setgid/sticky and group/other write; read and execute pass through.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                // Cap the archived mode at the single site that writes it: strip
-                // setuid/setgid/sticky (0o7000) and group/other write (0o022).
-                // Read and execute bits — the ones an archive legitimately carries
-                // — pass through untouched, so the executable bit survives the
-                // round trip. Applied to an entry that landed a regular file
-                // (`Unpacked::File`) OR a directory, whose raw header mode `unpack`
-                // wrote itself (`preserve_permissions`, no mask). Directory-ness is
-                // read from the written `dst`, NOT the header typeflag: tar-rs's
-                // old-BSD path unpacks a non-ustar header whose name ends in `/` as
-                // a directory even under a regular typeflag, so a typeflag check
-                // would miss it and leave `0o2777` intact. A metadata-only entry
-                // (`pax_global_header`) creates nothing, so `dst` is absent and it
-                // is correctly skipped — chmod on a missing path would fail the run.
+                // From `dst`, not the typeflag: tar-rs unpacks an old-BSD `/`-suffixed regular entry as a directory.
                 let landed_directory = std::fs::symlink_metadata(&dst).map(|m| m.is_dir()).unwrap_or(false);
+                // A metadata-only entry (`pax_global_header`) leaves `dst` absent; chmod would fail the run.
                 if let Some(mode) = archived_mode
                     && (matches!(unpacked, tar::Unpacked::File(_)) || landed_directory)
                 {
@@ -328,40 +258,23 @@ fn extract_from_archive<R: std::io::Read>(
     }
     tracing::debug!("Extracted {count} entries total");
 
-    // Every hop exists now; re-judge each link against the finished tree (see
-    // `sweep_symlinks` for the reverse-order ladder this closes).
+    // Every hop exists now: re-judge each link against the finished tree.
     crate::archive::sweep_symlinks(&canonical_root)?;
 
     Ok(())
 }
 
-/// Resolves a hard-link entry's link name to an existing path inside `output`.
+/// Resolves a hard-link entry's name to an existing file inside `output`, or `None`.
 ///
-/// Returns `None` when the link name is absent, is emptied by `strip_components`,
-/// or does not resolve to a file inside `output`.
-///
-/// `tar::Entry::unpack` cannot be trusted with hard links: it calls
-/// `fields.unpack(None, dst)`, and with `target_base: None` the hard-link branch
-/// hands the archive's raw link name to `fs::hard_link` verbatim (tar 0.4.46,
-/// `src/entry.rs`). That is wrong in both directions — an absolute link name
-/// pulls any host file the extracting user can read into the tree as an ordinary
-/// regular file (invisible to every symlink guard, so it gets bundled and
-/// published), and a relative one resolves against the process CWD instead of
-/// `output`, which makes ordinary GNU-tar-deduplicated archives fail to extract.
+/// Never `unpack`: it hands the raw name to `hard_link`, pulling in any readable host file or resolving against the CWD.
 fn resolve_hard_link_source(output: &Path, link_name: &Path, strip_components: usize) -> Option<PathBuf> {
-    // The link name addresses an earlier entry by its path *within the archive*,
-    // so it takes the same `strip_components` transform as the entry paths.
+    // A link name is an archive path, so it takes `strip_components` too.
     let stripped: PathBuf = link_name.iter().skip(strip_components).collect();
     if stripped.as_os_str().is_empty() {
         return None;
     }
     let candidate = crate::fs::path::join_under_root(output, &stripped).ok()?;
-    // `join_under_root` is lexical, and the extraction root need not be empty:
-    // an intermediate component that is itself a symlink can collapse a
-    // declared in-root path onto a real out-of-root file. The source has to
-    // exist already for `hard_link` to succeed, so resolve it for real and
-    // re-check — the same containment argument tar's own `validate_inside_dst`
-    // makes for `unpack_in`.
+    // Lexical is not enough: a symlinked component can land the source outside, so resolve and re-check.
     let source = dunce::canonicalize(&candidate).ok()?;
     let root = dunce::canonicalize(output).ok()?;
     source.starts_with(&root).then_some(source)

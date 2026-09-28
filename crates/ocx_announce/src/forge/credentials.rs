@@ -4,28 +4,20 @@
 //! The credentials a forge run carries, and the CI identity they were resolved
 //! under.
 //!
-//! Two credentials, not one, because the two halves of a GitLab write have
-//! different requirements: a CI job token can push over HTTP but cannot open a
-//! merge request, while a project or personal access token can call the API but
-//! is not the pipeline's own identity. Resolution happens once, at the CLI
-//! boundary, and the resolved pair travels down as one value — a forge never
-//! reads the environment for itself.
+//! Two credentials, because a GitLab CI job token can push over HTTP but cannot
+//! open a merge request. Resolved once at the CLI boundary; a forge never reads
+//! the environment itself.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
 use super::{ForgeToken, WriteTransport, is_valid_path_segment};
 
-/// Every environment variable the credential precedence ladder reads, in one
-/// place.
+/// Every environment variable the credential precedence ladder reads.
 ///
-/// Grouped so the ladder's whole input surface is a list a reviewer can hold in
-/// their head — and so a test cannot isolate half of it. `ocx_util::env::var`'s
-/// test seam falls through to the real process environment for any key a test
-/// did not override (`get_override` returns `None`, and `var` then calls
-/// `std::env::var`), so a partially-overridden ladder test's green is the
-/// **ambient environment's** green, on whatever machine happened to run it.
-/// [`ALL`] is what the tests isolate against.
+/// Tests isolate against [`ALL`]: `ocx_util::env::var` falls through to the real
+/// environment for any key a test did not override, so a partly isolated test
+/// passes or fails on the ambient environment.
 #[cfg_attr(
     not(test),
     expect(
@@ -34,54 +26,26 @@ use super::{ForgeToken, WriteTransport, is_valid_path_segment};
     )
 )]
 mod var {
-    /// The two forge-credential names, re-exported from [`ocx_config::env::keys`]
-    /// rather than re-spelled here: `OCX_ANNOUNCE_TOKEN` (the operator's own
-    /// announce credential, rung 1 of the API ladder) and
-    /// `OCX_ANNOUNCE_GIT_TOKEN` (a push-only credential overriding the API
-    /// credential for the git half alone, rung 1 of the push ladder).
-    ///
-    /// One literal per variable, workspace-wide, and the split it prevents is a
-    /// real one: `OCX_ANNOUNCE_GIT_TOKEN` is read *here* and scrubbed from
-    /// plugin child environments *there*
-    /// ([`CREDENTIAL_KEYS`](ocx_config::env::keys::CREDENTIAL_KEYS)), so two copies
-    /// mean a rename that keeps working while the push credential silently
-    /// stops being stripped. `OCX_ANNOUNCE_TOKEN` is a documented non-member of
-    /// that list and is spelled once for the same reason — the CLI's exit-80
-    /// refusal names it, and a refusal naming a variable the ladder no longer
-    /// reads is worse than no message.
+    /// Re-exported, never re-spelled: [`CREDENTIAL_KEYS`](ocx_config::env::keys::CREDENTIAL_KEYS) scrubs
+    /// `OCX_ANNOUNCE_GIT_TOKEN` from plugin children, and a second literal lets a rename silently end that scrub.
     pub use ocx_config::env::keys::{OCX_ANNOUNCE_GIT_TOKEN, OCX_ANNOUNCE_TOKEN};
 
-    /// The user half of the push pair, defaulting to
-    /// [`super::GitPushCredential::DEFAULT_USERNAME`].
-    ///
-    /// Stays local: it is not a credential, so it has no `CREDENTIAL_KEYS` row
-    /// to drift from, and this is its only spelling in the workspace.
+    /// The user half of the push pair; unset means [`super::GitPushCredential::DEFAULT_USERNAME`].
     pub const OCX_ANNOUNCE_GIT_USERNAME: &str = "OCX_ANNOUNCE_GIT_USERNAME";
 
-    /// GitLab's own marker that this process is a CI job. One of the three
-    /// conjuncts guarding the job-token rung.
+    /// GitLab's marker that this process is a CI job.
     pub const GITLAB_CI: &str = "GITLAB_CI";
 
-    /// GitLab's own name for the token a job runs under. Read here so the API
-    /// credential can be recognised *as* it without any caller saying so.
+    /// The token a GitLab CI job runs under.
     pub const CI_JOB_TOKEN: &str = "CI_JOB_TOKEN";
 
-    /// GitLab's own name for the full path of the project a job runs in — the
-    /// **publishing** project, which the index project's job-token allowlist is
-    /// checked against.
+    /// The **publishing** project's full path, checked against the index project's job-token allowlist.
     pub const CI_PROJECT_PATH: &str = "CI_PROJECT_PATH";
 
-    /// GitLab's numeric id for the same project. Not read by the ladder itself,
-    /// and listed so a test isolating the ladder isolates the whole CI identity
-    /// rather than the half that happens to be read today.
+    /// Not read by the ladder; listed so a ladder test isolates the whole CI identity.
     pub const CI_PROJECT_ID: &str = "CI_PROJECT_ID";
 
-    /// Every name above.
-    ///
-    /// Never read in production — its consumer is the test that isolates the
-    /// ladder — and that is why it is here rather than inlined into the test
-    /// module: a rung added without a row here is a rung whose variable the
-    /// isolation misses.
+    /// Every name above; a rung whose variable is missing here escapes test isolation.
     pub const ALL: &[&str] = &[
         OCX_ANNOUNCE_TOKEN,
         OCX_ANNOUNCE_GIT_TOKEN,
@@ -95,45 +59,25 @@ mod var {
 
 /// The credential a `git push` carries.
 ///
-/// The username is not cosmetic: GitLab's HTTP endpoint authenticates the pair,
-/// and a job token is presented under the conventional `gitlab-ci-token` user,
-/// which is also the default when the operator sets no
-/// `OCX_ANNOUNCE_GIT_USERNAME`. The pair travels as a base64 `user:secret`
-/// `Authorization` header injected through git's own configuration environment,
-/// never in a URL and never in argv.
+/// Travels as a base64 `user:secret` `Authorization` header through git's
+/// configuration environment, never in a URL and never in argv.
 #[derive(Clone, Debug)]
 pub struct GitPushCredential {
     /// The user half of the pair.
     pub username: String,
-    /// The secret half. Redacted in `Debug` by [`ForgeToken`]'s own impl.
+    /// The secret half, redacted in `Debug` by [`ForgeToken`].
     pub secret: ForgeToken,
 }
 
 impl GitPushCredential {
-    /// The user half GitLab expects when no operator names one.
-    ///
-    /// GitLab authenticates a job token under this conventional user, and the
-    /// same default applies to a project or personal access token presented over
-    /// HTTP — GitLab reads the secret and ignores which non-empty user carries
-    /// it.
+    /// The user GitLab expects for a job token; for an access token GitLab
+    /// ignores which non-empty user carries it.
     pub const DEFAULT_USERNAME: &'static str = "gitlab-ci-token";
 
-    /// The `Authorization` header value this pair travels as: `Basic` plus the
-    /// base64 of `username:secret`.
+    /// The `Authorization` value: `Basic` plus base64 of `username:secret`.
     ///
-    /// Lives here, on the credential, rather than in the workspace that injects
-    /// it, for two reasons. It is the **pure half** of C-022's agreement check —
-    /// the injected header and the redactor's secret list must be fed from one
-    /// value, and one function both can be tested against is what makes "they
-    /// agree" a statement rather than a hope. And the encoding is what
-    /// neutralises a username or secret carrying `\r\n`: base64's alphabet
-    /// cannot spell a header separator, so no escaping rule of ocx's own is
-    /// needed or written.
-    ///
-    /// HTTP Basic has no escaping on the *pair*: a server splits the decoded
-    /// text on the **first** colon. A username carrying one would therefore
-    /// re-partition the pair silently, which is why the ladder refuses one
-    /// before a credential ever reaches here.
+    /// Base64 is what neutralises a `\r\n` in either half. A `:` in the username
+    /// would re-partition the pair server-side, so the ladder refuses one first.
     #[must_use]
     pub fn basic_authorization(&self) -> String {
         let encoded = BASE64_STANDARD.encode(format!("{}:{}", self.username, self.secret.0));
@@ -143,67 +87,28 @@ impl GitPushCredential {
 
 /// Everything a forge needs to authenticate, resolved once at the CLI boundary.
 ///
-/// Every field is private, and the four `bool`/CI-identity ones are private for
-/// a reason a reader should not have to infer: they are **derived**, never
-/// supplied. `api_is_job_token` and `push_is_job_token` each answer "is this
-/// half of the pair this environment's own job token", and a caller that could
-/// set either could make ocx send a `JOB-TOKEN` header for a credential that is
-/// not one, or refuse a push at exit 86 over a job-token setting that governs no
-/// credential the run holds — both failing in a way that reads like a permission
-/// problem. `push_is_explicit` and `in_gitlab_ci` are the same class: they say
-/// which rung answered and where the process is running, and C-064's notice
-/// fires off them. The derivation is the constructor's, so there is exactly one
-/// place each question is answered.
+/// The flags and CI identity are private because they are derived: a settable
+/// `api_is_job_token` would send a `JOB-TOKEN` header for a credential that is not one.
 #[derive(Clone, Debug)]
 pub struct ForgeCredentials {
-    /// The REST credential. Empty means unauthenticated — the `--out` path.
+    /// Empty means unauthenticated — the `--out` path.
     api: ForgeToken,
-    /// The push credential, when the git transport is selected and one was
-    /// resolved. `None` leaves git's own credential helpers in charge.
+    /// `None` leaves git's own credential helpers in charge.
     push: Option<GitPushCredential>,
-    /// Whether [`Self::api`] is this environment's own `CI_JOB_TOKEN`.
     api_is_job_token: bool,
-    /// Whether [`Self::push`]'s secret is this environment's own
-    /// `CI_JOB_TOKEN` — a different question from [`Self::api_is_job_token`],
-    /// which the push ladder's rung 1 lets it diverge from.
     push_is_job_token: bool,
-    /// Whether [`Self::push`]'s secret came from `OCX_ANNOUNCE_GIT_TOKEN` —
-    /// rung 1 of the push ladder — rather than from rung 2's copy of the API
-    /// half.
-    ///
-    /// Not derivable from the two credentials: rung 1 and rung 2 produce the
-    /// same [`GitPushCredential`] whenever the operator exported one value under
-    /// both names, so "did the operator choose this push credential" has no
-    /// answer once the ladder has run unless the ladder records it.
+    /// Recorded by the ladder, never derived later: rungs 1 and 2 yield the same
+    /// credential when one value is exported under both names.
     push_is_explicit: bool,
-    /// Whether this process is a GitLab CI job — `GITLAB_CI` set and non-empty,
-    /// the same read the API ladder's second rung is guarded by.
-    ///
-    /// Recorded rather than re-read at the CLI: C-063 pins
-    /// `OCX_ANNOUNCE_GIT_TOKEN`'s and the CI family's read site to this module,
-    /// and a second reader elsewhere would put the credential-exemption table in
-    /// `subsystem-cli.md` in disagreement with the code. Distinct from
-    /// [`Self::publishing_project`], which is `CI_PROJECT_PATH` and can be
-    /// absent or malformed inside a perfectly ordinary job.
+    /// Recorded here rather than re-read at the CLI, or a second `GITLAB_CI` reader
+    /// puts the credential-exemption table in `subsystem-cli.md` out of step with the code.
     in_gitlab_ci: bool,
-    /// The full path of the project this run publishes from, when it runs in
-    /// CI, and only when every segment of it is a legal forge path segment.
-    ///
-    /// Carried here rather than passed as a second argument to the preflight:
-    /// it is the same class of value as `api_is_job_token` — CI-environment
-    /// identity, resolved once at the boundary, unsettable by a caller — and it
-    /// is meaningless on a forge that has no job tokens, so widening a trait
-    /// signature every implementor pays for would be the wrong home for it.
+    /// Only when every segment is a legal forge path segment.
     publishing_project: Option<String>,
 }
 
 impl ForgeCredentials {
     /// Resolve the API half, with no push credential.
-    ///
-    /// `api_is_job_token` is true only when `api` equals a **non-empty**
-    /// `CI_JOB_TOKEN` — see [`is_job_token`] for why that qualifier carries the
-    /// whole check. `push_is_job_token` and `push_is_explicit` are false here by
-    /// construction: there is no push credential for either to describe.
     #[must_use]
     pub fn new(api: ForgeToken) -> Self {
         Self {
@@ -217,38 +122,12 @@ impl ForgeCredentials {
         }
     }
 
-    /// Resolve **both** credentials from the environment, by C-063's precedence
-    /// ladder.
+    /// Resolve both credentials from the environment by the precedence ladders.
     ///
-    /// The API ladder: `OCX_ANNOUNCE_TOKEN` when set and non-empty, then
-    /// `CI_JOB_TOKEN` when non-empty **and** `transport` is
-    /// [`WriteTransport::Git`] **and** `GITLAB_CI` is set, then nothing. All
-    /// three conjuncts on the second rung are load-bearing and each is dropped
-    /// independently by a plausible implementation, so each is asserted alone.
-    ///
-    /// The push ladder: `OCX_ANNOUNCE_GIT_TOKEN` when set and non-empty, then
-    /// the resolved API credential, then **nothing injected** — `None`, never
-    /// `Some` with an empty secret. The two halves are independent by
-    /// construction: a job carrying a job-token API credential and a separate
-    /// push PAT sends `JOB-TOKEN` on its reads and the PAT on its push.
-    ///
-    /// The username for both push rungs is `OCX_ANNOUNCE_GIT_USERNAME` when set,
-    /// non-empty and free of `:`, else [`GitPushCredential::DEFAULT_USERNAME`].
-    ///
-    /// **The non-emptiness qualifiers carry the whole ladder.** A wrapper
-    /// exporting `OCX_ANNOUNCE_TOKEN=` would otherwise win rung 1, suppress the
-    /// job-token pickup, and produce a silently unauthenticated run inside a CI
-    /// job that had a perfectly good `CI_JOB_TOKEN`; an empty
-    /// `OCX_ANNOUNCE_GIT_TOKEN` winning its own rung 1 would inject
-    /// `Basic base64("gitlab-ci-token:")` — a header that authenticates as
-    /// nobody, while `-c credential.helper=` suppresses the operator's helpers
-    /// that would have worked. `GITLAB_CI=` is read the same way, for
-    /// consistency with its two sibling rungs rather than as a second rule.
-    ///
-    /// The terminal rung yields an **empty** [`Self::api`], not an error: the
-    /// `AuthError` (80) that an unauthenticated write earns, and the `--out`
-    /// carve-out that exempts it, are raised at the CLI boundary where the write
-    /// mode is known.
+    /// API: `OCX_ANNOUNCE_TOKEN`, then `CI_JOB_TOKEN` when `transport` is
+    /// [`WriteTransport::Git`] and `GITLAB_CI` is set, else an empty [`Self::api`]
+    /// (not an error; the CLI owns the exit-80 refusal). Push: `OCX_ANNOUNCE_GIT_TOKEN`,
+    /// then the resolved API credential, else `None`. Empty counts as unset throughout.
     #[must_use]
     pub fn resolve(transport: WriteTransport) -> Self {
         let job_token = (transport == WriteTransport::Git && in_gitlab_ci())
@@ -256,29 +135,19 @@ impl ForgeCredentials {
             .flatten();
         let api = non_empty(var::OCX_ANNOUNCE_TOKEN).or(job_token).unwrap_or_default();
 
-        // Rung 2 of the push ladder is the *resolved* API credential, so an
-        // empty one falls through to rung 3 rather than injecting a header that
-        // authenticates as nobody. Which rung answered is recorded here and
-        // nowhere else: the two rungs yield an identical credential whenever one
-        // value was exported under both names, so nothing downstream can
-        // reconstruct it.
+        // An empty API credential falls through to `None`, or the push injects a header that authenticates as nobody.
         let explicit_push = non_empty(var::OCX_ANNOUNCE_GIT_TOKEN);
         let push_is_explicit = explicit_push.is_some();
         let push_secret = explicit_push.or_else(|| (!api.is_empty()).then(|| api.clone()));
 
-        // Through `new` rather than a second struct literal: `api_is_job_token`
-        // and the `CI_PROJECT_PATH` filter are answered in exactly one place,
-        // so the ladder cannot drift from the constructor it replaces.
+        // Through `new`, so `api_is_job_token` and the `CI_PROJECT_PATH` filter cannot drift from it.
         let mut credentials = Self::new(ForgeToken::new(api));
         credentials.push = push_secret.map(|secret| GitPushCredential {
             username: push_username(),
             secret: ForgeToken::new(secret),
         });
         credentials.push_is_explicit = push_is_explicit;
-        // Derived from the credential the ladder actually resolved, never from
-        // the rung that produced it: an operator may export the job token under
-        // the ocx name, and rung 2 may hand the push half a credential that is
-        // one without any rung having said so.
+        // From the resolved secret, never the rung: rungs 1 and 2 can each carry the job token without saying so.
         credentials.push_is_job_token = credentials
             .push
             .as_ref()
@@ -298,22 +167,16 @@ impl ForgeCredentials {
         self.push.as_ref()
     }
 
-    /// Whether an API credential was resolved at all.
+    /// Whether any rung resolved an API credential.
     ///
-    /// The terminal rung of [`Self::resolve`] yields an **empty** [`ForgeToken`]
-    /// rather than an error, and every field here is private, so this is the
-    /// only way to observe that outcome. Two consumers ask it, and both must ask
-    /// the *ladder* rather than re-reading `OCX_ANNOUNCE_TOKEN` themselves —
-    /// which would miss the job-token rung entirely: the claim and announce
-    /// reports, whose `credential_kind` is `"none"` exactly when this is false
-    /// (C-060), and C-063's exit-80 refusal of an unauthenticated write.
+    /// Ask this, never re-read `OCX_ANNOUNCE_TOKEN`, which misses the job-token rung.
     #[must_use]
     pub fn api_is_present(&self) -> bool {
         !self.api.0.is_empty()
     }
 
-    /// Whether the REST credential is this environment's own CI job token — the
-    /// single input to the `JOB-TOKEN` header decision.
+    /// Whether the REST credential is this environment's own CI job token, which
+    /// decides the `JOB-TOKEN` header.
     #[must_use]
     pub fn api_is_job_token(&self) -> bool {
         self.api_is_job_token
@@ -321,96 +184,52 @@ impl ForgeCredentials {
 
     /// Whether the **push** credential is this environment's own CI job token.
     ///
-    /// True exactly when a push credential was resolved **and** its secret
-    /// equals a non-empty `CI_JOB_TOKEN`. Read off C-063's push ladder that is:
-    /// at rung 1, true only when the operator exported the job token itself
-    /// under `OCX_ANNOUNCE_GIT_TOKEN` and false for any other value; at rung 2,
-    /// exactly whether the resolved API half is the job token; and at rung 3
-    /// always false, because nothing is injected there.
-    ///
-    /// Not a synonym for [`Self::api_is_job_token`], and that is why it exists:
-    /// rung 1 replaces the push half while the API half remains the job token,
-    /// so the two genuinely differ. GitLab's job-token push setting and the
-    /// allowlist behind it govern the **push** credential, so a preflight keyed
-    /// on the API flag would refuse an ordinary announce whose project simply
-    /// has that setting off.
+    /// Not [`Self::api_is_job_token`]: rung 1 can replace the push half, and a
+    /// preflight keyed on the API flag would refuse an announce whose project has job-token push off.
     #[must_use]
     pub fn push_is_job_token(&self) -> bool {
         self.push_is_job_token
     }
 
-    /// Whether the operator *chose* the push credential, by exporting
-    /// `OCX_ANNOUNCE_GIT_TOKEN` — rung 1 of the push ladder.
+    /// Whether the operator chose the push credential by exporting `OCX_ANNOUNCE_GIT_TOKEN`.
     ///
-    /// False at rung 2, where the push half is a copy of the API credential the
-    /// operator set for the REST calls, and false at rung 3, where nothing is
-    /// injected. C-064's notice is the consumer: a false here inside a GitLab
-    /// job is the state where the push authenticates as somebody the operator
-    /// never nominated for it.
+    /// False inside a GitLab job means the push authenticates as someone the
+    /// operator never nominated for it.
     #[must_use]
     pub fn push_is_explicit(&self) -> bool {
         self.push_is_explicit
     }
 
-    /// Whether this run is a GitLab CI job.
+    /// Whether this run is a GitLab CI job (`GITLAB_CI` non-empty).
     ///
-    /// The only way to observe `GITLAB_CI` **for the credential ladder** — C-063
-    /// pins that read surface here, so a caller that needs the fact asks the
-    /// resolved credentials for it rather than reading the variable again.
-    /// `ocx_shell::ci`'s `gitlab_flavor::detect` reads the same variable for a
-    /// different question — which `--ci` export flavor to write — and answers it
-    /// more strictly (`== "true"`, not merely non-empty), so the two are not
-    /// interchangeable and neither is a second reader of the other's rule.
+    /// Ask this rather than re-read `GITLAB_CI`. Not interchangeable with
+    /// `ocx_shell::ci`'s detection, which requires `GITLAB_CI == "true"`.
     #[must_use]
     pub fn in_gitlab_ci(&self) -> bool {
         self.in_gitlab_ci
     }
 
     /// The full path of the project this run publishes from, when it runs in CI.
-    ///
-    /// The index project's job-token allowlist is read only when this differs
-    /// from the index project, and the refusal message names both paths.
     #[must_use]
     pub fn publishing_project(&self) -> Option<&str> {
         self.publishing_project.as_deref()
     }
 }
 
-/// Whether every `/`-separated segment of a CI-supplied project path is a legal
-/// forge path segment.
+/// Whether every `/`-separated segment of a CI-supplied project path is legal.
 ///
-/// The same check [`super::RepoCoordinate`]'s parser applies to a coordinate,
-/// for the same reason and against the same function: this value reaches a
-/// `pub` accessor, an allowlist comparison, a request URL and a report's
-/// `detail`, and the GitHub client interpolates a path into a URL raw — so
-/// `acme?x=1/index` would silently retarget a request. In the fork-merge-request
-/// threat model this feature exists for, the author of a `.gitlab-ci.yml` chooses
-/// what `CI_PROJECT_PATH` says, which makes it untrusted input at a boundary
-/// rather than a value the runner vouches for.
-///
-/// Deliberately **not** [`super::RepoCoordinate`]'s `FromStr`: that parser reads
-/// a leading host-shaped segment as a host, so a real nested GitLab group path
-/// like `acme.team/platform/index` would be mis-parsed into host `acme.team`.
-/// Segment legality is the whole of what is needed here.
-///
-/// A failing value is treated as **absent**, not as an error: the allowlist
-/// comparison it feeds already has a "not in CI" path, and refusing the whole
-/// run over a variable ocx did not ask for would break announces that never
-/// touch the job-token path.
+/// `CI_PROJECT_PATH` is untrusted and reaches request URLs raw (`acme?x=1/index`
+/// would retarget one). Not `RepoCoordinate`'s parser, which reads
+/// `acme.team/platform/index` as host-qualified. A failing value counts as
+/// absent, not an error, so announces off the job-token path keep working.
 fn is_valid_project_path(path: &str) -> bool {
     path.split('/').all(is_valid_path_segment)
 }
 
-/// The user half of the push pair: the operator's own, or
-/// [`GitPushCredential::DEFAULT_USERNAME`].
+/// The operator's push username, or [`GitPushCredential::DEFAULT_USERNAME`].
 ///
-/// A username carrying `:` is treated as **absent**, not as an error. HTTP
-/// Basic has no escaping on the pair — a server splits the decoded text on the
-/// first colon — so `a:b` would silently re-partition it into user `a` and
-/// secret `b:<secret>`, a 401 that reads like a bad token. An empty one has the
-/// same symptom via `base64(":secret")`. Both are refused the way
-/// `CI_PROJECT_PATH` already is here, rather than by minting an error for a
-/// variable ocx did not ask for.
+/// A `:` makes it count as absent: HTTP Basic splits on the first colon, so
+/// `a:b` would re-partition the pair into a 401 that reads like a bad token.
 fn push_username() -> String {
     non_empty(var::OCX_ANNOUNCE_GIT_USERNAME)
         .filter(|username| !username.contains(':'))
@@ -419,30 +238,22 @@ fn push_username() -> String {
 
 /// Whether `secret` is this environment's own `CI_JOB_TOKEN`.
 ///
-/// One function for both halves of the pair, so "is this a job token" is
-/// answered in exactly one place. The **non-emptiness** qualifier carries the
-/// whole check: outside a CI job both sides are ordinarily the empty string,
-/// and `"" == ""` would otherwise claim a job token in an environment that has
-/// none.
+/// Requires a non-empty `CI_JOB_TOKEN`, or `"" == ""` claims a job token outside CI.
 fn is_job_token(secret: &str) -> bool {
     non_empty(var::CI_JOB_TOKEN).is_some_and(|token| token == secret)
 }
 
-/// Whether this process is a GitLab CI job.
-///
-/// One spelling for the two readers — the API ladder's second rung and
-/// [`ForgeCredentials::in_gitlab_ci`] — so the flag a caller branches on and the
-/// flag that opened the job-token rung can never disagree about what "in CI"
-/// means. Empty counts as unset for the reason [`non_empty`] gives.
+/// Whether this process is a GitLab CI job; the one spelling the ladder and
+/// [`ForgeCredentials::in_gitlab_ci`] share, so they cannot disagree.
 fn in_gitlab_ci() -> bool {
     non_empty(var::GITLAB_CI).is_some()
 }
 
 /// An environment variable's value, or `None` when it is unset **or empty**.
 ///
-/// Treating empty as unset is the point: CI runners routinely export a variable
-/// with no value, and every reader here would otherwise have to remember to
-/// filter it.
+/// CI runners export empty variables: an empty `OCX_ANNOUNCE_TOKEN` would win rung 1
+/// and leave a job with a good `CI_JOB_TOKEN` unauthenticated.
+/// An empty `OCX_ANNOUNCE_GIT_TOKEN` would inject a header that authenticates as nobody.
 fn non_empty(key: &str) -> Option<String> {
     ocx_util::env::var(key).filter(|value| !value.is_empty())
 }

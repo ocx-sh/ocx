@@ -9,24 +9,10 @@ mod content_path;
 mod env_override;
 mod forge_write;
 mod group_selection;
-mod keep_tag;
-// `pub mod` rather than the sibling `mod` + `pub use` idiom: `Hook` has no
-// consumer until WP-11 flattens it into `self activate`, and a `pub use` with
-// no consumer is an `unused_imports` failure under `warnings = "deny"`. WP-9
-// adds the re-export alongside the first call site.
 pub mod hook;
 mod identifier;
 mod interactive;
-// The cosign-parity option groups, on the same `pub mod` footing as `hook` and
-// for a second reason on top of the `unused_imports` one: nothing attaches them
-// until the sign-side and verify-side command work lands, and those are two
-// independent efforts. The module path IS the frozen import spelling
-// (`crate::options::key::KeyOpt`, `crate::options::rekor_upload::RekorUploadOpt`,
-// `crate::options::signature_format::SignatureFormatOpt`,
-// `crate::options::tags::TagsOpt`), so neither effort has to edit this file to
-// reach them -- two of them editing one options file is the collision this
-// layout exists to prevent. Do not add a `pub use` here later either: the path
-// is the contract, and shortening it would put both back in this file.
+mod keep_tag;
 pub mod key;
 mod lazy_mode;
 mod lazy_report;
@@ -50,8 +36,6 @@ pub use consent::Consent;
 pub use content_path::ContentPath;
 pub use env_override::EnvOverride;
 pub use forge_write::ForgeWriteOptions;
-// The global `--format` / `--json` group lives in `ocx_console`, shared with
-// every OCX binary; re-exported so `options::Format` keeps its path here.
 pub use group_selection::GroupSelection;
 pub use identifier::Identifier;
 pub use interactive::Interactive;

@@ -4,12 +4,6 @@
 use super::hook::{Rung, resolve_ladder};
 
 /// Whether to inject shell completions during `ocx self activate`.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add the paired
-/// `--completion` / `--no-completion` flags. `--completion` forces completions
-/// on, `--no-completion` forces them off. The two are POSIX last-wins, so
-/// passing both is not an error. With neither flag the decision follows the
-/// ladder in [`Completion::enabled`].
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Completion {
     /// Force shell-completion injection on, regardless of session interactivity.
@@ -22,36 +16,19 @@ pub struct Completion {
 }
 
 impl Completion {
-    /// Resolve whether completions should be loaded for this session.
-    ///
-    /// Ladder, most specific first — the same five rungs, in the same order,
-    /// as `[shell] hook`:
-    ///
-    /// 1. `--no-completion` → off
-    /// 2. `--completion` → on
-    /// 3. `OCX_NO_COMPLETIONS` truthy → off
-    /// 4. `[shell] completions` (`configured`) → as set
-    /// 5. auto: `interactive`
-    ///
-    /// The default is on, in interactive shells only.
-    //
-    // `interactive` is the caller's signal: the shim decides it and passes an
-    // explicit flag, so the gate never depends on probing a stderr the shim may
-    // have redirected. The auto arm serves a direct in-terminal invocation.
+    /// Whether completions load: the `[shell] hook` ladder over the flags, `OCX_NO_COMPLETIONS`,
+    /// `[shell] completions` (`configured`), then `interactive`.
+    // Take `interactive` from the caller, never probe stderr here: the shim may have redirected it.
     pub fn enabled(&self, interactive: bool, configured: Option<bool>) -> bool {
         self.resolve(interactive, configured).0
     }
 
     /// Which rung of the ladder decided [`Self::enabled`] for the same inputs.
-    // No `expect(dead_code)`: the crate has a library target, so a `pub` method
-    // on a `pub` type is reachable and the lint no longer fires. First in-tree
-    // call site still lands in WP-13 (`ocx shell state`).
     pub fn rung(&self, interactive: bool, configured: Option<bool>) -> Rung {
         self.resolve(interactive, configured).1
     }
 
-    // One ladder evaluation feeds both accessors, so the reported rung can
-    // never disagree with the decision it explains.
+    // Both accessors share this one evaluation, or the reported rung can disagree with the decision.
     fn resolve(&self, interactive: bool, configured: Option<bool>) -> (bool, Rung) {
         let flag = if self.no_completion {
             Some(false)

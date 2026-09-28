@@ -10,57 +10,24 @@ use ocx_package_manager::{HandoffFailure, SelfUpdateResult, TagProbe, UpdateChec
 
 use crate::api::data::self_update::{SelfUpdateData, UpdateCheckData};
 
-/// Update OCX to the latest available version.
+/// Arguments of `ocx self update`; its help text lives on `SelfGroup::Update`.
 ///
-/// Without `--check`, downloads and installs the latest release if a newer
-/// version exists. With `--check`, only reports whether an update is
-/// available — no installation.
-///
-/// Version discovery lists tags live through the configured index chain
-/// (`TagProbe::Remote`): the newest published tag is resolved from the source,
-/// the same one the background auto-check uses — self-update exists to reach the
-/// freshest upstream release, so it does not read the (possibly stale) local
-/// index. Routing through the chain rather than a registry's tags API is what
-/// makes the logical `ocx.sh/ocx/cli` name resolve to wherever the published
-/// index currently points it. `--offline` still refuses (no client → skipped).
-/// (User-facing copy of this lives on the
-/// `SelfGroup::Update` variant, which is the surface clap renders; this struct
-/// doc is rustdoc-only.)
-///
-/// Both forms always bypass the throttle (explicit user intent).
-///
-/// # Exit codes
-///
-/// | Outcome | Exit |
-/// |---|---|
-/// | `up_to_date` / `update_available` / `installed` | 0 |
-/// | `pulled` (downloaded, nothing activated) | 75 (sysexits `EX_TEMPFAIL`) |
-/// | `skipped` (any [`SkippedReason`](ocx_package_manager::SkippedReason)) | 75 (sysexits `EX_TEMPFAIL`) |
-///
-/// `installed` stays 0 even when the hand-off reported a failure: the binary
-/// the user asked for is the one `current` now names, and the advisory says
-/// what is left to do.
-///
-/// Scripts can `case $?` on these without parsing JSON — `--check` returning
-/// `update_available` deliberately stays 0 so a "found update" outcome can be
-/// distinguished from a "couldn't determine" one (UX-W1).
+/// Exits 0 for `up_to_date`, `update_available` and `installed` (even with a hand-off failure),
+/// 75 for `pulled` and `skipped`.
 #[derive(Parser)]
 pub struct SelfUpdate {
     /// Check for a newer ocx version without installing it.
-    ///
-    /// Behaviour:
-    ///
-    /// * Looks up the latest published version live rather than from your local
-    ///   index. Under `--offline` the check is skipped (exit 75).
-    /// * Always bypasses the 24h auto-check throttle (explicit user intent).
-    /// * Exit status: 0 if the lookup succeeded (whether or not a newer
-    ///   version was found); 75 (`EX_TEMPFAIL`) if the check was skipped.
-    /// * Output: status, identifier (when an update is available), and
-    ///   structured skip reason. JSON shape:
-    ///   `{"status":"update_available","identifier":"ocx.sh/ocx/cli:1.2.3"}` or
-    ///   `{"status":"skipped","skipped_reason":{"reason":"offline"}}`.
-    ///
-    /// Pair with `--format json` for programmatic consumption.
+    #[arg(long_help = "\
+        Check for a newer ocx version without installing it.\n\n\
+        Behaviour:\n\n\
+        * Looks up the latest published version live rather than from your local index. Under \
+        `--offline` the check is skipped (exit 75). * Always bypasses the 24h auto-check throttle \
+        (explicit user intent). * Exit status: 0 if the lookup succeeded (whether or not a newer \
+        version was found); 75 (`EX_TEMPFAIL`) if the check was skipped. * Output: status, \
+        identifier (when an update is available), and structured skip reason. JSON shape: \
+        `{\"status\":\"update_available\",\"identifier\":\"ocx.sh/ocx/cli:1.2.3\"}` or \
+        `{\"status\":\"skipped\",\"skipped_reason\":{\"reason\":\"offline\"}}`.\n\n\
+        Pair with `--format json` for programmatic consumption.")]
     #[arg(long)]
     check: bool,
 }
@@ -68,11 +35,7 @@ pub struct SelfUpdate {
 impl SelfUpdate {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         if self.check {
-            // Self-update discovers the newest published ocx, so it lists live
-            // through the configured index chain (`TagProbe::Remote`) — the same
-            // source the background auto-check uses, not the local index a stale
-            // `ocx index update` snapshot would echo. `--offline` still refuses
-            // (no client → skipped).
+            // Live through the index chain: the local index may be stale, and only the chain routes `ocx.sh/ocx/cli`.
             let result = context
                 .manager()
                 .self_check_update(Some(Duration::ZERO), TagProbe::Remote)
@@ -82,9 +45,7 @@ impl SelfUpdate {
             Ok(exit)
         } else {
             let result = context.manager().self_update().await?;
-            // The new binary already ran its own `ocx self setup` (and printed
-            // whatever that had to say). All that is left here is the one line
-            // about what the user should do next.
+            // The new binary already ran its own `ocx self setup`; only the next-step line is left.
             if let Some(advisory) = advisory_for(&result) {
                 emit_advisory(&context, &advisory);
             }
@@ -96,41 +57,25 @@ impl SelfUpdate {
 }
 
 /// What `ocx self update` says on stderr once the hand-off has finished.
-///
-/// A separate type from the result so the policy — which outcome earns which
-/// line — is decided by a pure function and unit-tested without a live
-/// `Context`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HandoffAdvisory {
-    /// The update landed and its setup completed: one hint that the new
-    /// environment needs a fresh shell.
+    /// The update landed and its setup completed.
     Reload,
-    /// The update landed, but a managed block in a shell profile carries local
-    /// edits and was left alone (the child's exit 82).
+    /// The update landed, but a managed profile block with local edits was left alone (the child's exit 82).
     DirtyProfile,
-    /// The update landed, but the new binary's setup did not finish. Carries
-    /// the rendered failure so the user can see how the child ended.
+    /// The update landed, but the new binary's setup did not finish.
     SetupIncomplete(String),
-    /// The release was downloaded but nothing was activated — `current` still
-    /// names the old binary, so the machine is unchanged.
+    /// Downloaded but not activated: `current` still names the old binary.
     NotActivated(String),
 }
 
-/// Decides the advisory for a finished `self update`.
-///
-/// The verdict already distinguishes swapped from not-swapped; this only
-/// chooses the wording, and the one case it must get right is the swap that
-/// carries a failure: that is a *successful* update with unfinished setup, not
-/// a failed one.
+/// Decides the advisory; a swap carrying a failure is a successful update with unfinished setup, not a failed one.
 fn advisory_for(result: &SelfUpdateResult) -> Option<HandoffAdvisory> {
     match result {
         SelfUpdateResult::Installed { handoff: None, .. } => Some(HandoffAdvisory::Reload),
         SelfUpdateResult::Installed {
             handoff: Some(failure), ..
         } => Some(match failure {
-            // The child got past its select and refused to overwrite a profile
-            // the user had edited. Name the flag that overrides it rather than
-            // the generic re-run.
             HandoffFailure::Exited(code) if *code == OcxExitCode::DirtyRcBlock as i32 => HandoffAdvisory::DirtyProfile,
             failure => HandoffAdvisory::SetupIncomplete(failure.to_string()),
         }),
@@ -164,8 +109,7 @@ fn emit_advisory(context: &crate::app::Context, advisory: &HandoffAdvisory) {
 
 fn exit_code_for_check(result: &UpdateCheckResult) -> ExitCode {
     match result {
-        // `update_available` deliberately stays SUCCESS — finding an update is
-        // not a failure mode (matches rustup / cargo conventions).
+        // Finding an update is not a failure, as with rustup and cargo.
         UpdateCheckResult::AlreadyUpToDate | UpdateCheckResult::UpdateAvailable(_) => ExitCode::SUCCESS,
         UpdateCheckResult::Skipped(_) => OcxExitCode::TempFail.into(),
     }
@@ -173,11 +117,9 @@ fn exit_code_for_check(result: &UpdateCheckResult) -> ExitCode {
 
 fn exit_code_for_update(result: &SelfUpdateResult) -> ExitCode {
     match result {
-        // `Installed` is SUCCESS even with a hand-off failure attached: the
-        // binary the user asked for is the one `current` now names.
+        // Even with a hand-off failure: `current` now names the binary the user asked for.
         SelfUpdateResult::AlreadyUpToDate | SelfUpdateResult::Installed { .. } => ExitCode::SUCCESS,
-        // `Pulled` joins `Skipped` at EX_TEMPFAIL — the operation could not be
-        // completed and re-running it is meaningful.
+        // `Pulled` activated nothing, so re-running is meaningful.
         SelfUpdateResult::Pulled { .. } | SelfUpdateResult::Skipped(_) => OcxExitCode::TempFail.into(),
     }
 }

@@ -14,7 +14,6 @@ use crate::app::Context;
 pub struct About;
 
 /// Isometric cube logo rendered with `+` and `=` characters.
-/// 21 lines tall, max 52 chars wide.
 #[rustfmt::skip]
 const LOGO: [&str; 21] = [
     "              ++++++               ++++++",
@@ -44,37 +43,22 @@ const LOGO_WIDTH: usize = 52;
 
 impl About {
     pub async fn execute(&self, context: Context) -> anyhow::Result<ExitCode> {
-        // Effective version (honours dev-deploy `__OCX_BUILD_VERSION`
-        // override) — same source the `version` command + lock metadata
-        // use, so all three stay aligned.
         let version = crate::app::version().to_string();
-        // Reflect the same default registry the rest of the CLI resolves —
-        // env var, layered config, then compiled fallback (already merged in
-        // Context::default_registry).
         let registry = context.default_registry().to_string();
-        // Render the host platform's bare os/arch base (no `+os_features`
-        // suffix): `Platform::current()`'s `Display` now carries the detected
-        // libc, which the dedicated `Libc` row already shows. `segments()` is
-        // the no-features rendering.
+        // Bare os/arch: `Platform`'s `Display` carries the libc, which the `Libc` row already shows.
         let host_platform = ocx_oci::Platform::current().unwrap_or_else(ocx_oci::Platform::any);
         let platforms: Vec<String> = vec![host_platform.segments().join("/")];
         let current_shell = shell::Shell::from_process().map(|s| format!("{s}"));
         let home = ocx_config::home::default_ocx_root()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "~/.ocx".to_string());
-        // Reuse the libc families the resolution path detected —
-        // `Context::try_init` already ran `HostCapabilities::detect_and_cache()`,
-        // so this reads the populated cache rather than spawning a second probe.
-        // A host may advertise multiple families (e.g. glibc + musl).
+        // The cache `Context::try_init` populated; no second probe.
         let libc: Vec<String> = ocx_oci::cached_libc_labels();
 
         let info = crate::api::data::about::About::new(version, registry, platforms, libc, current_shell, home);
 
-        // C-034's reader. The strip happens inside the config loader, whose
-        // `log::warn!` lands on a stderr the shell shims discard — so the only
-        // channels that can report it are the reconciler's eval'd script and
-        // this command. Diagnostics, not payload: it rides stderr in both
-        // output modes so `--format json`'s stdout stays one JSON document.
+        // The loader's own warning lands on a stderr the shims discard, so this command must report
+        // the strip; on stderr, so `--format json`'s stdout stays one document.
         if let Some(reason) = context
             .config()
             .shell
@@ -87,8 +71,7 @@ impl About {
         let data = context.api().data();
         if context.api().is_json() {
             context.api().report(&info)?;
-        // Show the logo in terminals (even with --color never, just unstyled),
-        // and also when color is forced (--color always) even if piped.
+        // Logo on a terminal (unstyled under `--color never`), or whenever colour is forced.
         } else if Term::stdout().is_term() || data.color() {
             self.print_logo(&info, data.color())?;
         } else {
@@ -114,10 +97,6 @@ impl About {
         let shell_str = info.shell.as_deref().unwrap_or("n/a");
         let commit_summary = info.commit_summary();
 
-        // Build the info-table in a Vec so optional rows (Commit,
-        // Channel) only land when their source data was baked into the
-        // binary. Local `cargo build` without git → no Commit row;
-        // non-dev-deploy build → no Channel row.
         let mut info_entries: Vec<(&str, &str)> = Vec::with_capacity(7);
         info_entries.push(("Version", &info.version));
         if let Some(commit) = commit_summary.as_deref() {
@@ -139,7 +118,6 @@ impl About {
             .map(|(label, value)| format!("{} {}", label_style.apply_to(format!("{label:<10}")), value))
             .collect();
 
-        // Center info lines vertically alongside the logo
         let info_offset = (LOGO.len().saturating_sub(info_lines.len())) / 2;
         let gap = "  ";
 
@@ -161,7 +139,6 @@ impl About {
             ))?;
         }
 
-        // Center the URL under the logo
         let url = "https://ocx.sh";
         let url_padding = (LOGO_WIDTH.saturating_sub(url.len())) / 2;
         term.write_line(&format!("\n{}{}", " ".repeat(url_padding), dim_style.apply_to(url)))?;

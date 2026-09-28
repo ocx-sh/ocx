@@ -11,31 +11,17 @@ use serde::Serialize;
 
 use crate::api::Printable;
 
-/// Origin of a resolved environment variable entry.
+/// Origin of a resolved environment variable entry, shown under `--show-patches`.
 ///
-/// `Package` is the native origin — the entry came from the package's own
-/// declared metadata; native entries carry `source = None`, so JSON omits the
-/// field entirely. `Patch { rule, companion }` is a companion patch overlay
-/// entry (`--show-patches`) carrying its provenance: `rule` is the descriptor
-/// rule glob that admitted the companion for the base, and `companion` is the
+/// A package-native entry has no `source` object at all. A companion patch
+/// overlay entry carries `{"kind": "patch", "rule": "<glob>", "companion":
+/// "<companion-id>"}`, exactly these three keys: `rule` is the descriptor rule
+/// glob that admitted the companion for the base, and `companion` is the
 /// companion identifier whose interface projection produced the entry.
-///
-/// JSON shape (internally tagged on a `kind` discriminator, lowercase):
-///
-/// ```json
-/// "source": { "kind": "patch", "rule": "<glob>", "companion": "<companion-id>" }
-/// ```
-///
-/// The keys are exactly `kind` (always `"patch"` for an overlay entry), `rule`,
-/// and `companion`. A native entry has no `source` object at all (the field is
-/// skipped). Pre-1.0 this replaces the Phase-4 `"source":"patch"` string with
-/// the richer provenance object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum EntrySource {
-    // Never constructed — a native entry's `source` stays `None` so JSON omits
-    // the field entirely. Kept as the explicit complement to `Patch` so the
-    // taxonomy is total.
+    // Never constructed (a native entry's `source` stays `None`); kept so the taxonomy is total.
     #[allow(dead_code)]
     Package,
     Patch {
@@ -48,7 +34,6 @@ impl fmt::Display for EntrySource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EntrySource::Package => write!(f, "package"),
-            // Compact single-cell provenance for the plain `--show-patches` table.
             EntrySource::Patch { rule, companion } => write!(f, "{companion} (rule: {rule})"),
         }
     }
@@ -56,32 +41,22 @@ impl fmt::Display for EntrySource {
 
 /// A single resolved environment variable entry, tagged with its modifier kind.
 ///
-/// The optional `source` field is populated by the CLI when `--show-patches` is
-/// enabled. It is `None` for package-native entries and
-/// `Some(EntrySource::Patch { rule, companion })` for entries that came from a
-/// companion overlay (carrying the rule + companion provenance). The field is
-/// omitted from JSON output when absent.
-///
-/// The optional `separator` field carries the fold separator for a
-/// [`ModifierKind::List`] entry; every other kind omits it. Callers construct
-/// this type from entries that already passed compose-time separator
-/// agreement (`ocx_package::metadata::env::apply::reconcile_list_separators`), so a `list` entry
-/// reaching here never carries a bare `None` unless nothing in the
-/// composition ever declared one.
+/// `source` is present only under `--show-patches`, and only for an entry that
+/// came from a companion overlay. `separator` carries the fold separator of a
+/// `list` entry, absent only when nothing in the composition declared one;
+/// every other kind omits it.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct EnvEntry {
     pub key: String,
     pub value: String,
     #[serde(rename = "type")]
     pub kind: ModifierKind,
-    /// The separator a [`ModifierKind::List`] entry folds with. `None` on
-    /// every other kind. Skipped in JSON when `None`.
+    /// The separator a `list` entry folds with; absent on every other kind.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub separator: Option<String>,
-    /// Origin annotation for `--show-patches`. `None` = package native entry;
-    /// `Some(EntrySource::Patch { rule, companion })` = companion overlay entry
-    /// carrying its provenance. Skipped in JSON when `None`.
+    /// Origin annotation under `--show-patches`: absent for a package-native
+    /// entry, the patch provenance object for a companion overlay entry.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub source: Option<EntrySource>,
@@ -90,12 +65,8 @@ pub struct EnvEntry {
 /// A single admitted `binaries`/`entrypoints` claim, attributed to the
 /// package that declared it.
 ///
-/// `package` is `Option<String>` — `None` means "attribution unknown," never
-/// "this package has zero binaries." With the current admission model
-/// (`ocx_package_manager::composer::compose`'s admitted-set closure),
-/// `package` is populated for every entry; the `Option` typing leaves room
-/// for a future no-clean-attribution source without a breaking schema
-/// change. See `adr_declared_binaries_metadata.md` §4 Decision A.
+/// An absent `package` means "attribution unknown", never "this package has
+/// zero binaries".
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct BinaryAttribution {
     pub name: String,
@@ -105,11 +76,8 @@ pub struct BinaryAttribution {
 }
 
 impl BinaryAttribution {
-    /// Projects admitted `(identifier, claimed name)` pairs into the wire shape.
-    ///
-    /// Shared by `binaries` and `entrypoints` — both are `(PinnedIdentifier, T:
-    /// Display)` pairs from `AdmittedClaims`, differing only in the claim
-    /// type. See `adr_declared_binaries_metadata.md` §4 Decision A.
+    /// Projects admitted `(identifier, claimed name)` pairs into the wire shape, for `binaries` and
+    /// `entrypoints` alike (`adr_declared_binaries_metadata.md` §4 Decision A).
     pub fn from_pairs<T: fmt::Display>(pairs: &[(ocx_oci::PinnedPackageRef, T)]) -> Vec<Self> {
         pairs
             .iter()
@@ -124,16 +92,12 @@ impl BinaryAttribution {
 /// One admitted integration contribution, attributed to the declaring
 /// package.
 ///
-/// `payload` is the interpolated payload — arbitrary JSON OCX does not
-/// interpret. `package` is `Option` for the same reason
-/// [`BinaryAttribution::package`] is: `None` means "attribution unknown",
-/// never "no payload".
-///
-/// The field is `namespace`, not `name`: two of the three sibling arrays are
-/// name claims that resolve on `PATH`, while an integration row is a keyed
-/// payload. One row per (package, namespace) pair — an array longer than the
+/// `payload` is the interpolated payload, arbitrary JSON OCX does not
+/// interpret. An absent `package` means "attribution unknown", never "no
+/// payload". One row per (package, namespace) pair: an array longer than the
 /// distinct-namespace count is the structural guarantee that nothing merged.
-/// See `adr_package_integrations.md` C-014.
+// `namespace`, not `name`: an integration row is a keyed payload, not a `PATH` name claim
+// (`adr_package_integrations.md`).
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct IntegrationAttribution {
     pub namespace: String,
@@ -144,12 +108,8 @@ pub struct IntegrationAttribution {
 }
 
 impl IntegrationAttribution {
-    /// Projects admitted `(identifier, entry)` pairs into the wire shape — the
-    /// payload-carrying sibling of [`BinaryAttribution::from_pairs`].
-    ///
-    /// One row per input pair, in the admitted-set visit order compose
-    /// established — never grouped by namespace, never collapsed for a single
-    /// root (`adr_package_integrations.md` D2/D18).
+    /// Projects admitted `(identifier, entry)` pairs into the wire shape: one row per pair, in
+    /// admitted-set order, never grouped by namespace.
     pub fn from_pairs(pairs: &[(ocx_oci::PinnedPackageRef, IntegrationEntry)]) -> Vec<Self> {
         pairs
             .iter()
@@ -168,10 +128,10 @@ impl IntegrationAttribution {
 /// on `message`, which is the human rendering of the same fact. `key` is
 /// present only for the two variants that name an environment variable.
 ///
-/// Advisories are warning-only and never fail a compose. They exist because a
-/// deferred tool's declared metadata can describe something that will not
-/// substitute cleanly until its content materializes; reaching a log alone
-/// would make them unreadable to the tooling this product is a backend for.
+/// Advisories are warning-only and never fail a compose. They flag a deferred
+/// tool's declared metadata that will not substitute cleanly until its content
+/// materializes.
+// Reported, not only logged, or the tooling reading the report never sees them.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct LazyAdvisoryReport {
     pub kind: &'static str,
@@ -183,8 +143,7 @@ pub struct LazyAdvisoryReport {
 }
 
 impl LazyAdvisoryReport {
-    /// Projects the library's advisories into the wire shape, preserving the
-    /// order the composer raised them in.
+    /// Projects the library's advisories into the wire shape, in the order they were raised.
     pub fn from_advisories(advisories: &[ocx_package_manager::LazyAdvisory]) -> Vec<Self> {
         use ocx_package_manager::LazyAdvisory;
         advisories
@@ -212,28 +171,15 @@ impl LazyAdvisoryReport {
 
 /// Resolved environment variables for one or more packages, in declaration order.
 ///
-/// Each entry carries its [`ModifierKind`] so callers can apply the correct operation:
-/// - [`ModifierKind::Constant`] — replace any existing value for this key.
-/// - [`ModifierKind::Path`]     — prepend to any existing value using the platform path separator.
+/// Each `entries` item carries its modifier `type`: `constant` replaces any
+/// existing value for the key, `path` prepends using the platform path separator.
+/// A key may appear more than once, with different types.
 ///
-/// An ordered list (rather than type-keyed maps) preserves declaration order, allows multiple
-/// entries per key with different kinds, and naturally accommodates future modifier types.
-///
-/// JSON format: `{"entries": [{"key": "...", "value": "...", "type": "constant"|"path"|"list"[,
-/// "separator": "..."][, "source": {"kind": "patch", "rule": "...", "companion": "..."}]}, ...],
-/// "binaries": [{"name": "...", "package": "..."}, ...], "entrypoints": [{"name": "...", "package":
-/// "..."}, ...], "integrations": [{"namespace": "...", "package": "...", "payload": {...}}, ...]}`.
-/// The optional `"separator"` field is present only for a `"type":"list"` entry — every other
-/// kind omits it. The optional `"source"` object is present only when `--show-patches` is passed
-/// and only for companion overlay entries; it is omitted for package-native entries. `binaries`
-/// and `entrypoints` are the admitted-set claim attribution (`adr_declared_binaries_metadata.md`
-/// §4) — always present as arrays, possibly empty. `integrations` is the third such array
-/// (`adr_package_integrations.md` C-014), never collapsed for a single root. The `entries`
-/// envelope is the canonical shape shared with `ci export` so consumers can branch on a single
-/// shape; `binaries`, `entrypoints` and `integrations` are top-level siblings, not nested
-/// inside `entries`. `advisories` is the fourth such sibling — always present, empty unless a
-/// deferred tool raised something; warning-only, and a consumer branches on its `kind`, never
-/// on `message`.
+/// JSON format: `{"entries", "binaries", "entrypoints", "integrations",
+/// "advisories"}`, each always present as an array, possibly empty. The last four
+/// are top-level siblings, never nested inside `entries`, and `integrations` is
+/// never collapsed for a single root.
+// An ordered list, not type-keyed maps: it keeps declaration order and allows several entries per key.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct EnvVars {
     pub entries: Vec<EnvEntry>,
@@ -261,12 +207,7 @@ impl EnvVars {
         }
     }
 
-    /// Attaches the deferred-composition advisories, returning `self` for
-    /// chaining after [`new`](Self::new).
-    ///
-    /// A separate step rather than a fourth constructor argument: only a
-    /// command that composes lazily has any to attach, and every other call
-    /// site says so by not calling this.
+    /// Attaches the deferred-composition advisories; only a lazily composing command has any.
     #[must_use]
     pub fn with_advisories(mut self, advisories: Vec<LazyAdvisoryReport>) -> Self {
         self.advisories = advisories;
@@ -274,26 +215,11 @@ impl EnvVars {
     }
 }
 
-/// Number of names spelled out in a hint line before collapsing the rest into
-/// a trailing `...`. The hint is a glance, not the exhaustive list —
-/// `--format json` is the full-list path (Decision C).
+/// Names spelled out in a hint line before a trailing `...`; `--format json` carries the full list.
 const HINT_NAME_PREVIEW: usize = 3;
 
-/// Formats the `--format plain` availability hint for the three claim arrays.
-///
-/// Per `adr_declared_binaries_metadata.md` §4 Decision C: the `entries` table
-/// stays byte-stable (a `binaries` column would misrepresent a dataset with
-/// no natural per-entry-row mapping); binary/entrypoint availability is a
-/// separate hint line below the table, not a new column or a second table.
-/// `adr_package_integrations.md` C-015/D15 adds the integrations clause on
-/// the same reasoning, and for the same reason names only the NAMESPACE keys —
-/// an opaque payload has no per-entry-row mapping either, and plain output
-/// never renders one.
-///
-/// Clause order is binaries, entrypoints, integrations, then the trailing
-/// `use --format json for the full list`. E.g. `"5 binaries available (cmake,
-/// ctest, cpack, ...); 2 integration namespaces (com.jetbrains,
-/// com.microsoft.vscode); use --format json for the full list"`.
+/// The `--format plain` availability hint for the three claim arrays: a separate line, never a
+/// table column, since no claim maps to an entry row (`adr_declared_binaries_metadata.md` §4 Decision C).
 fn availability_hint(
     binaries: &[BinaryAttribution],
     entrypoints: &[BinaryAttribution],
@@ -301,18 +227,7 @@ fn availability_hint(
 ) -> String {
     let binary_names: Vec<&str> = binaries.iter().map(|c| c.name.as_str()).collect();
     let entrypoint_names: Vec<&str> = entrypoints.iter().map(|c| c.name.as_str()).collect();
-    // The integrations array carries one row per (package, namespace) pair,
-    // so two packages declaring one namespace yield two rows. The clause counts
-    // and names NAMESPACES, so it dedupes — the no-merge guarantee (D2) lives in
-    // the JSON array, and a hint reading "2 integration namespaces (x, x)"
-    // would be false on its own terms.
-    //
-    // `seen` gates membership in O(1); `namespaces` is the parallel
-    // first-seen-order list the hint must preserve (D2/D18 visit order) — a
-    // HashSet alone cannot express "which one was seen first". The loop runs
-    // over the AGGREGATE rows across every admitted package in the closure,
-    // not one package's declarations, so there is no small per-package bound
-    // to lean on for an O(n^2) scan here.
+    // Two packages can declare one namespace; dedupe, keeping first-seen order.
     let mut seen: HashSet<&str> = HashSet::new();
     let mut namespaces: Vec<&str> = Vec::new();
     for row in integrations {
@@ -335,11 +250,7 @@ fn availability_hint(
     parts.join("; ")
 }
 
-/// Summarizes one claim kind as `"N <label> (a, b, c, ...)"`, or `None` when
-/// `names` is empty. `names` order is the admitted-set visit order compose
-/// already established — reused verbatim, no re-sort. The label carries its own
-/// `available` where the claim kind reads that way, so the integrations
-/// clause is `"2 integration namespaces (...)"`.
+/// `"N <label> (a, b, c, ...)"` in the given order, or `None` when `names` is empty.
 fn summarize_claims(singular: &str, plural: &str, names: &[&str]) -> Option<String> {
     if names.is_empty() {
         return None;
@@ -352,18 +263,14 @@ fn summarize_claims(singular: &str, plural: &str, names: &[&str]) -> Option<Stri
     Some(format!("{} {label} ({preview})", names.len()))
 }
 
-/// Whether any entry carries a companion patch overlay origin. Gates the
-/// plain-table Source column — extracted so the decision is unit-testable
-/// without capturing `DataInterface`'s stdout writes.
+/// Whether any entry carries a companion patch origin, which adds the plain Source column.
 fn has_patch_entry(entries: &[EnvEntry]) -> bool {
     entries
         .iter()
         .any(|e| matches!(e.source, Some(EntrySource::Patch { .. })))
 }
 
-/// Whether the Decision C hint line has anything to announce. Extracted so
-/// the three-way gate is unit-testable without capturing `Printer`'s direct
-/// stdout writes — same rationale as `has_patch_entry`.
+/// Whether the availability hint has anything to announce.
 fn has_availability_hint(
     binaries: &[BinaryAttribution],
     entrypoints: &[BinaryAttribution],
@@ -399,9 +306,6 @@ impl Printable for EnvVars {
             );
         }
 
-        // Decision C hint line — Single-Table Rule keeps the table above
-        // byte-stable; availability is a separate line, only when there is
-        // anything to announce.
         if has_availability_hint(&self.binaries, &self.entrypoints, &self.integrations) {
             printer.print_hint(&availability_hint(
                 &self.binaries,

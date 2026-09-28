@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Restrained monochrome theme — emphasis via weight/effects only, no
-//! hue. Reads on any palette; selected by name once theming is wired to
-//! configuration.
+//! Monochrome theme: emphasis via weight and effects only, no hue.
 
 use super::{Theme, s};
 

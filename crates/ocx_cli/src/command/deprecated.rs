@@ -1,86 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Deprecated command spellings, kept alive for exactly one release pair.
+//! Deprecated command spellings for the 0.6-to-0.7 pair, deleted whole in 0.7 with the hidden
+//! variants that call it, so nothing else may depend on it.
 //!
-//! Every name renamed in 0.6 dispatches through this module, so one grep finds
-//! the whole set and 0.7 removes it by deleting this file together with the
-//! hidden `Command` / `Package` variants that call it. Nothing else may depend
-//! on it.
-//!
-//! An old spelling is a *hidden command*, never a clap alias: `ArgMatches`
-//! reports the canonical name, so an alias is invisible to the code and could
-//! not warn. The hidden variant also keeps its own
-//! [`crate::app::canonical_command_name`] arm reporting the **old** string, so
-//! the frozen v1 error envelope still distinguishes a deprecated invocation
-//! from a current one and nothing already emitted by a released binary changes
-//! meaning.
-//!
-//! # External sites the 0.7 removal must delete with this file
-//!
-//! One spelling in this window is a renamed **flag**, not a renamed command
-//! (`ocx package announce --package` became a positional, C-062). clap cannot
-//! tell the two forms apart at parse time, so the deprecated half is two
-//! declarations that must live on the announce args struct rather than here.
-//! Both carry a `// 0.7 removal:` comment naming this module, so one grep over
-//! `0.7 removal:` finds the whole set:
-//!
-//! | Site | What it is |
-//! |---|---|
-//! | the `package_flag` `Arg` on [`crate::command::package_announce::PackageAnnounce`] | the hidden `--package` long |
-//! | the `package_selector` `ArgGroup` on the same struct, and the `override_usage` beside it | what makes exactly one of the two spellings required, and what keeps the hidden one out of the rendered usage line (DX-65) |
-//!
-//! Deleting this file therefore is not the whole removal: the two clap
-//! declarations go with it, and the positional loses its `Option`.
+//! Each spelling is a hidden command, never a clap alias: `ArgMatches` reports only the canonical
+//! name, so an alias could never warn. The `--package` flag rename's sites carry `// 0.7 removal:`.
 
 use crate::app::Context;
 
 /// The release that deletes this module and every spelling in it.
 const REMOVAL_RELEASE: &str = "0.7";
 
-/// Every command spelling this window renames, as `(old, new)`.
-///
-/// The authority the sweep reads. Before this existed, each rename was three
-/// hand-written literals — the hidden `Command` / `Package` variant, its
-/// [`warn_renamed`] call, and its [`crate::app::canonical_command_name`] arm —
-/// with nothing naming the set, so a repo-wide check for stale spellings had no
-/// input it could be driven from. `test/lint/test_deprecated_spellings.py`
-/// parses this list out of this file and sweeps every old spelling in it.
-///
-/// The renamed **flag** (`ocx package announce --package`, C-062) is not here
-/// and cannot be: it renames an argument, not a command, so it has no `(old,
-/// new)` command pair. The sweep carries it as its own rendering.
+/// Every command spelling this window renames, as `(old, new)`; the authority
+/// `test/lint/test_deprecated_spellings.py` parses to sweep the repo. The renamed `--package` flag
+/// has no `(old, new)` pair, so the sweep carries it separately.
 pub const RENAMED: &[(&str, &str)] = &[
     ("run", "exec"),
     ("package describe", "package description push"),
     ("package info", "package description pull"),
 ];
 
-/// Warn on stderr that `old` has been renamed to `new`.
-///
-/// Fires once per invocation by construction — one process dispatches one
-/// command. Routed through [`Context::ui`], so the notice never reaches stdout
-/// and degrades to `log::warn!` when quiet or non-interactive.
+/// Warn on stderr that `old` has been renamed to `new`; once, as one process dispatches one command.
 pub fn warn_renamed(context: &Context, old: &str, new: &str) {
     context.ui().warn(format!(
         "`ocx {old}` is renamed to `ocx {new}` and is removed in {REMOVAL_RELEASE}"
     ));
 }
 
-/// The notice `ocx package announce --package` prints, naming the positional
-/// form and [`REMOVAL_RELEASE`] (C-062).
-///
-/// Returns the sentence instead of warning with it, and that split is the
-/// point: [`ocx_console::Printer`] writes the real streams and no seam in this
-/// workspace captures one, so a `warn_renamed`-shaped helper would leave the
-/// sentence — and the release it names — with nothing able to assert it. The
-/// caller routes the value through [`Context::ui`], which is what keeps it on
-/// stderr and off stdout; once-ness is the caller's too, and is why the two arg
-/// ids are merged in `execute` rather than in an accessor read more than once.
-///
-/// [`warn_renamed`] cannot serve: its sentence renames one *command* to
-/// another, and a flag becoming a positional is a different statement about a
-/// different surface.
+/// The notice `ocx package announce --package` prints. Returned rather than warned so a test can
+/// assert it; the caller routes it through [`Context::ui`] and owns once-ness.
 #[must_use]
 pub fn package_flag_notice() -> String {
     format!(
@@ -93,11 +42,11 @@ pub fn package_flag_notice() -> String {
 mod tests {
     use super::{RENAMED, package_flag_notice};
 
-    /// C-062 / S-034: the notice names the deprecated spelling, the form that
-    /// replaces it, and the release that removes it.
+    /// The notice names the deprecated spelling, the form that replaces it, and the
+    /// release that removes it.
     ///
     /// This is the **reachable half** of the inventory's
-    /// `announce_warning_never_reaches_stdout` (DX-69). No Rust seam in this
+    /// `announce_warning_never_reaches_stdout`. No Rust seam in this
     /// workspace observes stdout — [`ocx_console::Printer`] writes the real
     /// streams and [`ocx_console::Cell`] exposes no text — so the stdout-purity
     /// and once-ness halves are acceptance assertions instead, in
@@ -134,8 +83,8 @@ mod tests {
         );
     }
 
-    /// C-062 / E-22: every site the 0.7 removal must delete is findable from one
-    /// `0.7 removal:` grep.
+    /// Every site the 0.7 removal must delete is findable from one `0.7 removal:`
+    /// grep.
     ///
     /// Scanned over **`command/package_announce.rs`**, a different file, and
     /// that is the whole design: a scan run over this module's own source would

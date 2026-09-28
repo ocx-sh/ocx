@@ -1,43 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx package announce` orchestration (ocx-sh/ocx#216).
+//! `ocx package announce` orchestration: updates one package's entry in the
+//! `ocx-sh/index` repository (`adr_announce_publisher_surface.md`).
+//! "Reference parity" means matching `ocx-sh/index` `bot/cli/announce.py`.
 //!
-//! A self-contained, forge-neutral routine (reused by `ocx-mirror`) that a
-//! publisher runs to update **one** package's entry in the `ocx-sh/index`
-//! repository. It observes an owner-curated set of registry tags, rebuilds the
-//! package's index root byte-exactly (CONTRACTS §14, via
-//! [`ocx_index::serialize_root`]) and stores each observed tag's image
-//! index verbatim as a content-addressed object, then writes the result locally
-//! (`--out`), opens/updates a pull request from a fork of the index (`--fork`),
-//! or opens the same pull request from a branch on the index repository itself
-//! (neither flag — for a publisher whose credential can already push there).
-//! Server-side privileged verification (ownership, claim re-derivation) happens
-//! in the index CI, never here.
-//!
-//! Every remote mode ends in a **pull request** — the fork-free path narrows
-//! design register S3 ("always fork") to "always a reviewed pull request",
-//! because GitHub cannot fork a repository into the organization that owns it,
-//! so first-party publishers had no working path at all.
-//!
-//! The pipeline behaviourally matches the Python reference tool
-//! (`ocx-sh/index` `bot/cli/announce.py`, design register FP-9), with the
-//! owner-ratified C-cell decisions layered on: branch-head base (C4),
-//! replace/union/refresh/from-registry curation (C3/C5), the unchanged
-//! short-circuit (C6),
-//! owner-only yank markers (C7), fork auto-create at the upstream base SHA (C8),
-//! and one atomic multi-file commit (C15). The SSRF guard runs before the first
-//! registry request (X3); the announce credential never leaves the ambient
-//! `OCX_ANNOUNCE_TOKEN` (X6), carried only by the passed-in
-//! [`Forge`](crate::forge::Forge) implementation.
-//!
-//! ADR: `adr_announce_publisher_surface.md` (D5 — orchestration in `ocx_lib`,
-//! the CLI a thin wrapper).
+//! The SSRF guard runs before the first registry request; `OCX_ANNOUNCE_TOKEN`
+//! reaches only the passed-in [`Forge`](crate::forge::Forge).
 
 pub mod error;
-// `pub(crate)` because claim is the second caller of the description observer
-// and the file-set builder (design decision D-2): one observer, two commands,
-// no parallel implementation. Nothing here leaves the crate.
 pub(crate) mod pipeline;
 pub mod request;
 
@@ -54,23 +25,17 @@ use crate::forge::{
 use ocx_index::serialize_root;
 use ocx_package::publisher::Publisher;
 
-/// The main branch of the index repository (design register C10).
+/// The main branch of the index repository.
 const INDEX_BASE_REF: &str = "main";
 
-/// Announce one package (design register C11/C12 — one package per call).
-///
-/// `forge` is `Some` for every mode that reaches a remote: it reads the
-/// committed root (C10) and, for [`AnnounceTarget::Fork`] and
-/// [`AnnounceTarget::Direct`], commits and opens the pull request. A `None`
-/// forge cannot read the committed root, so announce returns
-/// [`AnnounceError::ForgeRequired`].
+/// Announce one package.
 ///
 /// # Errors
 ///
-/// Returns an [`AnnounceError`] for a missing forge, an unclaimed package, an
-/// SSRF-forbidden physical host, a curated tag that does not resolve, a
-/// yank/unyank input error, or any forge / filesystem failure. See
-/// [`AnnounceError`] for the full taxonomy.
+/// [`AnnounceError::ForgeRequired`] when `forge` is `None`, since every mode
+/// reads the committed root through it; otherwise an unclaimed package, an
+/// SSRF-forbidden host, an unresolvable curated tag, a yank/unyank input error,
+/// or any forge or filesystem failure.
 pub async fn announce(
     publisher: &Publisher,
     forge: Option<&dyn Forge>,
@@ -80,19 +45,11 @@ pub async fn announce(
     let package = request.package.repository().to_string();
     let root_path = format!("p/{package}.json");
     let branch = format!("indexbot-announce-{}", package.replace('/', "-"));
-    // The capability array is non-empty on **every** run, so it is seeded here
-    // rather than at the one path that probes: `ensure_push_access` is reached
-    // only from the fork-free commit arm, and `--out`, both unchanged arms and
-    // the whole fork path would otherwise report nothing at all. Held as the
-    // `PushAccess` itself — see `AnnounceOutcome::capability_checks` for why the
-    // rows are never copied out into a bare vector.
+    // Seeded here, not in the one arm that probes, or every other run reports no capability rows.
     let mut capability_checks = PushAccess::skipped_all();
 
-    // 0. Resolve the fork's REAL identity first, so every later endpoint is
-    //    built from it — the announce branch lives on the fork, and `--fork
-    //    <owner>/<repo>` may name one renamed away from the upstream's
-    //    repository name. Deliberately read-only (`find_fork`, never
-    //    `ensure_fork`): an unchanged run must not provoke a fork create (C6).
+    // Endpoints come from the fork's real identity, since `--fork` may name one renamed away from upstream.
+    // Read-only `find_fork`, never `ensure_fork`: an unchanged run must not create a fork.
     let fork_target = match &request.target {
         AnnounceTarget::Fork(target) => Some(target),
         AnnounceTarget::Direct | AnnounceTarget::Out(_) => None,
@@ -101,26 +58,14 @@ pub async fn announce(
         Some(target) => forge.find_fork(&request.index_repo, target).await?,
         None => None,
     };
-    // Where the announce branch lives *right now*: a fork that already exists,
-    // the index repository itself on the fork-free path, nowhere for `--out`.
-    // Every later endpoint is built from this one value, so the fork and direct
-    // paths share the whole branch-state / root-read / commit sequence below.
     let branch_repo = match &request.target {
         AnnounceTarget::Direct => Some(request.index_repo.clone()),
         AnnounceTarget::Fork(_) => existing_fork.as_ref().map(|fork| fork.coordinate(&request.index_repo)),
         AnnounceTarget::Out(_) => None,
     };
 
-    // 0b. Is the announce branch still carrying work, or is it residue?
-    //     The branch is per package (C4) and outlives every pull request opened
-    //     from it, so its mere existence says nothing. Accumulating onto a spent
-    //     branch re-proposes already-merged commits and the pull request
-    //     conflicts on the root file every announce edits (#228).
     let branch_state = resolve_branch_state(forge, &request.index_repo, branch_repo.as_ref(), &branch).await?;
 
-    // 1. Read the committed root (C10), from the announce branch head while the
-    //    branch is live (C4) so sequential announces accumulate, else from the
-    //    index main — carrying a stale branch's tag delta forward (D1).
     let root_read = read_committed_root(
         forge,
         &request.index_repo,
@@ -139,14 +84,7 @@ pub async fn announce(
     if !committed_root.is_object() {
         return Err(AnnounceError::RootNotObject { path: root_path });
     }
-    // #477: the root's `name` and the identifier on the command line are two
-    // statements of the same fact, and nobody compared them — so announcing
-    // `ghcr.io/acme/widget` against a root that says `ocx.sh/acme/widget`
-    // rewrote somebody else's entry. Checked here, immediately after the shape
-    // check and before the branch-tag carry, so a disagreement costs zero
-    // registry requests and the run cannot half-rebuild the wrong package.
-    // Fails closed on an absent `name`: the index schema requires it of every
-    // root, so a file without one is not the root it is standing in for.
+    // A root whose `name` differs or is absent is another package's entry, which announcing would rewrite.
     let expected_name = crate::claim::root_name(&request.package);
     let committed_name = committed_root.get("name").and_then(Value::as_str).unwrap_or_default();
     if committed_name != expected_name {
@@ -156,19 +94,13 @@ pub async fn announce(
             expected: expected_name,
         });
     }
-    // D1: a stale branch supplies its tags but never its shape — that shape is
-    // what froze in #399. `committed_bytes` deliberately stays the BASE's raw
-    // bytes while the regeneration input becomes the merged root: comparing C6
-    // against the merged root would read `unchanged` for exactly the runs this
-    // rebuild exists to unfreeze.
+    // `committed_bytes` stays the base's bytes: comparing against the carried root would report
+    // `unchanged` on exactly the stale runs this rebuild must unfreeze.
     if let Some(carried) = &root_read.carried_tags {
         pipeline::carry_branch_tags(&mut committed_root, carried);
     }
 
-    // 2/3/4. Resolve the curated tag set (C3/C5), observe it (X3), regenerate
-    //        the tags (C6-preserving), apply yank markers (C7), and assemble
-    //        the atomic file set (C15) — one timestamp shared by all of them so
-    //        the run is self-consistent.
+    // One timestamp for the whole run, race retry included, so every written object agrees.
     let now = pipeline::current_timestamp();
     let Rebuilt {
         root_bytes: new_root_bytes,
@@ -192,7 +124,6 @@ pub async fn announce(
     .await?;
     let mut desc_status = AnnounceStatus::from_changed(desc_updated);
 
-    // C6: byte-identical root AND no new CAS object ⇒ nothing moved.
     let unchanged = new_root_bytes == committed_bytes && pipeline::new_cas_count(&committed_root, &observed) == 0;
     let mut status = if unchanged {
         AnnounceStatus::Unchanged
@@ -202,16 +133,9 @@ pub async fn announce(
     let message = format!("announce: curate {package}");
     let pull_request_body = format!("Publisher-curated tag update for `{package}`.");
 
-    // 7. Dispatch: write locally (`--out`), or commit and open/update the pull
-    //    request — from a fork (`--fork`) or from the index repository itself.
     match &request.target {
         AnnounceTarget::Out(directory) => {
-            // `--out` writes on EVERY run, unchanged included. C6 is scoped to
-            // "no commit, no pull request" (design register), and a local write
-            // is neither: a pipeline shaped `announce --out dir && publish dir`
-            // must not silently publish an empty directory just because nothing
-            // moved. The byte contract makes the repeated write idempotent, and
-            // `status` still reports `unchanged` so callers can tell.
+            // Writes even when unchanged, or `announce --out dir && publish dir` publishes an empty directory.
             let written_paths = pipeline::write_out(directory, &files).await?;
             Ok(AnnounceOutcome {
                 package,
@@ -221,28 +145,13 @@ pub async fn announce(
                 written_paths,
                 reserved_tags_dropped: reserved_dropped,
                 desc_status,
-                // No branch is read and none is pushed, so none is reported —
-                // the name is derivable on every run, and naming it here would
-                // tell a consumer a branch was written.
                 branch: String::new(),
                 capability_checks,
             })
         }
         AnnounceTarget::Fork(_) | AnnounceTarget::Direct => {
             if unchanged {
-                // C6: a pure no-op — unless a prior announce left commits
-                // on the branch that the index base does not have. Such a run
-                // may have committed content whose pull request then failed to
-                // open, stranding the update; ensure an open PR exists so it is
-                // never lost (design register C6 amendment).
-                //
-                // Exactly two states carry something unmerged, and they need
-                // opposite handling. `Live` (`branch_sha` is `Some`) accumulates
-                // and may still be missing its pull request. `Stale` already HAS
-                // one — the variant holds it — so the only open question there
-                // is whether that request can still merge (D2). Every other
-                // state carries nothing unmerged, and opening a pull request for
-                // it produces the unmergeable one #228 is about.
+                // A prior run may have committed without opening its pull request, stranding the update.
                 if let BranchState::Stale(pull_request) = &branch_state {
                     refuse_if_unmergeable(forge, &request.index_repo, &branch_state, &branch).await?;
                     return Ok(AnnounceOutcome {
@@ -257,6 +166,7 @@ pub async fn announce(
                         capability_checks: capability_checks.clone(),
                     });
                 }
+                // `branch_sha` is `Some` only for `Live`.
                 if let Some(repo) = &branch_repo
                     && root_read.branch_sha.is_some()
                 {
@@ -282,6 +192,7 @@ pub async fn announce(
                         capability_checks: capability_checks.clone(),
                     });
                 }
+                // No other state carries unmerged work; opening a request here yields a spent branch's unmergeable one.
                 return Ok(AnnounceOutcome {
                     package,
                     status,
@@ -294,17 +205,7 @@ pub async fn announce(
                     capability_checks: capability_checks.clone(),
                 });
             }
-            // C8: reuse the already-resolved fork, else create one under the
-            // requested owner (S12 shared fork), then commit onto the
-            // accumulating branch head (C4, live branch) or the upstream base
-            // SHA (C8 — first announce, and equally a spent branch, whose head
-            // `read_committed_root` was told to ignore) — one atomic multi-file
-            // commit (C15).
-            //
-            // Both resolutions sit AFTER the unchanged short-circuit on purpose:
-            // C6 says a run that moves nothing must provoke no fork create, and
-            // symmetrically must not demand push permission the direct path only
-            // needs in order to write.
+            // After the unchanged return, so a no-op run neither creates a fork nor demands push permission.
             let (commit_repo, fork) = match fork_target {
                 Some(target) => {
                     let fork = match existing_fork {
@@ -312,10 +213,7 @@ pub async fn announce(
                         None => forge.ensure_fork(&request.index_repo, Some(&target.namespace)).await?,
                     };
                     let coordinate = fork.coordinate(&request.index_repo);
-                    // The commit below parents off a SHA read from the upstream
-                    // repository but is written to the fork, so the base object
-                    // reaches it only through the shared fork network. Land that
-                    // object in the fork's own history first (see `sync_fork`).
+                    // The commit parents off an upstream SHA the fork may lack until `sync_fork` lands it.
                     forge.sync_fork(&coordinate, INDEX_BASE_REF).await;
                     (coordinate, Some(fork))
                 }
@@ -324,40 +222,14 @@ pub async fn announce(
                     (request.index_repo.clone(), None)
                 }
             };
-            // C4/C8 and the stale-fork guard in one place: an accumulating run
-            // bases on the branch head in the repository the branch lives in; a
-            // fresh or rebuilt branch bases on the **upstream** index's default
-            // branch, never on the fork's own copy of it, which is routinely far
-            // behind and would re-propose content the index already has.
-            // The SHA is the one the root was READ at, never a fresh resolution
-            // of the same ref name — see `RootRead::base_sha`.
+            // A non-accumulating run bases on upstream `main`, never the fork's lagging copy,
+            // which would re-propose content the index already has.
             let (base_repo, base_branch) = match root_read.branch_sha {
                 Some(_) => (commit_repo.clone(), branch.as_str()),
                 None => (request.index_repo.clone(), INDEX_BASE_REF),
             };
             let base_sha = root_read.base_sha;
-            // F2/C4: the ref update is the CAS an accumulating branch needs —
-            // a rebuilt one (spent or stale) repoints with `Reset` on purpose,
-            // see `BranchState::ref_update`. Either way, if the base moved
-            // between our read and our commit, re-read the new head, re-run the
-            // WHOLE regeneration against it, and retry exactly once so the
-            // concurrent change is preserved, never overwritten.
-            //
-            // The commit and the pull request are **one unit of work** for the
-            // purposes of that race, because which of the two loses it depends
-            // on the transport. Under `api` the commit's compare-and-swap is
-            // rejected. Under `git`, `commit_files` performs no network write at
-            // all — objects and a local ref only — and the push happens inside
-            // `open_or_update_pull_request`, so the rejection arrives there.
-            // Retrying around the commit alone therefore lets a concurrent
-            // announce be lost under exactly the transport that needs it most.
-            // The one line this path emits, and it exists because #436 could
-            // not be explained from a run's own output: two announces both
-            // reported `updated` and exit 0 while one deleted the other's tag,
-            // and reconstructing which commit each had been built on took a
-            // commit-diff forensics session. These four fields name that
-            // directly. INFO because it is the default console level, so the
-            // next report of this class arrives with the answer attached.
+            // INFO (the default level) so a lost tag can be traced to the base each announce committed on.
             tracing::info!(
                 branch = %branch,
                 state = branch_state.name(),
@@ -381,8 +253,7 @@ pub async fn announce(
                 )
                 .await
             {
-                // Re-announce reuses the open request without patching
-                // title/body — the C4 branch-head commits carry the update.
+                // Under `git` the push happens here, not in `commit_files`, so the race retry must cover this call.
                 Ok(_) => {
                     forge
                         .open_or_update_pull_request(
@@ -399,49 +270,19 @@ pub async fn announce(
             };
             let pull_request = match first_attempt {
                 Ok(pull_request) => pull_request,
-                // The two spellings of "the base moved under us", one per
-                // transport. `api` refuses the fast-forward. `git` pushes a
-                // `RefUpdate::Reset` rebuild with `--force-with-lease` (C-040)
-                // and loses the lease, which is `StaleLease` and never
-                // `NonFastForward`. Matching only the second would retry under
-                // `api` and give up under `git` for the identical race — and
-                // since both classify to exit 75, no assertion on the outcome
-                // could tell the two behaviours apart.
+                // One race, two spellings (`api` refuses the fast-forward, `git` loses the lease): match both
+                // or one transport exits 75 where the other retries.
                 Err(crate::forge::ForgeError::NonFastForward { .. } | crate::forge::ForgeError::StaleLease { .. }) => {
-                    // WHOSE head to re-read is the same question the first
-                    // attempt already answered — and the ref update it chose is
-                    // what recorded the answer. An accumulating run raced
-                    // another announce on the branch, so the branch head is the
-                    // winner. A rebuilt run (spent or stale) never based on the
-                    // branch at all — it lost to the index main moving under it,
-                    // and re-reading the branch head here would turn the rebuild
-                    // straight back into accumulate-on-stale, which is #399 in
-                    // the retry path.
-                    //
-                    // `root_read.branch_sha` stood in for this and is wrong on
-                    // one arm: it is `None` for a rebuild AND for an `Absent`
-                    // accumulate, so an `Absent` run that raced re-read the index
-                    // main, regenerated the same main-derived root, and was
-                    // refused again — one silent tag loss traded for a permanent
-                    // exit 75 (#436). `ref_update()` separates the two, and it is
-                    // what the ADR's own wording names ("whenever the first
-                    // attempt used `Reset`").
-                    // Announce never renders a root independently of its base,
-                    // so it never asks for `Accumulate`; the arm is here because
-                    // the enum is total, not because the state machine reaches it.
+                    // A rebuild lost to `main` moving; re-reading the branch head would make it accumulate-on-stale.
                     let branch_head = match branch_state.ref_update() {
+                        // Keyed on `ref_update()`, not `branch_sha` (also `None` for `Absent`), or a raced
+                        // `Absent` run re-reads `main` and is refused forever (exit 75).
                         RefUpdate::FastForward | RefUpdate::Accumulate => {
                             forge.get_ref_sha(&commit_repo, &format!("heads/{branch}")).await?
                         }
                         RefUpdate::Reset => None,
                     };
-                    // No branch head on an accumulating retry means the branch
-                    // genuinely is not there — the rejection came from somewhere
-                    // other than a race on it (the open call, under `api`) — and
-                    // the index base is the only head there is. Should the ref
-                    // read be lying, as it was in #436, the commit is refused a
-                    // second time and the run exits 75 rather than deriving from
-                    // main unnoticed: `commit_files` backstops this arm.
+                    // No branch head (a rebuild, or no branch yet): the index `main` is the only head to re-read.
                     let (retry_repo, retry_branch, head_sha) = match branch_head {
                         Some(sha) => (&commit_repo, branch.as_str(), sha),
                         None => {
@@ -467,9 +308,7 @@ pub async fn announce(
                             path: root_path.clone(),
                             source,
                         })?;
-                    // D1 again: the re-read base carries the shape, the stale
-                    // branch the tags. Skipping this would drop on the retry
-                    // exactly what the first attempt carried.
+                    // Skipping the carry would drop on the retry the stale tags the first attempt carried.
                     if let Some(carried) = &root_read.carried_tags {
                         pipeline::carry_branch_tags(&mut head_root, carried);
                     }
@@ -487,41 +326,17 @@ pub async fn announce(
                         &package,
                     )
                     .await?;
-                    // The retry re-resolved the curated set against the winning
-                    // head, so its drop list supersedes — never unions with —
-                    // the pre-race one: for `--tags-file`/`--refresh` the base
-                    // root differs between passes, so the two lists legitimately
-                    // differ and only the second describes what was announced.
+                    // Replace, never union: only the retry's drop list describes what was announced.
                     reserved_dropped = merged.reserved_dropped;
                     desc_status = AnnounceStatus::from_changed(merged.desc_updated);
-                    // Re-apply C6 against the head that WON the race: two
-                    // identical racing announces both regenerate the same
-                    // bytes, so committing again would push a commit whose tree
-                    // equals its base — an empty diff, a governance threat class
-                    // the index bot tests for (X7). Skip the commit and fall
-                    // through to the ensure-PR call below, which still runs, so
-                    // nothing is stranded.
+                    // Identical racing announces regenerate the same bytes; committing would push an empty-diff
+                    // commit, a governance threat the index bot flags.
                     if merged.root_bytes == head_bytes && pipeline::new_cas_count(&head_root, &merged.observed) == 0 {
                         status = AnnounceStatus::Unchanged;
-                        // The same D2 tripwire as the first pass, for the same
-                        // reason: this arm commits nothing, so a conflicting
-                        // request stays conflicting and would be reported as a
-                        // benign `unchanged` — #399 in the retry path. Reachable
-                        // when a concurrent writer wins the race on a stale
-                        // branch: GitLab sends a per-file `last_commit_id` even
-                        // under `Reset` and maps its rejection to
-                        // `NonFastForward`.
-                        //
-                        // Control still falls through to the open call below, so
-                        // the winning commit is never stranded without a request.
+                        // Commits nothing, so a conflicting stale request would otherwise report a benign `unchanged`.
                         refuse_if_unmergeable(forge, &request.index_repo, &branch_state, &branch).await?;
                     } else {
-                        // The retry commits against a different ref than the
-                        // line above announced — the branch's own repository
-                        // when accumulating, the index main when rebuilding —
-                        // so a run that raced would otherwise leave a trace
-                        // naming a base it never committed on, which is the
-                        // exact reading #436 needed and did not have.
+                        // The retry commits on a different base than the first log line named.
                         tracing::info!(
                             branch = %branch,
                             state = branch_state.name(),
@@ -532,20 +347,10 @@ pub async fn announce(
                             "committing the announce"
                         );
                         forge
-                            // Same ref discipline as the first attempt, for the
-                            // same reasons. Accumulating: the winning head IS
-                            // our base now, so the update is a fast-forward by
-                            // construction — and it stays CAS-checked, since a
-                            // third announce could have advanced the branch
-                            // again while we regenerated. Rebuilt: the branch
-                            // still holds the commits the base does not, so the
-                            // repoint is still deliberately not a fast-forward.
+                            // Same `ref_update()`: still CAS-checked, since a third announce could advance the branch.
                             .commit_files(
                                 &commit_repo,
                                 &branch,
-                                // The base is wherever the head was re-read
-                                // from: the branch's own repository when
-                                // accumulating, the index main when rebuilding.
                                 CommitBase {
                                     repo: retry_repo,
                                     sha: &head_sha,
@@ -557,9 +362,7 @@ pub async fn announce(
                             )
                             .await?;
                     }
-                    // One shot, by construction: a second rejection propagates
-                    // rather than starting a third pass (S-023 — still rejected
-                    // is exit 75, and the caller reruns the command).
+                    // One retry only: a second rejection propagates as exit 75 and the caller reruns.
                     forge
                         .open_or_update_pull_request(
                             &request.index_repo,
@@ -571,10 +374,7 @@ pub async fn announce(
                         )
                         .await?
                 }
-                // Every other failure is settled, not raced. Widening this to
-                // `Err(_)` once two calls feed one `match` is the natural
-                // mistake and the costly one: `MergeRequestUnconfirmed` means
-                // the push already landed, so retrying pushes a second time.
+                // Widening the retry to `Err(_)` re-pushes after `MergeRequestUnconfirmed`, whose push already landed.
                 Err(other) => return Err(other.into()),
             };
             Ok(AnnounceOutcome {
@@ -592,64 +392,37 @@ pub async fn announce(
     }
 }
 
-/// The base a regeneration pass runs against: the root document, and where that
-/// document was read.
-///
-/// The three travel together because the orphan diff needs all three at once —
-/// the document supplies the previous referenced set, and the repository and
-/// commit are the tree a logo probe reads (design decision E). Splitting them
-/// into parameters is what would let a pass diff one root and probe another.
+/// The root a regeneration pass runs against and the tree it was read from, kept
+/// together so the orphan diff cannot diff one root and probe another's tree.
 #[derive(Clone, Copy)]
 struct RootBase<'a> {
-    /// The committed root the pass regenerates from, after the D1 branch-tag
-    /// carry.
+    /// The committed root, after the branch-tag carry.
     root: &'a Value,
-    /// The repository `sha` lives in: the branch's own repository while the
-    /// announce branch is live, the index repository otherwise.
+    /// The repository `sha` lives in.
     repo: &'a RepoCoordinate,
-    /// The commit `root` was read at — [`RootRead::base_sha`], or the winning
-    /// head on the race retry.
+    /// The commit `root` was read at.
     sha: &'a str,
 }
 
 /// One regenerated announce payload.
 struct Rebuilt {
-    /// The canonical root bytes (CONTRACTS §14) — what the C6 byte comparison
-    /// reads.
     root_bytes: Vec<u8>,
-    /// The atomic file set a commit would carry: the root plus every CAS object
-    /// (C15).
+    /// The root plus every CAS object, committed as one atomic set.
     files: BTreeMap<String, FileChange>,
-    /// What every curated tag was observed to hold — the C6 "no new CAS object"
-    /// input.
     observed: Vec<pipeline::Observed>,
-    /// Reserved tags this pass dropped from the curated set (D7).
     reserved_dropped: Vec<String>,
-    /// Whether the `__ocx.desc` observation moved this pass (D6) — false when
-    /// the description is unchanged or the package has none.
+    /// Whether the `__ocx.desc` observation moved this pass.
     desc_updated: bool,
 }
 
-/// One full regeneration pass over `base_root`: resolve the curated tag universe
-/// (C3/C5) and drop its reserved tags (D7), observe every curated tag behind the SSRF pre-flight (X3), rebuild
-/// the tags (C6), apply the yank markers (C7), serialize the root, and assemble
-/// the atomic file set (C15).
+/// One full regeneration pass over `base.root`, producing the atomic file set.
 ///
-/// Shared verbatim by the initial commit and the C4 non-fast-forward retry, so
-/// the retry re-derives the *whole* sequence from the winning head instead of
-/// replaying a tag universe resolved against the pre-race root. Re-resolving is
-/// what preserves a concurrent announce's additions: `--tags-file` and
-/// `--refresh` take the base root's tags as their starting set, so unioning
-/// against the new head keeps a tag the winner added — replaying a stale set
-/// would delete it, since [`pipeline::regenerate`] replaces `tags` wholesale.
-/// `--tags` stays a deliberate replace (C3): its universe is the flag, not the
-/// base root, so a tag it omits is still dropped on the retry — the publisher
-/// asked for exactly that set.
+/// The race retry reruns all of it against the winning head: replaying the first
+/// pass's tag set would delete a tag the winner added.
 ///
 /// # Errors
 ///
-/// Propagates the curated-resolution (C3/C5), observe/SSRF (X3) and yank/unyank
-/// (C7) failures of the steps it composes.
+/// Curated-resolution, observe/SSRF and yank/unyank failures.
 async fn observe_and_rebuild(
     publisher: &Publisher,
     forge: &dyn Forge,
@@ -661,16 +434,7 @@ async fn observe_and_rebuild(
 ) -> Result<Rebuilt, AnnounceError> {
     let base_root = base.root;
     let base_tags = pipeline::committed_tag_names(base_root);
-    // X3: the physical target is remote-controlled data (a root `repository`
-    // pointer), so it is resolved and validated once, ahead of the first
-    // registry request of any kind. Under `--tags-from-registry` that first
-    // request is the tag listing rather than an observe — a pre-flight inside
-    // the observe loop would guard the wrong thing.
-    //
-    // The field lift is here rather than inside the guard because claim resolves
-    // the same pointer off its own command line and has no root to read it out
-    // of; the refusal an absent `repository` earns is announce's, so announce
-    // raises it.
+    // `repository` is remote-controlled: it passes the SSRF guard before any registry request, tag listing included.
     let repository = base_root
         .get("repository")
         .and_then(Value::as_str)
@@ -692,27 +456,9 @@ async fn observe_and_rebuild(
         reserved_dropped,
     } = pipeline::resolve_curated_tags(&request.curated, &base_tags, &discovered)?;
     let observed = pipeline::observe_curated(publisher, &physical, &curated).await?;
-    // D6: the description is a floating tag of its own, observed after the
-    // curated set (reference parity) and behind the same pre-flight — the root's
-    // `desc` object is rewritten only when its tag digest moved, so `--refresh`
-    // on a package whose description never changes stays byte-identical. Its CAS
-    // blobs ride along on every run regardless, exactly as the curated tags' do.
     let desc = pipeline::observe_desc(publisher, &physical, base_root).await?;
     let mut root = pipeline::regenerate(base_root, &observed, now);
-    // #436's second guard, and it is load-bearing only because of the first:
-    // `GitWorkspace::commit_files` now refuses a fast-forward onto a head this
-    // run did not read, so `base_root` IS the tree the commit lands on. A tag it
-    // carries that the regenerated set does not is therefore a deletion from the
-    // index, not the artefact of having read one commit and committed onto
-    // another — which is exactly what made #436 invisible.
-    //
-    // Scoped to the additive selections: `Replace` names its own universe (C3)
-    // and `reserved_dropped` is D7's deliberate removal, so both are excluded
-    // rather than refused. `regenerate` is the only step that rewrites `tags`;
-    // `apply_yank_markers` below marks entries and never removes one.
-    // Spelled as the three positives rather than `!Replace`: a negation opts a
-    // total match out of the exhaustiveness the compiler would otherwise give
-    // it, so a fifth selection would silently join the refusing set.
+    // A committed tag the regenerated set lacks is a real deletion from the index; additive selections refuse it.
     if matches!(
         request.curated,
         TagSelection::UnionFile(_) | TagSelection::Refresh | TagSelection::FromRegistry
@@ -728,17 +474,11 @@ async fn observe_and_rebuild(
     if let Some(updated) = &desc.desc
         && let Some(object) = root.as_object_mut()
     {
-        // Replacing an existing key keeps its position (preserve_order), the
-        // same mechanism `regenerate` relies on for `tags`. Every root carries
-        // `desc` — the index schema requires the key, `null` when unset.
+        // The schema requires a `desc` key, so this replaces in place and keeps the key order (preserve_order).
         object.insert("desc".to_string(), updated.clone());
     }
     pipeline::apply_yank_markers(&mut root, &request.yank, &request.unyank, &request.yank_reason, now)?;
-    // Owner mandate: the objects this root stops referencing leave the index in
-    // the same commit that stops referencing them. Diffed against the base —
-    // which is the tree the commit parents on, never a second independently
-    // resolved read — so a concurrent writer's objects are outside the diff
-    // rather than swept by it.
+    // Diffed against the commit's own base, never a second read, or a concurrent writer's objects get swept.
     let orphans = pipeline::orphan_paths(Some(base_root), &root, package, forge, base.repo, base.sha).await?;
     let root_bytes = serialize_root(&root);
     let files = pipeline::build_files(root_path, &root_bytes, package, &observed, &desc.blobs, &orphans);
@@ -751,23 +491,14 @@ async fn observe_and_rebuild(
     })
 }
 
-/// D2's tripwire: refuse an outcome that moves nothing while its open pull
-/// request cannot merge.
+/// Tripwire: refuse an outcome that moves nothing while its open pull request cannot merge.
 ///
-/// A no-op for every state but [`BranchState::Stale`]. That is not an
-/// optimisation but the whole design: every other outcome either commits — and
-/// a commit repoints the branch with [`RefUpdate::Reset`], making the request
-/// mergeable by construction — or has no open request to be stuck. So the
-/// mergeability read costs a round trip only where announce has already decided
-/// to write nothing, never on the hot path.
-///
-/// [`Mergeability::Unknown`] is deliberately benign: the forge may still be
-/// computing a verdict, and the next run re-asks. No polling.
+/// A no-op for every state but [`BranchState::Stale`]; [`Mergeability::Unknown`]
+/// passes, and the next run re-asks.
 ///
 /// # Errors
 ///
-/// [`AnnounceError::PullRequestUnmergeable`] when the forge reports a conflict —
-/// the one corner announce cannot clear itself — or any forge failure.
+/// [`AnnounceError::PullRequestUnmergeable`] on a conflict, or any forge failure.
 async fn refuse_if_unmergeable(
     forge: &dyn Forge,
     index_repo: &RepoCoordinate,
@@ -790,73 +521,42 @@ async fn refuse_if_unmergeable(
     Ok(())
 }
 
-/// The outcome of reading the committed root: its bytes (`None` when the path is
-/// absent), the fork branch head SHA when the announce branch already exists
-/// (C4, reused as the commit base), and the ref it was read from.
+/// The committed root as read: its bytes (`None` when absent) and where they were read.
 struct RootRead {
     bytes: Option<Vec<u8>>,
+    /// The announce branch head, `Some` only while the branch is `Live`.
     branch_sha: Option<String>,
-    /// The commit the bytes were actually read at, and therefore the only sound
-    /// commit base. Reading the content through a *ref name* and resolving that
-    /// ref to a SHA in a second call leaves a window: the ref can advance in
-    /// between, and the commit would then be based on a head whose version of
-    /// the root it never saw — on GitLab that even passes the `last_commit_id`
-    /// check, because the check is against the newer commit. Resolving first and
-    /// reading at the resolved SHA closes it.
+    /// The commit the bytes were read at, the only sound commit base: re-resolving
+    /// the ref could base the commit on a head whose root was never read.
     base_sha: String,
-    /// The repository `base_sha` is a commit of — the branch's own repository
-    /// when accumulating, the index repository otherwise. Paired with
-    /// `base_sha` because a sha alone names no tree to read: the orphan diff's
-    /// logo probe reads at that commit and has to ask the repository that has
-    /// it, the same reason [`CommitBase`] carries its own `repo`.
+    /// The repository holding `base_sha`; a SHA alone names no tree to read.
     repo: RepoCoordinate,
     base_ref: String,
-    /// The stale announce branch head's own `tags` object, merged onto the
-    /// base's root before regeneration (D1) so no tag already announced into
-    /// the still-open pull request is lost. `None` for every state but
-    /// [`BranchState::Stale`], and `None` there too when the branch head
-    /// carries no root or no `tags`.
+    /// The stale branch head's `tags`, merged onto the base root so no tag
+    /// announced into the open pull request is lost; `None` unless [`BranchState::Stale`].
     carried_tags: Option<Value>,
 }
 
-/// What the per-package announce branch on the fork is currently worth.
-///
-/// The branch name is derived from the package alone, so it outlives every pull
-/// request opened from it. "The ref exists" therefore answers nothing on its own,
-/// and reading it that way is what made a second announce for a package
-/// unmergeable once the first one's pull request had been squash-merged
-/// (ocx-sh/ocx#228).
+/// What the per-package announce branch is worth; its name outlives every pull
+/// request, so the ref existing says nothing on its own.
 enum BranchState {
-    /// No announce branch on the fork — the first announce for this package.
+    /// No announce branch — the first announce for this package.
     Absent,
-    /// The branch is still carrying work and its commits fast-forward onto the
-    /// index base. Accumulate onto it (C4), so two announces before a merge land
-    /// in one pull request with both tag sets.
+    /// Unmerged commits that fast-forward onto the base: accumulate, so two
+    /// announces before a merge share one pull request.
     Live,
-    /// The branch holds unmerged commits, the index base has moved on
-    /// underneath them, and a pull request over the result is still open.
+    /// Unmerged commits the base moved away from, with a pull request still open.
     ///
-    /// Reading that branch head as the committed root is what froze 34 packages
-    /// for up to 21 days: its root may predate a base-wide shape migration, so
-    /// every later run reproduced the pre-migration bytes and reported a benign
-    /// `unchanged` while the pull request stayed unmergeable (ocx-sh/ocx#399).
-    /// The base supplies the shape, the branch supplies its tag delta, and the
-    /// ref is repointed at the result — one commit on the current base, carrying
-    /// every tag the open request already had. Holds that request so the
-    /// unchanged path can reuse it without a second lookup.
+    /// Rebuilt on the base with its tag delta carried: reading its head as the
+    /// root reproduces a pre-migration shape as a benign `unchanged` forever.
     Stale(PullRequest),
-    /// The branch exists and carries nothing the base needs — its pull request
-    /// merged (leaving it `Diverged` under a squash merge, `Behind` under a merge
-    /// commit) or was closed unmerged. Residue: rebuild from the base and repoint
-    /// the ref at the result.
+    /// Carries nothing the base needs (merged, or closed unmerged): rebuild from
+    /// the base and repoint the ref.
     Spent,
 }
 
 impl BranchState {
-    /// The state's name, for the one log line the announce path emits.
-    ///
-    /// Not `Debug`: `Stale` carries a whole [`PullRequest`], and a log line that
-    /// prints it is one nobody reads.
+    /// The state's name, for the commit log line.
     fn name(&self) -> &'static str {
         match self {
             Self::Absent => "absent",
@@ -866,17 +566,13 @@ impl BranchState {
         }
     }
 
-    /// Whether the branch's own head may serve as the committed root for this
-    /// announce. A stale branch may not: its shape is the frozen one.
+    /// Whether the branch head may serve as the committed root; a stale one's shape is frozen.
     fn is_live(&self) -> bool {
         matches!(self, Self::Live)
     }
 
-    /// How the ref update must behave. Repointing a spent or stale branch at a
-    /// commit built on the upstream base is deliberately not a fast-forward —
-    /// refusing the rewrite would preserve exactly what makes the branch
-    /// unusable: the already-merged commits of a spent one, the pre-migration
-    /// root of a stale one.
+    /// How the ref update behaves: a fast-forward-only repoint of a spent or stale
+    /// branch would keep its merged commits or frozen root.
     fn ref_update(&self) -> RefUpdate {
         match self {
             Self::Spent | Self::Stale(_) => RefUpdate::Reset,
@@ -885,16 +581,11 @@ impl BranchState {
     }
 }
 
-/// Classify the announce branch (see [`BranchState`]).
+/// Classify the announce branch.
 ///
-/// Ancestry is asked first and unconditionally, so an indeterminate or
-/// unmodelled compare fails closed on **every** run rather than only on the runs
-/// that happen to reach it. Three of the four answers are decisive on their own;
-/// only [`BranchComparison::Diverged`] needs a second question, because git
-/// cannot tell "my commits were squash-merged and the base now carries them"
-/// from "my commits are unmerged and the base moved on underneath me". An open
-/// pull request means the latter — [`BranchState::Stale`], rebuilt on the base
-/// with its tags carried forward, never read as the committed root itself.
+/// Ancestry is asked unconditionally, so an indeterminate compare fails closed
+/// on every run. [`BranchComparison::Diverged`] cannot tell squash-merged from
+/// unmerged: an open pull request means unmerged ([`BranchState::Stale`]).
 async fn resolve_branch_state(
     forge: &dyn Forge,
     index_repo: &RepoCoordinate,
@@ -908,9 +599,7 @@ async fn resolve_branch_state(
         return Ok(BranchState::Absent);
     }
     match forge.compare_branch(index_repo, INDEX_BASE_REF, fork, branch).await? {
-        // Strictly ahead: the commits are unmerged and they fast-forward, so
-        // keep them whether or not a pull request is open — when none is, the
-        // C6 amendment opens the one they never got.
+        // Kept even with no open request; the unchanged path opens the one they never got.
         BranchComparison::Ahead => Ok(BranchState::Live),
         BranchComparison::Identical | BranchComparison::Behind => Ok(BranchState::Spent),
         BranchComparison::Diverged => match forge.find_open_pull_request(index_repo, fork, branch).await? {
@@ -920,20 +609,11 @@ async fn resolve_branch_state(
     }
 }
 
-/// Read the committed root per C4/C10: the announce branch head while the
-/// branch is [`BranchState::Live`] (accumulate), else the index repository's
-/// `main`.
+/// Read the committed root from the announce branch head while [`BranchState::Live`], else the index `main`.
 ///
-/// `branch_repo` is the **verified** coordinate the branch lives in — `None` for
-/// `--out` and for a fork target with no fork yet, both of which can only read
-/// the index base. Reading the branch through the verified coordinate rather
-/// than the raw `--fork` value is what makes C4 accumulation work for a fork
-/// renamed away from the upstream's repository name.
-///
-/// The liveness decision is the caller's, passed in as `branch_state` rather
-/// than re-derived here: the base SHA this returns is the one the bytes were
-/// READ at (see [`RootRead::base_sha`]), and a second, independent answer to
-/// "is this branch usable" could disagree with the one the commit is built on.
+/// `branch_repo` is the verified coordinate the branch lives in (`None` for
+/// `--out` and a fork target with no fork yet). Liveness comes from the caller's
+/// `branch_state`, never re-asked, so it agrees with the commit's base.
 ///
 /// # Errors
 ///
@@ -948,8 +628,6 @@ async fn read_committed_root(
     root_path: &str,
     branch: &str,
 ) -> Result<RootRead, AnnounceError> {
-    // The announce branch only ever exists on the fork; an absent branch reads
-    // back as `None`, falling through to `main`.
     if let Some(repo) = branch_repo.filter(|_| branch_state.is_live())
         && let Some(branch_sha) = forge.get_ref_sha(repo, &format!("heads/{branch}")).await?
     {
@@ -970,9 +648,7 @@ async fn read_committed_root(
             repo: index_repo.full_path(),
         })?;
     let bytes = forge.get_file_contents(index_repo, root_path, &base_sha).await?;
-    // D1: the base supplies the shape, a stale branch supplies the tags it
-    // announced into the still-open pull request. One extra read, for `tags`
-    // alone — every other key of that root may be the pre-migration form.
+    // Only `tags` from a stale branch; every other key of its root may be pre-migration.
     let carried_tags = match (branch_repo, branch_state) {
         (Some(repo), BranchState::Stale(_)) => branch_head_tags(forge, repo, root_path, branch).await?,
         _ => None,
@@ -989,11 +665,8 @@ async fn read_committed_root(
 
 /// The `tags` object of the announce branch head's root.
 ///
-/// `None` when the ref, the file, or the key is absent: a branch with no root to
-/// read carries no delta, and failing the run instead would keep the package
-/// frozen — the outcome this whole path exists to end. A root that is present
-/// but unparseable is a different claim (announce wrote it, so it cannot be
-/// malformed) and is refused.
+/// `None` when the ref, the file or the key is absent: failing instead would keep
+/// the package frozen.
 ///
 /// # Errors
 ///

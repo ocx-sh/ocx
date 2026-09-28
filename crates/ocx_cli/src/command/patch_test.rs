@@ -196,7 +196,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     // ── Step 4: Materialize the descriptor's matched companions into the scratch
     // store so the compose step finds them. Companions named for BASE-ID come from
     // a local archive (`--companion-archive`) when supplied, else are pulled from
-    // the registry. Required companions fail closed via the compose step (C7). ──
+    // the registry. Required companions fail closed via the compose step. ──
     let companions = descriptor.collect_companions(&base_id, patches.required);
     materialize_companions(&context, &manager, &companions, &args.companion_archives, &platform).await?;
 
@@ -210,8 +210,8 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
         .await
         .map_err(|kind| ocx_package_manager::Error::package(base_id.clone(), kind))?;
 
-    // W-11: `composition.entries` and `env_overrides` are disjoint `Vec`s
-    // holding independent copies of the `--env` overrides (mirrors exec.rs /
+    // `composition.entries` and `env_overrides` are disjoint `Vec`s holding
+    // independent copies of the `--env` overrides (mirrors exec.rs /
     // package_test.rs) — reconcile them together, before any of the three
     // downstream branches (script, command, or the printed report) reads
     // either, so a package- or companion-established `list` separator reaches
@@ -269,7 +269,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
             &engine_scratch,
             &platform,
             process_env,
-            // `--junit` sits on `package test` alone (issue #452).
+            // `--junit` sits on `package test` alone.
             None,
         )
         .await
@@ -336,7 +336,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
 /// Fail posture mirrors production composition (`build_site_patch_set`):
 /// - A **required** companion (effective `required == true`) that cannot be
 ///   pulled is surfaced directly so the maintainer sees the unresolvable
-///   companion (the fail-closed compose step would also catch it via C7).
+///   companion (the compose step's required-companion check would also catch it).
 /// - An **optional** companion (effective `required == false`) that cannot be
 ///   pulled is warned-and-skipped, leaving the subsequent compose step to
 ///   exercise the real fail-open path — so the dry-run preview matches what
@@ -604,7 +604,7 @@ mod tests {
         );
     }
 
-    // --- Clap surface: --descriptor rename (C9) ---
+    // --- Clap surface: --descriptor rename ---
 
     /// `--descriptor` parses and is threaded through to the args struct.
     #[test]
@@ -643,7 +643,7 @@ mod tests {
     }
 
     /// `--descriptor-file` is the OLD flag name — it must be an unknown flag
-    /// now that `patch test` uses `--descriptor` (C9).
+    /// now that `patch test` uses `--descriptor`.
     #[test]
     fn descriptor_file_flag_is_rejected() {
         use clap::Parser as _;
@@ -656,7 +656,7 @@ mod tests {
         );
     }
 
-    /// `--companion-archive` is unchanged by the C7/C9 rename (C10) — still parses.
+    /// `--companion-archive` is unchanged by the `--descriptor` rename — still parses.
     #[test]
     fn companion_archive_flag_still_parses() {
         use clap::Parser as _;

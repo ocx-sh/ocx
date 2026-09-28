@@ -3,37 +3,8 @@
 
 //! Policy-gated auto-verify hook fired at the metadata-first pull seam.
 //!
-//! [`PackageManager::maybe_auto_verify`] runs immediately after a package's
-//! manifest is resolved (digest known) and before any layer download, so a
-//! fail-closed abort leaves no package-store or symlink state. It sits in
-//! `setup_impl`, the single choke point every package — root and transitive
-//! dependency — passes through, so **every** install surface is gated: not just
-//! `ocx package install` / `pull` but every `find_or_install` path (`package
-//! exec`, `package env`, `run`, patch discovery). The config is attached once
-//! on the shared manager in `Context::try_init`, so a new install command
-//! inherits the gate for free.
-//!
-//! A failed covered install does leave the benign traces `resolve` already
-//! wrote before the seam — the tag→digest pointer and manifest blobs committed
-//! to the local index via write-through. These are inert (not usable installed
-//! state; no package dir, no symlink); a re-resolve re-verifies before anything
-//! is materialised.
-//!
-//! Gate (composes #98 `resolve_tiered` + #196 trust-root/offline + #194
-//! pipeline via [`PackageManager::verify_one`]):
-//!
-//! 1. No [`AutoVerify`] configured (no trust policies) → no-op.
-//! 2. A matching `[[trust.policy]]` covers the target → verify; a malformed
-//!    matched policy is exit 78.
-//! 3. No matching policy → INFO log, install proceeds (opt-in trust model).
-//! 4. Covered + user opted out (`--no-verify` / `OCX_NO_VERIFY`) → WARN once
-//!    per invocation, install proceeds.
-//! 5. Covered + verify fails → abort fail-closed (exit code from the verify
-//!    error taxonomy). Covered + verify passes → proceed.
-//!
-//! Trust-root material is resolved lazily (only when a policy actually covers a
-//! package) and memoized, so a package outside every policy scope never trips
-//! the offline gate.
+//! Runs after resolve and before any layer download, so a fail-closed abort leaves no package or symlink state.
+//! Called only from `setup_impl`: an install path that bypasses it installs unverified.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,19 +25,14 @@ use super::super::PackageManager;
 use super::verify::VerifyOptions;
 use ocx_sign::verify::VerifyContentMode;
 
-/// Injected auto-verify configuration for the install/pull pipeline.
-///
-/// Present on a [`PackageManager`] only when at least one trust policy is
-/// configured; absent → the hook is a no-op. Cheap to clone (the heavy
-/// material is `Arc`-shared or resolved lazily).
+/// Auto-verify configuration, present on a [`PackageManager`] only when a trust policy is configured.
 #[derive(Clone)]
 pub struct AutoVerify {
     /// Operator-tier policies from `config.toml` (authoritative).
     operator_policies: Arc<Vec<TrustPolicy>>,
     /// Project-tier policies from `ocx.toml` (empty for OCI-tier install/pull).
     project_policies: Arc<Vec<TrustPolicy>>,
-    /// Registry client — its transport is used even under `--offline` (verify
-    /// reads the artifact + signature referrer from the registry regardless).
+    /// Registry client, used even under `--offline`: verify reads the artifact and its signature referrer.
     registry_client: ocx_oci::Client,
     /// Rekor transparency-log endpoint (default public Rekor).
     rekor_url: Url,
@@ -78,12 +44,9 @@ pub struct AutoVerify {
     trusted_root_env: Option<PathBuf>,
     /// Operator `[trust.sigstore]` from `config.toml`, captured at construction.
     sigstore_trust: Option<ocx_trust::SigstoreTrust>,
-    /// `$OCX_HOME/sigstore/trusted-root.json` convention path, if `$OCX_HOME`
-    /// resolved. Passed in rather than read here so the ladder stays free of
-    /// environment reads and a test can point it anywhere.
+    /// `$OCX_HOME/sigstore/trusted-root.json` convention path, if `$OCX_HOME` resolved.
     home_trusted_root: Option<PathBuf>,
-    /// User opted out of verification (resolved `--no-verify` / `OCX_NO_VERIFY`,
-    /// flag wins over env).
+    /// Resolved `--no-verify` / `OCX_NO_VERIFY` opt-out (flag wins).
     user_opted_out: bool,
     /// Lazily-resolved trust root, memoized on success (`get_or_try_init`).
     trust_root: Arc<OnceCell<TrustRoot>>,
@@ -135,9 +98,7 @@ impl AutoVerify {
         }
     }
 
-    /// Override the resolved user opt-out. The shared config is built with the
-    /// `OCX_NO_VERIFY` env default; `ocx package install` / `pull` refine it
-    /// from their `--verify` / `--no-verify` flag, which wins over the env.
+    /// Override the `OCX_NO_VERIFY`-derived opt-out with a `--verify` / `--no-verify` flag, which wins.
     #[must_use]
     pub fn with_user_opted_out(mut self, opted_out: bool) -> Self {
         self.user_opted_out = opted_out;
@@ -146,31 +107,19 @@ impl AutoVerify {
 }
 
 impl PackageManager {
-    /// Policy-gated auto-verify for a resolved package.
+    /// Policy-gated auto-verify for a resolved package; a no-op when no [`AutoVerify`] is configured.
     ///
-    /// A no-op when no [`AutoVerify`] is configured. See the module docs for the
-    /// full gate. Called from the pull pipeline after resolve, before download.
+    /// `resolved` must be the platform-selected leaf (`ResolvedChain.pinned`): verification does not narrow.
     ///
     /// # Errors
     /// Returns a [`PackageErrorKind`] (fail-closed) when a policy-covered
     /// package fails verification, when a matched policy is malformed (exit 78),
     /// or when required trust material is unavailable (exit 78).
-    ///
-    /// `resolved` is the platform-selected leaf digest (`ResolvedChain.pinned`),
-    /// so verification narrows into nothing (`platform: None`) — the leaf is
-    /// already a flat manifest and the selection has already happened. This is
-    /// the same target the pre-C-010 `Platform::any()` argument produced: `any`
-    /// was how "do not narrow" had to be spelled while the parameter was
-    /// mandatory, and it worked only because a flat manifest advertises `any()`
-    /// back. `None` says it directly, and keeps saying it if the leaf ever
-    /// stops advertising `any()`.
     pub async fn maybe_auto_verify(&self, resolved: &ocx_oci::PackageRef) -> Result<(), PackageErrorKind> {
         let Some(auto_verify) = self.auto_verify() else {
             return Ok(());
         };
 
-        // Resolve the effective ANY-of policy set for this target under
-        // cross-tier precedence (operator config.toml authoritative).
         let target = format!("{}/{}", resolved.registry(), resolved.repository());
         let policies =
             ocx_trust::resolve_tiered(&auto_verify.operator_policies, &auto_verify.project_policies, &target)
@@ -181,8 +130,7 @@ impl PackageManager {
             return Ok(());
         }
 
-        // The package is policy-covered from here — every exit is verify or a
-        // deliberate opt-out, never a silent skip.
+        // Policy-covered from here: every exit is a verify or the explicit opt-out, never a silent skip.
         if auto_verify.user_opted_out {
             if !auto_verify.warned.swap(true, Ordering::Relaxed) {
                 log::warn!(
@@ -192,20 +140,12 @@ impl PackageManager {
             return Ok(());
         }
 
-        // Trusted-hosts set for the target's registry — the same value the
-        // pipeline's own SSRF floor reads (`VerifyPipeline::run_inner` step 0
-        // calls `ctx.index.trusted_hosts_for(..)`). `verify_one` resolves through
-        // `read_only_view`, which carries this set unchanged, so the guard below
-        // and the pipeline's can never disagree about what is exempt.
+        // The same set the verify pipeline's SSRF floor reads, so the two guards never disagree on what is exempt.
         let trusted = self.index().trusted_hosts_for(resolved.registry());
 
-        // Resolve the trust root lazily — only now that a policy matches, so a
-        // package outside every scope never trips the offline gate. Memoized on
-        // success; a failure recomputes (fail-closed) on the next covered package.
-        // The signing tier's corner of the state root, derived once: the trust-root
-        // cache is `ocx_sign`'s to lay out, and the `StateStore` this task holds is
-        // only where that root lives (ADR 1.9).
         let signing_state = SigningStatePaths::new(auto_verify.state.root());
+        // Lazy, so a package outside every policy never trips the offline gate; memoized on success only, so a
+        // failure retries fail-closed on the next covered package.
         let trust_root = auto_verify
             .trust_root
             .get_or_try_init(|| async {
@@ -218,16 +158,9 @@ impl PackageManager {
                     auto_verify.offline,
                 )
                 .await?;
-                // Online with a bare Fulcio-CA PEM root (no pinned Rekor key):
-                // fetch the Rekor key ONCE here and pin it into the memoized
-                // root, so the N covered packages in a batch reuse it instead of
-                // each TOFU-fetching it inside the pipeline.
+                // No pinned Rekor key: fetch it once into the memoized root for the whole batch.
                 if !auto_verify.offline && root.rekor_public_key_pem().is_none() {
-                    // Hoisting that fetch out of `verify_one` also hoisted it out
-                    // of the pipeline's SSRF floor, which guards this exact dial
-                    // on every other verify path. Re-apply the floor here, or the
-                    // one Sigstore endpoint auto-verify dials on its own is the
-                    // only one reached without a resolve-then-validate check
+                    // Outside the pipeline's SSRF floor, so re-applied here or this endpoint is reached unvalidated
                     // (CWE-918).
                     ocx_oci::endpoint::resolve_sigstore_url(&auto_verify.rekor_url, trusted)
                         .await
@@ -252,22 +185,13 @@ impl PackageManager {
             offline: auto_verify.offline,
             state: &auto_verify.state,
             no_cache: false,
-            // Auto-verify asks "is this artifact signed", never "what does it
-            // carry": attestations do not participate (S-015). A subject whose
-            // referrers are all attestations still fails closed here.
+            // Signatures only: a subject whose referrers are all attestations fails closed.
             content: VerifyContentMode::Signature,
-            // No flag reaches the install hot path, so discovery keeps D9's
-            // default: prefer a bundle, fall back to a sidecar only when the
-            // bundle shape is absent — and never onto a keyless sidecar with no
-            // transparency-log evidence, which the same absence of a flag keeps
-            // refused. An install-time gate is the last place to widen what
-            // counts as signed.
+            // Default discovery order and no unlogged keyless sidecar: an install gate must not widen what counts
+            // as signed.
             signature_format: None,
             allow_unlogged_signature: false,
-            // Q3. This hook renders no report, so it stays ANY-of first-match
-            // and pays crypto for exactly one candidate. `true` here would run
-            // full verification over every candidate the caps allow on every
-            // install of every policy-covered package, for output nobody reads.
+            // First match only: `true` runs full crypto over every candidate on every covered install, unread.
             report_all: false,
         };
         self.verify_one(resolved, None, options)
@@ -279,8 +203,7 @@ impl PackageManager {
     }
 }
 
-/// Wrap a [`VerifyErrorKind`] as a package-manager error preserving the verify
-/// exit code (`Internal(crate::Error::Verify)` → `VerifyError::classify`).
+/// Wrap a [`VerifyErrorKind`] as a package-manager error, keeping the verify exit code.
 fn verify_kind(identifier: &ocx_oci::PackageRef, kind: VerifyErrorKind) -> PackageErrorKind {
     PackageErrorKind::Internal(crate::Error::Verify(Box::new(VerifyError::new(
         identifier.clone(),

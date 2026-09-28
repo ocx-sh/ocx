@@ -3,23 +3,8 @@
 
 //! Surgical `[shell]` writes into the home-tier `$OCX_HOME/config.toml`.
 //!
-//! Contract stub only — the body belongs to WP-10 of
-//! `.claude/artifacts/plan_shell_env_overhaul.md` (C-040).
-//!
-//! **A separate module from the crate root on purpose.** The shipped
-//! `--managed` write shares only the *target path*: it reads the whole file as
-//! a string and drives a fenced-block state machine through
-//! [`crate::rc_block`], classifying `Fresh`/`Current`/`FormatUpgraded`/
-//! `Dirty` and exiting 82 on user edits. Keeping the fenced writer and the
-//! surgical writer in one file would make its reader hold two mental models.
-//!
-//! **`[shell]` is deliberately not fenced**, so exit 82 (`DirtyRcBlock`) does
-//! **not** apply here: there is no fence, so there is no dirty state. A user's
-//! hand-written `[shell] hook = false` is simply overwritten by an explicit
-//! `--hook`, which is what the flag means. A write failure is 74 `IoError`.
-//!
-//! The read-modify-write itself is [`ocx_config::edit::edit`] (ocx#468):
-//! this module owns only the `[shell]` closure.
+//! `[shell]` is not fenced: an explicit flag overwrites a hand-written value and
+//! exit 82 never applies.
 
 use std::path::{Path, PathBuf};
 
@@ -55,10 +40,8 @@ impl ShellKey {
 
 /// The value written under a [`ShellKey`].
 ///
-/// `Bool` covers the boolean rungs (`hook`, `completions`, `modify_path`).
-/// `Paths` covers `profiles`, where an **empty slice is a real, distinct
-/// value** from the key being absent: absent means auto-detect, empty means
-/// write no profile blocks.
+/// For `profiles`, an empty slice (write no profile blocks) differs from an
+/// absent key (auto-detect).
 #[derive(Debug, Clone, Copy)]
 pub enum ShellValue<'a> {
     /// A boolean rung.
@@ -67,41 +50,16 @@ pub enum ShellValue<'a> {
     Paths(&'a [PathBuf]),
 }
 
-/// Set exactly one `[shell]` key in the home-tier `config.toml` (C-040).
+/// Set exactly one `[shell]` key in the home-tier `config.toml`, creating the file if missing.
 ///
-/// `config_path` is `file_structure.root().join("config.toml")` — i.e.
-/// `$OCX_HOME/config.toml`, **not** `ConfigLoader::user_path()`
-/// (`config_dir()/ocx/config.toml`). `--config` / `OCX_CONFIG` name a **read**
-/// override and never redirect this write. `locks_root` is
-/// `file_structure.locks`, where [`edit::edit`] takes the cross-process lock
-/// every `config.toml` writer shares (ocx#468).
-///
-/// A **missing file is created** with just the one section.
-///
-/// The mechanism is a **surgical `toml_edit` edit** (`toml_edit` is already a
-/// workspace dependency of `ocx_lib`), not a whole-file rewrite and not a
-/// fenced block: `Config` derives `Deserialize` only, so a serde round-trip is
-/// unavailable; a rewrite would discard comments and unknown keys the
-/// forward-compat contract exists to preserve; and a fence would make
-/// `[shell]` an ocx-owned region a user may not edit, which is the opposite of
-/// the intent for a user-facing toggle. Create the table if absent and
-/// preserve every other byte of the file.
-///
-/// A [`ShellValue::Paths`] renders as a TOML array of strings via
-/// `Path::to_string_lossy()` — a path is not guaranteed UTF-8 on Windows, and
-/// a lossy render of the rare non-UTF-8 byte beats refusing the whole write.
-///
-/// Callers pass the key only when a write was requested: **no call, no
-/// change**, and the default applies. When a higher tier already sets the
-/// key, the write still lands and the CLI reports which tier will win
-/// (C-034).
+/// `config_path` is `$OCX_HOME/config.toml`; `--config`/`OCX_CONFIG` never redirect this write.
+/// `locks_root` must be `file_structure.locks`, or this write races the other `config.toml`
+/// writers and loses updates.
 ///
 /// # Errors
 ///
-/// [`EditError`] — the read/parse/atomic-write failure, classified 74
-/// `IoError`; a document over the config size ceiling is 78.
+/// [`EditError`]: read, parse or write failure (74); a document over the size ceiling (78).
 pub async fn set(locks_root: &Path, config_path: &Path, key: ShellKey, value: ShellValue<'_>) -> Result<(), EditError> {
-    // Rendered ahead of the closure so it owns nothing borrowed.
     let value = match value {
         ShellValue::Bool(flag) => toml_edit::value(flag),
         ShellValue::Paths(paths) => {
@@ -126,29 +84,10 @@ pub async fn set(locks_root: &Path, config_path: &Path, key: ShellKey, value: Sh
     .map(drop)
 }
 
-/// Render a freshly created `[shell]` table **before** every table already in
-/// the document.
-///
-/// The default position for a new table is end-of-document, and that is not
-/// safe here: `$OCX_HOME/config.toml` is also where `ocx self setup
-/// --managed-config` appends its `[managed]` seed inside an
-/// [`rc_block`](crate::rc_block) fence. The fence *closer* parses as
-/// trailing trivia, so a table appended at the end renders **between** the
-/// `[managed]` body and the closer — inside the fence. The block then hashes to
-/// something its own marker disagrees with, `rc_block::classify` calls it
-/// `Dirty`, and `ocx self setup` starts exiting 82 (which C-051 forbids for
-/// this write) while `--force` collapses the fence and deletes the toggle with
-/// it.
-///
-/// Going to the front is what makes that impossible rather than unlikely: a
-/// fence opener is a comment attached to the header of the table it precedes,
-/// so every fenced region in the document begins at or after the first table.
-/// Nothing can be hoisted above the first table and still be inside a fence.
+/// Render a freshly created `[shell]` table before every table already in the document.
+// Appended at the end it lands inside the `[managed]` fence, which then reads `Dirty` and setup exits 82.
 fn hoist_above_every_table(document: &mut DocumentMut) {
-    // `doc_position` is a signed ordering key and a parsed document numbers its
-    // tables from zero, so a negative slot sorts ahead of all of them without
-    // renumbering — and therefore without touching one byte of anyone else's
-    // table.
+    // Parsed tables number from zero, so -1 sorts first without renumbering anyone else's table.
     if let Some(Item::Table(shell)) = document.get_mut("shell") {
         shell.set_position(Some(-1));
     }

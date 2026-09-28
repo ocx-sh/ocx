@@ -3,29 +3,16 @@
 
 /// Whether and how `ocx package create` scans the content tree for
 /// interface-surface executables to fill or verify the `binaries` claim.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add the paired
-/// `--bin-scan` / `--no-bin-scan` flags. The two use POSIX last-wins
-/// semantics (`overrides_with`) — combining the flags is not an error (git
-/// `--[no-]verify` idiom), same shape as [`super::Pull`]. Unlike `Pull`,
-/// this resolves to a **tri-state** [`BinScanMode`] via [`BinScan::mode`]
-/// rather than `enabled(default: bool)`: "auto" and "off" are not a
-/// default/override pair, they are three distinct behaviors — see
-/// `adr_declared_binaries_metadata.md` §2.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct BinScan {
     /// Scan the content tree for executables the package puts on `PATH`,
     /// verifying a declared `binaries` claim or filling an absent one.
     ///
-    /// Requires `--metadata`/`-m`: there is nothing to check or fill
-    /// without a metadata sidecar; omitting it is a usage error (exit 64).
-    /// When `binaries` is undeclared, behaves
-    /// like the default and fills it from the scan. When `binaries` is
-    /// declared, verifies it against the scan and fails (exit 65) if a
-    /// scanned executable is missing from the declared list, or a declared
-    /// name exists on disk but is not executable. See
-    /// https://ocx.sh/docs/reference/metadata#executables for the field's
-    /// full semantics.
+    /// Requires `--metadata`/`-m`, without which there is nothing to check or
+    /// fill (exit 64). An undeclared `binaries` is filled from the scan, as by
+    /// default; a declared one is verified against it, failing (exit 65) if a
+    /// scanned executable is missing from the list or a declared name exists
+    /// but is not executable. See https://ocx.sh/docs/reference/metadata#executables.
     #[clap(long = "bin-scan", overrides_with = "no_bin_scan")]
     bin_scan: bool,
 
@@ -40,28 +27,19 @@ pub struct BinScan {
     no_bin_scan: bool,
 }
 
-/// Resolved scan behavior for `ocx package create`.
-///
-/// See `adr_declared_binaries_metadata.md` §2 mode table for the full
-/// fill/verify/pass-through matrix against each authoring-field state.
+/// Resolved scan behavior for `ocx package create` (matrix: `adr_declared_binaries_metadata.md` §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinScanMode {
-    /// Neither flag given: scan and fill an absent `binaries` claim; pass a
-    /// declared claim through verbatim (no verification).
+    /// Neither flag: fill an absent `binaries` claim; pass a declared one through unverified.
     Auto,
-    /// `--bin-scan`: scan; verify a declared claim one-directionally against
-    /// the scan result, or fill an absent one exactly like `Auto`.
+    /// `--bin-scan`: verify a declared claim one-directionally against the scan, or fill an absent one.
     Verify,
-    /// `--no-bin-scan`: never scan; the `binaries` field passes through
-    /// verbatim regardless of its state.
+    /// `--no-bin-scan`: never scan; `binaries` passes through verbatim.
     Off,
 }
 
 impl BinScan {
-    /// Resolves the paired flags to a [`BinScanMode`]. Neither flag yields
-    /// `Auto`; `--bin-scan` yields `Verify`; `--no-bin-scan` yields `Off`.
-    /// POSIX last-wins with both flags — `overrides_with` guarantees at most
-    /// one of `bin_scan`/`no_bin_scan` is `true` after parsing.
+    /// Resolves the paired flags to a [`BinScanMode`].
     pub fn mode(&self) -> BinScanMode {
         if self.bin_scan {
             BinScanMode::Verify

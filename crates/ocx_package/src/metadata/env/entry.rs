@@ -12,13 +12,9 @@ pub struct Entry {
     pub key: String,
     pub value: String,
     pub kind: ModifierKind,
-    /// The separator a [`ModifierKind::List`] entry folds with; `None` on every
-    /// other kind, and on a list entry whose surface allowed it to be omitted.
-    ///
-    /// A plain field with no constructor invariant: `Entry`'s fields are `pub`
-    /// with struct-literal production sites all over the tree, so an invariant
-    /// here would be unenforceable. Each parse boundary validates instead, and
+    /// The separator a [`ModifierKind::List`] entry folds with; `None` on other
+    /// kinds, and on a list entry whose separator
     /// [`reconcile_list_separators`](crate::metadata::env::apply::reconcile_list_separators)
-    /// settles what a surviving `None` inherits before the fold runs.
+    /// settles before the fold.
     pub separator: Option<String>,
 }

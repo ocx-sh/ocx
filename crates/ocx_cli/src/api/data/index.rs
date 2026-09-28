@@ -1,23 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Report payloads for the two `ocx index` shapes that emit one
-//! (`adr_servable_index_snapshot.md` C-010, C-027).
-//!
-//! `ocx index update` has no stdout payload — the aggregated error on stderr is
-//! its batch signal — so both types here are new surface rather than a shared
-//! one gaining a field.
-//!
-//! Both carry names OCX did not author. `regenerate`'s three lists are
-//! repository paths derived from a `p/` walk over a tree C-007 explicitly admits
-//! may have been "written by another implementation", and
-//! `index sync --dry-run`'s list is the key set of a foreign `c/index.json`,
-//! which [`CatalogDocument::into_packages`] admits after validating
-//! `format_version` and nothing about the keys. Both are printed to an
-//! operator's terminal, so both are neutralized on the plain path — see
-//! [`sanitize_for_terminal`].
-//!
-//! [`CatalogDocument::into_packages`]: ocx_index::CatalogDocument
+//! Report payloads for `ocx index regenerate` and `ocx index sync --dry-run`
+//! (`adr_servable_index_snapshot.md`). Both carry names OCX did not author, so the plain path
+//! neutralizes them ([`sanitize_for_terminal`]).
 
 use ocx_console::{Cell, DataInterface};
 use ocx_index::RegenerateOutcome;
@@ -25,8 +11,6 @@ use serde::Serialize;
 
 use crate::api::Printable;
 use crate::api::data::sanitize_for_terminal;
-
-// ── `ocx index regenerate` (C-010) ───────────────────────────────────────────
 
 /// One registry's drift-repair outcome.
 ///
@@ -61,18 +45,7 @@ impl RegenerateEntry {
     }
 }
 
-/// What `ocx index regenerate <REGISTRY>...` changed, per registry.
-///
-/// Plain format: a four-column table (Registry | Roots | Change | Package), one
-/// row per changed package plus one `none` row for a registry that changed
-/// nothing, with Registry and Roots carried on the first row of each group.
-/// Every registry therefore appears, which is what makes the per-registry
-/// `roots` reportable in a mixed run. A run in which *every* registry was
-/// already clean prints a single line instead — C-010's "a clean run says so in
-/// one line".
-///
-/// JSON format: an array of `{ registry, roots, added, corrected, removed }`
-/// objects in argument order.
+/// What `ocx index regenerate <REGISTRY>...` changed, per registry, in argument order.
 pub struct RegenerateReport {
     registries: Vec<RegenerateEntry>,
 }
@@ -82,23 +55,13 @@ impl RegenerateReport {
         Self { registries }
     }
 
-    /// Whether every registry's catalog already matched its tree — the
-    /// predicate [`Printable::print_plain`] selects C-010's "a clean run says so
-    /// in one line" branch on.
-    ///
-    /// Named rather than inlined so a test can assert the branch's actual
-    /// condition. Asserting `all(is_clean)` over a fixture built from empty
-    /// `Vec`s instead reduces to `Vec::new().is_empty()` and holds however
-    /// `print_plain` is wired — a round-2 reviewer inverted the selector and the
-    /// suite stayed green.
+    /// Whether every registry's catalog already matched its tree, which prints one line instead of
+    /// a table; named so a test asserts the branch's actual condition.
     fn all_clean(&self) -> bool {
         self.registries.iter().all(RegenerateEntry::is_clean)
     }
 
-    /// The plain table's column-major rows, already neutralized.
-    ///
-    /// Split out of [`Printable::print_plain`] so the sanitization is assertable
-    /// without capturing stdout — the rows are what reaches the terminal.
+    /// The plain table's column-major rows, neutralized, so tests can assert what reaches the terminal.
     fn plain_rows(&self) -> [Vec<String>; 4] {
         let mut rows: [Vec<String>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         for entry in &self.registries {
@@ -110,17 +73,12 @@ impl RegenerateReport {
             .into_iter()
             .flat_map(|(change, names)| names.iter().map(move |name| (change, sanitize_for_terminal(name))))
             .collect();
-            // A clean registry still gets a row. C-010 reports `roots` PER
-            // registry, and in a mixed run the all-clean hint below does not
-            // fire — so without this the clean registry and its root count
-            // vanish from the report entirely while a dirty sibling is printed.
+            // A clean registry still gets a row, or in a mixed run it and its `roots` vanish from the report.
             if changes.is_empty() {
                 changes.push(("none", "-".to_string()));
             }
             for (position, (change, package)) in changes.into_iter().enumerate() {
-                // Registry and roots label the group, not every row — the value
-                // is constant across a group and repeating it buries the
-                // package names the report exists to show.
+                // Registry and roots label the group's first row only.
                 let label = position == 0;
                 rows[0].push(if label {
                     sanitize_for_terminal(&entry.registry)
@@ -160,8 +118,6 @@ impl Printable for RegenerateReport {
     }
 }
 
-// ── `ocx index sync --dry-run` (C-027) ───────────────────────────────────────
-
 /// One registry's enumerated package set.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct CatalogPreviewEntry {
@@ -170,33 +126,14 @@ pub struct CatalogPreviewEntry {
 }
 
 impl CatalogPreviewEntry {
-    /// Sorts `packages`. C-027's report row says "sorted", and the sort lives
-    /// here rather than at the call site so the claim is a property of the
-    /// payload the doc makes it about — a `CatalogIndex` arrives ordered but a
-    /// registry's repository listing does not.
-    ///
-    /// This is the report's sort, and only the report's: the wet path does not
-    /// ride on it. C-012's "the lowest input index wins" needs the same
-    /// determinism and gets it from `enumerate_catalog`, which sorts before
-    /// either path sees the vector. Moving this sort to the print site is
-    /// therefore a safe refactor — it was not, while this was the only one.
+    /// Sorts `packages`: a registry's repository listing arrives unordered.
     pub fn new(registry: String, mut packages: Vec<String>) -> Self {
         packages.sort();
         Self { registry, packages }
     }
 }
 
-/// What `ocx index sync --dry-run` would refresh.
-///
-/// `index sync` is the only refresh shape whose work set the operator cannot read
-/// off the command line, which is the whole reason this payload exists while the
-/// refresh itself still reports nothing.
-///
-/// Plain format: a two-column table (Registry | Package), one package per line,
-/// sorted within each registry. An empty enumeration prints one line and still
-/// exits 0.
-///
-/// JSON format: an array of `{ registry, packages }` objects in argument order.
+/// What `ocx index sync --dry-run` would refresh, per registry, in argument order.
 pub struct CatalogPreview {
     registries: Vec<CatalogPreviewEntry>,
 }
@@ -206,8 +143,7 @@ impl CatalogPreview {
         Self { registries }
     }
 
-    /// The plain table's column-major rows, already neutralized. See
-    /// [`RegenerateReport::plain_rows`] for why this is not inlined.
+    /// The plain table's column-major rows, neutralized.
     fn plain_rows(&self) -> [Vec<String>; 2] {
         let mut rows: [Vec<String>; 2] = [Vec::new(), Vec::new()];
         for entry in &self.registries {
@@ -240,8 +176,7 @@ impl Printable for CatalogPreview {
     }
 }
 
-// The `Serialize` impl above is transparent, so the published schema is the
-// inner type's. `registries` is written as a bare array.
+// Transparent `Serialize`: the schema is the bare registry array.
 impl schemars::JsonSchema for CatalogPreview {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "CatalogPreview".into()
@@ -252,8 +187,7 @@ impl schemars::JsonSchema for CatalogPreview {
     }
 }
 
-// The `Serialize` impl above is transparent, so the published schema is the
-// inner type's. `registries` is written as a bare array.
+// Transparent `Serialize`: the schema is the bare registry array.
 impl schemars::JsonSchema for RegenerateReport {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "RegenerateReport".into()

@@ -2,65 +2,22 @@
 // Copyright 2026 The OCX Authors
 
 //! Launcher-safe string newtype for characters that cannot appear in generated launchers.
-//!
-//! The Unix `.sh` launcher and the Windows `.shim` sidecar are generated on
-//! every platform (cross-platform packages), so the unsafe-character set is
-//! unified rather than per-platform. Lives alongside [`super::generate`] (the launcher generator)
-//! because the unsafe-character set encodes a *consumer-layer* shell template
-//! constraint — not a metadata invariant. The publish-time validator
-//! ([`ocx_package::metadata::validation`]) still calls into this module via
-//! the crate-visible re-export to surface unsafe characters at publish time as
-//! defense-in-depth.
 
-/// Characters that cannot appear in any string baked into a generated launcher.
+/// Characters no launcher string may carry, one set for the `.sh` body and the `.shim` sidecar
+/// (`adr_windows_exe_shim.md` §`.shim` Sidecar Format Contract).
 ///
-/// The set is unified across the `.sh` launcher body and the `.shim` sidecar:
-/// - `'` breaks Unix single-quoted shell literals (cannot be escaped inside one).
-/// - `\n`, `\r`, `\0` would inject newlines/control bytes into the `.sh` body
-///   or break the frozen one-line `.shim` sidecar — a code-injection vector.
-/// - `"` is retained because it must be quoted/escaped for `CreateProcessW`
-///   command-line assembly and for the `.sh` body's quoting.
-///
-/// `%` is **not** unsafe: post-cutover no consumer treats it specially — the
-/// `.sh` body single-quotes the package-root literal, the `.shim` sidecar
-/// carries it as a verbatim one-line value, and the native shim spawns via
-/// `CreateProcessW` with no `cmd.exe` (so no `%VAR%` expansion). A Windows
-/// install path containing `%` (e.g. a user folder `100%real`) must succeed.
-///
-/// All generated bodies exist on every platform (cross-platform packages),
-/// so the character set is unified rather than per-platform.
-///
-/// **Reused by the `.shim` sidecar.** The Windows `.shim` sidecar written by
-/// [`super::body::shim_sidecar_body`] carries the `pkg_root` as its sole content.
-/// Because the `pkg_root` is already wrapped in a [`LauncherSafeString`] at the
-/// `generate()` entry boundary, the sidecar body function receives a
-/// pre-validated value and performs no second validation — this set is the
-/// single enforcement point for both the `.sh` launcher body and the `.shim`
-/// sidecar. See `adr_windows_exe_shim.md` §`.shim` Sidecar Format Contract.
-///
-/// **Why backslash (`\`) is intentionally NOT in the set.** Windows package
-/// roots normally contain `\` (e.g. `C:\Users\…\.ocx\packages\…`), and the
-/// native `.exe` shim reads that path verbatim from the single-line `.shim`
-/// sidecar. `\` is an ordinary path byte there — it cannot terminate the
-/// line or change parsing. Forbidding `\` would block every realistic
-/// Windows install path; allowing it introduces no injection surface.
+/// `'` cannot be escaped in a single-quoted shell literal; `\n`, `\r`, `\0` inject lines;
+/// `"` breaks `CreateProcessW` and `.sh` quoting. Adding `%` or `\` blocks real Windows install paths.
 const LAUNCHER_UNSAFE_CHARS: &[char] = &['\'', '"', '\n', '\r', '\0'];
 
 /// A `String` proven free of characters that would corrupt a generated launcher.
-///
-/// Construction via [`LauncherSafeString::new`] is the only way to obtain one;
-/// the launcher body functions accept `&LauncherSafeString` so the unsafe-char
-/// check happens once, at the entry boundary, not per platform.
 #[derive(Debug, Clone)]
 pub(crate) struct LauncherSafeString(String);
 
 impl LauncherSafeString {
-    /// Validates `value` against [`LAUNCHER_UNSAFE_CHARS`] and wraps it.
-    ///
     /// # Errors
     ///
-    /// Returns [`crate::Error::LauncherUnsafeCharacter`] if the input contains
-    /// any of the unsafe characters listed above.
+    /// [`crate::Error::LauncherUnsafeCharacter`] if `value` holds a [`LAUNCHER_UNSAFE_CHARS`] character.
     pub(crate) fn new(value: impl Into<String>) -> Result<Self, crate::Error> {
         let value = value.into();
         if let Some(c) = value.chars().find(|c| LAUNCHER_UNSAFE_CHARS.contains(c)) {

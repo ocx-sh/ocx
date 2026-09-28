@@ -3,19 +3,9 @@
 
 //! Self-install: bootstrap, env shim files, managed RC blocks, profile detection.
 //!
-//! Shell-scaffold ownership for `ocx self setup`.
-//!
-//! This module is the single source of truth for OCX shell integration:
-//! per-shell env shims, the versioned RC-block state machine, profile-target
-//! detection, and the self-install bootstrap. The install scripts shrink to
-//! bootstrap-only and hand off to [`run`]; `ocx self update` hands off to it
-//! too, re-executing the newly pulled binary as `ocx self setup … --handoff`
-//! ([`SetupOptions::handoff`]) so every surface is written by the new version's
-//! own code instead of a subset of these phases run from the old binary.
-//!
-//! See `.claude/artifacts/adr_self_setup.md` (decisions 1B + 2A + 3D + 4C) for
-//! the design record and `.claude/state/plans/plan_self_setup.md` for the
-//! component contracts implemented here.
+//! The install scripts and `ocx self update` (via [`SetupOptions::handoff`]) both hand off
+//! to [`run`], so every surface is written by the new version's own code
+//! (`.claude/artifacts/adr_self_setup.md`).
 
 use std::path::{Path, PathBuf};
 
@@ -40,42 +30,23 @@ pub use session_path::{
 pub use version_spec::VersionSpec;
 
 /// POSIX fence payload — sources the POSIX env shim.
-///
-/// `$OCX_HOME` is *not* exported yet when the login profile runs this block:
-/// `env.sh` is the file that sets and exports it (`: "${OCX_HOME:=…}"`). So the
-/// fence cannot rely on `$OCX_HOME` to locate `env.sh` — a fresh login shell has
-/// it empty, and a bare `. "$OCX_HOME/env.sh"` then sources `. "/env.sh"` and
-/// fails ("No such file or directory") on every shell start. The
-/// `${OCX_HOME:-$HOME/.ocx}` form resolves the path *without* assigning or
-/// exporting (env.sh still owns the canonical `:=`/`export`), and the `-f`
-/// existence guard keeps the block silent when ocx is not installed.
+// `${OCX_HOME:-…}`, never bare `$OCX_HOME`: `env.sh` is what exports it, so a fresh login
+// shell would source `/env.sh` and fail on every start.
 const POSIX_BODY: &str = r#"if [ -f "${OCX_HOME:-$HOME/.ocx}/env.sh" ]; then
     . "${OCX_HOME:-$HOME/.ocx}/env.sh"
 fi"#;
 
 /// Elvish fence payload — slurps and evaluates the elvish env shim.
-///
-/// Mirrors the POSIX guard in elvish idiom. Elvish reads env vars via
-/// `$E:OCX_HOME` (it does NOT interpolate `$OCX_HOME` inside double quotes), so
-/// the value is resolved explicitly with `has-env` and plain string
-/// concatenation (`$E:HOME/.ocx`) before the `?(test -f …)` existence guard —
-/// the same chicken-and-egg fix: `env.elv` is what sets `OCX_HOME`, so the fence
-/// must locate it without depending on it. Concatenation is used instead of
-/// `path:join` because the latter needs a `use path` import that does not carry
-/// into the `eval`-ed shim scope.
+// Resolves the home without `OCX_HOME`, which `env.elv` sets; concatenation, not `path:join`,
+// whose `use path` import does not reach the `eval`-ed scope.
 const ELVISH_BODY: &str = r#"var _ocx_home = (if (has-env OCX_HOME) { put $E:OCX_HOME } else { put $E:HOME/.ocx })
 if ?(test -f $_ocx_home/env.elv) {
     eval (slurp < $_ocx_home/env.elv)
 }"#;
 
-/// PowerShell fence payload (plan contract 4). Resolves the ocx home *without*
-/// depending on `OCX_HOME` (the env.ps1 shim is what sets it), then existence-
-/// guards the source — the same chicken-and-egg fix as the POSIX body.
-///
-/// `$env:USERPROFILE` is null on Linux/macOS PowerShell 7, so it falls back to
-/// `$HOME` (mirroring the env.ps1 shim's `$_ocxBase`) — otherwise an unset
-/// `OCX_HOME` on non-Windows pwsh would resolve the home to `\.ocx` and never
-/// activate. `Join-Path` keeps the path separator correct on every platform.
+/// PowerShell fence payload.
+// Resolves the home without `OCX_HOME`, which `env.ps1` sets; the `$HOME` fallback is needed
+// because `$env:USERPROFILE` is null on non-Windows pwsh, which would never activate.
 const POWERSHELL_BODY: &str = r#"$_ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.ocx' } else { Join-Path $HOME '.ocx' }
 $_ocxEnv = Join-Path $_ocxHome 'env.ps1'
 if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
@@ -83,8 +54,7 @@ if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
 /// Options controlling a single `ocx self setup` run.
 #[derive(Debug, Clone, Default)]
 pub struct SetupOptions {
-    /// Write the env shims but do not modify any shell profile, **and** leave
-    /// the session PATH alone. The wider of the two refusals — see `profiles`.
+    /// Leave every shell profile and the session PATH alone; the shims are still written.
     pub no_modify_path: bool,
     /// Which shell profiles this run writes:
     ///
@@ -92,43 +62,27 @@ pub struct SetupOptions {
     /// - `Some(&[])` — write **no** profile block at all (`--no-profile`).
     /// - `Some(paths)` — write exactly those files.
     ///
-    /// `Some(&[])` is deliberately *not* `no_modify_path`: it suppresses only
-    /// the profile blocks, leaving the env shims and the session-PATH arm
-    /// running. Collapsing the two is the bug this tri-state exists to prevent.
+    /// `Some(&[])` is not `no_modify_path`: the session-PATH arm still runs.
     pub profiles: Option<Vec<PathBuf>>,
     /// Report intended actions without writing any byte.
     pub dry_run: bool,
     /// Overwrite a managed RC block that carries user edits (dirty state).
     pub force: bool,
-    /// This run is the child half of an `ocx self update` hand-off, so it may
-    /// **heal** a managed block but must never *introduce* one (Decision 4C).
-    ///
-    /// A genuinely first-time `ocx self setup` is indistinguishable from an
-    /// update-triggered one from inside [`run`] — no config, no block, no shims
-    /// either way — so the parent states which it is instead of this layer
-    /// guessing. On a machine that is already set up the flag costs nothing: a
-    /// drifted block still heals and a legacy footprint still migrates; only a
-    /// profile with no ocx footprint at all is left alone.
+    /// This run is the child half of an `ocx self update` hand-off: it may heal a
+    /// managed block but never introduce one. The parent states it, since a first-time
+    /// setup is indistinguishable from inside [`run`].
     pub handoff: bool,
     /// Optional version spec — when `Some`, pins the bootstrap to a specific
-    /// tag, digest, or `tag@digest` combination (plan D1–D4).
+    /// tag, digest, or `tag@digest` combination.
     pub version: Option<VersionSpec>,
-    /// The effective managed-config tier to adopt, already resolved by the
-    /// caller: `Some(ref)` adopts (sync fetch+persist, then fence write),
-    /// `Some("")` clears, `None` leaves the tier untouched. The CLI applies the
-    /// flag → `OCX_MANAGED_CONFIG` → `[managed].source` seed precedence before
-    /// building these options; this layer just consumes the result.
+    /// The already-resolved managed-config tier: `Some(ref)` adopts, `Some("")`
+    /// clears, `None` leaves it untouched.
     pub managed_config: Option<String>,
 }
 
 impl SetupOptions {
-    /// Whether the session-PATH arm runs — the encoding preflight (phase 0) and
-    /// the registration (phase 3.5) alike.
-    ///
-    /// Only `--no-modify-path` suppresses it. An empty `profiles` list does not:
-    /// a session PATH is not a profile block, and the two opt-outs are separate
-    /// promises. This is the single site that decides it, so the preflight and
-    /// the writer can never disagree about which run touches a PATH store.
+    /// Whether the session-PATH arm (phases 0 and 3.5) runs; only `--no-modify-path` suppresses it.
+    // The one decision site, or the preflight and the writer can disagree about which run writes.
     fn touches_session_path(&self) -> bool {
         !self.no_modify_path
     }
@@ -147,42 +101,23 @@ pub enum ProfileOutcome {
     SkippedDirty,
 }
 
-/// True when a setup/heal run changed at least one managed block: a fresh or
-/// upgraded block was written ([`ProfileOutcome::Completed`]) or a legacy
-/// footprint was migrated ([`ProfileOutcome::Migrated`]).
-///
-/// Single source for the "re-source your profile" reload hint, in every mode:
-/// a hand-off run ([`SetupOptions::handoff`]) reports the same outcomes, so a
-/// healed block counts as changed and a profile left alone
-/// ([`ProfileOutcome::NoOp`]) does not.
+/// True when a run wrote or migrated at least one managed block; feeds the reload hint.
 pub fn profiles_changed(profiles: &[(PathBuf, ProfileOutcome)]) -> bool {
     profiles
         .iter()
         .any(|(_, outcome)| matches!(outcome, ProfileOutcome::Completed | ProfileOutcome::Migrated))
 }
 
-/// True when at least one session-PATH store gained the ocx directories on
-/// this run ([`SessionPathOutcome::Written`]).
-///
-/// The third input to the reload hint, beside [`profiles_changed`] and a
-/// non-empty shim set. A session PATH is read once, when the session starts —
-/// by the systemd user manager for an `environment.d` drop-in, by `launchd` at
-/// login for the macOS agent, by the desktop shell for the Windows registry
-/// value — so a store this run wrote reaches nothing already running, and the
-/// user has to be told. Without it the common re-run (shims current, every
-/// profile already `Current`, session PATH newly written) printed a `written`
-/// row and no guidance at all.
+/// True when a session-PATH store was written this run; feeds the reload hint, since a
+/// session PATH is read only at session start.
 pub fn session_path_written(session_path: &[(PathBuf, SessionPathOutcome)]) -> bool {
     session_path
         .iter()
         .any(|(_, outcome)| *outcome == SessionPathOutcome::Written)
 }
 
-/// True when at least one profile carried user edits inside the managed fence
-/// and was left untouched ([`ProfileOutcome::SkippedDirty`]).
-///
-/// Single source for the dirty signal — drives the `self setup` exit code (82)
-/// and the `self update` "run `ocx self setup --force`" advisory.
+/// True when a profile's managed fence carried user edits and was left untouched;
+/// drives exit 82 and the `self update` `--force` advisory.
 pub fn profiles_dirty(profiles: &[(PathBuf, ProfileOutcome)]) -> bool {
     profiles
         .iter()
@@ -192,7 +127,7 @@ pub fn profiles_dirty(profiles: &[(PathBuf, ProfileOutcome)]) -> bool {
 /// Aggregate result of an `ocx self setup` run.
 #[derive(Debug, Clone)]
 pub struct SetupOutcome {
-    /// Self-install bootstrap outcome (the hard gate ran first — contract 2).
+    /// Self-install bootstrap outcome (the hard gate, run first).
     pub bootstrap: BootstrapOutcome,
     /// env.* shim files that were (re)written.
     pub shims_written: Vec<PathBuf>,
@@ -202,44 +137,27 @@ pub struct SetupOutcome {
     pub exec_policy_warning: Option<String>,
     /// An `ocx` on `PATH` ahead of the directory the shim prepends.
     pub conflicting_ocx: Option<PathBuf>,
-    /// Whether this run changed a PATH surface, so the CLI should tell the
-    /// user what to reload.
-    ///
-    /// True when a shim was written, a managed profile block changed, or a
-    /// session-PATH store was written ([`session_path_written`]). Which
-    /// sentence to print is the CLI's decision, not this flag's: a profile is
-    /// re-sourced, a session PATH is only re-read at the next login.
+    /// Whether this run changed a shim, profile block or session-PATH store, so the
+    /// CLI should say what to reload.
     pub reload_hint: bool,
     /// Result of adopting/clearing the `--managed-config` tier (phase 1.5).
     pub managed_config: ManagedConfigSetupOutcome,
-    /// Per-store session-PATH outcomes (C-036), keyed by the location each
-    /// platform owns.
-    ///
-    /// **Always populated on a supported host**, in every state — including a
-    /// `--no-modify-path` run, which reports
-    /// [`SessionPathOutcome::SkippedOptOut`] for each store it did not touch.
-    /// A [`SessionPathOutcome::Failed`] here is warned about and exits 0; the
-    /// only session-PATH condition that changes the exit code is the C-037
-    /// encoding refusal, and that never reaches this field because it is an
-    /// `Err` from [`run`].
+    /// Per-store session-PATH outcomes; populated on every supported host, as
+    /// [`SessionPathOutcome::SkippedOptOut`] under `--no-modify-path`.
     pub session_path: Vec<(PathBuf, SessionPathOutcome)>,
     /// Result of persisting an installer-exported `OCX_EXTRA_CA_CERTS` value
-    /// into `config.toml` (phase 0.5, C-008, ocx#448).
+    /// into `config.toml` (phase 0.5).
     pub extra_ca_certs: ExtraCaCertsOutcome,
 }
 
-/// Outcome of `ocx self setup` phase 0.5 (C-008, ocx#448): persisting an
-/// installer-exported `OCX_EXTRA_CA_CERTS` value into the home-tier
-/// `config.toml` as `extra_ca_certs_pem`, so the corp CA an installer used to
-/// bootstrap survives past the `mktemp` file the installer deletes on exit
-/// (D-5). `ocx config setup` does not run this phase.
+/// Outcome of phase 0.5: persisting an installer-exported `OCX_EXTRA_CA_CERTS` into home
+/// `config.toml` as `extra_ca_certs_pem`, so it outlives the installer's temp file.
 #[derive(Debug, Clone)]
 pub enum ExtraCaCertsOutcome {
     /// `OCX_EXTRA_CA_CERTS` was unset or `""` — nothing to do, zero I/O.
     NotConfigured,
     /// The resolved value equals what `config.toml` already carries —
-    /// compared as the parsed TOML string, not file bytes (C-008) — so no
-    /// write.
+    /// compared as the parsed TOML string, not file bytes — so no write.
     Unchanged {
         /// Number of certificates the resolved bundle carries.
         certificates: usize,
@@ -254,10 +172,8 @@ pub enum ExtraCaCertsOutcome {
         /// Number of certificates the resolved bundle carries.
         certificates: usize,
     },
-    /// `OCX_EXTRA_CA_CERTS` was set, but the pair is system-locked
-    /// (ocx#469): nothing was validated or written, since the loader takes
-    /// the pair from `/etc/ocx/config.toml` alone and would ignore the
-    /// home-tier value on every later invocation.
+    /// `OCX_EXTRA_CA_CERTS` was set but the pair is system-locked, so a home-tier value
+    /// would be ignored; nothing was validated or written.
     SystemLocked,
 }
 
@@ -266,13 +182,10 @@ pub enum ExtraCaCertsOutcome {
 pub enum ManagedConfigSetupOutcome {
     /// No `--managed-config` flag/env/seed resolved — nothing to do.
     NotConfigured,
-    /// The resolved ref matches the existing seed, a matching snapshot is on
-    /// disk, and the re-sync produced no new content — either the registry
-    /// still serves the recorded digest, or the refresh was deliberately
-    /// skipped (digest-pinned seed, no network, in-force pause).
+    /// The ref matches the existing seed and snapshot, and the re-sync produced no new
+    /// content or was skipped (digest-pinned seed, no network, in-force pause).
     AlreadyAdopted {
-        /// The existing snapshot's verified digest (operator TOFU signal —
-        /// decision 10: the digest is always visible on adopt paths).
+        /// The existing snapshot's verified digest.
         digest: ocx_oci::Digest,
     },
     /// An already-adopted seed was re-synced and the registry served newer
@@ -283,19 +196,12 @@ pub enum ManagedConfigSetupOutcome {
         /// The newly persisted digest.
         to: ocx_oci::Digest,
     },
-    /// The refresh of an already-adopted seed failed before anything was
-    /// written (fetch fault, source vanished from the registry, or a published
-    /// payload that fails validation); the existing snapshot is kept and the
-    /// run still succeeds (exit 0). Never reported as `AlreadyAdopted` — a
-    /// refresh that did not run must not look healthy. A snapshot-*write*
-    /// failure is NOT downgraded to this outcome: it can leave the new payload
-    /// live under the old provenance, so it propagates as an error instead.
+    /// The refresh of an adopted seed failed before any write; the snapshot is kept and
+    /// the run exits 0. A snapshot-write failure is an error instead.
     RefreshUnavailable {
         /// The retained snapshot's digest — unchanged by the failed refresh.
         digest: ocx_oci::Digest,
-        /// Why the refresh did not complete — the fetch error with its full
-        /// `source()` chain flattened in (`ocx_util::error::render_chain`), since
-        /// the outermost message alone names no cause.
+        /// Why the refresh did not complete, with the error's whole `source()` chain.
         reason: String,
     },
     /// `--dry-run` against an already-adopted seed: a refresh would run, but
@@ -305,75 +211,43 @@ pub enum ManagedConfigSetupOutcome {
         digest: ocx_oci::Digest,
     },
     /// A new or changed ref was adopted: synchronous fetch+persist succeeded
-    /// before the fence was written (ADR "Setup ordering").
+    /// before the fence was written.
     Adopted {
         /// The newly persisted manifest digest.
         digest: ocx_oci::Digest,
     },
     /// `--managed-config ""` cleared the fence and deleted the snapshot dir.
     Cleared,
-    /// The `[managed]` fence carries user edits and `--force` was not passed;
-    /// left untouched. The CLI maps this to exit 82, mirroring
-    /// [`ProfileOutcome::SkippedDirty`].
+    /// The `[managed]` fence carries user edits and `--force` was not passed (exit 82).
     Dirty,
     /// `--dry-run`: an adopt/re-adopt would run, but nothing was fetched or
     /// written.
     WouldAdopt,
 }
 
-/// Orchestrate a full `ocx self setup`: bootstrap the CAS, write the env
-/// shims, and apply the RC-block state machine to each target profile.
+/// Orchestrate a full `ocx self setup`: bootstrap, env shims, then the RC-block state machine per profile.
 ///
-/// # Hard ordering invariant (contract 1, item 2 — Block-tier)
-///
-/// The session-PATH encoding refusal runs **before** bootstrap, as phase 0:
-/// an `$OCX_HOME` this host's PATH format cannot spell is refused with the
-/// machine byte-identical — no snapshot fetched, no shim written, no profile
-/// touched. It sits there rather than beside the registration it guards
-/// because it is the only refusal that would otherwise fire after four
-/// writing phases. `--no-modify-path` suppresses it along with the whole
-/// session-PATH arm. Phase 0.5, `OCX_EXTRA_CA_CERTS` persistence (C-008,
-/// ocx#448), is a second pre-write refusal in the same spirit: a refused or
-/// oversized extra-CA value is caught before bootstrap ever fetches, leaving
-/// the machine byte-identical.
-///
-/// Bootstrap runs first among the **writing** phases. If it fails, `run` returns the error immediately,
-/// having written **zero shims and touched zero profiles** — there is no partial
-/// state. The shims point at the `current` symlink the bootstrap wires, so
-/// writing them before the CAS exists would produce dangling integration.
-///
-/// `dry_run` short-circuits every write: it computes the would-write shim set
-/// and every per-profile outcome without touching a byte (and never returns the
-/// dirty exit code — a dirty profile is reported as would-skip).
+/// Phases 0 and 0.5 refuse before bootstrap, leaving the machine byte-identical. A failed
+/// bootstrap writes no shim, since the shims would dangle without `current`.
 ///
 /// # Errors
 ///
-/// Returns [`error::Error`] if the bootstrap fails (zero shims written, zero
-/// profiles touched), or if a shim / profile write fails; also
-/// [`error::Error::ExtraCaCerts`], [`error::Error::ExtraCaCertsNotUtf8`] or
-/// [`error::Error::RenderedConfigTooLarge`] if phase 0.5's
-/// `OCX_EXTRA_CA_CERTS` persistence refuses before bootstrap runs.
+/// [`error::Error`] if bootstrap or a shim or profile write fails, or phase 0.5 refuses
+/// `OCX_EXTRA_CA_CERTS`.
 pub async fn run(
     options: &SetupOptions,
     config: &ocx_config::Config,
     manager: &PackageManager,
     file_structure: &FileStructure,
 ) -> Result<SetupOutcome, error::Error> {
-    // ── Phase 0: session-PATH encoding preflight (C-037) ──────────────────────
-    // Ahead of every writing phase, because the refusal's whole promise is that
-    // a refused run leaves the machine byte-identical. The two directories are
-    // pure path joins off `file_structure` (no bootstrap, no config), so there
-    // is nothing this check needs that a later phase produces. Suppressed under
-    // `--no-modify-path` for the same reason phase 3.5 is (C-043): the arm never
-    // runs, so an `$OCX_HOME` it could not spell is not this run's problem.
+    // ── Phase 0: session-PATH encoding preflight ──────────────────────────────
+    // Ahead of every write, so a refused run leaves the machine byte-identical.
     if options.touches_session_path() {
         session_path::refuse_unencodable(&session_path_directories(file_structure))?;
     }
 
-    // ── Phase 0.5: persist OCX_EXTRA_CA_CERTS (C-008, ocx#448) ────────────────
-    // Before bootstrap and no network: a later fetch failure must still leave
-    // the CA persisted, since the whole point is that the corp registry
-    // bootstrap below can trust it.
+    // ── Phase 0.5: persist OCX_EXTRA_CA_CERTS ─────────────────────────────────
+    // Before bootstrap, so a later fetch failure still leaves the CA persisted for the corp registry.
     let extra_ca_certs = persist_extra_ca_certs(
         &file_structure.locks,
         file_structure.root(),
@@ -384,13 +258,11 @@ pub async fn run(
     .await?;
 
     // ── Phase 1: bootstrap (hard gate, runs first) ────────────────────────────
-    // On `Err`, propagate now — zero shims written, zero profiles touched.
     let bootstrap =
         bootstrap::ensure_self_installed(manager, file_structure, options.dry_run, options.version.as_ref()).await?;
 
-    // ── Phase 1.5: managed-config adoption (ADR "Setup ordering (AMENDED)":
-    // resolve ref (flag>env>seed) → synchronous fetch+persist FIRST → fence
-    // write only on success) ──────────────────────────────────────────────
+    // ── Phase 1.5: managed-config adoption ────────────────────────────────────
+    // Fetch and persist first, fence only on success (`adr_managed_config_tier.md` § Setup ordering).
     let managed_config = apply_managed_config(
         config,
         options.managed_config.as_deref(),
@@ -418,18 +290,8 @@ pub async fn run(
     let profiles = apply_profile_phase(ocx_home, options).await?;
 
     // ── Phase 3.5: session PATH (unless --no-modify-path) ─────────────────────
-    // Co-primary with the profile blocks rather than a fallback for them: a
-    // profile reaches login shells, a session PATH reaches everything else.
-    // The `?` below is C-037's encoding refusal (exit 78) and nothing else —
-    // a *write* failure comes back inside the `Ok` as
-    // `SessionPathOutcome::Failed`, which `emit_advisories` warns about and
-    // which never changes the exit code (C-036). Phase 0 already applied that
-    // same refusal to the same directories, so reaching it here means a caller
-    // bypassed `run`; the check stays because the writers own it, not because
-    // this path is expected to fire.
+    // The `?` is the encoding refusal only, already refused in phase 0; a write failure is `Failed` in `Ok`.
     let session_path = if !options.touches_session_path() {
-        // C-043 suppresses the whole arm, so the writers are never called and
-        // cannot name their own stores; the caller enumerates them instead.
         session_path::session_path_stores(ocx_home)
             .into_iter()
             .map(|store| (store, SessionPathOutcome::SkippedOptOut))
@@ -441,21 +303,8 @@ pub async fn run(
             let ocx_home = ocx_home.to_path_buf();
             let dry_run = options.dry_run;
             move || {
-                // C-084, and strictly **before** the registration: Windows and
-                // macOS merge into the stored value and never subtract what a
-                // previous run wrote, so the entry an unreleased build left at
-                // `<root>/bin` would sit there forever beside the current one.
-                // Linux regenerates `ocx.conf` wholesale and self-heals, which
-                // is why this call is unconditional rather than platform-gated
-                // — a platform-gated one would be a branch no Linux run can
-                // observe.
-                //
-                // The outcome is dropped on purpose: `Unchanged` is the answer
-                // on every machine that never ran an unreleased build, and it
-                // is not a fact a user asked about. The `?` is C-037's encoding
-                // refusal only, and it is unreachable here — phase 0 already
-                // applied that refusal to the longer `active/bin` spelling
-                // under the same `$OCX_HOME`.
+                // Before registering: Windows and macOS merge without subtracting, so a retired entry stays forever.
+                // The outcome is dropped: `Unchanged` except on machines that ran an unreleased build.
                 session_path::deregister_session_path(&ocx_home, &retired, dry_run)?;
                 session_path::register_session_path(&ocx_home, &directories, dry_run)
             }
@@ -477,14 +326,6 @@ pub async fn run(
     // ── Phase 5: best-effort conflicting-ocx scan (never fails setup) ─────────
     let conflicting_ocx = conflicting_ocx_on_path(file_structure).await;
 
-    // The reload hint only makes sense when this run actually changed a PATH
-    // surface: a shim was (re)written, a profile gained/upgraded a managed
-    // block, or a session-PATH store was written. A pure no-op re-run (all
-    // shims current, every profile already Current, every store Unchanged)
-    // suppresses it so the user is not told to reload an unchanged machine.
-    // The three inputs stay separate rather than collapsing into one boolean
-    // here, because the *remedy* differs per surface and the CLI renders one
-    // line per surface from these same three predicates.
     let reload_hint = !shims_written.is_empty() || profiles_changed(&profiles) || session_path_written(&session_path);
 
     Ok(SetupOutcome {
@@ -500,45 +341,15 @@ pub async fn run(
     })
 }
 
-/// Phase 0.5 of [`run`] (C-008, ocx#448): resolve `OCX_EXTRA_CA_CERTS` as
-/// C-005's env arm ([`ocx_config::tls::from_env_value`]: a
-/// value containing `-----BEGIN` is inline PEM, D-4; else a path read via
-/// [`ocx_util::fs::read_bounded`]), validate it through
-/// [`ocx_config::tls::parse_pem`] (C-004, the single choke
-/// point), and persist it as root-level `extra_ca_certs_pem` in
-/// `<home>/config.toml` through [`ocx_config::edit::edit`] — the one
-/// locked read-modify-write every `config.toml` writer shares (ocx#468) —
-/// removing a root `extra_ca_certs` key if present (XOR: `ocx self setup`
-/// persists inline PEM only, D-5, never a path). Diff-gated on the parsed
-/// TOML string, so a byte-identical re-run and a CRLF-escaped re-render both
-/// count as unchanged. Refuses (before any write) when the rendered document
-/// would exceed the config loader's 64 KiB ceiling.
-///
-/// `env_value` is `None` or `""` for "unset" (matching every other
-/// `=""`-is-unset `OCX_*` variable in this crate) — a no-op with zero I/O.
-/// `system_locked` is [`ocx_config::Config::extra_ca_certs_system_locked`]
-/// (ocx#469): a set value under the lock is
-/// [`ExtraCaCertsOutcome::SystemLocked`], also with zero I/O — the loader
-/// would ignore whatever was persisted, and the same loader skips the env
-/// value unvalidated, so setup neither validates nor writes it.
-///
-/// `home` is `file_structure.root()` (`$OCX_HOME`), never
-/// `ConfigLoader::user_path()` — the same write target `shell_config::set`
-/// uses; `locks_root` is `file_structure.locks`.
-///
-/// The validation (the bounded file read and
-/// [`ocx_config::tls::parse_pem`]'s probe build, DX-11) runs on the
-/// blocking pool ahead of the edit, so the lock is never held for it.
+/// Phase 0.5 of [`run`]: resolve `OCX_EXTRA_CA_CERTS` like the loader's env arm, validate it,
+/// and persist it as root-level `extra_ca_certs_pem` in `<home>/config.toml`, dropping any
+/// `extra_ca_certs` key. `home` is `file_structure.root()`, never `ConfigLoader::user_path()`.
 ///
 /// # Errors
 ///
-/// [`error::Error::ExtraCaCerts`] for a path value the bounded read refuses
-/// and for anything [`ocx_config::tls::parse_pem`] refuses
-/// (C-004); [`error::Error::ExtraCaCertsNotUtf8`] for a valid bundle that is
-/// not UTF-8 and so cannot be a TOML string;
-/// [`error::Error::Io`] for a `config.toml` read/parse/write failure;
-/// [`error::Error::RenderedConfigTooLarge`] when the document is, or would
-/// render, over the size ceiling.
+/// [`error::Error::ExtraCaCerts`] for a refused read or PEM; [`error::Error::ExtraCaCertsNotUtf8`]
+/// for a non-UTF-8 bundle; [`error::Error::RenderedConfigTooLarge`] over the size ceiling;
+/// [`error::Error::ConfigEdit`] for any other edit failure.
 async fn persist_extra_ca_certs(
     locks_root: &Path,
     home: &Path,
@@ -555,6 +366,7 @@ async fn persist_extra_ca_certs(
     let Some(value) = env_value.filter(|value| !value.is_empty()) else {
         return Ok(ExtraCaCertsOutcome::NotConfigured);
     };
+    // The loader ignores a home-tier pair when system-locked, so neither validate nor write.
     if system_locked {
         return Ok(ExtraCaCertsOutcome::SystemLocked);
     }
@@ -564,17 +376,13 @@ async fn persist_extra_ca_certs(
         source,
     };
 
-    // C-005's env arm: a path is read now (D-5 — the installer's file is gone
-    // on exit) and the text kept as read, so what lands in `config.toml` is
-    // the operator's bundle, not a re-encoding of it.
+    // Read now, since the installer deletes its file on exit, and outside the edit so the config
+    // lock is never held for it.
     let value = value.to_owned();
     let (pem, certificates) = tokio::task::spawn_blocking(move || -> Result<_, error::Error> {
         let (pem, origin) = from_env_value(&value)?;
         let certificates = parse_pem(&pem, &origin)?.len();
-        // Validated first, decoded second: only this phase needs text (a TOML
-        // string is UTF-8 by definition), so a bundle every client already
-        // trusts is refused here alone, and as data — the file's bytes are
-        // what is wrong.
+        // Validated before decoding: only persistence needs UTF-8, so it alone refuses a trusted bundle.
         let pem = String::from_utf8(pem).map_err(|error| error::Error::ExtraCaCertsNotUtf8 {
             bytes: error.as_bytes().len(),
         })?;
@@ -584,25 +392,20 @@ async fn persist_extra_ca_certs(
     .map_err(|join| io_error(std::io::Error::other(join.to_string())))??;
 
     let outcome = edit::edit(locks_root, &config_path, dry_run, move |document| {
-        // The diff gate compares the PARSED string, so a CRLF bundle whose
-        // `\r`s render escaped still counts as the same value on the next run.
+        // Compares the parsed string, so a CRLF bundle whose `\r`s render escaped still matches.
         let already_persisted = document.get(PEM_KEY).and_then(toml_edit::Item::as_str) == Some(pem.as_str())
             && !document.contains_key(PATH_KEY);
         if already_persisted {
             return Ok(());
         }
-        // Root-level values render ahead of every `[table]` regardless of
-        // insertion order, so the key never lands inside a `[managed]` fence;
-        // the XOR removal keeps the file loadable (the loader refuses both
-        // keys).
+        // Both keys at once make the file unloadable, so the path key goes.
         document.remove(PATH_KEY);
         document[PEM_KEY] = toml_edit::value(pem);
         Ok(())
     })
     .await
     .map_err(|error| match error {
-        // Re-homed for its remedy (shrink the file, or use the path form);
-        // every other refusal reads best in the edit's own words.
+        // Re-homed for its remedy; every other refusal reads best in the edit's own words.
         EditError::TooLarge { path, bytes } => error::Error::RenderedConfigTooLarge { path, bytes },
         other => error::Error::ConfigEdit(other),
     })?;
@@ -614,48 +417,15 @@ async fn persist_extra_ca_certs(
     })
 }
 
-/// The two directories `ocx self setup` registers at session level, **in the
-/// order they must appear on PATH** (C-060).
-///
-/// `$OCX_HOME/toolchain/active/bin` leads and
-/// [`FileStructure::ocx_install_bin_path`](ocx_store::file_structure::FileStructure::ocx_install_bin_path)
-/// follows, so a
-/// global toolchain that pins `ocx` is the one a session resolves and the
-/// installed binary is the floor beneath it. D-4 removed the refusal that used
-/// to stop a toolchain rendering that name; an ordering that kept the installed
-/// binary in front would have left the pin rendered and permanently unreachable.
-/// Every session-PATH writer takes this slice verbatim and prepends it in the
-/// order given, so the order decided here is the order that reaches the registry
-/// value, the `environment.d` line and the LaunchAgent script alike.
-///
-/// A named function rather than a `vec![]` inline in [`run`] because the order
-/// is a decision with a contract number attached, and an ordering nobody can
-/// call is an ordering no test can pin.
-/// The toolchain half is [`ocx_store::file_structure::ToolchainStore::bin`], never
-/// a literal `toolchain/active/bin` join: C-001 builds that store once from the
-/// composite root precisely so no caller re-derives the tree location, and a
-/// second spelling here is what would keep pointing at the old place the day
-/// the layout moves.
+/// The two directories `ocx self setup` registers at session level, in PATH order.
 pub fn session_path_directories(file_structure: &FileStructure) -> Vec<PathBuf> {
+    // Toolchain bin first, or a global toolchain's pinned `ocx` renders but stays unreachable.
+    // From `ToolchainStore::bin`, never a literal join, which would miss a layout move.
     vec![file_structure.toolchain.bin(), file_structure.ocx_install_bin_path()]
 }
 
-/// The session-PATH segment `<root>/bin`, which no longer exists (C-084).
-///
-/// The trampoline directory sat directly under the toolchain root until the
-/// `active` indirection moved it one level down, so a machine that ran `ocx
-/// self setup` against an unreleased build carries a session-PATH entry naming
-/// a directory that will never be written again. [`run`] subtracts it before it
-/// registers [`session_path_directories`].
-///
-/// A **named constant**, not an accessor: there is deliberately no live
-/// derivation for a path the tree no longer has, and inventing one would keep a
-/// dead shape spellable. It is deleted in the release after the one that
-/// introduces it — the batched-window shape, with its removal release named
-/// when the window opens.
-///
-/// Scope: only machines that ran `ocx self setup` against an unreleased build.
-/// Everywhere else this is an `Unchanged` nobody sees.
+/// The session-PATH segment `<root>/bin` unreleased builds registered, which [`run`]
+/// subtracts before registering. Delete this in the release after the one that introduces it.
 pub fn retired_session_path_directories(file_structure: &FileStructure) -> Vec<PathBuf> {
     /// The name the trampoline directory carried directly under the root.
     const RETIRED_TOOLCHAIN_BIN: &str = "bin";
@@ -663,59 +433,16 @@ pub fn retired_session_path_directories(file_structure: &FileStructure) -> Vec<P
     vec![file_structure.toolchain.root().join(RETIRED_TOOLCHAIN_BIN)]
 }
 
-/// Adopt (or clear) the managed-config tier from an already-resolved
-/// managed-config value.
+/// Adopt (or clear) the managed-config tier from an already-resolved value.
 ///
-/// The single implementation behind both adoption entry points: `ocx self
-/// setup` (phase 1.5 of [`run`]) and `ocx config setup` (config-only, no
-/// bootstrap/shims/profiles). The caller owns the precedence (flag >
-/// `OCX_MANAGED_CONFIG` > `[managed].source` seed) and passes the resolved
-/// value.
-///
-/// `None` — nothing resolved — short-circuits to
-/// [`ManagedConfigSetupOutcome::NotConfigured`] without touching the filesystem
-/// or network.
-///
-/// `Some("")` clears: removes the `[managed]` fence and deletes the
-/// snapshot directory (no ghost tier), warning if `OCX_MANAGED_CONFIG` is
-/// still exported (it would re-activate the tier on the next command).
-///
-/// `Some(ref)` adopts: re-parses `ref` as an [`ocx_oci::PackageRef`]
-/// (CWE-74 defense — the fence body below is real TOML serialization, never
-/// `format!` interpolation of the raw ref), then follows ADR "Setup ordering":
-/// synchronous fetch+persist FIRST, fence written only on success. A dirty
-/// fence (user-edited) is left untouched without `force`
-/// ([`ManagedConfigSetupOutcome::Dirty`]). `dry_run` short-circuits to
-/// [`ManagedConfigSetupOutcome::WouldAdopt`] before any write.
-///
-/// # Refresh on re-run
-///
-/// A fence already `Current` for the same rendered body does **not** skip the
-/// fetch: setup reconciles the tier on every run, so a newer fleet config is
-/// picked up by the natural provisioning entry point
-/// ([`ManagedConfigSetupOutcome::Refreshed`]; unchanged content reports
-/// [`ManagedConfigSetupOutcome::AlreadyAdopted`], now verified rather than
-/// assumed). The fence itself is never rewritten — `rc_block::apply` returns
-/// `None` for a `Current` block.
-///
-/// The refresh is **best-effort only when an identity-matching snapshot is
-/// already on disk**: a failed fetch then warns, keeps that snapshot, and
-/// returns [`ManagedConfigSetupOutcome::RefreshUnavailable`] with exit 0.
-/// First adoption and self-heal (fence current but the snapshot is wiped or
-/// belongs to another source) have nothing to fall back on and keep the
-/// hard-fail fetch-first ADR contract. A refresh is skipped entirely — without
-/// a warning — for a digest-pinned seed, with no network, or under an in-force
-/// `ocx config update --pause` (see [`refresh_skip_reason`]); `dry_run`
-/// reports [`ManagedConfigSetupOutcome::WouldRefresh`] and never fetches.
+/// `Some("")` clears the fence and snapshot; `Some(ref)` fetches and persists, then writes the
+/// fence. A refresh failing before any snapshot write keeps the snapshot
+/// ([`ManagedConfigSetupOutcome::RefreshUnavailable`], exit 0). `dry_run` never writes or fetches.
 ///
 /// # Errors
 ///
-/// Returns [`error::Error`] when the ref does not parse as an OCI identifier,
-/// the fetch+persist of a not-yet-adopted seed fails (no partial state — the
-/// fence is not written), or a filesystem write fails. A system-locked tier
-/// (the merged `config`'s `[managed] required = true`) rejects an explicit
-/// clear or redirect with [`error::Error::ManagedConfigLocked`] (exit 78)
-/// before any write, so a direct library caller cannot bypass the lock.
+/// [`error::Error`] when the ref does not parse, a first fetch fails (no fence is written) or a
+/// write fails; [`error::Error::ManagedConfigLocked`] (exit 78) to clear or redirect a locked tier.
 pub async fn apply_managed_config(
     config: &ocx_config::Config,
     managed_config: Option<&str>,
@@ -732,18 +459,11 @@ pub async fn apply_managed_config(
         return Ok(ManagedConfigSetupOutcome::NotConfigured);
     };
 
-    // Defense in depth: a system-locked tier may only be re-adopted with a
-    // matching ref — never cleared (`""`) or redirected to a different source.
-    // The CLI seam (`resolve_managed_config_arg`) enforces this before calling
-    // in, but the public library function re-checks against the merged config
-    // (which carries the system-tier `[managed] required = true` lock) so a
-    // direct caller cannot bypass the lock and corrupt the required tier.
+    // Re-checked here, or a direct library caller bypasses the system-tier lock the CLI enforces.
     check_locked_managed_override(config, flag_value)?;
 
     let config_path = file_structure.root().join("config.toml");
-    // The decision read: which state the fence is in decides the outcome and
-    // whether a fetch runs at all. The write below re-reads under the edit
-    // lock, so an edit that lands during the fetch is not overwritten.
+    // Decides the outcome only; the write re-reads under the edit lock, or an edit landing mid-fetch is lost.
     let content = read_to_string_or_empty(&config_path).await?;
 
     if flag_value.is_empty() {
@@ -767,8 +487,7 @@ pub async fn apply_managed_config(
         interval: Some(ManagedConfig::DEFAULT_INTERVAL.to_string()),
         system_locked: false,
     };
-    // Real TOML serialization of the typed struct — never `format!`
-    // interpolation of `flag_value` (Block-tier CWE-74 fix, ADR Decision C).
+    // Serialized, never `format!`-interpolated, or a crafted ref injects TOML (CWE-74).
     let body = format!(
         "[managed]\n{}",
         toml::to_string(&managed).expect("ManagedConfig has no float/map keys and always serializes")
@@ -778,19 +497,11 @@ pub async fn apply_managed_config(
     if state == rc_block::BlockState::Dirty && !force {
         return Ok(ManagedConfigSetupOutcome::Dirty);
     }
-    // The identity-matching snapshot already on disk, if any. Its presence is
-    // the ONLY licence for the best-effort refresh arm below: a failed fetch
-    // can fall back to it. First adopt and self-heal leave this `None`, so they
-    // keep the hard-fail fetch-first contract and a `required = true` fence can
-    // never be written with no snapshot behind it.
+    // The only licence for the best-effort refresh below; `None` keeps first adopt and self-heal
+    // hard-failing, or a `required = true` fence could be written with no snapshot behind it.
     let mut adopted: Option<ocx_config::managed::ManagedConfigSnapshot> = None;
     if state == rc_block::BlockState::Current {
-        // W3: a `Current` fence alone does not prove the tier is healthy — the
-        // snapshot may have been wiped or belong to a different source (e.g. a
-        // restored $OCX_HOME). Only a present, identity-matching snapshot
-        // counts as adopted; otherwise fall through to the fetch+persist below
-        // to self-heal (the fence itself is never rewritten — `rc_block::apply`
-        // returns `None` for a `Current` block).
+        // A `Current` fence alone is not proof: the snapshot may be gone or another source's.
         let snapshot =
             ocx_config::managed_config::read_managed_config_snapshot(&file_structure.state.managed_config()).await;
         match snapshot {
@@ -804,9 +515,6 @@ pub async fn apply_managed_config(
     }
 
     if let Some(snapshot) = &adopted {
-        // A deliberate skip is not a failure: report the existing snapshot as
-        // adopted and stay silent on stderr (no warn noise for `--offline`, a
-        // digest-pinned seed, or an in-force pause).
         let paused = ocx_config::managed_config::read_pause(&file_structure.state.managed_config())
             .await
             .is_some();
@@ -817,8 +525,6 @@ pub async fn apply_managed_config(
             });
         }
         if dry_run {
-            // Dry-run never fetches — `ocx config update --check` is the probe
-            // surface. Report that a refresh would run, nothing more.
             return Ok(ManagedConfigSetupOutcome::WouldRefresh {
                 digest: snapshot.digest.clone(),
             });
@@ -829,9 +535,7 @@ pub async fn apply_managed_config(
         return Ok(ManagedConfigSetupOutcome::WouldAdopt);
     }
 
-    // Synchronous fetch+persist FIRST (ADR "Setup ordering"): a transient
-    // network blip during onboarding must not leave a `required = true` fence
-    // with no snapshot, which would brick every subsequent command.
+    // Fetch first, or a network blip leaves a `required = true` fence with no snapshot, bricking every command.
     let resolved = ocx_config::managed::ResolvedManagedConfig {
         source: identifier,
         required: ManagedConfig::DEFAULT_REQUIRED,
@@ -840,23 +544,10 @@ pub async fn apply_managed_config(
             .expect("DEFAULT_INTERVAL is always a valid interval"),
         system_required: false,
     };
-    // An absent-in-registry source (`Ok(None)` from the fetch) surfaces as
-    // `Err(ManagedConfigUpdateError::SourceNotFound)`, propagated through
-    // `Error::ManagedConfigUpdateFailed` — no fence is written, no partial
-    // state (ADR "Setup ordering"). A successful update always carries the
-    // persisted digest.
     let result = match manager.update_managed_config(&resolved, None).await {
         Ok(result) => result,
         Err(error) => {
-            // Best-effort ONLY behind an identity-matching snapshot, and ONLY
-            // for errors proven to fire before any snapshot write: a registry
-            // blip or a bad published payload (invalid TOML, a CA bundle this
-            // host cannot load) must not fail a re-run, because the tier
-            // stays usable on the content already on disk. A
-            // `SnapshotWriteFailed` can fire AFTER the payload rename (the
-            // metadata write is a separate atomic rename), leaving the new
-            // payload live under the old provenance — reporting "kept the
-            // existing snapshot" there would be false, so it propagates.
+            // Best-effort only for errors proven to fire before any snapshot write.
             let pre_write_failure = matches!(
                 &error,
                 ocx_config::managed_config::ManagedConfigUpdateError::Fetch(_)
@@ -866,12 +557,11 @@ pub async fn apply_managed_config(
                             | ocx_config::managed_config::ManagedConfigPersistError::ExtraCaCertsInvalid { .. }
                     )
             );
+            // Never downgrade `SnapshotWriteFailed`: the new payload may already be live under the old provenance.
             let Some(previous) = adopted.filter(|_| pre_write_failure) else {
                 return Err(error.into());
             };
-            // The error never reaches `main`, so nothing walks its `source()`
-            // chain for us — and the dominant variant (`Fetch`) interpolates
-            // nothing, so its bare `Display` would name no cause at all.
+            // The whole chain: this error never reaches `main`, and `Fetch` alone names no cause.
             let reason = ocx_util::error::render_chain(&error);
             log::warn!(
                 "could not refresh the managed-config snapshot from '{}': {reason}; keeping the existing snapshot \
@@ -885,15 +575,8 @@ pub async fn apply_managed_config(
         }
     };
 
-    // Fence written only after the fetch+persist above succeeded — through
-    // the one `config.toml` edit lock (ocx#468), never across the fetch: the
-    // state machine re-runs on the text as it is now, so a `[shell]` or
-    // extra-CA edit that landed meanwhile is carried, not overwritten. The
-    // dry-run gates above already returned, so this is never a dry run.
+    // Under the edit lock, never across the fetch, so a `[shell]` or extra-CA edit landing meanwhile is kept.
     ocx_config::edit::edit_text(&file_structure.locks, &config_path, false, move |current| {
-        // `rc_block::apply` is infallible today and documents its `Result`
-        // as a signature reservation; a refusal, should one arrive, is the
-        // file's shape and lands as `Malformed` (74) with the file untouched.
         let rewritten = rc_block::apply(current, &body, force, rc_block::MANAGED_LABEL)
             .map_err(|_| "the [managed] fence could not be rewritten")?;
         Ok(rewritten.unwrap_or_else(|| current.to_owned()))
@@ -915,20 +598,8 @@ pub async fn apply_managed_config(
     })
 }
 
-/// Why a refresh of an **already-adopted** managed-config seed is skipped, or
-/// `None` when it must run.
-///
-/// Pure decision, no I/O — the whole matrix is unit-testable without a
-/// registry. Precedence is deliberate: a digest-pinned seed is content-
-/// addressed and cannot drift, so it reports first; a missing client (offline)
-/// outranks a pause because no fetch could happen either way.
-///
-/// The returned string is a diagnostic label, not a user-facing message — each
-/// case reports [`ManagedConfigSetupOutcome::AlreadyAdopted`] and logs at
-/// debug. `OCX_NO_CONFIG_REFRESH` is deliberately absent: that kill switch
-/// gates the background tick only, and `--offline` is the no-network lever for
-/// setup. `--frozen` is absent for a different reason: it scopes to the
-/// package tier, so the managed tier behaves identically with and without it.
+/// Why a refresh of an **already-adopted** managed-config seed is skipped, or `None` if it must run.
+// No `OCX_NO_CONFIG_REFRESH` (it gates only the background tick) and no `--frozen` (package tier only).
 fn refresh_skip_reason(identifier: &ocx_oci::OciIdentifier, can_fetch: bool, paused: bool) -> Option<&'static str> {
     if identifier.digest().is_some() {
         return Some("digest-pinned");
@@ -942,17 +613,11 @@ fn refresh_skip_reason(identifier: &ocx_oci::OciIdentifier, can_fetch: bool, pau
     None
 }
 
-/// Clears the `--managed-config` tier: removes the `[managed]` fence from
-/// `config.toml` (if present) and deletes the snapshot directory entirely —
-/// no ghost tier survives a clear. Warns if `OCX_MANAGED_CONFIG` is still
-/// exported, since the env override would re-activate the tier on the very
-/// next command.
+/// Clears the `--managed-config` tier: the `[managed]` fence and the whole snapshot directory.
 async fn clear_managed_config(
     config_path: &Path,
     file_structure: &FileStructure,
 ) -> Result<ManagedConfigSetupOutcome, error::Error> {
-    // Under the one `config.toml` edit lock (ocx#468); an unchanged strip
-    // writes nothing.
     ocx_config::edit::edit_text(&file_structure.locks, config_path, false, |content| {
         Ok(crate::rc_block::remove_block(content, crate::rc_block::MANAGED_LABEL))
     })
@@ -978,37 +643,21 @@ async fn clear_managed_config(
     Ok(ManagedConfigSetupOutcome::Cleared)
 }
 
-/// Non-fatal advisory printed when the current-user execution policy is
-/// `Restricted` (a `$PROFILE` fence is inert until the user relaxes it). OCX
-/// never auto-changes the policy — that is a user security decision.
+/// Advisory for a `Restricted` execution policy, which leaves a `$PROFILE` fence inert.
 const EXEC_POLICY_ADVISORY: &str =
     "run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` to allow the profile to load";
 
 /// Resolve the profile files this run should target, in write order.
 ///
-/// `Some(overrides)` skips auto-detection entirely — including `Some(&[])`,
-/// which resolves to **no targets at all** (`--no-profile`). Explicit overrides
-/// are treated as POSIX-fence targets (contract 1 edge). `None` auto-detects the
-/// POSIX/dedicated-file set from the real environment and probes the PowerShell
-/// `$PROFILE` via a subprocess.
+/// `Some(overrides)`, including `Some(&[])` (no targets), skips detection; overrides are POSIX fences.
 async fn resolve_targets(ocx_home: &Path, overrides: Option<&[PathBuf]>) -> Vec<ProfileTarget> {
-    // The probe is the one part of resolution that leaves the process, so it
-    // runs here and the composition below stays a pure function of what it
-    // answered. An override list short-circuits before it: a caller that named
-    // its profiles is not asking which shells are installed.
     if overrides.is_some() {
         return compose_targets(ocx_home, overrides, None);
     }
     compose_targets(ocx_home, None, profiles::detect_powershell_profile().await)
 }
 
-/// [`resolve_targets`] with the PowerShell probe's answer already in hand.
-///
-/// Split out so the composition is testable without spawning a PowerShell
-/// host: the unit test drove a real `pwsh` on any machine that has one, which
-/// cost a second of the suite's wall clock and made what it asserted depend on
-/// what was installed. `powershell` is the probe's result, `None` when no host
-/// answered.
+/// [`resolve_targets`] with the PowerShell probe's answer (`None` when no host answered) in hand.
 fn compose_targets(ocx_home: &Path, overrides: Option<&[PathBuf]>, powershell: Option<PathBuf>) -> Vec<ProfileTarget> {
     if let Some(overrides) = overrides {
         return overrides
@@ -1032,15 +681,8 @@ fn compose_targets(ocx_home: &Path, overrides: Option<&[PathBuf]>, powershell: O
 
 /// Apply the activation payload to one profile target.
 ///
-/// Fence targets run the RC-block state machine (with a legacy-migration
-/// detour); dedicated-file targets (fish/nushell) are fully rewritten with a
-/// diff-gate. On `dry_run`, the outcome is computed but nothing is written.
-///
-/// `heal_only` is the `ocx self update` post-swap mode (Decision 4C): it heals
-/// an existing ocx-owned block (FormatUpgraded rewrites, dirty stays skipped)
-/// but never *introduces* one — a profile with no ocx footprint is left alone,
-/// and an absent dedicated file is not created. This makes the update refresh
-/// implicitly respect an original `--no-modify-path` install.
+/// `heal_only` heals an existing ocx-owned block or file but never introduces one, so an
+/// update respects an original `--no-modify-path` install.
 async fn apply_target(
     target: &ProfileTarget,
     force: bool,
@@ -1060,18 +702,7 @@ async fn apply_target(
     }
 }
 
-/// Phase 3 of [`run`]: resolve the profile targets and apply the managed block
-/// to each, in write order.
-///
-/// The two profile opt-outs stay separate here. `--no-modify-path` skips the
-/// phase outright (and, via [`SetupOptions::touches_session_path`], the
-/// session-PATH arm with it); an empty `profiles` list resolves to zero targets
-/// and stops there, leaving every other phase running.
-///
-/// `handoff` is passed straight through as `apply_target`'s `heal_only`: under
-/// a hand-off no profile gains a block it did not already have, while a drifted
-/// block still heals and a dirty one still reports
-/// [`ProfileOutcome::SkippedDirty`] (exit 82, which the parent translates).
+/// Phase 3 of [`run`]: apply the managed block to each profile target, in write order.
 ///
 /// # Errors
 ///
@@ -1094,12 +725,7 @@ async fn apply_profile_phase(
     Ok(profiles)
 }
 
-/// Run the fence state machine against one profile file.
-///
-/// Reads the file (absent → empty), classifies it, and either appends a fresh
-/// fence, upgrades the format, migrates a legacy footprint, skips a dirty block,
-/// or no-ops. Legacy artifacts (`# BEGIN ocx`, `shell init`, extensionless env)
-/// are stripped before the fresh fence is written → [`ProfileOutcome::Migrated`].
+/// Run the fence state machine against one profile file, migrating a legacy footprint first.
 async fn apply_fence(
     path: &Path,
     body: &str,
@@ -1110,23 +736,16 @@ async fn apply_fence(
     let content = read_to_string_or_empty(path).await?;
     let state = rc_block::classify(&content, body, rc_block::OCX_LABEL);
 
-    // A dirty block without --force is left untouched (a non-error outcome; the
-    // CLI maps it to exit 82 by inspecting outcomes, not via an error variant).
     if state == rc_block::BlockState::Dirty && !force {
         return Ok(ProfileOutcome::SkippedDirty);
     }
 
     let has_legacy = rc_block::has_legacy_artifacts(&content);
 
-    // Heal-only (self update post-swap): never INTRODUCE a managed block where
-    // none exists. Only a profile that carries no ocx footprint at all (Fresh
-    // and no legacy artifacts) is skipped — a present-but-drifted block still
-    // heals (FormatUpgraded below), a legacy footprint still migrates.
     if heal_only && state == rc_block::BlockState::Fresh && !has_legacy {
         return Ok(ProfileOutcome::NoOp);
     }
 
-    // Legacy migration: strip the pre-v1 footprint, then append the fresh fence.
     if has_legacy {
         let stripped = rc_block::strip_block(&content);
         if let Some(new_content) = rc_block::apply(&stripped, body, force, rc_block::OCX_LABEL)? {
@@ -1135,8 +754,7 @@ async fn apply_fence(
             }
             return Ok(ProfileOutcome::Migrated);
         }
-        // `strip_block` produced a Fresh file, so `apply` always returns Some;
-        // this arm is unreachable, but reported as a no-op for totality.
+        // Unreachable: `strip_block` leaves a Fresh file, for which `apply` returns `Some`.
         return Ok(ProfileOutcome::NoOp);
     }
 
@@ -1147,32 +765,18 @@ async fn apply_fence(
             }
             Ok(ProfileOutcome::Completed)
         }
-        // `apply` returns None for Current and (already handled) dirty-skip.
         None => Ok(ProfileOutcome::NoOp),
     }
 }
 
-/// Fully rewrite a dedicated-file shell target (fish/nushell), diff-gated.
-///
-/// The file is ocx-owned (no inline fence), so a byte-identical file is a no-op
-/// and any drift is overwritten with the canonical body. This is intentional and
-/// mirrors the `env.*` shims: these paths live in tool-managed auto-load dirs
-/// (`fish/conf.d`, `nushell/vendor/autoload`) that OCX owns outright, exactly as
-/// conda/rustup own their vendor files. The "no clobber without `--force`" bar
-/// applies only to the managed block inside a user's OWN RC files (handled by
-/// `apply_fence`), never to these regenerated files — user customization belongs
-/// in the user's RC, not here. (Cross-model review 2026-06-04 flagged the
-/// asymmetry; resolution: documented intended ownership.)
+/// Fully rewrite an ocx-owned dedicated-file target (fish/nushell) unless already current;
+/// no `--force` bar, unlike the managed block inside a user's own RC file.
 async fn rewrite_dedicated(
     path: &Path,
     body: &str,
     heal_only: bool,
     dry_run: bool,
 ) -> Result<ProfileOutcome, error::Error> {
-    // Heal-only (self update post-swap): a dedicated file is ocx-owned, so an
-    // existing one is refreshed, but an ABSENT one is never created — a setup
-    // that never wrote it (e.g. --no-modify-path, or a different shell) stays
-    // untouched on update.
     if heal_only && !ocx_util::fs::path_exists_lossy(path).await {
         return Ok(ProfileOutcome::NoOp);
     }
@@ -1186,8 +790,7 @@ async fn rewrite_dedicated(
     Ok(ProfileOutcome::Completed)
 }
 
-/// Read a profile file to a `String`, mapping a missing file to an empty string
-/// (a fresh profile is the common case). Any other I/O error propagates.
+/// Read a profile file to a `String`; a missing file reads as empty.
 async fn read_to_string_or_empty(path: &Path) -> Result<String, error::Error> {
     match tokio::fs::read_to_string(path).await {
         Ok(content) => Ok(content),
@@ -1199,15 +802,10 @@ async fn read_to_string_or_empty(path: &Path) -> Result<String, error::Error> {
     }
 }
 
-/// Atomically write `content` to a profile file, creating the parent directory
-/// (`mkdir -p`) if absent. Uses the Windows-retry-aware atomic-publish primitive
-/// off the async executor (it is blocking I/O).
+/// Atomically write `content` to a profile file, creating its parent directory.
 async fn write_profile(path: &Path, content: &str) -> Result<(), error::Error> {
     let path = path.to_path_buf();
     let content = content.to_string();
-    // Clone the path for the join-error arm: the closure moves `path`, but a
-    // join error means the closure never ran, so its captured copy is gone —
-    // the error context must carry the path explicitly, not an empty one.
     let join_path = path.clone();
     tokio::task::spawn_blocking(move || write_profile_blocking(&path, &content))
         .await
@@ -1217,9 +815,7 @@ async fn write_profile(path: &Path, content: &str) -> Result<(), error::Error> {
         })?
 }
 
-/// Blocking body of [`write_profile`]: create the parent dir, then write the
-/// content atomically via [`ocx_util::fs::write_bytes_atomic`] (private
-/// temp file in the parent, published over `path`).
+/// Blocking body of [`write_profile`].
 fn write_profile_blocking(path: &Path, content: &str) -> Result<(), error::Error> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|source| error::Error::Io {
@@ -1250,11 +846,7 @@ fn home_env_from_environment(ocx_home: &Path) -> HomeEnv {
     }
 }
 
-/// Best-effort scan of `$PATH` for an `ocx` executable that appears AHEAD of the
-/// directory the env shim prepends (`$OCX_HOME/symlinks/.../current/content/bin`).
-///
-/// Returns the shadowing path if found, or `None` on any read failure — a `$PATH`
-/// read error never fails setup (contract 1, item 14).
+/// Best-effort scan of `$PATH` for an `ocx` ahead of the shim's bin directory; `None` on any failure.
 async fn conflicting_ocx_on_path(file_structure: &FileStructure) -> Option<PathBuf> {
     let shim_bin_dir = file_structure.ocx_install_bin_path();
 
@@ -1262,7 +854,6 @@ async fn conflicting_ocx_on_path(file_structure: &FileStructure) -> Option<PathB
     let executable = if cfg!(windows) { "ocx.exe" } else { "ocx" };
 
     for dir in std::env::split_paths(&path_var) {
-        // Reaching the shim's own bin dir first means nothing shadows it.
         if dir == shim_bin_dir {
             return None;
         }

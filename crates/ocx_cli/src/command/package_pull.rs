@@ -9,7 +9,7 @@ use crate::{api, conventions, options};
 
 /// Downloads packages into the local object store without creating install symlinks.
 ///
-/// Unlike [`install`](super::install), this command does not create candidate or
+/// Unlike `install`, this command does not create candidate or
 /// current symlinks — it only populates the content-addressed object store.
 /// This is the recommended primitive for CI environments where reproducibility
 /// matters and symlink management is unnecessary.
@@ -33,8 +33,7 @@ pub struct PackagePull {
 impl PackagePull {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let oci_packages = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
-        // Auto-verify is attached on the shared manager (Context::try_init);
-        // refine its opt-out from this command's --verify/--no-verify flag.
+        // Not `context.manager()`, or `--verify`/`--no-verify` is ignored.
         let manager = crate::conventions::manager_with_verify_flag(&context, &self.verify);
         let install_infos = manager
             .pull_all(

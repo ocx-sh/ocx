@@ -9,45 +9,9 @@ use ocx_util::fs::symlink;
 
 use crate::{file_structure::FileStructure, file_structure::cas_ref_name};
 
-/// [`Result`](std::result::Result) over the one failure this tier's file
-/// operations can raise. `From<FileError>` for the crate-wide error yields
-/// exactly `InternalFile(path, cause)`, one conversion later than it was.
 type Result<T> = std::result::Result<T, ocx_util::error::FileError>;
 
-/// Manages forward symlinks and their back-references inside the object store.
-///
-/// Every forward symlink (candidate, current, or user-defined link) is paired
-/// with a back-reference symlink stored in `{object}/refs/`.  The back-ref
-/// points from the object back to the forward symlink, enabling:
-///
-/// - **Safe removal**: an object can be deleted only when its `refs/` dir is empty.
-/// - **Garbage collection**: scanning `refs/` for stale or broken entries
-///   identifies objects that are no longer reachable.
-///
-/// Back-reference names are derived by hashing the canonical forward-symlink
-/// path (16 hex chars of SHA-256).  The symlink's target IS the forward path,
-/// so `readlink refs/<hash>` is the human-readable audit entry.
-///
-/// Concurrent [`link`](Self::link) calls for the same forward path do not
-/// require locking (issue #179):
-///
-/// - The **forward symlink** is written via [`symlink::replace_atomic`]
-///   (stage-and-`rename(2)`), so two installers racing on the same
-///   `candidates/{tag}` slot converge on a valid link instead of one hitting
-///   `EEXIST`. Its staging temp lives beside the forward path (under
-///   `symlinks/…`), never in a GC-scanned directory.
-/// - The **back-reference** is written with an idempotent create: its name is
-///   `SHA-256(forward_path)` and its target IS the forward path, so two
-///   installers of the same package derive an identical `(name, target)` and a
-///   create race resolves to the one link both wanted. It deliberately does
-///   *not* stage a `.tmp-*` symlink under `refs/symlinks/`, where a crash-orphan
-///   would be mis-read as a live install ref by the GC root scan.
-///
-/// When two installers resolve the same tag to *different* digests (a concurrent
-/// tag advance), the forward link converges to one valid root by last-writer-wins
-/// on the mutable tag alias; the loser leaves a stale back-ref that the next
-/// `ocx clean` reconciles. Both roots are validly installed, so no candidate ever
-/// points at absent content.
+/// Forward symlinks paired with back-references in `{object}/refs/`; an object with a back-reference is never collected.
 pub struct ReferenceManager {
     file_structure: FileStructure,
 }
@@ -57,20 +21,13 @@ impl ReferenceManager {
         Self { file_structure }
     }
 
-    /// Derives the reference name for an install symlink's forward path.
-    ///
-    /// The name is the first 16 hex characters of the SHA-256 hash of the
-    /// path bytes — unique and fixed-length regardless of path length.
-    /// Used for install back-refs (`refs/symlinks/`) where the ref's identity
-    /// is the symlink location, not a content digest.
+    /// First 16 hex characters of `SHA-256(forward_path)`: the back-ref name in `refs/symlinks/`.
     pub fn name_for_path(forward_path: &Path) -> String {
         let mut hasher = Sha256::new();
         hasher.update(forward_path.as_os_str().as_encoded_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 
-    /// Returns the back-reference path inside the object that `content_path`
-    /// belongs to, keyed by `forward_path`.
     fn back_ref_path(
         &self,
         content_path: &Path,
@@ -83,12 +40,7 @@ impl ReferenceManager {
             .join(Self::name_for_path(forward_path)))
     }
 
-    /// Creates or updates a forward symlink from `forward_path` to `content_path`,
-    /// maintaining the corresponding back-reference.
-    ///
-    /// If `forward_path` already exists and points to a different object, the old
-    /// back-reference is removed before the new one is created (re-link).  If it
-    /// already points to `content_path`, the call is a no-op.
+    /// Points `forward_path` at `content_path` and maintains its back-reference; lock-free and idempotent.
     pub fn link(
         &self,
         forward_path: &Path,
@@ -110,7 +62,7 @@ impl ReferenceManager {
                     current_target.display(),
                     content_path.display(),
                 );
-                // Remove the old back-ref; tolerate failure (stale ref or GC'd object).
+                // Tolerated: the old object may already be collected.
                 if let Ok(old_ref) = self.back_ref_path(&current_target, forward_path) {
                     log::trace!("Removing old back-ref '{}'.", old_ref.display());
                     let _ = symlink::remove(&old_ref);
@@ -120,33 +72,15 @@ impl ReferenceManager {
             log::debug!("Linking '{}' → '{}'.", forward_path.display(), content_path.display(),);
         }
 
-        // Atomic create-or-replace: stage a temp symlink in the same directory
-        // and `rename(2)` it onto the forward path. Unlike remove-then-create,
-        // a concurrent installer writing the same forward symlink never
-        // observes `EEXIST` — the losing rename simply supersedes (or is
-        // superseded by) the winner, and both point at the same content root
-        // because installs of a given package are idempotent. Fixes the
-        // candidate-symlink TOCTOU under concurrent install (issue #179).
+        // Atomic replace, not remove-then-create, or a concurrent installer of this link hits `EEXIST`.
         symlink::replace_atomic(content_path, forward_path)?;
 
         let ref_path = self.back_ref_path(content_path, forward_path)?;
         if let Some(parent) = ref_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| ocx_util::error::FileError::new(parent, e))?;
         }
-        // Idempotent create — never stage a temp under `refs/symlinks/`. The
-        // back-ref name is `SHA-256(forward_path)` and its target is the forward
-        // path, so two installers of the same package derive an identical
-        // `(name, target)`; a create race resolves to the one link both wanted.
-        // `replace_atomic` here would stage a `.tmp-*` symlink in this
-        // GC-scanned directory that a crash could orphan into a phantom install
-        // root (issue #179), so a plain create-or-tolerate-existing is used.
+        // Never staged via a temp: a crash-orphaned `.tmp-*` under `refs/symlinks/` would be a phantom GC root.
         if symlink::is_link(&ref_path) {
-            // A back-ref already exists. If it already points at `forward_path`
-            // the call is a no-op (the common concurrent-install case). A
-            // stale/corrupt entry pointing elsewhere is healed with
-            // remove-then-create; this is not a concurrent-install race
-            // (identical installers all derive the correct target), so it needs
-            // no staging.
             if std::fs::read_link(&ref_path).ok().as_deref() != Some(forward_path) {
                 log::trace!("Healing stale back-ref '{}'.", ref_path.display());
                 symlink::remove(&ref_path)?;
@@ -155,15 +89,7 @@ impl ReferenceManager {
         } else {
             match symlink::create(forward_path, &ref_path) {
                 Ok(()) => {}
-                // A concurrent installer created — or, on Windows, is mid-way
-                // through the two-step junction create (atomic `mkdir` won, the
-                // reparse-point write still pending) of — the identical back-ref.
-                // The `mkdir` loser gets `AlreadyExists` (Windows error 183)
-                // *before* the winner's reparse data lands, so `is_link` is
-                // transiently false and cannot be the sole guard. Every racer
-                // derives an identical `(name, target)` — name is
-                // `SHA-256(forward_path)`, target is `forward_path` — so a
-                // colliding create is by construction the link we wanted; converge.
+                // `AlreadyExists` is a racer's identical link; `is_link` alone misses a Windows junction whose reparse data is pending.
                 Err(ocx_util::error::FileError { cause: ref io, .. })
                     if io.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(_) if symlink::is_link(&ref_path) => {}
@@ -179,11 +105,7 @@ impl ReferenceManager {
         Ok(())
     }
 
-    /// Removes the forward symlink at `forward_path` and its back-reference.
-    ///
-    /// If `forward_path` does not exist the call is a no-op.  Failure to remove
-    /// a stale back-reference is tolerated — the broken ref will be reported by
-    /// `broken_refs` and can be cleaned up separately.
+    /// Removes `forward_path` and its back-reference; no-op if absent, and a leftover back-ref surfaces in [`Self::broken_refs`].
     pub fn unlink(&self, forward_path: &Path) -> Result<()> {
         if !symlink::is_link(forward_path) {
             log::trace!("unlink '{}': path is not a symlink, skipping.", forward_path.display());
@@ -201,21 +123,7 @@ impl ReferenceManager {
         symlink::remove(forward_path)
     }
 
-    /// Creates a dependency forward-reference in the dependent's `deps/` directory.
-    ///
-    /// The forward-ref allows GC to discover dependencies via filesystem traversal
-    /// (instead of parsing metadata digests), which handles Image Index →
-    /// platform-specific digest resolution correctly. GC determines reachability
-    /// by walking `deps/` edges from root objects (those with install symlink refs
-    /// in `refs/symlinks/`).
-    ///
-    /// The filename is derived from `dependency_digest` via
-    /// `cas_path::cas_ref_name` so the ref is self-describing: a quick look
-    /// at `refs/deps/` tells you exactly which package digests the dependent
-    /// points at.
-    ///
-    /// No back-reference is created in the dependency's `refs/` — that directory
-    /// is reserved for install symlink refs (candidate/current).
+    /// Records a GC edge in the dependent's `refs/deps/`; never a back-ref, or the dependency becomes a GC root.
     pub fn link_dependency(
         &self,
         dependent_content: &Path,
@@ -225,8 +133,6 @@ impl ReferenceManager {
         self.create_forward_dep_ref(dependent_content, dependency_content, dependency_digest)
     }
 
-    /// Creates a forward-dependency symlink in the dependent's `deps/` directory
-    /// pointing to the dependency's content path.
     fn create_forward_dep_ref(
         &self,
         dependent_content: &Path,
@@ -252,7 +158,6 @@ impl ReferenceManager {
                 );
                 return Ok(());
             }
-            // Stale ref — replace it.
             symlink::remove(&dep_path)?;
         }
 
@@ -265,8 +170,6 @@ impl ReferenceManager {
         Ok(())
     }
 
-    /// Removes a dependency forward-reference from the dependent's `deps/` directory.
-    ///
     /// No-op if the forward-ref does not exist.
     pub fn unlink_dependency(&self, dependent_content: &Path, dependency_digest: &ocx_oci::Digest) -> Result<()> {
         if let Ok(deps_dir) = self
@@ -284,16 +187,7 @@ impl ReferenceManager {
         Ok(())
     }
 
-    /// Returns the paths of all broken back-references found in the package store.
-    ///
-    /// A back-reference is broken when:
-    /// - Its target (the forward path) no longer exists, or
-    /// - The forward path no longer points to the expected content (the package
-    ///   was re-linked without going through [`ReferenceManager`]).
-    ///
-    /// Uses `PackageStore::list_all` to enumerate package directories, so only
-    /// `refs/` entries inside known package dirs are inspected.  Package-installed
-    /// files under `content/` are never traversed.
+    /// Sorted back-references whose forward path is gone or no longer points at their package.
     pub async fn broken_refs(&self) -> Result<Vec<PathBuf>> {
         let package_dirs = self.file_structure.packages.list_all().await?;
         if package_dirs.is_empty() {
@@ -332,16 +226,7 @@ impl ReferenceManager {
         Ok(broken)
     }
 
-    /// Idempotently upserts a `refs/blobs/` forward-ref for every entry in
-    /// `chain`. The link name is derived from each entry's digest via
-    /// `cas_ref_name` so concurrent peers producing the same chain produce
-    /// identical symlinks — races resolve to the correct state.
-    ///
-    /// Eventual consistency: this function does not verify that targets
-    /// exist on disk. If a target blob is missing (e.g., a concurrent
-    /// `ocx clean` raced the caller), a dangling symlink is written and
-    /// the next GC pass collects it. Callers don't need to serialize
-    /// against GC — the system converges on its own.
+    /// Idempotently upserts a `refs/blobs/` forward-ref per `chain` entry; a missing target leaves a dangling link GC collects.
     pub async fn link_blobs<'a>(
         &self,
         content_path: &Path,
@@ -393,8 +278,7 @@ async fn check_refs_dir(refs_dir: &Path, expected_content: &Path) -> Result<Vec<
     let mut broken = Vec::new();
 
     while let Ok(Some(entry)) = entries.next_entry().await {
-        // Skip staging temps: a `.tmp-*` symlink is an in-flight or crash-orphaned
-        // stage, never a real back-ref (issue #179).
+        // A `.tmp-*` entry is a crash-orphaned stage, never a back-ref to report.
         if entry.file_name().to_string_lossy().starts_with(".tmp-") {
             continue;
         }
@@ -411,7 +295,6 @@ async fn check_refs_dir(refs_dir: &Path, expected_content: &Path) -> Result<Vec<
             continue;
         };
         if !symlink::is_link(&forward_path) {
-            // Forward symlink no longer exists.
             log::trace!(
                 "Broken back-ref '{}': forward symlink '{}' no longer exists.",
                 back_ref.display(),
@@ -420,7 +303,6 @@ async fn check_refs_dir(refs_dir: &Path, expected_content: &Path) -> Result<Vec<
             broken.push(back_ref);
             continue;
         }
-        // Verify the forward symlink still points to this object's content.
         let Ok(actual) = tokio::fs::read_link(&forward_path).await else {
             log::trace!(
                 "Broken back-ref '{}': could not read target of forward symlink '{}'.",

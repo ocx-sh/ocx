@@ -1,160 +1,40 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The rendered toolchain tree — one grammar, two tiers (C-001, C-002, D-V14).
-//!
-//! A toolchain home is the directory `ocx` renders a composed toolchain into:
+//! The rendered toolchain tree: one grammar ([`ToolchainHome`]), two tiers.
 //!
 //! ```text
 //! {root}/
-//! ├── .gitignore                     "*" — C-004
-//! ├── active -> shells/default/      the PATH-facing indirection — C-078
+//! ├── .gitignore                     "*", ensure-present
+//! ├── active -> shells/default/      the PATH-facing indirection
 //! ├── links/<group>/<entry>/         directory link (junction on Windows) to a package root
 //! └── shells/default/bin/            launcher trampolines, DEFAULT group only
 //! ```
-//!
-//! **One grammar implementation, two owners.** [`ToolchainHome`] is the value
-//! type; it answers every path question about that tree and is the *only*
-//! place the shape is written down. [`ToolchainStore`] is the
-//! `FileStructure`-owned wrapper for the **global** tier
-//! (`$OCX_HOME/toolchain/`) and forwards every accessor to one of these, so
-//! the store and a project home cannot drift into disagreeing about the
-//! layout — a second grammar is the bug class D-V14 removes by construction
-//! rather than by review. Both spellings C-010 derives its lookup-PATH
-//! exclusion from — [`ToolchainStore::bin`] and [`ToolchainHome::bin`] —
-//! therefore resolve to the same rule.
-//!
-//! **The tier split is about ownership, not shape.** C-002's "a project home
-//! is a value, not a store" is a statement about `FileStructure`: the global
-//! home is a field on it and a project home is not, because a project home
-//! depends on which project is in scope. Both are the same tree, and the
-//! project tier's root is resolved per call by
-//! [`resolve_toolchain_home`](crate::project::resolve_toolchain_home) —
-//! project keying is project domain, the grammar is not.
-//!
-//! **Why the grammar lives in `file_structure` and not in `project`.**
-//! `project::consent` already reads [`StateStore`](super::StateStore), so a
-//! `file_structure → project` import would close a `use` cycle on the crate's
-//! most foundational layer — the same shape `activation.rs` sits at the crate
-//! root to avoid (guarded there by `shell_does_not_import_project`).
-//!
-//! **That cycle compiles today, and the qualifier is the point.** Rust module
-//! graphs *may* be cyclic within one crate, so `file_structure` importing
-//! `project` would build — the reason to refuse it is layering, plus the fact
-//! that a `use` cycle does **not** compile across a crate boundary, which
-//! makes it a blocker for the planned `ocx_lib` split
-//! ([ocx-sh/ocx#313](https://github.com/ocx-sh/ocx/issues/313)). The
-//! precedent states it that way for exactly this reason; a reader who learns
-//! "module cycles do not compile" from here would not recognise a genuine
-//! cross-crate cycle when they meet one. Dependencies run one way: `project`
-//! consumes this module, never the reverse.
-//!
-//! # Outside the GC graph
-//!
-//! Like [`ShimBinStore`](super::ShimBinStore), this store is **outside the
-//! three GC tiers** (`blobs/`, `layers/`, `packages/`) — never walked, never
-//! collected by `ocx clean`. Its contents are derived: a stale tree is
-//! re-rendered by the next `ocx pull`, and a superseded one is litter accepted
-//! by design.
-//!
-//! # Carve-out: a toolchain link is NOT a `ReferenceManager` link
-//!
-//! `subsystem-file-structure.md` says "always use [`ReferenceManager`] for
-//! install symlinks, never raw `symlink::update`". **That rule does not reach
-//! the `<group>/<entry>` links in this tree, and applying it here makes the
-//! system worse, not better** — the same shape of carve-out `ProjectRegistry`
-//! already carries for `$OCX_HOME/projects/` (ARCH-4b).
-//!
-//! [`ReferenceManager::link`](crate::reference_manager::ReferenceManager::link)
-//! writes a `refs/symlinks/` **back-reference** into the target package, and a
-//! back-reference is a GC root. It has **no containment check**: the back-ref
-//! path comes from
-//! [`PackageStore::refs_symlinks_dir_for_content`](super::PackageStore::refs_symlinks_dir_for_content),
-//! which canonicalizes the target, strips a trailing `content` component if
-//! there is one, and joins `refs/symlinks` — pure sibling navigation, with
-//! nothing asserting the result is under `$OCX_HOME/packages`. The `projects/`
-//! ledger escapes by geography: its targets are project directories outside
-//! `$OCX_HOME`, so that navigation would write a `refs/symlinks/` **into the
-//! user's own tree**, which is why the carve-out is forced there.
-//!
-//! A toolchain link gets no such accident. Its target is a package **root** —
-//! the same argument shape the shipped `candidates/` and `current` links
-//! already pass — so the navigation resolves to exactly that package's live
-//! `refs/symlinks/` and the link silently pins the package forever, on every
-//! project that ever rendered a tree. C-052 states the invariant positively:
-//! no `refs/symlinks/` back-reference is taken for any toolchain link. Use
-//! [`symlink::update`](ocx_util::fs::symlink::update) directly.
-//!
-//! A future reviewer reaching for `ReferenceManager` here is reading the right
-//! rule against the wrong tree — this paragraph exists so they read it before
-//! the edit rather than after the leak.
 
 use std::path::{Path, PathBuf};
 
 use ocx_util::fs::BoundedReadError;
 
-/// Leaf name of the launcher-trampoline directory — the `bin` in both
-/// [`ToolchainHome::bin`] and [`ToolchainHome::shell_bin`].
-///
-/// A leaf, never a depth-1 component: the physical directory is
-/// `shells/<shell>/bin` and the PATH-facing spelling is `active/bin`, so this
-/// name can no longer collide with a group or a tool name (C-071) and is not
-/// reserved against one.
 const TOOLCHAIN_BIN_DIR: &str = "bin";
 
-/// The VCS-ignore file C-004 keeps present in every rendered home.
-///
-/// One of the tree's own depth-1 names (C-071), beside [`ACTIVE_LINK`],
-/// [`LINKS_DIR`] and [`SHELLS_DIR`] — not a reserved group or tool name:
-/// `<root>/links/.gitignore` and `<root>/.gitignore` are different paths.
 const GITIGNORE_FILE: &str = ".gitignore";
 
-/// The depth-1 link every `PATH` route resolves through — `<root>/active`,
-/// pointing at `shells/<shell>` (C-078).
-///
-/// A symlink on POSIX, a junction on Windows. Its one legal target is derived,
-/// never remembered: see [`expected_active_target`].
 const ACTIVE_LINK: &str = "active";
 
-/// The depth-1 directory holding every group's entry links — `<root>/links`
-/// (C-071, C-072).
-///
-/// Every user-supplied name lives one level below this, which is what retires
-/// the old depth-1 name reservation by construction instead of by validation.
+/// Every user-supplied name lives below this, so no group can collide with a depth-1 name.
 const LINKS_DIR: &str = "links";
 
-/// The depth-1 directory holding the physical per-shell render targets —
-/// `<root>/shells` (C-078).
 const SHELLS_DIR: &str = "shells";
 
-/// The one shell a render writes today.
-///
-/// Not configuration: multi-shell selection is out of scope
-/// ([#363](https://github.com/ocx-sh/ocx/issues/363),
-/// [#189](https://github.com/ocx-sh/ocx/issues/189)), so `shells/` holds
-/// exactly one entry. It is `pub` only because the accessors that take a shell
-/// name need a caller-nameable value for it.
+/// The one shell a render writes; multi-shell selection is ocx-sh/ocx#363.
 pub const DEFAULT_SHELL: &str = "default";
 
-/// The closed set of depth-1 names a rendered home owns (C-071).
-///
-/// The renderer's depth-1 orphan scan compares against **this** set rather
-/// than deriving a name from an accessor: `Path::file_name` on either `bin()`
-/// or `shell_bin()` yields the string `"bin"`, so a keep-set derived that way
-/// would silently keep a legacy `bin/` at the root forever.
+/// The closed set of depth-1 names a home owns; never derive it from an accessor, whose `file_name` is `"bin"`.
 pub const TREE_OWN_DEPTH1_NAMES: [&str; 4] = [GITIGNORE_FILE, ACTIVE_LINK, LINKS_DIR, SHELLS_DIR];
 
-/// `active`'s one legal target, derived from the home root and the shell name
-/// (C-079).
+/// Derived, never remembered: a copied `$OCX_HOME` carries a stale junction and a stamp that agrees with it.
 ///
-/// **Derived, never remembered.** A copied `$OCX_HOME` carries a stale
-/// absolute junction *and* any stamp that agreed with it, so a stamped
-/// comparison passes on precisely the state it exists to catch. POSIX renders
-/// the **relative** `shells/<shell>` — two normal components, no leading `/`,
-/// no `..` — so a moved or copied home still points inside itself by
-/// construction, and containment needs no separate check. Windows renders the
-/// **absolute** `<root>\shells\<shell>`, because a junction accepts only an
-/// absolute local-drive target.
+/// Relative on POSIX so a moved home points into itself; absolute on Windows because a junction requires it.
 fn expected_active_target(root: &Path, shell: &str) -> PathBuf {
     if cfg!(windows) {
         root.join(SHELLS_DIR).join(shell)
@@ -163,20 +43,9 @@ fn expected_active_target(root: &Path, shell: &str) -> PathBuf {
     }
 }
 
-/// Compare a stored link target against a derived one (C-079).
+/// Raw bytes, never `Path`'s `PartialEq`, which ignores the trailing separator `readlink(2)` distinguishes.
 ///
-/// **Byte equality on both arms, never `Path`'s own `PartialEq`**, which drops
-/// trailing separators — `shells/default/` and `shells/default` are one value
-/// to `PathBuf` and two distinct stored targets to `readlink(2)`. C-080 says
-/// raw, so the raw bytes are what is compared, and a differently-spelled
-/// target that happens to resolve to the right directory is repointed rather
-/// than accepted.
-///
-/// `case_insensitive` is a **parameter rather than a `cfg!`** so both arms are
-/// reachable from the one CI leg that runs: a fold that only exists under
-/// `#[cfg(windows)]` is the unreachable-red class RUL-10/C-025 refuses.
-/// `dunce::simplified` runs on both sides unconditionally — it strips a
-/// Windows `\\?\` prefix and is the identity on every other shape.
+/// `case_insensitive` is a parameter, not a `cfg!`, so Linux CI reaches both arms.
 fn targets_match(actual: &Path, expected: &Path, case_insensitive: bool) -> bool {
     let actual = dunce::simplified(actual).as_os_str();
     let expected = dunce::simplified(expected).as_os_str();
@@ -187,27 +56,13 @@ fn targets_match(actual: &Path, expected: &Path, case_insensitive: bool) -> bool
     }
 }
 
-/// The exact bytes C-004 keeps in every rendered home's ignore file: the `*`
-/// pattern, on one newline-terminated line.
-///
-/// A fixed byte string rather than a formatted one, because
-/// [`ToolchainHome::ensure_gitignore`] compares the file against it before
-/// deciding to write: C-047 requires two renders of the same input to leave a
-/// byte-identical tree, so "already correct" has to be a byte equality and not
-/// a looser match.
+/// Compared byte-for-byte before writing, so two renders of one input leave identical trees.
 const GITIGNORE_CONTENT: &[u8] = b"*\n";
 
-/// Which of [`ToolchainHome::entry`]'s two components a
-/// [`ToolchainPathError`] refused.
-///
-/// Typed rather than a `&'static str` role because both spellings reach the
-/// same message and a stringly-typed discriminant is what lets a caller pass
-/// the wrong one silently.
+/// Which of [`ToolchainHome::entry`]'s two components a [`ToolchainPathError`] refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolchainPathComponent {
-    /// The group name — the first component under the home root.
     Group,
-    /// The entry name — the tool's directory inside its group.
     Entry,
 }
 
@@ -220,483 +75,210 @@ impl std::fmt::Display for ToolchainPathComponent {
     }
 }
 
-/// A group or entry name that cannot become a path component of a rendered
-/// toolchain tree (D-V14).
+/// A group or entry name that cannot become a path component of a rendered toolchain tree.
 ///
-/// # Why this validation lives here and not only at `ocx.toml` parse
-///
-/// C-013/C-014 validate group and tool names when `ocx.toml` is parsed, but
-/// that is **one of at least three producers**. A group name also arrives from
-/// `-g` on the command line, and from the group keys of `ocx.lock` — a file a
-/// hostile clone ships and that C-051's heal iterates. A validator on one
-/// producer is not a guard, so the grammar validates its own inputs at the
-/// point they become path components, the same way
-/// `SigningStatePaths::referrers_capability_file`
-/// slugs a registry string so it cannot escape the store root.
-///
-/// The offending name is interpolated with `{:?}`, never raw: these values
-/// come from untrusted files and a raw newline in one forges log lines
-/// (CWE-117).
+/// Validated here, not at a producer: names also arrive from `-g` and a hostile clone's `ocx.lock`.
+/// Interpolated with `{:?}`, never raw, or a newline in an untrusted name forges log lines (CWE-117).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ToolchainPathError {
-    /// The name was empty, which would collapse the component away and make
-    /// `<group>/<entry>` name the group directory itself.
+    /// An empty component would make `<group>/<entry>` name the group directory itself.
     #[error("toolchain {component} name is empty")]
-    Empty {
-        /// Which component was refused.
-        component: ToolchainPathComponent,
-    },
+    Empty { component: ToolchainPathComponent },
 
-    /// The name carries a Unicode control character.
-    ///
-    /// `ocx.lock` is a file a hostile clone ships, and C-065 makes a lock
-    /// entry's name a **component of an emitted `PATH` value**. Every sink
-    /// downstream absorbs a control byte today — the shell emitters quote, the
-    /// CI flavors validate their own keys — but that is four independent
-    /// defences for one input, and one emitter regression turns a name into an
-    /// injection (CWE-117 in a log line, CWE-77 in a `$GITHUB_PATH` entry).
-    /// Refused at the grammar instead, where the untrusted value is first
-    /// turned into a path.
-    ///
-    /// Every Unicode control character, not only C0: `validate_namespace` in
-    /// `package/metadata/integrations.rs` states the same rule for the same
-    /// reason, and C1 (`U+0080`–`U+009F`) is invisible in a terminal too.
+    /// Any Unicode control character, `U+0080`–`U+009F` included: the name reaches emitted `PATH` values (CWE-77) and logs (CWE-117).
     #[error("toolchain {component} name {value:?} contains a control character")]
     ControlCharacter {
-        /// Which component was refused.
         component: ToolchainPathComponent,
-        /// The refused name.
         value: String,
     },
 
-    /// The name carries a path separator, so it would silently widen one
-    /// component into several — the escape D-V14 exists to refuse.
-    ///
-    /// **Both `/` and `\`, on every platform**, never the host's own separator
-    /// only: see [`ToolchainHome::entry`] for why the platform-conditional
-    /// reading is the bug and not the rule.
+    /// `/` or `\`, on every platform, or one component widens into several.
     #[error("toolchain {component} name {value:?} contains a path separator")]
     Separator {
-        /// Which component was refused.
         component: ToolchainPathComponent,
-        /// The refused name.
         value: String,
     },
 
-    /// The name carries a path **prefix** — any `:` — which on Windows makes
-    /// the join discard the home root entirely.
-    ///
-    /// [`PathBuf::push`] documents that pushing a path with a prefix but no
-    /// root *replaces `self`*, so `root.join("C:").join("cmake")` is
-    /// `C:cmake` on Windows with the home root gone, and
-    /// `entry("default", "C:")` collapses the whole path to `C:`. Group keys
-    /// reach [`ToolchainHome::entry`] from `ocx.lock`, which D-V14's premise
-    /// says a hostile clone ships.
-    ///
-    /// Refused on **every** platform, not only Windows, and the shipped
-    /// [`join_under_root`](ocx_util::fs::path::join_under_root) states
-    /// the same rule for the same reason: "Windows drive-letter / UNC /
-    /// verbatim prefixes are rejected on every platform, not just Windows,
-    /// because `Path::is_absolute` only parses those prefixes on Windows."
-    /// A `#[cfg(windows)]` refusal would put its regression test behind a cfg
-    /// the CI leg that actually runs never compiles.
+    /// Any `:`, on every platform: on Windows `PathBuf::push("C:")` discards the home root.
     #[error("toolchain {component} name {value:?} carries a path prefix")]
     PathPrefix {
-        /// Which component was refused.
         component: ToolchainPathComponent,
-        /// The refused name.
         value: String,
     },
 
-    /// The name ends with a `.` or a space, which Windows strips when it
-    /// resolves a path — so `foo.` and `foo ` and `foo` are three lock keys
-    /// naming **one** rendered directory.
-    ///
-    /// A render-identity collision, not a reserved name: C-047 requires two
-    /// renders of the same input to leave a byte-identical tree, and two
-    /// distinct group keys collapsing onto one path make that unachievable
-    /// whatever the names are. Refused on every platform rather than under
-    /// `#[cfg(windows)]`, for the reason [`Self::PathPrefix`] gives — a
-    /// host-conditional refusal is one the CI leg that actually runs can never
-    /// observe.
+    /// A trailing `.` or space, on every platform: Windows strips it, so `foo.` and `foo` name one directory.
     #[error("toolchain {component} name {value:?} ends with a dot or a space")]
     TrailingDotOrSpace {
-        /// Which component was refused.
         component: ToolchainPathComponent,
-        /// The refused name.
         value: String,
     },
 
-    /// The name is `.` or `..`, which navigates rather than names.
+    /// `.` or `..`.
     #[error("toolchain {component} name {value:?} is a relative path component")]
     Relative {
-        /// Which component was refused.
         component: ToolchainPathComponent,
-        /// The refused name.
         value: String,
     },
 }
 
-/// The rendered toolchain tree at one root (C-001).
+/// The rendered toolchain tree at one root; every path question about it is answered here.
 ///
 /// ```text
 /// <root>/
-/// ├── .gitignore                     "*" — C-004, ensure-present, both tiers
-/// ├── active -> shells/default/      the PATH-facing indirection — C-078
+/// ├── .gitignore                     "*", ensure-present, both tiers
+/// ├── active -> shells/default/      the PATH-facing indirection
 /// ├── links/<group>/<entry>/         directory link to a package root
 /// └── shells/default/bin/            launcher trampolines, DEFAULT group only
 /// ```
-///
-/// Every path question about that tree is answered here and nowhere else.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolchainHome {
     root: PathBuf,
 }
 
 impl ToolchainHome {
-    /// A home rooted at `root`.
-    ///
-    /// Pure — touches no filesystem and validates nothing about `root` itself.
-    /// Containment of a configured `toolchain_dir` root is C-017–C-019's
-    /// refusal at the `config.toml` seam, deliberately upstream of this type:
-    /// a home is a grammar, not a policy.
+    /// Pure; `root` containment is enforced upstream, at the `config.toml` seam.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
-    /// The home's root directory.
-    ///
-    /// **Never join a group or entry name onto this.** [`Self::entry`] and
-    /// [`Self::links_group`] validate their components and are the only
-    /// sanctioned routes to a user-supplied name; [`Self::active`],
-    /// [`Self::bin`], [`Self::shell_bin`] and [`Self::gitignore`] are the
-    /// sanctioned routes to the tree's own names. A literal join here is the
-    /// one bypass this type cannot close, so it is signposted instead.
+    /// Never join a group or entry name onto this; only [`Self::entry`] and [`Self::links_group`] validate them.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// The `active` link, `<root>/active` (C-078).
-    ///
-    /// Deliberately **not** covered by the renderer's symlinked-leaf refusal:
-    /// it must *be* a link, so its rule is [`Self::active_is_valid`], not that
-    /// loop's negation.
+    /// Must be a link, so it is exempt from the renderer's symlinked-leaf refusal; see [`Self::active_is_valid`].
     pub fn active(&self) -> PathBuf {
         self.root.join(ACTIVE_LINK)
     }
 
-    /// The **PATH-facing** trampoline directory, `<root>/active/bin` (C-078).
-    ///
-    /// This is the directory the three PATH routes point at, and the one
-    /// C-010's lookup-PATH exclusion is derived from — never a literal join at
-    /// the call site, so the exclusion cannot drift from the tree shape.
-    ///
-    /// It resolves *through* the `active` link, so anything that stats, opens
-    /// or enumerates at or below it sees whatever `active` points at: `lstat`
-    /// does not follow a path's final component but does follow every
-    /// intermediate one. The renderer therefore writes, prunes, fingerprints
-    /// and guards through [`Self::shell_bin`] instead, and the two are equal
-    /// only *through* the link, never by string equality.
+    /// The PATH-facing `<root>/active/bin`; resolves through `active`, so never write, prune or fingerprint through it.
     pub fn bin(&self) -> PathBuf {
         self.active().join(TOOLCHAIN_BIN_DIR)
     }
 
-    /// The **physical** trampoline directory for one shell,
-    /// `<root>/shells/<shell>/bin` (C-078).
+    /// The physical render target, immune to a repointed `active`.
     ///
-    /// Where the renderer writes. Every write, prune, fingerprint and guard
-    /// pass uses this and not [`Self::bin`], so none of them can be redirected
-    /// by a repointed `active`.
-    ///
-    /// `shell` is a tree-owned constant ([`DEFAULT_SHELL`]), never a
-    /// user-supplied name, so it is not validated here — multi-shell selection
-    /// is out of scope, and the day a name arrives from configuration it must
-    /// route through `validate_component` like every other one.
+    /// `shell` is not validated; a shell name from configuration must go through `validate_component` first.
     pub fn shell_bin(&self, shell: &str) -> PathBuf {
         self.root.join(SHELLS_DIR).join(shell).join(TOOLCHAIN_BIN_DIR)
     }
 
-    /// `active`'s one legal target (C-079) — the value the renderer writes
-    /// and [`Self::active_is_valid`] compares against.
-    ///
-    /// Exposed because the heal and the predicate must not derive it twice:
-    /// C-081 writes the link, C-080 validates it, and a second derivation in
-    /// the renderer would be exactly the drift a *derived* target exists to
-    /// rule out.
+    /// `active`'s one legal target; the heal and [`Self::active_is_valid`] both use this, never a second derivation.
     pub fn expected_active_target(&self, shell: &str) -> PathBuf {
         expected_active_target(&self.root, shell)
     }
 
-    /// Whether `<root>/active` is a link at exactly its derived target
-    /// (C-080).
+    /// Whether `<root>/active` is a link at exactly its derived target; read-only, shared by render heal and prompt gate.
     ///
-    /// The **one** validity predicate, shared by the render path's heal and
-    /// the prompt path's gate so the two cannot answer differently. Read-only:
-    /// a prompt must never write, so a `false` here is a withhold at the
-    /// prompt and a heal at the render.
-    ///
-    /// [`ocx_util::fs::symlink::is_link`], never `Path::is_symlink`, because Windows
-    /// writes a junction and `is_symlink` reports `false` for one. Raw
-    /// `read_link`, never a canonicalising probe, because
-    /// `shells/../shells/default` is contained and resolves correctly and is
-    /// still not the value this tree writes. A `read_link` that errors is
-    /// **invalid**, never "unchanged": on Windows `is_link` is true for any
-    /// reparse point, including ones `read_link` cannot read.
-    ///
-    /// `active/bin` goes on `PATH`, so a link that escapes the home is an
-    /// arbitrary-directory-on-PATH primitive (CWE-426). That is closed here,
-    /// by equality with a derived value, rather than by a containment test
-    /// bolted on afterwards.
+    /// Equality, not containment: an escaping `active` puts an arbitrary directory on `PATH` (CWE-426).
     pub fn active_is_valid(&self, shell: &str) -> bool {
         let active = self.active();
+        // `is_link`, never `is_symlink`, which is false for a Windows junction.
         if !ocx_util::fs::symlink::is_link(&active) {
             return false;
         }
+        // Raw `read_link`, never canonicalised: `shells/../shells/default` resolves right but is not what this tree writes.
+        // An error is invalid, not unchanged: on Windows `is_link` is true for reparse points `read_link` cannot read.
         match std::fs::read_link(&active) {
             Ok(target) => targets_match(&target, &expected_active_target(&self.root, shell), cfg!(windows)),
             Err(_) => false,
         }
     }
 
-    /// The VCS-ignore file, `<root>/.gitignore` (C-004).
-    ///
-    /// The path only; [`Self::ensure_gitignore`] is what writes it.
     pub fn gitignore(&self) -> PathBuf {
         self.root.join(GITIGNORE_FILE)
     }
 
-    /// Write [`Self::gitignore`] if it is absent or its content differs;
-    /// return whether this call wrote (C-004).
+    /// Writes the ignore file unless it already matches; returns whether it wrote. Blocking.
     ///
-    /// **Ensure-present, not write-once.** Write-once means one `git clean`
-    /// permanently unhides the tree. Content-compare-then-write rather than
-    /// unconditional write is the other half: C-047 requires two renders of
-    /// the same input to leave a byte-identical tree, so an already-matching
-    /// file must be left exactly as it is — not rewritten with fresh
-    /// timestamps.
-    ///
-    /// The write goes through
-    /// [`write_bytes_atomic`](ocx_util::fs::write_bytes_atomic), never
-    /// `fs::write`, and that is load-bearing rather than stylistic: a hostile
-    /// clone can ship `.ocx/toolchain/.gitignore` as a symlink to
-    /// `~/.bashrc`, which `fs::write` follows and truncates, and which
-    /// temp-in-parent-then-rename replaces instead. The parent directory must
-    /// exist first — that helper stages its temp file in the target's parent
-    /// and explicitly does not create it.
-    ///
-    /// # The path is type-checked before it is opened, and the read is bounded
-    ///
-    /// This path is inside a tree a hostile clone controls, and `fs::read`
-    /// both follows a symlink and reads without a ceiling. Those are two
-    /// independent halves and each takes its own guard — neither one closes
-    /// the other.
-    ///
-    /// The stat with [`std::fs::symlink_metadata`] closes the **type** half.
-    /// Three consequences of reading a non-regular file:
-    ///
-    /// - a link to `/dev/zero` makes `ocx pull` allocate until it dies;
-    /// - a FIFO makes `ocx pull` **hang forever** — the same hazard D-V15
-    ///   rules out for its sibling predicate;
-    /// - a link whose target *already* holds `*\n` short-circuits the compare
-    ///   and survives every render, so "the ignore path is a regular file" is
-    ///   never established and the ignore capability stays revocable by
-    ///   repointing the link later.
-    ///
-    /// Anything that is not a regular file therefore takes the write branch,
-    /// which replaces it.
-    ///
-    /// [`read_bounded`](ocx_util::fs::read_bounded) closes the **size**
-    /// half, which no type check can reach: a plain regular file of arbitrary
-    /// size passes every stat there is, and a multi-gigabyte run of zeros
-    /// costs a hostile clone almost nothing in a packfile (CWE-400). The cap
-    /// is `GITIGNORE_CONTENT.len()` and is exactly tight — anything longer
-    /// differs from the canonical content by definition, so over-cap is the
-    /// write branch and never an error. That tightness is also why no
-    /// behavioural test can see the bound: bounded and unbounded agree on
-    /// every input, and differ only in what the process held while deciding.
-    ///
-    /// The helper closes one more thing the stat opened by existing:
-    /// `symlink_metadata(path)` then `fs::read(path)` is two observations of
-    /// one *name*, so a concurrent local writer can swap a symlink in between
-    /// them. `read_bounded` opens first and stats the **handle**, so what it
-    /// measured is what it read.
-    ///
-    /// Blocking: one stat, one read and one atomic write. Async callers wrap
-    /// it in `spawn_blocking`.
+    /// Ensure-present, not write-once, or one `git clean` unhides the tree for good.
     ///
     /// # Errors
     ///
-    /// The stat's, the read's or the write's own I/O failure, with the path
-    /// attached. An absent file is not an error — it is the case that writes.
+    /// The stat, read or write fails; an absent file is not an error.
     pub fn ensure_gitignore(&self) -> Result<bool, ocx_util::error::FileError> {
         let path = self.gitignore();
+        // Type-checked before opening: a hostile clone's link to `/dev/zero` exhausts memory and a FIFO hangs forever.
+        // A link whose target already holds `*\n` must still be replaced, or repointing it revokes the ignore.
         match std::fs::symlink_metadata(&path) {
-            // A regular file is the only thing worth opening — see the
-            // type-check section above for the three things opening anything
-            // else costs.
             Ok(metadata) if metadata.is_file() => {
+                // `read_bounded`, never `fs::read`: a multi-gigabyte file of zeros is nearly free in a packfile (CWE-400).
                 match ocx_util::fs::read_bounded(&path, GITIGNORE_CONTENT.len() as u64) {
-                    // Already the pattern: leave the file exactly as it is.
-                    // Rewriting identical bytes is what C-047's
-                    // byte-identical-across-two-renders half forbids.
                     Ok(current) if current == GITIGNORE_CONTENT => return Ok(false),
                     Ok(_) => {}
-                    // Longer than the canonical content, therefore different
-                    // from it: the write branch, decided without the bytes
-                    // ever being held.
                     Err(BoundedReadError::TooLarge { .. }) => {}
-                    // Swapped for a link, a FIFO or a device between the stat
-                    // and the open. The race's answer is the stat's answer:
-                    // replace it.
                     Err(BoundedReadError::NotRegularFile { .. }) => {}
-                    // Vanished between the stat and the open: the absent
-                    // case, which writes.
                     Err(BoundedReadError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
                     Err(BoundedReadError::Io { source, .. }) => {
                         return Err(ocx_util::error::FileError::new(&path, source));
                     }
                 }
             }
-            // A symlink, a FIFO, a socket, a device: never read, always
-            // replaced.
             Ok(_) => {}
-            // An absent file is the case that writes, not a failure.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(ocx_util::error::FileError::new(&path, e)),
         }
 
-        // `write_bytes_atomic` stages its temp file in the target's parent and
-        // explicitly does not create it, so the home root has to exist first.
         std::fs::create_dir_all(&self.root).map_err(|e| ocx_util::error::FileError::new(&self.root, e))?;
+        // Never `fs::write`, which follows a hostile `.gitignore` symlink to `~/.bashrc` and truncates it.
         ocx_util::fs::write_bytes_atomic(&path, GITIGNORE_CONTENT)
             .map_err(|e| ocx_util::error::FileError::new(&path, e))?;
         Ok(true)
     }
 
-    /// The directory link for `entry` in `group`,
-    /// `<root>/links/<group>/<entry>` (C-072).
-    ///
-    /// One tree-owned literal plus two validated components, three joins,
-    /// never one `join(format!(…))` — a single formatted join would embed a
-    /// literal separator and mix separators on Windows.
-    ///
-    /// Fallible because it validates its own inputs (D-V14): a component is
-    /// refused when it is empty, carries a control character, carries a path
-    /// separator, carries a path prefix (`:`), is `.` or `..`, or ends with a
-    /// `.` or a space. **No name is refused for colliding with the tree's
-    /// own** — every component here lands at depth 2 or below, one level under
-    /// the closed depth-1 set, so `[group.links]` renders at
-    /// `links/links/<entry>` and collides with nothing (C-071, C-073). See
-    /// [`ToolchainPathError`] for why the parse-time validator is not
-    /// sufficient on its own, and for why the prefix and trailing-dot refusals
-    /// are unconditional rather than `#[cfg(windows)]`.
-    ///
-    /// **Both `/` and `\` are refused on every platform**, regardless of the
-    /// host's own separator. The check is on the *characters*, not on
-    /// `Path::components()`, precisely because `components()` only knows the
-    /// separators of the platform it is compiled for: a name containing `\`
-    /// is one component on Unix and two on Windows, so a platform-conditional
-    /// refusal would render `ocx.lock`'s `a\b` as a directory literally named
-    /// `a\b` on Linux while refusing it on Windows, and would put its
-    /// regression test behind a `#[cfg(windows)]` that the CI leg which
-    /// actually runs never compiles.
-    ///
-    /// The rendered link is written with
-    /// [`symlink::update`](ocx_util::fs::symlink::update), never through
-    /// [`ReferenceManager`](crate::reference_manager::ReferenceManager) — see
-    /// this module's carve-out section for the mechanism and for why the
-    /// obvious "use the shipped helper" edit leaks a GC root.
+    /// `<root>/links/<group>/<entry>`; write it with `symlink::update`, never `ReferenceManager`, whose back-ref pins a GC root forever.
     ///
     /// # Errors
     ///
-    /// [`ToolchainPathError`] naming the component and the refused value.
+    /// [`ToolchainPathError`] for a refused component.
     pub fn entry(&self, group: &str, entry: &str) -> Result<PathBuf, ToolchainPathError> {
         let group_dir = self.links_group(group)?;
         validate_component(ToolchainPathComponent::Entry, entry)?;
-        // Built on `links_group` rather than beside it: the two would agree
-        // until someone changed one literal, and nothing but this construction
-        // makes `entry(g, e).parent() == links_group(g)` true by definition.
         Ok(group_dir.join(entry))
     }
 
-    /// The directory holding one group's entry links, `<root>/links/<group>`
-    /// (C-072).
-    ///
-    /// The sanctioned route for every call site that needs the group
-    /// directory itself rather than an entry inside it — the renderer's
-    /// group-orphan scan and its default-group observation both joined the
-    /// group name onto the root before this existed, which is exactly the
-    /// bypass [`Self::root`] signposts.
+    /// `<root>/links/<group>`.
     ///
     /// # Errors
     ///
-    /// [`ToolchainPathError`] naming the refused group — the same refusals,
-    /// in the same order, that [`Self::entry`] applies to its group
-    /// component, because both call `validate_component`.
+    /// [`ToolchainPathError`] for a refused group.
     pub fn links_group(&self, group: &str) -> Result<PathBuf, ToolchainPathError> {
         validate_component(ToolchainPathComponent::Group, group)?;
         Ok(self.root.join(LINKS_DIR).join(group))
     }
 }
 
-/// Refuse `value` as a path component of a rendered toolchain tree (D-V14).
-///
-/// Shared by both of [`ToolchainHome::entry`]'s components so the two cannot
-/// drift into different refusal sets — the same "one grammar" argument that
-/// makes [`ToolchainStore`] a wrapper rather than a second implementation.
 fn validate_component(component: ToolchainPathComponent, value: &str) -> Result<(), ToolchainPathError> {
     if value.is_empty() {
         return Err(ToolchainPathError::Empty { component });
     }
-    // Before every other refusal, so a name carrying both a control byte and a
-    // separator is reported as the more dangerous of the two — and so no
-    // refusal below ever interpolates a raw control byte into its own message.
+    // First, so no later refusal interpolates a raw control byte into its message.
     if value.chars().any(char::is_control) {
         return Err(ToolchainPathError::ControlCharacter {
             component,
             value: value.to_string(),
         });
     }
-    // On the characters, never on `Path::components()`: that only knows the
-    // separators of the platform it was compiled for, so a `cfg`-conditional
-    // refusal would render `ocx.lock`'s `a\b` as a directory literally named
-    // `a\b` on Linux while refusing it on Windows.
+    // On characters, never `Path::components()`, which knows only the host's separators.
     if value.contains('/') || value.contains('\\') {
         return Err(ToolchainPathError::Separator {
             component,
             value: value.to_string(),
         });
     }
-    // A path *prefix*, not a separator: `PathBuf::push` documents that a path
-    // with a prefix but no root replaces `self` entirely, so on Windows
-    // `root.join("C:").join("cmake")` is `C:cmake` with the home root
-    // discarded, and `entry("default", "C:")` collapses the whole path to
-    // `C:`. Refused on every platform for the reason `join_under_root` gives:
-    // `Path::is_absolute` only parses those prefixes on Windows, so a
-    // `cfg`-conditional refusal would leave the Linux CI leg unable to observe
-    // it at all.
     if value.contains(':') {
         return Err(ToolchainPathError::PathPrefix {
             component,
             value: value.to_string(),
         });
     }
-    // Before the trailing-dot refusal below, so `.` and `..` keep naming
-    // themselves as relative components rather than as trailing dots.
+    // Before the trailing-dot check, so `.` and `..` report as relative.
     if value == "." || value == ".." {
         return Err(ToolchainPathError::Relative {
             component,
             value: value.to_string(),
         });
     }
-    // Windows strips trailing dots and spaces when it resolves a path, so
-    // `foo.`, `foo ` and `foo` all resolve to ONE directory — three distinct
-    // lock keys rendering onto one path, which C-047's byte-identical-across-
-    // two-renders contract cannot survive. The refusal is about render
-    // identity, not about any reserved name: nothing at depth 1 is reachable
-    // from here any more (C-071), and this rule outlives the reservation that
-    // used to be its neighbour. Meaningless on every platform anyway, so it is
-    // refused everywhere rather than under a `cfg` the CI leg never compiles.
     if value.ends_with('.') || value.ends_with(' ') {
         return Err(ToolchainPathError::TrailingDotOrSpace {
             component,
@@ -706,84 +288,57 @@ fn validate_component(component: ToolchainPathComponent, value: &str) -> Result<
     Ok(())
 }
 
-/// The global toolchain home as a `FileStructure`-owned store.
-///
-/// A thin wrapper over one [`ToolchainHome`]; see the module docs for why it
-/// is a wrapper and not a second implementation of the grammar.
+/// The global toolchain home: a thin wrapper over [`ToolchainHome`], never a second grammar.
 #[derive(Debug, Clone)]
 pub struct ToolchainStore {
     home: ToolchainHome,
 }
 
 impl ToolchainStore {
-    /// A store rooted at `root` (`$OCX_HOME/toolchain`).
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             home: ToolchainHome::new(root),
         }
     }
 
-    /// The underlying home — the value type a renderer or composer passes
-    /// around, so global and project tiers share one code path.
     pub fn home(&self) -> &ToolchainHome {
         &self.home
     }
 
-    /// The store root, `$OCX_HOME/toolchain`.
-    ///
-    /// **Never join a group or entry name onto this** — see
-    /// [`ToolchainHome::root`].
+    /// Never join a group or entry name onto this; see [`ToolchainHome::root`].
     pub fn root(&self) -> &Path {
         self.home.root()
     }
 
-    /// The **PATH-facing** trampoline directory, `{root}/active/bin` (C-078).
     pub fn bin(&self) -> PathBuf {
         self.home.bin()
     }
 
-    /// The **physical** trampoline directory the renderer writes,
-    /// `{root}/shells/<shell>/bin` (C-078).
     pub fn shell_bin(&self, shell: &str) -> PathBuf {
         self.home.shell_bin(shell)
     }
 
-    /// The VCS-ignore file, `{root}/.gitignore` (C-004).
     pub fn gitignore(&self) -> PathBuf {
         self.home.gitignore()
     }
 
-    /// Ensure `{root}/.gitignore` is present and current (C-004); `Ok(true)`
-    /// when this call wrote it.
-    ///
-    /// Blocking: forwards to a synchronous stat + read + atomic write. Async
-    /// callers wrap it in `spawn_blocking`.
-    ///
     /// # Errors
     ///
-    /// See [`ToolchainHome::ensure_gitignore`], which owns the write.
+    /// See [`ToolchainHome::ensure_gitignore`].
     pub fn ensure_gitignore(&self) -> Result<bool, ocx_util::error::FileError> {
         self.home.ensure_gitignore()
     }
 
-    /// The directory link for `entry` in `group`,
-    /// `{root}/links/<group>/<entry>` (C-072).
-    ///
     /// # Errors
     ///
-    /// [`ToolchainPathError`] — see [`ToolchainHome::entry`], which owns the
-    /// validation.
+    /// See [`ToolchainHome::entry`].
     pub fn entry(&self, group: &str, entry: &str) -> Result<PathBuf, ToolchainPathError> {
         self.home.entry(group, entry)
     }
 
-    /// The directory holding one group's entry links, `{root}/links/<group>`
-    /// (C-072).
-    ///
     /// # Errors
     ///
-    /// [`ToolchainPathError`] — see [`ToolchainHome::links_group`], which owns
-    /// the validation.
+    /// See [`ToolchainHome::links_group`].
     pub fn links_group(&self, group: &str) -> Result<PathBuf, ToolchainPathError> {
         self.home.links_group(group)
     }

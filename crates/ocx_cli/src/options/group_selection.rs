@@ -1,20 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-/// The repeatable `-g` / `--group` scope selector.
-///
-/// Flatten into a command with `#[clap(flatten)]` to add the flag, then read
-/// the selection through [`GroupSelection::names`].
-///
-/// **Project-toolchain tier only.** Groups are declared in `ocx.toml`, so an
-/// OCI-tier command has nothing to select and must not flatten this struct —
-/// the flag would parse and silently do nothing.
-///
-/// Validation is deliberately not a method here, because the two checks belong
-/// to different phases of a command: `project_context::ensure_group_segments_nonempty`
-/// rejects empty comma segments before any filesystem or network work, and
-/// `project_context::ensure_groups_known` rejects unknown names once the config
-/// is loaded.
+/// The repeatable `-g` / `--group` scope selector, read through
+/// [`GroupSelection::names`].
+// Project-tier commands only: groups live in `ocx.toml`, so on an OCI-tier command the flag silently does nothing.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct GroupSelection {
     /// Restrict the composition to the named group(s).
@@ -32,10 +21,7 @@ pub struct GroupSelection {
 }
 
 impl GroupSelection {
-    /// The requested group names, in `-g` order, exactly as typed.
-    ///
-    /// Reserved names (`default`, `all`) are not expanded here — expansion is
-    /// `expand_all_keyword`'s job and needs the loaded config.
+    /// The requested group names in `-g` order, unexpanded (`expand_all_keyword` expands `default`/`all`).
     pub fn names(&self) -> &[String] {
         &self.groups
     }

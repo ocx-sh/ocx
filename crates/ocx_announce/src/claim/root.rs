@@ -1,27 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The claim root renderer (C-047).
+//! The claim root renderer.
 //!
-//! Nine fields, in this order: `name`, `repository`, `owners`, `status`,
-//! `deprecated_message`, `created`, `desc`, `upstream` (omitted entirely when
-//! absent, never `null`), `tags`.
-//!
-//! Three traps, each of which ships a wrong root if missed:
-//!
-//! - An owner object is **`login` and `id` only**. The four-key form the
-//!   vendored golden roots carry is indexbot's output; a builder copying them
-//!   validates against the live schema and then diverges from every byte
-//!   assertion here.
-//! - `upstream`'s **inner** optionals omit rather than emit `null`, while
-//!   `deprecated_message` and `desc` **are** `null`. A `skip_serializing_if`
-//!   applied uniformly to every `Option` drops the wrong two.
-//! - `serialize_root` takes an order-preserving [`serde_json::Value`] and
-//!   `preserve_order` is on crate-wide, so insertion order *is* emission order —
-//!   but **`IndexMap::eq` is order-independent**, so comparing two parsed
-//!   `Value`s passes with the fields in any order. Byte-level assertion is the
-//!   only order check there is; a later "simplification" to
-//!   `assert_eq!(Value, Value)` is a regression, not a cleanup.
+//! `IndexMap::eq` ignores order, so only a byte-level assertion checks the field order; never reduce
+//! one to `assert_eq!(Value, Value)`.
 
 use serde_json::{Map, Value};
 
@@ -29,26 +12,15 @@ use super::error::ClaimError;
 use super::owners::ResolvedOwner;
 use super::request::Upstream;
 
-/// The root's `name`: `<registry>/<namespace>/<package>`, with no tag and no
-/// digest (C-047).
+/// The root's `name`: `<registry>/<namespace>/<package>`, with no tag and no digest.
 ///
-/// The registry comes from the identifier the caller was handed — the
-/// `OCX_DEFAULT_REGISTRY` resolution lives at the CLI boundary, so a library-side
-/// read of that variable would measure nothing. `PackageRef`'s own `Display`
-/// appends `:tag` and `@digest`, which is why this is not `format!("{package}")`.
+/// Not `format!("{package}")`: `PackageRef`'s `Display` appends `:tag` and `@digest`.
 #[must_use]
 pub fn root_name(package: &ocx_oci::PackageRef) -> String {
     format!("{}/{}", package.registry(), package.repository())
 }
 
-/// Validate `--repository` as an `oci://host/path` pointer, returning it
-/// verbatim (C-047).
-///
-/// The parse is `ocx_oci::OciIdentifier::parse_repository_pointer`'s, which demands an exact
-/// `OciIdentifier` round-trip — so every accepted value reconstructs byte-identically
-/// and the "verbatim" half has no reachable red. The refusal is the half that
-/// does, and it is [`ClaimError::MalformedRepository`] at **exit 64**, never the
-/// index error's own 65.
+/// Validate `--repository` as an `oci://host/path` pointer, returning it verbatim.
 ///
 /// # Errors
 ///
@@ -56,10 +28,7 @@ pub fn root_name(package: &ocx_oci::PackageRef) -> String {
 /// slash, an empty host or path, or a smuggled tag, digest, uppercase segment or
 /// stray colon.
 pub fn parse_repository(value: &str) -> Result<String, ClaimError> {
-    // The parse error is deliberately dropped rather than carried as a
-    // `#[source]`: it classifies to `DataError` (65), and a malformed *flag
-    // value* is operator input, which is `EX_USAGE` (64). The refused value is
-    // named back instead, which is what an operator acts on.
+    // Dropped rather than carried as a `#[source]`: the parse error classifies to 65, a malformed flag is 64.
     ocx_oci::OciIdentifier::parse_repository_pointer(value)
         .map(|_| value.to_string())
         .map_err(|_| ClaimError::MalformedRepository {
@@ -67,37 +36,12 @@ pub fn parse_repository(value: &str) -> Result<String, ClaimError> {
         })
 }
 
-/// The claim root as a [`Value`], in C-047's fixed nine-field order (D-4).
+/// The claim root as a [`Value`] in the fixed field order; the caller rewrites `desc` afterwards.
 ///
-/// A [`Value`] rather than bytes because a claim rewrites `desc` from the
-/// registry observation *after* the root is assembled and before it is
-/// serialized: parsing rendered bytes back would need its own failure mode for
-/// a document this function just produced, and a second `Map`-building site is
-/// exactly the field-order divergence the module doc warns about. The caller
-/// hands the result to `ocx_index::serialize_root`; there is no second
-/// serializer. That is observable, and it is what carries `ensure_ascii`: a
-/// non-ASCII scalar anywhere in the root emits as `\uXXXX`, and the document ends
-/// in exactly one `\n`.
-///
-/// `created` is read from `ocx_index::current_date()` — a **date**, not a
-/// timestamp — so both renderings derive from one instant and one seam.
-///
-/// **`carried` is the committed root, not a set of overrides.** D-3's field
-/// table, in the order the fields are emitted:
-///
-/// | Field | Rule |
-/// |---|---|
-/// | `name`, `repository` | Always the arguments — the caller has already refused a committed root that disagrees. |
-/// | `owners` | Always the argument; the committed-first union is computed by the caller, which is where the resolved ids are. |
-/// | `status`, `deprecated_message`, `created` | Carried verbatim when present. `created` never resets — a re-claim is not a new claim. |
-/// | `desc` | Carried verbatim; the caller overwrites it when `observe_desc` reports the description moved. |
-/// | `upstream` | `--upstream-org` **replaces**; absent **carries**. A carried `null` is dropped rather than re-emitted, since the omit-never-null rule is this renderer's. |
-/// | `tags` | Carried verbatim. Claim never writes tags. |
-///
-/// Building a fresh map rather than mutating the parsed committed root is the
-/// whole point of the parameter: `preserve_order` keeps an inserted key where
-/// it already sat, so a newly supplied `upstream` would land *after* `tags` on
-/// a committed root that carried none (CONTRACTS §14).
+/// `name`, `repository` and `owners` always come from the arguments, never `carried`: the caller must
+/// refuse a disagreeing committed `name`/`repository` and pass the committed-first owner union, or a
+/// re-claim silently repoints the package or drops owners. A given `upstream` replaces the carried one;
+/// every other field carries verbatim, minus a committed `null` `upstream`.
 #[must_use]
 pub(crate) fn build_root(
     name: &str,
@@ -107,9 +51,8 @@ pub(crate) fn build_root(
     carried: Option<&Value>,
 ) -> Value {
     let carried_field = |key: &str| carried.and_then(|root| root.get(key)).cloned();
-    // `serde_json`'s `preserve_order` feature is on crate-wide, so `Map` is an
-    // `IndexMap` and insertion order below *is* emission order. Fields are
-    // inserted in C-047's order; nothing here may be reordered for tidiness.
+    // Insertion order is emission order (`preserve_order`); reordering changes the committed bytes.
+    // A fresh map, never the mutated committed root, or a new `upstream` lands after `tags`.
     let mut root = Map::new();
     root.insert("name".to_string(), Value::from(name));
     root.insert("repository".to_string(), Value::from(repository));
@@ -119,8 +62,7 @@ pub(crate) fn build_root(
             owners
                 .iter()
                 .map(|owner| {
-                    // `login` and `id` only — the four-key form in the vendored
-                    // golden roots is indexbot's output, not ocx's.
+                    // `login` and `id` only: copying indexbot's four-key golden form fails every byte assertion.
                     let mut object = Map::new();
                     object.insert("login".to_string(), Value::from(owner.login.as_str()));
                     object.insert("id".to_string(), Value::from(owner.id));
@@ -143,10 +85,7 @@ pub(crate) fn build_root(
     );
     root.insert("desc".to_string(), carried_field("desc").unwrap_or(Value::Null));
     if let Some(upstream) = upstream {
-        // The OUTER object is omitted when absent; the INNER optionals are
-        // omitted when absent too — the live root schema sets
-        // `additionalProperties: false` and takes no placeholder null, while
-        // `deprecated_message` and `desc` above deliberately do emit one.
+        // Omitted when absent: the root schema refuses a `null` here, unlike `deprecated_message`/`desc`.
         let mut object = Map::new();
         object.insert("org".to_string(), Value::from(upstream.org.as_str()));
         if let Some(url) = &upstream.repository_url {
@@ -157,9 +96,7 @@ pub(crate) fn build_root(
         }
         root.insert("upstream".to_string(), Value::Object(object));
     } else if let Some(carried_upstream) = carried_field("upstream").filter(|value| !value.is_null()) {
-        // Absent flag carries the committed object — but never a committed
-        // `null`, which this renderer would not have written and which the
-        // live schema refuses.
+        // Never carry a committed `null`: the root schema refuses it.
         root.insert("upstream".to_string(), carried_upstream);
     }
     root.insert(

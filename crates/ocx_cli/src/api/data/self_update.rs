@@ -7,13 +7,8 @@ use serde::Serialize;
 
 use crate::api::Printable;
 
-// ── StatusKind ────────────────────────────────────────────────────────────────
-
-/// Typed status discriminant shared by [`UpdateCheckData`] and [`SelfUpdateData`].
-///
-/// Prevents typos at compile time (a stringly-typed `&'static str` would accept
-/// `"up_to-date"` silently). Serde serializes each variant to its `snake_case`
-/// name, matching the JSON wire format pinned by the snapshot tests.
+// The `snake_case` names are wire format, pinned by the snapshot tests.
+/// Outcome of an update check or a self-update, as a `snake_case` slug.
 #[derive(Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum StatusKind {
@@ -28,7 +23,7 @@ enum StatusKind {
 
 impl std::fmt::Display for StatusKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Mirror the serde snake_case output for use in plain-text table cells.
+        // Must match the serde `snake_case` names.
         match self {
             Self::UpToDate => f.write_str("up_to_date"),
             Self::Skipped => f.write_str("skipped"),
@@ -39,19 +34,12 @@ impl std::fmt::Display for StatusKind {
     }
 }
 
-// ── UpdateCheckResult wrapper ─────────────────────────────────────────────────
-
-/// CLI wrapper around [`UpdateCheckResult`] for API reporting.
+/// Result of an update check, discriminated by `status`.
 ///
-/// JSON format (discriminated by `status`):
 /// - `{"status": "up_to_date"}` — no payload
 /// - `{"status": "update_available", "identifier": "<id>"}` — newer version
 ///   available at `identifier`
 /// - `{"status": "skipped", "skipped_reason": {"reason": "<variant>"[, "detail": "…"]}}`
-///   — structured `SkippedReason` discriminator, programmatic without string parsing
-///
-/// Plain format: key/value table; rows with no payload (e.g. `identifier` when
-/// status = `up_to_date`) are suppressed.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct UpdateCheckData {
     status: StatusKind,
@@ -59,9 +47,8 @@ pub struct UpdateCheckData {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     identifier: Option<String>,
-    /// Why the check was skipped; present iff status = `skipped`. Carries the
-    /// structured [`SkippedReason`] enum so scripts can dispatch on `reason`
-    /// without string parsing.
+    /// Why the check was skipped; present iff status = `skipped`. Scripts
+    /// dispatch on its `reason` slug without string parsing.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     skipped_reason: Option<SkippedReason>,
@@ -91,8 +78,7 @@ impl UpdateCheckData {
 
 impl Printable for UpdateCheckData {
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
-        // Key/value layout: rows[0] = field names, rows[1] = values. Conditional
-        // rows keep the output narrow — only fields with payload appear.
+        // Only fields with a payload get a row.
         let mut fields: Vec<Cell> = vec!["Status".into()];
         let mut values: Vec<Cell> = vec![Cell::from(self.status.to_string())];
 
@@ -109,43 +95,31 @@ impl Printable for UpdateCheckData {
     }
 }
 
-// ── SelfUpdateResult wrapper ──────────────────────────────────────────────────
-
-/// CLI wrapper around [`SelfUpdateResult`] for API reporting.
+// `handoff` stays absent on a clean hand-off, keeping the `installed` payload byte-identical.
+/// Result of `ocx self update`, discriminated by `status`.
 ///
-/// JSON format (discriminated by `status`):
 /// - `{"status": "up_to_date"}` — no payload
 /// - `{"status": "installed", "from": "0.0.1", "to": "0.0.2"}` (`from` omitted
-///   when subprocess version query failed — bootstrap mode)
+///   when the old binary's version query failed)
 /// - `{"status": "installed", …, "handoff": {"reason": "exited", "detail": 82}}`
 ///   — the swap landed, but the new binary's own setup did not finish
-/// - `{"status": "pulled", "to": "0.0.2", "handoff": {…}}` — downloaded, but
-///   `current` still names the old binary, so nothing was activated
+/// - `{"status": "pulled", "to": "0.0.2", "handoff": {…}}` — downloaded, nothing activated
 /// - `{"status": "skipped", "skipped_reason": {"reason": "<variant>"[, "detail": "…"]}}`
-///
-/// `handoff` is absent whenever the hand-off completed cleanly, so a clean
-/// `installed` payload is byte-identical to the one this command has always
-/// emitted.
-///
-/// Plain format: key/value table with conditional rows; `Status` always
-/// present, `From`/`To`/`Handoff`/`Skipped reason` appear only when applicable.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SelfUpdateData {
     status: StatusKind,
-    /// Previously installed version; present iff status = `installed` AND the
-    /// subprocess version query succeeded. `None` indicates the subprocess
-    /// invocation was not available (binary absent, non-zero exit, malformed
-    /// JSON output).
+    /// Previously installed version; present on `installed` and `pulled` when
+    /// the old binary's version query succeeded. Absent when that query was not
+    /// available (binary absent, non-zero exit, malformed JSON output).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     from: Option<String>,
-    /// Newly installed version; present iff status = `installed`.
+    /// Newly downloaded version; present iff status is `installed` or `pulled`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     to: Option<String>,
-    /// Why the update was skipped; present iff status = `skipped`. Carries the
-    /// structured [`SkippedReason`] enum so scripts can dispatch on `reason`
-    /// without string parsing.
+    /// Why the update was skipped; present iff status = `skipped`. Scripts
+    /// dispatch on its `reason` slug without string parsing.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     skipped_reason: Option<SkippedReason>,
@@ -195,8 +169,7 @@ impl SelfUpdateData {
 
 impl Printable for SelfUpdateData {
     fn print_plain(&self, printer: &ocx_console::DataInterface) {
-        // Key/value layout: only fields with payload appear. Suppresses the empty
-        // rows the old 4-column `Status|From|To|Reason` layout produced.
+        // Only fields with a payload get a row.
         let mut fields: Vec<Cell> = vec!["Status".into()];
         let mut values: Vec<Cell> = vec![Cell::from(self.status.to_string())];
 

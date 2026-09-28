@@ -5,20 +5,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-// ── Entry-level visibility deserializer (§ ADR Tension 3, 4) ─────────────────
-
-/// Reject `"sealed"` on `Var.visibility` at parse time.
-///
-/// `Var.visibility` uses `Visibility` as its type but restricts the valid wire
-/// values to `["private", "public", "interface"]`. `"sealed"` is rejected
-/// because a `Var` that is invisible everywhere (neither self nor consumer) is
-/// dead config — see ADR Tension 4.
-///
-/// Used via `#[serde(deserialize_with = "deserialize_entry_visibility")]` on
-/// `Var.visibility`. The restriction lives here rather than in a newtype because
-/// all production construction goes through constant expressions (`Visibility::PRIVATE`,
-/// `Visibility::PUBLIC`, `Visibility::INTERFACE`) and no caller ever needs
-/// `TryFrom<Visibility>` outside of parse time.
+/// Deserializes `Var.visibility`, refusing `"sealed"`: an entry visible on no surface is dead config.
 pub fn deserialize_entry_visibility<'de, D>(deserializer: D) -> Result<Visibility, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -32,21 +19,13 @@ where
     Ok(v)
 }
 
-/// Default value for `Var.visibility` when the field is absent in JSON.
-///
-/// Returns `Visibility::PRIVATE` — the post-research-flip default (ADR Tension 1,
-/// decision A, changelog 2026-04-29). `Visibility::default()` returns `SEALED`
-/// (struct default, both booleans false), which is wrong for `Var.visibility`.
-/// This function is used via `#[serde(default = "default_entry_visibility")]`.
+/// Default for an absent `Var.visibility`: `PRIVATE`, not `Visibility::default()` (`SEALED`),
+/// which [`deserialize_entry_visibility`] refuses.
 pub const fn default_entry_visibility() -> Visibility {
     Visibility::PRIVATE
 }
 
-/// JSON Schema for `Var.visibility` — restricts the schema to the three valid
-/// entry-axis values, excluding `"sealed"` (ADR Tension 4).
-///
-/// Used via `#[schemars(schema_with = "entry_visibility_schema")]` on
-/// `Var.visibility`.
+/// JSON Schema for `Var.visibility`: the three entry values, without `"sealed"`.
 pub fn entry_visibility_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "string",
@@ -58,21 +37,9 @@ pub fn entry_visibility_schema(_generator: &mut schemars::SchemaGenerator) -> sc
     })
 }
 
-/// Two-axis visibility marker for dependency edges and entry-axis carriers.
-///
-/// Inspired by CMake's `target_link_libraries` visibility model
-/// (PUBLIC/PRIVATE/INTERFACE). The struct is two orthogonal booleans:
-///
-/// - `private` — self-axis: visible to the package's own execution
-///   (shims, entry points).
-/// - `interface` — consumer-axis: propagated to consumers of the package.
-///
-/// The four named values on the wire and in `--help` are the four
-/// `(private, interface)` combinations: `sealed` (false, false),
-/// `private` (true, false), `interface` (false, true), `public` (true, true).
-///
-/// Propagation through a dependency chain uses [`through_edge`](Self::through_edge).
-/// Diamond deduplication uses [`merge`](Self::merge).
+/// Two-axis visibility of a dependency edge or env entry, modelled on CMake's
+/// `target_link_libraries` (PUBLIC/PRIVATE/INTERFACE); each wire value names one
+/// `(private, interface)` combination.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Visibility {
     /// Self-axis: visible to the package's own runtime (shims, entry points).
@@ -82,70 +49,47 @@ pub struct Visibility {
 }
 
 impl Visibility {
-    /// No env propagation. Content accessed structurally (mount, path).
-    /// Most deps in a tool-focused package manager.
+    /// No env propagation; content is reached structurally (mount, path).
     pub const SEALED: Self = Self {
         private: false,
         interface: false,
     };
 
-    /// Env available for the package's own execution (shims, entry points),
-    /// but not propagated to consumers.
+    /// Env for the package's own execution only.
     pub const PRIVATE: Self = Self {
         private: true,
         interface: false,
     };
 
-    /// Env available for the package's own execution AND propagated to
-    /// consumers.
+    /// Env for the package's own execution and its consumers.
     pub const PUBLIC: Self = Self {
         private: true,
         interface: true,
     };
 
-    /// Env propagated to consumers but not used by the package itself.
-    /// Typical for meta-packages that compose environments.
+    /// Env for consumers only, typical of meta-packages that compose environments.
     pub const INTERFACE: Self = Self {
         private: false,
         interface: true,
     };
 
-    /// Does this visibility contribute to the interface (consumer) surface?
-    ///
-    /// Returns `true` for `PUBLIC` and `INTERFACE`. Used by the two-env
-    /// composer to gate TC entries and env-var entries for the default exec
-    /// surface (consumer view, `--self` off).
+    /// Whether this contributes to the consumer surface (`PUBLIC`, `INTERFACE`).
     pub const fn has_interface(self) -> bool {
         self.interface
     }
 
-    /// Does this visibility contribute to the private (self) surface?
-    ///
-    /// Returns `true` for `PUBLIC` and `PRIVATE`. Used by the two-env
-    /// composer to gate TC entries and env-var entries for the `--self`
-    /// runtime surface.
+    /// Whether this contributes to the self surface, `--self` (`PUBLIC`, `PRIVATE`).
     pub const fn has_private(self) -> bool {
         self.private
     }
 
-    /// Compose visibility through a dependency edge.
-    ///
-    /// If the child's effective visibility does not export to consumers
-    /// (`child_eff.interface == false`), it cannot propagate at all →
-    /// result is [`Self::SEALED`]. Otherwise the edge passes through unchanged.
-    ///
-    /// Used in `ResolvedPackage::with_dependencies()` when applying an edge
-    /// to a child's already-resolved transitive deps. Renamed from `propagate`
-    /// to clarify the inductive intent: "compose edge with child's effective
-    /// visibility" (see `adr_two_env_composition.md`).
+    /// Composes this edge with a child's effective visibility: [`Self::SEALED`] unless the
+    /// child exports to consumers, else the edge unchanged (`adr_two_env_composition.md`).
     pub const fn through_edge(self, child_eff: Self) -> Self {
         if child_eff.interface { self } else { Self::SEALED }
     }
 
-    /// Merge two paths in a diamond — take the most open per axis.
-    ///
-    /// If *any* path makes a dep visible on an axis, it stays visible.
-    /// Implements the OR operator on the (self, consumer) axes.
+    /// Merges two diamond paths, OR per axis.
     pub const fn merge(self, other: Self) -> Self {
         Self {
             private: self.private || other.private,

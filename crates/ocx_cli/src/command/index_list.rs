@@ -35,10 +35,6 @@ type ResolvedTags = Vec<(String, ocx_oci::PackageRef, Vec<String>)>;
 
 impl IndexList {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // `index list` enumerates tags, where a digest-bearing identifier narrows
-        // nothing — reject it early with a usage error pointing at `package description pull`.
-        // With `--platforms` a digest DOES resolve to that one artifact's platform
-        // set (report_platforms handles it directly), so it is accepted there.
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         for (raw, identifier) in self.packages.iter().zip(&identifiers) {
             if identifier.digest().is_some() && !self.platforms {
@@ -71,11 +67,8 @@ impl IndexList {
         let futures = self.packages.iter().zip(identifiers).map(|(package, identifier)| {
             let context = context.clone();
             async move {
-                // A digest-pinned identifier with `--platforms` resolves straight to
-                // that one artifact (`report_platforms` handles it directly and never
-                // reads `tags` for this branch) — skip `list_tags` entirely so it
-                // never emits an ordinary "not found in the index" warning for a
-                // lookup that was never a tag lookup.
+                // Skipped for a digest under `--platforms`, or it warns "not found" for a lookup that
+                // was never a tag lookup.
                 let tags = if identifier.digest().is_some() && self.platforms {
                     Vec::new()
                 } else {
@@ -113,14 +106,9 @@ impl IndexList {
         let variants_report = resolved
             .into_iter()
             .map(|(package, _, tags)| {
-                // One derivation, shared with the `variants` field
-                // `ocx package announce` records on an index root — so this
-                // listing and a published root can never disagree about what a
-                // tag set means.
+                // Shared with the `variants` field `ocx package announce` records, so the two never disagree.
                 let mut names = version::variant_names(tags.iter().map(String::as_str));
-                // The default variant has no name; the empty string is this
-                // command's placeholder for it and belongs to the display, not
-                // to the derivation (and never to the wire).
+                // The empty string is this display's placeholder for the default variant, never the wire's.
                 if tags
                     .iter()
                     .filter_map(|tag| Version::parse(tag))
@@ -140,9 +128,7 @@ impl IndexList {
     async fn report_platforms(context: &crate::app::Context, resolved: ResolvedTags) -> anyhow::Result<()> {
         let mut platforms_report = HashMap::new();
         for (package, identifier, tags) in resolved {
-            // A digest-pinned identifier resolves straight to that one artifact's
-            // platform set (the image index under its digest) — no tag
-            // filtering, and no yank check (a digest pin bypasses the tag lane).
+            // A digest pin bypasses tag filtering and the yank check.
             let target = if identifier.digest().is_some() {
                 identifier.clone()
             } else {

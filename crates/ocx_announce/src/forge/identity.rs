@@ -1,33 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Fork identity built and verified from forge API response bodies only.
+//! Fork identity, built and verified from forge API response bodies only.
 //!
-//! Two X5 invariants live here, and both are per forge only in their wire
-//! spelling — the guard itself is the same on every forge, which is why every
-//! spelling of it sits in this one file rather than beside its client:
-//!
-//! 1. **A fork's parent must be the upstream.** A repository sitting at the
-//!    conventional fork path that is not actually a fork of the upstream is a
-//!    same-named stranger, and pushing an announce branch to it leaks the branch
-//!    — and anything the write carries — to an unrelated owner. GitHub answers
-//!    the question with `parent.full_name`, GitLab with
-//!    `forked_from_project.id`; a missing answer is a refusal, never a pass.
-//! 2. **Identity is read, never composed.** Every field comes from the response
-//!    body's own path, so a fork renamed away from the upstream's project name
-//!    (or living in a nested group) resolves to where it really is. A
-//!    `{login}/{basename}` guess would target a different repository entirely.
+//! A missing or mismatched parent is a refusal, never a pass: pushing to a same-named
+//! non-fork leaks the announce branch.
+//! The fork path is read from the body, never composed as `{login}/{basename}`, which
+//! misses a renamed or nested-group fork.
 
 use serde_json::Value;
 
 use super::{ForgeError, ForkIdentity, RepoCoordinate};
 
-/// Split a forge's own `namespace/project` path into a [`ForkIdentity`].
-///
-/// The path from the response body is the single source of the fork's identity;
-/// `id` carries the forge's opaque handle where it has one. The namespace keeps
-/// every segment but the last, so a fork in a nested group survives the split
-/// intact.
+/// Split a forge's own `namespace/project` path into a [`ForkIdentity`]; the
+/// namespace keeps every segment but the last.
 ///
 /// # Errors
 ///
@@ -62,17 +48,14 @@ fn string_field<'a>(body: &'a Value, path: &[&str], field: &str) -> Result<&'a s
 
 /// Verify a GitHub fork response against `upstream` and build its identity.
 ///
-/// The parent comparison is ASCII-case-insensitive: GitHub routes owner and
-/// repository names case-insensitively, and the upstream half is spelled by the
-/// publisher on the command line while the parent half comes from the API, so a
-/// case-sensitive compare would refuse a legitimate fork of `Acme/index`.
+/// The parent compare is case-insensitive, as GitHub routes names, or a
+/// legitimate fork of `Acme/index` spelled `acme/index` is refused.
 ///
 /// # Errors
 ///
 /// Returns [`ForgeError::ForkParentMismatch`] / [`ForgeError::ForkParentAbsent`]
-/// when the response parent does not match the upstream, and
-/// [`ForgeError::ForkFieldMissing`] / [`ForgeError::MalformedForkFullName`] when
-/// the response path is absent or not in `namespace/project` form.
+/// for a wrong or missing parent, and [`ForgeError::ForkFieldMissing`] /
+/// [`ForgeError::MalformedForkFullName`] for an absent or malformed `full_name`.
 pub fn verify_github_fork(fork: &Value, upstream: &RepoCoordinate) -> Result<ForkIdentity, ForgeError> {
     let expected = upstream.full_path();
     match fork
@@ -92,20 +75,13 @@ pub fn verify_github_fork(fork: &Value, upstream: &RepoCoordinate) -> Result<For
     fork_identity_from_path(string_field(fork, &["full_name"], "full_name")?, None)
 }
 
-/// Verify a GitLab project response is a fork of `upstream_id` and build its
-/// identity.
-///
-/// GitLab answers the parent question with a **numeric project id**, which is
-/// immutable — unlike a path, which a rename or a group transfer changes under
-/// you. Comparing ids is therefore strictly stronger than GitHub's path compare,
-/// and needs no case folding.
+/// Verify a GitLab project response is a fork of `upstream_id` and build its identity.
 ///
 /// # Errors
 ///
 /// Returns [`ForgeError::ForkParentMismatch`] / [`ForgeError::ForkParentAbsent`]
-/// when `forked_from_project.id` does not match `upstream_id` or is absent, and
-/// [`ForgeError::ForkFieldMissing`] / [`ForgeError::MalformedForkFullName`] when
-/// `path_with_namespace` is absent or malformed.
+/// for a wrong or missing `forked_from_project.id`, and [`ForgeError::ForkFieldMissing`] /
+/// [`ForgeError::MalformedForkFullName`] for an absent or malformed `path_with_namespace`.
 pub fn verify_gitlab_fork(project: &Value, upstream_id: u64) -> Result<ForkIdentity, ForgeError> {
     let expected = upstream_id.to_string();
     match project
@@ -127,21 +103,15 @@ pub fn verify_gitlab_fork(project: &Value, upstream_id: u64) -> Result<ForkIdent
     fork_identity_from_path(full_path, id)
 }
 
-/// Verify a fork lives under `expected_namespace`.
+/// Verify a fork lives under `expected_namespace`: the token identity for a personal
+/// fork, the requested namespace for a shared organization or group fork.
 ///
-/// For a personal fork this is the token identity; for a shared organization or
-/// group fork (design register S12) it is the requested namespace — the verified
-/// identity must match what was asked for, not merely the token account.
-///
-/// The comparison is on the **whole** namespace path, not its root: a fork at
-/// `acme/other-group/index` is not the fork that was requested at `acme/index`,
-/// and accepting it would push the announce branch into a group the publisher
-/// never named.
+/// Compares the whole namespace path, not its root, or the announce branch lands in
+/// a group the publisher never named.
 ///
 /// # Errors
 ///
-/// Returns [`ForgeError::ForkOwnerMismatch`] when the identity's namespace does
-/// not match `expected_namespace`.
+/// Returns [`ForgeError::ForkOwnerMismatch`] when the namespace does not match.
 pub fn verify_fork_namespace(identity: &ForkIdentity, expected_namespace: &str) -> Result<(), ForgeError> {
     if identity.namespace.eq_ignore_ascii_case(expected_namespace) {
         Ok(())

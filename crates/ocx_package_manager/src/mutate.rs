@@ -1,34 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Commit-then-render — the one orchestration `ocx add`, `ocx remove`,
-//! `ocx lock` and `ocx update` share (C-054, D-V8) — and the render half on its
-//! own, which `ocx pull` shares with them.
+//! Commit-then-render: the one orchestration `ocx add`, `ocx remove`, `ocx lock`
+//! and `ocx update` share, plus the render half `ocx pull` shares with them.
 //!
-//! # Why the sequencing lives here and not at four call sites
-//!
-//! ADR D4 makes "add/remove/lock/update re-render" a **behavioural contract**,
-//! not a CLI convenience. Encoded in `ocx_cli` it would be out of reach of every
-//! non-CLI consumer and of unit test, against the project's "lib hosts
-//! orchestration, CLI = thin wrapper" doctrine — and four copies of a two-step
-//! sequence is four places for the second step to go missing.
-//!
-//! # Why `package_manager/`, not beside `project/mutation.rs` (RUL-49)
-//!
-//! D-V8's three requirements are "one shared function", "in `ocx_lib`, not
-//! `ocx_cli`", and "not inside `MutationGuard::commit`". All three hold at
-//! either address; the dependency direction does not. `project/mutation.rs`
-//! imports nothing from `package_manager` today, and the render is a
-//! [`PackageManager`] method, so hosting the sequence under `project` would
-//! invert the shipped `package_manager → project` direction for no gain.
-//!
-//! # Why the commit is never rolled back on a render failure (RUL-53)
-//!
-//! The lock is the declaration; the rendered tree is a materialisation of it.
-//! A read-only checkout or a foreign-owned directory is a C-050 skip — warn,
-//! carry on, exit 0 — and the resulting half-rendered tree is exactly what the
-//! stamp gate (C-061) exists to withhold. Undoing a correct lock write because
-//! a directory was not writable would trade a recoverable state for a lost one.
+//! A render failure never rolls the commit back: the lock is the declaration,
+//! the tree only its materialisation.
 
 use ocx_project::{DEFAULT_GROUP, MutationCommit, MutationGuard, ProjectLock, StagedMutation};
 use ocx_store::file_structure::{RenderStampScope, ToolchainHome};
@@ -38,29 +15,14 @@ use super::tasks::render_toolchain::{RenderOutcome, RenderReport, RenderRequest,
 
 /// Where a render writes and for which platform — the three inputs
 /// [`PackageManager::render_home`] cannot derive from a lock.
-///
-/// `groups`, `pinned` and `dry_run` are **not** here, and travel as ordinary
-/// parameters instead, because the two callers legitimately disagree about all
-/// three: [`PackageManager::commit_and_render`] passes every group the new lock
-/// declares plus [`DEFAULT_GROUP`] (RUL-70), the `pinned` its *staged* manifest
-/// answers for, and `dry_run: false` (RUL-54 keeps `--dry-run` `ocx pull`'s
-/// alone); `ocx pull` passes its own `-g` set (C-045) and the invocation's
-/// `--dry-run`. Folding any of them into this struct would make one caller's
-/// answer look like a property of the destination.
+// `groups`, `pinned` and `dry_run` stay parameters: the two callers disagree on all three.
 pub struct ToolchainRender<'a> {
     /// Which tier's tree this render targets, and — for a project — the
-    /// **canonical** project directory (D-V13: parity with the consent key).
-    ///
-    /// The tier is carried by this value rather than by a separate flag so
-    /// "a global render under a project key" stays unspellable, exactly as
-    /// [`RenderStampScope`] makes it unspellable in the stamp.
+    /// **canonical** project directory (parity with the consent key).
     pub scope: &'a RenderStampScope,
 
     /// The validated `toolchain_dir` root, or `None` for the in-project
-    /// `<project>/.ocx/toolchain` default (C-002, R-W20).
-    ///
-    /// Ignored for [`RenderStampScope::Global`]: the global home is
-    /// `$OCX_HOME/toolchain` and never relocates (C-016).
+    /// `<project>/.ocx/toolchain` default; ignored for [`RenderStampScope::Global`].
     pub toolchain_root: Option<&'a ocx_config::ToolchainRoot>,
 
     /// The platform whose leaf each locked tool resolves to.
@@ -72,40 +34,16 @@ pub struct MutationOutcome {
     /// The paths the commit rewrote — `ocx.toml` and `ocx.lock`.
     pub commit: MutationCommit,
 
-    /// What the render did, or `None` when it did not run at all.
-    ///
-    /// `None` is **not** an error and never rolls the commit back (RUL-53): it
-    /// is the whole-render counterpart of the per-entry
-    /// [`RenderOutcome::Skipped`](super::tasks::render_toolchain::RenderOutcome::Skipped)
-    /// that C-050 already defines — the surface could not be resolved (a
-    /// `--frozen` or `--offline` run whose metadata is not local), so there was
-    /// nothing to reconcile the tree against. A warn names the cause; the exit
-    /// code stays 0, and the next `ocx pull` renders.
+    /// What the render did, or `None` when the surface could not be resolved
+    /// (e.g. `--frozen`/`--offline` with metadata not local) — not an error; the
+    /// exit code stays 0 and the next `ocx pull` renders.
     pub render: Option<RenderReport>,
 }
 
-/// One warning line per [`RenderOutcome::Skipped`] entry in `report` — the
-/// single CWE-117-safe rendering of a C-050 skip (RUL-52, R-W44).
-///
-/// # Why lines rather than a `warn!`
-///
-/// Two callers on two channels: `ocx pull` warns through the CLI's user
-/// interface (stderr, user-facing), and [`PackageManager::commit_and_render`]
-/// has no user interface and logs. One printer would force one of them onto the
-/// wrong channel; one *formatter* keeps the escaping single-sourced, which is
-/// the part that must not have two implementations.
-///
-/// # The escaping is the contract
-///
-/// [`RenderedArtifact::Trampoline`](super::tasks::render_toolchain::RenderedArtifact::Trampoline),
-/// `GroupDirectory` and `Skipped { reason }` all carry a name a hostile clone
-/// controls — a `read_dir` result, not a validated identifier. Interpolated
-/// bare, a name carrying `\n` or an ANSI sequence forges lines in the
-/// consumer's output. **Every untrusted component is interpolated with `{:?}`**,
-/// the convention `ToolchainPathError` already states in
-/// `file_structure/toolchain_store.rs`.
-///
-/// [`RenderOutcome::Skipped`]: super::tasks::render_toolchain::RenderOutcome::Skipped
+/// One warning line per [`RenderOutcome::Skipped`] entry in `report`, the single
+/// CWE-117-safe rendering of a render skip.
+// Names are `read_dir` results a hostile clone controls: interpolate each with `{:?}`,
+// or a `\n` or ANSI sequence forges output lines.
 #[must_use]
 pub fn skipped_render_warnings(report: &RenderReport) -> Vec<String> {
     report
@@ -121,36 +59,24 @@ pub fn skipped_render_warnings(report: &RenderReport) -> Vec<String> {
         .collect()
 }
 
-/// One artifact, named for a warn line — **every name component escaped**
-/// (RUL-52).
-///
-/// `{:?}` on each `String`, not on the whole sentence: the words around them
-/// are this function's own and must stay legible, while the names inside are
-/// `read_dir` results a hostile clone controls.
+/// One artifact, named for a warn line — **every name component escaped**.
+// `{:?}` per name, not on the whole sentence, so the surrounding words stay legible.
 fn describe_artifact(artifact: &RenderedArtifact) -> String {
     match artifact {
         RenderedArtifact::Trampoline(name) => format!("trampoline {name:?}"),
         RenderedArtifact::Link { group, entry } => format!("link {entry:?} in group {group:?}"),
         RenderedArtifact::GroupDirectory(group) => format!("group directory {group:?}"),
-        // Never "group directory": depth 1 is closed and tree-owned (C-071), so
-        // a name found there is a leftover of the pre-`links/` layout or a
-        // foreign file, and calling it a group would tell the user to look for
-        // an `ocx.toml` table that does not exist.
+        // Never "group directory": a depth-1 name is no group, and calling it one sends
+        // the user hunting a nonexistent `ocx.toml` table.
         RenderedArtifact::RootEntry(name) => format!("home-root entry {name:?}"),
     }
 }
 
 impl PackageManager {
-    /// The home a render targets, for either tier (C-002, C-016, R-W20).
-    ///
-    /// The one derivation, so [`Self::commit_and_render`] and `ocx pull` cannot
-    /// disagree about where a project's tree lives:
-    ///
-    /// - [`RenderStampScope::Global`] → `$OCX_HOME/toolchain`, ignoring
-    ///   `toolchain_root` entirely (C-016).
-    /// - [`RenderStampScope::Project`] →
-    ///   [`resolve_toolchain_home`](ocx_project::resolve_toolchain_home) over
-    ///   the scope's canonical project directory.
+    /// The home a render targets, for either tier: `$OCX_HOME/toolchain` for
+    /// [`RenderStampScope::Global`], else
+    /// [`resolve_toolchain_home`](ocx_project::resolve_toolchain_home) over the
+    /// canonical project directory.
     ///
     /// # Errors
     ///
@@ -161,47 +87,23 @@ impl PackageManager {
         toolchain_root: Option<&ocx_config::ToolchainRoot>,
     ) -> crate::Result<ToolchainHome> {
         match scope {
-            // C-016: the global home is the `FileStructure` field, built once
-            // in `with_root`. `toolchain_root` is not consulted at all — not
-            // even as a fallback — because a global tree under a project-keyed
-            // root would have no project key to be filed under.
+            // Never consult `toolchain_root`: a global tree under a project-keyed root has no key.
             RenderStampScope::Global => Ok(ToolchainHome::new(self.file_structure().toolchain.root().to_path_buf())),
             RenderStampScope::Project(project_directory) => {
-                // The project tier raises its own error since WP-33; `ocx_lib::Error`
-                // carries it transparently and the classifier delegates, so the exit
-                // code is the one this call produced before the move.
                 ocx_project::resolve_toolchain_home(project_directory, toolchain_root).map_err(Into::into)
             }
         }
     }
 
     /// Commit a staged `ocx.toml` + `ocx.lock` mutation, then re-render the
-    /// toolchain home it describes (C-054, D-V8).
-    ///
-    /// **This is the whole of what `add`, `remove`, `lock` and `update` call.**
-    /// A command that calls [`MutationGuard::commit`] directly still writes a
-    /// correct lock and leaves the rendered tree describing the previous one —
-    /// which is why there is one function rather than a documented convention.
-    ///
-    /// # Order, and what it costs
-    ///
-    /// Commit first: the lock is the declaration, and a render is only ever a
-    /// materialisation of a lock that has landed. The window this opens — a
-    /// process killed between the two steps — leaves a written lock and a stale
-    /// tree, which is the state C-061's stamp gate already withholds and C-064
-    /// already designs the prompt path around. The reverse order would open a
-    /// worse one: a tree describing a lock that was never written.
-    ///
-    /// The render reads package **metadata** (the closure walk behind
-    /// [`Self::toolchain_surface`]), never package content, so it runs before
-    /// the caller's own materialisation step without needing it.
+    /// toolchain home it describes. Calling [`MutationGuard::commit`] directly
+    /// instead leaves the rendered tree describing the previous lock.
     ///
     /// # Errors
     ///
-    /// - The commit's own failures — a diverged manifest edit, a stale
-    ///   predecessor lock — propagate unchanged, with nothing written.
-    /// - A render failure **after** a successful commit does not roll it back
-    ///   (RUL-53); it degrades to [`MutationOutcome::render`] `= None`.
+    /// - The commit's own failures propagate unchanged, with nothing written.
+    /// - A render failure after a successful commit degrades to
+    ///   [`MutationOutcome::render`] `= None`.
     pub async fn commit_and_render(
         &self,
         guard: MutationGuard,
@@ -209,18 +111,10 @@ impl PackageManager {
         new_lock: ProjectLock,
         render: ToolchainRender<'_>,
     ) -> crate::Result<MutationOutcome> {
-        // Read before the commit consumes `staged`: `pinned` is a property of
-        // the composition this mutation just declared, so the candidate
-        // manifest answers for it, never the one still on disk. `None` for the
-        // `cli` tier because none of the four commands declares `--pinned`.
+        // From the staged manifest, not the one on disk, or `pinned` reflects the pre-mutation composition.
         let pinned = super::pinned_for_project(None, staged.config());
 
-        // RUL-70 — the default group is **always** in scope. Deriving the group
-        // set from the lock alone would leave `bin_in_scope == false` the moment
-        // a mutation removes the last default-group tool, and the trampoline it
-        // just dropped from the lock would survive the re-render (S-008).
-        // `pull`'s `-g` is the only narrowing (RUL-25), and `pull` passes its
-        // own set to [`PackageManager::render_home`] rather than coming here.
+        // Default group always in scope, or removing its last tool leaves the dropped trampoline behind.
         let mut groups: Vec<String> = vec![DEFAULT_GROUP.to_owned()];
         for tool in &new_lock.tools {
             if !groups.iter().any(|group| group == &tool.group) {
@@ -228,14 +122,9 @@ impl PackageManager {
             }
         }
 
+        // Commit before render: the reverse order leaves a tree for a lock never written.
         let commit = guard.commit(staged, new_lock.clone()).await?;
 
-        // RUL-53 — past this point nothing rolls the commit back. A render that
-        // cannot run at all degrades to `render: None` with a warn, and one
-        // that ran but could not write some entries reports them as C-050
-        // skips, one warn line each.
-        // RUL-54 — `--dry-run` is `ocx pull`'s alone; none of the four mutation
-        // commands grows one by coming through here.
         let render = match self.render_home(&new_lock, pinned, &render, &groups, false).await {
             Ok(report) => {
                 for line in skipped_render_warnings(&report) {
@@ -243,11 +132,7 @@ impl PackageManager {
                 }
                 Some(report)
             }
-            // Quiet on an offline manager, loud otherwise. `--no-pull` renders
-            // through `offline_view` on purpose (the closure walk is a download
-            // too), so a cold store there is the ordinary, expected state and
-            // the next `ocx pull` renders. An *online* manager that cannot
-            // resolve is a genuine surprise and says so.
+            // Debug, not warn: `--no-pull` renders offline, where a cold store is the expected state.
             Err(error) if self.is_offline() => {
                 log::debug!("The toolchain home was not re-rendered: {error}");
                 None
@@ -261,47 +146,16 @@ impl PackageManager {
         Ok(MutationOutcome { commit, render })
     }
 
-    /// Render `<home>/toolchain/` as a whole-compose pass over `groups`
-    /// (C-054, RUL-59) — **the one producer of a [`RenderRequest`]**.
-    ///
-    /// D-V8's argument for hosting the commit-then-render sequence here applies
-    /// verbatim to the render half on its own: `ocx pull` is the command D4
-    /// names the *primary* render trigger, and a second `RenderRequest`
-    /// producer in `ocx_cli` would be out of reach of every non-CLI consumer
-    /// and of unit test. It matters more here than anywhere, because
-    /// [`RenderRequest::surface`] carries a contract its own type cannot
-    /// express — the surface is the **default group's** closure and never the
-    /// selected groups' — and a second producer is a second place to get that
-    /// silently wrong.
-    ///
-    /// # `groups` scopes the tree, and decides whether `bin/` is touched
-    ///
-    /// `ocx pull`'s `-g` narrows the render (C-045); the four mutation commands
-    /// always pass the whole lock's groups plus [`DEFAULT_GROUP`] (RUL-70).
-    /// Either way `bin/` covers the default group and nothing else, so the
-    /// closure walk that feeds it — the one step here that reads metadata, and
-    /// therefore the one that can reach the network — runs **only** when the
-    /// default group is in scope (RUL-25). A `-g ci` run leaves `bin/`
-    /// untouched rather than emptied; the window in which it is older than the
-    /// lock is the one C-064 designs the prompt path around.
-    ///
-    /// # `dry_run` (S-007, RUL-54)
-    ///
-    /// Threaded into the request rather than short-circuiting here: the
-    /// render's own dry-run arm reports the delta and performs none of the
-    /// write steps, so short-circuiting would silently report a delta of zero.
-    /// Only `ocx pull` passes `true`.
+    /// Render `<home>/toolchain/` as a whole-compose pass over `groups`; the
+    /// network-reaching `bin/` closure walk runs only when `groups` holds the
+    /// default group, otherwise `bin/` is left untouched.
     ///
     /// # Errors
     ///
     /// The home's canonicalisation failure, or a surface resolution that could
-    /// not complete. A per-entry write failure is **not** an error: C-050 makes
-    /// it a [`RenderOutcome::Skipped`] inside the returned report, which the
-    /// caller renders through [`skipped_render_warnings`]. Kept fallible so
-    /// each caller degrades all of it at one place (RUL-53) — with its own
-    /// sink, `log::warn!` here and the user interface in `ocx pull`.
-    ///
-    /// [`RenderOutcome::Skipped`]: super::tasks::render_toolchain::RenderOutcome::Skipped
+    /// not complete. A per-entry write failure is a [`RenderOutcome::Skipped`]
+    /// in the report instead; render it through [`skipped_render_warnings`].
+    // The one `RenderRequest` producer: `surface` must be the default group's closure, which its type cannot enforce.
     pub async fn render_home(
         &self,
         lock: &ProjectLock,
@@ -316,9 +170,6 @@ impl PackageManager {
             .toolchain_home(render.scope, render.toolchain_root)
             .map_err(PackageErrorKind::Internal)?;
 
-        // RUL-25 — resolved only when this invocation actually selected the
-        // default group. Trivially true for the four mutation commands, which
-        // seed `DEFAULT_GROUP` unconditionally; the narrowing is `ocx pull`'s.
         let surface = if groups.iter().any(|group| group == DEFAULT_GROUP) {
             let roots = default_group_roots(lock, render.platform);
             self.toolchain_surface(&roots, render.platform).await?
@@ -334,24 +185,16 @@ impl PackageManager {
             groups,
             pinned,
             platform: render.platform,
+            // Passed through, never short-circuited here, or a dry run reports a delta of zero.
             dry_run,
         })
         .await
     }
 }
 
-/// The **default group's** root identifiers, as [`RenderRequest::surface`]'s
-/// producer takes them (C-045).
-///
-/// `bin/` covers [`DEFAULT_GROUP`] and nothing else, so the surface is the
-/// default group's closure and never the selected groups'. Deduplicated,
-/// because two bindings may name one package and the closure walk would
-/// otherwise pay for it twice.
-///
-/// A tool with no leaf for this platform is **skipped, not refused** (RUL-31):
-/// a lock legitimately carries tools that have no build here, and failing the
-/// whole render over one would make an unavailable tool cost the user every
-/// other trampoline.
+/// The **default group's** root identifiers, deduplicated; a tool with no leaf
+/// for this platform is skipped, not refused.
+// Refusing would make one tool without a build here cost every other trampoline.
 #[must_use]
 pub fn default_group_roots(lock: &ProjectLock, platform: &ocx_oci::Platform) -> Vec<ocx_oci::PackageRef> {
     let mut roots: Vec<ocx_oci::PackageRef> = Vec::new();
@@ -496,8 +339,8 @@ mod tests {
         }
 
         /// The canonical project directory — `resolve_toolchain_home`'s own
-        /// precondition, and the value `RenderStampScope::Project` carries
-        /// (D-V13). `tempfile` hands back a path under `/tmp`, itself a symlink
+        /// precondition, and the value `RenderStampScope::Project` carries.
+        /// `tempfile` hands back a path under `/tmp`, itself a symlink
         /// on macOS, so a non-canonical spelling here would hash to a second
         /// project key.
         fn canonical_project_dir(&self) -> PathBuf {
@@ -529,7 +372,7 @@ mod tests {
         }
 
         /// A stale trampoline in the directory the renderer actually writes and
-        /// prunes — the **physical** `<home>/shells/default/bin` (C-078).
+        /// prunes — the **physical** `<home>/shells/default/bin`.
         ///
         /// Through the accessor, never a literal join: a fixture that spelled
         /// the tree itself would keep seeding the old place after a layout
@@ -618,9 +461,9 @@ mod tests {
         }
     }
 
-    // ── C-054 / RUL-57 / RUL-53 — commit, then render ────────────────────────
+    // ── Commit, then render ────────────────────────
 
-    /// C-054, RUL-57 — the sequence is **commit then render**, and the render is
+    /// The sequence is **commit then render**, and the render is
     /// reached: a mutation whose new lock declares no tools still reconciles
     /// `bin/`, so a stale trampoline left by the removed tool is pruned.
     ///
@@ -632,7 +475,7 @@ mod tests {
     ///   (`bin_in_scope == true`, and the stale entry is gone).
     ///
     /// Mutation that reds it: a `commit_and_render` that only calls
-    /// `guard.commit(...)` — the four-copies-of-a-two-step-sequence defect D-V8
+    /// `guard.commit(...)` — the four-copies-of-a-two-step-sequence defect the shared function
     /// exists to prevent — leaves `render == None` and `bin/stale` on disk.
     // Multi-thread flavour: `MutationGuard::commit` fans its two publishes
     // (`ocx.lock`, then `ocx.toml`) onto the blocking pool.
@@ -673,7 +516,7 @@ mod tests {
         );
     }
 
-    /// RUL-59 — `-g` on `ocx lock` / `ocx update` scopes **resolution**, and the
+    /// `-g` on `ocx lock` / `ocx update` scopes **resolution**, and the
     /// re-render is whole-home.
     ///
     /// Expressed as the type contract it is: [`ToolchainRender`] carries no
@@ -724,7 +567,7 @@ mod tests {
         );
     }
 
-    /// RUL-53 — a render that cannot run **never rolls the commit back**.
+    /// A render that cannot run **never rolls the commit back**.
     ///
     /// The lock declares a tool whose package is in no index this offline
     /// manager can reach, so the surface walk fails. The contract is: `Ok`, a
@@ -762,7 +605,7 @@ mod tests {
     }
 
     /// The commit's own refusal propagates, and **nothing is written** — the
-    /// counterweight to RUL-53, so "never roll back" is not read as "always
+    /// counterweight to never rolling back, so "never roll back" is not read as "always
     /// write something".
     ///
     /// The input is `MutationGuard::commit`'s coherence gate: a lock whose
@@ -798,9 +641,9 @@ mod tests {
         );
     }
 
-    // ── C-054 — the home derivation ──────────────────────────────────────────
+    // ── The home derivation ──────────────────────────────────────────
 
-    /// C-016 — the **global** home is `$OCX_HOME/toolchain` and ignores
+    /// The **global** home is `$OCX_HOME/toolchain` and ignores
     /// `toolchain_dir` entirely.
     ///
     /// The discriminating input: a `toolchain_root` is supplied and must make no
@@ -832,7 +675,7 @@ mod tests {
         );
     }
 
-    /// C-002 — with no `toolchain_dir`, a project's home is the in-project
+    /// With no `toolchain_dir`, a project's home is the in-project
     /// `<project>/.ocx/toolchain`.
     #[test]
     fn a_project_home_defaults_to_the_in_project_tree() {
@@ -848,12 +691,12 @@ mod tests {
         );
     }
 
-    /// C-002 / R-W20 — a configured `toolchain_dir` relocates a project's home
+    /// A configured `toolchain_dir` relocates a project's home
     /// to `<root>/<project-key>/toolchain`, keyed by the same 16-hex derivation
-    /// the consent stamp uses (D-V13).
+    /// the consent stamp uses.
     ///
     /// Mutation that reds it: `<root>/toolchain/<key>` — the reversed order
-    /// R-W1 names as the data-loss path, since it puts every project's tree
+    /// that is the data-loss path, since it puts every project's tree
     /// inside a directory indistinguishable from a group directory.
     #[test]
     fn a_configured_root_relocates_a_project_home_under_its_project_key() {
@@ -874,7 +717,7 @@ mod tests {
         );
     }
 
-    // ── RUL-52 — the C-050 warn line escapes its untrusted name (CWE-117) ────
+    // ── The skip warn line escapes its untrusted name (CWE-117) ────
 
     fn report_of(items: Vec<RenderedItem>) -> RenderReport {
         RenderReport {
@@ -901,7 +744,7 @@ mod tests {
         }
     }
 
-    /// C-050 — only skips warn. A report of successes produces no lines at all,
+    /// Only skips warn. A report of successes produces no lines at all,
     /// so a clean render is silent.
     #[test]
     fn a_report_without_skips_produces_no_warning_lines() {
@@ -922,7 +765,7 @@ mod tests {
         );
     }
 
-    /// C-050 — one line per skipped entry, each naming the path it could not
+    /// One line per skipped entry, each naming the path it could not
     /// write, across all three artifact kinds.
     #[test]
     fn every_skipped_artifact_kind_produces_one_line_naming_its_path() {
@@ -972,7 +815,7 @@ mod tests {
         );
     }
 
-    /// **RUL-52 / R-W44 (CWE-117)** — every untrusted component is interpolated
+    /// **CWE-117** — every untrusted component is interpolated
     /// with `{:?}`, so a `read_dir` name a hostile clone controls cannot forge a
     /// line in the consumer's output.
     ///

@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ProjectConfig",
-  "description": "Project-tier configuration parsed from `ocx.toml`.\n\nSchema follows ADR \"Project-Level Toolchain Config\" decision 1A:\nflat `[tools]` table as the implicit default group, plus additive\n`[group.<name>]` tables for optional named groups. Values are\nregistry-qualified [`PackageRef`] strings of the form\n`registry/repo[:tag][@digest]`. Bare-tag forms (no registry, e.g.\n`cmake = \"3.28\"`) are rejected with\n[`super::error::ProjectErrorKind::ToolValueMissingRegistry`].\n\nBare-repo entries with no tag and no digest (e.g.\n`cmake = \"ocx.sh/cmake\"`) parse with `:latest` injected at the\nschema boundary — see [`parse_tool_value`] for the contract. The\ndefault does not apply to digest-pinned entries\n(`tool = \"ghcr.io/acme/tool@sha256:...\"`); the digest is the\ncanonical pin.\n\n`#[serde(deny_unknown_fields)]` is enforced at the struct level so\nschema drift in consumer `ocx.toml` files surfaces as a parse error\nrather than silent ignore.\n\nPhase 2.1 NOTE: the `platforms` field is removed in this revision.\nThe effective platform set is sourced ambient from the project tier\n(currently the canonical five-platform set) until ADR-driven\nper-tool platform overrides land.",
+  "description": "Project-tier configuration parsed from `ocx.toml`.\n\nA flat `[tools]` table is the implicit default group; `[group.<name>]`\ntables add optional named groups. Values are registry-qualified package\nreferences, `registry/repo[:tag][@digest]`; a bare tag with no registry\n(`cmake = \"3.28\"`) is rejected. A bare repository with no tag and no digest\n(`cmake = \"ocx.sh/cmake\"`) parses as `:latest`; a digest-pinned entry gets\nno default tag, since the digest is the canonical pin. Unknown keys are a\nparse error.",
   "type": "object",
   "properties": {
     "tools": {
-      "description": "Tools in the reserved `default` group (the top-level `[tools]`\ntable in `ocx.toml`). Values are fully-qualified\n[`PackageRef`]s.",
+      "description": "Tools in the reserved `default` group (the top-level `[tools]` table in\n`ocx.toml`). Values are fully-qualified package references.",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/PackageRef"
@@ -13,11 +13,11 @@
       "default": {}
     },
     "env": {
-      "description": "Environment variables for the default group; `[env]` in TOML.\n\nStanding in the same relation to `[group.<name>.env]` that `[tools]`\ndoes to `[group.<name>.tools]`. Excluded from\n[`super::declaration_hash`] — it does not change *which* packages\nresolve, so an env edit must not force a re-lock.",
+      "description": "Environment variables for the default group; `[env]` in TOML.\n\nStands to `[group.<name>.env]` as `[tools]` does to\n`[group.<name>.tools]`. It does not change which packages resolve, so an\nedit never forces a re-lock.",
       "$ref": "#/$defs/ProjectEnv"
     },
     "group": {
-      "description": "Named additive groups; `[group.<name>]` in TOML. `default` is\nreserved — a literal `[group.default]` declaration is a parse\nerror (enforced at parse time, not at the serde layer).\n\nThe Rust field is plural, the TOML table singular: `[group.<name>]`\nis what users write. Do not rename the wire key.",
+      "description": "Named additive groups; `[group.<name>]` in TOML. `default` is reserved:\na literal `[group.default]` declaration is a parse error.",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/Group"
@@ -25,7 +25,7 @@
       "default": {}
     },
     "package": {
-      "description": "Per-package resolve-time settings; `[package.\"<id>\"]` in TOML. Keyed by\nthe canonical author string (registry/repo[:tag]) so Serialize\nround-trips byte-faithfully. Currently carries the `no-patches` opt-out.\n\nThis is RESOLVE-TIME POLICY, not a tool-binding declaration: it is\ndeliberately excluded from [`super::declaration_hash`] (a `no-patches`\nedit must not invalidate `ocx.lock`).",
+      "description": "Per-package resolve-time settings; `[package.\"<id>\"]` in TOML, keyed by\nthe canonical author string `registry/repo[:tag]`.\n\nResolve-time policy, not a tool binding: a `no-patches` edit never\ninvalidates `ocx.lock`.",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/PackageSettings"
@@ -33,7 +33,7 @@
       "default": {}
     },
     "lazy-mode": {
-      "description": "Toolchain-tier `lazy-mode` (`plan_lazy_package_loading.md` C-006) —\nthe least specific tier of the resolution ladder, only outranked by\n`[group.<g>]`, `[package.\"<id>\"]`, and the CLI flag. `None` means\nfall through to `OCX_LAZY_MODE`, never [`LazyMode::Never`] — only the\nladder's own floor applies that default.\n\nThe FIRST bare scalar fields on this struct — every other field is a\ncollection. This is RESOLVE-TIME POLICY, not a tool-binding\ndeclaration: deliberately excluded from [`super::declaration_hash`]\n(same rationale as `env` and `packages`).",
+      "description": "Toolchain-tier `lazy-mode`, the least specific config tier: outranked by\n`[group.<g>]`, `[package.\"<id>\"]` and the CLI flag. Absent falls through\nto `OCX_LAZY_MODE`; it does not mean `never`. An edit never invalidates\n`ocx.lock`.",
       "anyOf": [
         {
           "$ref": "#/$defs/LazyMode"
@@ -44,7 +44,7 @@
       ]
     },
     "lazy-report": {
-      "description": "Toolchain-tier `lazy-report`. `None` means fall through to the\nbuilt-in default. Excluded from [`super::declaration_hash`].",
+      "description": "Toolchain-tier `lazy-report`. Absent falls through to `OCX_LAZY_REPORT`,\nthen to `silent`. An edit never invalidates `ocx.lock`.",
       "anyOf": [
         {
           "$ref": "#/$defs/LazyReport"
@@ -55,7 +55,7 @@
       ]
     },
     "activate": {
-      "description": "Toolchain-tier `activate` mode (`plan_toolchain_activation.md`\nC-006 / C-012) — whether a project's rendered toolchain reaches a\nshell via per-prompt environment composition (`env`, the ladder's\nfloor), a `PATH` entry for `<home>/toolchain/active/bin` (`bin`), or\nneither (`none`). `None` means fall through to\n`OCX_TOOLCHAIN_ACTIVATE`, never [`crate::activate::ACTIVATE_FLOOR`]\ndirectly — only the ladder's own floor applies that default.\n[`ActivateMode`]'s own `Deserialize` already rejects an unrecognized\nwire value (exit 78, C-012) — the same \"no second validation pass\"\nshape [`Self::lazy_mode`] uses.\n\nRESOLVE-TIME POLICY, not a tool-binding declaration: excluded from\n[`super::declaration_hash`] by omission (same rationale as\n`lazy-mode`).",
+      "description": "Toolchain-tier `activate` mode: how a project's rendered toolchain\nreaches a shell — per-prompt environment composition (`env`, the\ndefault), a `PATH` entry for `<home>/toolchain/active/bin` (`bin`), or\nneither (`none`). Absent falls through to `OCX_TOOLCHAIN_ACTIVATE`, then\nto `env`. An unrecognized value is a parse error (exit 78). An edit\nnever invalidates `ocx.lock`.",
       "anyOf": [
         {
           "$ref": "#/$defs/ActivateMode"
@@ -66,14 +66,14 @@
       ]
     },
     "pinned": {
-      "description": "Toolchain-tier `pinned` setting (`plan_toolchain_activation.md`\nC-007 / C-012) — whether composed paths follow the rendered\n`links/<group>/<entry>` links (`false`, the ladder's floor) or pin to\ndigest roots (`true`). `None` means fall through to\n`OCX_TOOLCHAIN_PINNED`; \"unset\" and \"explicitly false\" stay\ndistinguishable all the way down the ladder, which is why this is\n`Option<bool>` rather than a bare `bool`.\n\nRESOLVE-TIME POLICY, not a tool-binding declaration: excluded from\n[`super::declaration_hash`] by omission (same rationale as\n`lazy-mode`).",
+      "description": "Toolchain-tier `pinned`: whether composed paths follow the rendered\n`links/<group>/<entry>` links (`false`, the default) or pin to digest\nroots (`true`). Absent falls through to `OCX_TOOLCHAIN_PINNED`. An edit\nnever invalidates `ocx.lock`.",
       "type": [
         "boolean",
         "null"
       ]
     },
     "trust": {
-      "description": "Identity-pinned verification policies; `[[trust.policy]]` in TOML.\n\nLike [`Self::packages`], this is resolve-time policy — NOT a tool\nbinding — so it is excluded from [`super::declaration_hash`] (a policy\nedit must not invalidate `ocx.lock`). Consumed by `ocx package verify`,\nwhere it pools (array-append) with the `config.toml` tiers. See\n`ocx_trust`.",
+      "description": "Identity-pinned verification policies; `[[trust.policy]]` in TOML.\n\nConsumed by `ocx package verify`, where it pools (array-append) with the\n`config.toml` tiers. Resolve-time policy, not a tool binding: a policy\nedit never invalidates `ocx.lock`.",
       "anyOf": [
         {
           "$ref": "#/$defs/TrustConfig"
@@ -134,22 +134,22 @@
       ]
     },
     "Group": {
-      "description": "A named group's body: `[group.<name>.tools]` and `[group.<name>.env]`.\n\nExactly two optional sub-tables, nothing else. A tool binding written\ndirectly under `[group.<name>]` is a parse error\n([`ProjectErrorKind::GroupHoldsDirectBinding`]) — one place bindings can\nlive, so nothing merges and nothing can collide across spellings.\n\nA tool literally named `env` or `tools` needs no special handling: it is\njust a key inside [`Self::tools`], which is a plain map.",
+      "description": "A named group's body: `[group.<name>.tools]` and `[group.<name>.env]`.\n\nExactly two optional sub-tables, nothing else: a tool binding written\ndirectly under `[group.<name>]` is a parse error. A tool may still be named\n`env` or `tools`; it is just a key inside `tools`.",
       "type": "object",
       "properties": {
         "tools": {
-          "description": "Tool bindings for this group. Values are fully-qualified\n[`PackageRef`]s, validated on the second parse pass exactly as\n`[tools]` is.",
+          "description": "Tool bindings for this group. Values are fully-qualified package\nreferences, validated exactly as `[tools]` is.",
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/PackageRef"
           }
         },
         "env": {
-          "description": "Environment variables applied when this group is selected.\n\nSkipped when empty so `ocx add -g ci` never writes a bare\n`[group.ci.env]` into a file that declares none.",
+          "description": "Environment variables applied when this group is selected.",
           "$ref": "#/$defs/ProjectEnv"
         },
         "lazy-mode": {
-          "description": "Group-tier override of the `lazy-mode` resolution ladder\n(`plan_lazy_package_loading.md` C-006). `None` means inherit from the\ntoolchain tier, never [`LazyMode::Never`]. Excluded from\n[`super::declaration_hash`] — resolve-time policy, not a tool\nbinding.",
+          "description": "Group-tier `lazy-mode` override: outranks the toolchain tier and is\noutranked by `[package.\"<id>\"]` and the CLI flag. Absent inherits from\nthe toolchain tier; it does not mean `never`. An edit never invalidates\n`ocx.lock`.",
           "anyOf": [
             {
               "$ref": "#/$defs/LazyMode"
@@ -163,10 +163,10 @@
       "additionalProperties": false
     },
     "LazyMode": {
-      "description": "Whether a declared tool composes onto `PATH` eagerly or as a shim that\ndefers content materialization to first invocation.\n\nClosed, internal enum — no `#[non_exhaustive]` (`arch-principles.md`\n\"Internal enum exhaustiveness\"): `ocx_lib` ships no external API, so\nevery match over `LazyMode` stays total across the workspace.\n\n`Deserialize` rejects any wire value outside `\"never\"` / `\"always\"` —\nthe derived enum tag match is exhaustive by construction, so an unknown\nvalue surfaces as a parse error rather than silently defaulting.",
+      "description": "Whether a declared tool composes onto `PATH` eagerly or as a shim that\ndefers content materialization to first invocation.\n\nWire values are `\"never\"` and `\"always\"`; any other value is a parse error,\nnever a silent default.",
       "oneOf": [
         {
-          "description": "Compose eagerly: content materializes before the tool reaches\n`PATH`. The floor [`LazyModeLadder::resolve`] applies when every\ntier of the resolution ladder is absent.",
+          "description": "Compose eagerly: content materializes before the tool reaches `PATH`.\nThe default when every tier of the resolution ladder is absent.",
           "type": "string",
           "const": "never"
         },
@@ -178,7 +178,7 @@
       ]
     },
     "PackageSettings": {
-      "description": "Per-package resolve-time settings declared in `ocx.toml` under\n`[package.\"<registry/repo[:tag]>\"]`.\n\nCurrently carries a single opt-out: `no-patches = true` declines the\nsite-tier companion overlay for that base — EXCEPT a system-required patch\nstill applies (enforcement beats opt-out, C7). The opt-out is\nversion-independent: it keys on canonical `registry/repository` and applies\nto every installed version.\n\n`#[serde(deny_unknown_fields)]` so a typo in a `[package.*]` key's body\nsurfaces as a parse error rather than a silent no-op.",
+      "description": "Per-package resolve-time settings: `[package.\"<registry/repo[:tag]>\"]`.\n\n`no-patches = true` declines the site-tier companion overlay for that base,\nexcept that a system-required patch still applies (enforcement beats\nopt-out). The opt-out is version-independent: it keys on canonical\n`registry/repository` and applies to every installed version. Unknown keys\nare a parse error.",
       "type": "object",
       "properties": {
         "no-patches": {
@@ -187,7 +187,7 @@
           "default": false
         },
         "lazy-mode": {
-          "description": "Package-tier override of the `lazy-mode` resolution ladder\n(`plan_lazy_package_loading.md` C-006) — the most specific config\ntier, only outranked by the CLI flag. `None` means inherit from the\ngroup/toolchain tiers, never [`LazyMode::Never`]. Excluded from\n[`super::declaration_hash`] — resolve-time policy, not a tool\nbinding.",
+          "description": "Package-tier `lazy-mode` override, the most specific config tier: only\nthe CLI flag outranks it. Absent inherits from the group and toolchain\ntiers; it does not mean `never`. An edit never invalidates `ocx.lock`.",
           "anyOf": [
             {
               "$ref": "#/$defs/LazyMode"
@@ -198,7 +198,7 @@
           ]
         },
         "lazy-report": {
-          "description": "Package-tier override of the `lazy-report` setting. `None` means\ninherit from the group/toolchain tiers. Excluded from\n[`super::declaration_hash`].",
+          "description": "Package-tier `lazy-report` override. Absent inherits from the toolchain\ntier. An edit never invalidates `ocx.lock`.",
           "anyOf": [
             {
               "$ref": "#/$defs/LazyReport"
@@ -212,7 +212,7 @@
       "additionalProperties": false
     },
     "LazyReport": {
-      "description": "Whether a shim's first-invocation materialization renders progress.\n\nClosed, internal enum — no `#[non_exhaustive]`, same rationale as\n[`LazyMode`]. Under [`LazyReport::Progress`], opening the controlling\nterminal (`/dev/tty`, `CONOUT$`) degrades to [`LazyReport::Silent`] on\nfailure, never to an error — `ENXIO` is the documented, common case in\nDocker builds, CI runners, and anything under `setsid`. Errors still go\nto stderr regardless of this setting.",
+      "description": "Whether a shim's first-invocation materialization renders progress.\n\nUnder `progress`, failing to open the controlling terminal (`/dev/tty`,\n`CONOUT$`) degrades to `silent`, never to an error. Errors still go to\nstderr regardless of this setting.",
       "oneOf": [
         {
           "description": "No progress channel is opened for a first-invocation materialization.",
@@ -227,10 +227,10 @@
       ]
     },
     "ActivateMode": {
-      "description": "How a rendered toolchain home reaches a shell's environment.\n\n# C-006\n\nClosed, internal enum — no `#[non_exhaustive]` (`arch-principles.md`\n\"Internal enum exhaustiveness\"): `ocx_lib` ships no external API, so every\nmatch over `ActivateMode` stays total across the workspace.\n\n`Deserialize` rejects any wire value outside `\"env\"` / `\"bin\"` / `\"none\"`\n— the derived enum tag match is exhaustive by construction, so an unknown\n`ocx.toml` value surfaces as a parse error (C-012, exit 78) rather than\nsilently defaulting.\n\nDeliberately **no `Default` impl**. The floor is [`ACTIVATE_FLOOR`] and it\nis applied by [`crate::ladder::Ladder::resolve`]'s `floor` parameter at the\none site that resolves the ladder; a `Default` here would be a second floor\nthat no reader of the ladder can see (C-005).",
+      "description": "How a rendered toolchain home reaches a shell's environment.\n\nWire values are `\"env\"`, `\"bin\"` and `\"none\"`; any other `ocx.toml` value\nis a parse error (exit 78), never a silent default.",
       "oneOf": [
         {
-          "description": "Compose the toolchain environment on every prompt — the shipped\nbehaviour, and the ladder's floor.",
+          "description": "Compose the toolchain environment on every prompt. The default.",
           "type": "string",
           "const": "env"
         },
@@ -259,7 +259,7 @@
           "default": []
         },
         "sigstore": {
-          "description": "Sigstore trust material for a self-hosted stack (`[trust.sigstore]`).\n\nRead from the operator `config.toml` tiers only. The project `ocx.toml`\nalso deserializes into [`TrustConfig`], but its `sigstore` sub-table is\nnever consulted: a repository that could name its own Fulcio CA would\nverify its own signatures, which is the whole trust decision.",
+          "description": "Sigstore trust material for a self-hosted stack (`[trust.sigstore]`).\n\nRead from the operator `config.toml` tiers only. The project `ocx.toml`\nalso accepts a `[trust]` table, but its `sigstore` sub-table is never\nconsulted.",
           "anyOf": [
             {
               "$ref": "#/$defs/SigstoreTrust"
@@ -273,11 +273,11 @@
       }
     },
     "TrustPolicy": {
-      "description": "A single `[[trust.policy]]` entry.\n\nOne `signers` array names everyone this policy accepts, each entry tagged\n`kind = \"keyless\"` or `kind = \"key\"` ([`SignerSpec`]). Acceptance is ANY-of,\nso **adding a signer always widens what verifies, never narrows it**. There is no\n`[trust.policy.key]` sub-table and no `[trust.policy.keyless]` one — one\ncanonical spelling. [`Self::scope`] and [`Self::builder`] stay top-level\nbecause neither depends on which backend produced the signature.\n\n```toml\n[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n# or, to carve a subtree back out:\n# scope = { include = [\"ghcr.io/acme/*\"], exclude = [\"ghcr.io/acme/experimental/*\"] }\n\nsigners = [\n  { kind = \"keyless\",\n    identity = \"https://github.com/acme/tool/.github/workflows/release.yml@refs/tags/v1.2.3\",\n    oidc_issuer = \"https://token.actions.githubusercontent.com\" },\n]\n```\n\nEvery field is optional at the serde layer, for the same fleet\nforward-compat reason unknown keys are tolerated (see [`TrustConfig`]): an\nentry written by a newer ocx degrades to its known parts instead of failing\nthe whole file. An unknown `kind` degrades the same way, through\n[`SignerSpec::Unknown`] — an internally-tagged enum would otherwise make it\na parse error for the entire document. What a *resolved* policy is allowed\nto mean is narrowed at [`TrustPolicy::compile`] instead, which refuses a\npolicy that leaves no backend behind: an absent or empty array with\n[`TrustPolicyError::NoSigners`], and one whose every entry named an unknown\nkind with [`TrustPolicyError::NoUsableSigner`]. That is also what makes a\nmisspelled field loud — it parses as an unknown key, leaves the entry\ndeclaring nothing, and fails closed rather than widening.",
+      "description": "A single `[[trust.policy]]` entry.\n\nOne `signers` array names everyone this policy accepts, each entry tagged\n`kind = \"keyless\"` or `kind = \"key\"`. Acceptance is ANY-of, so **adding a\nsigner always widens what verifies, never narrows it**.\n\n```toml\n[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n# or, to carve a subtree back out:\n# scope = { include = [\"ghcr.io/acme/*\"], exclude = [\"ghcr.io/acme/experimental/*\"] }\n\nsigners = [\n  { kind = \"keyless\",\n    identity = \"https://github.com/acme/tool/.github/workflows/release.yml@refs/tags/v1.2.3\",\n    oidc_issuer = \"https://token.actions.githubusercontent.com\" },\n]\n```\n\nA policy left with no usable signer (an absent or empty `signers`, only unknown `kind`s, or a\nmisspelled field that parses as an unknown key) is refused and fails closed, never widening.",
       "type": "object",
       "properties": {
         "scope": {
-          "description": "Which packages this policy applies to — one prefix pattern, or an\ninclude/exclude set of them ([`ScopeSpec`]).\n\nA pattern with no `*` matches the target's canonical\n`registry/repository` on `/`-separated path-segment boundaries:\n`ghcr.io/acme/tool` matches the exact repo `ghcr.io/acme/tool` and any\nsub-path under it (`ghcr.io/acme/tool/plugin`), but NOT a sibling that\nmerely shares the prefix text — `ghcr.io/acme/tool` does **not** cover\n`ghcr.io/acme/tool-cli`. A trailing `/*` covers the subtree; a mid-string\n`*` is a literal-prefix substring glob (see [`pattern_matches`]).\n\n```toml\nscope = \"ghcr.io/acme/*\"\nscope = { include = [\"ghcr.io/acme/*\"], exclude = [\"ghcr.io/acme/experimental/*\"] }\n```\n\nAbsent reads exactly like `\"\"`: a catch-all. So does an object form with\nan empty `include` and no `exclude`.",
+          "description": "Which packages this policy applies to: one prefix pattern, or an include/exclude set of them.\n\nA pattern with no `*` matches the target's canonical `registry/repository` on `/`-separated\npath-segment boundaries: `ghcr.io/acme/tool` matches that exact repo and any sub-path under it\n(`ghcr.io/acme/tool/plugin`), but **not** a sibling that merely shares the prefix text, such as\n`ghcr.io/acme/tool-cli`. A trailing `/*` covers the subtree; a mid-string `*` is a literal-prefix\nsubstring glob.\n\n```toml\nscope = \"ghcr.io/acme/*\"\nscope = { include = [\"ghcr.io/acme/*\"], exclude = [\"ghcr.io/acme/experimental/*\"] }\n```\n\nAbsent reads exactly like `\"\"`: a catch-all, as is an empty `include` with no `exclude`.",
           "anyOf": [
             {
               "$ref": "#/$defs/ScopeSpec"
@@ -289,7 +289,7 @@
           "default": null
         },
         "builder": {
-          "description": "Expected SLSA provenance builder identity, matched against the\nprovenance predicate during attestation verify.\n\nBackend-independent — it names who *built* the artifact, not how the\nsignature was made — so it is a sibling of [`Self::scope`] rather than a\nmember of a backend sub-table. Inert in signature mode: a pin on a\npolicy that never verifies provenance is forward configuration, not an\nerror.",
+          "description": "Expected SLSA provenance builder identity, matched against the\nprovenance predicate during attestation verify.\n\nIgnored in signature mode, without an error.",
           "type": [
             "string",
             "null"
@@ -297,7 +297,7 @@
           "default": null
         },
         "signers": {
-          "description": "The signers this policy accepts — an **ANY-of** set, each entry tagged\n`kind = \"keyless\"` or `kind = \"key\"` ([`SignerSpec`]).\n\n```toml\nsigners = [\n  { kind = \"keyless\", identity = \"release@acme.example\", oidc_issuer = \"https://accounts.google.com\" },\n  { kind = \"key\",     key = \"etc/acme-release.pub\" },\n]\n```\n\n**Every entry added here widens what verifies.** The set is an ANY-of, so\na new signer is a new way to pass, never a new condition to satisfy.\n\nAbsent reads as empty, and an empty set is a **configuration error**, not\na catch-all — a policy naming no acceptable signer accepts nothing, and\nthe permissive reading would turn a deleted line into a silent bypass.\nThat is also where a mis-spelled entry lands: unknown keys are tolerated\nfor the fleet forward-compat reason [`TrustPolicy`] states, so a typo\nleaves no signer behind and fails closed at [`Self::compile`].",
+          "description": "The signers this policy accepts: an **ANY-of** set, each entry tagged\n`kind = \"keyless\"` or `kind = \"key\"`.\n\n```toml\nsigners = [\n  { kind = \"keyless\", identity = \"release@acme.example\", oidc_issuer = \"https://accounts.google.com\" },\n  { kind = \"key\",     key = \"etc/acme-release.pub\" },\n]\n```\n\n**Every entry added here widens what verifies**: a new signer is a new way to pass, never a new\ncondition to satisfy. Absent reads as empty, and an empty set is a **configuration error**, not a\ncatch-all. A mis-spelled entry leaves no signer behind and fails closed the same way.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/SignerSpec"
@@ -347,7 +347,7 @@
       ]
     },
     "SignerSpec": {
-      "description": "One entry of a policy's `signers = [...]` array.\n\nThe **config layer**. It compiles into a [`PolicyBackend`] exactly as\n[`KeylessMatcher`] compiles into [`CompiledKeyless`]: `PolicyBackend` holds a\ncompiled [`regex::Regex`] and deliberately carries no serde derives, so it is\nnever deserialized into directly.\n\nInternally tagged on `kind` with newtype variants, so a signer's fields sit\nflat beside the tag and the keyless arm reuses [`KeylessMatcher`] verbatim:\n\n```toml\n[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nsigners = [\n  { kind = \"keyless\", identity = \"release@acme.example\", oidc_issuer = \"https://accounts.google.com\" },\n  { kind = \"key\", key = \"etc/acme-release.pub\" },\n]\n```\n\nAn empty array is a configuration error, never a catch-all — see\n[`validate_signers`]. `scope` and `builder` stay policy-level siblings for\nthe reason [`TrustPolicy::builder`] gives: neither depends on which backend\nsigned.\n\nReachable from `Config` through [`TrustPolicy::signers`], so the `JsonSchema`\nderive is what puts these entries in the published `config.toml` schema —\nwhich is where typo detection for a signer belongs, since the deserializer\ndeliberately tolerates unknown keys (see [`TrustConfig`]).",
+      "description": "One entry of a policy's `signers = [...]` array, tagged on `kind` with the\nsigner's fields flat beside the tag:\n\n```toml\n[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nsigners = [\n  { kind = \"keyless\", identity = \"release@acme.example\", oidc_issuer = \"https://accounts.google.com\" },\n  { kind = \"key\", key = \"etc/acme-release.pub\" },\n]\n```\n\nAn empty array is a configuration error, never a catch-all.",
       "oneOf": [
         {
           "description": "`{ kind = \"keyless\", identity | identity_regexp, oidc_issuer }`.",
@@ -378,7 +378,7 @@
           ]
         },
         {
-          "description": "A `kind` this build does not know — an entry written by a newer ocx.\n\nWithout this arm an internally-tagged enum makes an unrecognised `kind`\na hard **parse** error for the whole file, and a managed payload that\ndoes not parse is dropped entirely (`ConfigLoader` logs it and carries\non) — so one forward-looking signer would silently remove every trust\npolicy the fleet has. That is the one direction fleet forward-compat\nmust never take, for the same reason `[shell.consent]` carries the\nopposite carve-out: dropping an unknown *narrowing* declaration widens\ntrust.\n\nIt compiles to no backend, so it narrows — it accepts nobody, and a\nsibling `keyless` entry in the same policy keeps working. A policy whose\nsigners are *all* unknown compiles to nothing at all and is refused by\nname ([`TrustPolicyError::NoUsableSigner`]) rather than left to fail as\na confusing identity mismatch.",
+          "description": "A `kind` this build does not know — an entry written by a newer ocx.\n\nIt narrows: it accepts nobody, and a sibling `keyless` entry in the same\npolicy keeps working. A policy whose signers are *all* unknown is refused\nwith an error naming it.",
           "type": "object",
           "properties": {
             "kind": {
@@ -393,11 +393,11 @@
       ]
     },
     "KeylessMatcher": {
-      "description": "A `kind = \"keyless\"` signer: which Sigstore identity may sign.\n\nExactly one of `identity` / `identity_regexp` must be set — both or neither\nis a configuration error surfaced by [`TrustPolicy::compile`] (cosign's\n`--certificate-identity` / `--certificate-identity-regexp` precedent) — and\n`oidc_issuer` must be present. All three are `Option` at the serde layer and\nmandatory at compile, for the tolerance reason [`TrustPolicy`] states.",
+      "description": "A `kind = \"keyless\"` signer: which Sigstore identity may sign.\n\nExactly one of `identity` / `identity_regexp` must be set — both or neither\nis a configuration error — and `oidc_issuer` must be present.",
       "type": "object",
       "properties": {
         "identity": {
-          "description": "Exact expected certificate SAN (byte-equal). Mutually exclusive with\n[`Self::identity_regexp`].",
+          "description": "Exact expected certificate SAN (byte-equal).\n\nMutually exclusive with `identity_regexp`.",
           "type": [
             "string",
             "null"
@@ -405,7 +405,7 @@
           "default": null
         },
         "identity_regexp": {
-          "description": "Regex the certificate SAN must match in full (anchored `\\A…\\z`).\nMutually exclusive with [`Self::identity`].",
+          "description": "Regex the certificate SAN must match in full (anchored `\\A…\\z`).\n\nMutually exclusive with `identity`.",
           "type": [
             "string",
             "null"
@@ -423,11 +423,11 @@
       }
     },
     "KeyMatcher": {
-      "description": "The `kind = \"key\"` signer: one public key, by reference or inline.\n\n`key` XOR `key_pem`, mirroring [`KeylessMatcher`]'s identity XOR — both\n`Option` at the serde layer for the fleet forward-compat reason\n[`TrustPolicy`] states, both narrowed at [`validate_signers`]. There is no\n`key_regexp`: a public key is a fixed value, not a pattern.\n\n`ocx config push` inlines the reference form into `key_pem` at publish time,\nfor the reason [`SigstoreTrust::trusted_root_json`] already gives — a path on\nthe operator's disk means nothing on a consumer's.",
+      "description": "The `kind = \"key\"` signer: one public key, by reference or inline.\n\nExactly one of `key` / `key_pem` must be set. There is no `key_regexp`: a\npublic key is a fixed value, not a pattern.\n\n`ocx config push` inlines the reference form into `key_pem` at publish time.",
       "type": "object",
       "properties": {
         "key": {
-          "description": "A key reference in the [`KeyRef`](key_ref::KeyRef) grammar\n(`[scheme://]<rest>`) — the same spelling `--key` takes on the command\nline, so a KMS entry later needs no config-format change. Mutually\nexclusive with [`Self::key_pem`].\n\n# Legal in a local tier, rejected in a managed payload\n\nA managed-config payload is a `config.toml` shipped as a package to a\nfleet, so a `file:` reference in one names the *operator's* disk and\nmeans nothing on any consumer. A published payload therefore accepts\n[`Self::key_pem`] only, and the path form is refused with an error\nnaming `key_pem` as the fix — the same convention `trusted_root` /\n`trusted_root_json` already follows, where\n`package_manager::managed_config::publish::inline_trusted_root` reads the path form at\npublish time and inlines it. Rejecting it removes an incoherent state\nrather than adding a guard.\n\n**Local tiers (project / operator / user config on the author's own\ndisk) leave this unrestricted.** A relative reference resolves against\nthe directory of the config file that declared it — ordinary resolution\nsemantics so a relative path means what its author meant. That is *not*\na containment check and must not be described as one; the author owns\nthat filesystem.\n\nThe refusal lives in\n`package_manager::managed_config::publish::validate_managed_config_payload`,\nbeside its `trusted_root` twin. A managed payload that reaches a\nconsumer with this field set anyway — published by an older ocx — has it\ndropped at load time rather than read.",
+          "description": "A key reference (`[scheme://]<rest>`), the same spelling `--key` takes on the command line.\n\nMutually exclusive with `key_pem`. Unrestricted in a local tier (project, operator or user\nconfig on the author's own disk), where a relative reference resolves against the directory of\nthe config file that declared it. Refused in a managed-config payload: publishing fails with an\nerror naming `key_pem` as the fix, and a payload an older ocx published anyway has this field\ndropped at load time rather than read.",
           "type": [
             "string",
             "null"
@@ -435,7 +435,7 @@
           "default": null
         },
         "key_pem": {
-          "description": "Verbatim SPKI PEM. Mutually exclusive with [`Self::key`].",
+          "description": "Verbatim SPKI PEM.\n\nMutually exclusive with `key`.",
           "type": [
             "string",
             "null"
@@ -445,11 +445,11 @@
       }
     },
     "SigstoreTrust": {
-      "description": "The `[trust.sigstore]` sub-table: where verification gets its trust root\nwhen the stack is self-hosted rather than the Sigstore public good.\n\nEvery field is optional and the whole sub-table may be absent — omitting it\nreproduces the public-good behaviour exactly. Its purpose is fleet\ndistribution: an operator running an internal Fulcio/Rekor publishes one\n`config.toml` through the `[managed]` tier and every machine verifies\nagainst the internal CA with no env var and no file copy.",
+      "description": "The `[trust.sigstore]` sub-table: where verification gets its trust root\nwhen the stack is self-hosted rather than the Sigstore public good.\n\nEvery field is optional and the whole sub-table may be absent — omitting it\nreproduces the public-good behaviour exactly.",
       "type": "object",
       "properties": {
         "trusted_root": {
-          "description": "Path to a Sigstore trusted-root JSON, or a directory holding\n`trusted_root.json`.\n\nA relative path resolves against the directory of the `config.toml`\nthat declared it — rewritten to absolute at load time, so the same\nvalue means the same file regardless of the process working directory.\nMutually exclusive with [`Self::trusted_root_json`].",
+          "description": "Path to a Sigstore trusted-root JSON, or a directory holding\n`trusted_root.json`.\n\nA relative path resolves against the directory of the `config.toml`\nthat declared it — rewritten to absolute at load time, so the same\nvalue means the same file regardless of the process working directory.\nMutually exclusive with `trusted_root_json`.",
           "type": [
             "string",
             "null"
@@ -457,7 +457,7 @@
           "default": null
         },
         "trusted_root_json": {
-          "description": "The trusted-root document inlined verbatim.\n\nThis is the form a fleet receives: `ocx config push` reads a path-form\n[`Self::trusted_root`] at publish time and inlines it here, because a\npath on the operator's disk means nothing on a consumer's. Mutually\nexclusive with [`Self::trusted_root`].",
+          "description": "The trusted-root document inlined verbatim.\n\nThis is the form a fleet receives: `ocx config push` reads a path-form\n`trusted_root` at publish time and inlines it here. Mutually exclusive\nwith `trusted_root`.",
           "type": [
             "string",
             "null"
@@ -481,7 +481,7 @@
           "default": null
         },
         "rekor_upload": {
-          "description": "Fleet-wide default for uploading a **key-mode** signature to the\ntransparency log, when neither `--rekor-upload` nor `--no-rekor-upload`\nis given. Absent means off.\n\n**Key mode only.** Under keyless the upload is a *requirement*, not a\ndefault — a Fulcio certificate is valid for about ten minutes, and the\nRekor timestamp is the only proof the signature happened inside that\nwindow — so this field is ignored there, deliberately without a warning.\nErroring or warning on every keyless signature because a fleet-wide\nkey-mode setting says `false` would let an unrelated configuration key\nbreak the default signing path.\n\nOff by default in key mode even though cosign uploads: `rekor_url`\ndefaults to the **public** Rekor, so an on-by-default key path would\npublish the digest and signer of a private corporate artifact to a\nworld-readable append-only log on first run. That is irreversible; a\nsignature with no transparency record is fixed by re-signing.",
+          "description": "Fleet-wide default for uploading a **key-mode** signature to the\ntransparency log, when neither `--rekor-upload` nor `--no-rekor-upload`\nis given.\n\nAbsent means off. **Key mode only**: keyless signing always uploads, and ignores this\nfield without a warning. `rekor_url` defaults to the **public** Rekor, where an upload\npublishes the artifact's digest and signer to a world-readable log.",
           "type": [
             "boolean",
             "null"
