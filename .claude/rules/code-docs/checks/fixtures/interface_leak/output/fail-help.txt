@@ -1,0 +1,7 @@
+Usage: mycli ci [options]
+
+render or check the catalog CI pipeline (C-906)
+
+Options:
+  --check     check-only, no writes
+  -h, --help  display help for command

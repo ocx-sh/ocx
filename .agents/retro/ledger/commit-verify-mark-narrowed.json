@@ -1,0 +1,27 @@
+{
+  "artifact": "commit",
+  "cost_min": 0,
+  "entries": [
+    "20260924T215507Z-e5b228f3.json"
+  ],
+  "first_seen": "2026-09-24T21:55:07Z",
+  "fixed": {
+    "at": "2026-09-28T21:50:29Z",
+    "by": "CLAUDE.md",
+    "stale_versions": []
+  },
+  "folded_at": "2026-09-28T21:50:08Z",
+  "folds": 1,
+  "id": "commit-verify-mark-narrowed",
+  "kind": "defect",
+  "last_seen": "2026-09-24T21:55:07Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "high",
+  "status": "fixed",
+  "title": "verify:mark narrowed to merge context; small commits ran full task verify",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

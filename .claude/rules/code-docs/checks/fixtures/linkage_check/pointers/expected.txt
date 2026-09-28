@@ -1,0 +1,10 @@
+# path:line: RULE for every finding; any other finding fails the self-test.
+src/fail_pointers.rs:1: LNK-02
+src/fail_pointers.rs:2: LNK-02
+src/fail_pointers.rs:3: LNK-02
+src/fail_pointers.rs:4: LNK-02
+src/fail_pointers.rs:5: LNK-02
+src/fail_pointers.rs:6: LNK-02
+src/fail_pointers.rs:7: LNK-03
+src/fail_pointers.rs:8: LNK-03
+src/fail_pointers.rs:9: LNK-07

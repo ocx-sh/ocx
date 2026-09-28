@@ -1,0 +1,9 @@
+/// Adds two numbers and returns their sum. This helper exists because the
+/// call sites used to spell the addition inline and it read badly in review.
+///
+/// ```
+/// assert_eq!(demo::add(1, 2), 3);
+/// ```
+pub fn add(a: u32, b: u32) -> u32 {
+    a + b
+}

@@ -1,0 +1,10 @@
+// plan_missing.md was never committed.
+// docs/adr/untracked-0002.md sits on disk but not in the index.
+// adr_index.md#z9 names no heading.
+// adr_index.md#c2 names two headings.
+// nowhere:docs/adr/adr_index.md names a repo the map lacks.
+// other:docs/adr/adr_gone.md is not tracked in the other repo.
+// adr_index.md:12 is a line number.
+// adr_index.md#a2-on-disk-layout-a-local-copy-owner-decision-2026-07-18 is the full slug.
+// https://github.com/o/r/blob/main/docs/adr/adr_index.md follows a branch.
+pub fn f() {}

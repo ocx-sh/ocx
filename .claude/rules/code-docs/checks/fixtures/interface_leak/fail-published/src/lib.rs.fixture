@@ -1,0 +1,10 @@
+/// Pulls a package into the local store, see [`Self::resolve`].
+///
+/// Retries three times (C-901).
+pub struct Client;
+
+#[derive(clap::Parser)]
+pub struct Cli {
+    /// Registry host, see [`crate::Registry`].
+    host: String,
+}

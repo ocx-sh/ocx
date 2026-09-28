@@ -1,0 +1,2 @@
+// FOO-5, FOO-6, FOO-7 and FOO-8 sit in test scope, which discovery skips.
+fn t() {}

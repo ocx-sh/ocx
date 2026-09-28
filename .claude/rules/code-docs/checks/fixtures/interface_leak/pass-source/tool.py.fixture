@@ -1,0 +1,28 @@
+"""Module docstring with a decoy C-807; plain docstrings render only with --published."""
+
+import argparse
+from typing import Annotated
+
+import typer
+
+app = typer.Typer(help="Typer help.")
+
+
+@app.command()
+def run(name: Annotated[str, typer.Option(help="Name to use.")] = "x") -> None:
+    """Run the thing."""
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Argparse description.")
+    # A comment names C-808 and never renders.
+    p.add_argument(
+        "--flag",
+        help="A flag with help text long enough that the formatter keeps it split over "
+        "two source lines, so the hit lands on the second line.",
+    )
+    return p
+
+
+def helper() -> None:
+    """Private docstring (C-809)."""

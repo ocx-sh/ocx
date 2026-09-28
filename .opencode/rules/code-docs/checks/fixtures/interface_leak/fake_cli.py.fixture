@@ -1,0 +1,18 @@
+"""Fake CLI for the --help-walk self-test: clap-style screens, one planted leak per level."""
+
+import sys
+
+SCREENS = {
+    (): (
+        "Usage: fake <COMMAND>\n\nCommands:\n  build  Build the site, with a description\n"
+        "         wrapped onto a second line\n  ci     Check the pipeline\n"
+        "  help   Print this message\n\nOptions:\n  -h, --help  Print help\n"
+    ),
+    (
+        "build",
+    ): "Usage: fake build <COMMAND>\n\nCommands:\n  deep  Nested command\n  help  Print this message\n",
+    ("build", "deep"): "Usage: fake build deep\n\nRender deeply (C-902, adr_planted_fixture.md).\n",
+    ("ci",): "Usage: fake ci [options]\n\nrender or check the catalog CI pipeline (C-901)\n",
+}
+args = tuple(a for a in sys.argv[1:] if a != "--help")
+sys.stdout.write(SCREENS.get(args, "error: unknown command\n"))

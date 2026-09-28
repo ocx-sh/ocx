@@ -5,7 +5,8 @@
     "**/.claude/rules/bazel-quality/**",
     "**/.claude/rules/docs-quality/**",
     "**/.claude/rules/python-quality/**",
-    "**/.claude/rules/typescript-quality/**"
+    "**/.claude/rules/typescript-quality/**",
+    "**/.claude/rules/code-docs/**"
   ],
   "permissions": {
     "allow": [

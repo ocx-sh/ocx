@@ -1,0 +1,22 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20260927T232241Z-37586b2b.json",
+    "20260927T233714Z-2c144b41.json"
+  ],
+  "first_seen": "2026-09-27T23:22:41Z",
+  "fixed": null,
+  "folded_at": "2026-09-28T21:50:08Z",
+  "folds": 1,
+  "id": "project-fresh-worktree-bazel-splice",
+  "kind": "pitfall",
+  "last_seen": "2026-09-27T23:37:14Z",
+  "occurrences": 2,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "fresh worktree: cargo-bazel splice refuses TMPDIR under $HOME; schemas not generated",
+  "v": 1,
+  "versions": []
+}

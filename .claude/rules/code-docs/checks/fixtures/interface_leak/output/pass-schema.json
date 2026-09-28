@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tool.rs/schemas/fixture.json",
+  "title": "Fixture",
+  "description": "Configuration for the fixture tool.",
+  "type": "object",
+  "properties": {
+    "tier": {
+      "type": "string",
+      "description": "The tier to activate. Runs as S-1-5-18 on Windows; schema `V3`."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["C-801"],
+      "examples": ["C-802"],
+      "default": "C-803"
+    },
+    "description": {
+      "type": "string",
+      "description": "A property named description."
+    }
+  },
+  "$defs": {
+    "Sig": {
+      "title": "Signing mechanism",
+      "oneOf": [{"const": "a", "description": "Variant a."}]
+    }
+  }
+}

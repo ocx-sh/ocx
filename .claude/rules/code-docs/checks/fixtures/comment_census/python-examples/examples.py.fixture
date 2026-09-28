@@ -1,0 +1,64 @@
+def google_examples(s):
+    """Line 1 of prose.
+
+    Line 3 of prose.
+    Line 4 of prose.
+    Line 5 of prose.
+    Line 6 of prose.
+
+    Examples:
+        >>> google_examples("a")
+        'a'
+
+        >>> google_examples("b")
+        'b'
+    """
+    return s
+
+
+def literal_block():
+    """Line 1 of prose.
+
+    Line 3 of prose.
+    Line 4 of prose.
+    Line 5 of prose.
+    Typical usage::
+
+        cache = Cache(ttl=5)
+        cache.put("k", 1)
+        assert cache.get("k") == 1
+
+    Line 12 of prose.
+    """
+
+
+def bare_doctest():
+    """Line 1 of prose.
+
+    Line 3 of prose.
+    Line 4 of prose.
+    Line 5 of prose.
+    Line 6 of prose.
+    Line 7 of prose.
+    Line 8 of prose.
+
+    >>> bare_doctest()
+    ''
+    """
+    return ""
+
+
+def example_then_prose():
+    """Line 1 of prose.
+
+    Example:
+        >>> example_then_prose()
+
+    Line 6 of prose.
+    Line 7 of prose.
+    Line 8 of prose.
+    Line 9 of prose.
+    Line 10 of prose.
+    Line 11 of prose.
+    Line 12 of prose.
+    """

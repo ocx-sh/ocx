@@ -1,0 +1,4 @@
+/// Pulls a package into the local store.
+///
+/// Resolves the tag first, see [`Self::resolve`] and [`crate::index::Index`].
+pub struct Client;

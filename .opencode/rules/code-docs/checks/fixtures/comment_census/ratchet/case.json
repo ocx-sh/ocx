@@ -1,0 +1,36 @@
+{
+  "about": "LEN-03 per-file ratchet, one file per language, each holding over-cap blocks: a.rs 18 counted lines (a 7-line plain block and a 14-line doc whose 3 # Errors lines are not counted), b.py 6, c.ts 8, d.go 7. gen.rs carries a DO NOT EDIT header, so the census skips it. A rise in any one file fails and lists that file's blocks; an absent key counts as 0; drops and deleted files pass; a baseline key for a file that exists but was not measured fails; --update refuses a rise without --allow-regression and writes the sorted counts with it; a missing baseline under --check is exit 2.",
+  "runs": [
+    {"mode": "check", "baseline": {"a.rs": 18, "b.py": 6, "c.ts": 8, "d.go": 7}, "exit": 0, "expect": []},
+    {"mode": "check", "baseline": {"a.rs": 17, "b.py": 6, "c.ts": 8, "d.go": 7}, "exit": 1, "expect": ["a.rs:2 LEN-03", "a.rs:2 LEN-01", "a.rs:12 LEN-02"]},
+    {"mode": "check", "baseline": {"a.rs": 18, "b.py": 5, "c.ts": 8, "d.go": 7}, "exit": 1, "expect": ["b.py:2 LEN-03", "b.py:2 LEN-01"]},
+    {"mode": "check", "baseline": {"a.rs": 18, "b.py": 6, "c.ts": 7, "d.go": 7}, "exit": 1, "expect": ["c.ts:2 LEN-03", "c.ts:2 LEN-01"]},
+    {"mode": "check", "baseline": {"a.rs": 18, "b.py": 6, "c.ts": 8, "d.go": 6}, "exit": 1, "expect": ["d.go:4 LEN-03", "d.go:4 LEN-01"]},
+    {
+      "mode": "check", "baseline": {}, "exit": 1,
+      "expect": ["a.rs:2 LEN-03", "a.rs:2 LEN-01", "a.rs:12 LEN-02", "b.py:2 LEN-03", "b.py:2 LEN-01", "c.ts:2 LEN-03", "c.ts:2 LEN-01", "d.go:4 LEN-03", "d.go:4 LEN-01"]
+    },
+    {"mode": "check", "baseline": {"a.rs": 30, "b.py": 9, "c.ts": 8, "d.go": 7, "gone.rs": 4}, "exit": 0, "expect": []},
+    {"mode": "check", "baseline": {"a.rs": 18, "b.py": 6, "c.ts": 8, "d.go": 7, "gen.rs": 7}, "exit": 1, "expect": ["gen.rs:1 LEN-03"]},
+    {"mode": "check", "exit": 2, "expect": []},
+    {
+      "mode": "update", "baseline": {}, "exit": 1,
+      "expect": ["a.rs:2 LEN-03", "a.rs:2 LEN-01", "a.rs:12 LEN-02", "b.py:2 LEN-03", "b.py:2 LEN-01", "c.ts:2 LEN-03", "c.ts:2 LEN-01", "d.go:4 LEN-03", "d.go:4 LEN-01"],
+      "written": {}
+    },
+    {
+      "mode": "update", "baseline": {}, "allow_regression": true, "exit": 0,
+      "expect": ["a.rs:2 LEN-03", "a.rs:2 LEN-01", "a.rs:12 LEN-02", "b.py:2 LEN-03", "b.py:2 LEN-01", "c.ts:2 LEN-03", "c.ts:2 LEN-01", "d.go:4 LEN-03", "d.go:4 LEN-01"],
+      "written": {"a.rs": 18, "b.py": 6, "c.ts": 8, "d.go": 7}
+    },
+    {
+      "mode": "update", "baseline": {"a.rs": 30, "b.py": 9, "c.ts": 8, "d.go": 7, "gone.rs": 4}, "exit": 0, "expect": [],
+      "written": {"a.rs": 18, "b.py": 6, "c.ts": 8, "d.go": 7}
+    },
+    {
+      "mode": "update", "baseline": {"a.rs": 18, "b.py": 6, "c.ts": 8, "d.go": 7, "gen.rs": 7}, "exit": 1, "expect": ["gen.rs:1 LEN-03"],
+      "written": {"a.rs": 18, "b.py": 6, "c.ts": 8, "d.go": 7, "gen.rs": 7}
+    },
+    {"mode": "report", "over_lines": {".": 39}}
+  ]
+}

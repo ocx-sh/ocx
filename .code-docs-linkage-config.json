@@ -1,0 +1,5 @@
+{
+ "families": ["G", "R", "W", "E", "V", "F", "PKG", "ARCH", "OCX-C", "SEC", "CODEX-BLOCK", "M", "AM"],
+ "non_ids": ["P", "BZL-CORE", "LINT"],
+ "records": [".claude/artifacts/*.md"]
+}

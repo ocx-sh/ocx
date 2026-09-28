@@ -1,0 +1,8 @@
+pub fn publish(&self) {
+    self.stage();
+}
+
+pub fn stage(&self) {
+    // A reader never sees a half-written file, because a torn write would break the next parse.
+    self.rename();
+}

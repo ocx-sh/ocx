@@ -1,0 +1,9 @@
+pub fn parse(s: &str) -> Version {
+    // Parse the version string into its numeric parts and the optional
+    // build suffix, keeping the parts in the order the registry reports them.
+    split(s)
+}
+
+pub fn show(v: &Version) -> String {
+    v.to_string()
+}

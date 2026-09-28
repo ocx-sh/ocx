@@ -1,0 +1,31 @@
+function splitByBlank(): number {
+  // one
+  // two
+  // three
+
+  // four
+  // five
+  // six
+  return 1;
+}
+
+function fiveAcrossBlank(): number {
+  // one
+  // two
+
+  // three
+  // four
+  // five
+  return 2;
+}
+
+function splitByCode(): number {
+  // one
+  // two
+  // three
+  const a = 1;
+  // four
+  // five
+  // six
+  return a;
+}

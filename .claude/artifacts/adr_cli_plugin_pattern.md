@@ -277,3 +277,19 @@ Hand off to QA after Phase 1 lands:
 - [`adr_ocx_mirror.md`](./adr_ocx_mirror.md) — keeps `ocx_mirror` as separate binary crate sharing `ocx_lib`
 - [`adr_cli_high_low_layering.md`](./adr_cli_high_low_layering.md) — high-level vs OCI-tier layering; plugin pattern slots into the operator side
 - [`handshake_toolchain_cli.md`](./handshake_toolchain_cli.md) — current command taxonomy authority
+
+## Rationale from code: ocx_cli plugin dispatch
+
+`build_plugin_command` (`crates/ocx_cli/src/app/plugin_dispatch.rs`) uses
+`Env::new()` — full ambient — and NOT `Env::inherited()`, which is what `run`,
+`exec`, `package test` and `patch test` moved to. Ruled correct-as-is, so do
+not "align" it: those four take an explicit env selection from the user, and
+honouring what the user declared is the whole of the principle behind
+`inherited()`. A plugin invocation declares nothing — it is an extension of
+this ocx process, launched from the user's own shell, and narrowing its
+environment would break plugins for a rule that has no declaration to
+enforce.
+
+The decision rests on that principle and not on any PATH mechanic:
+`apply_ocx_config` (`env.rs`) pins `OCX_BINARY_PIN` to an absolute path, so a
+plugin's child `ocx` resolves without needing the reconciled PATH either way.

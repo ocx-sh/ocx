@@ -1,0 +1,10 @@
+//! Graph loading.
+
+/// Loads the graph from its IR; the rationale is docs/design/decisions.md#d1.
+pub fn load() {}
+
+// The retired flat layout is argued in docs/design/decisions.md#zz9.
+fn retired() {}
+
+// docs/guide.md#nope is a user page outside the records globs, never a pointer.
+fn guide() {}

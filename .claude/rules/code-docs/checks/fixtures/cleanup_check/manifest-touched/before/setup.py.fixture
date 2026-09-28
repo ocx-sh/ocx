@@ -1,0 +1,4 @@
+from setuptools import setup
+
+# Read the version from the package so the two cannot drift apart over time.
+setup(name="demo", version=__import__("demo").__version__)

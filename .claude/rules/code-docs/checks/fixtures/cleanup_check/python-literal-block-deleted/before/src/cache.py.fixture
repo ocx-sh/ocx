@@ -1,0 +1,18 @@
+"""File cache with TTL expiration.
+
+Stores raw bytes on disk, keyed by a domain tag and an arbitrary cache key,
+and reads the freshness of an entry from the file's modification time.
+
+Typical usage::
+
+    cache = FileCache("github", max_age=3600)
+    cache.put("key", b"raw bytes")
+    cached = cache.get("key")
+    obj = cache.get_json("key")
+
+The caller decides how to serialize and deserialize the data.
+"""
+
+
+class FileCache:
+    pass

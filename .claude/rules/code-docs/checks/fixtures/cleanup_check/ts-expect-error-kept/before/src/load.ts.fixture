@@ -1,0 +1,6 @@
+export function load(raw: unknown): Config {
+  // Parse the raw value that arrived from disk into the typed config shape,
+  // filling defaults for every key the file left out.
+  // @ts-expect-error legacy files still carry the v1 shape
+  return migrate(raw.v1);
+}

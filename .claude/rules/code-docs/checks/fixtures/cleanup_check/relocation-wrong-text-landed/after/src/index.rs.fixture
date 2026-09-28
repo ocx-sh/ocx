@@ -1,0 +1,8 @@
+pub fn index_path(root: &Path, registry: &str) -> PathBuf {
+    // Layout: docs/adr/0007-index-layout.md.
+    root.join(registry)
+}
+
+pub fn dir_name(registry: &str) -> String {
+    normalise(registry)
+}

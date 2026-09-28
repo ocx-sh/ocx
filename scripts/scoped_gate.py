@@ -183,8 +183,17 @@ ROWS_SECTIONS = frozenset({"crates", "verbs", "security"})
 # The CLI crate: package `ocx`, routed by markers (C-013/C-014) instead of a row.
 CLI_PACKAGE = "ocx"
 CLI_DIR = "crates/ocx_cli/"
-# The lint tier's floor and ceilings: read only by `test:lint:structure`.
-LINT_TIER_FILES = ("test/LINT_FLOOR", "test/LINT_SKIP_CEILING", "test/LINT_XFAIL_CEILING")
+# Read only by the lint tier: its floor and ceilings, and the code-docs ratchet's
+# config and baselines (test/lint/test_code_docs_ratchet.py).
+LINT_TIER_FILES = (
+    "test/LINT_FLOOR",
+    "test/LINT_SKIP_CEILING",
+    "test/LINT_XFAIL_CEILING",
+    ".code-docs-length.json",
+    ".code-docs-length-test.json",
+    ".code-docs-linkage.json",
+    ".code-docs-linkage-config.json",
+)
 COMMAND_DIR = "crates/ocx_cli/src/command/"
 # C-015 reader floors, each independent of the glob it checks: the command
 # files are counted off the tree against this constant, the acceptance modules

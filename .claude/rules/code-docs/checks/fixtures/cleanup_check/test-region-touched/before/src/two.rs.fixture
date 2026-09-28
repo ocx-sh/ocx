@@ -1,0 +1,12 @@
+pub fn two() -> u32 {
+    2
+}
+
+#[cfg(test)]
+mod tests {
+    // Checks the constant against a literal so a refactor cannot move it.
+    #[test]
+    fn is_two() {
+        assert_eq!(super::two(), 2);
+    }
+}

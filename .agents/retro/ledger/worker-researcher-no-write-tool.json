@@ -1,0 +1,23 @@
+{
+  "artifact": "worker-researcher",
+  "cost_min": 0,
+  "entries": [
+    "20260925T004301Z-f0131ae9.json"
+  ],
+  "first_seen": "2026-09-25T00:43:01Z",
+  "fixed": null,
+  "folded_at": "2026-09-28T21:50:08Z",
+  "folds": 1,
+  "id": "worker-researcher-no-write-tool",
+  "kind": "defect",
+  "last_seen": "2026-09-25T00:43:01Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "low",
+  "status": "deferred",
+  "title": "worker-researcher cannot persist research artifacts (no Write tool)",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

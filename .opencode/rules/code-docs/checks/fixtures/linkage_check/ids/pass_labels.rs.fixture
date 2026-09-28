@@ -1,0 +1,6 @@
+// ── H1: two versions, two platforms, every order ──────────────
+// H1 holds for every order of the two versions.
+/// H2: create() on the same filesystem links both paths.
+/// OCI tags do not allow `+` (`[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`).
+/// Anchored pointers such as adr_index.md#a2 carry no ID.
+pub fn f() {}

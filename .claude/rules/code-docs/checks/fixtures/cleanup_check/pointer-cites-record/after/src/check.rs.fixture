@@ -1,0 +1,4 @@
+/// Checks the graph against its schema. The IR choice: docs/design/decisions.md#d1.
+pub fn check(graph: &Graph) -> Result<(), Error> {
+    graph.validate()
+}

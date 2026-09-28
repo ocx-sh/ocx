@@ -1,0 +1,7 @@
+pub fn index_path(root: &Path, registry: &str) -> PathBuf {
+    // The index is laid out as one directory per registry, with a manifest
+    // per tag underneath. We picked this layout after comparing a flat hash
+    // store and a sqlite catalog, as docs/adr/adr_index.md records. The directory layout keeps diffs readable
+    // in review and lets a mirror copy the tree with rsync.
+    root.join(registry)
+}

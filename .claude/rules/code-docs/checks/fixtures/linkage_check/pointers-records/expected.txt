@@ -1,0 +1,3 @@
+# A records glob in the config makes docs/design/decisions.md a record: the
+# dead anchor is reported, the live one and the non-record page are not.
+src/lib.rs:6: LNK-02

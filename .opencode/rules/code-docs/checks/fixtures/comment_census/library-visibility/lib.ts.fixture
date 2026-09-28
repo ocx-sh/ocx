@@ -1,0 +1,57 @@
+/**
+ * Line 1 of prose.
+ * Line 2 of prose.
+ * Line 3 of prose.
+ * Line 4 of prose.
+ * Line 5 of prose.
+ * Line 6 of prose.
+ * Line 7 of prose.
+ * Line 8 of prose.
+ * Line 9 of prose.
+ * Line 10 of prose.
+ */
+export function publicTwelve(): void {}
+
+/**
+ * Line 1 of prose.
+ * Line 2 of prose.
+ * Line 3 of prose.
+ * Line 4 of prose.
+ * Line 5 of prose.
+ * Line 6 of prose.
+ * Line 7 of prose.
+ * Line 8 of prose.
+ * Line 9 of prose.
+ * Line 10 of prose.
+ */
+function localTwelve(): void {}
+
+export class Api {
+  /**
+   * Line 1 of prose.
+   * Line 2 of prose.
+   * Line 3 of prose.
+   * Line 4 of prose.
+   * Line 5 of prose.
+   * Line 6 of prose.
+   * Line 7 of prose.
+   * Line 8 of prose.
+   * Line 9 of prose.
+   * Line 10 of prose.
+   */
+  method(): void {}
+
+  /**
+   * Line 1 of prose.
+   * Line 2 of prose.
+   * Line 3 of prose.
+   * Line 4 of prose.
+   * Line 5 of prose.
+   * Line 6 of prose.
+   * Line 7 of prose.
+   * Line 8 of prose.
+   * Line 9 of prose.
+   * Line 10 of prose.
+   */
+  private hidden(): void {}
+}

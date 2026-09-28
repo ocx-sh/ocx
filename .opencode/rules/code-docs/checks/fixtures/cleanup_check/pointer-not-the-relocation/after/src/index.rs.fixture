@@ -1,0 +1,4 @@
+pub fn index_path(root: &Path, registry: &str) -> PathBuf {
+    // Layout: docs/adr/0008-mirror.md.
+    root.join(registry)
+}

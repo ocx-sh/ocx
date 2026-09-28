@@ -60,6 +60,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Bazel builds (`BUILD`/`MODULE.bazel`/Starlark) | [bazel-quality.md](./rules/bazel-quality.md) (shareable), skills `bazel-adopt`, `bazel-diagnose` |
 | Writing a flag into `.bazelrc`, a workflow or an rc file | [bazel-quality.md](./rules/bazel-quality.md) § BZL-FLAG-11 — prove it on the pinned binary's **two** help surfaces first; empty output is not a pass |
 | Bazel cache, credentials, `.bazelignore`, the module lockfile | [bazel-quality.md](./rules/bazel-quality.md) (shareable), [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) (`task` is the only entry point), [subsystem-ci.md](./rules/subsystem-ci.md) (which lane may write) |
+| Source comments and doc comments (length caps, guards, record pointers, process IDs, rendered help/schema text) | [code-docs.md](./rules/code-docs.md), skill `code-docs-cleanup` |
 | Hex mode state (discussion artifacts, `/hex-finalize` backup refs, re-anchor after compaction) | [hex-state.md](./rules/hex-state.md) (global), skills `hex-discuss`, `hex-finalize` |
 
 ## By language
@@ -116,6 +117,7 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `**/vite.config.*`, `**/.vitepress/config.*` | [quality-vite.md](./rules/quality-vite.md) |
 | `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md) — the one git hook this repository writes lives at `scripts/pre-push.sh` and is *copied* under the name git insists on, so the source keeps its suffix and stays linted |
 | `**/BUILD.bazel`, `**/BUILD`, `**/*.bzl`, `**/*.star`, `**/*.scl`, `**/MODULE.bazel`, `**/MODULE.bazel.lock`, `**/REPO.bazel`, `**/WORKSPACE`, `**/WORKSPACE.bazel`, `**/WORKSPACE.bzlmod`, `**/.bazelrc`, `**/*.bazelrc`, `**/.bazelrc.*`, `**/.bazelversion`, `**/.bazelignore` | [bazel-quality.md](./rules/bazel-quality.md) |
+| Source files (`**/*.rs`, `**/*.py`, `**/*.ts`, `**/*.go`, … — the rule's `paths:` list) | [code-docs.md](./rules/code-docs.md) |
 | `.github/workflows/**`, `.github/actions/**`, `renovate.json` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
 | `.github/ISSUE_TEMPLATE/**` | [workflow-github.md](./rules/workflow-github.md) |
 | `dist-workspace.toml`, `cliff.toml`, `CHANGELOG.md`, release workflows | [workflow-release.md](./rules/workflow-release.md), [workflow-git.md](./rules/workflow-git.md), [docs-quality.md](./rules/docs-quality.md) |
@@ -151,6 +153,9 @@ Exempt from overlap detection (intended broad coupling):
 | `subsystem-cli-api.md` + `subsystem-cli-commands.md` | `crates/ocx_cli/src/command/**` |
 | `workflow-feature.md` + `workflow-swarm.md` | `.claude/agents/**`, `.claude/skills/hex-*/**` |
 | `subsystem-script.md` + `subsystem-tests.md` | `test/tests/test_package_test_script.py` |
+| `code-docs.md` + `rust-quality.md` | `**/*.rs` |
+| `code-docs.md` + `python-quality.md` | `**/*.py` |
+| `code-docs.md` + `typescript-quality.md` | `**/*.ts`, `**/*.tsx`, `**/*.mts`, `**/*.cts` |
 
 ## Skills by task topic
 
@@ -177,4 +182,5 @@ Exempt from overlap detection (intended broad coupling):
 | Roadmap sync | `ocx-sync-roadmap` |
 | Commits (working phase) | `commit` |
 | Finalize branch for merge onto main | `hex-finalize` |
+| Shortening or cleaning up source comments | `code-docs-cleanup` |
 | Suggest next slash command from current state | `next` |

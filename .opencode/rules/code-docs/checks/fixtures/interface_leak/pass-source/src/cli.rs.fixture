@@ -1,0 +1,52 @@
+//! Module doc names C-801; a module doc renders nowhere outside the repo.
+
+use clap::Parser;
+
+/// Private helper, never rendered (C-802, adr_decoy.md).
+fn helper() {}
+
+/// Activate a tier.
+#[derive(Parser, schemars::JsonSchema)]
+#[command(about = "Run the tool", long_about = None)]
+pub struct Cli {
+    /// The tier to use.
+    // Guard: C-803 stays in a line comment, which never renders.
+    #[arg(long, help = "Tier name")]
+    pub tier: String,
+}
+
+#[derive(schemars::JsonSchema)]
+#[schemars(description = "Hand-set description")]
+pub struct Report {
+    pub ok: bool,
+}
+
+pub fn schema() -> serde_json::Value {
+    serde_json::json!({ "description": "Hand-written schema" })
+}
+
+pub struct Server;
+
+impl Server {
+    /// Search the catalog.
+    #[tool]
+    async fn search(&self) {}
+
+    /// Rustdoc only; the description attribute wins (C-804).
+    #[tool(description = "Fetch a package")]
+    async fn fetch(&self) {}
+}
+
+pub fn build() -> clap::Command {
+    clap::Command::new("x").about("Built by hand")
+}
+
+#[cfg(test)]
+mod tests {
+    #[derive(clap::Parser)]
+    #[command(about = "test only (C-805)")]
+    struct T {
+        /// test doc (C-806)
+        x: bool,
+    }
+}

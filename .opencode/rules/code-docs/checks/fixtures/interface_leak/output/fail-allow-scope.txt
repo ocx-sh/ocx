@@ -1,0 +1,1 @@
+The scoped allow entry for C-950 names another file, so this line still fails.

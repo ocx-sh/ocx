@@ -1,0 +1,8 @@
+{
+  "crates/ocx_cli/src/command/self_group/activate.rs": 12,
+  "crates/ocx_cli/src/command/self_group/setup.rs": 31,
+  "crates/ocx_shell/src/shell/hook.rs": 37,
+  "crates/ocx_shell/src/shell/tests_path_parity.rs": 18,
+  "website/.vitepress/theme/components/RoadmapFeature.vue": 11,
+  "website/.vitepress/theme/components/RoadmapPage.vue": 12
+}

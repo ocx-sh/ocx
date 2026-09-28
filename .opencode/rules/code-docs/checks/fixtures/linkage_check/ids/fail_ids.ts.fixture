@@ -1,0 +1,5 @@
+// C-050 names three documents.
+/** Implements the WP-9 specify phase. */
+export const x = 1;
+// review H1: the reference form, not a definition
+// The clause label C-S1-1 names a contract field.

@@ -1,0 +1,1 @@
+{"tools": [{"name": "grim_search", "description": "Search the registries (C-904).", "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "description": "Free text, ranked per RUL-51 (C-905)."}}}}]}

@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20260924T215508Z-0ad9705b.json"
+  ],
+  "first_seen": "2026-09-24T21:55:08Z",
+  "fixed": null,
+  "folded_at": "2026-09-28T21:50:08Z",
+  "folds": 1,
+  "id": "project-bazel-tag-guard-selftest-slow",
+  "kind": "slow",
+  "last_seen": "2026-09-24T21:55:08Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "high",
+  "status": "deferred",
+  "title": "bazel_tag_guard --self-test re-parses test modules without a cache (>300s)",
+  "v": 1,
+  "versions": []
+}

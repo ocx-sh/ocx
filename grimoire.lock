@@ -3,9 +3,9 @@ agent = []
 [metadata]
 lock_version = 1
 declaration_hash_version = 1
-declaration_hash = "sha256:e4370dc135bbe1596c7c86c2cd930a736a68c54bcaa3e437fce8d76d7f242584"
+declaration_hash = "sha256:c566c33228738106d21d50e6030e1d53012b97d4d12dfd369d27b0815a939bda"
 generated_by = "grim 0.14.2"
-generated_at = "2026-09-25T15:39:00Z"
+generated_at = "2026-09-27T22:32:15Z"
 
 [[skill]]
 name = "bazel-adopt"
@@ -18,6 +18,26 @@ name = "bazel-diagnose"
 pinned = "ghcr.io/ocx-sh/lore/bazel-diagnose@sha256:dc164748fdae83cc3dfa9d4f3c85d15149694c4e3220a23cd6bbae91220e0fd7"
 bundle = "ghcr.io/ocx-sh/lore/bazel-essentials"
 bundle_tag = "latest"
+
+[[skill]]
+name = "code-docs-cleanup"
+pinned = "ghcr.io/ocx-sh/lore/code-docs-cleanup@sha256:4b312606567dab8769e98fcf9770072bc425e6f2e9d1b71a3638e9c60bcaed18"
+
+[[skill.bundles]]
+repo = "ghcr.io/ocx-sh/lore/code-docs-essentials"
+tag = "latest"
+
+[[skill.bundles]]
+repo = "ghcr.io/ocx-sh/lore/python-essentials"
+tag = "latest"
+
+[[skill.bundles]]
+repo = "ghcr.io/ocx-sh/lore/rust-essentials"
+tag = "latest"
+
+[[skill.bundles]]
+repo = "ghcr.io/ocx-sh/lore/typescript-essentials"
+tag = "latest"
 
 [[skill]]
 name = "docs-instrument"
@@ -105,13 +125,33 @@ bundle_tag = "latest"
 
 [[rule]]
 name = "bazel-quality"
-pinned = "ghcr.io/ocx-sh/lore/bazel-quality@sha256:a7d36a1e1f8530fefbeaec94f9593325f13aeab5cf90307fbc8133b7b7d05ea4"
+pinned = "ghcr.io/ocx-sh/lore/bazel-quality@sha256:b1bca9704ca6d4e362f25092d5246f916d9f2c7047152f5c358b51ac24679a3a"
 bundle = "ghcr.io/ocx-sh/lore/bazel-essentials"
 bundle_tag = "latest"
 
 [[rule]]
+name = "code-docs"
+pinned = "ghcr.io/ocx-sh/lore/code-docs@sha256:179354fe1e02cca7eb0d211838c13840d9410eb9b2d73c3a947f6eb0fee6fc20"
+
+[[rule.bundles]]
+repo = "ghcr.io/ocx-sh/lore/code-docs-essentials"
+tag = "latest"
+
+[[rule.bundles]]
+repo = "ghcr.io/ocx-sh/lore/python-essentials"
+tag = "latest"
+
+[[rule.bundles]]
+repo = "ghcr.io/ocx-sh/lore/rust-essentials"
+tag = "latest"
+
+[[rule.bundles]]
+repo = "ghcr.io/ocx-sh/lore/typescript-essentials"
+tag = "latest"
+
+[[rule]]
 name = "docs-quality"
-pinned = "ghcr.io/ocx-sh/lore/docs-quality@sha256:cb951c2acc1c3b4c3e88989f72b664ff518c933e1805c535ec628be41d058bd3"
+pinned = "ghcr.io/ocx-sh/lore/docs-quality@sha256:d9ab2df9ccff688f98f539ab1f1c3c9cf56fdfefa91b7d190dfca70d0afed09e"
 bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
 bundle_tag = "latest"
 
@@ -129,7 +169,7 @@ bundle_tag = "latest"
 
 [[rule]]
 name = "python-quality"
-pinned = "ghcr.io/ocx-sh/lore/python-quality@sha256:7ad282eaddce2add9f9fd7ef17dc6cbd547908a3d7f5cb1be47f751b8a360797"
+pinned = "ghcr.io/ocx-sh/lore/python-quality@sha256:81ea86fdb1d8e2cc46b9192f300fc67a21aede449905e5e80c70702d5df4f497"
 bundle = "ghcr.io/ocx-sh/lore/python-essentials"
 bundle_tag = "latest"
 
@@ -141,7 +181,7 @@ bundle_tag = "latest"
 
 [[rule]]
 name = "rust-quality"
-pinned = "ghcr.io/ocx-sh/lore/rust-quality@sha256:39f5455aadd3ce6dff3b085aab28454b95a7a681ec3de6fadb14a84014a81e65"
+pinned = "ghcr.io/ocx-sh/lore/rust-quality@sha256:44ad99505fd8e655f18e1cfaf7aecd6ab1ea99038e4ce815c6ef6006b49e9d2f"
 bundle = "ghcr.io/ocx-sh/lore/rust-essentials"
 bundle_tag = "latest"
 
@@ -153,7 +193,7 @@ bundle_tag = "latest"
 
 [[rule]]
 name = "typescript-quality"
-pinned = "ghcr.io/ocx-sh/lore/typescript-quality@sha256:88bcbc2540b71653ae9ea31760369e1e4eb8f7128fc09299325feb1467913b77"
+pinned = "ghcr.io/ocx-sh/lore/typescript-quality@sha256:f76456817459ba29060c8cc5d62449b1c7a9a47ae65f44938f8f7788950a26c3"
 bundle = "ghcr.io/ocx-sh/lore/typescript-essentials"
 bundle_tag = "latest"
 
@@ -177,6 +217,22 @@ id = "ghcr.io/ocx-sh/lore/bazel-diagnose:latest"
 kind = "rule"
 name = "bazel-quality"
 id = "ghcr.io/ocx-sh/lore/bazel-quality:latest"
+
+[[bundle]]
+name = "code-docs-essentials"
+repo = "ghcr.io/ocx-sh/lore/code-docs-essentials"
+tag = "latest"
+pinned = "ghcr.io/ocx-sh/lore/code-docs-essentials@sha256:6451c0575d0722c6970983478641fd16bd06ea68e7e304a0aac60fc65b8726a2"
+
+[[bundle.member]]
+kind = "skill"
+name = "code-docs-cleanup"
+id = "ghcr.io/ocx-sh/lore/code-docs-cleanup:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "code-docs"
+id = "ghcr.io/ocx-sh/lore/code-docs:latest"
 
 [[bundle]]
 name = "docs-essentials"
@@ -280,7 +336,17 @@ id = "ghcr.io/michael-herwig/arcana/nox-review:latest"
 name = "python-essentials"
 repo = "ghcr.io/ocx-sh/lore/python-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/python-essentials@sha256:e187285b34e5e6f10c62b6ddc6fd8daaa7b17858d3a1f4598d72cbd92f8b805e"
+pinned = "ghcr.io/ocx-sh/lore/python-essentials@sha256:0312af6e6eed618a17b0bcb68f027b640e76596932445acb724694458b081399"
+
+[[bundle.member]]
+kind = "skill"
+name = "code-docs-cleanup"
+id = "ghcr.io/ocx-sh/lore/code-docs-cleanup:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "code-docs"
+id = "ghcr.io/ocx-sh/lore/code-docs:latest"
 
 [[bundle.member]]
 kind = "rule"
@@ -296,7 +362,17 @@ id = "ghcr.io/ocx-sh/lore/python-quality:latest"
 name = "rust-essentials"
 repo = "ghcr.io/ocx-sh/lore/rust-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/rust-essentials@sha256:f7568c69419e77418eac29fd4d6bae9fcaa6ebee2b73df1d84ecfed5b0484722"
+pinned = "ghcr.io/ocx-sh/lore/rust-essentials@sha256:59e4de7d30af4ab105ab3c4e1652fd2fcee00d6ab942e0090139b3aa134922f5"
+
+[[bundle.member]]
+kind = "skill"
+name = "code-docs-cleanup"
+id = "ghcr.io/ocx-sh/lore/code-docs-cleanup:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "code-docs"
+id = "ghcr.io/ocx-sh/lore/code-docs:latest"
 
 [[bundle.member]]
 kind = "rule"
@@ -312,7 +388,17 @@ id = "ghcr.io/ocx-sh/lore/rust-quality:latest"
 name = "typescript-essentials"
 repo = "ghcr.io/ocx-sh/lore/typescript-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/typescript-essentials@sha256:6c982240b307a4d5521311b0744d3fbf1796e9ec75c75924402f50e9eafb3662"
+pinned = "ghcr.io/ocx-sh/lore/typescript-essentials@sha256:1d3400ff08c87fb3283067b70e51d9383f0edb2553de73bff3fa30e9d4a3a4e5"
+
+[[bundle.member]]
+kind = "skill"
+name = "code-docs-cleanup"
+id = "ghcr.io/ocx-sh/lore/code-docs-cleanup:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "code-docs"
+id = "ghcr.io/ocx-sh/lore/code-docs:latest"
 
 [[bundle.member]]
 kind = "rule"

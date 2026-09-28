@@ -1,0 +1,8 @@
+/**
+ * A port on a device. The generator copies this text into the published
+ * schema, where editors show it on hover, and the long form stayed because
+ * the hover is the documentation most users read first.
+ */
+export interface Port {
+  name: string;
+}

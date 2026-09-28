@@ -1,0 +1,8 @@
+"""Negative fixtures: nothing here is a process ID."""
+
+# SPDX-2.3, UTF-8, SHA-256, CWE-79, RFC 8259 and issue #1234 match no family.
+# A V2 lock and the RFC 9111 S4.3.4 section shorthand are not short labels.
+# H1: a label this block defines.
+# Citing H1 again inside the defining block is allowed.
+# Identifiers such as plan_for and [`plan_for`] are neither IDs nor pointers.
+VALUE = 1  # a trailing comment with nothing to flag

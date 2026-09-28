@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tool.rs/schemas/fixture.json",
+  "title": "Fixture",
+  "description": "Planted leak (C-901, adr_planted_fixture.md).",
+  "type": "object",
+  "properties": {
+    "tier": {
+      "type": "string",
+      "description": "The tier to activate. See [`Self::tier`] (C-902)."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["C-801"],
+      "examples": ["C-802"],
+      "default": "C-803"
+    },
+    "description": {
+      "type": "string",
+      "description": "A property named description."
+    }
+  },
+  "$defs": {
+    "Sig": {
+      "title": "Signing mechanism (C-S1-1 contract field)",
+      "oneOf": [{"const": "a", "description": "Variant (C-903)."}]
+    }
+  }
+}

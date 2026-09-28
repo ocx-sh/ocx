@@ -4,6 +4,7 @@ clients = ["claude", "codex", "opencode"]
 
 [bundles]
 bazel-essentials = "ghcr.io/ocx-sh/lore/bazel-essentials:latest"
+code-docs-essentials = "ghcr.io/ocx-sh/lore/code-docs-essentials:latest"
 docs-essentials = "ghcr.io/ocx-sh/lore/docs-essentials:latest"
 hex = "ghcr.io/michael-herwig/arcana/hex:latest"
 nox = "ghcr.io/michael-herwig/arcana/nox:latest"

@@ -1,0 +1,16 @@
+# path:line: RULE for every finding; any other finding fails the self-test.
+fail_ids.rs:1: LNK-01
+fail_ids.rs:2: LNK-01
+fail_ids.rs:3: LNK-01
+fail_ids.rs:4: LNK-01
+fail_ids.rs:5: LNK-13
+fail_ids.rs:6: LNK-13
+fail_ids.rs:9: LNK-01
+fail_ids.ts:1: LNK-01
+fail_ids.ts:2: LNK-01
+fail_ids.ts:4: LNK-13
+fail_ids.ts:5: LNK-01
+fail_ids.py:1: LNK-01
+fail_ids.py:3: LNK-01
+fail_ids.py:4: LNK-01
+fail_ids.py:8: LNK-01

@@ -1,0 +1,5 @@
+pub fn size(meta: &Metadata) -> u64 {
+    // Report the size the filesystem gives us for this entry, in bytes,
+    // without following symlinks, so the total matches what du prints.
+    meta.len()
+}

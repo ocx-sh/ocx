@@ -1,0 +1,15 @@
+import { Command, Option } from "commander";
+
+// A line comment names C-810 and never renders.
+/** TSDoc names C-811; it renders only in a published API reference. */
+export function buildProgram(): Command {
+  const program = new Command();
+  program
+    .command("ci")
+    .description("render or check the pipeline")
+    .option("--check", "check-only, no writes")
+    .addOption(new Option("--mode <m>", "mode to run"));
+  program.command("deploy", "deploy the site");
+  program.summary('short summary');
+  return program;
+}

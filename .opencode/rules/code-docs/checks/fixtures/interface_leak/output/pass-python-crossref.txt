@@ -1,0 +1,1 @@
+Open a session with [`Client`][mypkg.Client]; see also [`Report`].

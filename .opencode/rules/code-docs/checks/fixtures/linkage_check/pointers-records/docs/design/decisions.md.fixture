@@ -1,0 +1,7 @@
+# Decisions
+
+## D1 The graph IR is the source of truth
+
+Every renderer reads the IR, never the parsed input.
+
+## D2 Ports are typed once

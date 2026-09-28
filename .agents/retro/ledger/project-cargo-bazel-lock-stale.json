@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20260924T215509Z-fcf61ba5.json"
+  ],
+  "first_seen": "2026-09-24T21:55:09Z",
+  "fixed": null,
+  "folded_at": "2026-09-28T21:50:08Z",
+  "folds": 1,
+  "id": "project-cargo-bazel-lock-stale",
+  "kind": "pitfall",
+  "last_seen": "2026-09-24T21:55:09Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "gitignored Cargo.bazel.lock.json goes stale; bazel query exits 7 on digest mismatch",
+  "v": 1,
+  "versions": []
+}

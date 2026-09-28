@@ -1,0 +1,3 @@
+// FOO-1 and FOO-2 set the order.
+// FOO-3 and FOO-4 keep it.
+pub fn f() {}

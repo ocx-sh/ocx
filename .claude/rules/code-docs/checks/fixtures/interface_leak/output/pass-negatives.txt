@@ -1,0 +1,7 @@
+Security identifier S-1-5-18 is the local system account.
+On-disk schema version. `V3` is the only version this build reads; V1 is gone.
+serde_json escapes C0 controls, and headings run H1 to H6.
+Schema id https://tool.rs/schemas/config.json, docs at tool.rs/docs.
+Letters A-Z, a bare ADR- prefix and C-S without digits are not IDs.
+usage: mycli.py [-h]; install from https://example.org/install.sh
+Implements https://modelcontextprotocol.io/specification/2025-11-25 of the MCP spec.

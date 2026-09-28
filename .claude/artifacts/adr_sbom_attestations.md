@@ -2171,3 +2171,72 @@ refusal restores the policy's enforcement meaning: if it matches, only a
 verified result satisfies the read, full stop.
 
 
+
+## Rationale from code: ocx_cli
+
+**`sbom --output`'s truncated-scan refusal** (`single_document`,
+`command/package_sbom.rs`), the one document `--output` may write, or a
+refusal naming the rest:
+
+A truncated scan is refused before anything is picked. `--output` needs
+exactly one candidate, and truncation is the state in which "exactly one"
+cannot be established: a second SBOM the budget never reached is
+indistinguishable from no second SBOM, so the ambiguity check fails open and
+the command writes one document silently, exit 0. A demanded scan already
+fails closed on this inside the library (`finish_scan`); a permissive one
+deliberately does not, because a *listing* survives truncation and reports
+it as `partial_failure`. That is right for a listing and wrong for a pick,
+and this is where the asymmetry is repaired. The check lives here rather
+than at the call site so a pick cannot be made without it.
+
+Zero of either kind never reaches here — the library ends that scan as
+`AttestationNotFound` (79). More than one is `MultipleAttestations` (65)
+naming every referrer digest, because picking one would let the registry's
+listing order decide which document a consumer reads.
+
+A verified document wins outright, and the unverified set is not even looked
+at. That precedence is defensive rather than reachable: the two lists are
+mode-exclusive by construction — a demanded scan refuses unsigned
+attachments instead of listing them, and a permissive one verifies nothing —
+so exactly one of them is ever non-empty. Kept as the fail-safe ordering
+anyway, because if that ever stops holding, the answer that must not depend
+on listing order is which trust class `--output` writes. Ambiguity is judged
+within a trust class and never across it.
+
+The refusal carries every distinct predicate type in the colliding set, not
+the first one: a package can carry a CycloneDX SBOM and an SPDX one, and a
+message naming only whichever the registry listed first states something
+untrue about the other candidate and hides the `--type` value that would
+actually resolve the ambiguity. `BTreeSet` both dedupes and sorts, so the
+message is stable across listing order.
+
+## Rationale from code: ocx_oci
+
+`crates/ocx_oci/src/referrer/media_types.rs` — cosign's own SBOM layer
+spellings (the two `COSIGN_SBOM_*` constants). OCX's own three `SBOM_*`
+constants are what OCX *writes*; these two are what cosign v3.1.1 writes and
+OCX must therefore *read*. The two sets are deliberately not unified:
+widening what OCX emits would change a wire format for no reason, while
+refusing to read cosign's spelling would leave the parity reader blind to
+cosign's own default output.
+
+Measured against a live `cosign attach sbom --sbom DOC --type T
+[--input-format F]` run, from the `mediaType [...]` cosign prints for the
+layer it uploads:
+
+```
+type=spdx      format=json (auto for .json)  -> `text/spdx+json`
+type=spdx      format=text                   -> `text/spdx`          (SBOM_SPDX_TEXT)
+type=cyclonedx format=json (auto)            -> `application/vnd.cyclonedx+json` (SBOM_CYCLONEDX)
+type=cyclonedx format=xml                    -> `application/vnd.cyclonedx+xml`
+type=syft      format=json                   -> `application/vnd.syft+json`
+```
+
+`application/spdx+json` — OCX's own SPDX-JSON spelling — is *not* in that
+table, and `--type spdx` is cosign's default, so `text/spdx+json` is the
+single most likely `.sbom` layer type in the wild.
+
+syft is absent on purpose rather than forgotten: there is no in-toto
+predicateType URI for syft's native format, so it has nothing to be labelled
+with and is refused by name (`sbom_media_type_unsupported`) rather than
+listed under a URI nobody claimed.

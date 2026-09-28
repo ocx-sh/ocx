@@ -1,0 +1,23 @@
+{
+  "about": "--report notes each undeclared package that looks published: a pyproject.toml with [build-system], a package.json with a name and no private: true, a Cargo.toml with a lib target and no publish = false. Not noted: a pyproject.toml with no build system, a private package.json, publish = false, a bin-only crate, a package declared under library. Manifests ship as .fixture so an adopter's dependency bots never read them.",
+  "runs": [
+    {
+      "mode": "report",
+      "over_lines": {
+        "declared": 0,
+        "jspkg": 0,
+        "jsprivate": 0,
+        "pyapp": 0,
+        "pylib": 0,
+        "rsbin": 0,
+        "rslib": 0,
+        "rsnopub": 0
+      },
+      "candidates": [
+        "jspkg",
+        "pylib",
+        "rslib"
+      ]
+    }
+  ]
+}

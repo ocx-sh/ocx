@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-execute",
+  "cost_min": 0,
+  "entries": [
+    "20260928T054054Z-6d9720fe.json"
+  ],
+  "first_seen": "2026-09-28T05:40:54Z",
+  "fixed": null,
+  "folded_at": "2026-09-28T21:50:08Z",
+  "folds": 1,
+  "id": "hex-execute-resume-duplicate-writers",
+  "kind": "pitfall",
+  "last_seen": "2026-09-28T05:40:54Z",
+  "occurrences": 1,
+  "scope": "harness",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "resuming a stalled execute sub-orchestrator re-spawns live workers: two writers per worktree",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-execute@sha256:3fe60f56dec0be1646ab10d76bf222dc51b0ddcf413ba09314e3f80deec21fcd"
+  ]
+}

@@ -1,0 +1,12 @@
+name: setup-demo
+# maintainers: see C-801 for the input naming
+description: Install the demo CLI (C-901).
+inputs:
+  version:
+    description: |
+      Version to install.
+      Pinned per adr_release.md.
+    default: latest
+runs:
+  using: node20
+  main: dist/index.js

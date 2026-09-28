@@ -1,0 +1,8 @@
+/// Checks the graph against its schema.
+///
+/// We weighed a per-renderer parser against one shared IR and chose the IR,
+/// after a long discussion of the trade-offs between the two designs and a
+/// look at how other graph tools structure the same pipeline.
+pub fn check(graph: &Graph) -> Result<(), Error> {
+    graph.validate()
+}

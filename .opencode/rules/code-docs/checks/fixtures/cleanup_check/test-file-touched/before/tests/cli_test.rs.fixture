@@ -1,0 +1,16 @@
+use clap::Parser;
+
+#[derive(Parser)]
+struct Cli {
+    /// Print what would change without writing anything.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+fn run(cli: &Cli) -> u32 {
+    // Walk every configured registry, one after another, and count them
+    // so the caller can print a summary line at the end of the run.
+    let mut n = 0;
+    n += u32::from(cli.dry_run);
+    n
+}

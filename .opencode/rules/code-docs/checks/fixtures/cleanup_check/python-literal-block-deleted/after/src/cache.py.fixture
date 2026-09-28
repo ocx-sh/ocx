@@ -1,0 +1,12 @@
+"""File cache with TTL expiration.
+
+Typical usage::
+
+    cache = FileCache("github", max_age=3600)
+
+The caller decides how to serialize and deserialize the data.
+"""
+
+
+class FileCache:
+    pass

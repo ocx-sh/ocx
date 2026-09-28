@@ -1,0 +1,21 @@
+plan id C-901
+clause label C-S1-1
+rule RUL-51
+action A-21
+slice S-004, done
+work package WP-12
+dx item DX-40
+decision DEC-7a
+decision D-12
+adr number ADR-0042
+record adr_planted_fixture.md
+record plan_fixture.md
+dated 2026-07-31
+see config_setup.rs, here
+ends with pull.rs
+link [`Manifest`]
+path Self::execute
+path crate::context
+record rulings_cli.md and subsystem-cli.md
+record dir docs/adr/0007-audit-gate.md#category-floors
+source path mirrors src/mycli/commands.py

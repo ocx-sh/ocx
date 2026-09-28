@@ -14,14 +14,7 @@ Standards for `ocx_cli` API reporting layer (`api/data/`, `api.rs`). Rules ensur
 
 Every file in `api/data/` follow this structure:
 
-1. **Doc comments** on all public types — describe purpose, plain format, JSON format:
-   ```rust
-   /// Short description of what this represents.
-   ///
-   /// Plain format: N-column table (Col1 | Col2 | Col3).
-   ///
-   /// JSON format: shape description (array of objects, keyed object, etc.).
-   ```
+1. **Doc comments** on all public types: one summary line of what the report represents. Do not restate the plain columns (the static `print_table` headers say them) or the JSON shape (the schema golden pins it). Add a format sentence only for what neither shows, such as a column that is omitted or a JSON key that differs from its plain header. [code-docs.md](./code-docs.md) governs the length.
 2. **`new()` constructor** (or named constructors for polymorphic types)
 3. **`Printable` impl** with single `print_table` call — no conditional empty-checks, no multiple tables
 4. **Static `&str` headers** in `print_table` — never `format!()` for dynamic headers; add data columns instead

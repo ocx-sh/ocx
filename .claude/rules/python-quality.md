@@ -120,3 +120,6 @@ set where everything blocks teaches the reader to negotiate with all of it.
   version floor that must actually run, dependency declaration, lockfiles,
   wheel contents, and publishing credentials. Loads on `pyproject.toml`
   and `uv.lock`.
+- **`code-docs`** — comments, docstrings, decision-record pointers and test
+  names as documentation, in every language: what a comment keeps, where each
+  clause goes and how long a block runs. Loads on every source file.

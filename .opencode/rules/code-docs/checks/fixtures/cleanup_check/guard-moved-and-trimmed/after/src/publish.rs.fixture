@@ -1,0 +1,9 @@
+pub fn publish(&self) {
+    self.stage();
+}
+
+pub fn stage(&self) {
+    // Render output goes to a temp file first and is renamed into place at the end.
+    // The temp file sits next to the target so both live on one filesystem.
+    self.rename();
+}

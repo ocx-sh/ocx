@@ -1,0 +1,7 @@
+# Decisions
+
+## D1 One shared IR
+
+The checker and every renderer read one shared IR. A per-renderer parser was
+weighed against it and rejected after a look at how other graph tools
+structure the same pipeline.

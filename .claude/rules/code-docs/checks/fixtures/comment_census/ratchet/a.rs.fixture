@@ -1,0 +1,26 @@
+fn seven() {
+    // Line 1 of prose.
+    // Line 2 of prose.
+    // Line 3 of prose.
+    // Line 4 of prose.
+    // Line 5 of prose.
+    // Line 6 of prose.
+    // Line 7 of prose.
+    let x = 1;
+}
+
+/// Line 1 of prose.
+/// Line 2 of prose.
+/// Line 3 of prose.
+/// Line 4 of prose.
+/// Line 5 of prose.
+/// Line 6 of prose.
+/// Line 7 of prose.
+/// Line 8 of prose.
+/// Line 9 of prose.
+/// Line 10 of prose.
+///
+/// # Errors
+///
+/// Fails when the file is missing.
+pub fn eleven_counted() {}

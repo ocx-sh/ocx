@@ -1,0 +1,58 @@
+fn split_by_blank() {
+    // one
+    // two
+    // three
+
+    // four
+    // five
+    // six
+    let x = 1;
+}
+
+fn five_across_blank() {
+    // one
+    // two
+
+    // three
+    // four
+    // five
+    let y = 2;
+}
+
+fn split_by_code() {
+    // one
+    // two
+    // three
+    let a = 1;
+    // four
+    // five
+    // six
+    let b = 2;
+}
+
+/// one
+/// two
+/// three
+/// four
+/// five
+/// six
+
+/// seven
+/// eight
+/// nine
+/// ten
+/// eleven
+pub fn doc_across_blank() {}
+
+/// one
+/// two
+/// three
+/// four
+/// five
+
+/// six
+/// seven
+/// eight
+/// nine
+/// ten
+pub fn ten_across_blank() {}
