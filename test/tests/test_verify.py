@@ -3,8 +3,7 @@
 """Acceptance tests for ``ocx package verify`` (Slice 1 — referrers verify).
 
 Contract source: ``.claude/artifacts/adr_oci_referrers_signing_v1.md``
-(specifically C-S1-1 frozen envelope + C-S1-2 VerifyErrorKind variant set) and
-``.claude/state/plans/plan_slice1_sign_and_verify.md``.
+(specifically C-S1-1 frozen envelope + C-S1-2 VerifyErrorKind variant set).
 
 Trust-root seam: verify runs against the local stack's trusted-root JSON
 (``--sigstore-trusted-root``), which carries the Fulcio CA and the pinned Rekor key. The

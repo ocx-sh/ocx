@@ -309,7 +309,7 @@ def test_the_air_gap_pipeline_resolves_the_same_platform_manifest_digest(
        words its parity claim as "byte-identical to `wget --mirror` of the
        served tree", which is circular under its own arrangement — the served
        tree *is* the copy — and this is the non-circular half, the version of
-       `adr_oci_index_only_dispatch.md:761-762` with teeth: a snapshot whose
+       `adr_oci_index_only_dispatch.md#validation` with teeth: a snapshot whose
        serialization differed from its source's would be a fixed point of
        nothing, and every round of copying would rewrite the tree.
 

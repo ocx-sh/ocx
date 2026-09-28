@@ -2,7 +2,7 @@
 # Copyright 2026 The OCX Authors
 """Shared construction and observation helpers for the rendered toolchain tree.
 
-Owned by WP-12a of ``plan_toolchain_activation.md``; imported by
+Design record: ``.claude/artifacts/adr_toolchain_activation.md``; imported by
 ``test/tests/test_toolchain_render.py`` and by the wave-6 suites that build on
 it (WP-12b, WP-12d).
 

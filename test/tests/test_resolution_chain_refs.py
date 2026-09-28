@@ -1,10 +1,10 @@
 """Acceptance tests for Capture Full OCI Resolution Chain in Package refs/blobs/ (#35).
 
-Specification-mode tests — written from the design record
-(.claude/artifacts/plan_resolution_chain_refs.md), NOT from the implementation.
+Specification-mode tests — written from ocx-sh/ocx#35, NOT from the
+implementation.
 
 These tests encode the acceptance criteria (AC1–13) and user-experience
-scenarios (UX1–7) from the design record. They MUST fail against the current
+scenarios (UX1–7) from issue #35. They MUST fail against the current
 binary because the ChainedIndex write-through, link_blobs, and GC
 changes are not yet wired.
 

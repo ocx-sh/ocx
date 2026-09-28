@@ -231,12 +231,14 @@ rule targets to 87. The tag guard printed `143 rule targets read` against a
 floor of 101 and passed: 42 of headroom is a floor that has stopped
 discriminating, which is the state this constant exists to close."""
 
-ACCEPTANCE_MODULE_TARGETS = 172
+ACCEPTANCE_MODULE_TARGETS = 171
 """One `sh_test` per `test/tests/test_*.py` (C-024) — `bazel query
-'kind(sh_test, //test:all)'` answers 172 and `ls test/tests/test_*.py` answers
-172 (181 until eight source-only sweep modules moved to the lint tier,
+'kind(sh_test, //test:all)'` answers 171 and `ls test/tests/test_*.py` answers
+171 (181 until eight source-only sweep modules moved to the lint tier,
 plan_test_speed_tiers.md C-009; 173 until `test_schema_generation.py` was
-ported into `crates/ocx_schema/tests/schema_outputs.rs`, C-020). The single home for that number: `bazel_accept_proofs.ACCEPTANCE_MODULES`
+ported into `crates/ocx_schema/tests/schema_outputs.rs`, C-020; 172 until
+`test_pull_progress.py`, whose only assertions were on log message text, was
+deleted). The single home for that number: `bazel_accept_proofs.ACCEPTANCE_MODULES`
 is an alias of this, and `test/BUILD.bazel` states no count at all — the `glob`
 is the enumeration. Three spellings of one fact is how the tree carried 172,
 181 and "188" simultaneously."""
@@ -249,7 +251,7 @@ per-module groups that left `:suite_inputs` (`:bench_inputs`,
 `:vendored_specs`). No `sh_test`, but `kind(rule, ...)` counts them, so the
 floor has to."""
 
-ACCEPTANCE_RULE_TARGETS = ACCEPTANCE_MODULE_TARGETS + ACCEPTANCE_SUPPORT_TARGETS  # 181
+ACCEPTANCE_RULE_TARGETS = ACCEPTANCE_MODULE_TARGETS + ACCEPTANCE_SUPPORT_TARGETS  # 180
 
 GRAPH_TAIL_TARGETS = 8
 """What `//...` holds that no earlier stage's universe names: `//:all` (4 —
@@ -267,8 +269,8 @@ two targets take `//crates/...` to 61 and the total to 336; the acceptance
 binary under test and launcher (`ocx_cli:ocx`, `ocx_shim:ocx_shim`) take them
 to 63 and 338; the `//crates/ocx_schema:schemas` genrule (plan_bazel_cargo_port.md
 C-001) and the 20 `rust_doc_test` targets (C-030) take them to 84 and 359; the
-`//:rustdoc_error_format` setting takes the total to 360 today (84 + 181 + 87 +
-8). The floor stays two under: it counts the drift floor's 82,
+`//:rustdoc_error_format` setting takes the total to 360 (84 + 181 + 87 + 8);
+deleting `test_pull_progress.py` takes it to 359 today. The floor stays two under: it counts the drift floor's 82,
 which excludes the seam twin and the schemas genrule."""
 
 # ---------------------------------------------------------------------------
@@ -1663,16 +1665,16 @@ def prove_counts() -> int:
         f"stage-3's floor is {STAGE_FLOORS['stage-3'].minimum}, the union universe has 169",
     )
     expect(
-        ACCEPTANCE_MODULE_TARGETS == 172,
-        f"acceptance modules is {ACCEPTANCE_MODULE_TARGETS}, test/tests/ holds 172",
+        ACCEPTANCE_MODULE_TARGETS == 171,
+        f"acceptance modules is {ACCEPTANCE_MODULE_TARGETS}, test/tests/ holds 171",
     )
     expect(
-        ACCEPTANCE_RULE_TARGETS == 181,
-        f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 181",
+        ACCEPTANCE_RULE_TARGETS == 180,
+        f"acceptance rule targets is {ACCEPTANCE_RULE_TARGETS}, //test:all holds 180",
     )
     expect(
-        STAGE_FLOORS["stage-4"].minimum == 358,
-        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 358",
+        STAGE_FLOORS["stage-4"].minimum == 357,
+        f"stage-4's floor is {STAGE_FLOORS['stage-4'].minimum}, `//...` has 357",
     )
     expect(
         STAGE_FLOORS["stage-4"].minimum
@@ -1682,7 +1684,7 @@ def prove_counts() -> int:
     )
     print(
         "counts  OK : 21 = 21 + 0, 78 = 20 + 35 + 3 + 20, 82 = 78 + 4, 45 = 40 + 5, 42 = 39 + 3, "
-        "169 = 82 + 45 + 42, 181 = 172 + 9, 358 = 169 + 181 + 8 — internal consistency only; "
+        "169 = 82 + 45 + 42, 180 = 171 + 9, 357 = 169 + 180 + 8 — internal consistency only; "
         "WP-15/WP-16 must assert these against WP-12's generated table, which is the reality "
         "check"
     )

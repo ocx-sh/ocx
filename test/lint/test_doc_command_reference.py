@@ -16,11 +16,10 @@ Plus command-specific assertions:
 * ``shell hook`` — references the ``prompt-hook`` flow and the
   ``_OCX_APPLIED`` fingerprint.
 
-Plan reference: ``.claude/state/plans/plan_project_toolchain.md`` lines
-859–873 (Phase 10 deliverable 5 — reference page entries for the new
-commands). ``pull`` already has a documented body (see lines 520–571 of
-``command-line.md`` at the time of writing), so this file does not
-re-validate it.
+Design record: ``.claude/artifacts/adr_project_toolchain_config.md`` —
+reference page entries for the new commands. ``pull`` already has a
+documented body (see lines 520–571 of ``command-line.md`` at the time of
+writing), so this file does not re-validate it.
 """
 from __future__ import annotations
 
@@ -56,7 +55,7 @@ NEW_COMMAND_ANCHORS = [
 ]
 
 # Removed/tombstone anchors: these commands were deleted in the
-# handshake_toolchain_cli.md taxonomy refactor (plan_toolchain_cli.md C4).
+# handshake_toolchain_cli.md taxonomy refactor.
 # They must have a ``> **REMOVED**`` or ``> **Moved to ...`` tombstone marker
 # (NOT a ``**Usage**`` block — they no longer exist as live commands).
 TOMBSTONE_ANCHORS = [

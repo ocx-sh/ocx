@@ -2,12 +2,11 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for WP-8 — the CLI wiring of the toolchain home.
 
-Traces one-to-one to ``.claude/state/plans/plan_toolchain_activation.md``:
-C-054 (the four mutation commands re-render), C-055 (``--pinned``), C-056
-(``ocx shell state`` reports the resolved home), C-058 (``ocx exec``'s lookup
-PATH excludes both trampoline directories), C-068 (the three-way exit-code
-mapping a trampoline's baked home inherits), S-007 (``ocx pull --dry-run`` over
-a poisoned tree), plus rulings RUL-50/52/53/54/55/57/59.
+Traces one-to-one to design record ``.claude/artifacts/adr_toolchain_activation.md``:
+the four mutation commands re-render, ``--pinned``, ``ocx shell state`` reports
+the resolved home, ``ocx exec``'s lookup PATH excludes both trampoline
+directories, the three-way exit-code mapping a trampoline's baked home
+inherits, and ``ocx pull --dry-run`` over a poisoned tree.
 
 Specification mode (contract-first TDD)
 ---------------------------------------

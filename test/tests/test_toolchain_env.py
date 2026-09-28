@@ -2,7 +2,7 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for `ocx env` (toolchain-tier composed-env command).
 
-Encodes plan_toolchain_cli.md Phase 2 contracts (C2, C3, C5) — updated to the
+Encodes handshake_toolchain_cli.md §3 The `env` command contracts — updated to the
 context-format model (format reversal, no longer "backend-first JSON default"):
 
 - ``ocx env`` (no project) → exit 64 (UsageError)
@@ -498,7 +498,7 @@ def test_shell_env_removed(ocx: OcxRunner, tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Block A2 — exit-64 regression tests for additional removed root commands
 #
-# Plan C4 contract (plan_toolchain_cli.md): ocx maps all clap parse-level
+# Per handshake_toolchain_cli.md: ocx maps all clap parse-level
 # rejections to UsageError (exit 64, EX_USAGE) — NOT exit 2 (clap default).
 # Verified empirically. These regressions guard against accidental re-addition.
 # ---------------------------------------------------------------------------

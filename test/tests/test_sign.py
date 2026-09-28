@@ -2,8 +2,7 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for ``ocx package sign`` (Slice 1 — referrers signing).
 
-Contract source: ``.claude/artifacts/adr_oci_referrers_signing_v1.md`` +
-``.claude/state/plans/plan_slice1_sign_and_verify.md``.
+Contract source: ``.claude/artifacts/adr_oci_referrers_signing_v1.md``.
 
 All tests run against the real Rust sign pipeline. Crypto-dependent tests drive
 the real Sigstore stack (`sigstore` compose profile) through the

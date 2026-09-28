@@ -3,8 +3,7 @@
 """Acceptance tests for ``ocx run`` (plan Phase 3 specification mode).
 
 These tests trace one-to-one to the Phase 3.2 contract in
-``.claude/state/plans/plan_cli_run_layering.md`` §Phase 3.2 (Step 3.2) and
-the §UX Scenarios + §Error / Exit-Code Mapping Table in that plan.
+``.claude/artifacts/adr_cli_high_low_layering.md``.
 
 Specification mode (contract-first TDD)
 ---------------------------------------

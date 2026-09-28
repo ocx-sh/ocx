@@ -415,8 +415,8 @@ VALID_IDENTIFIERS = (
     "ocx.sh/shellcheck:0.10",
 )
 
-# Bare-tag form is rejected at the schema layer per plan_project_toolchain.md
-# Phase 2.1 finding F1: identifiers must be fully qualified
+# Bare-tag form is rejected at the schema layer per adr_project_toolchain_config.md:
+# identifiers must be fully qualified
 # (registry/repo[:tag][@digest]) — no env-var expansion of the default
 # registry at parse time, otherwise a checked-in `ocx.toml` would resolve
 # differently across machines that set `OCX_DEFAULT_REGISTRY` to different
@@ -504,7 +504,7 @@ def test_bare_tag_in_project_config_exits_78(
 # ---------------------------------------------------------------------------
 # Home-tier fallback (Phase 9)
 #
-# Plan plan_project_toolchain.md Phase 9 (lines 830–855).  When the CWD walk
+# Design record adr_project_toolchain_config.md.  When the CWD walk
 # finds nothing, the resolver falls back to ``$OCX_HOME/ocx.toml``.  When a
 # project ``ocx.toml`` exists in the walk, the home tier MUST NOT compose
 # (Amendment C — wholesale replacement).

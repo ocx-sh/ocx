@@ -1,7 +1,7 @@
 """Acceptance tests for Transparent Tag Fallback (GitHub issue #41).
 
-Specification-mode tests — written from the design record
-(.claude/artifacts/plan_tag_fallback.md), NOT from the implementation.
+Specification-mode tests — written from ``.claude/artifacts/research_tag_fallback.md``
+and issue #41, NOT from the implementation.
 These tests MUST fail against the current binary (before Context::try_init
 wiring) because the ChainedIndex is not yet constructed.
 

@@ -11,7 +11,7 @@ Encodes adr_global_toolchain_tier.md + handshake_toolchain_cli.md (signed
   only — it never mutates the parent shell.
 - Isolation is by PATH precedence only (no PATH strip).
 
-Phase 5 rewrites (plan_toolchain_cli.md Phase 5 / handshake §2):
+Rewrites per handshake_toolchain_cli.md §2:
 - Test 1: ``install --global`` (deleted) replaced with ``ocx --global add``;
   ``shell init`` (deleted) replaced with ``ocx --global env --shell=sh`` activation.
 - Tests 3, 5: ``install --global`` replaced with ``ocx --global add``.

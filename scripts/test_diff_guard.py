@@ -397,7 +397,7 @@ def _fixture_only(mode: str) -> bool:
 _NEVER_NEW = frozenset({"conftest.py", "__init__.py", "pytest.ini", "tox.ini", "setup.cfg"})
 
 # The Bazel files the adoption adds under `test/`: the acceptance package and
-# the macro declaring its 172 `sh_test` targets (WP-36), the cast package and
+# the macro declaring its `sh_test` targets (WP-36), the cast package and
 # its macro (WP-33). Enumerated rather than allowed by shape, so a further
 # Bazel file under `test/` is still a decision - a new package there moves the
 # boundary that `//:` labels resolve against, which has twice taken `//...`

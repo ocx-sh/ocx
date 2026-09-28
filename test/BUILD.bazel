@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
 #
-# The acceptance suite, as one `sh_test` per `tests/test_*.py` (C-024) — 172
+# The acceptance suite, as one `sh_test` per `tests/test_*.py` (C-024) — 171
 # today, and the number is the filesystem's rather than this comment's: the
 # `glob` below is the enumeration and `scripts/bazel_accept_proofs.py`'s
 # `prove_counts` reds when its own constant drifts from `test/tests/`. The tag
@@ -92,7 +92,7 @@ filegroup(
 #     `src/**/*.py`, `tests/**` — the session hooks, the venv, and the helper
 #     package 160-odd modules import; `tests/conftest.py` imports
 #     `tests.fixtures.sigstore_stack`, so every module reads `tests/fixtures/`.
-#   * `sigstore/**` — read by that conftest-imported fixture, so by all 172
+#   * `sigstore/**` — read by that conftest-imported fixture, so by all 171
 #     (`scripts/bazel_tag_guard.py`'s derivation says so), and mounted into the
 #     Fulcio/Rekor/CT containers.
 #   * `docker-compose.yml`, `zot-config.json` — the stack every module runs

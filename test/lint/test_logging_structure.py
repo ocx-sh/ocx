@@ -1,11 +1,11 @@
-"""The logging oracle's row table is complete against the tree (plan C-048).
+"""The logging oracle's row table is complete against the tree.
 
-`tests/test_logging.py` pins, per library crate, one `log::` line an
-`OCX_LOG=<crate>=debug` directive must select. Its `LIBRARY_TARGETS` table is
+`tests/test_logging.py` pins, per library crate, that an `OCX_LOG=<target>=<level>`
+directive selects that crate's `log::` lines. Its `LIBRARY_TARGETS` table is
 only as good as its coverage of the crates that actually log, and that is a
 fact about `crates/*/src/**/*.rs`, not about the binary — so the completeness
-check reads the tree here, in the lint tier (plan_test_speed_tiers.md C-009),
-while the rows themselves keep running against `ocx` in acceptance.
+check reads the tree here, in the lint tier, while the rows themselves keep
+running against `ocx` in acceptance.
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ from src.helpers import PROJECT_ROOT
 
 # The acceptance module's own table, read from its source rather than copied:
 # a second list here would be checked against the tree while the one the
-# acceptance rows run stayed free to drift. Only each row's crate name is read;
-# the rest of a row names the binary's behaviour, which is acceptance's to run.
+# acceptance rows run stayed free to drift. Only each row's directive target is
+# read; the rest of a row names the binary's behaviour, which is acceptance's to run.
 LIBRARY_TARGETS = [
     (row.elts[0].value, None, None, None)
     for node in ast.parse(
@@ -32,8 +32,7 @@ LIBRARY_TARGETS = [
 
 
 # The crate whose targets are the CLI's own. Excluded from the derived set
-# below because it is not a library row: its coverage is ``CLI_TARGET``, which
-# every parametrised case asserts as its control.
+# below because it is not a library row.
 CLI_CRATE = "ocx_cli"
 
 

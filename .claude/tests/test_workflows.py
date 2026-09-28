@@ -661,7 +661,7 @@ _BUILD_TEST_ELSEWHERE = {
     # The deep workflow runs the acceptance suite. It once spelled this
     # `task test`, the SERIAL pytest entry point (21:41 for 3819 tests on an
     # idle four-core runner), then `task test:parallel`, and now the Bazel
-    # lane: 172 `sh_test` targets with their results cached, run concurrently
+    # lane: 171 `sh_test` targets with their results cached, run concurrently
     # behind the runner's host locks. `verify-basic.yml` is
     # deliberately not the home for it — that workflow is the fast PR gate and
     # the acceptance suite is the deep one's long half.

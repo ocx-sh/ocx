@@ -3,7 +3,7 @@
 """Acceptance for signing a *published, multi-manifest* package.
 
 Contract source: OCX-C-3 in
-``ocx-mirror/.claude/state/plans/plan_mirror_signing.md``. Its bullets are
+``ocx-mirror:.claude/artifacts/adr_mirror_signing.md``. Its bullets are
 lettered here so every test below can cite one::
 
     (a) `push --sign` writes one signature per platform manifest,
@@ -28,7 +28,7 @@ here is a **two-platform index**, because that is the only shape where
 manifest there was", and where ``-p`` narrowing is distinguishable from
 "narrowed to the only child".
 
-**The division of labour it pins** (ADR D2, `adr_mirror_signing.md`): a push
+**The division of labour it pins** (ADR D2, `ocx-mirror:.claude/artifacts/adr_mirror_signing.md`): a push
 signs the **platform manifests** it writes and never the index, whose digest
 is rewritten every time another platform merges in; the index is signed only
 by a later ``sign --tags-file`` sweep. Both halves are asserted — a signature

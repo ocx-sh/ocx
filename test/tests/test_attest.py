@@ -2,10 +2,8 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for ``ocx package attest`` and ``ocx package push --sbom``.
 
-Contract source: ``.claude/artifacts/adr_sbom_attestations.md`` +
-``.claude/state/plans/plan_sbom_attestations.md`` scenarios S-001..S-005,
-S-010, S-018. The sbom-reading half (S-006..S-008, S-017, S-019) lives in
-``test_sbom.py``.
+Contract source: ``.claude/artifacts/adr_sbom_attestations.md``. The
+sbom-reading half lives in ``test_sbom.py``.
 
 Everything here drives the real Sigstore stack (``sigstore`` compose profile)
 through the ``sigstore_stack`` / ``identity_token`` fixtures — there is no fake.

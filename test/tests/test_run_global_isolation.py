@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Acceptance tests for ``ocx run`` C7 isolation contract (plan_toolchain_cli.md §C7).
+"""Acceptance tests for ``ocx run``'s isolation contract (handshake_toolchain_cli.md §5).
 
-Encodes the Phase 3 contracts from handshake §5 + plan C7:
+Encodes the contracts from handshake_toolchain_cli.md §5 Isolation & `run`:
 
 - ``ocx run -- <cmd>`` (bare) = PROJECT tier only; exit 64 when no project/lock
   in scope. Must NOT fall back to the global toolchain.

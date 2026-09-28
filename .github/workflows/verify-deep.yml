@@ -433,7 +433,7 @@ jobs:
         # It saves nothing here: acceptance verdicts cache on local disk only
         # (adr_bazel_build_adoption.md § Stage 4, amended) and this job holds no
         # write credential, so a fresh runner starts with an empty disk cache
-        # and executes all 172 targets on every run. The verdict cache pays off
+        # and executes all 171 targets on every run. The verdict cache pays off
         # in the local loop; this lane reads only compile actions from the
         # remote cache. The targets run concurrently behind the runner's host
         # locks (`test/bazel.bzl` § Concurrency) — `ACCEPT_JOBS` at the task's

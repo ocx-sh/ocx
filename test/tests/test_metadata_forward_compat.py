@@ -14,8 +14,8 @@ NOT `list`: this branch's own binary knows `list` (the W release lands here
 too), so only a token that stays unknown forever proves the forward-compat
 reader path rather than a feature this same binary will grow.
 
-See ``plan_env_list_type.md`` contracts R-4 (metadata → 65), R-6 (`FromStr`
-remedy → 78 toml / 64 flag), and the `deps.rs` lenient-site UX row.
+See ``.claude/artifacts/adr_env_modifier_types.md`` for the forward-compat
+reader contract, and the `deps.rs` lenient-site UX row.
 """
 
 from __future__ import annotations

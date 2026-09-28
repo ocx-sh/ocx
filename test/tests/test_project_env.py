@@ -6,8 +6,7 @@
 Scope
 -----
 Encodes the Component Contracts (CLI, Precedence, Composition) and the
-Config-shape-fault table in
-``.claude/state/plans/plan_project_env_declaration.md``, plus the ratified
+Config-shape-fault table, plus the ratified
 decisions (S1-S9b, C1-C5, L1-L3, Q1-Q7, R1-R3, X1-X3) in
 ``.claude/artifacts/adr_project_env_declaration.md``.
 

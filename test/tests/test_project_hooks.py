@@ -3,8 +3,8 @@
 """Acceptance tests for project-tier ``ocx run`` env composition.
 
 Spec sources:
-- ``plan_cli_run_layering.md`` — group composition order; default-group
-  PATH precedes inherited PATH.
+- ``.claude/artifacts/adr_cli_high_low_layering.md`` — group composition
+  order; default-group PATH precedes inherited PATH.
 """
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def test_run_later_group_env_overrides_earlier(
     """``ocx run -g groupA -g groupB`` — later group's env wins on key collision.
 
     Two named groups each publish a package whose env entry uses the
-    same key (``OVERRIDE_KEY``). Per ``plan_cli_run_layering.md``, the
+    same key (``OVERRIDE_KEY``). Per ``adr_cli_high_low_layering.md``, the
     group passed last on the command line wins.
     """
     short = uuid4().hex[:8]

@@ -2,11 +2,8 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for ``ocx package sbom``.
 
-Contract source: ``.claude/artifacts/adr_sbom_attestations.md`` +
-``.claude/state/plans/plan_sbom_attestations.md`` scenarios S-006, S-007,
-S-008, S-017, S-019, plus the signature/attestation scan-isolation half of
-S-012. The writing side (``package attest``, ``push --sbom``) is
-``test_attest.py``.
+Contract source: ``.claude/artifacts/adr_sbom_attestations.md``. The
+writing side (``package attest``, ``push --sbom``) is ``test_attest.py``.
 
 Two verification modes are resolved per invocation, mirroring
 ``crates/ocx_cli/src/command/package_sbom.rs``: **demand** (``--verify``, or by

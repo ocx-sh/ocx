@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Attestation and SBOM acceptance fixtures (WP10-fix, plan `plan_sbom_attestations.md`).
+"""Attestation and SBOM acceptance fixtures (design record `adr_sbom_attestations.md`).
 
 Builders here feed WP10a (`test_attest.py`, `test_sbom.py`) and WP10b
 (`test_verify.py`, `test_sign.py`) once those land in wave 6 — this module
