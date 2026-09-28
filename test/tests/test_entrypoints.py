@@ -868,7 +868,7 @@ def test_install_transitive_closure_collision_aborts_before_disk(
 
 # ---------------------------------------------------------------------------
 # Suite A — Entrypoint collision gated on interface projection
-# (Step 3.5 of plan_two_env_composition.md)
+# (adr_two_env_composition.md)
 #
 # R and B both declare entrypoint ``e``.  The collision check runs on the
 # *interface projection* of R's TC only.  Four edge-visibility cells:
@@ -960,7 +960,7 @@ def test_suite_a_entrypoint_collision_gated_on_interface_projection(
 
 # ---------------------------------------------------------------------------
 # Suite E — Closure-deep mixed-edge collision
-# (Step 3.9 of plan_two_env_composition.md)
+# (adr_two_env_composition.md)
 #
 # New test: same transitive shape as test_install_transitive_closure_collision_aborts_before_disk
 # (R → A,B → C,D, all public, C+D declare ``cmake``) but with A→C edge

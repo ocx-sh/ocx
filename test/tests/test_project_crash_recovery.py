@@ -9,7 +9,7 @@ Spec sources:
 - ``crates/ocx_project/src/mutation.rs`` — ``MutationGuard::commit``
   ordering contract: lock first, manifest second, with rollback on
   manifest failure.
-- plan_review_fixes_project_toolchain.md Phase 1 step 4 (atomic two-file
+- ``.claude/artifacts/adr_project_toolchain_config.md`` (atomic two-file
   write contract).
 
 These tests are SPECIFICATION mode. The implementation must add

@@ -8,8 +8,6 @@ execution in the composed env, tempdir lifecycle (auto-clean vs ``--keep``),
 metadata validation, surface selection (``--self``), ``--clean`` env stripping,
 and identifier validation.
 
-Plan reference: plan_package_test.md §4 Phase 3 acceptance-test table (17 rows).
-
 Exit codes per quality-rust-exit_codes.md:
   0  = Success
   1  = Failure (child propagation)

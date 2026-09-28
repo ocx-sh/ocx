@@ -2,7 +2,7 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for the update-check throttle mechanism.
 
-Exercises plan_self_activate.md Phase B contracts:
+Exercises the update-check throttle's contracts:
 
 - State-file slug contains no dots.
 - Two consecutive invocations within the throttle window → only one registry

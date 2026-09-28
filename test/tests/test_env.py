@@ -1,7 +1,7 @@
 """Tests for OCI-tier per-package env (``ocx package env``).
 
-Rewritten Phase 5 (plan_toolchain_cli.md):
-- ``ocx env <pkg>`` → ``ocx package env <pkg>`` (OCI-tier, C3 contract).
+Rewritten per handshake_toolchain_cli.md §2:
+- ``ocx env <pkg>`` → ``ocx package env <pkg>`` (OCI-tier).
 - ``ocx shell env <pkg>`` (deleted) → rewritten to assert exit 64.
 
 Note (W5): ``ocx package env`` auto-installs missing packages via

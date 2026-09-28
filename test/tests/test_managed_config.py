@@ -2,10 +2,9 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for the corporate managed-configuration tier (``[managed]``).
 
-Design record: ``.claude/artifacts/adr_managed_config_tier.md``;
-``.claude/state/plans/plan_managed_config.md`` section "Acceptance criteria
-(29)" is the single source of truth for the 29 numbered criteria referenced
-below.
+Design record: ``.claude/artifacts/adr_managed_config_tier.md``. The
+numbering of the criteria referenced below is this module's own map, not
+the ADR's.
 
 These tests run against the CURRENT STUBS (Phase 3, contract-first TDD, same
 posture as ``test_oci_registry_mirror.py``): every scenario below is expected
@@ -43,7 +42,7 @@ fully covered at the Rust unit level instead):
 | 22 | not applicable to `[managed]` — this criterion is about `config.toml` reflow *around* the seed fence, already covered generically by `setup::rc_block` reflow tests (`rc_block.rs`'s existing CRLF/format-upgrade suite covers the mechanism; it is label-agnostic). |
 | 23 | ``test_managed_fetch_honors_local_mirror_ignores_payload_mirror`` |
 | 24 | unit: ``setup::rc_block::tests::managed_config_fence_body_is_toml_injection_safe`` |
-| 25 | ``test_no_config_refresh_kill_switch_silences_debug_hook_but_not_explicit_update`` |
+| 25 | ``test_no_config_refresh_kill_switch_is_reported_and_leaves_explicit_update_working``, ``test_no_config_refresh_kill_switch_stops_the_background_apply_tick`` |
 | 26 | ``test_no_config_hermetic_suppresses_candidate_and_env_override`` |
 | 27 | ``test_zip_and_move_warm_home_offline_identical`` |
 | 28 | unit: ``config::loader::tests::managed_snapshot_cannot_override_system_locked_registry`` — mirrors the sanctioned pattern in ``test_patches.py::test_launcher_digest_matched_opt_out_respects_system_required``: a SYSTEM-scope ``/etc/ocx/config.toml`` is the only thing that sets `system_locked`, which acceptance tests cannot write without root. |
@@ -61,6 +60,7 @@ import pytest  # noqa: F401 -- unused since the xdist group left; DEC-10 keeps t
 from src.helpers import make_package, push_managed_config
 from src.registry import push_raw_config_package
 from src.runner import OcxRunner
+from src.terminal import requires_pty, run_on_a_terminal
 
 # The managed-config fence's own label (ADR "Seed write mechanism" example:
 # `# >>> ocx managed v1 <hash> >>>` ... `# <<< ocx managed <<<`) — distinct
@@ -640,23 +640,14 @@ def test_managed_fetch_honors_local_mirror_ignores_payload_mirror(
 
 
 # ---------------------------------------------------------------------------
-# Criterion 25 — OCX_NO_CONFIG_REFRESH kills the tick, not explicit update
+# Criterion 25 — OCX_NO_CONFIG_REFRESH is reported and leaves explicit update working
 # ---------------------------------------------------------------------------
 
 
-def test_no_config_refresh_kill_switch_silences_debug_hook_but_not_explicit_update(
+def test_no_config_refresh_kill_switch_is_reported_and_leaves_explicit_update_working(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
-    # Half A: the kill-switch check in the background-tick hook runs BEFORE
-    # the TTY gate, so its debug log fires even in a non-interactive
-    # subprocess (app/managed_config_check.rs::check_for_managed_config_refresh).
-    silenced = _run(ocx, "index", "catalog", env_overrides={"OCX_NO_CONFIG_REFRESH": "1"}, log_level="debug")
-    assert "OCX_NO_CONFIG_REFRESH" in silenced.stderr, (
-        f"the kill switch must be observable in the debug log, got stderr: {silenced.stderr!r}"
-    )
-
-    # Half B: the kill switch must NOT block the EXPLICIT `ocx config update`
-    # verb -- only the automatic background tick.
+    # Half B: the kill switch must NOT block the EXPLICIT `ocx config update` verb.
     ref = f"{registry}/{unique_repo}:v1"
     push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "kill-switch-a.example"\n')
     self_image = _publish_self_image(ocx, tmp_path, f"{unique_repo}_self")
@@ -666,6 +657,12 @@ def test_no_config_refresh_kill_switch_silences_debug_hook_but_not_explicit_upda
     push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "kill-switch-b.example"\n')
     update = _run(ocx, "config", "update", env_overrides={"OCX_NO_CONFIG_REFRESH": "1"})
     assert update.returncode == 0, f"explicit `ocx config update` must still work under the kill switch: {update.stderr}"
+
+    # Half A: `config update --check` reports the switch as active. That the switch stops the
+    # background tick is `test_no_config_refresh_kill_switch_stops_the_background_apply_tick`.
+    check = _run(ocx, "config", "update", "--check", env_overrides={"OCX_NO_CONFIG_REFRESH": "1"})
+    assert check.returncode == 0, check.stderr
+    assert "OCX_NO_CONFIG_REFRESH" in json.loads(check.stdout)["kill_switches"], check.stdout
 
     # Half C: the kill switch must NOT block the setup-driven reconciling
     # refresh either -- `ocx config setup` (like `ocx self setup`) is an
@@ -679,6 +676,36 @@ def test_no_config_refresh_kill_switch_silences_debug_hook_but_not_explicit_upda
         f"the setup refresh must still work under the kill switch: {reconciled.stderr}"
     )
     assert json.loads(reconciled.stdout)["managed_config"]["status"] == "refreshed", reconciled.stdout
+
+
+@requires_pty
+def test_no_config_refresh_kill_switch_stops_the_background_apply_tick(
+    ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
+) -> None:
+    """With `refresh = "apply"`, no throttle window and stderr on a terminal, an
+    ordinary command's background tick swaps in newer registry content. Under
+    `OCX_NO_CONFIG_REFRESH=1` the snapshot must stay put; the same run without
+    the switch is the control proving the tick would otherwise have fired."""
+    write_home_config(ocx, '[managed]\nrefresh = "apply"\ninterval = "0"\n')
+    ref = f"{registry}/{unique_repo}:v1"
+    push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "tick-before.example"\n')
+    assert _run(ocx, "config", "update", env_overrides={"OCX_MANAGED_CONFIG": ref}).returncode == 0
+    before = _snapshot_digest(ocx)
+    push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "tick-after.example"\n')
+
+    # stderr stays on the pty (the tick's TTY gate); the update check is silenced so
+    # nothing but the managed tick reaches the network.
+    env = {**ocx.env, "OCX_MANAGED_CONFIG": ref, "OCX_NO_UPDATE_CHECK": "1"}
+    script = tmp_path / "tick.sh"
+    script.write_text(f'"{ocx.binary}" index catalog >/dev/null\n')
+
+    status, terminal = run_on_a_terminal(script, cwd=tmp_path, env={**env, "OCX_NO_CONFIG_REFRESH": "1"})
+    assert status == 0, terminal
+    assert _snapshot_digest(ocx) == before, "OCX_NO_CONFIG_REFRESH=1 must stop the background apply tick"
+
+    status, terminal = run_on_a_terminal(script, cwd=tmp_path, env=env)
+    assert status == 0, terminal
+    assert _snapshot_digest(ocx) != before, "control: without the switch the tick must apply the newer payload"
 
 
 # ---------------------------------------------------------------------------

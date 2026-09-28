@@ -13,8 +13,8 @@ config by running ``taplo check`` (the canonical CLI command) against:
 2. a malformed ``ocx.toml`` with a non-string ``[tools]`` value (must
    surface a type-mismatch — schema is fail-loud).
 
-Plan reference: ``.claude/state/plans/plan_project_toolchain.md`` lines
-859–873 (Phase 10 deliverable 2 — taplo auto-completion).
+Design record: ``.claude/artifacts/adr_project_toolchain_config.md`` —
+taplo auto-completion.
 
 Operational notes
 -----------------

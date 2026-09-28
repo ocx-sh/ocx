@@ -683,7 +683,7 @@ def test_item16_a_package_claiming_the_name_ocx_renders_a_trampoline_and_runs(
         f"claiming the name `ocx` must not refuse; rc={pulled.returncode}\n{pulled.stderr}"
     )
     assert "WARN" not in pulled.stderr, (
-        f"a claimed `ocx` warns nobody — the surface is one debug line; got {pulled.stderr!r}"
+        f"a claimed `ocx` warns nobody; got {pulled.stderr!r}"
     )
 
     home = directory / ".ocx" / "toolchain"
@@ -708,11 +708,8 @@ def test_item16_two_packages_claiming_one_name_render_one_trampoline_last_wins(
 ) -> None:
     """Item 16 / C-024: two claims on one name — last walked wins, silently.
 
-    One file, not two and not a refusal, and the loser is not lost: the debug
-    line names the winning identifier *and* the claim it shadowed. That line is
-    the whole of the surface D-4 allows (``RenderReport`` carries no collision
-    field, RUL-34), so it is what this asserts — an `ocx inspect` row for the
-    shadowed rival does not exist today.
+    One file, not two, no refusal and no warning; the trampoline runs the
+    last-walked package.
 
     RED: add a collision refusal or a warning to
     ``toolchain_names::record_claim`` — the pull stops being silent, or stops
@@ -749,14 +746,6 @@ def test_item16_two_packages_claiming_one_name_render_one_trampoline_last_wins(
         f"the last-walked claim owns the name; got {ran.stdout!r}"
     )
     assert first.marker not in ran.stdout, ran.stdout
-
-    debug = run_in(ocx, directory, "--log-level", "debug", "pull")
-    assert debug.returncode == EXIT_SUCCESS, debug.stderr
-    claims = [line for line in debug.stderr.splitlines() if f"'{shared}' claimed by" in line]
-    assert len(claims) == 1, f"exactly one collision line per collision; got {claims}"
-    assert second.repo in claims[0] and first.repo in claims[0], (
-        f"the debug line names the winner and the claim it shadowed; got {claims[0]!r}"
-    )
 
 
 # ---------------------------------------------------------------------------

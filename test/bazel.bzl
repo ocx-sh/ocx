@@ -179,7 +179,7 @@ from source and reds any acceptance module that has one, because there is no
 longer a way to declare it here.
 
 **Per-module fixture attribution is not feasible, and this is measured rather
-than assumed:** **160 of the then 181** (172 today) modules carry an `import`/`from` of the one
+than assumed:** **160 of the then 181** (171 today) modules carry an `import`/`from` of the one
 shared `src` package (an AST walk over `test/tests/test_*.py`, not a grep), so a
 per-module input set would be the shared set plus a rounding error for almost
 every target. The honest unit is therefore **module + shared group**: a

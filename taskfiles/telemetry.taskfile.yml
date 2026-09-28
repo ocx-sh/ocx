@@ -173,7 +173,7 @@ tasks:
       `STAGE_FLOORS["stage-4"]` already holds, in a taskfile, where nothing
       re-measures it. The tighter reads of the same graph are two
       steps away and do block: `build:drift` floors at 82 and `tag:guard` at
-      358.
+      357.
 
       Failure is loud and non-fatal, the contract `push` above already has:
       the script prints one line per finding on stderr and exits 1, and this

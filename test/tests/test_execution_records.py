@@ -5,10 +5,10 @@
 Specification mode (contract-first TDD)
 ---------------------------------------
 Every test here is written from the design record, not from the
-implementation: ``.claude/state/plans/plan_exec_resolution_record.md`` §3.2
-(the acceptance table) and ``.claude/artifacts/adr_exec_resolution_record.md``
-(the record format, the three exemplary records, the ``[records]`` block, the
-filename grammar). They are expected to FAIL until WP-7b lands.
+implementation: ``.claude/artifacts/adr_exec_resolution_record.md``
+(the acceptance table, the record format, the three exemplary records, the
+``[records]`` block, the filename grammar). They are expected to FAIL until
+the resolution record lands.
 
 What is deliberately NOT here (plan §3.2 "Moved to unit level")
 ---------------------------------------------------------------

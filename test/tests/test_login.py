@@ -1,7 +1,7 @@
 """Acceptance tests for ``ocx login`` / ``ocx logout``.
 
-Specification-phase tests anchored to ``plan_ocx_login.md`` User Experience
-Scenarios + Edge Cases. Tests panic with `unimplemented!()` against the
+Specification-phase tests anchored to ``adr_ocx_login_credential_store.md``.
+Tests panic with `unimplemented!()` against the
 current stubs — that is the contract-first TDD specification gate.
 
 Each test invokes the compiled ``ocx`` binary and asserts:

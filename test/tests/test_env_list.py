@@ -8,8 +8,8 @@ wire), so every fixture here goes through the normal `ocx package create` /
 except the one test that specifically proves the wire gate rejects metadata
 missing the required field.
 
-See ``plan_env_list_type.md`` contract rows W-3/W-4/W-7/W-8/W-9/W-10/W-11 and
-the "User Experience Scenarios" table for the behaviors pinned below.
+See ``.claude/artifacts/adr_env_modifier_types.md`` for the behaviors pinned
+below.
 
 Every custom ``env`` entry passed to ``make_package``/``make_package_with_entrypoints``
 needs an explicit ``"visibility": "public"`` — the wire default is

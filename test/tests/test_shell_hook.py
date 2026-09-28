@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Acceptance tests for shell activation — rewritten to plan_toolchain_cli.md
+"""Acceptance tests for shell activation — rewritten to the
 Phase 5 contract (handshake_toolchain_cli.md §2/§5/§7).
 
 Covers:
@@ -721,8 +721,7 @@ def test_direnv_export_byte_stability_after_emit_lines_extraction(
     the same bytes.  Any non-determinism (output ordering, stray timestamps,
     random IDs, non-reproducible quoting) is caught here.
 
-    The name retains the historical ``emit_lines_extraction`` suffix for
-    traceability to plan_toolchain_cli.md Phase 2 where it was authored;
+    The name retains the historical ``emit_lines_extraction`` suffix;
     the assertion itself is a permanent determinism fence, not a pre/post-
     refactor identity check.
 

@@ -2,8 +2,7 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for the CLI plugin dispatch contract.
 
-Contract source: ``.claude/artifacts/adr_cli_plugin_pattern.md`` (decisions 1–7)
-and ``plan_cli_plugin_pattern.md`` Phase 3 acceptance table (9 cases).
+Contract source: ``.claude/artifacts/adr_cli_plugin_pattern.md`` (decisions 1–7).
 
 Implementation is complete — all 10 tests pass against the production binary.
 """

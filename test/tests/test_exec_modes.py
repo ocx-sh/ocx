@@ -6,7 +6,7 @@ surface-completeness tests. The lib retains an internal `Full` traversal
 mode for fetch-time entrypoint collision checks, but `--mode=full` is not
 accepted from argv.
 
-Per ADR `.claude/artifacts/adr_visibility_two_axis_and_exec_modes.md`.
+Per ADR `.claude/artifacts/archive/adr_visibility_two_axis_and_exec_modes.md`.
 """
 
 from __future__ import annotations
@@ -157,7 +157,7 @@ def test_env_self_mode_excludes_interface_only_deps(
 ):
     """`ocx env --self` excludes Interface-only deps (two-env composition: private surface).
 
-    Under the two-env composition model (plan_two_env_composition.md Step 3.8):
+    Under the two-env composition model (adr_two_env_composition.md):
     - Default consumer view (interface projection): Interface deps ARE visible.
     - Self view (private projection): only deps with ``has_private()=true`` visible.
       Interface edges have ``has_private()=false``, so deps reached ONLY via
@@ -464,7 +464,7 @@ def test_invalid_mode_returns_clap_usage_error(
 
 # ---------------------------------------------------------------------------
 # Suite B — Dep entry tagged ``EntryVisibility::Interface``
-# (Step 3.6 of plan_two_env_composition.md)
+# (adr_two_env_composition.md)
 #
 # Package A declares a single env var FOO with ``visibility: "interface"``.
 # R depends on A via various edge visibilities.
@@ -551,7 +551,7 @@ def test_suite_b_dep_interface_entry_visibility_matrix(
 
 # ---------------------------------------------------------------------------
 # Suite C — Dep entry tagged ``EntryVisibility::Private``
-# (Step 3.7 of plan_two_env_composition.md)
+# (adr_two_env_composition.md)
 #
 # A.interface = {}, A.private = {FOO}
 #
@@ -621,7 +621,7 @@ def test_suite_c_dep_private_entry_never_crosses_edges(
 
 # ---------------------------------------------------------------------------
 # Suite D — Dep entry tagged ``EntryVisibility::Public``
-# (Step 3.8 of plan_two_env_composition.md)
+# (adr_two_env_composition.md)
 #
 # A.interface = {FOO}, A.private = {FOO} (public = both surfaces)
 #

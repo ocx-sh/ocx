@@ -33,7 +33,7 @@ pytestmark = pytest.mark.command("direnv*")
 EXIT_CONFIG = 78
 
 
-# Spec content from plan_project_toolchain.md lines 813-818.
+# Spec content from adr_project_toolchain_config.md.
 # Constructed by concatenation rather than a single triple-quoted literal so
 # the trailing-newline contract on each line is unambiguous.
 EXPECTED_ENVRC = (

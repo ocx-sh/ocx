@@ -2,14 +2,11 @@
 # Copyright 2026 The OCX Authors
 """Acceptance tests for the rendered toolchain tree.
 
-Two halves, both traced to ``.claude/state/plans/plan_toolchain_activation.md``:
+Two halves, both traced to design record ``.claude/artifacts/adr_toolchain_activation.md``:
 
-* **WP-15's C-070** — every composing emitter heals the groups it is about to
-  emit, not just the default one (C-065, C-067, C-070, S-006; ruling RUL-96).
-* **WP-12a's render / prune / stamp / config-refusal suite** — ADR validation
-  items 2, 12, 13, 14, 17, 18, 23, 24, 25, 31, 32, 33, 34, 36 and scenario
-  S-004 (toolchain_activation), at the *tree* level. This file now cites two
-  scenario catalogs, so every ``S-NNN`` in it names its record.
+* Every composing emitter heals the groups it is about to emit, not just the
+  default one.
+* The render / prune / stamp / config-refusal suite, at the *tree* level.
 
 Where WP-8's ``test_toolchain_cli.py`` already covers the CLI half of an item
 (does ``pull`` render, does ``remove`` prune, does a skip roll the commit back),

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Acceptance tests for ``ocx self setup`` (plan_self_setup.md Phase C.3.2).
+"""Acceptance tests for ``ocx self setup`` (design record ``adr_self_setup.md``).
 
 ``ocx self setup`` completes a bare-binary install. It runs three things in a
 hard order (bootstrap FIRST, then shims, then profiles):
@@ -1017,9 +1017,9 @@ def test_setup_bootstrap_pulls_latest_published(
 
 
 # ---------------------------------------------------------------------------
-# Version-selection tests (plan_self_setup_version_selection.md Phase C.3.2)
+# Version-selection tests (design record adr_self_setup.md)
 #
-# Each test covers one UX row from the plan's "User Experience Scenarios" table.
+# Each test covers one version-selection scenario the ADR encodes.
 # The `__OCX_SELF_IMAGE` seam redirects `ocx.sh/ocx/cli` to a fixture-published
 # stand-in package on localhost:5000.  The seam is loopback-only-asserted at
 # runtime and compiled only when built with `--features ocx/__testing`.

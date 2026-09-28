@@ -3,8 +3,8 @@
 """Acceptance tests for ``ocx package test --script`` (embedded Starlark runner).
 
 Specification-phase tests: written from the design record
-(``plan_package_test_scripting.md`` UX scenarios U1-U23 + Component Contracts
-C1-C9 + Error Taxonomy + ``adr_package_test_scripting.md``), NOT from the
+(``adr_package_test_scripting.md`` — UX scenarios, component contracts and
+error taxonomy), NOT from the
 implementation. They drive the real ``ocx`` binary against a real materialized
 package and MUST fail against the current ``unimplemented!()`` script branch
 (the binary lacks the behaviour). Each test maps explicitly to a scenario ID in

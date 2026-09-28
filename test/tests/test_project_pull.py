@@ -3,7 +3,7 @@
 """Acceptance tests for ``ocx pull`` project-config path (plan Phase 6).
 
 These tests trace one-to-one to the Phase 6 contract in
-``.claude/state/plans/plan_project_toolchain.md`` §6 (lines 734–751) plus the
+``.claude/artifacts/adr_project_toolchain_config.md`` plus the
 parity invariants borrowed from Phase 4's ``ocx exec`` and the project-config
 ``Validation Checklist`` (line 934 in particular: the project-config path must
 use ``pull_all()`` only — never ``install_all`` / ``find_or_install_all`` and

@@ -136,7 +136,7 @@ fact are how they stop agreeing.
 (`//crates/... + //test/doc_scripts/...` >= 169, WP-33's 45 and WP-33b's 42
 added to `//crates/...`'s 82 — the 42 GIF renders took that package from 45 targets to
 87, and until the floor moved with them it cleared by 42 and discriminated
-nothing) and now stage 4 (`//...` >= 358: 169 + the acceptance package's 181 +
+nothing) and now stage 4 (`//...` >= 357: 169 + the acceptance package's 180 +
 the 8 root and website targets no earlier universe names). `--stage` defaults to
 stage 4, which is the single place the adoption's stage advances:
 `bazel:tag:guard` passes no `--stage` on purpose, so a second spelling cannot go
@@ -2746,7 +2746,7 @@ def prove_suite_inputs(scratch: Path, live: list[dict]) -> int:
 
     # A whole directory glob deleted. `sigstore/**` by name: every module reads
     # it through the fixture `tests/conftest.py` imports, so it is the shared
-    # directory the per-module derivation would charge to all 172 at once.
+    # directory the per-module derivation would charge to all 171 at once.
     sigstore = {m for m in members if m.startswith(ACCEPTANCE_PACKAGE + "sigstore/")}
     expect(len(sigstore) > 0, "the live group carries no sigstore/ file, so this case proves nothing")
     findings = _judge(path, _mutate(live, group, drop_inputs=sigstore))

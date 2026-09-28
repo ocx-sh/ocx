@@ -6,7 +6,7 @@ A tool whose `lazy-mode` resolves to `always` is **deferred**: it reaches
 `PATH` as a directory of generated launchers under `$OCX_HOME/shims/` and its
 content materializes on the first invocation of one of its declared names.
 
-Two families live here, both from `plan_lazy_package_loading.md`:
+Two families live here, both from `adr_lazy_package_loading.md`:
 
 - one test per user-experience scenario **S-001 … S-013** (S-011 is the direnv
   scenario and lives in `test_lazy_direnv.py`; S-010 was "Windows composes

@@ -8,7 +8,7 @@ artifact type. These tests pin that wire shape and the operator-facing
 validation/exit-code contract.
 
 Design record: ``.claude/artifacts/adr_managed_config_tier.md`` (v2
-amendment); plan ``.claude/state/plans/plan_managed_config_v2.md`` Phase 1.
+amendment).
 """
 
 from __future__ import annotations

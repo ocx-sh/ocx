@@ -20,7 +20,6 @@ Deferred:
        either a C toolchain in the test environment or shipping a
        pre-compiled fixture binary.  This warrants its own test
        fixture authoring effort.
-       See .claude/artifacts/plan_hardlink_assembly.md Sub-plan 6 / I1.
 
 Shared-layer construction (Option B):
   make_package() cannot force two different packages to reference the

@@ -25,7 +25,6 @@ ocx_util = [
 ocx_console = [
     "tests/test_color.py",
     "tests/test_progress_channel.py",
-    "tests/test_pull_progress.py",
     "tests/test_completion_ascii.py",
 ]
 # registry transport, references, layers, referrers, auth (`login`, `push`, `tag`)
