@@ -1,0 +1,10 @@
+{
+  "about": "LEN-01 block definition: comment lines of one kind with only blank lines between them form one block, and the blank lines do not count. A 3+3 run across a blank line is 6 lines (red); 2+3 across a blank line is 5 (green); 3+3 split by code is two blocks (green). Doc blocks span blank lines the same way: 6+5 is 11 (red), 5+5 is 10 (green).",
+  "runs": [
+    {
+      "mode": "over-cap",
+      "exit": 1,
+      "expect": ["blocks.go:4 LEN-01", "blocks.py:2 LEN-01", "blocks.rs:2 LEN-01", "blocks.rs:33 LEN-02", "blocks.ts:2 LEN-01"]
+    }
+  ]
+}

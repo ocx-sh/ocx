@@ -17,7 +17,7 @@ paths:
   - "**/*.star"
   - "**/*.scl"
 summary: The Bazel quality index — the gate, the non-negotiables, and where the depth lives
-keywords: bazel,starlark,bzlmod,module-extension,repository-rule,lockfile,remote-cache,remote-execution,rbe,disk-cache,hermeticity,sandbox,determinism,buildifier,gazelle,bazel-diff,target-determinator,rules_rust,rules_python,rules_js,rules_ts,rules_cc,protobuf,monorepo,ci,bazelrc,bazelisk
+keywords: bazel,starlark,bzlmod,module-extension,repository-rule,lockfile,remote-cache,remote-execution,rbe,disk-cache,hermeticity,sandbox,determinism,buildifier,gazelle,rules_go,go_deps,nogo,x_defs,bazel-diff,target-determinator,rules_rust,rules_python,rules_js,rules_ts,rules_cc,protobuf,monorepo,ci,bazelrc,bazelisk
 license: Apache-2.0
 repository: https://github.com/ocx-sh/grimoire-lore
 ---
@@ -39,7 +39,8 @@ you are on.** Four behaviours flip at 9.0.0 — `WORKSPACE` support is gone,
 `sh_*`, `java_*` and `proto_library` symbol needs an explicit `load()`,
 `--incompatible_strict_action_env` defaults on, and `--repo_contents_cache`
 defaults on — and every rule set here was measured on 8.7.0, 8.8.0 and 9.2.0
-(2026-09-06). Where a rule names a version, that is the version it was
+(2026-09-06), except `java.md` and `go.md`, whose own measurement disclosure
+governs. Where a rule names a version, that is the version it was
 watched on. Where it names none, it held on both majors. Bazel's own docs,
 ruleset READMEs and release notes were each measured wrong at least once
 during that work; the binary's two help surfaces are the only authority for
@@ -131,7 +132,8 @@ filed under. One level deep; these files do not point at each other.
 | Writing a `ts_project`, `npm_translate_lock`, a pnpm lockfile entry, a JS test target, or running Gazelle for JS | [bazel-quality/typescript.md](bazel-quality/typescript.md) |
 | Writing a `cc_*` target, registering a C++ toolchain, enabling `layering_check` or a sanitizer, or wrapping a CMake or Autotools build | [bazel-quality/cpp.md](bazel-quality/cpp.md) |
 | Writing a `java_*` or `kt_jvm_*` target, pinning the JDK version flags, repinning `maven_install.json`, or building a deploy jar | [bazel-quality/java.md](bazel-quality/java.md) |
-| Editing `Cargo.toml`, `pyproject.toml`, `package.json`, `tsconfig*.json`, `build.gradle.kts` or `pom.xml` themselves | `rust-cargo`, `python-packaging`, `typescript-packaging`, `gradle-build`, `maven-build` (sibling sets — see below) |
+| Writing a `go_*` target, running Gazelle for Go, repinning `go_deps`, or wiring `nogo` | [bazel-quality/go.md](bazel-quality/go.md) |
+| Editing `Cargo.toml`, `pyproject.toml`, `package.json`, `tsconfig*.json`, `build.gradle.kts`, `pom.xml` or `go.mod` themselves | `rust-cargo`, `python-packaging`, `typescript-packaging`, `gradle-build`, `maven-build`, `go-modules` (sibling sets — see below) |
 | Deciding whether to adopt Bazel, or migrating a repository onto it | the `bazel-adopt` skill |
 | A build that is already slow, missing the cache, nondeterministic, flaky or refetching | the `bazel-diagnose` skill |
 
@@ -153,13 +155,13 @@ set where everything blocks teaches the reader to negotiate with all of it.
 ## Siblings
 
 - **`rust-cargo`, `python-packaging`, `typescript-packaging`, `gradle-build`,
-  `maven-build`** — own `Cargo.toml`, `pyproject.toml`, `package.json`,
-  `tsconfig*.json`, `build.gradle.kts`, `pom.xml` and the lockfiles beside them. The language depth files here say what a
+  `maven-build`, `go-modules`** — own `Cargo.toml`, `pyproject.toml`, `package.json`,
+  `tsconfig*.json`, `build.gradle.kts`, `pom.xml`, `go.mod` and the lockfiles beside them. The language depth files here say what a
   *Bazel-specific* edit to one of those files must look like and name the
   file; this set never loads on it.
 - **`rust-quality`, `python-quality`, `typescript-quality`, `java-quality`,
-  `kotlin-quality`** — own the source files a target here compiles. This set
-  never loads on `*.rs`, `*.py`, `*.ts`, `*.java` or `*.kt`, so the two never
+  `kotlin-quality`, `go-quality`** — own the source files a target here compiles. This set
+  never loads on `*.rs`, `*.py`, `*.ts`, `*.java`, `*.kt` or `*.go`, so the two never
   load together.
 - **`bazel-adopt`** (skill) — the go/no-go gate and the migration order,
   run once per repository. **`bazel-diagnose`** (skill) — a build that is

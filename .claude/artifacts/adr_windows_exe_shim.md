@@ -769,3 +769,48 @@ doc-writer at landing; no rebuttal/matrix row needs rewording now.
 | 2026-05-18 | Builder (Opus 4.7, Codex gate one-shot) | Contract 1 §Behavior re-sequenced for the combined `STARTUPINFOEXW`(HANDLE_LIST+JOB_LIST, no-suspend) rewrite: console handler before child runs (finding 4); stdio-only handle whitelist (finding 1, CWE-403); job-at-create via attribute list — removed `CREATE_SUSPENDED`/`AssignProcessToJobObject`/`ResumeThread` race window. Postconditions updated. Context fact #4 updated. |
 | 2026-05-18 | Builder (Opus 4.7, review-fix R2 doc-reconcile) | **R2 design-record reconciliation to shipped review-fix code (code behavior unchanged except a behavior-preserving dead-arm collapse).** §`.shim` Sidecar Format Contract: removed `%` from the forbidden-byte set (`LAUNCHER_UNSAFE_CHARS` is now `'`,`"`,`\n`,`\r`,`\0`), added the amendment paragraph + this row — rationale (no post-cutover consumer treats `%` specially: `.sh` single-quotes `pkg_root`, one-line `.shim` read verbatim, `CreateProcessW` has no `cmd.exe`) and the explicit statement that this is a **backward-compatible admissible-set widening** (old `.shim` files are a strict subset of the new grammar — no installed-launcher migration; the dangerous narrowing direction is not taken). Fixed the §Content row (was "the same string baked into the `.cmd` body" — `.cmd` removed in the cutover; now references the `.sh` body single-quoted literal). §Error Taxonomy stderr column reconciled to the shipped lines: E1/E2 carry the `(re-run \`ocx install\` …)` recovery hint; E5 has two messages (unset-pin vs defined-but-missing-pin naming the path); E6 is `failed to start {program}: win32 error {win32}` (not the old `<win32 error>` placeholder / hard-coded `ocx`) — exit codes 69/74/77/78 unchanged. Contract 1: added the third degraded mode (no-console parent → neither `STARTF_USESTDHANDLES` nor the std trio, OS default streams, child still launches) to §Postconditions; annotated step 9 that `STARTF_USESTDHANDLES` is gated on all-three-valid via `core::use_std_handles`. Code: collapsed the now-identical `ERROR_ACCESS_DENIED`/`other` `SpawnFailure` match arms in `ocx_shim::run()` into one (77-vs-74 discrimination already lives in `exit_code()`); behavior identical, verified by `ocx_shim` tests. |
 | 2026-05-18 | Builder (Opus 4.7, user-directed scope change) | **Axis C C1→C2 cutover (Status → Accepted).** Stop emitting `.cmd` entirely; Windows launcher is `.exe`+`.shim` only. Rewrote Axis C verdict + weighted table + §Decision Outcome + §Quantified Impact (2 files/entry, PATHEXT machinery removed) + §Consequences (residual `%*` orphan GONE; accepted negative now = no launcher in unsigned-`.exe`-blocked locked-down envs) + §Reversibility + §Migration (clean break, pre-1.0, no migration code) + Context facts #2/#6 + Implementation Plan (PATHEXT removal now in-scope/done, not deferred) + doc-surface list. Title + Status updated. Removed the dead PATHEXT inject/warn subsystem (`pathext` module, `warn_if_pathext_missing_launcher`, `emplace_pathext` call sites, `synthetic_pathext_entry`). Shim blob unaffected — not rebuilt. |
+
+## Rationale from code: ocx_package_manager
+
+`prepare_lazy.rs`'s `write_windows_shim_slot` hardlinks `<name>.exe` from
+`shim_bin` (the same committed blob `crate::launcher::generate` hardlinks
+for an installed package's `entrypoints/`) and writes its `<name>.shimref`
+sidecar — one line, the pinned identifier, newline-terminated — so
+`ocx launcher shim`'s Windows dispatch (`materialize_lazy`'s
+`GENERATED_SIBLING_EXTENSIONS`) can find it. `.shimref`, never `.shim`:
+`.shim` names an installed package's sidecar under `entrypoints/`, and a
+shim tree's `bin/` is a different grammar (`materialize_lazy.rs`).
+
+The `.exe` is linked before the `.shimref` is written, mirroring the
+sibling `.shim` producer's write-ordering postcondition: the only
+recoverable partial state on a mid-write fault is exe-present/sidecar-
+absent, never a `.shimref` whose `.exe` is missing.
+
+`hardlink::create`, never `hardlink::update`: the tree is staged fresh
+into a `TempDir` and published by one atomic rename, so a slot can never
+land on an occupied path — an occupied slot is a bug in the caller, and
+this surfaces it as `EEXIST` rather than converging on it.
+
+Not exercised by this workspace's `cargo check` gate: `#[cfg(windows)]`
+code compiles only when cross-compiling for a Windows target, which this
+repository's toolchain cannot do without an MSVC host. A merge review
+type-checks this arm by hand via a local flip, applied to **every** `cfg`
+in `prepare_lazy.rs`, not only the `#[cfg(windows)]` attributes:
+`cfg(windows)` → `cfg(unix)` **and** `not(windows)` → `not(unix)`. The
+second rewrite is load-bearing, not cosmetic — `write_shim_launchers`
+carries a sibling `#[cfg_attr(not(windows), expect(unused_variables, …))]`
+on its `shim_bin` parameter, and `not(windows)` does not contain the
+substring `cfg(windows)`, so a flip that only rewrites the latter leaves
+that attribute evaluating true on Linux. Once the flip makes this arm's
+call site live, `shim_bin` is used, the `expect`'s lint no longer fires, and
+an unfulfilled `#[expect]` is itself a hard error under `-D warnings`
+(`unfulfilled_lint_expectations`) — so the flip names both halves because
+running only the first produces a clippy failure, not a clean type-check.
+The flip proves the arm compiles under the same borrow/type rules the
+Windows target would apply, and nothing more: `ocx_store::hardlink::create`
+is a plain `std::fs::hard_link` on the flipped host's real filesystem and
+`ocx_store::shim::SHIM_BYTES` is `&[]` off Windows, so the flip *does* write
+a real (zero-byte-sourced) `.shimref` to that filesystem — it cannot observe
+Windows-only failure modes (`ERROR_*` codes, NTFS/ReFS/FAT/network-share
+path length limits, file locking). Actual Windows behaviour is unverified
+until this arm runs on a real Windows host or CI runner.

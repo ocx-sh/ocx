@@ -1,0 +1,30 @@
+def split_by_blank():
+    # one
+    # two
+    # three
+
+    # four
+    # five
+    # six
+    return 1
+
+
+def five_across_blank():
+    # one
+    # two
+
+    # three
+    # four
+    # five
+    return 2
+
+
+def split_by_code():
+    # one
+    # two
+    # three
+    a = 1
+    # four
+    # five
+    # six
+    return a + 1

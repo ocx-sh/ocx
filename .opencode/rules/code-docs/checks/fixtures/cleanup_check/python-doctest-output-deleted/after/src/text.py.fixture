@@ -1,0 +1,9 @@
+def normalize(s: str) -> str:
+    """Collapse runs of whitespace and trim both ends of the string.
+
+    Examples:
+        >>> normalize("  a   b ")
+        'a b'
+        >>> normalize("   ")
+    """
+    return " ".join(s.split())

@@ -1,0 +1,14 @@
+name: setup-demo
+description: Install the demo CLI and add it to PATH.
+inputs:
+  version:
+    description: >
+      Version to install, or `latest`.
+    required: false
+outputs:
+  path:
+    description: Directory the CLI was installed to.
+runs:
+  using: node20
+  main: dist/index.js
+  post: dist/cleanup/index.js

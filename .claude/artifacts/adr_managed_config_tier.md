@@ -475,3 +475,60 @@ publisher can no longer widen it on a locked host.
 - Research: `.claude/artifacts/research_oci_config_artifact.md`
 - Siblings/precedents: `adr_infrastructure_patches.md` (simplified-away sibling), `adr_self_setup.md` (fence machine), `adr_ci_env_export_flag.md` (env/flag dual-role precedent), `config/patch.rs` + `mirror.rs` (structural template), `website/src/docs/reference/environment.md` (same-commit rule)
 - GitHub: #42 (unified freshness/TTL), #150 (setup digest binding), #159 (remote_client audit), #98/#99 (trust policy / auto-verify deferrals)
+
+## Rationale from code: ocx_config
+
+Moved from the doc comment of `insecure_hosts` in `crates/ocx_config/src/insecure.rs`.
+
+**The one subtraction.** A `[registries."<name>"]` entry resolved from the SYSTEM scope
+(`/etc/ocx/config.toml`, so `system_locked`) that *states* `insecure = false` removes that
+name from the result — `OCX_INSECURE_REGISTRIES` included. `Some(false)` is a decision;
+`None` is silence and subtracts nothing, which is exactly the distinction the
+`Option<bool>` already carries. Without this, the per-entry lock `RegistryConfig::merge`
+enforces against lower config tiers would be defeated by one env var, and the platform
+engineer hardening a fleet would have no lever at all. Everything else is additive: a
+*non*-system tier saying `insecure = false` revokes nothing.
+
+**What "matched exactly" means, and against what.** Names are compared with plain string
+equality, `host[:port]` together, because that is what the transport does: `oci_client`'s
+`ClientProtocol::HttpsExcept` tests the resolved registry string for membership. An entry
+for `registry.corp` therefore does not cover `registry.corp:5001`, and case matters.
+
+The *subject* of that comparison is each gate's own resolved host string, and they are not
+all the same string. The transport and the mirror gate both compare
+`Reference::resolve_registry()`; the index gate compares the index base URL's host;
+`ocx login` compares `canonicalize_registry`'s output. For `host[:port]` names all four
+agree. Docker Hub is the one name they do not: `docker.io` resolves to `index.docker.io`
+for the transport and to `https://index.docker.io/v1/` for login, so no spelling of it can
+be granted a plaintext allowance here. That is deliberate — Docker Hub is not served over
+plain HTTP — and pinned by the `protocol_for` tests in `ocx_oci::auth::login`.
+
+**Spelling: exact to grant, normalised to revoke.** The two directions want opposite
+normalisation, so they get it.
+
+**Granting stays byte-exact**, case included, because that is the comparison the transport
+makes and being stricter than the transport fails *closed*: a mis-cased
+`[registries."Registry.Corp"]` grants nothing, which is the safe outcome. Pinned by
+`host_and_port_are_one_opaque_name`.
+
+**Revoking normalises**, because being stricter there fails *open*. Two axes, both of which
+let a differently-spelled name reach the same socket. **ASCII case**: hostnames are
+case-insensitive (RFC 4343) and DNS resolves every spelling to the same address, so an
+exact-match revoke lets `OCX_INSECURE_REGISTRIES=Registry.Corp:5000` — or a lower-tier
+`[registries."Registry.Corp:5000"]`, a different map key that therefore never meets the
+locked entry in `RegistryConfig::merge` — walk past a lock on `registry.corp:5000`. **Port
+spelling**: `url` parses a port numerically before dialling, so
+`http://registry.corp:05000/` opens TCP 5000. An exact-match revoke lets
+`OCX_INSECURE_REGISTRIES=registry.corp:05000` take the session plaintext to the port the
+operator locked shut, by adding one character. Either bypass is CWE-319/CWE-522.
+`same_registry_name` is the one place both normalisations live.
+
+The asymmetry is not a wart: the strict side is the one where strictness is safe, and both
+sides are the *conservative* reading of an ambiguous name.
+
+**Known residual: default-port elision.** A lock on `registry.corp` does not reach a
+declaration of `registry.corp:80`, nor the reverse. Closing it needs the scheme's default
+port, and this one list gates four consumers across both schemes — so any constant filled
+in here would be wrong for some of them. Left open deliberately rather than guessed.
+Over-subtracting fails closed, but guessing which port an operator meant is not something a
+comparison can do.

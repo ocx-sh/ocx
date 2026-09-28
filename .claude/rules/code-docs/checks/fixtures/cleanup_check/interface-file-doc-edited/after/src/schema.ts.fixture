@@ -1,0 +1,6 @@
+/**
+ * A port on a device.
+ */
+export interface Port {
+  name: string;
+}

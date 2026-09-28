@@ -1,0 +1,14 @@
+/**
+ * Projects every region onto the map grid and merges the shapes. Consumes the
+ * baked regions json file that the import script writes next to the page.
+ */
+export function projectRegions(): Shape[] {
+  return merge(load());
+}
+
+/**
+ * Draws the merged shapes into the page canvas at the current zoom level.
+ */
+export function drawRegions(shapes: Shape[]): void {
+  paint(shapes);
+}

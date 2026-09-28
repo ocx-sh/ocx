@@ -1,0 +1,4 @@
+pub fn size(meta: &Metadata) -> u64 {
+    // Size in bytes, as du reports it.
+    0
+}

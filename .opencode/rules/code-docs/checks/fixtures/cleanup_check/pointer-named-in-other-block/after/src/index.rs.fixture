@@ -1,0 +1,5 @@
+// Index files follow docs/adr/adr_index.md.
+pub fn index_path(root: &Path, registry: &str) -> PathBuf {
+    // Layout: docs/adr/adr_index.md#layout.
+    root.join(registry)
+}

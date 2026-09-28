@@ -1,0 +1,97 @@
+import click
+from pydantic import BaseModel
+
+
+def eleven_lines():
+    """Line 1 of prose.
+
+    Line 3 of prose.
+    Line 4 of prose.
+    Line 5 of prose.
+    Line 6 of prose.
+    Line 7 of prose.
+    Line 8 of prose.
+    Line 9 of prose.
+    Line 10 of prose.
+    """
+
+
+def args_not_counted(a, b):
+    """Line 1 of prose.
+
+    Line 3 of prose.
+    Line 4 of prose.
+    Line 5 of prose.
+
+    Args:
+        a: the first value.
+        b: the second value,
+            which wraps.
+        c: a third.
+
+    Returns:
+        The pair.
+    """
+    return a, b
+
+
+def note_counted(a, b):
+    """Line 1 of prose.
+
+    Line 3 of prose.
+    Line 4 of prose.
+    Line 5 of prose.
+
+    Note:
+        a: the first value.
+        b: the second value,
+            which wraps.
+        c: a third.
+    """
+    return a, b
+
+
+def rest_fields_not_counted(a, b):
+    """Line 1 of prose.
+
+    Line 3 of prose.
+    Line 4 of prose.
+    Line 5 of prose.
+
+    :param a: the first value.
+    :param b: the second value,
+        which wraps.
+    :returns: the pair.
+    :rtype: tuple
+    """
+    return a, b
+
+
+class Settings(BaseModel):
+    """Line 1 of prose.
+
+    Line 3 of prose.
+    Line 4 of prose.
+    Line 5 of prose.
+    Line 6 of prose.
+    Line 7 of prose.
+    Line 8 of prose.
+    Line 9 of prose.
+    Line 10 of prose.
+    """
+
+    name: str
+
+
+@click.command()
+def run():
+    """Line 1 of prose.
+
+    Line 3 of prose.
+    Line 4 of prose.
+    Line 5 of prose.
+    Line 6 of prose.
+    Line 7 of prose.
+    Line 8 of prose.
+    Line 9 of prose.
+    """

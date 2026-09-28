@@ -261,3 +261,27 @@ Plan via `/hex-plan` after ADR approval, **jointly with `adr_toolchain_activatio
 | 2026-09-05 | Cross-model gate on the amending ADR (Codex `sol`, one-shot), applied here: `toolchain-dir` is refused at parse unless it resolves inside `$HOME`/`%USERPROFILE%` or `$OCX_HOME`, and the `owned_prefixes` note is narrowed to `<toolchain-dir>/<project-key>/toolchain/` for the consented in-scope project while recording that `$OCX_HOME/toolchain/bin` and `ocx_install_bin_path` must stay permanently in the desired set. |
 | 2026-09-05 | Owner decisions on the amending ADR, applied here: the env floor for `pinned` is spelled `OCX_TOOLCHAIN_PINNED` under the new naming rule (bare inside `ocx.toml`, noun-qualified outside it), and the name set the rendered tree exposes is the metadata-declared `binaries` ∪ `entrypoints` claims of the roots **and every interface-admitted dependency**, with no refusal or warning on any name collision. |
 | 2026-09-06 | **Implementation corrections from the amending ADR, applied here (append-only, WP-13b).** Two statements this record made are false against what shipped, and both are corrected inline with the superseded text quoted. (1) **`toolchain-dir` expansion** — the managed-tier example offered `%LOCALAPPDATA%\ocx\toolchain`; a **leading `~` is the only expansion on any platform**, `%VAR%` never expands, and the unexpanded value is refused at parse (exit 78) as a non-absolute path. (2) **`pinned = true`** — the "each trampoline bakes a digest root … a pinned tree's trampoline bodies churn on every version bump" consequence is void under D-9: a body bakes only the home selector and the `ocx` install path, so every body is byte-identical whatever `pinned` says and a flip needs no re-render; what `pinned` selects is what the emitters compose, and the link pass is suppressed whole, prunes included. Full record: [`adr_toolchain_activation.md`](./adr_toolchain_activation.md) § *Amendment — 2026-09-06*. |
+
+## Rationale from code: ocx_package_manager composer
+
+**Following-lane install paths.** Two spellings name one directory: the digest
+root `<packages>/<registry>/<shard>/<digest>`, and the rendered link
+`<home>/toolchain/links/<group>/<entry>` that points at it. The digest root
+**pins** — an `ocx update` that repoints the link leaves an already-composed
+digest path running the previous package. The link **follows**. Which of the two a
+composition emits is `pinned`: `true` pins to digest roots, `false` follows the
+links. It is a property of every composing emitter — `ocx env`, `ocx exec`,
+`ocx direnv export` and the `env`-mode hook — never of a mode, which is why the
+composer answers it once rather than four times at the emitters.
+
+What is **not** in this lane, and must stay digest:
+
+- `synth_shim_path_for` — a shim store, not a package. No lock entry names it and
+  no link points at it.
+- `tc_entry_object_data` and `PackageManager::compose_roots`' own
+  `store.package_dir` — **read** paths for `metadata.json` / `resolve.json`,
+  answered before any composition exists.
+- `${deps.NAME.installPath}`, restated on `PathLane::Digest`.
+- Every persisted artifact: `packages/**/*.json`, `refs/**`, generated launcher
+  bodies, the render stamp, the execution record. A link path baked into a file
+  outlives the tree it was probed against.

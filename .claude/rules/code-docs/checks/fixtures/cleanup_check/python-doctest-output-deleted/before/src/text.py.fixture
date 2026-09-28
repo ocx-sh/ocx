@@ -1,0 +1,12 @@
+def normalize(s: str) -> str:
+    """Collapse runs of whitespace and trim both ends of the string.
+
+    This used to live in three call sites that each spelled it differently.
+
+    Examples:
+        >>> normalize("  a   b ")
+        'a b'
+        >>> normalize("   ")
+        ''
+    """
+    return " ".join(s.split())

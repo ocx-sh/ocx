@@ -1,0 +1,3 @@
+from setuptools import setup
+
+setup(name="demo", version=__import__("demo").__version__)

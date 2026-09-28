@@ -1,0 +1,23 @@
+{
+  "about": "Library-kind package (.code-docs.json declares the root). LEN-02 visibility tier: a public item may run to 15 lines, a non-public one to 10, an unplaced one (a module doc) gets the library tier. Public: Rust pub, enum variants and trait items of a pub parent, pub fields; Python names with no leading underscore under public classes and outside functions, dunders included, multi-line signatures included; TS exports and members of an exported class; Go capitalised identifiers, methods included. Non-public: Rust fn, pub(crate), private-enum variants and private fields; Python _names, methods of a _class and nested functions; an unexported TS function and a private member; a lowercase Go func. A Rust //! module doc directly above a /// item doc stays a separate block.",
+  "runs": [
+    {
+      "mode": "over-cap",
+      "exit": 1,
+      "expect": [
+        "lib.go:17 LEN-02",
+        "lib.py:31 LEN-02",
+        "lib.py:65 LEN-02",
+        "lib.py:85 LEN-02",
+        "lib.py:132 LEN-02",
+        "lib.rs:28 LEN-02",
+        "lib.rs:42 LEN-02",
+        "lib.rs:56 LEN-02",
+        "lib.rs:94 LEN-02",
+        "lib.rs:139 LEN-02",
+        "lib.ts:15 LEN-02",
+        "lib.ts:44 LEN-02"
+      ]
+    }
+  ]
+}

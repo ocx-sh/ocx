@@ -1105,3 +1105,190 @@ One-line amendment, no new field. Every launching frame documented above writes 
 - **Open upstream questions we depend on:** [in-toto/attestation#28](https://github.com/in-toto/attestation/issues/28) (subject semantics) · [cosign#4019](https://github.com/sigstore/cosign/issues/4019) (subject with no local blob)
 - **Precedent:** [pip installation report](https://pip.pypa.io/en/stable/reference/installation-report/) · [PEP 710](https://peps.python.org/pep-0710/) · [SLSA v1 provenance](https://slsa.dev/spec/v1.0/provenance) · [Bazel user manual](https://bazel.build/docs/user-manual) · [LLVM source-based coverage](https://clang.llvm.org/docs/SourceBasedCodeCoverage.html) · [POSIX `write()`](https://pubs.opengroup.org/onlinepubs/9699919799/functions/write.html) · [append atomicity](https://nullprogram.com/blog/2016/08/03/)
 - **Evaluated, rejected:** [OpenLineage](https://openlineage.io/docs/spec/examples/) · [CloudEvents](https://github.com/cloudevents/spec) · [W3C Trace Context](https://www.w3.org/TR/trace-context/) · [in-toto `runtime-trace`](https://github.com/in-toto/attestation/blob/main/spec/predicates/runtime-trace.md) · [SPDX 3.0 model](https://github.com/spdx/spdx-3-model)
+
+## Rationale from code: launch
+
+Recording used to be three near-identical call sites, which meant a future
+exec-ish command could simply forget it — a hazard already realised twice,
+since five spawn sites exist today. Routing a launch through `Launch` turns
+forgetting into a compile error rather than a test finding: a launch cannot
+be constructed without deciding what it records.
+
+Three properties keep a new command *on* the seam, and all three are
+load-bearing. `Launch`'s fields are private and it is built through
+constructors, so there is no struct literal to slip a default into. Recording
+state is not caller-chosen: it arrives as a `RecordingPolicy`, which only
+`record::policy::resolve_records` can mint — a caller cannot fabricate
+"recording off", only configuration can. The sanctioned exemptions are
+bounded by the same value: `exemption_allowed` refuses one under a
+fail-closed posture over a live sink, so a frame that *can* claim an
+exemption still cannot take one the operator's policy contradicts. The spawn
+primitives live in a **private** submodule of the launch module, so the raw
+`execvp`/spawn calls are unreachable outside the seam. Without that a new
+command could skip `Launch` entirely and still compile.
+
+A recording launch is also derived *from* its record rather than described
+beside it: the executable and arguments come out of `RecordInputs`, so the
+record cannot name one binary while ocx runs another. Resolution stays at the
+call site, which resolves once and hands the result to both.
+
+Two escapes types cannot close each get a structural test:
+`no_process_spawn_outside_launch` catches a new command reaching a spawn
+primitive directly, and `every_launch_exemption_is_enumerated` catches one
+reusing an existing `ExemptionReason` — which adds no variant and would
+otherwise compile clean.
+
+Those two are **searches over source text**, not proofs. Privacy is what
+actually holds: `launch::child_process` is unreachable from outside the
+launch module, so no other file can call the primitives it wraps. What the
+searches add is catching a file that builds its *own* `std`/`tokio` `Command`
+— for the spellings `SPAWN_TOKENS` recognises. A spelling nobody anticipated
+would pass them, so read the claim as "the primitives are private and the
+common escapes are caught", never as "spawning outside the seam is
+impossible".
+
+**The spawn primitives (`launch::child_process`).** The module is declared
+`mod child_process;` — private — inside `launch.rs`. That nesting is what makes
+the seam's compile-time claim true at all: while a raw spawn primitive is
+publicly callable, a new command can skip `Launch` entirely and still compile.
+Visibility comes from module nesting rather than `pub(crate)`, per
+`arch-principles.md`.
+
+Both primitives take an `on_started` callback invoked with **the pid of the
+process that will run the tool**, at the one moment each platform can name it:
+`exec` on Unix calls it before `execvp(2)`, with ocx's own pid, because the
+syscall replaces this image in place and that pid *becomes* the tool; `exec`
+elsewhere and `spawn_and_wait` everywhere call it after the spawn, with the
+child's pid, which does not exist until then. The callback is where the launch
+seam writes its record, so that ordering is the record's pre-exec guarantee on
+Unix and the reason the seam probes the sink before spawning everywhere else.
+
+**That guarantee is Unix-only, and the difference is not cosmetic.** Where the
+pid only exists after the spawn, the pre-spawn probe writes zero bytes and the
+real record is written with the child already running: a mount that
+disappears, a full disk or a permission change between the two leaves a
+`required` launch returning exit 74 *after* the tool has begun work. The child
+is then stopped and reaped (`stop_refused_child`), but it ran. So fail-closed
+off Unix means "refused before the spawn if the sink was unwritable at probe
+time", not "no unrecorded child can ever have run". Suspending the child across
+the write would close it, and is rejected: it needs the child's *thread*
+handle to resume, which `std::process::Child` does not expose.
+
+Neither primitive knows what the callback does. `env` is applied after
+`env_clear()` on both paths, so no parent-shell variable can leak past the
+authoritative env the caller built (this is what makes `--clean` and
+`Env::apply_ocx_config`'s remove branches load-bearing).
+
+**The record sink (`record::sink`).** The sink is a **directory**, never a
+file, and never inside `$OCX_HOME`. Records are output the operator collects,
+not ocx runtime state, and `$OCX_HOME` is per-user while the audit trail is
+fleet-wide. A directory sink is also the only shape that is correct on every
+filesystem: no portable, spec-backed guarantee exists for concurrent append
+anywhere — POSIX promises non-interleaving only for pipes, NFS has no append
+opcode at all, and the Windows CRT's emulation does not inherit the native
+atomic-append guarantee.
+
+**Publication must not clobber.** A plain tempfile-then-rename publish is
+atomic but *replacing*: a record can appear atomically on top of another
+record, which is a worse failure than an interleaved append — it is silent and
+total. Two containers on one host sharing an NFS sink each have their own PID
+namespace, so both can be PID 1 in the same millisecond, and a template
+carrying only `{time}` collides across every host on a shared mount. So the
+publish is no-clobber and a collision retries under a freshly drawn random
+component. On the hardlink fallback path — which is exactly the NFS path — a
+lost reply can produce a spurious collision report even though the link
+landed, so the failure mode is a byte-identical duplicate, never a loss.
+Duplicates join on the same digest; loss would not be recoverable. One
+consequence worth stating for whoever writes the collector: a crash between
+link and unlink strands a temp file in the sink permanently. A collector must
+ignore `.tmp*`.
+
+**Refusing a substituted sink (`refuse_substituted_sink`).**
+`resolve_records` resolves the operator's configured sink to its real location
+once and pins the result, so a pinned path re-resolves to itself for as long
+as nobody moves the directory. A disagreement means a symlink has been
+inserted into the pinned path since designation — which would otherwise
+redirect an audit trail somewhere the operator never designated, with no error
+and no missing record at the source, so the collector simply sees an empty
+sink. What this does not catch, because it compares a canonical *path* rather
+than holding the directory's identity: replacing the sink with a *different
+real directory* at the same path re-resolves to itself and is accepted; and a
+symlink inserted between this check and `NamedTempFile::new_in` is followed,
+because the file is created by path, not through a handle pinned here. Closing
+either needs an `openat`-style directory handle opened at designation and
+every write made relative to it. This is an integrity control against a script
+or a rotator redirecting the trail by accident, not a defence against an
+adversary racing it — consistent with the rest of `[records]`, where anyone
+able to plant that symlink can equally just not run `ocx`. It is deliberately
+*not* a symlink-in-ancestor refusal: every path picks up OS aliases (macOS
+reaches `/var/log` through `/var` → `/private/var`), so that guard refused
+ordinary hosts — permanently, under `required = true`.
+
+**Record filename templates (`record::name_template`).** The default grammar —
+`<utc-basic-ms>-<pid>-<8 hex random>.json` — is part of the contract: it sorts
+lexicographically into chronological order, names the owning process, and
+breaks same-pid-same-millisecond ties across hosts and containers. The
+placeholder set is **closed**, and an unknown placeholder is a configuration
+error rather than a silent literal. The failure mode of a silently unexpanded
+`{jobid}` is a directory of identically named files, discovered during an
+audit.
+
+The selection rule is that a placeholder must be **cheap to make safe as a
+filename**. Three of the four are OCX-generated and safe by construction;
+`{host}` is read from the environment, where a UTS hostname is bytes to the
+kernel and may legitimately contain `/`, so its expansion is slugified here
+(everything outside `[A-Za-z0-9._-]` becomes `_`, and a name that reduces to
+`.` or `..` is dropped). A `{command}` placeholder was considered and rejected
+on the same rule: sanitizing user-controlled argv for path separators, spaces,
+unicode and length is real surface for cosmetic value, when the command is
+already in the record and one `jq` away. The sanitizer covers the expanded
+values; the literal text around them is checked by `NameTemplate::parse`,
+which refuses a separator while the operator is still looking at their config.
+`super::sink` is the backstop behind both, refusing to publish under any
+rendered name that is not a single plain filename — so nothing can place a
+record outside the operator's sink.
+
+These are substitutions only, never behaviour. A profile-runtime style
+specifier that carries semantics (merge pools, continuous sync) would be a
+contract worth regretting.
+
+`{rand}` draws from the operating system's CSPRNG (`getrandom`/`arc4random`,
+reached through `rand_core`'s `OsRng` — the same source the signing path draws
+its ephemeral keys from) for two properties, and the second is why the source
+is the OS rather than `RandomState`. It is **distinct across processes and
+containers**: two containers that are both PID 1 in the same millisecond on a
+shared mount draw different values, so the default template stays unique
+where its timestamp and pid do not. It is **unpredictable to a local
+co-tenant**: a shared sink is writable by principals other than the recording
+user, and a name sequence that could be predicted could be pre-created —
+burning every publish attempt and, under `required = true`, stopping the job.
+`RandomState` is SipHash-1-3 over empty input with a thread-local key that
+merely increments, and its own documentation disclaims cryptographic strength.
+
+**Package URL rendering (`record::purl`).**
+`pkg:oci/<name>@sha256:<hex>?repository_url=<registry>/<repository>&tag=<tag>&arch=<arch>`
+— the registered `oci` purl type, never an invented `pkg:ocx`, because OCX
+packages *are* OCI artifacts. The semantics match with zero impedance: the
+purl version is the sha256 digest, and `tag` is documented as "the artifact
+tag that may have been associated with the digest at the time", which is
+exactly OCX's digest-is-identity / tag-is-advisory model.
+
+Four properties this depends on, each verified rather than assumed. The colon
+in the version is emitted **unencoded** (`sha256:3f7a…`), which is what the
+specification requires: ECMA-427 §5.4 says the colon shall not be
+percent-encoded, and the `oci` type's official test suite gives `sha256:` bare
+in every canonical form. The crate's encode set excludes `b':'`, and the round
+trip holds. Documented so nobody "fixes" it. Qualifiers serialize in
+**alphabetical** order, not authored order, so `arch` precedes
+`repository_url` precedes `tag`. Assert on parsed qualifiers, never on a
+literal string. The name is the **last repository segment** and is already
+correct by construction: repository segments are lowercase-only at the
+parser, so purl's lowercasing rules need no normalization layer here. A `tag`
+qualifier appears only when a tag was genuinely resolved. A project-tier
+record has none — the lock stores a bare repository plus a per-platform digest
+and rejects a tag at validation — and synthesising one would be the first lie
+in an audit record.
+
+What this buys is **identity, not scanning**: a stable standardised string
+that joins across tools. Vulnerability lookup is not among them — no
+mainstream scanner resolves a whole-artifact `pkg:oci` to CVEs.

@@ -1,0 +1,1 @@
+Reviewed: C-950 stays until the contract publishes anchors, and so does DEC-OK1.

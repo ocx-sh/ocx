@@ -1,0 +1,14 @@
+use clap::Parser;
+
+#[derive(Parser)]
+struct Cli {
+    /// Print what would change without writing anything.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+fn run(cli: &Cli) -> u32 {
+    let mut n = 0;
+    n += u32::from(cli.dry_run);
+    n
+}

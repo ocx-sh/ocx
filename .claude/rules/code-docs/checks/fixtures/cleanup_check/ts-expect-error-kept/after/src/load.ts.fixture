@@ -1,0 +1,5 @@
+export function load(raw: unknown): Config {
+  // Fill defaults for keys the file left out.
+  // @ts-expect-error legacy files still carry the v1 shape
+  return migrate(raw.v1);
+}

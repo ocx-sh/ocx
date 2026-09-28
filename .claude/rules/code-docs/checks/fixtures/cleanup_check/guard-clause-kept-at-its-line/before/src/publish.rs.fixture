@@ -1,0 +1,10 @@
+pub fn publish(&self) {
+    // Render output goes to a temp file first and is renamed into place at the end.
+    // A reader never sees a half-written file, because a torn write would break the next parse.
+    // The temp file sits next to the target so both live on one filesystem.
+    self.stage();
+}
+
+pub fn stage(&self) {
+    self.rename();
+}

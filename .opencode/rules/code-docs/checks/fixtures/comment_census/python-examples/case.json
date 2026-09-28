@@ -1,0 +1,10 @@
+{
+  "about": "LEN-07, Python example forms, app caps. A Google Examples: section with blank-separated doctests, a '::' literal block and a bare >>> doctest (whose output is '') each take a docstring over the cap of 10 only when counted, so none is listed. The Example: section that ends at prose indented no deeper than its heading leaves that prose, and the blank line before it, counted: 11 lines, listed.",
+  "runs": [
+    {
+      "mode": "over-cap",
+      "exit": 1,
+      "expect": ["examples.py:52 LEN-02"]
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "about": "interface_files: a TS-to-JSON-Schema generator the census cannot see renders schema/*.ts. Its doc comments count as interface lines (LEN-08) at the public tier; the same 11-line block in an undeclared file stays a doc block (LEN-02). 10-line blocks are green in both.",
+  "runs": [
+    {
+      "mode": "over-cap",
+      "exit": 1,
+      "expect": ["schema/types.ts:1 LEN-08", "src/util.ts:1 LEN-02"]
+    }
+  ]
+}

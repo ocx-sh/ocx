@@ -103,6 +103,23 @@ research-axes:
 
 ## Memory
 
+- Retro candidate (project-context): "One build at a time host-wide; fan out edit workers freely (31 GB host OOM-rebooted)" — ledger hex-execute-parallel-build-oom, .agents/retro/reports/2026-09-28.md.
+- Retro candidate (project-context): "Shared-checkout commits race prek's stash of all unstaged files" — ledger project-prek-stash-shared-checkout, .agents/retro/reports/2026-09-28.md.
+- Retro candidate (project-context): "Build/verify time dominates loops (2,409 tool-busy min mined)" — ledger project-slow-builds, .agents/retro/reports/2026-09-28.md.
+- Retro candidate (project-context): "bazel_tag_guard --self-test re-parses test modules ~34x (>300s)" — ledger project-bazel-tag-guard-selftest-slow, .agents/retro/reports/2026-09-28.md.
+- Retro candidate (project-context): "Gitignored Cargo.bazel.lock.json goes stale; bootstrap repins only when absent" — ledger project-cargo-bazel-lock-stale, .agents/retro/reports/2026-09-28.md.
+- Retro candidate (project-context): "Fresh worktree: cargo-bazel splice refuses TMPDIR under $HOME" — ledger project-fresh-worktree-bazel-splice, .agents/retro/reports/2026-09-28.md.
+- Retro candidate (project-context): "worker-researcher lacks Write; cannot persist its research artifact" — ledger worker-researcher-no-write-tool, .agents/retro/reports/2026-09-28.md.
+- Retro candidate (checklist-item): "Proxied grep/find/cat results are not evidence; decide via /usr/sbin/git and rtk proxy grep" — ledger project-shell-read-failures, .agents/retro/reports/2026-09-28.md.
+- Retro candidate (project-context): "rm/pkill denials retried; decide the allowed cleanup path" — ledger project-rm-denied, .agents/retro/reports/2026-09-28.md.
+
+- **Plan (hex/code-docs-cleanup, 2026-09-28, plan-approved): `.claude/artifacts/plan_code_docs_cleanup.md`** —
+  code-docs cleanup, 22 WPs in 4 waves (adopt checks → per-crate sweeps → schemars text → baseline
+  lock-in). Next: `/hex-execute` on it. Pointer also in `.claude/state/current_plan.md`.
+- **Discussion (2026-09-28, handed-off → loop): `.agents/discussions/code-docs-cleanup.md`** —
+  code-docs cleanup of prod Rust (1:4–1:6 reported, not gated), ADR/issue refs to pointers,
+  log-string asserts to behaviour; ratchet over prod + Rust tests + Python suite. Next: `/hex-loop`.
+
 - **Plan (goat, 2026-09-25, done — reviewed and approved at c3e6ad672): `.claude/artifacts/plan_bazel_cargo_port.md`** — port the
   remaining `task verify` cargo compiles (schema, clippy, doc ratchet, doctests) to cached Bazel
   actions on `refactor/bazel-test-binary` (PR [ocx-sh/ocx#527](https://github.com/ocx-sh/ocx/pull/527)).

@@ -140,3 +140,7 @@ set where everything blocks teaches the reader to negotiate with all of it.
   and publish verification. Loads on `**/package.json`,
   `**/tsconfig*.json`, `**/eslint.config.*` and `**/biome.json*` — globs
   this set deliberately does not cover, so the two never load together.
+- **`code-docs`** — comments, TSDoc and JSDoc blocks (the one-sentence
+  summary line included), decision-record pointers and test names as
+  documentation, in every language. This set carries no doc-comment rules of
+  its own. Loads on every source file.

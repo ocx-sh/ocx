@@ -1,0 +1,7 @@
+# path:line: RULE for every finding; any other finding fails the self-test.
+docs/adr/adr_a.md:3: LNK-06
+docs/adr/adr_a.md:4: LNK-06
+docs/adr/adr_a.md:6: LNK-06
+docs/adr/adr_b.md:7: LNK-06
+.agents/adr/adr_c2.md:3: LNK-06
+docs/adr/adr_d.md:3: LNK-06

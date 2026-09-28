@@ -1,0 +1,8 @@
+pub fn render(&self) {
+    let _render_lock = self.lock.lock();
+    self.write_all();
+}
+
+pub fn write_all(&self) {
+    self.flush();
+}

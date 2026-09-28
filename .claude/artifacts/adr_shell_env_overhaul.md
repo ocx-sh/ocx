@@ -640,3 +640,89 @@ The only genuinely one-way element is `package create` refusing reserved env key
 | 2026-08-25 | Owner design review round B, surface + validation — **`[shell] completions` added** (Decision 5): completions had a flag and `OCX_NO_COMPLETIONS` but no config rung at all (`Completion::enabled` takes no `configured`), so `hook` and `completions` now share one five-rung ladder, one home-tier `toml_edit` write, and one read point (`self activate`, shell start, never per prompt); `ocx self setup` gains the `--completion` / `--no-completion` pair it lacks today. **Decision 10 added — `ocx shell state`**, the ADR's only new command surface: read-only introspection over the decoded ledger, applied-per-scope, fingerprint status and `priors` intactness, and above all the **enumerated reason a shell is not active** (no stamp + no grant, source-set drift, hook disabled naming the deciding rung and tier, yielded to direnv/mise naming the live signal, ledger over cap, ledger absent vs corrupt); its output is **human-readable and never eval-able**, stated as a contract because a command whose output is meant for `eval` and one that prints diagnostics must never be confusable. **`unset __OCX_ENV_STATE` documented as the repair gesture** (Decision 1) — one gesture covering both stale detection and a wrong ledger, with no new command, since the fingerprint lives inside the ledger; its cost is stated (priors destroyed, so `JAVA_HOME` keeps the project's value for that shell's life — a new shell is the clean floor and loses nothing), as is the consequence knowingly accepted (the carrier becomes user-facing contract, acceptable inside the reserved `__OCX_*` namespace) and its silence (indistinguishable from the normal first-prompt absence, so `ocx shell state` is what confirms it). **`ocx shell refresh` recorded as considered and cut**: a child cannot mutate its parent's environment, so it needs either `eval "$(…)"` (defeats the point) or an alias/function (bypassed by an absolute-path invocation), and the request-file variant is complexity for no gain now that Round A's retirement rule and the `unset` gesture cover both its cases. **Validation restructured by cost tier**, grounded in the shipped `test/tests/test_shell_activation.py` (all-shell matrix, stdlib+pytest, `_script_pty_command`, shell-zoo image) and extending it: tier 1 no shell (pure emitters, golden fixtures, **all** hostile-value/escaping cases), tier 2 execute-the-snippet-no-pty (most of the matrix — global add/update/**remove**, branch switch deleting a tool and `[env]`-only, **no duplicate PATH entry on a digest change**, idempotency, list separators, subshell containment, cross-shell inheritance, the whole consent/yield/degradation set), tier 3 thin pty (hook fires per prompt, `cd` enter/leave, project switch, PATH not growing, starship / oh-my-zsh / powerlevel10k coexistence, wrapper same-command-line freshness), plus matrix control (all shells × small core, bash+pwsh × depth), a **Windows runner leg** (5.1 is not approximable by pwsh-on-Linux), and named fault injections so red is cheap at tiers 1–2. **All three open questions closed as decisions**: both grants with `paths` primary, `namespaces` the auto-enabler and the global toolchain always trusted; default-on for interactive shells from the first hook-carrying release; PowerShell 5.1 **supported** via prompt-wrap with full interactive fidelity (the "degraded" framing withdrawn — the missing `LocationChangedEventArgs` only affects a programmatic `Set-Location` that never reaches a prompt). Strict AND mode recorded as considered and not shipped. The ADR now has **zero** open questions; Status stays **Proposed** |
 | 2026-08-26 | Post-merge review round 3 — **clause 2 stops quantifying over the lock's claim** ([#344](https://github.com/ocx-sh/ocx/issues/344), addendum A-39). The package store is keyed by `(registry, digest)` only, so composition finds a locked tool without the lock's `repository` field ever being true; a lock pairing a granted org's name with the digest of content served by a different repository therefore satisfied a claim-based clause 2. The predicate now quantifies over `refs/origins/` — one marker per repository this host resolved and fetched that digest under, written by `record_origin` from the fetching branch of `setup_owned_impl` alone, past both store-hit fast paths and skipped for `pull_local`. Any tool the store cannot corroborate refuses the whole grant as `Reason::UncorroboratedNamespace`, which carries claim and record side by side. Clause 1 keeps comparing against the claim, since a stamp records what the lock said at the time. Consequence: a namespace grant activates against a warm store (the fleet case) and is inert on a cold one until the first `ocx pull`, which stamps anyway. |
 | 2026-08-27 | **PR [#339](https://github.com/ocx-sh/ocx/pull/339) closeout — the specification reconciled against the code that shipped, in addendum resolutions A-45 through A-52.** **The per-prompt sequencing left `shell/`** ([#343](https://github.com/ocx-sh/ocx/issues/343)): it was planned for `shell/reconcile/session.rs` and landed at the crate root, `ocx_lib::activation`, because `project::consent` reads `shell::coexistence` and `shell::reconcile` while the sequencing reads `project::consent` — a `use` cycle that does not compile across a crate boundary and so blocks the `ocx_lib` split — a third blocker beside the `sign` ⇄ `verify` cycle ([#313](https://github.com/ocx-sh/ocx/issues/313)) and the HTTP transport layer's missing owner ([#324](https://github.com/ocx-sh/ocx/issues/324)), neither of which this move closes. `shell/reconcile.rs` keeps the three pure pieces and a directory-walk test holds it there (A-45). **The carrier gained `messages_fp`** (A-46), additive per A-04: A-21 gave deferred diagnostics a channel but no repetition rule, so the direnv-yield line printed before every prompt for the shell's whole life; the digest gives `outcome.messages` the same delta treatment the summary line already gave itself, and survives into the over-cap marker beside `fp`. **`tiers` is bounded at decode** to eight, against the five the loader can emit (A-47): the 16 KiB cap bounds the envelope, not the array inside it, and every entry is a `stat` per prompt for the shell's life. **The recorded `dir` is bounded before it reaches the filesystem** (A-48) — absolute, inside the live CWD's own ancestry, one `symlink_metadata`, in exactly one place. The hole it closes was live: `""` is a prefix of every path and `Path::new("").join("ocx.toml")` is *relative*, so a hand-set carrier turned A-11's probe into "does `$PWD` hold an `ocx.toml`" and could pin the recorded scope for the shell's life. **Two review findings are recorded as rejected**, deliberately, because the record is the only thing that stops them being re-derived: the summary's `(false, false)` arm is unreachable through the shipped caller — `plan` and `next_ledger` run the same A-10 predicate over the same `Outcome` — so the proposed fourth glyph was reverted and the reachable behaviour pinned by a test instead (A-49); and on a stale or missing `ocx.lock` the **retain-the-scope fail-safe shipped** over the plan-and-announce alternative, which would have reverted the project scope and produced exactly the mid-`git checkout` teardown the `Err` contract exists to prevent (A-50). **The summary line names the project on a switch** — and only on a switch, where the marks alone are ambiguous (A-51). **The reconcile budget was re-derived, and this ADR stopped carrying the figure** (A-52): the 3 ms of 2026-08-26 was measured on a bench arena whose every fixture root took `local_root`'s `NotFound` arm, so the reconciler's dominant term was absent from the number bounding it. The gate was never red — the defect is provenance, the same one the arena fix closed a layer down, sitting in the assert that guards the budget. Budget and evidence now live together in `test/bench/shell_latency.py` under a headroom self-check that forces them to move together, which is why the NFR above names constants rather than milliseconds |
+
+## Rationale from code: ocx_config
+
+Moved from the doc comments of `ConfigLoader::parse_config_stripping_refused_consent`,
+`consent_table_shape_is_readable` and `guard_managed_shell_consent` in
+`crates/ocx_config/src/loader.rs`.
+
+**Why a refused `[shell.consent]` table is stripped rather than failing its file.** Two
+rules hold, and only together:
+
+- `arch-principles.md`'s fleet forward-compat row: a payload written for a newer ocx "must
+  degrade to its known parts, never fail the whole file". One `config.toml` is fleet-wide
+  state, so a refusal that takes the file down takes `[registries]`, `[mirrors]` and
+  `[[trust.policy]]` with it. On a `required = false` managed tier that silently drops the
+  operator's trust pins and falls back to the default registry: a commit whose subject is a
+  *narrowing* would widen the effective posture on every host at once.
+- That row's consent-bearing-table carve-out: dropping an unknown *narrowing* key widens
+  trust, so `ShellConsent` refuses instead. The carve-out is about the direction of the
+  change, not about which file dies. Dropping the **whole grant** is the narrowest possible
+  outcome **only for a table that grants and does not withdraw**. `exclude` is the one thing
+  a `[shell.consent]` table says that TAKES a grant away, and it accumulates across tiers
+  (`ShellConsent::merge`) against a predicate of `covered && !excluded`, so dropping it
+  leaves another tier's `include` standing and **widens**. A table carrying a non-empty
+  `namespaces.exclude` therefore keeps the hard failure.
+
+So the consent half is stripped structurally and the file survives, exactly as
+`guard_managed_shell_consent` does for an unpinned source: same shape, same recorded
+reason, one tier wider. It applies on **every** tier, not just the managed one: a
+discovered tier's refusal is a hard error on every `ocx` invocation on that host, the same
+fail-the-file outcome with a smaller blast radius, and the carve-out's reasoning is
+tier-independent. The signal is not lost: the reason is logged and recorded on the payload,
+where `ocx about` surfaces it and the reconciler emits it through the eval'd script, and the
+published JSON schema is where typo detection belongs.
+
+**Why the shape test reads `toml::Value` variants.** The typed error is unreachable there:
+the deserializer hands every refusal to `serde::de::Error::custom`, which erases
+`ConsentPatternError` into an opaque `toml::de::Error` message, and `ShellConsent`'s
+`deny_unknown_fields` refusal is serde's own text that no marker could reach without
+hand-writing that derive. Reading the variants keeps the discriminator type-level anyway,
+and out of the error's prose. It asks only what serde would answer with `invalid type`:
+is `consent` a table, `paths` a list of strings, `namespaces` a string or a table, and its
+`include`/`exclude` lists of strings. It does not re-check `include`'s emptiness or an
+unknown key either, for the same reason it does not re-run the pattern validator.
+
+**Why an unpinned managed grant degrades while a refused local table fails.**
+`guard_managed_shell_consent` leaves `[shell] hook` and `completions` alone deliberately:
+they merge unconditionally in both directions, which is safe only because consent still
+gates every project independently. `[shell.consent]` is the half that grants, so it is
+honoured only behind a pin; otherwise the consent material arrives over the very channel it
+exists to authorise, and whoever can move the tag can swap it. Same rule, same reason, as
+`guard_managed_sigstore_trust`'s `trusted_root_json`.
+
+The reason is recorded on the payload as well as logged: `log::warn!` goes to a stderr the
+shell shims discard, so the strip would otherwise be invisible exactly where it matters.
+`ocx about` surfaces the recorded reason, and the reconciler emits it through the eval'd
+script.
+
+The gate is managed-tier-only. A file named by `--config` / `OCX_CONFIG` is a third
+consent-bearing channel of the same already-out-of-scope threat class, and has no
+`[managed] source` for the pin question to be asked of at all.
+
+Only the grant is stripped. `paths` and `namespaces.include` grant; `namespaces.exclude`
+withdraws, and it accumulates across tiers (`ConsentScopeSpec::accumulate`), so dropping
+one leaves whatever `include` another tier, or `OCX_CONSENT_NAMESPACES`, contributed
+standing unopposed. That is the one direction this gate exists to forbid, so the carve-outs
+survive the strip: honouring them needs no pin, because whoever moved the tag can only ever
+take a grant away with them.
+
+`parse_config_stripping_refused_consent` answers the same asymmetry by refusing the file
+instead, and the two are not in conflict: there the table failed to parse, so there are no
+trustworthy patterns left to keep, and a local `config.toml` can fail closed (exit 78)
+without consequence for anyone else. Failing this payload closed would hand whoever can move
+the tag a fleet-wide denial of service, holding every host's `ocx` hostage, which is why the
+managed tier degrades instead of refusing.
+
+## Rationale from code: ocx_oci
+
+`PackageRef::first_path_segment` (`crates/ocx_oci/src/package_ref.rs`) is the
+unit of shell-activation consent: `<registry>/<first path segment>` is the
+org — the unit an operator controls and the unit an attacker must register.
+Registry granularity alone would be nearly vacuous (consent to one GHCR org
+would consent to all of GHCR); full repository granularity would re-prompt
+on every ordinary tool addition. The method lives on the `PackageRef`
+coordinate rather than in `project::consent` because it is a property of
+the coordinate, and `ocx shell state`'s diagnostics are already a second
+consumer of the same coordinate.

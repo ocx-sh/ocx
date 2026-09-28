@@ -1,0 +1,7 @@
+# B
+
+Status: superseded.
+
+This decision moved `src/old.rs` to `src/new.rs`.
+See `src/new.rs` for the parser.
+`src/gone.rs` held the cache.

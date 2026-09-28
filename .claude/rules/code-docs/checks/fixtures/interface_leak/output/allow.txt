@@ -1,0 +1,5 @@
+# Reviewed exceptions for the self-test. Scoped entries must not mask the
+# same token in another fixture (fail-allow-scope.txt proves it).
+*pass-allowed.txt C-950
+*pass-allowed.json#/properties/x/description C-951
+DEC-OK1

@@ -1,0 +1,6 @@
+def reset():
+    """Clear the cache; the next call reloads from disk."""
+
+
+def load():
+    return open("x").read().splitlines()

@@ -1,0 +1,145 @@
+"""Line 1 of prose.
+Line 2 of prose.
+Line 3 of prose.
+Line 4 of prose.
+Line 5 of prose.
+Line 6 of prose.
+Line 7 of prose.
+Line 8 of prose.
+Line 9 of prose.
+Line 10 of prose.
+Line 11 of prose.
+"""
+
+
+def public_twelve():
+    """Line 1 of prose.
+    Line 2 of prose.
+    Line 3 of prose.
+    Line 4 of prose.
+    Line 5 of prose.
+    Line 6 of prose.
+    Line 7 of prose.
+    Line 8 of prose.
+    Line 9 of prose.
+    Line 10 of prose.
+    Line 11 of prose.
+    """
+
+
+def _private_twelve():
+    """Line 1 of prose.
+    Line 2 of prose.
+    Line 3 of prose.
+    Line 4 of prose.
+    Line 5 of prose.
+    Line 6 of prose.
+    Line 7 of prose.
+    Line 8 of prose.
+    Line 9 of prose.
+    Line 10 of prose.
+    Line 11 of prose.
+    """
+
+
+def spread_signature(
+    first,
+    second,
+):
+    """Line 1 of prose.
+    Line 2 of prose.
+    Line 3 of prose.
+    Line 4 of prose.
+    Line 5 of prose.
+    Line 6 of prose.
+    Line 7 of prose.
+    Line 8 of prose.
+    Line 9 of prose.
+    Line 10 of prose.
+    Line 11 of prose.
+    """
+    return first, second
+
+
+def public_sixteen():
+    """Line 1 of prose.
+    Line 2 of prose.
+    Line 3 of prose.
+    Line 4 of prose.
+    Line 5 of prose.
+    Line 6 of prose.
+    Line 7 of prose.
+    Line 8 of prose.
+    Line 9 of prose.
+    Line 10 of prose.
+    Line 11 of prose.
+    Line 12 of prose.
+    Line 13 of prose.
+    Line 14 of prose.
+    Line 15 of prose.
+    """
+
+
+class _Hidden:
+    def method(self):
+        """Line 1 of prose.
+        Line 2 of prose.
+        Line 3 of prose.
+        Line 4 of prose.
+        Line 5 of prose.
+        Line 6 of prose.
+        Line 7 of prose.
+        Line 8 of prose.
+        Line 9 of prose.
+        Line 10 of prose.
+        Line 11 of prose.
+        """
+
+
+class Shown:
+    def method(self):
+        """Line 1 of prose.
+        Line 2 of prose.
+        Line 3 of prose.
+        Line 4 of prose.
+        Line 5 of prose.
+        Line 6 of prose.
+        Line 7 of prose.
+        Line 8 of prose.
+        Line 9 of prose.
+        Line 10 of prose.
+        Line 11 of prose.
+        """
+
+    def __repr__(self):
+        """Line 1 of prose.
+        Line 2 of prose.
+        Line 3 of prose.
+        Line 4 of prose.
+        Line 5 of prose.
+        Line 6 of prose.
+        Line 7 of prose.
+        Line 8 of prose.
+        Line 9 of prose.
+        Line 10 of prose.
+        Line 11 of prose.
+        """
+        return "Shown"
+
+
+def outer():
+    def inner():
+        """Line 1 of prose.
+        Line 2 of prose.
+        Line 3 of prose.
+        Line 4 of prose.
+        Line 5 of prose.
+        Line 6 of prose.
+        Line 7 of prose.
+        Line 8 of prose.
+        Line 9 of prose.
+        Line 10 of prose.
+        Line 11 of prose.
+        """
+
+    return inner

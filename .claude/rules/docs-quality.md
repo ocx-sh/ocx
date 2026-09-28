@@ -197,6 +197,9 @@ Named holes, so a reader can tell a gap from a clearance.
   wire the checks above into CI. It picks a link checker per generator and
   stands up a tested-example harness per language. It also lands a new lint
   without reddening every open pull request.
+- **`code-docs`** owns text written in source files. That covers comments, doc
+  comments, decision-record pointers and test names as documentation, and doc
+  text that renders into help, schemas and hover. This set owns markup files.
 
 Nothing in this set co-loads with `css-theming`. A docs site's own stylesheet is
 that rule's subject, and this one stops at what reaches the page.

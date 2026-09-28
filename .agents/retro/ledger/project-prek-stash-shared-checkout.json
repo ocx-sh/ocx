@@ -1,0 +1,21 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20260928T204502Z-c639d254.json"
+  ],
+  "first_seen": "2026-09-28T20:50:00Z",
+  "fixed": null,
+  "folded_at": "2026-09-28T21:50:08Z",
+  "folds": 1,
+  "id": "project-prek-stash-shared-checkout",
+  "kind": "pitfall",
+  "last_seen": "2026-09-28T20:50:00Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "medium",
+  "status": "deferred",
+  "title": "prek pre-commit stashes all unstaged files; clobber risk for parallel editors in one checkout",
+  "v": 1,
+  "versions": []
+}

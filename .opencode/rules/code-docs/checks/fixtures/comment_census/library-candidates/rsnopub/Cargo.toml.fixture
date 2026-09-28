@@ -1,0 +1,3 @@
+[package]
+name = "rsnopub"
+publish = false

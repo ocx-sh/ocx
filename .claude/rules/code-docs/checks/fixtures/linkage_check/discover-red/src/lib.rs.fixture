@@ -1,0 +1,4 @@
+// FOO-1 and FOO-2 set the order.
+// FOO-3 keeps it.
+// FOO-4, FOO-5 and FOO-6 close it.
+pub fn f() {}

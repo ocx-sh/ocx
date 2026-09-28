@@ -1,0 +1,3 @@
+pub fn index_path(root: &Path, registry: &str) -> PathBuf {
+    root.join(registry)
+}

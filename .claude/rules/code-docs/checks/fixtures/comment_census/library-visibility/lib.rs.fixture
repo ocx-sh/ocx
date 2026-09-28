@@ -1,0 +1,152 @@
+//! Line 1 of prose.
+//! Line 2 of prose.
+//! Line 3 of prose.
+//! Line 4 of prose.
+//! Line 5 of prose.
+//! Line 6 of prose.
+//! Line 7 of prose.
+//! Line 8 of prose.
+//! Line 9 of prose.
+//! Line 10 of prose.
+//! Line 11 of prose.
+//! Line 12 of prose.
+
+/// Line 1 of prose.
+/// Line 2 of prose.
+/// Line 3 of prose.
+/// Line 4 of prose.
+/// Line 5 of prose.
+/// Line 6 of prose.
+/// Line 7 of prose.
+/// Line 8 of prose.
+/// Line 9 of prose.
+/// Line 10 of prose.
+/// Line 11 of prose.
+/// Line 12 of prose.
+pub fn public_twelve() {}
+
+/// Line 1 of prose.
+/// Line 2 of prose.
+/// Line 3 of prose.
+/// Line 4 of prose.
+/// Line 5 of prose.
+/// Line 6 of prose.
+/// Line 7 of prose.
+/// Line 8 of prose.
+/// Line 9 of prose.
+/// Line 10 of prose.
+/// Line 11 of prose.
+/// Line 12 of prose.
+fn private_twelve() {}
+
+/// Line 1 of prose.
+/// Line 2 of prose.
+/// Line 3 of prose.
+/// Line 4 of prose.
+/// Line 5 of prose.
+/// Line 6 of prose.
+/// Line 7 of prose.
+/// Line 8 of prose.
+/// Line 9 of prose.
+/// Line 10 of prose.
+/// Line 11 of prose.
+/// Line 12 of prose.
+pub(crate) fn crate_twelve() {}
+
+/// Line 1 of prose.
+/// Line 2 of prose.
+/// Line 3 of prose.
+/// Line 4 of prose.
+/// Line 5 of prose.
+/// Line 6 of prose.
+/// Line 7 of prose.
+/// Line 8 of prose.
+/// Line 9 of prose.
+/// Line 10 of prose.
+/// Line 11 of prose.
+/// Line 12 of prose.
+/// Line 13 of prose.
+/// Line 14 of prose.
+/// Line 15 of prose.
+/// Line 16 of prose.
+#[must_use]
+pub fn public_sixteen() -> bool {
+    true
+}
+
+pub enum Public {
+    /// Line 1 of prose.
+    /// Line 2 of prose.
+    /// Line 3 of prose.
+    /// Line 4 of prose.
+    /// Line 5 of prose.
+    /// Line 6 of prose.
+    /// Line 7 of prose.
+    /// Line 8 of prose.
+    /// Line 9 of prose.
+    /// Line 10 of prose.
+    /// Line 11 of prose.
+    /// Line 12 of prose.
+    Variant,
+}
+
+enum Private {
+    /// Line 1 of prose.
+    /// Line 2 of prose.
+    /// Line 3 of prose.
+    /// Line 4 of prose.
+    /// Line 5 of prose.
+    /// Line 6 of prose.
+    /// Line 7 of prose.
+    /// Line 8 of prose.
+    /// Line 9 of prose.
+    /// Line 10 of prose.
+    /// Line 11 of prose.
+    /// Line 12 of prose.
+    Variant,
+}
+
+pub trait Api {
+    /// Line 1 of prose.
+    /// Line 2 of prose.
+    /// Line 3 of prose.
+    /// Line 4 of prose.
+    /// Line 5 of prose.
+    /// Line 6 of prose.
+    /// Line 7 of prose.
+    /// Line 8 of prose.
+    /// Line 9 of prose.
+    /// Line 10 of prose.
+    /// Line 11 of prose.
+    /// Line 12 of prose.
+    fn call(&self);
+}
+
+pub struct Holder {
+    /// Line 1 of prose.
+    /// Line 2 of prose.
+    /// Line 3 of prose.
+    /// Line 4 of prose.
+    /// Line 5 of prose.
+    /// Line 6 of prose.
+    /// Line 7 of prose.
+    /// Line 8 of prose.
+    /// Line 9 of prose.
+    /// Line 10 of prose.
+    /// Line 11 of prose.
+    /// Line 12 of prose.
+    pub open: bool,
+    /// Line 1 of prose.
+    /// Line 2 of prose.
+    /// Line 3 of prose.
+    /// Line 4 of prose.
+    /// Line 5 of prose.
+    /// Line 6 of prose.
+    /// Line 7 of prose.
+    /// Line 8 of prose.
+    /// Line 9 of prose.
+    /// Line 10 of prose.
+    /// Line 11 of prose.
+    /// Line 12 of prose.
+    closed: bool,
+}

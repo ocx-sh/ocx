@@ -1,0 +1,7 @@
+# B
+
+Status: accepted.
+
+This decision moved `src/old.rs` to `src/new.rs`.
+See `src/old.rs` for the parser.
+`src/gone.rs` held the cache.

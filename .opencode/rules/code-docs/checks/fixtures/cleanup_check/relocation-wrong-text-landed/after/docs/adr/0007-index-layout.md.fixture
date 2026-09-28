@@ -1,0 +1,6 @@
+# 0007 Index layout
+
+Status: accepted.
+
+The registry name is lowercased and stripped of a trailing slash before it
+becomes a directory name here.

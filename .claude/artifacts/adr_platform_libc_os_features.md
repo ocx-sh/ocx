@@ -542,3 +542,32 @@ target-namespace detection is deferred to a separate ADR.**
 | 2026-05-31 | review-fix (max-tier /swarm-review) | **Naming reconciliation** (no behavior change). The matcher shipped as `Platform::can_run` (not the `host_supports` name used in this changelog row above and the plan); `can_run` is canonical — it reads correctly as "host `can_run` candidate" at the `index.rs` call site. The select-result + error variant shipped as `SelectResult::FeatureMismatch` / `PackageErrorKind::FeatureMismatch` (not `LibcMismatch`): the matcher is generic over `os.features`, not libc-specific (libc is merely the first such feature), so the feature-neutral name is correct. Both renames are recorded here so the locked-decisions table (`can_run`, already correct) and the implementation agree; `subsystem-oci.md` `SelectResult` block updated to include the `FeatureMismatch` variant. Also: `elf` dependency bumped `0.7.4` → `0.8` (no CVE; the `minimal_parse`/`segments`/`PT_INTERP` API OCX uses is stable across the boundary). Rebased onto v0.3.3 base (the prior checkpoint had reverted the release). |
 | 2026-07-05 | review-fix (r5) | **`os_version` fail-closed rule** (Finding #1). `can_run` now binds `os_version` on both sides and rejects a candidate whose declared `os_version` differs from the host's — `Platform::current()` never populates it, so a version-bearing candidate stays unselectable, preserving the deleted strict-`matches` behaviour until a version-range ADR supersedes it. Locked-decisions table gained an `os_version` matching row; four regression tests added. **Known-limitation row added** (Finding #5): `all_supported()` enumerates only empty-`os_features` platforms + `Any`, so `patch sync` without `--platform` silently skips libc-tagged companions; code fix deferred to keep the `can_run` invariant narrow. No wire-format or published-artifact change. |
 | 2026-07-18 | amendment (unification follow-up) | **`os_version` axis deleted** by `adr_platform_model_unification.md`: the field is gone from `Platform::Specific`, so the 2026-07-05 fail-closed rule above is superseded (nothing left to match). `can_run` itself is superseded by `is_compatible`/`select_best` (unification D1). Forward-looking `os.version` mentions in this document (Option 1 pros, D5 "future path", Consequences "future axes") are dead — any version-range axis requires a new ADR and a new model field. Historical sections are left as written. |
+
+## Rationale from code: ocx_oci
+
+### host-capability record TTL
+
+`host_capabilities::TTL_SECS` (24 hours) was one hour until 2026-08-27, on the
+reasoning that a full re-detect is "unmeasurable beside the ~3.6 ms an `ocx`
+process costs to start at all." That reasoning did not survive the per-prompt
+shell reconciler: the reconcile is budgeted at `exec_floor + 3 ms`, and
+`test/bench/shell_latency.py` measures the **cold** detect (record deleted
+before the spawn) at Δ 3.659–4.732 ms, over that budget on its own. So the
+first prompt of every TTL period landed over budget — at one hour, that was
+once an hour, per host, on a path whose whole contract is that a user never
+notices it.
+
+Lengthening the clock was chosen over refreshing off the prompt path, because
+there is no off-prompt path to refresh on: every `ocx` invocation is a fresh
+short-lived process that exits as soon as it has emitted, so a detached
+background refresh would be killed before it finished and would buy a
+complexity budget for nothing.
+
+24 hours matches the trust-root cache's TTL. The note this replaces argued for
+something shorter, on the grounds that a local answer can change under the
+user's hands between two prompts while a remote's cannot. That argument
+belongs to `HostCapabilityRecord::evidence_still_holds` instead, which is what
+actually catches those changes (file identity — device, inode, size, mtime —
+on every recorded loader); the clock only ever covered the "libc added"
+direction that check cannot see, and that direction is self-diagnosing
+(`FeatureMismatch`, exit 65) and recoverable by deleting the record.

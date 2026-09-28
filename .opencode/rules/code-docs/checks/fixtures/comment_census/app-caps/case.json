@@ -1,0 +1,20 @@
+{
+  "about": "App-kind package, no config. LEN-01/02: doc cap 10 for public and private items alike (11 lines red, 10 green). LEN-07: Rust # Errors and # Examples with fences, Python Args:/Returns: and reST fields, JSDoc @param/@returns leave the count (green); # Safety, Note: and @remarks stay counted (red). LEN-08: an 11-line doc on a clap Parser item and a pydantic model are red; a 10-line clap Args doc and click command are green.",
+  "runs": [
+    {
+      "mode": "over-cap",
+      "exit": 1,
+      "expect": [
+        "app.go:3 LEN-02",
+        "app.py:6 LEN-02",
+        "app.py:39 LEN-02",
+        "app.py:71 LEN-08",
+        "app.rs:13 LEN-02",
+        "app.rs:60 LEN-02",
+        "app.rs:75 LEN-08",
+        "app.ts:1 LEN-02",
+        "app.ts:32 LEN-02"
+      ]
+    }
+  ]
+}

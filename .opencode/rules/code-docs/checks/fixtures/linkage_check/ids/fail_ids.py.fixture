@@ -1,0 +1,9 @@
+"""Implements the slot rule from DEC-27."""
+
+# RUL-98: the first trustworthy candidate keeps the slot.
+SLOT = 1  # trailing comment naming C-050
+
+
+def keep() -> int:
+    """Return the slot, as WP-9 specified."""
+    return SLOT

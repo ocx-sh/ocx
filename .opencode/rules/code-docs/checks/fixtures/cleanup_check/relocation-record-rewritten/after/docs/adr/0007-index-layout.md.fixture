@@ -1,0 +1,11 @@
+# 0007 Index layout
+
+Status: superseded.
+
+The index is laid out as one directory per registry, with a manifest per tag
+underneath. We picked this layout after comparing a flat hash store and a
+sqlite catalog. The directory layout keeps diffs readable in review and lets a
+mirror copy the tree with rsync. Each manifest file names its digest in the
+file name, so a reader can check a fetch without a second lookup. Old tags stay
+on disk until a sweep removes them, and the mirror and the CLI share this one
+layout.

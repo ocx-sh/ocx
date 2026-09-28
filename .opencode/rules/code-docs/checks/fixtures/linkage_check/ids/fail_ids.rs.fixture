@@ -1,0 +1,11 @@
+// C-018 is the plan contract this line echoes.
+/// Refuses the key shadowing it (D-V14).
+pub fn f() {} // trailing WP-6
+/* A block comment that cites ADR-4. */
+// See H1 for why, with no definition in this block.
+// ── resolve_layer_placement (U16, U17) ──────────
+#[cfg(test)]
+mod tests {
+    // S-005: every reason variant is in the arm corpus.
+    fn t() {}
+}

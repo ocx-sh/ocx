@@ -1,0 +1,46 @@
+/**
+ * Line 1 of prose.
+ * Line 2 of prose.
+ * Line 3 of prose.
+ * Line 4 of prose.
+ * Line 5 of prose.
+ * Line 6 of prose.
+ * Line 7 of prose.
+ * Line 8 of prose.
+ * Line 9 of prose.
+ */
+export function elevenLines(): void {}
+
+/**
+ * Line 1 of prose.
+ * Line 2 of prose.
+ * Line 3 of prose.
+ * Line 4 of prose.
+ * Line 5 of prose.
+ * Line 6 of prose.
+ * Line 7 of prose.
+ *
+ * @param a - the first addend
+ * @param b - the second addend
+ * @returns the sum
+ *   of both
+ */
+export function tagsNotCounted(a: number, b: number): number {
+  return a + b;
+}
+
+/**
+ * Line 1 of prose.
+ * Line 2 of prose.
+ * Line 3 of prose.
+ * Line 4 of prose.
+ * Line 5 of prose.
+ * Line 6 of prose.
+ * Line 7 of prose.
+ *
+ * @remarks The first remark.
+ *   More of it.
+ *   Still more.
+ *   The end.
+ */
+export function remarksCounted(): void {}

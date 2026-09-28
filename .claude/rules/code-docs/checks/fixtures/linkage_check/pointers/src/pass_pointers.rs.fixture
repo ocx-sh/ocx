@@ -1,0 +1,10 @@
+//! The index layout follows docs/adr/adr_index.md#a2 and adr_index.md.
+//! The fallback is `adr_index.md#f5b`, and the local repo name also
+//! resolves: pointers:docs/adr/adr_index.md#a2.
+
+/// A wrapped pointer still reads whole (`adr_
+/// index.md` A2).
+/// [`plan_for`] and plan_for are identifiers, not pointers.
+/// Pinned: https://github.com/o/r/blob/0123abcd/docs/adr/adr_index.md
+/// The repos map resolves other:docs/adr/adr_other.md#b1.
+pub fn plan_for() {}

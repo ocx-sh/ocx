@@ -1,0 +1,45 @@
+# One comment line per row.
+# "+ " must be flagged (LNK-01 or LNK-13), "- " must not, and "~ " is an
+# accepted residual false positive that must still be flagged.
++ The generated shim directory (C-003 / C-008).
++ Refuse an unpinned or key-shadowed keyless identity (D3; C-012, C-014).
++ S-005, S-006, D-V9) and the wave-3b rulings RUL-78…RUL-84 / RUL-96…RUL-99,
++ consumer until WP-11 flattens it into `self activate`, and a `pub use` with
++ them — the static half of DEC-33.
++ `null` when the run produced nothing is DX-40.3's rule, not an option this
++ back (RUL-53).
++ C-029/A-27 — `ScopeSpec`'s own hand-written deserializer **drops** unknown
++ spec_ref: IDENTITY-006, IDENTITY-016, IDENTITY-017, D-001.
++ D-V8's three requirements are "one shared function", "in `core_lib`, not
++ Root-to-root patch computation and PR classification (ADR-1 D2/D3;
++ ── resolve_layer_placement (U16, U17) ───────────────────────────────────
++ exercised at acceptance level U7/U8/U13/U14).
++ deliberate: it is a shipped JSON contract (C-S1-1), and turning it null
++ C-036 / E-X14: `session_path` is present in **every** state, including
++ $HOME/.codex` (SD § 9.4, Security-H5) is exactly the entry whose target the
++ Regression lock (design record F8): a local-pack failure carries its
++ live descriptor advances to M2 naming `ca-bundle-v2` (SNAP_VAR=advanced)
++ and Spec A10 — tasks live in `package_manager/tasks/`; the aggregator is
++ Announce one package (design register C11/C12 — one package per call).
++ (review H1: `mytool self` reads the file, not its directory)
+- H1: create() on same filesystem — hardlink created, both paths accessible
+- ── H1: two versions, two platforms, every order ────────────────
+- `load_global` with a V1 `global.json` under the grim-home anchors:
+- Rollback trap: a V2-format JSON blob MUST fail when an old consumer
+- As per [RFC 9111 S4.3.4], we need to confirm that our validators match. Here,
+- [RFC 9110 S15]: https://www.rfc-editor.org/rfc/rfc9110#section-15
+- OCI tags do not allow `+` (`[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`). This
+- non-UTF-8 argv never panics.
+- The index's own SHA-256 over `bytes`, deliberately independent of the
+- Ceiling on the upstream manifest body (CWE-400).
+- against the word "cookie." As of V8 6.6 this is faster than handrolling or
+- * @param <V1> the type returned by the first future
+- A committed **V2** lock
+- files, so this could either be the V1 or V2 encoding. We assume
+- `text=True` alone decodes with `locale.getpreferredencoding(False)` — UTF-8
+- Character set for percent-encoding PURL components, copied from packageurl.rs
+- SPDX-2.3, RFC 8259 and issue #1234 match no family.
+~ Line numbers of H5 and H6 headings, ignoring anything inside a fence.
+~ Cached S3 credentials to avoid running the credential helper multiple times.
+~ adds `bevy_winit` + window descriptor (requires X11/Wayland headers).
+~ a U32 default renders its decimal

@@ -1,0 +1,11 @@
+function eight(): number {
+  // Line 1 of prose.
+  // Line 2 of prose.
+  // Line 3 of prose.
+  // Line 4 of prose.
+  // Line 5 of prose.
+  // Line 6 of prose.
+  // Line 7 of prose.
+  // Line 8 of prose.
+  return 1;
+}

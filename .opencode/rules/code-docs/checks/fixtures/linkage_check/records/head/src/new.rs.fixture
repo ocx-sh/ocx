@@ -1,0 +1,4 @@
+//! The parser.
+pub fn parse(input: &str) -> usize {
+    input.len()
+}

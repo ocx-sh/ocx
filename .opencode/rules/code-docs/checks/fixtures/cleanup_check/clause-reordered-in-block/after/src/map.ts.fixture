@@ -1,0 +1,8 @@
+/**
+ * Projects every region onto the map grid and merges the shapes. Called at build
+ * time by the page generator, once for each locale that it renders. Consumes the
+ * baked regions json file that the import script writes next to the page.
+ */
+export function projectRegions(): Shape[] {
+  return merge(load());
+}

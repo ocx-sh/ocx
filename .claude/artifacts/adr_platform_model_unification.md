@@ -841,3 +841,56 @@ resolved by user review (see D4 and R6). The remaining two are resolved by the a
 | 2026-07-27 | architect (opus) | **D5 loses the create-time host default** (defect found in `package_create.rs::validation_platform`, which still resolved an absent `--platform` to `Platform::current()`). `--platform` is now required whenever `--metadata` is given — usage error, exit 64, naming both flags — and has no default at all; without `--metadata` it stays optional and filename-only. The host platform answers what the build machine *supplies* (libc included); the sidecar field states what the artifact *demands*, and `create` is the step that records it, so the guess corrupted the pins, the `bin_scan` executable convention, and the value `push`/`test` bind to. Empirically: a glibc host recorded `linux/amd64+libc.glibc` with no platform named anywhere. Alternative (b) — record nothing and let `MissingRecordedPlatform` fire at push — was rejected: it still needs a platform for the projection and the binaries scan, and `Platform::any()` there both misfires D5's any-target rules on concrete bundles and silently bakes a wrong `binaries` claim, moving the guess to a field with no downstream guard. Consequences: the D5 any-target digest-pin check now runs on every `--metadata` invocation (the no-`--platform` path had skipped `pin_dependencies` for already-pinned sidecars), and the "omitted ⇒ must be fully pinned" usage error is deleted with the branch it guarded. Pre-1.0 clean break — a fully-pinned bundle created without `--platform` now exits 64. |
 | 2026-08-05 | doc-writer (sonnet), `testing-hardening` branch (`2fbfa894`) | **D5's recorded-platform field replaced by a build receipt; per-dependency `platforms` pin maps deleted.** `AuthoringBundle.platform` and `AuthoringError::{PlatformMismatch, MissingRecordedPlatform}` are gone — the platform never enters `metadata.json`, published or authoring. `ocx package create --metadata` now writes a second sidecar, `<stem>-receipt.json` (`build_receipt.rs`: `{"version": 1, "platform": "..."}`, no `JsonSchema` derive, never pushed), and `push`/`test` resolve their target via the pure `resolve_target_platform(recorded, explicit, receipt_path)` table function: a disagreeing explicit `--platform` now **overrides with a warning** (was a hard `PlatformMismatch` rejection); no receipt and no `--platform` is now `UsageError` (64, was `DataError` 65 via `MissingRecordedPlatform`) — a missing required argument, not malformed data. `AuthoringDependency` drops its `platforms: Option<BTreeMap<String, Digest>>` field entirely: every dependency pin, under a concrete platform or `any`, is now a single digest bare on the identifier — `dependency_pinning.rs::pin` collapsed to one code path with no map-write branch. This narrows push's `any`-target enforcement from a structural pin-map shape check to **registry-verified provenance** (`publish_gate.rs::verify_any_pin_provenance`, unchanged in principle from the prior amendment, now checking a bare digest instead of a map entry): push re-fetches the dependency's own manifest by its advisory tag and accepts the pin iff the index advertises that digest as `any`; `create` still refuses a pre-existing digest pin in an `any`-target outright (no registry access, no evidence). A dependency pinned with no advisory tag is fetched at `latest` for the provenance check, which usually fails closed — the tag is what names the index stream the digest came from. Rationale: the deleted field and map were sidecar-authored claims a hand-edited `metadata.json` could forge or omit with no downstream check; the receipt is a local, unpublished handoff between two steps of one build, and the any-target check now verifies the one fact that actually matters (does the registry agree this digest is `any`) instead of trusting a shape. D5 body, Implementation Surface Map, and Validation checklist updated; validation rows re-verified against `build_receipt.rs`, `dependency_pinning.rs`, and `publish_gate.rs` test suites. |
 | 2026-08-05 | builder (opus), `testing-hardening` branch | **The build receipt is a fallback, never an authority.** `PlatformAdvisory` is deleted with the advisory semantics of the row above: an explicit `--platform` / `--identifier` wins in silence, is never compared against the receipt, and does not cause it to be read at all. `resolve_target_platform(explicit, receipt)` and the new `resolve_target_identifier(explicit, receipt)` collapse to three rows each — flag given / receipt records it / neither (`UsageError` 64). `ocx package create` now writes the receipt whenever it has something to record (with or without `--metadata`), carrying the declared `--platform` and the resolved `--identifier`, both optional on the wire (V1 reshaped in place — unreleased, no compat shim); nothing declared writes no file. `ocx package push`'s `-i` becomes optional and resolves through the same table (`ocx package test` keeps its required `-i`: it names the local test subject and rejects `@digest`). Reads are lazy via `read_beside_bundle(layers)` — a fully explicit invocation never opens the file, so a corrupt receipt cannot fail it; when the file is needed, a corrupt one still propagates (65) rather than degrading to `absent`. Rationale (owner): a receipt that warns when overridden, and notes when absent, makes the publisher argue with a build artifact about a value they just stated; it is there to answer a question that was not asked. |
+
+## Rationale from code: ocx_oci
+
+### Unsupported OCI Image Index architectures
+
+`ocx_oci::platform::architecture::Architecture` intentionally represents only
+the architectures OCX supports and tests. For reference, the OCI Image Index
+spec (mirroring Go's `GOARCH`) defines additional architecture values this
+enum does not carry:
+
+- `i386` — 32 bit x86, little-endian
+- `Amd64p32` — 64 bit x86 with 32 bit pointers, little-endian
+- `ARM` — 32 bit ARM, little-endian
+- `ARMbe` — 32 bit ARM, big-endian
+- `ARM64be` — 64 bit ARM, big-endian
+- `LoongArch64` — 64 bit Loongson RISC CPU, little-endian
+- `Mips` — 32 bit Mips, big-endian
+- `Mipsle` — 32 bit Mips, little-endian
+- `Mips64` — 64 bit Mips, big-endian
+- `Mips64le` — 64 bit Mips, little-endian
+- `Mips64p32` — 64 bit Mips with 32 bit pointers, big-endian
+- `Mips64p32le` — 64 bit Mips with 32 bit pointers, little-endian
+- `PowerPC` — 32 bit PowerPC, big-endian
+- `PowerPC64` — 64 bit PowerPC, big-endian
+- `PowerPC64le` — 64 bit PowerPC, little-endian
+- `RISCV` — 32 bit RISC-V, little-endian
+- `RISCV64` — 64 bit RISC-V, little-endian
+- `s390` — 32 bit IBM System/390, big-endian
+- `s390x` — 64 bit IBM System/390, big-endian
+- `SPARC` — 32 bit SPARC, big-endian
+- `SPARC64` — 64 bit SPARC, bi-endian
+
+### Unsupported OCI Image Index operating systems
+
+`ocx_oci::platform::operating_system::OperatingSystem` intentionally represents
+only the operating systems OCX supports and tests. For reference, the OCI
+Image Index spec (mirroring Go's `GOOS`) defines additional `Os` values this
+enum does not carry:
+
+- `AIX`
+- `Android`
+- `DragonFlyBSD`
+- `FreeBSD`
+- `Hurd`
+- `Illumos`
+- `iOS`
+- `Js`
+- `Nacl`
+- `NetBSD`
+- `OpenBSD`
+- `Plan9`
+- `Solaris`
+- `zOS`

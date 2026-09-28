@@ -1,0 +1,23 @@
+{
+  "artifact": "hex-execute",
+  "cost_min": 0,
+  "entries": [
+    "20260928T071125Z-a9efa112.json"
+  ],
+  "first_seen": "2026-09-28T07:11:25Z",
+  "fixed": null,
+  "folded_at": "2026-09-28T21:50:08Z",
+  "folds": 1,
+  "id": "hex-execute-parallel-build-oom",
+  "kind": "defect",
+  "last_seen": "2026-09-28T07:11:25Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "high",
+  "status": "deferred",
+  "title": "parallel per-WP builds on a 31 GB host exhaust memory and reboot it",
+  "v": 1,
+  "versions": [
+    "ghcr.io/michael-herwig/arcana/hex-execute@sha256:3fe60f56dec0be1646ab10d76bf222dc51b0ddcf413ba09314e3f80deec21fcd"
+  ]
+}

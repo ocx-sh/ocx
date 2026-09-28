@@ -1,0 +1,6 @@
+# A
+
+The parser lives in `src/old.rs`.
+`src/gone.rs` holds the cache.
+`crates/x/build.rs` sets the cfgs.
+- [Parser](../../src/old.rs)

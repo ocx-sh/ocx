@@ -1,0 +1,6 @@
+def reset():
+
+
+def load():
+    # Read the whole file at once, then split it into lines for the parser.
+    return open("x").read().splitlines()
